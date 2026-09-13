@@ -19,4 +19,6 @@ Public benchmark data is cold-start evidence. Enough comparable local evidence f
 
 Use `python3 ../../scripts/office_runtime.py route <request.yaml>` for deterministic selection. Record the request/decision hashes with the run.
 
+Treat the route result's `selection_disclosure` as required handoff data. Before any executor, plan-reviewer, or code-reviewer invocation, show the user one concise notice containing role, exact invocation model identifier (or canonical `model_id` fallback), effort, harness/version, and `reason`. Carry that same object into the dispatch envelope/readback. The reason must identify the actual decisive filters or tie-breaks; “best model” is not sufficient.
+
 When the resolved config sets `roles.<role>.preferred_seed`, pass it through in the request as `preferred_seed` (same ordered list of `{model_id, effort, harness?}`). `route` uses it at the advisory-anchor stage: candidates matching an entry pass; if none match, the anchor imposes no restriction. Among passing candidates it then ranks by chain position first (first entry wins if it clears every earlier stage) and cost only as a tie-break within the same rank — so an explicit preference chain overrides `cost_policy`'s money-band elimination for its own entries.

@@ -22,6 +22,10 @@
     "model_id": {
       "type": "string"
     },
+    "invocation_model_id": {
+      "type": "string",
+      "minLength": 1
+    },
     "effort": {
       "enum": [
         "none",

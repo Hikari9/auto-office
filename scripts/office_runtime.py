@@ -102,6 +102,31 @@ def preferred_rank(c, preferred_seed):
     return None
 
 
+def selection_disclosure(role: str, chosen: dict, preferred_seed, cost_policy: str) -> dict:
+    """Build the durable, user-visible explanation for a selected route."""
+    rank = preferred_rank(chosen, preferred_seed)
+    reasons = ["cleared the applicable trust, capability, role-floor, and task-shape gates"]
+    quota = chosen.get("quota", {})
+    if quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None:
+        reasons.append("fit within the protected quota reserve")
+    elif quota.get("status") != "ok" or quota.get("tightest_remaining_percent") is None:
+        reasons.append("was selected with quota headroom explicitly unknown")
+    if rank is not None:
+        reasons.append(f"matched preferred seed #{rank + 1}, which decided the advisory ranking")
+    else:
+        reasons.append(f"won the {cost_policy} cost and local-evidence comparison")
+    return {
+        "role": role,
+        "model_id": chosen.get("model_id"),
+        "invocation_model_id": chosen.get("invocation_model_id") or chosen.get("model_id"),
+        "effort": chosen.get("effort"),
+        "harness": chosen.get("harness"),
+        "harness_version": chosen.get("harness_version"),
+        "triple": candidate_id(chosen),
+        "reason": "; ".join(reasons),
+    }
+
+
 def route(request: dict) -> dict:
     role = request["role"]
     playbook = request.get("playbook")
@@ -229,6 +254,7 @@ def route(request: dict) -> dict:
 
     chosen=stage[0]
     return {"selected":candidate_id(chosen),"status":"selected","candidate":chosen,"rejected":rejected,
+            "selection_disclosure":selection_disclosure(role, chosen, preferred_seed, cost_policy),
             "decision_hash":sha256_obj({"role":role,"playbook":playbook,"selected":candidate_id(chosen),"policy":policy,"candidate":chosen})}
 
 
@@ -283,7 +309,7 @@ def init_db(path: Path):
     con.execute('PRAGMA journal_mode=WAL')
     con.executescript("""
     CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
-    CREATE TABLE IF NOT EXISTS dispatches(id TEXT PRIMARY KEY, run_id TEXT, role TEXT, holder_id TEXT, triple TEXT, task_shape TEXT, size_class TEXT, started_at TEXT, ended_at TEXT, money_estimate REAL, money_actual REAL, quota_estimate REAL, quota_delta REAL, wall_clock_seconds REAL, attribution TEXT, outcome TEXT);
+    CREATE TABLE IF NOT EXISTS dispatches(id TEXT PRIMARY KEY, run_id TEXT, role TEXT, holder_id TEXT, triple TEXT, invocation_model_id TEXT, selection_reason TEXT, task_shape TEXT, size_class TEXT, started_at TEXT, ended_at TEXT, money_estimate REAL, money_actual REAL, quota_estimate REAL, quota_delta REAL, wall_clock_seconds REAL, attribution TEXT, outcome TEXT);
     CREATE TABLE IF NOT EXISTS findings(id TEXT PRIMARY KEY, dispatch_id TEXT, reviewer_dispatch_id TEXT, status TEXT, severity TEXT, summary TEXT, evidence_hash TEXT, created_at TEXT);
     CREATE TABLE IF NOT EXISTS validations(id TEXT PRIMARY KEY, dispatch_id TEXT, kind TEXT, command TEXT, passed INTEGER, known_bad_proven INTEGER, evidence_hash TEXT, created_at TEXT);
     CREATE TABLE IF NOT EXISTS routing_decisions(id TEXT PRIMARY KEY, run_id TEXT, role TEXT, request_hash TEXT, selected_triple TEXT, decision_hash TEXT, created_at TEXT);
@@ -293,6 +319,11 @@ def init_db(path: Path):
     CREATE TABLE IF NOT EXISTS lineage(id TEXT PRIMARY KEY, component_kind TEXT, component_id TEXT, parent_id TEXT, event TEXT, multiplier REAL, created_at TEXT);
     CREATE TABLE IF NOT EXISTS leases(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, role TEXT NOT NULL, scope TEXT NOT NULL, holder_id TEXT NOT NULL, acquired_at TEXT NOT NULL, expires_at TEXT NOT NULL, released_at TEXT, revoked_at TEXT, revoke_reason TEXT);
     """)
+    dispatch_columns = {row[1] for row in con.execute("PRAGMA table_info(dispatches)")}
+    if "invocation_model_id" not in dispatch_columns:
+        con.execute("ALTER TABLE dispatches ADD COLUMN invocation_model_id TEXT")
+    if "selection_reason" not in dispatch_columns:
+        con.execute("ALTER TABLE dispatches ADD COLUMN selection_reason TEXT")
     con.commit(); return con
 
 
@@ -305,7 +336,10 @@ def cmd_record_dispatch(args):
     if data.get('attribution') and data['attribution'] not in ATTRIBUTIONS: raise SystemExit('invalid attribution')
     if data.get('outcome') and data['outcome'] not in OUTCOMES: raise SystemExit('invalid outcome')
     con=init_db(Path(args.db))
-    cols=['id','run_id','role','holder_id','triple','task_shape','size_class','started_at','ended_at','money_estimate','money_actual','quota_estimate','quota_delta','wall_clock_seconds','attribution','outcome']
+    disclosure=data.get('selection_disclosure') or {}
+    data.setdefault('invocation_model_id', disclosure.get('invocation_model_id'))
+    data.setdefault('selection_reason', disclosure.get('reason'))
+    cols=['id','run_id','role','holder_id','triple','invocation_model_id','selection_reason','task_shape','size_class','started_at','ended_at','money_estimate','money_actual','quota_estimate','quota_delta','wall_clock_seconds','attribution','outcome']
     row=[data.get(k) for k in cols]; row[0]=row[0] or str(uuid.uuid4())
     con.execute(f"INSERT INTO dispatches({','.join(cols)}) VALUES ({','.join('?'*len(cols))})", row); con.commit(); con.close(); dump_json({'recorded':row[0]}); return 0
 
@@ -540,4 +574,3 @@ def main():
     args=p.parse_args(); sys.exit(args.func(args))
 
 if __name__=='__main__': main()
-

@@ -5,7 +5,7 @@ description: Internal Auto Office v3 execution spoke. Use after an accepted plan
 
 # Auto Execution
 
-Before dispatch, validate both the run envelope and execution packet. Reject missing/contradictory mandatory fields.
+Before dispatch, validate both the run envelope and execution packet. Reject missing/contradictory mandatory fields. Require the router's `selection_disclosure`, publish it to the user before launching the executor/worker, and preserve it in the dispatch record and readback.
 
 A packet must include base SHA, task scope, observable outcome, blast radius, allowed mutations, protected paths, validation commands, known-bad behavior to exclude, self-review, and rollback/restore notes.
 

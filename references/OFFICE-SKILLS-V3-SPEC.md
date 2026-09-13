@@ -205,6 +205,8 @@ The orchestrator is the user's entry model. v3 may advise that another model/har
 
 The orchestrator is still scored.
 
+Every serialized plan declares the orchestrator's model assignment: canonical `model_id`, exact invocation model identifier when the entry harness exposes one, effort, harness/version, and why the entry model owns the role.
+
 ### 6.2 Planner
 
 The planner owns **how** to implement the already-frozen intent.
@@ -216,6 +218,8 @@ The planner:
 - may be inline or separately routed;
 - emits a serialized plan artifact;
 - must revise the plan when an accepted `PLAN DEFECT` invalidates an assumption.
+
+The serialized plan contains a `model_assignments` block for both orchestrator and planner. Each entry records canonical `model_id`, exact invocation model identifier when available, effort, harness/version, selection rationale, and whether the planner is inline or separately routed. Sharing one session never makes either declaration implicit.
 
 Default planner preference:
 
@@ -273,6 +277,8 @@ created_at: <iso8601>
 ```
 
 Role-specific payloads are attached to this envelope.
+
+Each routed envelope also carries the router's `selection_disclosure`: role, canonical model ID, exact invocation model identifier when available, effort, harness/version, selected triple, and evidence-backed reason. Before executor or reviewer invocation, the orchestrator surfaces that disclosure to the user; dispatch readback preserves it.
 
 Examples:
 

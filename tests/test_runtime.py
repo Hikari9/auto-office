@@ -31,11 +31,17 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(r['selected'].startswith('b@'))
     def test_preferred_seed_picks_first_choice_even_if_pricier(self):
         first=cand('agy',model_id='gemini-3.8-flash',effort='medium',money=5)
+        first['invocation_model_id']='gemini-3.8-flash-preview'
         second=cand('claude',model_id='claude-sonnet-5',effort='high',money=1)
         seed=[{'harness':'agy','model_id':'gemini-3.8-flash','effort':'medium'},
               {'harness':'claude','model_id':'claude-sonnet-5','effort':'high'}]
         r=rt.route({'role':'executor','playbook':'Change','preferred_seed':seed,'candidates':[second,first]})
         self.assertTrue(r['selected'].startswith('agy@'))
+        disclosure=r['selection_disclosure']
+        self.assertEqual(disclosure['role'],'executor')
+        self.assertEqual(disclosure['model_id'],'gemini-3.8-flash')
+        self.assertEqual(disclosure['invocation_model_id'],'gemini-3.8-flash-preview')
+        self.assertIn('preferred seed #1',disclosure['reason'])
     def test_preferred_seed_falls_back_when_first_choice_excluded(self):
         first=cand('agy',model_id='gemini-3.8-flash',effort='medium',floor=False)
         second=cand('claude',model_id='claude-sonnet-5',effort='high')

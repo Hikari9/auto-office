@@ -74,6 +74,10 @@ Use the mandatory filter order:
 
 Never lower an absolute floor for cost or quota. Public benchmark data is a cold-start prior; enough comparable local evidence for the exact routable triple outranks it.
 
+Every plan must contain a `model_assignments` block naming the orchestrator and planner identities. Record the exact invocation model identifier when the harness exposes one, plus canonical `model_id`, effort, harness/version, whether the planner is inline or separately routed, and a concise selection rationale. If the current entry model owns both roles, declare both explicitly rather than implying the planner identity.
+
+Immediately before invoking an executor or reviewer, publish a concise route notice to the user naming the role, exact invocation model identifier (falling back to canonical `model_id` only when no more specific identifier exists), effort, harness/version, and why that route won. Base the explanation on the actual decisive routing evidence—such as task-shape fit, capability/trust floor, preferred seed, quota, cost, or comparable local results—not a generic statement about model quality. Persist the same disclosure in the dispatch envelope/readback.
+
 ## Dispatch and mutation
 
 Run `check-spoke --spoke auto-execution`; if not loaded, load `skills/auto-execution/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-execution`. Validate every packet before dispatch. One mutable holder owns a write scope at a time. A holder change is a takeover requiring lease acquisition and stale-state reconciliation.

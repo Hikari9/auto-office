@@ -28,6 +28,8 @@ This preview keeps those names to make migration concrete. Treat them as compati
 
 `office_runtime.py route` accepts a JSON/YAML request containing `role`, `gear`, `playbook`, `policy`, and `candidates`. Candidates already represent locally discovered/bound `harness@version × model × effort` triples. The helper performs deterministic filtering and selection; it does not use the network.
 
+Successful route results include a `selection_disclosure` with the canonical model identity, the exact harness invocation identifier when available, and an evidence-based reason. Dispatch telemetry persists the invocation identifier and reason so the user-visible notice and durable record agree.
+
 ## Catalog refresh boundary
 
 `catalog-snapshot` creates a content-addressed immutable normalized snapshot from a local file. Fetching provider/benchmark source data is intentionally kept outside route-time; an agent or scheduled maintenance step may fetch source data and then pass the normalized input to this command.

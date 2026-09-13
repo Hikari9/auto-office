@@ -110,6 +110,10 @@ class TestLifecycleIntegration(unittest.TestCase):
             'role': 'executor',
             'holder_id': 'executor-001',
             'triple': 'fake@1.0/fake-model@medium',
+            'selection_disclosure': {
+                'invocation_model_id': 'fake-model-2026-09-13',
+                'reason': 'matched the task shape and protected quota reserve',
+            },
             'started_at': datetime.now(timezone.utc).isoformat(),
         }))
         rc, out, _ = run_cmd('record-dispatch',
@@ -172,9 +176,15 @@ class TestLifecycleIntegration(unittest.TestCase):
         # 12. Verify DB state
         con = sqlite3.connect(self.db)
         dispatches = con.execute('SELECT COUNT(*) FROM dispatches').fetchone()[0]
+        invocation_model_id, selection_reason = con.execute(
+            'SELECT invocation_model_id, selection_reason FROM dispatches WHERE holder_id=? ORDER BY started_at LIMIT 1',
+            ('executor-001',)
+        ).fetchone()
         findings = con.execute('SELECT COUNT(*) FROM findings').fetchone()[0]
         leases = con.execute('SELECT COUNT(*) FROM leases').fetchone()[0]
         self.assertGreaterEqual(dispatches, 2)
+        self.assertEqual(invocation_model_id, 'fake-model-2026-09-13')
+        self.assertIn('task shape', selection_reason)
         self.assertGreaterEqual(findings, 2)
         self.assertGreaterEqual(leases, 1)
         con.close()

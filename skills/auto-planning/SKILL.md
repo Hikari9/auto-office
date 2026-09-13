@@ -11,7 +11,7 @@ Receive the pinned run envelope and orchestrator-frozen intent. Own **how**, nev
 2. Propose playbook (`Change|Restructure|Investigate|Prototype|Visual`); orchestrator freezes it.
 3. Declare evidence-backed blast radius. Cite static call/data/interface boundaries; add runtime probes when static evidence is insufficient. Widen uncertainty rather than hiding it.
 4. Classify `S|M|L|XL` from task count, touched interfaces, diff scope, migration/security involvement, and validation surface.
-5. Serialize the plan with observable outcomes, dependencies, protected paths, validation strategy, known-bad behavior tests, and rollback/restore notes.
+5. Serialize the plan with observable outcomes, dependencies, protected paths, validation strategy, known-bad behavior tests, rollback/restore notes, and `model_assignments` for both orchestrator and planner. Each assignment names exact invocation model identifier when available, canonical `model_id`, effort, harness/version, selection rationale, and `inline|routed` status. Declare both roles even when one session owns both.
 6. Emit execution packets only after the plan is accepted at the required gate.
 7. On accepted `PLAN DEFECT`, increment plan version and invalidate dependent packets before revising.
 
