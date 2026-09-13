@@ -1,0 +1,51 @@
+# Learned patterns, sanitized. Evidence capsule is local; only its hash is public.
+# None of these touch capability floors, reward definitions, hard exclusions,
+# destructive permissions, maturity policy, or security boundaries.
+
+- name: review-tree-exclusivity
+  stream: learned-pattern
+  identity_hash: sha256:9cde97bfc6549567d642d66fc3e3cf24d4f50d7da2a8d6379f8fcc7ca5d2bdfe
+  evidence_hash: sha256:c8f36b2f54437a50748308200639f90c291f0c26bcc1f005a19558b88b347910
+  source_count: 1
+  schema_version: 3
+  target_skill: auto-review
+  changes_behavioral_policy: false
+  privacy_lint: passed
+  pattern: >-
+    Serialize producer and reviewer on a shared working tree. A review describes one tree state; concurrent edits by the producer invalidate the reviewer's line numbers, findings scope, and contamination check. Prefer one combined repair round over several partial ones.
+
+- name: verification-double-saturation
+  stream: learned-pattern
+  identity_hash: sha256:2f5de61bb90e7259dfd7af0b45c2b850395785a517c40aa6f02da2eccf15cb0b
+  evidence_hash: sha256:c8f36b2f54437a50748308200639f90c291f0c26bcc1f005a19558b88b347910
+  source_count: 1
+  schema_version: 3
+  target_skill: auto-verification
+  changes_behavioral_policy: false
+  privacy_lint: passed
+  pattern: >-
+    A suite that injects a test double at every seam validates the doubles, not the wiring. Cover the real construction path separately, asserting the arguments that reach the real factory without opening a connection. Re-run the suite after rebasing onto current mainline: a clean textual merge does not reconcile semantics, and a required-argument change in a merged dependency is invisible to the merge and fatal at runtime.
+
+- name: artifact-provenance-by-cardinality
+  stream: learned-pattern
+  identity_hash: sha256:69c97baaa00424bd6b39c21f54e423dab9e6a4b2783357667dc61e3691a4347a
+  evidence_hash: sha256:c8f36b2f54437a50748308200639f90c291f0c26bcc1f005a19558b88b347910
+  source_count: 1
+  schema_version: 3
+  target_skill: auto-verification
+  changes_behavioral_policy: false
+  privacy_lint: passed
+  pattern: >-
+    An agent forbidden from calling a live system cannot produce an artifact defined as a capture of it; asked for one, it produces a structurally valid fabrication. Check provenance by cardinality rather than shape, since a stand-in reproduces the schema faithfully and the record count not at all. Capture belongs to whoever may call the live system. Related gate-placement errors: a capture path that validates before capturing can never capture the invalid states worth capturing, and a read-only export behind a write-confirmation flag makes the rollback target unobtainable.
+
+- name: gate-measures-written-bytes
+  stream: learned-pattern
+  identity_hash: sha256:b0805f75bb8721adb63a26af79da554dcc105bdab0add461fe2fb535d1b8dbdd
+  evidence_hash: sha256:c8f36b2f54437a50748308200639f90c291f0c26bcc1f005a19558b88b347910
+  source_count: 1
+  schema_version: 3
+  target_skill: auto-verification
+  changes_behavioral_policy: false
+  privacy_lint: passed
+  pattern: >-
+    A size or format gate must measure the exact serialization that reaches the destination. Independent serialization in the gate and the writer admits documents that overflow the destination and fails after partial writes rather than before the first one.
