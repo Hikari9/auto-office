@@ -1,0 +1,4 @@
+schema_version: 3
+title: "User-tier config must reach the effective config"
+expectation: "roles.executor.preferred_seed set only in ~/.config/auto-office/config.yaml must survive the merge, because the plugin default has no preferred_seed for executor and repo-scoped search cannot see the user tier"
+source: OFFICE-SKILLS-V3-SPEC

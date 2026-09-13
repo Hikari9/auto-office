@@ -22,7 +22,12 @@ Load only the protocol/reference needed for the current lifecycle step.
 ## Start or resume a run
 
 1. Resolve user intent and scope.
-2. Load effective config using `prompt/CLI > repo > user > plugin default` precedence.
+2. Load effective config by running `python3 scripts/office_runtime.py effective-config`.
+   It merges `prompt/CLI > repo > user > plugin default` and emits `effective_config_hash`.
+   Never hand-read `config/config.default.yaml` and treat it as the answer: the user tier
+   (`~/.config/auto-office/config.yaml`) lives outside the repo, is invisible to repo search,
+   and routinely sets role `preferred_seed` chains the plugin default does not have.
+   Use the emitted hash for `new-run --config-hash`; do not invent one.
 3. Run lazy maintenance for eligible historical rows when practical.
 4. Resolve the current immutable catalog and adapter snapshots; refresh may run separately, but route-time itself must not use the network.
 5. Establish repository/runtime baseline and classify task shape, risk, blast radius, and size class.

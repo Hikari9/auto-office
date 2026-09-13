@@ -363,6 +363,114 @@ def cmd_catalog_snapshot(args):
     dump_json({'snapshot':str(out),'catalog_snapshot_hash':'sha256:'+digest,'immutable_existing':out.exists()}); return 0
 
 
+NON_CONFIGURABLE_KEYS = {"schema_version", "config_precedence", "hard_invariants"}
+CONFIG_TIERS = ("plugin_default", "user", "repo", "prompt_cli")
+
+
+def config_default_path() -> Path:
+    return ROOT / "config" / "config.default.yaml"
+
+
+def deep_merge(base: Any, over: Any, tier: str, warnings: list, path: str = "") -> Any:
+    """Merge `over` onto `base`. Dicts merge recursively; lists and scalars replace.
+
+    A type conflict warns and keeps the lower-precedence value, which is what the spec
+    means by "invalid keys warn and fall back to the next lower-precedence tier".
+    """
+    if isinstance(base, dict) and isinstance(over, dict):
+        out = dict(base)
+        for k, v in over.items():
+            loc = f"{path}.{k}" if path else k
+            out[k] = deep_merge(base[k], v, tier, warnings, loc) if k in base else v
+        return out
+    if base is not None and over is not None and not _same_shape(base, over):
+        warnings.append({"tier": tier, "key": path, "reason": "type-mismatch-ignored",
+                         "expected": type(base).__name__, "got": type(over).__name__})
+        return base
+    return over
+
+
+def _same_shape(a: Any, b: Any) -> bool:
+    """True when b may replace a. Ints and floats are interchangeable; bools are not."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return isinstance(a, bool) and isinstance(b, bool)
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return True
+    return type(a) is type(b)
+
+
+def resolve_config_tiers(repo_root: Path, overrides_file: str | None, sets: list[str] | None,
+                         user_path: str | None = None) -> tuple[dict, list, list]:
+    default_p = config_default_path()
+    default_cfg = load_data(default_p) or {}
+    allowed_top = set(default_cfg) - NON_CONFIGURABLE_KEYS
+    paths = default_cfg.get("paths", {}) or {}
+
+    up = Path(user_path).expanduser() if user_path else Path(paths.get("user", "~/.config/auto-office/config.yaml")).expanduser()
+    rp = (repo_root / paths.get("repo", ".auto-office/config.yaml")).expanduser()
+
+    layers = [("plugin_default", default_p, default_cfg)]
+    for tier, p in (("user", up), ("repo", rp)):
+        layers.append((tier, p, (load_data(p) or {}) if p.is_file() else None))
+
+    cli: dict | None = None
+    if overrides_file:
+        cli = load_data(overrides_file) or {}
+    for expr in (sets or []):
+        if "=" not in expr:
+            raise SystemExit(f"--set expects key.path=value, got {expr!r}")
+        k, v = expr.split("=", 1)
+        try:
+            v = yaml.safe_load(v)
+        except yaml.YAMLError:
+            pass
+        node = cli = (cli if cli is not None else {})
+        parts = k.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = v
+    layers.append(("prompt_cli", Path(overrides_file) if overrides_file else None, cli))
+
+    warnings: list = []
+    effective = default_cfg
+    report = []
+    for tier, p, data in layers:
+        entry = {"tier": tier, "path": str(p) if p else None, "present": data is not None}
+        if data is None:
+            report.append(entry)
+            continue
+        if tier != "plugin_default":
+            kept = {}
+            for k, v in data.items():
+                if k == "schema_version":
+                    if v != default_cfg.get("schema_version"):
+                        warnings.append({"tier": tier, "key": k, "reason": "schema-version-mismatch-ignored",
+                                         "expected": default_cfg.get("schema_version"), "got": v})
+                elif k in NON_CONFIGURABLE_KEYS:
+                    warnings.append({"tier": tier, "key": k, "reason": "not-configurable-ignored"})
+                elif k not in allowed_top:
+                    warnings.append({"tier": tier, "key": k, "reason": "unknown-key-ignored"})
+                else:
+                    kept[k] = v
+            data = kept
+            effective = deep_merge(effective, data, tier, warnings)
+        entry["applied_keys"] = sorted(data)
+        report.append(entry)
+    return effective, report, warnings
+
+
+def cmd_effective_config(args):
+    effective, tiers, warnings = resolve_config_tiers(
+        Path(args.repo_root).expanduser().resolve(), args.overrides, args.set, args.user)
+    digest = sha256_obj(effective)
+    if args.hash_only:
+        print(digest)
+        return 0
+    dump_json({"effective_config_hash": digest, "tiers": tiers,
+               "warnings": warnings, "config": effective})
+    return 0
+
+
 def cmd_proposal_id(args):
     obj={'stream':args.stream,'kind':args.kind,'payload':load_data(args.file) if args.file else args.text}
     dump_json({'identity_hash':sha256_obj(obj)}); return 0
@@ -559,6 +667,7 @@ def main():
     q=sp.add_parser('increment-plan'); q.add_argument('--state-dir',required=True); q.add_argument('--db'); q.set_defaults(func=cmd_increment_plan)
     q=sp.add_parser('scaffold-adapter'); q.add_argument('id'); q.add_argument('--out',required=True); q.set_defaults(func=cmd_scaffold_adapter)
     q=sp.add_parser('catalog-snapshot'); q.add_argument('--input',required=True); q.add_argument('--out-dir',required=True); q.set_defaults(func=cmd_catalog_snapshot)
+    q=sp.add_parser('effective-config'); q.add_argument('--repo-root',default='.'); q.add_argument('--user'); q.add_argument('--overrides'); q.add_argument('--set',action='append'); q.add_argument('--hash-only',action='store_true'); q.set_defaults(func=cmd_effective_config)
     q=sp.add_parser('proposal-id'); q.add_argument('--stream',choices=['learned-pattern','catalog-policy'],required=True); q.add_argument('--kind',required=True); g=q.add_mutually_exclusive_group(required=True); g.add_argument('--file'); g.add_argument('--text'); q.set_defaults(func=cmd_proposal_id)
     q=sp.add_parser('replay'); q.add_argument('--dataset',required=True); q.add_argument('--old-policy',required=True); q.add_argument('--new-policy',required=True); q.set_defaults(func=cmd_replay)
     q=sp.add_parser('new-run'); q.add_argument('--family-id',required=True); q.add_argument('--holder-id',required=True); q.add_argument('--triple',required=True); q.add_argument('--gear',required=True); q.add_argument('--playbook',choices=['Change','Restructure','Investigate','Prototype','Visual'],required=True); q.add_argument('--base-sha',required=True); q.add_argument('--policy-hash',required=True); q.add_argument('--catalog-hash',required=True); q.add_argument('--adapter-hash',required=True); q.add_argument('--config-hash',required=True); q.add_argument('--out',required=True); q.set_defaults(func=cmd_new_run)

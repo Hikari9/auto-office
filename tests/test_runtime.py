@@ -67,3 +67,96 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(rt.validate_with_schema(p,'execution-packet.schema.json'),[])
 
 if __name__=='__main__': unittest.main()
+
+
+class EffectiveConfigTests(unittest.TestCase):
+    """The user tier is the only config tier outside the repo, so it is the one
+    agents skip. These tests pin the merge that makes skipping it impossible."""
+
+    def resolve(self, repo_root, user=None, overrides=None, sets=None):
+        return rt.resolve_config_tiers(Path(repo_root), overrides, sets or [], user)
+
+    def write(self, d, name, text):
+        p = Path(d)/name; p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding='utf-8'); return str(p)
+
+    def test_user_tier_adds_preferred_seed_absent_from_default(self):
+        # The exact shape of ~/.config/auto-office/config.yaml: executor has no
+        # preferred_seed in the plugin default, so a strict unknown-key filter
+        # would silently delete the only thing the user tier is there to say.
+        with tempfile.TemporaryDirectory() as d:
+            u = self.write(d, 'user.yaml',
+                'schema_version: 3\nroles:\n  executor:\n    preferred_seed:\n'
+                '      - {harness: agy, model_id: gemini-3.8-flash, effort: medium}\n')
+            cfg, tiers, warns = self.resolve(d, user=u)
+            self.assertEqual(cfg['roles']['executor']['preferred_seed'][0]['model_id'], 'gemini-3.8-flash')
+            # sibling keys at the same level survive the merge
+            self.assertEqual(cfg['roles']['executor']['required_capabilities'], ['builder'])
+            # omitted roles keep the plugin default
+            self.assertEqual(cfg['roles']['planner']['preferred_seed'][0]['model_id'], 'opus')
+            self.assertEqual(warns, [])
+            self.assertTrue(next(t for t in tiers if t['tier'] == 'user')['present'])
+
+    def test_repo_tier_outranks_user_tier(self):
+        with tempfile.TemporaryDirectory() as d:
+            u = self.write(d, 'user.yaml', 'quota: {reserve_percent: 30}\n')
+            self.write(d, '.auto-office/config.yaml', 'quota: {reserve_percent: 45}\n')
+            cfg, _, _ = self.resolve(d, user=u)
+            self.assertEqual(cfg['quota']['reserve_percent'], 45)
+
+    def test_cli_set_outranks_every_file_tier(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.write(d, '.auto-office/config.yaml', 'quota: {reserve_percent: 45}\n')
+            cfg, _, _ = self.resolve(d, sets=['quota.reserve_percent=5'])
+            self.assertEqual(cfg['quota']['reserve_percent'], 5)
+
+    def test_lists_replace_rather_than_concatenate(self):
+        with tempfile.TemporaryDirectory() as d:
+            u = self.write(d, 'user.yaml',
+                'roles:\n  planner:\n    preferred_seed:\n      - {model_id: luna, effort: high}\n')
+            cfg, _, _ = self.resolve(d, user=u)
+            self.assertEqual(cfg['roles']['planner']['preferred_seed'],
+                             [{'model_id': 'luna', 'effort': 'high'}])
+
+    def test_hard_invariants_cannot_be_overridden(self):
+        with tempfile.TemporaryDirectory() as d:
+            u = self.write(d, 'user.yaml', 'hard_invariants: []\n')
+            cfg, _, warns = self.resolve(d, user=u)
+            self.assertIn('no_self_approval', cfg['hard_invariants'])
+            self.assertEqual([w['reason'] for w in warns], ['not-configurable-ignored'])
+
+    def test_unknown_top_level_key_warns_and_is_dropped(self):
+        with tempfile.TemporaryDirectory() as d:
+            u = self.write(d, 'user.yaml', 'notakey: 1\n')
+            cfg, _, warns = self.resolve(d, user=u)
+            self.assertNotIn('notakey', cfg)
+            self.assertEqual(warns[0]['reason'], 'unknown-key-ignored')
+
+    def test_type_mismatch_falls_back_to_lower_tier(self):
+        with tempfile.TemporaryDirectory() as d:
+            u = self.write(d, 'user.yaml', 'quota: {reserve_percent: "lots"}\n')
+            cfg, _, warns = self.resolve(d, user=u)
+            self.assertEqual(cfg['quota']['reserve_percent'], 20)
+            self.assertEqual(warns[0]['reason'], 'type-mismatch-ignored')
+
+    def test_matching_schema_version_is_not_a_warning(self):
+        with tempfile.TemporaryDirectory() as d:
+            u = self.write(d, 'user.yaml', 'schema_version: 3\nquota: {reserve_percent: 25}\n')
+            _, _, warns = self.resolve(d, user=u)
+            self.assertEqual(warns, [])
+
+    def test_hash_is_deterministic_and_tier_sensitive(self):
+        with tempfile.TemporaryDirectory() as d:
+            u = self.write(d, 'user.yaml', 'quota: {reserve_percent: 33}\n')
+            a, _, _ = self.resolve(d, user=u)
+            b, _, _ = self.resolve(d, user=u)
+            bare, _, _ = self.resolve(d)
+            self.assertEqual(rt.sha256_obj(a), rt.sha256_obj(b))
+            self.assertNotEqual(rt.sha256_obj(a), rt.sha256_obj(bare))
+
+    def test_missing_user_file_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg, tiers, warns = self.resolve(d, user=str(Path(d)/'nope.yaml'))
+            self.assertFalse(next(t for t in tiers if t['tier'] == 'user')['present'])
+            self.assertEqual(warns, [])
+            self.assertEqual(cfg['quota']['reserve_percent'], 20)
