@@ -18,6 +18,10 @@ echo "<brief>" | SHELL=/bin/bash claude --bg --remote-control "[ROLE] <repo> —
 - **`--add-dir` is not checkout isolation.** A dispatched agent can still `git checkout` the shared tree it was pointed at before adding its own worktree, moving the branch under you. Pre-create the agent's worktree and `--add-dir` that (or dispatch from a tree you are not using yourself); after any dispatch returns, check `git rev-parse --abbrev-ref HEAD` before writing anything.
 - **Never pre-emptively fall back to `--in-session`** because CLI "was blocked before" — that's stale evidence. Attempt the CLI launch and read the actual result; only a real refusal in the current run justifies the fallback.
 
+## Quota
+
+Probe before dispatch: `python3 ../../scripts/claude-usage.py --json` (bare for human-readable, `--percent` for routing math only). Reads the Keychain-stored OAuth token; reports the tighter of the 5-hour/7-day windows. Exit `2` means unknown, not low. Full contract in `../../references/quota-probe.md`.
+
 ## The fork gotcha
 
 `--resume <id> --bg` against a live session — busy or blocked — forks unconditionally: it returns a new session id and leaves the original running untouched, so your steering message never reaches it and you now have two writers on one tree. Never use it to steer a live writer.

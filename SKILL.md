@@ -90,6 +90,7 @@ Use the harness primitive selected by the adapter (`skills/codex-cli`, `skills/c
 - `scripts/review_loop.sh` — multi-round verify/review/fix orchestrator enforcing no-self-approval and defect exits.
 - `scripts/review_finding.sh` — structured review finding recording and telemetry persistence.
 - `scripts/hooks/` — lifecycle hooks (`session_end.sh`, `pre_compact.sh`, `compact_advisor.sh`, `close_panes.sh`, `install_hooks.sh`) ensuring runs remain durable across interruptions and context compaction.
+- `scripts/agy-usage.py`, `scripts/claude-usage.py`, `scripts/codex-usage.py` — live per-brand quota probes (stdlib/OAuth reads against each vendor's usage API); each adapter's `quota_probe.command` names its probe. See `references/quota-probe.md`.
 
 ## Review and verification
 
@@ -128,3 +129,4 @@ Use `python3 scripts/check_ecosystem.py` before packaging or proposing plugin ch
 - `protocol/privacy-self-improvement.md` — sanitizer, dream compilation, proposal isolation and PR lineage.
 - `references/IMPLEMENTATION-NOTES.md` — what this preview implements vs. intentionally leaves provider-specific.
 - `references/MIGRATION-V2.md` — branded-office retirement/migration.
+- `references/quota-probe.md` — live quota probe contract: fit-test/pre-dispatch checkpoints, per-brand fields, exit codes.

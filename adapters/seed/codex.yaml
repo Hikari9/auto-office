@@ -27,7 +27,7 @@ dispatch_forms: [cli]
 trusted_for: [discovery, read-only-investigation, prototype, reversible-sandbox-worker, conformance]
 quota_probe:
   type: external-primitive
-  command: null
+  command: [python3, scripts/codex-usage.py, --json]
   unknown_is_unlimited: false
 shallow_review:
   supported: true

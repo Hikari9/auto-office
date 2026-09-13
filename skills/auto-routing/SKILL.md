@@ -13,6 +13,8 @@ Apply the exact filter order: hard exclusions → adapter trust → capabilities
 
 Never lower an absolute floor to save money/quota. Unknown quota is not unlimited. If every qualifying candidate crosses protected reserve, return control to the orchestrator instead of quietly spending it.
 
+Probe CLI headroom before it feeds routing — quota reads are network calls and must happen outside `office_runtime.py route`, which stays offline. Each adapter's `quota_probe.command` names the live probe (`scripts/agy-usage.py`, `scripts/claude-usage.py`, `scripts/codex-usage.py`); run the brand's probe at fit-test and again immediately before that brand's dispatch, never reuse a fit-test reading for a later dispatch. Exit `2` means unknown, not low — treat it as no known-safe alternative. Full contract in `../../references/quota-probe.md`.
+
 Public benchmark data is cold-start evidence. Enough comparable local evidence for the exact routable triple outranks generic priors. Keep runtime reliability evidence harness-specific even when two harnesses expose the same underlying model.
 
 Use `python3 ../../scripts/office_runtime.py route <request.yaml>` for deterministic selection. Record the request/decision hashes with the run.

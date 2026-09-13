@@ -22,6 +22,8 @@ agy --dangerously-skip-permissions --print-timeout 45m \
 
 ## Quota and recovery
 
+Probe before dispatch: `python3 ../../scripts/agy-usage.py --json` (bare for human-readable, `--percent` for routing math only). Live OAuth read against the CloudCode quota endpoint; exit `2` means unknown, not low. Full contract in `../../references/quota-probe.md`.
+
 A stall after a few narration lines with nothing in `git status`/`git log` is quota, not slowness — confirm before believing an external cause.
 
 - Clarifying-question stall or focused correction: `agy --continue` or `--conversation <id>`, same flag-ordering rules apply.

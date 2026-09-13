@@ -20,6 +20,10 @@ codex exec --yolo -m <model> -c model_reasoning_effort="<effort>" \
 - Pass an explicit `timeout: 600000` on every backgrounded dispatch. The Bash tool's default (`120000`) kills a codex run mid-work — long enough to look like real work, too short for a build plus test suite. Do not misattribute a killed-at-~180s run to an external process cap or a context limit; measure with a throwaway sleep loop before believing that.
 - Never pipe through `tail`/`head` — both buffer the entire stream until exit, so the harness's output file reads empty the whole run.
 
+## Quota
+
+Probe before dispatch: `python3 ../../scripts/codex-usage.py --json` (bare for human-readable, `--percent` for routing math only). Reads `~/.codex/auth.json`; reports the tighter of the 5-hour/weekly windows. Exit `2` means unknown, not low. Full contract in `../../references/quota-probe.md`.
+
 ## Liveness — do not trust `pgrep -f "codex exec"` or `comm == "codex"` alone
 
 `pgrep -f "codex exec …"` matches the harness's wrapper shell (the Bash tool runs it inside `/bin/zsh -c …`), which can outlive its codex child by tens of minutes. A hit is not evidence of life.
