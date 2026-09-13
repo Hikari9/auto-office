@@ -28,7 +28,7 @@ Load only the protocol/reference needed for the current lifecycle step.
 5. Establish repository/runtime baseline and classify task shape, risk, blast radius, and size class.
 6. Create or reconcile durable family/run state before dispatch.
 7. Freeze the orchestrator-owned intent fields. The v3 spec references five frozen fields without naming them; this preview keeps the existing office compatibility seed: `goal`, `done_criteria`, `blast_radius`, `named_actions`, `non_goals`. Treat this mapping as compatibility data, not a license to change the normative spec.
-8. Load `skills/auto-planning/SKILL.md` for planning and product-decision resolution.
+8. Run `python3 scripts/office_runtime.py check-spoke --state-dir <run-state-dir> --spoke auto-planning`. If it exits nonzero, load `skills/auto-planning/SKILL.md` via the Skill tool, then run `mark-spoke --spoke auto-planning` before proceeding. Never skip straight to planning work on the assumption the spoke is already loaded.
 
 For takeover/resume, load `protocol/state-and-takeover.md` before any mutable action.
 
@@ -56,7 +56,7 @@ Run this order:
 
 ## Role routing
 
-Load `skills/auto-routing/SKILL.md` before every routed role. Route the exact identity:
+Before every routed role, run `check-spoke --spoke auto-routing`; if not loaded, load `skills/auto-routing/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-routing`. Route the exact identity:
 
 `harness@version × model_id × effort`
 
@@ -76,7 +76,7 @@ Never lower an absolute floor for cost or quota. Public benchmark data is a cold
 
 ## Dispatch and mutation
 
-Load `skills/auto-execution/SKILL.md`. Validate every packet before dispatch. One mutable holder owns a write scope at a time. A holder change is a takeover requiring lease acquisition and stale-state reconciliation.
+Run `check-spoke --spoke auto-execution`; if not loaded, load `skills/auto-execution/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-execution`. Validate every packet before dispatch. One mutable holder owns a write scope at a time. A holder change is a takeover requiring lease acquisition and stale-state reconciliation.
 
 Use the harness primitive selected by the adapter (`skills/codex-cli`, `skills/claude-cli`, `skills/agy-cli`, `skills/hermes-cli`, or another conforming primitive). `auto-office` owns the lifecycle; adapters own harness execution. Runs are durable across interruptions via SQLite-backed leases and atomic state snapshots. Harness primitives are mechanics only; they never redefine lifecycle authority.
 
@@ -94,8 +94,8 @@ Use the harness primitive selected by the adapter (`skills/codex-cli`, `skills/c
 
 ## Review and verification
 
-- Load `skills/auto-review/SKILL.md` for plan/code gates and defect exits.
-- Load `skills/auto-verification/SKILL.md` for targeted tests, known-bad validation, browser/runtime acceptance flows, and evidence quality.
+- Run `check-spoke --spoke auto-review`; if not loaded, load `skills/auto-review/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-review`, for plan/code gates and defect exits.
+- Run `check-spoke --spoke auto-verification`; if not loaded, load `skills/auto-verification/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-verification`, for targeted tests, known-bad validation, browser/runtime acceptance flows, and evidence quality.
 - Require self-verification for every mutable run.
 - Require independent verification/review when risk, gear, playbook, repository policy, or user-facing acceptance requires it.
 
@@ -105,15 +105,17 @@ An accepted `PLAN DEFECT` or `BRIEF DEFECT` must name the contradicted assumptio
 
 ## Closeout and learning
 
-Load `skills/auto-closeout/SKILL.md`. Do not report implementation complete until the required outcome, validation, review, runtime/browser evidence, PR/branch state, blockers, and pinned hashes exist.
+Run `check-spoke --spoke auto-closeout`; if not loaded, load `skills/auto-closeout/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-closeout`. Do not report implementation complete until the required outcome, validation, review, runtime/browser evidence, PR/branch state, blockers, and pinned hashes exist.
 
-At the beginning/closeout of later invocations, load `skills/auto-maintenance/SKILL.md` for lazy labeling, maturity, catalog freshness, and structured local evidence.
+At the beginning/closeout of later invocations, run `check-spoke --spoke auto-maintenance`; if not loaded, load `skills/auto-maintenance/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-maintenance`, for lazy labeling, maturity, catalog freshness, and structured local evidence.
 
-Create public self-improvement proposals only through `skills/auto-self-improve/SKILL.md` and only in an isolated branch/worktree. Agents may propose and prove; the maintainer decides what becomes shipped policy.
+Create public self-improvement proposals only through `skills/auto-self-improve/SKILL.md` (run `check-spoke`/`mark-spoke --spoke auto-self-improve` the same way) and only in an isolated branch/worktree. Agents may propose and prove; the maintainer decides what becomes shipped policy.
 
 ## Deterministic helpers
 
 Use `python3 scripts/office_runtime.py --help` for packet validation, adapter validation/scaffolding, route selection, snapshot hashing, SQLite recorder initialization, maturity calculation, replay comparison, privacy linting, catalog snapshot creation, and proposal identity hashing.
+
+Spoke-load compliance is checkable, not assumed: `check-spoke --state-dir <run-state-dir> --spoke <name>` (all `check-spoke`/`mark-spoke` references above elide the shared `--state-dir <run-state-dir>` for brevity) exits 0 only if `mark-spoke --spoke <name>` was already recorded for this run's `state.json`. Do not treat "I loaded it earlier in the conversation" as sufficient — if `check-spoke` exits nonzero, load the spoke via the Skill tool and mark it before doing that stage's work, even if this feels redundant.
 
 Use `python3 scripts/check_ecosystem.py` before packaging or proposing plugin changes.
 

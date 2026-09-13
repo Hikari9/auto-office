@@ -420,6 +420,28 @@ def cmd_state_load(args):
     if not state_path.exists(): dump_json({"exists": False}); return 0
     dump_json(json.loads(state_path.read_text(encoding="utf-8"))); return 0
 
+def cmd_mark_spoke(args):
+    state_path = Path(args.state_dir) / "state.json"
+    if not state_path.exists():
+        dump_json({"error": "no state.json; run new-run/state-save first"}); return 1
+    obj = json.loads(state_path.read_text(encoding="utf-8"))
+    spokes = obj.setdefault("spokes_loaded", {})
+    spokes[args.spoke] = datetime.now(timezone.utc).isoformat()
+    tmp_path = state_path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
+    tmp_path.replace(state_path)
+    dump_json({"marked": args.spoke, "phase": obj.get("phase")}); return 0
+
+def cmd_check_spoke(args):
+    state_path = Path(args.state_dir) / "state.json"
+    if not state_path.exists():
+        dump_json({"loaded": False, "reason": "no state.json"}); return 2
+    obj = json.loads(state_path.read_text(encoding="utf-8"))
+    spokes = obj.get("spokes_loaded", {})
+    loaded = args.spoke in spokes
+    dump_json({"loaded": loaded, "spoke": args.spoke, "marked_at": spokes.get(args.spoke)})
+    return 0 if loaded else 2
+
 def cmd_state_reconcile(args):
     report = {"stale_leases_revoked": 0, "expired_dispatches": 0, "dirty_worktrees": 0}
     if args.db:
@@ -513,6 +535,8 @@ def main():
     q=sp.add_parser('state-save'); q.add_argument('--state-dir',required=True); q.add_argument('--run-id',required=True); q.add_argument('--family-id',required=True); q.add_argument('--phase',required=True); q.add_argument('--plan-version',type=int,default=1); q.add_argument('--packet-version',type=int,default=1); q.add_argument('--dispatches'); q.add_argument('--findings'); q.add_argument('--lease'); q.set_defaults(func=cmd_state_save)
     q=sp.add_parser('state-load'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_state_load)
     q=sp.add_parser('state-reconcile'); q.add_argument('--state-dir',required=True); q.add_argument('--db'); q.set_defaults(func=cmd_state_reconcile)
+    q=sp.add_parser('mark-spoke'); q.add_argument('--state-dir',required=True); q.add_argument('--spoke',required=True); q.set_defaults(func=cmd_mark_spoke)
+    q=sp.add_parser('check-spoke'); q.add_argument('--state-dir',required=True); q.add_argument('--spoke',required=True); q.set_defaults(func=cmd_check_spoke)
     args=p.parse_args(); sys.exit(args.func(args))
 
 if __name__=='__main__': main()
