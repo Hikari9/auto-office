@@ -23,7 +23,7 @@ The failure shape: a shared factory gains a required argument; every call site i
 
 Cover the wiring separately from the behavior. Assert what arguments reach the real factory, without opening a connection. When a suite is green but the code has never run against the real dependency, say so in the evidence rather than reporting the pass rate alone.
 
-Rebasing onto current mainline is part of verification, not a formality before it. Re-run the suite after the rebase: a clean merge says the text reconciled, never that the semantics did. A required-argument change in a merged dependency is invisible to the merge and fatal at runtime.
+A clean rebase onto current mainline reconciles text, never semantics: a required-argument change in a merged dependency is invisible to the merge and fatal at runtime. Where the base has moved and a rebase is warranted, that's a writer-lease action, not something verification does unilaterally — it changes the reviewed tree and the pinned base SHA. Acquire the lease, update or invalidate the affected packets per protocol/state-and-takeover.md, then re-run the suite and re-verify against the new base.
 
 ## An artifact a worker could not have captured is fabricated
 
@@ -37,7 +37,7 @@ Capture provenance belongs to whoever may call the live system. If the brief for
 
 Two gate-placement errors travel with this, both worth checking directly:
 
-- **A capture path that validates before it captures can never capture.** The states worth capturing are the invalid ones: before first provisioning, and after a corruption. Validate on restore, never on export. Refusing to record garbage is refusing to record exactly when the record matters.
+- **A capture path that semantically validates before it captures can never capture.** The states worth capturing are the invalid ones: before first provisioning, and after a corruption. Gate semantic/business validation on restore, not on export — refusing to record garbage is refusing to record exactly when the record matters. Export still needs its own non-gating structural/serialization/integrity check (well-formed, complete, readable) so a malformed artifact is caught at capture time rather than discovered only when someone tries to restore it.
 - **Confirmation flags gate writes, not reads.** A read-only export behind a write-confirmation flag means the rollback target can only be produced by someone who has already confirmed the write it protects against.
 
 ## Measure the bytes that get written
