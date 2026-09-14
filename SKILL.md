@@ -21,19 +21,15 @@ Load only the protocol/reference needed for the current lifecycle step.
 
 ## Start or resume a run
 
-1. Resolve user intent and scope.
-2. Load effective config by running `python3 scripts/office_runtime.py effective-config`.
-   It merges `prompt/CLI > repo > user > plugin default` and emits `effective_config_hash`.
-   Never hand-read `config/config.default.yaml` and treat it as the answer: the user tier
-   (`~/.config/auto-office/config.yaml`) lives outside the repo, is invisible to repo search,
-   and routinely sets role `preferred_seed` chains the plugin default does not have.
-   Use the emitted hash for `new-run --config-hash`; do not invent one.
-3. Run lazy maintenance for eligible historical rows when practical.
-4. Resolve the current immutable catalog and adapter snapshots; refresh may run separately, but route-time itself must not use the network.
-5. Establish repository/runtime baseline and classify task shape, risk, blast radius, and size class.
-6. Create or reconcile durable family/run state before dispatch.
-7. Freeze the orchestrator-owned intent fields. The v3 spec references five frozen fields without naming them; this preview keeps the existing office compatibility seed: `goal`, `done_criteria`, `blast_radius`, `named_actions`, `non_goals`. Treat this mapping as compatibility data, not a license to change the normative spec.
-8. Run `python3 scripts/office_runtime.py check-spoke --state-dir <run-state-dir> --spoke auto-planning`. If it exits nonzero, load `skills/auto-planning/SKILL.md` via the Skill tool, then run `mark-spoke --spoke auto-planning` before proceeding. Never skip straight to planning work on the assumption the spoke is already loaded.
+Step zero, always, before any other action: run
+
+`python3 scripts/office_runtime.py start --goal <text> --playbook <Change|Restructure|Investigate|Prototype|Visual> [--gear <direct|direct+review|light|quick|express|full>] [--repo <path>]`
+
+Echo the returned `kickoff` block to the user, then use its `state_dir` for every later `check-spoke`/`mark-spoke --state-dir` call. Doing the work inline instead of running this command is the known failure mode this step exists to close — there is no other valid entry point.
+
+`start` mechanically resolves effective config (merging `prompt/CLI > repo > user > plugin default`, emitting `effective_config_hash`; the user tier at `~/.config/auto-office/config.yaml` lives outside the repo, is invisible to repo search, and routinely sets `preferred_seed` chains the plugin default lacks — never hand-read `config/config.default.yaml` and treat it as the answer), pins the catalog/adapter snapshot hashes, policy hash, and base SHA, runs the gear fit test when `--gear` is omitted, and creates durable run state with `phase = "intake"`.
+
+Still manual, after `start` returns: freeze the five orchestrator-owned intent fields as compatibility data, not license to change the normative spec — `goal`, `done_criteria`, `blast_radius`, `named_actions`, `non_goals` — then run `check-spoke --state-dir <state_dir> --spoke auto-planning`; if it exits nonzero, load `skills/auto-planning/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-planning` before any planning work.
 
 For takeover/resume, load `protocol/state-and-takeover.md` before any mutable action.
 
