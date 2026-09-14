@@ -2,8 +2,15 @@ schema_version: 3
 kind: shipped-seed-catalog
 notes: >-
   Identity-only cold-start rows for model names explicitly present in the v3 specification.
-  Benchmark indexes, prices, speed, release dates, and provider slugs are intentionally unknown
-  until refreshed from authoritative sources. These rows do not prove local harness support.
+  Benchmark indexes, prices, speed, and release dates are intentionally unknown until refreshed
+  from authoritative sources. These rows do not prove local harness support.
+
+  `model_id` is the spec's canonical name; `invocation_model_id` is the slug the named harness
+  actually accepts on the command line. They are not interchangeable — the spec name `luna` is
+  rejected by codex, which wants `gpt-5.6-luna` — and a row that leaves `invocation_model_id`
+  null makes the router dispatch the canonical name unverified. When a dispatch fails on an
+  unknown model, record it with `office_runtime.py route-defect` and amend the row here through
+  `auto-self-improve`; never hand-patch the slug in a brief and move on.
 models:
   - model_id: opus
     source_identifier: spec:planner-seed-opus
@@ -32,6 +39,9 @@ models:
     content_hash: null
     supersession_metadata: null
   - model_id: luna
+    invocation_model_id: gpt-5.6-luna
+    invocation_harness: codex
+    invocation_source: local-evidence:dispatch-failure-amendment
     source_identifier: spec:reviewer-seed-luna
     source_name: office-skills-v3-spec
     effort: xhigh

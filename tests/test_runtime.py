@@ -55,6 +55,46 @@ class RuntimeTests(unittest.TestCase):
         seed=[{'harness':'agy','model_id':'gemini-3.8-flash','effort':'medium'}]
         r=rt.route({'role':'executor','playbook':'Change','preferred_seed':seed,'candidates':[unmatched,matched]})
         self.assertTrue(r['selected'].startswith('agy@'))
+    def test_disclosure_flags_unverified_invocation_slug(self):
+        only=cand('codex',model_id='luna')
+        r=rt.route({'role':'executor','playbook':'Change','candidates':[only]})
+        d=r['selection_disclosure']
+        self.assertEqual(d['invocation_model_id'],'luna')
+        self.assertEqual(d['invocation_model_id_source'],'fallback:model_id')
+        self.assertIn('unverified',d['reason'])
+    def test_disclosure_marks_catalog_slug_verified(self):
+        only=cand('codex',model_id='luna'); only['invocation_model_id']='gpt-5.6-luna'
+        d=rt.route({'role':'executor','playbook':'Change','candidates':[only]})['selection_disclosure']
+        self.assertEqual(d['invocation_model_id'],'gpt-5.6-luna')
+        self.assertEqual(d['invocation_model_id_source'],'catalog')
+        self.assertNotIn('unverified',d['reason'])
+
+class RouteDefectTests(unittest.TestCase):
+    class Args:
+        def __init__(self, **kw): self.__dict__.update(kw)
+
+    def _state(self, d):
+        (Path(d)/'state.json').write_text('{"run_id":"r"}')
+        return d
+
+    def test_recorded_defect_blocks_until_resolved(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._state(d)
+            self.assertEqual(rt.cmd_check_route_defects(self.Args(state_dir=d)),0)
+            rt.cmd_route_defect(self.Args(state_dir=d,kind='invalid-invocation-slug',
+                attempted='luna',observed='unknown model',correction='gpt-5.6-luna',harness='codex'))
+            self.assertEqual(rt.cmd_check_route_defects(self.Args(state_dir=d)),2)
+            rows=rt.load_route_defects(d)
+            self.assertEqual(rows[0]['correction'],'gpt-5.6-luna')
+            rt.cmd_resolve_route_defect(self.Args(state_dir=d,id=rows[0]['id'],proposal_ref='branch/x'))
+            self.assertEqual(rt.cmd_check_route_defects(self.Args(state_dir=d)),0)
+
+    def test_defect_requires_run_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(rt.cmd_route_defect(self.Args(state_dir=d,kind='other',
+                attempted='x',observed='y',correction=None,harness=None)),1)
+
+class _MaturityTests(unittest.TestCase):
     def test_maturity_curve(self):
         self.assertAlmostEqual(rt.maturity_age(0),0)
         self.assertGreater(rt.maturity_age(60),60)

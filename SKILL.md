@@ -77,6 +77,8 @@ Use the mandatory filter order:
 8. cost;
 9. local tie-break evidence.
 
+A harness rejecting the routed model/effort identity is a routing defect, not a retry: record it with `office_runtime.py route-defect`, re-dispatch corrected, and hand the amendment to an `auto-self-improve` subagent. `auto-closeout` gates on `check-route-defects`, so an unamended slug blocks completion.
+
 Never lower an absolute floor for cost or quota. Public benchmark data is a cold-start prior; enough comparable local evidence for the exact routable triple outranks it.
 
 Every plan must contain a `model_assignments` block naming the orchestrator and planner identities. Record the exact invocation model identifier when the harness exposes one, plus canonical `model_id`, effort, harness/version, whether the planner is inline or separately routed, and a concise selection rationale. If the current entry model owns both roles, declare both explicitly rather than implying the planner identity.
@@ -98,7 +100,7 @@ Use the harness primitive selected by the adapter (`skills/codex-cli`, `skills/c
 - `scripts/verify.sh` — ordered verification gate runner (lint, typecheck, test, runtime).
 - `scripts/review_loop.sh` — multi-round verify/review/fix orchestrator enforcing no-self-approval and defect exits.
 - `scripts/review_finding.sh` — structured review finding recording and telemetry persistence.
-- `scripts/hooks/` — lifecycle hooks (`session_end.sh`, `pre_compact.sh`, `compact_advisor.sh`, `close_panes.sh`, `install_hooks.sh`) ensuring runs remain durable across interruptions and context compaction.
+- `scripts/hooks/` — lifecycle hooks (`session_end.sh`, `pre_compact.sh`, `compact_advisor.sh`, `close_panes.sh`, `close_finished_panes.mjs`, `install_hooks.sh`) ensuring runs remain durable across interruptions and context compaction.
 - `scripts/agy-usage.py`, `scripts/claude-usage.py`, `scripts/codex-usage.py` — live per-brand quota probes (stdlib/OAuth reads against each vendor's usage API); each adapter's `quota_probe.command` names its probe. See `references/quota-probe.md`.
 
 ## Review and verification
@@ -114,7 +116,7 @@ An accepted `PLAN DEFECT` or `BRIEF DEFECT` must name the contradicted assumptio
 
 ## Closeout and learning
 
-Run `check-spoke --spoke auto-closeout`; if not loaded, load `skills/auto-closeout/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-closeout`. Do not report implementation complete until the required outcome, validation, review, runtime/browser evidence, PR/branch state, blockers, and pinned hashes exist.
+Reorganize the dispatch surface on every closeout, not only the last: run `node scripts/hooks/close_finished_panes.mjs < /dev/null` to close finished Herdr panes from the spawn ledger, then account for whatever pane remains open. Run `check-spoke --spoke auto-closeout`; if not loaded, load `skills/auto-closeout/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-closeout`. Do not report implementation complete until the required outcome, validation, review, runtime/browser evidence, PR/branch state, blockers, and pinned hashes exist.
 
 At the beginning/closeout of later invocations, run `check-spoke --spoke auto-maintenance`; if not loaded, load `skills/auto-maintenance/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-maintenance`, for lazy labeling, maturity, catalog freshness, and structured local evidence.
 

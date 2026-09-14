@@ -9,7 +9,13 @@ set -euo pipefail
 # Usage:
 #   office-spawn.sh --adapter <adapter.yaml> --model <model> --effort <effort> \
 #     --worktree <dir> --brief <file> --dispatch-id <id> --run-id <id> \
-#     [--state-dir <dir>] [--timeout <seconds>]
+#     [--state-dir <dir>] [--timeout <seconds>] [--pane-id <id>] [--agent-name <name>]
+#
+# --pane-id/--agent-name record the dispatch in the Herdr pane ledger
+# (OFFICE_PANE_LEDGER, default /tmp/office/panes.jsonl) so the Stop hook
+# scripts/hooks/close_finished_panes.mjs can close the pane once its agent
+# reports done. A pane-hosted dispatch spawned without these stays open forever,
+# because the hook only ever closes panes it finds in the ledger.
 
 ADAPTER=""
 MODEL=""
@@ -20,6 +26,9 @@ DISPATCH_ID=""
 RUN_ID=""
 STATE_DIR=""
 TIMEOUT=30
+PANE_ID=""
+AGENT_NAME=""
+
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -32,6 +41,8 @@ while [[ $# -gt 0 ]]; do
     --run-id) RUN_ID="$2"; shift 2 ;;
     --state-dir) STATE_DIR="$2"; shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
+    --pane-id) PANE_ID="$2"; shift 2 ;;
+    --agent-name) AGENT_NAME="$2"; shift 2 ;;
     *) echo "office-spawn: unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -135,6 +146,23 @@ print(json.dumps({
 }, indent=2))
 " "$PID" "$DISPATCH_ID" "$RUN_ID" "$MODEL" "$EFFORT" "$ADAPTER" "${WORKTREE:-.}" "$NOW" "$LOGFILE" \
   > "${DISPATCH_DIR}/meta.json"
+
+# Record the pane in the Herdr ledger, in the same block that spawned it, so it
+# cannot be forgotten separately from spawning.
+if [[ -n "$PANE_ID" ]]; then
+  LEDGER="${OFFICE_PANE_LEDGER:-/tmp/office/panes.jsonl}"
+  mkdir -p "$(dirname "$LEDGER")"
+  python3 -c "
+import json, sys
+print(json.dumps({
+    'pane_id': sys.argv[1],
+    'agent': sys.argv[2] or None,
+    'dispatch_id': sys.argv[3],
+    'run_id': sys.argv[4],
+    'recorded_at': sys.argv[5],
+}))
+" "$PANE_ID" "$AGENT_NAME" "$DISPATCH_ID" "$RUN_ID" "$NOW" >> "$LEDGER"
+fi
 
 # Startup check: wait briefly and verify process didn't die immediately
 sleep 1

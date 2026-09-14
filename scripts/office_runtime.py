@@ -115,10 +115,19 @@ def selection_disclosure(role: str, chosen: dict, preferred_seed, cost_policy: s
         reasons.append(f"matched preferred seed #{rank + 1}, which decided the advisory ranking")
     else:
         reasons.append(f"won the {cost_policy} cost and local-evidence comparison")
+    invocation = chosen.get("invocation_model_id")
+    if not invocation:
+        # The catalog row carries no harness-specific slug, so the dispatch will
+        # be attempted with the canonical model_id. Spec-seed names ("luna") are
+        # not harness slugs ("gpt-5.6-luna"), so this fallback is the single
+        # largest source of route-time dispatch failures. Say so in the
+        # disclosure instead of letting it look like a resolved slug.
+        reasons.append("carries no catalog invocation slug, so model_id is being used unverified")
     return {
         "role": role,
         "model_id": chosen.get("model_id"),
-        "invocation_model_id": chosen.get("invocation_model_id") or chosen.get("model_id"),
+        "invocation_model_id": invocation or chosen.get("model_id"),
+        "invocation_model_id_source": "catalog" if invocation else "fallback:model_id",
         "effort": chosen.get("effort"),
         "harness": chosen.get("harness"),
         "harness_version": chosen.get("harness_version"),
@@ -584,6 +593,75 @@ def cmd_check_spoke(args):
     dump_json({"loaded": loaded, "spoke": args.spoke, "marked_at": spokes.get(args.spoke)})
     return 0 if loaded else 2
 
+def cmd_route_defect(args):
+    """Record a routing defect and block closeout until it is amended.
+
+    A routing defect is a route this runtime emitted that the harness could not
+    actually invoke — overwhelmingly an invocation slug that does not exist
+    (`luna` where the harness wanted `gpt-5.6-luna`). Retrying by hand fixes the
+    run and loses the lesson, so the defect is durable state: `auto-closeout`
+    refuses to complete while an unresolved row remains, which is what forces the
+    isolated `auto-self-improve` amendment to the catalog row.
+    """
+    state_dir = Path(args.state_dir)
+    if not (state_dir / "state.json").exists():
+        dump_json({"error": "no state.json; run new-run/state-save first"}); return 1
+    path = state_dir / "route-defects.jsonl"
+    row = {
+        "id": str(uuid.uuid4()),
+        "kind": args.kind,
+        "attempted": args.attempted,
+        "observed_error": args.observed,
+        "correction": args.correction,
+        "harness": args.harness,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "resolved": False,
+    }
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+    dump_json({"recorded": row["id"], "file": str(path), "unresolved": len(load_route_defects(state_dir, unresolved_only=True))})
+    return 0
+
+def load_route_defects(state_dir, unresolved_only=False):
+    path = Path(state_dir) / "route-defects.jsonl"
+    if not path.exists(): return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip(): continue
+        try: row = json.loads(line)
+        except ValueError: continue
+        if unresolved_only and row.get("resolved"): continue
+        rows.append(row)
+    return rows
+
+def cmd_resolve_route_defect(args):
+    """Mark a recorded defect amended, naming the proposal that carries the fix."""
+    state_dir = Path(args.state_dir)
+    rows = load_route_defects(state_dir)
+    if not rows:
+        dump_json({"error": "no recorded route defects"}); return 1
+    found = False
+    for row in rows:
+        if row.get("id") == args.id:
+            row["resolved"] = True
+            row["proposal_ref"] = args.proposal_ref
+            row["resolved_at"] = datetime.now(timezone.utc).isoformat()
+            found = True
+    if not found:
+        dump_json({"error": f"no route defect with id {args.id}"}); return 1
+    path = state_dir / "route-defects.jsonl"
+    tmp = path.with_suffix(".jsonl.tmp")
+    tmp.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    tmp.replace(path)
+    dump_json({"resolved": args.id, "unresolved": len(load_route_defects(state_dir, unresolved_only=True))})
+    return 0
+
+def cmd_check_route_defects(args):
+    """Closeout gate. Exit 2 while any recorded routing defect is unamended."""
+    unresolved = load_route_defects(Path(args.state_dir), unresolved_only=True)
+    dump_json({"clear": not unresolved, "unresolved": unresolved})
+    return 0 if not unresolved else 2
+
 def cmd_state_reconcile(args):
     report = {"stale_leases_revoked": 0, "expired_dispatches": 0, "dirty_worktrees": 0}
     if args.db:
@@ -680,6 +758,9 @@ def main():
     q=sp.add_parser('state-reconcile'); q.add_argument('--state-dir',required=True); q.add_argument('--db'); q.set_defaults(func=cmd_state_reconcile)
     q=sp.add_parser('mark-spoke'); q.add_argument('--state-dir',required=True); q.add_argument('--spoke',required=True); q.set_defaults(func=cmd_mark_spoke)
     q=sp.add_parser('check-spoke'); q.add_argument('--state-dir',required=True); q.add_argument('--spoke',required=True); q.set_defaults(func=cmd_check_spoke)
+    q=sp.add_parser('route-defect'); q.add_argument('--state-dir',required=True); q.add_argument('--kind',choices=['invalid-invocation-slug','unsupported-effort','missing-adapter','other'],default='invalid-invocation-slug'); q.add_argument('--attempted',required=True); q.add_argument('--observed',required=True); q.add_argument('--correction'); q.add_argument('--harness'); q.set_defaults(func=cmd_route_defect)
+    q=sp.add_parser('resolve-route-defect'); q.add_argument('--state-dir',required=True); q.add_argument('--id',required=True); q.add_argument('--proposal-ref',required=True); q.set_defaults(func=cmd_resolve_route_defect)
+    q=sp.add_parser('check-route-defects'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_check_route_defects)
     args=p.parse_args(); sys.exit(args.func(args))
 
 if __name__=='__main__': main()

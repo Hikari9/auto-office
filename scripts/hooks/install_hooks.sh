@@ -24,7 +24,8 @@ cp "${HOOKS_SRC}/session_end.sh" "$HOOKS_DEST/"
 cp "${HOOKS_SRC}/pre_compact.sh" "$HOOKS_DEST/"
 cp "${HOOKS_SRC}/compact_advisor.sh" "$HOOKS_DEST/"
 cp "${HOOKS_SRC}/close_panes.sh" "$HOOKS_DEST/"
-chmod +x "$HOOKS_DEST"/*.sh
+cp "${HOOKS_SRC}/close_finished_panes.mjs" "$HOOKS_DEST/"
+chmod +x "$HOOKS_DEST"/*.sh "$HOOKS_DEST"/*.mjs
 
 cat > "$MANIFEST" << EOF
 {
@@ -55,6 +56,13 @@ cat > "$MANIFEST" << EOF
       "name": "close_panes",
       "trigger": "cleanup",
       "script": "${HOOKS_DEST}/close_panes.sh",
+      "idempotent": true,
+      "timeout": 30
+    },
+    {
+      "name": "close_finished_panes",
+      "trigger": "stop",
+      "script": "${HOOKS_DEST}/close_finished_panes.mjs",
       "idempotent": true,
       "timeout": 30
     }
@@ -109,7 +117,8 @@ if configure(p, {}):
     d['hooks'].update({
         'SessionEnd': [{'hooks': [{'type': 'command', 'command': h+'/session_end.sh', 'timeout': 30000}]}],
         'PreCompact': [{'hooks': [{'type': 'command', 'command': h+'/pre_compact.sh', 'timeout': 30000}]}],
-        'Stop': [{'hooks': [{'type': 'command', 'command': h+'/close_panes.sh', 'timeout': 30000}]}]
+        'Stop': [{'hooks': [{'type': 'command', 'command': h+'/close_panes.sh', 'timeout': 30000},
+                            {'type': 'command', 'command': h+'/close_finished_panes.mjs', 'timeout': 30000}]}]
     })
     with open(p, 'w') as f: json.dump(d, f, indent=2)
     configured.append('Claude')
@@ -121,7 +130,7 @@ if configure_codex(p):
 
 # Gemini
 p = os.path.expanduser('~/.gemini/config/hooks.json')
-if configure(p, {'SessionEnd': h+'/session_end.sh', 'Stop': h+'/close_panes.sh'}):
+if configure(p, {'SessionEnd': h+'/session_end.sh', 'Stop': [h+'/close_panes.sh', h+'/close_finished_panes.mjs']}):
     configured.append('Gemini')
 
 if configured:

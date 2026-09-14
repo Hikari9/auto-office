@@ -13,6 +13,11 @@ Record telemetry/outcomes before declaring completion when the recorder is avail
 
 Never merge policy/self-improvement changes to main autonomously. Human merge-to-main remains mandatory.
 
+**Close recorded routing defects.** Run `python3 scripts/office_runtime.py check-route-defects
+--state-dir <run-state-dir>`. Exit 2 means this run emitted a route the harness could not invoke and
+nothing has amended the catalog yet: dispatch the `auto-self-improve` subagent, then
+`resolve-route-defect --id <id> --proposal-ref <branch-or-PR>`. Do not report complete on exit 2.
+
 **Reclaim the dispatch surface.** A run that ends leaving its workers parked is not closed out.
 Once a ticket's work is merged and its evidence lives somewhere durable (the PR body, the
 resolution comment, a findings file), close the panes that produced it — a finished worker's
@@ -22,6 +27,14 @@ out of it. Close, in this order:
 - panes whose agent produced nothing (a mis-routed dispatch, an agent that died at startup);
 - panes whose work is merged and whose findings are recorded;
 - the run's tab or workspace once every pane in it is closed.
+
+Do this mechanically, not from memory. `scripts/hooks/close_finished_panes.mjs` (installed as a
+Stop hook by `scripts/hooks/install_hooks.sh`) closes ledger panes whose agent is `done` or gone,
+and is safe to run by hand at closeout: `node scripts/hooks/close_finished_panes.mjs < /dev/null`.
+It reads only the ledger written by `office_spawn.sh --pane-id`, never `herdr pane list`, so it
+cannot touch the user's own panes. It is a no-op without `herdr` on `PATH`. Run it, then read
+`herdr pane list` yourself and reorganize what remains — a surviving pane needs a reason you can
+state.
 
 Keep a pane only while its agent may still be resumed for another round — a reviewer mid-round,
 an executor awaiting fixes. Never close a pane you did not create, and never close one hosting a
