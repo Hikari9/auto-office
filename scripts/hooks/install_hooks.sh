@@ -20,10 +20,36 @@ fi
 
 mkdir -p "$HOOKS_DEST"
 HOOKS_SRC="$(cd "$(dirname "$0")" && pwd)"
-NODE_BIN="/opt/homebrew/bin/node"
-if [ ! -x "$NODE_BIN" ]; then
-    echo "Required Node binary not found at $NODE_BIN" >&2
-    exit 1
+
+# Resolve Node in the caller's environment. `command -v` finds ordinary PATH
+# installs and nvm shims; `type -P` unwraps a shell function to its executable
+# instead of invoking a potentially stale function preamble. An explicit
+# OFFICE_NODE_BIN may still name a command when the caller intentionally needs
+# shell-function resolution.
+resolve_node() {
+    local candidate
+    if [ -n "${OFFICE_NODE_BIN:-}" ]; then
+        printf '%s\n' "$OFFICE_NODE_BIN"
+        return 0
+    fi
+
+    candidate="$(command -v node 2>/dev/null || true)"
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+
+    candidate="$(type -P node 2>/dev/null || true)"
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    return 1
+}
+
+if ! NODE_BIN="$(resolve_node)"; then
+    NODE_BIN=:
+    echo "Node.js not found; Node-based close_finished_panes hooks will be no-ops." >&2
 fi
 cp "${HOOKS_SRC}/session_end.sh" "$HOOKS_DEST/"
 cp "${HOOKS_SRC}/pre_compact.sh" "$HOOKS_DEST/"
