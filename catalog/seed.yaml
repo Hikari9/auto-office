@@ -11,6 +11,11 @@ notes: >-
   null makes the router dispatch the canonical name unverified. When a dispatch fails on an
   unknown model, record it with `office_runtime.py route-defect` and amend the row here through
   `auto-self-improve`; never hand-patch the slug in a brief and move on.
+
+  `invocation_source` records machine-readable slug provenance across three states:
+  'local-evidence:*' (slug proven against a local harness command),
+  'documented:*' (slug documented in authoritative sources but unproven against local harness),
+  and 'unverified:*' (with null invocation_model_id, canonical name unverified).
 benchmark_index_version: Artificial Analysis Intelligence Index v4.3
 benchmark_index_notes: >-
   Scores from index version v4.3 (2026-09-07) are NOT comparable to v4.1.1 or v4.2 scores;
@@ -21,7 +26,7 @@ models:
   - model_id: opus
     invocation_model_id: claude-opus-5
     invocation_harness: claude
-    invocation_source: 'documented-model-id: the claude CLI cannot enumerate models, so this slug is documented rather than CLI-proven; record a route-defect if a dispatch rejects it'
+    invocation_source: 'documented: the claude CLI cannot enumerate models, so this slug is documented rather than CLI-proven; record a route-defect if a dispatch rejects it'
     source_identifier: spec:planner-seed-opus
     source_name: office-skills-v3-spec
     effort: medium
