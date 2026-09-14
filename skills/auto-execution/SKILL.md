@@ -17,4 +17,6 @@ Enter dispatch from `state.json.phase == "approved"`; `intake`, `planned`, or an
 Acquire the role lease/write scope: one mutable holder per scope. Treat takeover as a holder change requiring stale-state reconciliation.
 Use the selected harness primitive; a primitive never redefines lifecycle authority. The producer self-reviews and self-verifies, but that is a pass, never an approval (lifecycle spec §8) — independent approval remains held by an agent that did not produce the work.
 
+Check `HERDR_ENV`/`herdr` reachability before choosing how to launch that primitive (see the top-level `SKILL.md`'s Dispatch and mutation section) — do not default to an in-process subagent tool just because it is already loaded and works.
+
 If evidence contradicts the plan/brief assumption and continuing would violate outcome/safety, raise a supported `PLAN DEFECT` or `BRIEF DEFECT` instead of improvising a requirement change.
