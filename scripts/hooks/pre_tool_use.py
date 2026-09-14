@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Auto Office mutation check for PreToolUse hooks — defence in depth, not a gate.
 
-This raises the cost of mutating below approval; it does not prevent it. It
-decides by classifying Bash source text, an unbounded surface: interpreters
-(`node -p`, `awk ... system()`), script loaders (`source`), write-capable
-options (`sort -o`, `git diff --output=`) and process substitution all pass.
-It also cannot prove which repository an opaque shell string will touch, and
-`--quote` on `approve-plan` is unauthenticated. Issue #94 holds the redesign.
-The enforced boundary lives in office_runtime.py, which refuses to write
-`approved` outside `approve-plan` and invalidates approval on a version bump.
+This raises the cost of mutating below approval; it does not prevent it, and by
+decision it is not meant to. The office states the rule in the brief and trusts
+the executor to comply, correcting course when it does not — see
+references/why-trust-not-enforcement.md, which also records that the Bash
+classifier below is machinery that document says not to build.
+
+Do not extend the classifier to cover a newly found case. The surface is
+unbounded and chasing it was already tried for five review rounds.
 """
 
 from __future__ import annotations
