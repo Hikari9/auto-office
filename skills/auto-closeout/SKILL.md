@@ -45,7 +45,18 @@ After closeout, run eligible lazy maintenance and, when justified, hand sanitize
 the run's own initiative is prohibited — plan approval alone does not authorize it. Merge only with
 an explicit per-run user statement authorizing it; absent that, mark the PR ready and stop. A policy
 or self-improvement change needs that statement too, and never merges autonomously. After an
-authorized merge, propose cleanup and wait for separate explicit authorization: switch to `main`, pull,
-remove the temporary worktree (`git worktree remove <path> && git worktree prune`), and delete the
-local branch (`git branch -d <branch>`). Never clean up automatically or remove worktrees/force-delete
-branches with uncommitted state without explicit cleanup instruction.
+authorized merge, propose the sweep below and wait for separate explicit authorization for it.
+
+**The sweep**, in order, once authorized. Run it here; do not reach for another skill:
+
+1. Commit what is outstanding, with a message saying why.
+2. Run the gate. Red: commit and document only, open no PR, report and stop.
+3. No PR for the branch yet? Open one — base resolved from the run, never forced to `main` — and
+   arm automerge. An unarmed PR is not shipped.
+4. Sync the local base branch. A merge lands on the remote only, so `merged` is not done until
+   local and `origin/<base>` name the same commit.
+5. Remove only worktrees this run created, `git worktree remove` with no `--force` — a refusal
+   means uncommitted state to look at, not an obstacle to overrule. Then `git worktree prune` and
+   `git branch -d`. Never `-D`: it discards work that may exist nowhere else.
+6. Close the loops — issues whose premise this run changed, scratch files outside the repo, and
+   any question put to the user that never got an answer.
