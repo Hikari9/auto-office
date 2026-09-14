@@ -5,9 +5,9 @@ description: Internal Auto Office v3 loop-driver spoke. Use after plan approval 
 
 # Auto Loop
 
-Dispatch every task in the wave before waiting on any of them. One worktree per dispatch, cut from the run's pinned base SHA; the orchestrator commits and merges, workers never touch git. Two tasks in one wave never share a write scope — a wave is only real if it draws as disjoint.
+Dispatch every task in the wave before waiting on any of them. One worktree per dispatch, cut from the run's pinned base SHA; the orchestrator commits and merges, workers never touch git. Two tasks in one wave never share a write scope — a wave is only real if it draws as disjoint. Every brief's completion criterion is a command whose output settles it, not a target — "under 120 lines" is a wish, "`wc -l` reports under 120" is a receipt (spec §4).
 
-Polls while any dispatch is live. Between polls the orchestrator only touches write scopes no live dispatch holds: planning later waves, reviewing returned output, preparing briefs, reading state.
+A dispatch counts as in flight only once it has a receipt — an observed transition to working, or output in the pane — not a status read at dispatch time; harness `idle` semantics differ across codex and agy (spec §6). Polls while any dispatch is live. Between polls the orchestrator only touches write scopes no live dispatch holds: planning later waves, reviewing returned output, preparing briefs, reading state.
 
 Arm a background monitor over every dispatch at or before dispatch time, kept armed for the whole run. Completion is an event from it, not a wait, and it fires on every terminal state — finished, idle, blocked, unknown, disappeared — not just success. Talking to the user never suspends it. If the monitor is lost or unarmed, re-poll before asserting any dispatch's state.
 
