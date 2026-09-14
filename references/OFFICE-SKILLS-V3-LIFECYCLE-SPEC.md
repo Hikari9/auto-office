@@ -208,6 +208,22 @@ Observed failure this closes: an orchestrator implemented several streamed follo
 because each looked small, making itself the bottleneck, holding write scopes that belonged to
 workers, and dropping the routing and telemetry record that makes a run reviewable.
 
+## 5.2 Ownership does not mean inline typing
+
+When the user addresses the orchestrator directly — "you write this", "you handle it" — that
+names the office: the orchestrator together with its executors. It assigns ownership and
+dispatch, not personal typing. The inline exception in section 5.1 stays exactly as narrow as
+stated there: never volume, never speed.
+
+Observed failure this closes: the orchestrator read "you write this" as an instruction to edit
+files itself; the maintainer corrected it — "by 'you' i always meant you together with your
+executors. You own office."
+
+When the orchestrator does take the section 5.1 inline exception, it becomes a producer for that
+artifact and is bound by section 8's no-self-review rule: it must route an independent review of
+its own inline edit like any other producer's output, and may not carry that work to closeout
+ungated.
+
 ## 6. Non-blocking orchestration
 
 The orchestrator must not idle while delegated work runs. This is a requirement,
@@ -350,6 +366,15 @@ out (#23).
 A learned pattern that adds an imperative rule to a policy spoke is a policy
 change, not a pattern, regardless of how its metadata is labelled. It goes
 through the replay gate.
+
+### 10.1 Where a learned lesson lives
+
+A discipline learned during a run that should change future runs' behavior belongs in this spec
+or a spoke — versioned, reviewable, shipped — never in an agent's private session memory, which
+does not ship, does not survive a different agent picking up the repo, and cannot be reviewed.
+The self-improvement path above is the mechanism for proposing it: closeout emits a proposal
+citing the run_id and recorder rows, and an imperative policy rule still goes through the replay
+gate.
 
 ## 11. Assertable conventions
 
