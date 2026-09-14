@@ -3,7 +3,8 @@
 
 Exercises the full orchestration runtime without model tokens:
   create synthetic repo
-  → initialize auto-office run
+  → start auto-office run
+  → plan and approve
   → dispatch fake executor
   → persist state
   → simulate interruption
@@ -45,31 +46,51 @@ class TestLifecycleIntegration(unittest.TestCase):
     
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _start_run(self, goal='exercise the lifecycle'):
+        env = os.environ.copy()
+        env['XDG_STATE_HOME'] = str(Path(self.tmpdir) / 'xdg-state')
+        rc, out, err = run_cmd('start',
+            '--goal', goal,
+            '--playbook', 'Change',
+            '--gear', 'direct',
+            '--repo', str(self.repo),
+            env=env)
+        self.assertEqual(rc, 0, err)
+        state_dir = Path(out['state_dir'])
+        state = json.loads((state_dir / 'state.json').read_text())
+        return state_dir, state
+
+    def _save_phase(self, state_dir, state, phase):
+        return run_cmd('state-save',
+            '--state-dir', str(state_dir),
+            '--run-id', state['run_id'],
+            '--family-id', state['family_id'],
+            '--phase', phase)
     
     def test_full_lifecycle(self):
         # 1. Init DB
         rc, out, _ = run_cmd('init-db', '--db', str(self.db))
         self.assertEqual(rc, 0)
         
-        # 2. Create run
-        run_file = self.state_dir / 'run.json'
-        rc, out, _ = run_cmd('new-run',
-            '--family-id', 'test-family-001',
-            '--holder-id', 'test-orchestrator',
-            '--triple', 'fake@1.0/fake-model@medium',
-            '--gear', 'standard',
-            '--playbook', 'Change',
-            '--base-sha', 'abc123',
-            '--policy-hash', 'sha256:deadbeef',
-            '--catalog-hash', 'sha256:cafebabe',
-            '--adapter-hash', 'sha256:feedface',
-            '--config-hash', 'sha256:12345678',
-            '--out', str(run_file))
-        self.assertEqual(rc, 0)
-        self.assertTrue(run_file.exists())
-        run_data = json.loads(run_file.read_text())
-        run_id = run_data['run_id']
-        
+        # 2. Start, plan, and approve the run through the real lifecycle commands.
+        state_dir, state = self._start_run()
+        run_id = state['run_id']
+        family_id = state['family_id']
+        self.assertEqual(state['phase'], 'intake')
+        rc, _, err = self._save_phase(state_dir, state, 'planned')
+        self.assertEqual(rc, 0, err)
+        state = json.loads((state_dir / 'state.json').read_text())
+        rc, out, err = run_cmd('approve-plan',
+            '--state-dir', str(state_dir),
+            '--approved-by', 'user',
+            '--quote', 'I approve this plan as written')
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out['phase'], 'approved')
+        state = json.loads((state_dir / 'state.json').read_text())
+        rc, _, err = self._save_phase(state_dir, state, 'executing')
+        self.assertEqual(rc, 0, err)
+
         # 3. Acquire lease
         rc, out, _ = run_cmd('lease-acquire',
             '--db', str(self.db),
@@ -81,19 +102,12 @@ class TestLifecycleIntegration(unittest.TestCase):
         self.assertTrue(out['acquired'])
         lease_id = out['lease_id']
         
-        # 4. Save state
-        rc, out, _ = run_cmd('state-save',
-            '--state-dir', str(self.state_dir),
-            '--run-id', run_id,
-            '--family-id', 'test-family-001',
-            '--phase', 'executing')
-        self.assertEqual(rc, 0)
-        
-        # 5. Simulate interruption (just verify state can be loaded)
+        # 4. Simulate interruption (just verify state can be loaded)
         rc, out, _ = run_cmd('state-load',
-            '--state-dir', str(self.state_dir))
+            '--state-dir', str(state_dir))
         self.assertEqual(rc, 0)
         self.assertEqual(out['run_id'], run_id)
+        self.assertEqual(out['phase'], 'executing')
         
         # 6. Lease check (should still be active)
         rc, out, _ = run_cmd('lease-check',
@@ -172,8 +186,20 @@ class TestLifecycleIntegration(unittest.TestCase):
             '--holder-id', 'executor-001')
         self.assertEqual(rc, 0)
         self.assertTrue(out['released'])
-        
-        # 12. Verify DB state
+
+        # 12. Mark the review and close the run through adjacent lifecycle phases.
+        state = json.loads((state_dir / 'state.json').read_text())
+        rc, _, err = self._save_phase(state_dir, state, 'reviewed')
+        self.assertEqual(rc, 0, err)
+        state = json.loads((state_dir / 'state.json').read_text())
+        rc, _, err = self._save_phase(state_dir, state, 'closed')
+        self.assertEqual(rc, 0, err)
+        rc, out, _ = run_cmd('state-load', '--state-dir', str(state_dir))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out['phase'], 'closed')
+        self.assertIn('approval', out)
+
+        # 13. Verify DB state
         con = sqlite3.connect(self.db)
         dispatches = con.execute('SELECT COUNT(*) FROM dispatches').fetchone()[0]
         invocation_model_id, selection_reason = con.execute(
@@ -220,23 +246,311 @@ class TestLifecycleIntegration(unittest.TestCase):
         self.assertEqual(out.get('prior_holder'), 'old-holder')
     
     def test_duplicate_hook_idempotency(self):
-        # State save should be idempotent
+        # State save should be idempotent once start has created the state.
         run_cmd('init-db', '--db', str(self.db))
+        state_dir, state = self._start_run()
+        rc0, _, err0 = self._save_phase(state_dir, state, 'planned')
+        self.assertEqual(rc0, 0, err0)
+        state = json.loads((state_dir / 'state.json').read_text())
         rc1, out1, _ = run_cmd('state-save',
-            '--state-dir', str(self.state_dir),
-            '--run-id', 'test-run',
-            '--family-id', 'test-family',
-            '--phase', 'executing')
+            '--state-dir', str(state_dir),
+            '--run-id', state['run_id'],
+            '--family-id', state['family_id'],
+            '--phase', 'planned')
         rc2, out2, _ = run_cmd('state-save',
-            '--state-dir', str(self.state_dir),
-            '--run-id', 'test-run',
-            '--family-id', 'test-family',
-            '--phase', 'executing')
+            '--state-dir', str(state_dir),
+            '--run-id', state['run_id'],
+            '--family-id', state['family_id'],
+            '--phase', 'planned')
         self.assertEqual(rc1, 0)
         self.assertEqual(rc2, 0)
         # Same state should produce same hash
         self.assertEqual(out1['content_hash'], out2['content_hash'])
-    
+
+    def test_state_save_requires_existing_started_state(self):
+        state_dir = Path(self.tmpdir) / 'not-started'
+        rc, out, err = run_cmd('state-save',
+            '--state-dir', str(state_dir),
+            '--run-id', 'missing-run',
+            '--family-id', 'missing-family',
+            '--phase', 'intake')
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(err, '')
+        self.assertEqual(out['error'], 'no_state')
+        self.assertFalse(state_dir.exists())
+
+    def test_state_save_rejects_minimal_fake_receipt_before_approval(self):
+        state_dir = Path(self.tmpdir) / 'fake-run'
+        state_dir.mkdir()
+        state_path = state_dir / 'state.json'
+        state_path.write_text(json.dumps({
+            'run_id': 'fake-run',
+            'family_id': 'fake-family',
+            'phase': 'intake',
+        }))
+
+        rc, out, err = run_cmd('state-save',
+            '--state-dir', str(state_dir),
+            '--run-id', 'fake-run',
+            '--family-id', 'fake-family',
+            '--phase', 'planned')
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(err, '')
+        self.assertEqual(out['error'], 'invalid_start_receipt')
+        self.assertEqual(json.loads(state_path.read_text())['phase'], 'intake')
+
+        rc, out, err = run_cmd('approve-plan',
+            '--state-dir', str(state_dir),
+            '--approved-by', 'user',
+            '--quote', 'I approve this fake plan')
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(err, '')
+        self.assertEqual(out['error'], 'invalid_phase')
+        self.assertEqual(json.loads(state_path.read_text())['phase'], 'intake')
+
+    def test_state_save_preserves_versions_and_rejects_post_approval_changes(self):
+        state_dir, state = self._start_run()
+        rc, out, err = run_cmd('state-save',
+            '--state-dir', str(state_dir),
+            '--run-id', state['run_id'],
+            '--family-id', state['family_id'],
+            '--phase', 'planned',
+            '--plan-version', '3',
+            '--packet-version', '7')
+        self.assertEqual(rc, 0, err)
+        state = json.loads((state_dir / 'state.json').read_text())
+        self.assertEqual(state['plan_version'], 3)
+        self.assertEqual(state['packet_version'], 7)
+
+        rc, out, err = run_cmd('approve-plan',
+            '--state-dir', str(state_dir),
+            '--approved-by', 'user',
+            '--quote', 'I approve version three')
+        self.assertEqual(rc, 0, err)
+        state = json.loads((state_dir / 'state.json').read_text())
+        self.assertEqual(state['approval']['plan_version'], 3)
+        self.assertEqual(state['approval']['packet_version'], 7)
+
+        rc, out, err = run_cmd('state-save',
+            '--state-dir', str(state_dir),
+            '--run-id', state['run_id'],
+            '--family-id', state['family_id'],
+            '--phase', 'executing')
+        self.assertEqual(rc, 0, err)
+        state = json.loads((state_dir / 'state.json').read_text())
+        self.assertEqual(state['plan_version'], 3)
+        self.assertEqual(state['packet_version'], 7)
+
+        rc, out, err = run_cmd('state-save',
+            '--state-dir', str(state_dir),
+            '--run-id', state['run_id'],
+            '--family-id', state['family_id'],
+            '--phase', 'reviewed',
+            '--plan-version', '4')
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(err, '')
+        self.assertEqual(out['error'], 'version_change_after_approval')
+        after = json.loads((state_dir / 'state.json').read_text())
+        self.assertEqual(after['plan_version'], 3)
+        self.assertEqual(after['phase'], 'executing')
+
+    def test_state_save_cannot_forge_approval(self):
+        state_dir, state = self._start_run()
+        rc, _, err = self._save_phase(state_dir, state, 'planned')
+        self.assertEqual(rc, 0, err)
+        state = json.loads((state_dir / 'state.json').read_text())
+        rc, out, err = run_cmd('state-save',
+            '--state-dir', str(state_dir),
+            '--run-id', state['run_id'],
+            '--family-id', state['family_id'],
+            '--phase', 'approved')
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(err, '')
+        self.assertEqual(out['error'], 'approval_required')
+        after = json.loads((state_dir / 'state.json').read_text())
+        self.assertEqual(after['phase'], 'planned')
+        self.assertNotIn('approval', after)
+
+    def test_plan_version_bump_invalidates_prior_approval(self):
+        state_dir, state = self._start_run()
+        rc, _, err = self._save_phase(state_dir, state, 'planned')
+        self.assertEqual(rc, 0, err)
+        rc, out, err = run_cmd('approve-plan',
+            '--state-dir', str(state_dir),
+            '--approved-by', 'user',
+            '--quote', 'I approve version one')
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out['approval']['plan_version'], 1)
+
+        rc, out, err = run_cmd('increment-plan', '--state-dir', str(state_dir))
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(out['approval_invalidated'])
+        self.assertEqual(out['prior'], 1)
+        self.assertEqual(out['plan_version'], 2)
+
+        state = json.loads((state_dir / 'state.json').read_text())
+        self.assertEqual(state['phase'], 'planned')
+        self.assertNotIn('approval', state)
+        self.assertEqual(state['invalidated_approvals'][-1]['plan_version'], 1)
+        self.assertEqual(
+            state['invalidated_approvals'][-1]['invalidated_for']['plan_version'], 2)
+
+        hook = ROOT / 'scripts' / 'hooks' / 'pre_tool_use.py'
+        hook_env = os.environ.copy()
+        hook_env.pop('OFFICE_STATE_DIR', None)
+        hook_result = subprocess.run(
+            [sys.executable, str(hook)],
+            cwd=self.repo,
+            env=hook_env,
+            input=json.dumps({
+                'tool_name': 'Edit',
+                'tool_input': {'file_path': str(self.repo / 'target.py')},
+            }),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(hook_result.returncode, 2)
+        self.assertIn("phase 'planned'", hook_result.stdout)
+
+        rc, out, err = run_cmd('approve-plan',
+            '--state-dir', str(state_dir),
+            '--approved-by', 'user',
+            '--quote', 'I approve version two')
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out['approval']['plan_version'], 2)
+
+    def test_malformed_route_defect_row_fails_closed(self):
+        state_dir, _ = self._start_run()
+        (state_dir / 'route-defects.jsonl').write_text('{malformed row\n')
+
+        rc, out, err = run_cmd('check-route-defects', '--state-dir', str(state_dir))
+        self.assertEqual(rc, 2)
+        self.assertEqual(err, '')
+        self.assertFalse(out['clear'])
+        self.assertEqual(out['error'], 'route_defects_unreadable')
+        self.assertEqual(out['row'], 1)
+        self.assertIn('row 1', out['message'])
+
+    def test_start_cli_can_select_full_fit_path(self):
+        env = os.environ.copy()
+        env['XDG_STATE_HOME'] = str(Path(self.tmpdir) / 'xdg-full')
+        rc, out, err = run_cmd('start',
+            '--goal', 'exercise full risk fit',
+            '--playbook', 'Change',
+            '--repo', str(self.repo),
+            '--irreversible',
+            env=env)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out['gear'], 'full')
+
+    def test_start_normalizes_nested_repo_for_pointer(self):
+        nested = self.repo / 'nested' / 'directory'
+        nested.mkdir(parents=True)
+        env = os.environ.copy()
+        env['XDG_STATE_HOME'] = str(Path(self.tmpdir) / 'xdg-nested')
+        rc, out, err = run_cmd('start',
+            '--goal', 'start from a nested directory',
+            '--playbook', 'Change',
+            '--gear', 'direct',
+            '--repo', str(nested),
+            env=env)
+        self.assertEqual(rc, 0, err)
+        pointer = self.repo / '.office' / 'runs' / f"{out['run_id']}.ref"
+        self.assertTrue(pointer.exists())
+        self.assertFalse((nested / '.office' / 'runs' / f"{out['run_id']}.ref").exists())
+        self.assertEqual(pointer.read_text().strip(), out['state_dir'])
+
+    def test_start_pins_independent_plugin_policy_and_effective_hashes(self):
+        state_dir, state = self._start_run()
+        self.assertTrue(state['plugin_commit'])
+        self.assertNotEqual(state['policy_hash'], state['effective_config_hash'])
+        envelope = json.loads((state_dir / 'envelope.json').read_text())
+        self.assertEqual(envelope['plugin_commit'], state['plugin_commit'])
+        self.assertEqual(envelope['policy_hash'], state['policy_hash'])
+
+    def test_state_save_preserves_prior_fields(self):
+        # start pins base_sha/policy_hash/etc and mark-spoke records spokes_loaded;
+        # a later state-save must not drop either.
+        run_cmd('init-db', '--db', str(self.db))
+        state_dir, before = self._start_run()
+        state_path = state_dir / 'state.json'
+
+        rc, out, _ = run_cmd('mark-spoke', '--state-dir', str(state_dir), '--spoke', 'auto-planning')
+        self.assertEqual(rc, 0)
+
+        state = json.loads(state_path.read_text())
+        rc, out, err = self._save_phase(state_dir, state, 'planned')
+        self.assertEqual(rc, 0, err)
+
+        rc, out, _ = run_cmd('state-load', '--state-dir', str(state_dir))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out['phase'], 'planned')
+        self.assertIn('auto-planning', out.get('spokes_loaded', {}))
+        self.assertEqual(out.get('policy_hash'), before['policy_hash'])
+        self.assertEqual(out.get('base_sha'), before['base_sha'])
+
+        # check-spoke must still see the earlier mark after the state-save
+        rc, out, _ = run_cmd('check-spoke', '--state-dir', str(state_dir), '--spoke', 'auto-planning')
+        self.assertEqual(rc, 0)
+        self.assertTrue(out['loaded'])
+
+    def test_state_save_rejects_different_run_identity(self):
+        state_path = self.state_dir / 'state.json'
+        state_path.write_text(json.dumps({
+            'run_id': 'old-run',
+            'family_id': 'family-1',
+            'base_sha': 'old-base',
+            'policy_hash': 'old-policy',
+            'spokes_loaded': {'auto-planning': 'old-time'},
+        }))
+
+        rc, out, err = run_cmd('state-save',
+            '--state-dir', str(self.state_dir),
+            '--run-id', 'new-run',
+            '--family-id', 'family-1',
+            '--phase', 'planned')
+
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(err, '')
+        self.assertEqual(out['error'], 'state identity mismatch')
+        self.assertEqual(out['mismatches']['run_id']['existing'], 'old-run')
+        self.assertEqual(json.loads(state_path.read_text())['run_id'], 'old-run')
+
+        state_path.write_text(json.dumps({
+            'run_id': 'new-run',
+            'family_id': 'old-family',
+        }))
+        rc, out, err = run_cmd('state-save',
+            '--state-dir', str(self.state_dir),
+            '--run-id', 'new-run',
+            '--family-id', 'new-family',
+            '--phase', 'planned')
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(err, '')
+        self.assertEqual(out['error'], 'state identity mismatch')
+        self.assertEqual(out['mismatches']['family_id']['existing'], 'old-family')
+        self.assertEqual(json.loads(state_path.read_text())['family_id'], 'old-family')
+
+    def test_state_save_rejects_malformed_or_non_object_state(self):
+        state_path = self.state_dir / 'state.json'
+        for malformed in ('', '{"run_id":"r1",', '[]', 'null', '1'):
+            state_path.write_text(malformed)
+
+            rc, out, err = run_cmd('state-save',
+                '--state-dir', str(self.state_dir),
+                '--run-id', 'r1',
+                '--family-id', 'f1',
+                '--phase', 'planned')
+
+            self.assertNotEqual(rc, 0)
+            self.assertEqual(err, '')
+            self.assertEqual(out['error'], 'invalid state.json')
+            self.assertEqual(state_path.read_text(), malformed)
+            if malformed in ('[]', 'null', '1'):
+                self.assertEqual(out['reason'], 'state.json must contain a JSON object')
+            else:
+                self.assertEqual(out['reason'], 'malformed JSON')
+
     def test_self_approval_rejected(self):
         # A finding where producer == reviewer should be rejected
         run_cmd('init-db', '--db', str(self.db))

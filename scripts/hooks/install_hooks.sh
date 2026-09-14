@@ -20,11 +20,45 @@ fi
 
 mkdir -p "$HOOKS_DEST"
 HOOKS_SRC="$(cd "$(dirname "$0")" && pwd)"
+
+# Resolve Node in the caller's environment. `command -v` finds ordinary PATH
+# installs and nvm shims; `type -P` unwraps a shell function to its executable
+# instead of invoking a potentially stale function preamble. An explicit
+# OFFICE_NODE_BIN may still name a command when the caller intentionally needs
+# shell-function resolution.
+resolve_node() {
+    local candidate
+    if [ -n "${OFFICE_NODE_BIN:-}" ]; then
+        printf '%s\n' "$OFFICE_NODE_BIN"
+        return 0
+    fi
+
+    candidate="$(command -v node 2>/dev/null || true)"
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+
+    candidate="$(type -P node 2>/dev/null || true)"
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    return 1
+}
+
+if ! NODE_BIN="$(resolve_node)"; then
+    NODE_BIN=:
+    echo "Node.js not found; Node-based close_finished_panes hooks will be no-ops." >&2
+fi
 cp "${HOOKS_SRC}/session_end.sh" "$HOOKS_DEST/"
 cp "${HOOKS_SRC}/pre_compact.sh" "$HOOKS_DEST/"
 cp "${HOOKS_SRC}/compact_advisor.sh" "$HOOKS_DEST/"
 cp "${HOOKS_SRC}/close_panes.sh" "$HOOKS_DEST/"
-chmod +x "$HOOKS_DEST"/*.sh
+cp "${HOOKS_SRC}/close_finished_panes.mjs" "$HOOKS_DEST/"
+cp "${HOOKS_SRC}/pre_tool_use.py" "$HOOKS_DEST/"
+chmod +x "$HOOKS_DEST"/*.sh "$HOOKS_DEST"/*.mjs
+chmod +x "$HOOKS_DEST"/*.py
 
 cat > "$MANIFEST" << EOF
 {
@@ -57,6 +91,21 @@ cat > "$MANIFEST" << EOF
       "script": "${HOOKS_DEST}/close_panes.sh",
       "idempotent": true,
       "timeout": 30
+    },
+    {
+      "name": "close_finished_panes",
+      "trigger": "stop",
+      "script": "${HOOKS_DEST}/close_finished_panes.mjs",
+      "idempotent": true,
+      "timeout": 30
+    },
+    {
+      "name": "pre_tool_use_approval_gate",
+      "trigger": "pre_tool_use",
+      "event": "PreToolUse",
+      "script": "${HOOKS_DEST}/pre_tool_use.py",
+      "idempotent": true,
+      "timeout": 30
     }
   ]
 }
@@ -65,6 +114,7 @@ EOF
 python3 -c "
 import json, os
 h = '${HOOKS_DEST}'
+node_bin = '${NODE_BIN}'
 configured = []
 
 def remove_stale_telemetry_hooks(value):
@@ -97,7 +147,8 @@ def configure_codex(path):
     hooks = d.setdefault('hooks', {})
     hooks.update({
         'SessionStart': [{'hooks': [{'type': 'command', 'command': h+'/session_end.sh', 'timeout': 30000}]}],
-        'PreCompact': [{'hooks': [{'type': 'command', 'command': h+'/pre_compact.sh', 'timeout': 30000}]}]
+        'PreCompact': [{'hooks': [{'type': 'command', 'command': h+'/pre_compact.sh', 'timeout': 30000}]}],
+        'PreToolUse': [{'hooks': [{'type': 'command', 'command': h+'/pre_tool_use.py', 'timeout': 30000}]}]
     })
     with open(path, 'w') as f: json.dump(d, f, indent=2)
     return True
@@ -109,7 +160,10 @@ if configure(p, {}):
     d['hooks'].update({
         'SessionEnd': [{'hooks': [{'type': 'command', 'command': h+'/session_end.sh', 'timeout': 30000}]}],
         'PreCompact': [{'hooks': [{'type': 'command', 'command': h+'/pre_compact.sh', 'timeout': 30000}]}],
-        'Stop': [{'hooks': [{'type': 'command', 'command': h+'/close_panes.sh', 'timeout': 30000}]}]
+        'PreToolUse': [{'matcher': 'Edit|MultiEdit|Write|NotebookEdit|ApplyPatch|Bash',
+                        'hooks': [{'type': 'command', 'command': h+'/pre_tool_use.py', 'timeout': 30000}]}],
+        'Stop': [{'hooks': [{'type': 'command', 'command': h+'/close_panes.sh', 'timeout': 30000},
+                            {'type': 'command', 'command': node_bin+' '+h+'/close_finished_panes.mjs', 'timeout': 30000}]}]
     })
     with open(p, 'w') as f: json.dump(d, f, indent=2)
     configured.append('Claude')
@@ -121,7 +175,8 @@ if configure_codex(p):
 
 # Gemini
 p = os.path.expanduser('~/.gemini/config/hooks.json')
-if configure(p, {'SessionEnd': h+'/session_end.sh', 'Stop': h+'/close_panes.sh'}):
+if configure(p, {'SessionEnd': h+'/session_end.sh',
+                 'Stop': [h+'/close_panes.sh', node_bin+' '+h+'/close_finished_panes.mjs']}):
     configured.append('Gemini')
 
 if configured:

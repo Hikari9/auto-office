@@ -1568,9 +1568,14 @@ Metrics include:
 - role packet size;
 - PR prose word count.
 
-These are reported and may contribute weakly to efficiency analysis.
+These are reported and may contribute weakly to efficiency analysis. They are not CI gates.
 
-They are not CI gates.
+**Exception — per-file line budgets.** Issue #35 constraint 11 originally held that word/size
+metrics are reported, not gated. The maintainer (Rico Tiongson) explicitly reopened that constraint
+for `scripts/check_ecosystem.py`, which now enforces a per-skill-file line budget as a hard CI gate
+(fails the check when a file has no configured budget or exceeds it; see `SKILL_LINE_BUDGETS` in
+that script). This is a deliberate, scoped reopening, not a silent reversal: it applies only to the
+line-budget check, not to the other metrics listed above, which remain non-gating.
 
 Clarity and correctness outrank minimal size.
 

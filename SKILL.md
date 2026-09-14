@@ -11,8 +11,11 @@ Load only the protocol/reference needed for the current lifecycle step.
 ## Permanent invariants
 
 - Keep the lifecycle order fixed. Gears may fund or omit optional stages; never reorder the lifecycle.
-- Keep human merge-to-`main` as the permanent authority boundary.
-- Never let a producer approve its own work.
+- Keep merge-to-`main` a boundary no agent lifts on its own initiative; only an explicit
+  per-run user statement lifts it (spec 9.1).
+- Every independent approval and review gate is held by an agent that did not produce the work,
+  except the named section 5.1/5.2 inline waiver for small orchestrator edits (lifecycle spec §8).
+  Self-verification is a pass, never an approval (lifecycle spec §8).
 - Pin `plugin_commit`, `policy_hash`, `catalog_snapshot_hash`, `adapter_snapshot_hash`, and `effective_config_hash` for each run.
 - Never let an active run begin using an unmerged self-improvement policy implicitly.
 - Keep raw run evidence private. Public proposals receive only deterministic sanitization, an evidence capsule, privacy lint, and opaque evidence hashes.
@@ -21,43 +24,25 @@ Load only the protocol/reference needed for the current lifecycle step.
 
 ## Start or resume a run
 
-1. Resolve user intent and scope.
-2. Load effective config by running `python3 scripts/office_runtime.py effective-config`.
-   It merges `prompt/CLI > repo > user > plugin default` and emits `effective_config_hash`.
-   Never hand-read `config/config.default.yaml` and treat it as the answer: the user tier
-   (`~/.config/auto-office/config.yaml`) lives outside the repo, is invisible to repo search,
-   and routinely sets role `preferred_seed` chains the plugin default does not have.
-   Use the emitted hash for `new-run --config-hash`; do not invent one.
-3. Run lazy maintenance for eligible historical rows when practical.
-4. Resolve the current immutable catalog and adapter snapshots; refresh may run separately, but route-time itself must not use the network.
-5. Establish repository/runtime baseline and classify task shape, risk, blast radius, and size class.
-6. Create or reconcile durable family/run state before dispatch.
-7. Freeze the orchestrator-owned intent fields. The v3 spec references five frozen fields without naming them; this preview keeps the existing office compatibility seed: `goal`, `done_criteria`, `blast_radius`, `named_actions`, `non_goals`. Treat this mapping as compatibility data, not a license to change the normative spec.
-8. Run `python3 scripts/office_runtime.py check-spoke --state-dir <run-state-dir> --spoke auto-planning`. If it exits nonzero, load `skills/auto-planning/SKILL.md` via the Skill tool, then run `mark-spoke --spoke auto-planning` before proceeding. Never skip straight to planning work on the assumption the spoke is already loaded.
+Step zero, always, before any other action: run
+
+`python3 scripts/office_runtime.py start --goal <text> --playbook <Change|Restructure|Investigate|Prototype|Visual> [--gear <direct|direct+review|light|quick|express|full>] [--repo <path>]`
+
+Echo the returned `kickoff` block to the user, then use its `state_dir` for every later `check-spoke`/`mark-spoke --state-dir` call. Why: `references/why-start.md`.
+
+`start` resolves effective config (`prompt/CLI > repo > user > plugin default`, emitting `effective_config_hash`; check `~/.config/auto-office/config.yaml` directly), pins the catalog/adapter snapshot hashes, policy hash, and base SHA, runs the gear fit test when `--gear` is omitted, and creates durable run state with `phase = "intake"`. Why: `references/why-start.md`.
+
+Before freezing intent, run `check-spoke --state-dir <state_dir> --spoke auto-intake`; if it exits nonzero, load `skills/auto-intake/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-intake` before interviewing the user. The orchestrator owns this interview; the planner never talks to the user.
+
+Still manual, after `start` returns: freeze the five orchestrator-owned intent fields — `goal`, `done_criteria`, `blast_radius`, `named_actions`, `non_goals` — then run `check-spoke --state-dir <state_dir> --spoke auto-planning`; if it exits nonzero, load `skills/auto-planning/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-planning` before any planning work. Why: `references/why-start.md`.
+
+After the plan is approved, run `check-spoke --state-dir <state_dir> --spoke auto-loop`; if it exits nonzero, load `skills/auto-loop/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-loop` before driving waves, integration, and the autonomy ceiling.
 
 For takeover/resume, load `protocol/state-and-takeover.md` before any mutable action.
 
 ## Fixed lifecycle
 
-Run this order:
-
-1. Resolve intent and scope.
-2. Freeze orchestrator contract.
-3. Establish baseline.
-4. Classify task shape and risk.
-5. Resolve product decisions.
-6. Produce/refresh plan.
-7. Review plan when gear/risk requires it.
-8. Generate machine-checkable execution packets.
-9. Route and dispatch executors/workers.
-10. Self-verify changed work.
-11. Run independent review when funded/required.
-12. Run browser/runtime verification for user-facing acceptance paths when reachable.
-13. Reconcile findings and amendments.
-14. Run closeout checks.
-15. Record telemetry and durable state.
-16. Perform lazy maintenance on eligible rows.
-17. Optionally create isolated improvement proposals.
+Run this order: 1. resolve intent and scope; 2. freeze orchestrator contract; 3. establish baseline; 4. classify task shape and risk; 5. resolve product decisions; 6. produce/refresh plan; 7. review plan when gear/risk requires it; 8. generate machine-checkable execution packets; 9. route and dispatch executors/workers; 10. self-verify changed work; 11. integrate — commit and merge dispatch branches in wave order, validate the merged result; 12. run independent review when funded/required; 13. run browser/runtime verification for user-facing acceptance paths when reachable; 14. reconcile findings and amendments; 15. run closeout checks; 16. record telemetry and durable state; 17. perform lazy maintenance on eligible rows; 18. optionally create isolated improvement proposals.
 
 ## Role routing
 
@@ -65,29 +50,19 @@ Before every routed role, run `check-spoke --spoke auto-routing`; if not loaded,
 
 `harness@version × model_id × effort`
 
-Use the mandatory filter order:
+Use the mandatory filter order: 1. explicit hard exclusions; 2. adapter validity/trust; 3. required capabilities; 4. absolute role floor; 5. task-shape requirements; 6. quota safety; 7. preferred/advisory quality anchor; 8. cost; 9. local tie-break evidence.
 
-1. explicit hard exclusions;
-2. adapter validity/trust;
-3. required capabilities;
-4. absolute role floor;
-5. task-shape requirements;
-6. quota safety;
-7. preferred/advisory quality anchor;
-8. cost;
-9. local tie-break evidence.
+A harness rejecting the routed model/effort identity is a routing defect, not a retry: record it with `office_runtime.py route-defect`, re-dispatch corrected, and hand the amendment to an `auto-self-improve` subagent. `auto-closeout` gates on `check-route-defects`, so an unamended slug blocks completion.
 
-Never lower an absolute floor for cost or quota. Public benchmark data is a cold-start prior; enough comparable local evidence for the exact routable triple outranks it.
+Never lower an absolute floor for cost or quota. Why: `references/why-routing.md`.
 
-Every plan must contain a `model_assignments` block naming the orchestrator and planner identities. Record the exact invocation model identifier when the harness exposes one, plus canonical `model_id`, effort, harness/version, whether the planner is inline or separately routed, and a concise selection rationale. If the current entry model owns both roles, declare both explicitly rather than implying the planner identity.
+Every plan must contain a `model_assignments` block naming the orchestrator and planner identities: exact invocation model identifier (when exposed), canonical `model_id`, effort, harness/version, whether the planner is inline or separately routed, and a concise selection rationale. If the current entry model owns both roles, declare both explicitly.
 
-Immediately before invoking an executor or reviewer, publish a concise route notice to the user naming the role, exact invocation model identifier (falling back to canonical `model_id` only when no more specific identifier exists), effort, harness/version, and why that route won. Base the explanation on the actual decisive routing evidence—such as task-shape fit, capability/trust floor, preferred seed, quota, cost, or comparable local results—not a generic statement about model quality. Persist the same disclosure in the dispatch envelope/readback.
+Immediately before invoking an executor or reviewer, publish a route notice naming the role, exact invocation model identifier (or canonical `model_id`), effort, harness/version, and the decisive routing evidence (task-shape fit, capability/trust floor, preferred seed, quota, cost, or comparable local results). Persist the same disclosure in the dispatch envelope/readback. Why: `references/why-routing.md`.
 
 ## Dispatch and mutation
 
-Run `check-spoke --spoke auto-execution`; if not loaded, load `skills/auto-execution/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-execution`. Validate every packet before dispatch. One mutable holder owns a write scope at a time. A holder change is a takeover requiring lease acquisition and stale-state reconciliation.
-
-Use the harness primitive selected by the adapter (`skills/codex-cli`, `skills/claude-cli`, `skills/agy-cli`, `skills/hermes-cli`, or another conforming primitive). `auto-office` owns the lifecycle; adapters own harness execution. Runs are durable across interruptions via SQLite-backed leases and atomic state snapshots. Harness primitives are mechanics only; they never redefine lifecycle authority.
+Run `check-spoke --spoke auto-execution`; if not loaded, load `skills/auto-execution/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-execution`. Validate every packet before dispatch. One mutable holder owns a write scope at a time; a holder change is a takeover requiring lease acquisition and stale-state reconciliation. Use the harness primitive selected by the adapter (`skills/codex-cli`, `skills/claude-cli`, `skills/agy-cli`, `skills/hermes-cli`, or another conforming primitive): `auto-office` owns the lifecycle, adapters own harness execution only. Why: `references/why-dispatch.md`.
 
 ## Operational tooling
 
@@ -98,7 +73,7 @@ Use the harness primitive selected by the adapter (`skills/codex-cli`, `skills/c
 - `scripts/verify.sh` — ordered verification gate runner (lint, typecheck, test, runtime).
 - `scripts/review_loop.sh` — multi-round verify/review/fix orchestrator enforcing no-self-approval and defect exits.
 - `scripts/review_finding.sh` — structured review finding recording and telemetry persistence.
-- `scripts/hooks/` — lifecycle hooks (`session_end.sh`, `pre_compact.sh`, `compact_advisor.sh`, `close_panes.sh`, `install_hooks.sh`) ensuring runs remain durable across interruptions and context compaction.
+- `scripts/hooks/` — lifecycle hooks (`session_end.sh`, `pre_compact.sh`, `compact_advisor.sh`, `close_panes.sh`, `close_finished_panes.mjs`, `install_hooks.sh`) ensuring runs remain durable across interruptions and context compaction.
 - `scripts/agy-usage.py`, `scripts/claude-usage.py`, `scripts/codex-usage.py` — live per-brand quota probes (stdlib/OAuth reads against each vendor's usage API); each adapter's `quota_probe.command` names its probe. See `references/quota-probe.md`.
 
 ## Review and verification
@@ -114,17 +89,15 @@ An accepted `PLAN DEFECT` or `BRIEF DEFECT` must name the contradicted assumptio
 
 ## Closeout and learning
 
-Run `check-spoke --spoke auto-closeout`; if not loaded, load `skills/auto-closeout/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-closeout`. Do not report implementation complete until the required outcome, validation, review, runtime/browser evidence, PR/branch state, blockers, and pinned hashes exist.
+Reorganize the dispatch surface on every closeout: run `node scripts/hooks/close_finished_panes.mjs < /dev/null` to close finished Herdr panes from the spawn ledger, then account for whatever pane remains open. Run `check-spoke --spoke auto-closeout`; if not loaded, load `skills/auto-closeout/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-closeout`. Do not report implementation complete until the required outcome, validation, review, runtime/browser evidence, PR/branch state, blockers, and pinned hashes exist. Why: `references/why-closeout.md`.
 
-At the beginning/closeout of later invocations, run `check-spoke --spoke auto-maintenance`; if not loaded, load `skills/auto-maintenance/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-maintenance`, for lazy labeling, maturity, catalog freshness, and structured local evidence.
-
-Create public self-improvement proposals only through `skills/auto-self-improve/SKILL.md` (run `check-spoke`/`mark-spoke --spoke auto-self-improve` the same way) and only in an isolated branch/worktree. Agents may propose and prove; the maintainer decides what becomes shipped policy.
+At the beginning/closeout of later invocations, run `check-spoke --spoke auto-maintenance`; if not loaded, load `skills/auto-maintenance/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-maintenance`, for lazy labeling, maturity, catalog freshness, and structured local evidence. Create public self-improvement proposals only through `skills/auto-self-improve/SKILL.md` (run `check-spoke`/`mark-spoke --spoke auto-self-improve` the same way) and only in an isolated branch/worktree. Why: `references/why-closeout.md`.
 
 ## Deterministic helpers
 
 Use `python3 scripts/office_runtime.py --help` for packet validation, adapter validation/scaffolding, route selection, snapshot hashing, SQLite recorder initialization, maturity calculation, replay comparison, privacy linting, catalog snapshot creation, and proposal identity hashing.
 
-Spoke-load compliance is checkable, not assumed: `check-spoke --state-dir <run-state-dir> --spoke <name>` (all `check-spoke`/`mark-spoke` references above elide the shared `--state-dir <run-state-dir>` for brevity) exits 0 only if `mark-spoke --spoke <name>` was already recorded for this run's `state.json`. Do not treat "I loaded it earlier in the conversation" as sufficient — if `check-spoke` exits nonzero, load the spoke via the Skill tool and mark it before doing that stage's work, even if this feels redundant.
+No receipt, no gate: `check-spoke --state-dir <run-state-dir> --spoke <name>` (all `check-spoke`/`mark-spoke` references above elide the shared `--state-dir <run-state-dir>` for brevity) exits 0 only if `mark-spoke --spoke <name>` was already recorded for this run's `state.json`. The receipt is `check-spoke`'s exit code, not a memory of having loaded the spoke — if it exits nonzero, load the spoke via the Skill tool and mark it before doing that stage's work.
 
 Use `python3 scripts/check_ecosystem.py` before packaging or proposing plugin changes.
 
@@ -141,3 +114,5 @@ Use `python3 scripts/check_ecosystem.py` before packaging or proposing plugin ch
 - `references/IMPLEMENTATION-NOTES.md` — what this preview implements vs. intentionally leaves provider-specific.
 - `references/MIGRATION-V2.md` — branded-office retirement/migration.
 - `references/quota-probe.md` — live quota probe contract: fit-test/pre-dispatch checkpoints, per-brand fields, exit codes.
+- `references/OFFICE-SKILLS-V3-LIFECYCLE-SPEC.md` — intake interview, waves, non-blocking orchestration, integration, autonomy ceiling.
+- `references/why-start.md`, `references/why-routing.md`, `references/why-dispatch.md`, `references/why-closeout.md` — why the pinned rules exist, for disputing a rule; not needed to follow it.

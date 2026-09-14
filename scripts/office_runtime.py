@@ -5,7 +5,7 @@ Route-time commands never perform network access. Catalog fetching/normalization
 outside routing and be committed to a content-addressed local snapshot before selection.
 """
 from __future__ import annotations
-import argparse, hashlib, json, math, os, re, sqlite3, sys, uuid
+import argparse, contextlib, hashlib, io, json, math, os, re, sqlite3, subprocess, sys, uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
@@ -19,6 +19,17 @@ CANON_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
 MUTABLE_TRUST_ROLES = {"executor", "code_reviewer", "browser_verifier", "closeout_verifier"}
 ATTRIBUTIONS = {"model","harness","adapter","quota/account","environment/network","planner","brief","repository","verification","unknown"}
 OUTCOMES = {"pending","verified_no_observed_failure","recurrence_failure","revert_failure","material_post_merge_defect","abandoned","environment_failure"}
+PHASE_ORDER = ("intake", "planned", "approved", "executing", "reviewed", "closed")
+START_PINNED_FIELDS = (
+    "run_id",
+    "family_id",
+    "base_sha",
+    "policy_hash",
+    "catalog_snapshot_hash",
+    "adapter_snapshot_hash",
+    "effective_config_hash",
+    "plugin_commit",
+)
 
 
 def load_data(path: str | Path) -> Any:
@@ -39,6 +50,10 @@ def canonical_bytes(obj: Any) -> bytes:
 
 def sha256_obj(obj: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical_bytes(obj)).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def validate_with_schema(data: Any, schema_name: str) -> list[str]:
@@ -102,6 +117,33 @@ def preferred_rank(c, preferred_seed):
     return None
 
 
+def invocation_provenance(candidate: dict) -> str:
+    """Return the machine-readable provenance state for a candidate's invocation slug.
+
+    States:
+      - 'proven': slug proven against a local harness command
+      - 'documented': slug documented in authoritative sources but unproven against local harness
+      - 'none': no harness invocation slug
+    """
+    invocation = candidate.get("invocation_model_id")
+    if not invocation:
+        return "none"
+    explicit = candidate.get("invocation_provenance")
+    if explicit in ("proven", "documented", "none"):
+        return explicit
+    source = candidate.get("invocation_source")
+    if not source:
+        return "proven"
+    source = str(source).strip()
+    if source.startswith("documented") or source == "unproven":
+        return "documented"
+    if source.startswith("local-evidence") or source.startswith("proven"):
+        return "proven"
+    if source.startswith("unverified") or source == "none":
+        return "none"
+    return "proven"
+
+
 def selection_disclosure(role: str, chosen: dict, preferred_seed, cost_policy: str) -> dict:
     """Build the durable, user-visible explanation for a selected route."""
     rank = preferred_rank(chosen, preferred_seed)
@@ -115,16 +157,30 @@ def selection_disclosure(role: str, chosen: dict, preferred_seed, cost_policy: s
         reasons.append(f"matched preferred seed #{rank + 1}, which decided the advisory ranking")
     else:
         reasons.append(f"won the {cost_policy} cost and local-evidence comparison")
+    invocation = chosen.get("invocation_model_id")
+    prov = invocation_provenance(chosen)
+    if not invocation or prov == "none":
+        # The catalog row carries no harness-specific slug, so the dispatch will
+        # be attempted with the canonical model_id. Spec-seed names ("luna") are
+        # not harness slugs ("gpt-5.6-luna"), so this fallback is the single
+        # largest source of route-time dispatch failures. Say so in the
+        # disclosure instead of letting it look like a resolved slug.
+        reasons.append("carries no catalog invocation slug, so model_id is being used unverified")
+    elif prov == "documented":
+        reasons.append("catalog invocation slug is documented but unproven against local harness")
     return {
         "role": role,
         "model_id": chosen.get("model_id"),
-        "invocation_model_id": chosen.get("invocation_model_id") or chosen.get("model_id"),
+        "invocation_model_id": invocation or chosen.get("model_id"),
+        "invocation_model_id_source": "catalog" if invocation else "fallback:model_id",
+        "invocation_provenance": prov,
         "effort": chosen.get("effort"),
         "harness": chosen.get("harness"),
         "harness_version": chosen.get("harness_version"),
         "triple": candidate_id(chosen),
         "reason": "; ".join(reasons),
     }
+
 
 
 def route(request: dict) -> dict:
@@ -489,13 +545,218 @@ def cmd_replay(args):
     dump_json({'rows':len(rows),'flips':flips,'decisions':decisions,'zero_flip_warning':len(rows)>0 and not flips}); return 0
 
 
-def cmd_new_run(args):
+def _new_run_envelope(args):
     now=datetime.now(timezone.utc).isoformat()
-    obj={'run_id':str(uuid.uuid4()),'family_id':args.family_id,'dispatch_id':str(uuid.uuid4()),'role':'orchestrator','holder_id':args.holder_id,'triple':args.triple,'mode':args.gear,'playbook':args.playbook,'base_sha':args.base_sha,'policy_hash':args.policy_hash,'catalog_snapshot_hash':args.catalog_hash,'adapter_snapshot_hash':args.adapter_hash,'effective_config_hash':args.config_hash,'plan_version':1,'packet_version':1,'created_at':now}
+    envelope = {'run_id':getattr(args,'run_id',None) or str(uuid.uuid4()),'family_id':args.family_id,'dispatch_id':str(uuid.uuid4()),'role':'orchestrator','holder_id':args.holder_id,'triple':args.triple,'mode':args.gear,'playbook':args.playbook,'base_sha':args.base_sha,'policy_hash':args.policy_hash,'catalog_snapshot_hash':args.catalog_hash,'adapter_snapshot_hash':args.adapter_hash,'effective_config_hash':args.config_hash,'plan_version':1,'packet_version':1,'created_at':now}
+    if getattr(args, "plugin_commit", None):
+        envelope["plugin_commit"] = args.plugin_commit
+    return envelope
+
+
+def cmd_new_run(args):
+    obj=_new_run_envelope(args)
     errors=validate_with_schema(obj,'run-envelope.schema.json')
     if errors: dump_json({'valid':False,'errors':errors}); return 2
     out=Path(args.out); out.parent.mkdir(parents=True,exist_ok=True); out.write_text(json.dumps(obj,indent=2)+'\n')
     dump_json({'created':str(out),'run_id':obj['run_id']}); return 0
+
+
+def _atomic_write_json(path: Path, obj: Any) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _start_effective_config(repo: Path) -> tuple[dict, str]:
+    captured = io.StringIO()
+    call_args = argparse.Namespace(repo_root=str(repo), overrides=None, set=None, user=None, hash_only=False)
+    with contextlib.redirect_stdout(captured):
+        result = cmd_effective_config(call_args)
+    if result != 0:
+        raise RuntimeError("effective-config failed")
+    data = json.loads(captured.getvalue())
+    return data["config"], data["effective_config_hash"]
+
+
+def _start_catalog_hash() -> str:
+    return sha256_obj(load_data(ROOT / "catalog" / "seed.yaml"))
+
+
+def _start_adapter_hash() -> str:
+    adapter_dir = ROOT / "adapters" / "seed"
+    data = {str(path.relative_to(ROOT)): load_data(path) for path in sorted(adapter_dir.glob("*.yaml"))}
+    return sha256_obj(data)
+
+
+def _start_plugin_commit() -> str:
+    configured = os.environ.get("AUTO_OFFICE_PLUGIN_COMMIT")
+    if configured:
+        return configured
+    try:
+        result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(ROOT), check=True,
+                                capture_output=True, text=True)
+        commit = result.stdout.strip()
+        if commit:
+            return commit
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    # Installed plugin bundles may not carry a .git directory.  A content hash
+    # still pins the exact loaded plugin snapshot in that environment.
+    return sha256_file(ROOT / "SKILL.md")
+
+
+def _start_policy_hash() -> str:
+    # This is the policy artifact's byte hash, deliberately independent from
+    # the canonical hash of the fully merged effective configuration.
+    return sha256_file(ROOT / "config" / "config.default.yaml")
+
+
+def _start_base_sha(repo: Path) -> str:
+    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), check=True,
+                            capture_output=True, text=True)
+    return result.stdout.strip()
+
+
+def _start_repo_root(repo: Path) -> Path:
+    result = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=str(repo), check=True,
+                            capture_output=True, text=True)
+    root = result.stdout.strip()
+    if not root:
+        raise RuntimeError("git rev-parse --show-toplevel returned an empty path")
+    return Path(root).expanduser().resolve()
+
+
+def _start_state_root() -> Path:
+    root = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
+    return root.expanduser().resolve() / "auto-office" / "runs"
+
+
+def _start_holder() -> tuple[str, str]:
+    holder_id = os.environ.get("AUTO_OFFICE_HOLDER_ID") or "orchestrator"
+    triple = os.environ.get("AUTO_OFFICE_HOLDER_TRIPLE") or "codex@local/orchestrator@none"
+    return holder_id, triple
+
+
+def _start_gear(args) -> str:
+    if args.gear:
+        return args.gear
+    if getattr(args, "irreversible", False):
+        return "full"
+    return "express" if sum(bool(v) for v in (args.volume, args.interview, args.adversarial)) >= 2 else "direct"
+
+
+def _ensure_repo_gitignore(repo: Path) -> None:
+    path = repo / ".gitignore"
+    if path.exists():
+        text = path.read_text(encoding="utf-8")
+        if any(line.strip() == ".office/" for line in text.splitlines()):
+            return
+        with path.open("a", encoding="utf-8") as fh:
+            if text and not text.endswith("\n"):
+                fh.write("\n")
+            fh.write(".office/\n")
+        return
+    path.write_text(".office/\n", encoding="utf-8")
+
+
+def cmd_start(args):
+    try:
+        repo = Path(args.repo or ".").expanduser().resolve()
+        if not repo.is_dir():
+            dump_json({"error": "invalid_repo", "repo": str(repo)})
+            return 2
+        repo = _start_repo_root(repo)
+        config, config_hash = _start_effective_config(repo)
+        gear = _start_gear(args)
+        base_sha = _start_base_sha(repo)
+        catalog_hash = _start_catalog_hash()
+        adapter_hash = _start_adapter_hash()
+        plugin_commit = _start_plugin_commit()
+        policy_hash = _start_policy_hash()
+        holder_id, triple = _start_holder()
+        run_id = str(uuid.uuid4())
+        family_id = str(uuid.uuid4())
+        envelope_args = argparse.Namespace(family_id=family_id, holder_id=holder_id, triple=triple,
+            gear=gear, playbook=args.playbook, base_sha=base_sha, plugin_commit=plugin_commit,
+            policy_hash=policy_hash, catalog_hash=catalog_hash, adapter_hash=adapter_hash,
+            config_hash=config_hash, run_id=run_id)
+        envelope = _new_run_envelope(envelope_args)
+        envelope["goal"] = args.goal
+        envelope["repo_root"] = str(repo)
+        errors = validate_with_schema(envelope, "run-envelope.schema.json")
+        if errors:
+            dump_json({"valid": False, "errors": errors})
+            return 2
+        state_dir = _start_state_root() / run_id
+        state_dir.mkdir(parents=True, exist_ok=True)
+        state = {"run_id": run_id, "family_id": family_id, "phase": "intake", "plan_version": 1,
+                 "packet_version": 1, "updated_at": envelope["created_at"], "goal": args.goal,
+                 "playbook": args.playbook, "gear": gear, "holder_id": holder_id, "triple": triple,
+                 "base_sha": base_sha, "plugin_commit": plugin_commit, "policy_hash": policy_hash,
+                 "catalog_snapshot_hash": catalog_hash, "adapter_snapshot_hash": adapter_hash,
+                 "effective_config_hash": config_hash, "repo_root": str(repo)}
+        _atomic_write_json(state_dir / "state.json", state)
+        _atomic_write_json(state_dir / "envelope.json", envelope)
+        pointer = repo / ".office" / "runs" / f"{run_id}.ref"
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_text(str(state_dir.resolve()) + "\n", encoding="utf-8")
+        _ensure_repo_gitignore(repo)
+        kickoff = (f"Auto Office kickoff\nGoal: {args.goal}\nPlaybook: {args.playbook}\n"
+                   f"Gear: {gear}\nRun: {run_id}\nBase SHA: {base_sha}")
+        dump_json({"state_dir": str(state_dir.resolve()), "run_id": run_id, "gear": gear,
+                   "pointer": str(pointer.resolve()), "kickoff": kickoff})
+        return 0
+    except Exception as exc:
+        dump_json({"error": "start_failed", "message": str(exc)})
+        return 2
+
+
+def _plan_file_hash(path: str | None) -> str | None:
+    if not path:
+        return None
+    return "sha256:" + hashlib.sha256(Path(path).expanduser().read_bytes()).hexdigest()
+
+
+def cmd_approve_plan(args):
+    try:
+        state_path = Path(args.state_dir).expanduser() / "state.json"
+        if not state_path.exists():
+            dump_json({"error": "no_state", "state_dir": str(Path(args.state_dir).expanduser())})
+            return 2
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if not args.quote.strip():
+            dump_json({"error": "empty_quote", "message": "--quote must not be empty or whitespace-only"})
+            return 2
+        phase = state.get("phase")
+        plan_version = state.get("plan_version", 1)
+        if phase == "approved" and isinstance(state.get("approval"), dict):
+            approval = state["approval"]
+            if approval.get("plan_version") == plan_version:
+                dump_json({"approved": True, "idempotent": True, "phase": phase,
+                           "plan_version": plan_version})
+                return 0
+            dump_json({"error": "plan_version_mismatch", "phase": phase,
+                       "approved_plan_version": approval.get("plan_version"),
+                       "current_plan_version": plan_version})
+            return 2
+        if phase != "planned":
+            dump_json({"error": "invalid_phase", "phase": phase, "expected": "planned"})
+            return 2
+        approval = {"by": args.approved_by, "quote": args.quote,
+                    "at": datetime.now(timezone.utc).isoformat(),
+                    "plan_version": plan_version,
+                    "packet_version": state.get("packet_version", 1),
+                    "plan_sha": _plan_file_hash(args.plan_path)}
+        state["phase"] = "approved"
+        state["approval"] = approval
+        state["updated_at"] = approval["at"]
+        _atomic_write_json(state_path, state)
+        dump_json({"approved": True, "idempotent": False, "phase": "approved",
+                   "plan_version": plan_version, "approval": approval})
+        return 0
+    except Exception as exc:
+        dump_json({"error": "approve_plan_failed", "message": str(exc)})
+        return 2
 
 
 def cmd_lease_acquire(args):
@@ -545,15 +806,159 @@ def cmd_lease_check(args):
         dump_json({"active":not stale,"holder_id":cur[0],"expires_at":cur[1],"stale":stale}); return 0
     dump_json({"active":False}); return 0
 
+def _canonical_state_error(state_dir: Path, state: dict) -> dict | None:
+    required_fields = START_PINNED_FIELDS + ("repo_root", "plan_version", "packet_version")
+    missing = [key for key in required_fields if key not in state]
+    if missing:
+        return {"error": "invalid_start_receipt", "state_path": str(state_dir / "state.json"),
+                "reason": "missing pinned fields", "missing": missing}
+
+    envelope_path = state_dir / "envelope.json"
+    if not envelope_path.exists():
+        return {"error": "invalid_start_receipt", "state_path": str(state_dir / "state.json"),
+                "reason": "missing envelope.json"}
+    try:
+        envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {"error": "invalid_start_receipt", "state_path": str(state_dir / "state.json"),
+                "reason": "invalid envelope.json", "detail": str(exc)}
+    if not isinstance(envelope, dict):
+        return {"error": "invalid_start_receipt", "state_path": str(state_dir / "state.json"),
+                "reason": "envelope.json must contain a JSON object"}
+
+    envelope_errors = validate_with_schema(envelope, "run-envelope.schema.json")
+    if envelope_errors:
+        return {"error": "invalid_start_receipt", "state_path": str(state_dir / "state.json"),
+                "reason": "envelope schema validation failed", "details": envelope_errors}
+
+    mismatches = {
+        key: {"state": state.get(key), "envelope": envelope.get(key)}
+        for key in START_PINNED_FIELDS + ("repo_root",)
+        if state.get(key) != envelope.get(key)
+    }
+    if mismatches:
+        return {"error": "state envelope mismatch", "state_path": str(state_dir / "state.json"),
+                "mismatches": mismatches}
+
+    repo_root = Path(str(state["repo_root"])).expanduser().resolve()
+    pointer = repo_root / ".office" / "runs" / f"{state['run_id']}.ref"
+    if not pointer.is_file():
+        return {"error": "invalid_start_receipt", "state_path": str(state_dir / "state.json"),
+                "reason": "missing run pointer", "pointer": str(pointer)}
+    try:
+        pointer_target_text = pointer.read_text(encoding="utf-8").strip()
+        pointer_target = Path(pointer_target_text).expanduser()
+        if not pointer_target.is_absolute():
+            pointer_target = pointer.parent / pointer_target
+        pointer_target = pointer_target.resolve()
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return {"error": "invalid_start_receipt", "state_path": str(state_dir / "state.json"),
+                "reason": "invalid run pointer", "pointer": str(pointer), "detail": str(exc)}
+    if pointer_target != state_dir.resolve():
+        return {"error": "state pointer mismatch", "state_path": str(state_dir / "state.json"),
+                "pointer": str(pointer), "pointer_target": str(pointer_target),
+                "expected_target": str(state_dir.resolve())}
+    return None
+
+
+def _approval_version_error(state: dict) -> dict | None:
+    approval = state.get("approval")
+    if approval is None:
+        if state.get("phase") in PHASE_ORDER[PHASE_ORDER.index("approved"):]:
+            return {"error": "approval_required", "phase": state.get("phase"),
+                    "message": "approved lifecycle state must contain a recorded approval"}
+        return None
+    if not isinstance(approval, dict) or approval.get("plan_version") != state.get("plan_version"):
+        return {"error": "approval_version_mismatch", "phase": state.get("phase"),
+                "approved_plan_version": approval.get("plan_version") if isinstance(approval, dict) else None,
+                "current_plan_version": state.get("plan_version")}
+    if "packet_version" in approval and approval.get("packet_version") != state.get("packet_version"):
+        return {"error": "approval_version_mismatch", "phase": state.get("phase"),
+                "approved_packet_version": approval.get("packet_version"),
+                "current_packet_version": state.get("packet_version")}
+    return None
+
+
 def cmd_state_save(args):
-    state_dir = Path(args.state_dir); state_dir.mkdir(parents=True, exist_ok=True); state_path = state_dir / "state.json"
-    obj = {"run_id": args.run_id, "family_id": args.family_id, "phase": args.phase, "plan_version": args.plan_version, "packet_version": args.packet_version, "updated_at": datetime.now(timezone.utc).isoformat()}
+    state_dir = Path(args.state_dir)
+    state_path = state_dir / "state.json"
+    if not state_path.exists():
+        dump_json({"error": "no_state", "state_dir": str(state_dir),
+                   "message": "run start before saving lifecycle state"})
+        return 2
+    try:
+        obj = json.loads(state_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # A malformed state may contain an interrupted write or belong to a
+        # run we cannot safely identify.  Never recover by overwriting it
+        # implicitly: preserve the evidence and require explicit repair.
+        dump_json({"error": "invalid state.json", "reason": "malformed JSON",
+                   "state_path": str(state_path), "detail": str(exc)})
+        return 2
+    if not isinstance(obj, dict):
+        dump_json({"error": "invalid state.json",
+                   "reason": "state.json must contain a JSON object",
+                   "state_path": str(state_path),
+                   "json_type": type(obj).__name__})
+        return 2
+    mismatches = {
+        key: {"existing": obj[key], "incoming": getattr(args, key)}
+        for key in ("run_id", "family_id")
+        if key in obj and obj[key] != getattr(args, key)
+    }
+    if mismatches:
+        dump_json({"error": "state identity mismatch",
+                   "state_path": str(state_path), "mismatches": mismatches})
+        return 2
+    receipt_error = _canonical_state_error(state_dir, obj)
+    if receipt_error:
+        dump_json(receipt_error)
+        return 2
+    if args.phase == "approved":
+        dump_json({"error": "approval_required", "phase": obj.get("phase"),
+                   "message": "only approve-plan may transition a run to approved"})
+        return 2
+    if args.phase not in PHASE_ORDER:
+        dump_json({"error": "invalid_phase", "phase": args.phase,
+                   "expected": list(PHASE_ORDER)})
+        return 2
+    current_phase = obj.get("phase")
+    if current_phase not in PHASE_ORDER:
+        dump_json({"error": "invalid_phase", "phase": current_phase,
+                   "expected": list(PHASE_ORDER)})
+        return 2
+    approval_error = _approval_version_error(obj)
+    if approval_error:
+        dump_json(approval_error)
+        return 2
+    current_index = PHASE_ORDER.index(current_phase)
+    requested_index = PHASE_ORDER.index(args.phase)
+    if requested_index != current_index and requested_index != current_index + 1:
+        expected = current_phase if current_index == len(PHASE_ORDER) - 1 else PHASE_ORDER[current_index + 1]
+        dump_json({"error": "invalid_phase_transition", "from": current_phase,
+                   "to": args.phase, "expected": expected,
+                   "message": "lifecycle transitions are monotonic and adjacent"})
+        return 2
+    current_plan_version = obj["plan_version"]
+    current_packet_version = obj["packet_version"]
+    plan_version = current_plan_version if args.plan_version is None else args.plan_version
+    packet_version = current_packet_version if args.packet_version is None else args.packet_version
+    if current_index >= PHASE_ORDER.index("approved") and (
+        plan_version != current_plan_version or packet_version != current_packet_version
+    ):
+        dump_json({"error": "version_change_after_approval", "phase": current_phase,
+                   "current_plan_version": current_plan_version,
+                   "current_packet_version": current_packet_version,
+                   "requested_plan_version": plan_version,
+                   "requested_packet_version": packet_version})
+        return 2
+    obj.update({"run_id": args.run_id, "family_id": args.family_id, "phase": args.phase,
+                "plan_version": plan_version, "packet_version": packet_version,
+                "updated_at": datetime.now(timezone.utc).isoformat()})
     if args.dispatches: obj["dispatches"] = json.loads(args.dispatches)
     if args.findings: obj["findings"] = json.loads(args.findings)
     if args.lease: obj["lease"] = json.loads(args.lease)
-    tmp_path = state_path.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
-    tmp_path.replace(state_path)
+    _atomic_write_json(state_path, obj)
     hash_obj = {k: v for k, v in obj.items() if k != "updated_at"}
     dump_json({"saved": str(state_path), "content_hash": sha256_obj(hash_obj)}); return 0
 
@@ -569,9 +974,7 @@ def cmd_mark_spoke(args):
     obj = json.loads(state_path.read_text(encoding="utf-8"))
     spokes = obj.setdefault("spokes_loaded", {})
     spokes[args.spoke] = datetime.now(timezone.utc).isoformat()
-    tmp_path = state_path.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
-    tmp_path.replace(state_path)
+    _atomic_write_json(state_path, obj)
     dump_json({"marked": args.spoke, "phase": obj.get("phase")}); return 0
 
 def cmd_check_spoke(args):
@@ -583,6 +986,106 @@ def cmd_check_spoke(args):
     loaded = args.spoke in spokes
     dump_json({"loaded": loaded, "spoke": args.spoke, "marked_at": spokes.get(args.spoke)})
     return 0 if loaded else 2
+
+def cmd_route_defect(args):
+    """Record a routing defect and block closeout until it is amended.
+
+    A routing defect is a route this runtime emitted that the harness could not
+    actually invoke — overwhelmingly an invocation slug that does not exist
+    (`luna` where the harness wanted `gpt-5.6-luna`). Retrying by hand fixes the
+    run and loses the lesson, so the defect is durable state: `auto-closeout`
+    refuses to complete while an unresolved row remains, which is what forces the
+    isolated `auto-self-improve` amendment to the catalog row.
+    """
+    state_dir = Path(args.state_dir)
+    if not (state_dir / "state.json").exists():
+        dump_json({"error": "no state.json; run new-run/state-save first"}); return 1
+    path = state_dir / "route-defects.jsonl"
+    row = {
+        "id": str(uuid.uuid4()),
+        "kind": args.kind,
+        "attempted": args.attempted,
+        "observed_error": args.observed,
+        "correction": args.correction,
+        "harness": args.harness,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "resolved": False,
+    }
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+    dump_json({"recorded": row["id"], "file": str(path), "unresolved": len(load_route_defects(state_dir, unresolved_only=True))})
+    return 0
+
+
+class RouteDefectsUnreadable(ValueError):
+    """Raised when durable route-defect evidence cannot be read safely."""
+
+    def __init__(self, path: Path, row_number: int | None, detail: str):
+        self.path = path
+        self.row_number = row_number
+        location = f" row {row_number}" if row_number is not None else ""
+        super().__init__(f"{path}{location} is unreadable: {detail}")
+
+
+def load_route_defects(state_dir, unresolved_only=False):
+    path = Path(state_dir) / "route-defects.jsonl"
+    if not path.exists(): return []
+    rows = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise RouteDefectsUnreadable(path, None, str(exc)) from exc
+    for row_number, line in enumerate(lines, start=1):
+        if not line.strip(): continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RouteDefectsUnreadable(path, row_number, str(exc)) from exc
+        if not isinstance(row, dict):
+            raise RouteDefectsUnreadable(path, row_number, "row must contain a JSON object")
+        if unresolved_only and row.get("resolved"): continue
+        rows.append(row)
+    return rows
+
+def cmd_resolve_route_defect(args):
+    """Mark a recorded defect amended, naming the proposal that carries the fix."""
+    state_dir = Path(args.state_dir)
+    rows = load_route_defects(state_dir)
+    if not rows:
+        dump_json({"error": "no recorded route defects"}); return 1
+    found = False
+    for row in rows:
+        if row.get("id") == args.id:
+            row["resolved"] = True
+            row["proposal_ref"] = args.proposal_ref
+            row["resolved_at"] = datetime.now(timezone.utc).isoformat()
+            found = True
+    if not found:
+        dump_json({"error": f"no route defect with id {args.id}"}); return 1
+    path = state_dir / "route-defects.jsonl"
+    tmp = path.with_suffix(".jsonl.tmp")
+    tmp.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    tmp.replace(path)
+    dump_json({"resolved": args.id, "unresolved": len(load_route_defects(state_dir, unresolved_only=True))})
+    return 0
+
+def cmd_check_route_defects(args):
+    """Closeout gate. Exit 2 while any recorded routing defect is unamended."""
+    try:
+        unresolved = load_route_defects(Path(args.state_dir), unresolved_only=True)
+    except RouteDefectsUnreadable as exc:
+        result = {
+            "clear": False,
+            "unresolved": [],
+            "error": "route_defects_unreadable",
+            "message": str(exc),
+        }
+        if exc.row_number is not None:
+            result["row"] = exc.row_number
+        dump_json(result)
+        return 2
+    dump_json({"clear": not unresolved, "unresolved": unresolved})
+    return 0 if not unresolved else 2
 
 def cmd_state_reconcile(args):
     report = {"stale_leases_revoked": 0, "expired_dispatches": 0, "dirty_worktrees": 0}
@@ -628,10 +1131,48 @@ def cmd_invalidate_packets(args):
     if not state_path.exists(): dump_json({"invalidated": 0, "error": "no state.json"}); return 1
     state = json.loads(state_path.read_text(encoding="utf-8"))
     old_version = state.get("plan_version", 1)
+    approval_invalidated = _invalidate_approval_for_version_change(
+        state,
+        plan_version=args.plan_version,
+        packet_version=state.get("packet_version", 1),
+    )
     state["plan_version"] = args.plan_version
-    # Invalidate logic placeholder for state
     state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
-    dump_json({"invalidated": 1, "plan_version": args.plan_version}); return 0
+    dump_json({"invalidated": 1, "plan_version": args.plan_version,
+               "approval_invalidated": approval_invalidated}); return 0
+
+
+def _invalidate_approval_for_version_change(
+    state: dict,
+    *,
+    plan_version: int,
+    packet_version: int,
+) -> bool:
+    """Remove live approval when its approved artifact version no longer matches."""
+    approval = state.get("approval")
+    if not isinstance(approval, dict):
+        return False
+    packet_aligned = (
+        "packet_version" not in approval
+        or approval.get("packet_version") == packet_version
+    )
+    if approval.get("plan_version") == plan_version and packet_aligned:
+        return False
+
+    invalidated_at = datetime.now(timezone.utc).isoformat()
+    state.setdefault("invalidated_approvals", []).append({
+        **approval,
+        "invalidated_at": invalidated_at,
+        "invalidated_for": {
+            "plan_version": plan_version,
+            "packet_version": packet_version,
+        },
+    })
+    state.pop("approval", None)
+    if state.get("phase") in PHASE_ORDER[PHASE_ORDER.index("approved"):]:
+        state["phase"] = "planned"
+    state["updated_at"] = invalidated_at
+    return True
 
 def cmd_increment_plan(args):
     state_path = Path(args.state_dir) / "state.json"
@@ -639,6 +1180,11 @@ def cmd_increment_plan(args):
     state = json.loads(state_path.read_text(encoding="utf-8"))
     old = state.get("plan_version", 1)
     new = old + 1
+    approval_invalidated = _invalidate_approval_for_version_change(
+        state,
+        plan_version=new,
+        packet_version=state.get("packet_version", 1),
+    )
     state["plan_version"] = new
     state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     if args.db:
@@ -648,7 +1194,8 @@ def cmd_increment_plan(args):
         con.execute("INSERT INTO artifact_versions(id, run_id, kind, version, content_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                     (str(uuid.uuid4()), run_id, "plan", new, sha256_obj(state), now))
         con.commit(); con.close()
-    dump_json({"plan_version": new, "prior": old}); return 0
+    dump_json({"plan_version": new, "prior": old,
+               "approval_invalidated": approval_invalidated}); return 0
 
 def main():
     p=argparse.ArgumentParser(description='Auto Office v3 deterministic runtime helpers')
@@ -671,15 +1218,20 @@ def main():
     q=sp.add_parser('proposal-id'); q.add_argument('--stream',choices=['learned-pattern','catalog-policy'],required=True); q.add_argument('--kind',required=True); g=q.add_mutually_exclusive_group(required=True); g.add_argument('--file'); g.add_argument('--text'); q.set_defaults(func=cmd_proposal_id)
     q=sp.add_parser('replay'); q.add_argument('--dataset',required=True); q.add_argument('--old-policy',required=True); q.add_argument('--new-policy',required=True); q.set_defaults(func=cmd_replay)
     q=sp.add_parser('new-run'); q.add_argument('--family-id',required=True); q.add_argument('--holder-id',required=True); q.add_argument('--triple',required=True); q.add_argument('--gear',required=True); q.add_argument('--playbook',choices=['Change','Restructure','Investigate','Prototype','Visual'],required=True); q.add_argument('--base-sha',required=True); q.add_argument('--policy-hash',required=True); q.add_argument('--catalog-hash',required=True); q.add_argument('--adapter-hash',required=True); q.add_argument('--config-hash',required=True); q.add_argument('--out',required=True); q.set_defaults(func=cmd_new_run)
+    q=sp.add_parser('start'); q.add_argument('--goal',required=True); q.add_argument('--playbook',choices=['Change','Restructure','Investigate','Prototype','Visual'],required=True); q.add_argument('--gear',choices=['direct','direct+review','light','quick','express','full']); q.add_argument('--repo',default='.'); q.add_argument('--volume',action='store_true'); q.add_argument('--interview',action='store_true'); q.add_argument('--adversarial',action='store_true'); q.add_argument('--irreversible',action='store_true'); q.set_defaults(func=cmd_start)
     q=sp.add_parser('lease-acquire'); q.add_argument('--db',required=True); q.add_argument('--run-id',required=True); q.add_argument('--role',required=True); q.add_argument('--scope',required=True); q.add_argument('--holder-id',required=True); q.add_argument('--ttl',type=int,default=3600); q.set_defaults(func=cmd_lease_acquire)
     q=sp.add_parser('lease-renew'); q.add_argument('--db',required=True); q.add_argument('--lease-id',required=True); q.add_argument('--holder-id',required=True); q.add_argument('--ttl',type=int,default=3600); q.set_defaults(func=cmd_lease_renew)
     q=sp.add_parser('lease-release'); q.add_argument('--db',required=True); q.add_argument('--lease-id',required=True); q.add_argument('--holder-id',required=True); q.set_defaults(func=cmd_lease_release)
     q=sp.add_parser('lease-check'); q.add_argument('--db',required=True); q.add_argument('--run-id',required=True); q.add_argument('--scope',required=True); q.set_defaults(func=cmd_lease_check)
-    q=sp.add_parser('state-save'); q.add_argument('--state-dir',required=True); q.add_argument('--run-id',required=True); q.add_argument('--family-id',required=True); q.add_argument('--phase',required=True); q.add_argument('--plan-version',type=int,default=1); q.add_argument('--packet-version',type=int,default=1); q.add_argument('--dispatches'); q.add_argument('--findings'); q.add_argument('--lease'); q.set_defaults(func=cmd_state_save)
+    q=sp.add_parser('state-save'); q.add_argument('--state-dir',required=True); q.add_argument('--run-id',required=True); q.add_argument('--family-id',required=True); q.add_argument('--phase',required=True); q.add_argument('--plan-version',type=int); q.add_argument('--packet-version',type=int); q.add_argument('--dispatches'); q.add_argument('--findings'); q.add_argument('--lease'); q.set_defaults(func=cmd_state_save)
     q=sp.add_parser('state-load'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_state_load)
+    q=sp.add_parser('approve-plan'); q.add_argument('--state-dir',required=True); q.add_argument('--approved-by',choices=['user'],required=True); q.add_argument('--quote',required=True); q.add_argument('--plan-path'); q.set_defaults(func=cmd_approve_plan)
     q=sp.add_parser('state-reconcile'); q.add_argument('--state-dir',required=True); q.add_argument('--db'); q.set_defaults(func=cmd_state_reconcile)
     q=sp.add_parser('mark-spoke'); q.add_argument('--state-dir',required=True); q.add_argument('--spoke',required=True); q.set_defaults(func=cmd_mark_spoke)
     q=sp.add_parser('check-spoke'); q.add_argument('--state-dir',required=True); q.add_argument('--spoke',required=True); q.set_defaults(func=cmd_check_spoke)
+    q=sp.add_parser('route-defect'); q.add_argument('--state-dir',required=True); q.add_argument('--kind',choices=['invalid-invocation-slug','unsupported-effort','missing-adapter','other'],default='invalid-invocation-slug'); q.add_argument('--attempted',required=True); q.add_argument('--observed',required=True); q.add_argument('--correction'); q.add_argument('--harness'); q.set_defaults(func=cmd_route_defect)
+    q=sp.add_parser('resolve-route-defect'); q.add_argument('--state-dir',required=True); q.add_argument('--id',required=True); q.add_argument('--proposal-ref',required=True); q.set_defaults(func=cmd_resolve_route_defect)
+    q=sp.add_parser('check-route-defects'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_check_route_defects)
     args=p.parse_args(); sys.exit(args.func(args))
 
 if __name__=='__main__': main()

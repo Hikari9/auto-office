@@ -11,7 +11,7 @@
         "required": ["name", "trigger", "script", "idempotent"],
         "properties": {
           "name": {"type": "string"},
-          "trigger": {"enum": ["session_end", "pre_compact", "post_compact", "dispatch_complete", "cleanup"]},
+          "trigger": {"enum": ["session_end", "pre_compact", "post_compact", "pre_tool_use", "dispatch_complete", "cleanup", "stop"]},
           "script": {"type": "string"},
           "idempotent": {"type": "boolean"},
           "timeout": {"type": "integer"}

@@ -40,6 +40,9 @@ failure_signatures:
   - {id: slug-vs-display-name-silent-fallback, attribution: adapter, pattern: "--model <slug> accepted without error but session silently launches on account default model"}
   - {id: effort-unsupported-hard-fail, attribution: adapter, pattern: "--effort is not supported for model \"<slug>\" (Claude/gpt-oss routes)"}
   - {id: stdin-pipe-ignored, attribution: adapter, pattern: "prompt piped on stdin is not consumed; must bind to --print/--prompt="}
+  - {id: interactive-survey-blocks-status-unreported, attribution: adapter, pattern: "feedback survey blocks the agent mid-session while status still reads idle or working; dismiss with send-keys 0 and re-prompt, the agent has lost its task"}
+  - {id: start-prompt-not-landed, attribution: adapter, pattern: "prompt sent immediately after agent start returns did not land; confirm an observed transition to working plus pane output before treating the task as in flight"}
+  - {id: status-disagrees-with-pane, attribution: false-negative-liveness, pattern: "reported status reads idle while the pane shows active work (e.g. Searching... / esc to cancel); status is not a liveness signal for agy"}
 conformance:
   deterministic: pending
   live: pending

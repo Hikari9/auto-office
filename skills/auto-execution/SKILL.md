@@ -9,8 +9,10 @@ Before dispatch, validate both the run envelope and execution packet. Reject mis
 
 A packet must include base SHA, task scope, observable outcome, blast radius, allowed mutations, protected paths, validation commands, known-bad behavior to exclude, self-review, and rollback/restore notes.
 
-Acquire the role lease/write scope. Never allow two independent mutable holders for the same scope. Treat takeover as a holder change requiring stale-state reconciliation.
+Enter dispatch from `state.json.phase == "approved"`; `intake`, `planned`, or anything else is a hard stop, not a retry. A producer running `approve-plan` on its own behalf is a protocol violation. `--quote` carries the user's verbatim words as an audit record of what they approved; nothing authenticates it, so an agent that invents one produces a state that reads `approved` and is not (#94). The invariant therefore rests on the producer, not on a check — treat the `approval` block as authoritative and never fabricate or backfill it.
 
-Use the selected harness primitive; do not let a primitive redefine lifecycle authority. The producer self-reviews and self-verifies, but self-review is never independent approval.
+Acquire the role lease/write scope: one mutable holder per scope. Treat takeover as a holder change requiring stale-state reconciliation.
+
+Use the selected harness primitive; a primitive never redefines lifecycle authority. The producer self-reviews and self-verifies, but that is a pass, never an approval (lifecycle spec §8) — independent approval remains held by an agent that did not produce the work.
 
 If evidence contradicts the plan/brief assumption and continuing would violate outcome/safety, raise a supported `PLAN DEFECT` or `BRIEF DEFECT` instead of improvising a requirement change.

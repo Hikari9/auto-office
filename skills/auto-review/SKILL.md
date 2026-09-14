@@ -5,7 +5,7 @@ description: Internal Auto Office v3 independent review spoke. Use for plan revi
 
 # Auto Review
 
-Use a fresh/different reviewer session from the producer whenever the harness permits it. Never self-approve.
+Every gate is held by an agent that did not produce the work — never self-approve. Use a fresh/different reviewer session from the producer whenever the harness permits it.
 
 Before invoking a plan reviewer or code reviewer, publish the router's `selection_disclosure` to the user and preserve it in the dispatch record/readback. It must name the exact invocation model identifier when available, canonical model ID, effort, harness/version, and the evidence-backed reason this reviewer route won.
 
@@ -16,3 +16,15 @@ Findings use exactly: `accepted-material`, `accepted-minor`, `rejected-on-eviden
 Resume the same reviewer session across rounds when possible so it retains prior uncertainty/findings, but never resume into a producer identity.
 
 A defect exit earns gate-like credit only when it names a contradicted assumption and proves the current artifact was tested enough to expose it.
+
+## A review describes one tree state
+
+A review is a statement about a specific tree state. If the producer is still editing that tree, the reviewer's findings, line numbers, and contamination check all describe something that no longer exists, and afterward nobody can tell which findings survived. See references/review-tree-state.md for the observed collision pattern.
+
+Give a concurrent repair its own worktree, or wait for the in-flight review to land; combining several partial repair rounds into one tends to cost less than paying for a full re-review per round.
+
+Scope the contamination check to what changed between the review's start and end snapshot that falls outside the declared review scope — not to file authorship. A reviewer who never writes producer files will otherwise flag nearly every review as contaminated; the signal that actually matters is unscoped drift during the review window, regardless of who wrote it.
+
+## Review round caps
+
+`full`: 5 rounds. `express`: 2 rounds. A second CHANGES REQUIRED on the same task forces an orchestrator disposition, not an automatic re-plan. PLAN DEFECT and BRIEF DEFECT exit without consuming a round.
