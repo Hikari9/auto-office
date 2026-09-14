@@ -29,7 +29,11 @@ Echo the returned `kickoff` block to the user, then use its `state_dir` for ever
 
 `start` mechanically resolves effective config (merging `prompt/CLI > repo > user > plugin default`, emitting `effective_config_hash`; the user tier at `~/.config/auto-office/config.yaml` lives outside the repo, is invisible to repo search, and routinely sets `preferred_seed` chains the plugin default lacks — never hand-read `config/config.default.yaml` and treat it as the answer), pins the catalog/adapter snapshot hashes, policy hash, and base SHA, runs the gear fit test when `--gear` is omitted, and creates durable run state with `phase = "intake"`.
 
+Before freezing intent, run `check-spoke --state-dir <state_dir> --spoke auto-intake`; if it exits nonzero, load `skills/auto-intake/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-intake` before interviewing the user. The orchestrator owns this interview; the planner never talks to the user.
+
 Still manual, after `start` returns: freeze the five orchestrator-owned intent fields as compatibility data, not license to change the normative spec — `goal`, `done_criteria`, `blast_radius`, `named_actions`, `non_goals` — then run `check-spoke --state-dir <state_dir> --spoke auto-planning`; if it exits nonzero, load `skills/auto-planning/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-planning` before any planning work.
+
+After the plan is approved, run `check-spoke --state-dir <state_dir> --spoke auto-loop`; if it exits nonzero, load `skills/auto-loop/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-loop` before driving waves, integration, and the autonomy ceiling.
 
 For takeover/resume, load `protocol/state-and-takeover.md` before any mutable action.
 
@@ -47,13 +51,14 @@ Run this order:
 8. Generate machine-checkable execution packets.
 9. Route and dispatch executors/workers.
 10. Self-verify changed work.
-11. Run independent review when funded/required.
-12. Run browser/runtime verification for user-facing acceptance paths when reachable.
-13. Reconcile findings and amendments.
-14. Run closeout checks.
-15. Record telemetry and durable state.
-16. Perform lazy maintenance on eligible rows.
-17. Optionally create isolated improvement proposals.
+11. Integrate: commit and merge dispatch branches in wave order, validate the merged result.
+12. Run independent review when funded/required.
+13. Run browser/runtime verification for user-facing acceptance paths when reachable.
+14. Reconcile findings and amendments.
+15. Run closeout checks.
+16. Record telemetry and durable state.
+17. Perform lazy maintenance on eligible rows.
+18. Optionally create isolated improvement proposals.
 
 ## Role routing
 
@@ -139,3 +144,4 @@ Use `python3 scripts/check_ecosystem.py` before packaging or proposing plugin ch
 - `references/IMPLEMENTATION-NOTES.md` — what this preview implements vs. intentionally leaves provider-specific.
 - `references/MIGRATION-V2.md` — branded-office retirement/migration.
 - `references/quota-probe.md` — live quota probe contract: fit-test/pre-dispatch checkpoints, per-brand fields, exit codes.
+- `references/OFFICE-SKILLS-V3-LIFECYCLE-SPEC.md` — intake interview, waves, non-blocking orchestration, integration, autonomy ceiling.
