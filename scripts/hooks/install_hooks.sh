@@ -20,12 +20,19 @@ fi
 
 mkdir -p "$HOOKS_DEST"
 HOOKS_SRC="$(cd "$(dirname "$0")" && pwd)"
+NODE_BIN="/opt/homebrew/bin/node"
+if [ ! -x "$NODE_BIN" ]; then
+    echo "Required Node binary not found at $NODE_BIN" >&2
+    exit 1
+fi
 cp "${HOOKS_SRC}/session_end.sh" "$HOOKS_DEST/"
 cp "${HOOKS_SRC}/pre_compact.sh" "$HOOKS_DEST/"
 cp "${HOOKS_SRC}/compact_advisor.sh" "$HOOKS_DEST/"
 cp "${HOOKS_SRC}/close_panes.sh" "$HOOKS_DEST/"
 cp "${HOOKS_SRC}/close_finished_panes.mjs" "$HOOKS_DEST/"
+cp "${HOOKS_SRC}/pre_tool_use.py" "$HOOKS_DEST/"
 chmod +x "$HOOKS_DEST"/*.sh "$HOOKS_DEST"/*.mjs
+chmod +x "$HOOKS_DEST"/*.py
 
 cat > "$MANIFEST" << EOF
 {
@@ -65,6 +72,14 @@ cat > "$MANIFEST" << EOF
       "script": "${HOOKS_DEST}/close_finished_panes.mjs",
       "idempotent": true,
       "timeout": 30
+    },
+    {
+      "name": "pre_tool_use_approval_gate",
+      "trigger": "dispatch_complete",
+      "event": "PreToolUse",
+      "script": "${HOOKS_DEST}/pre_tool_use.py",
+      "idempotent": true,
+      "timeout": 30
     }
   ]
 }
@@ -73,6 +88,7 @@ EOF
 python3 -c "
 import json, os
 h = '${HOOKS_DEST}'
+node_bin = '${NODE_BIN}'
 configured = []
 
 def remove_stale_telemetry_hooks(value):
@@ -105,7 +121,8 @@ def configure_codex(path):
     hooks = d.setdefault('hooks', {})
     hooks.update({
         'SessionStart': [{'hooks': [{'type': 'command', 'command': h+'/session_end.sh', 'timeout': 30000}]}],
-        'PreCompact': [{'hooks': [{'type': 'command', 'command': h+'/pre_compact.sh', 'timeout': 30000}]}]
+        'PreCompact': [{'hooks': [{'type': 'command', 'command': h+'/pre_compact.sh', 'timeout': 30000}]}],
+        'PreToolUse': [{'hooks': [{'type': 'command', 'command': h+'/pre_tool_use.py', 'timeout': 30000}]}]
     })
     with open(path, 'w') as f: json.dump(d, f, indent=2)
     return True
@@ -117,8 +134,10 @@ if configure(p, {}):
     d['hooks'].update({
         'SessionEnd': [{'hooks': [{'type': 'command', 'command': h+'/session_end.sh', 'timeout': 30000}]}],
         'PreCompact': [{'hooks': [{'type': 'command', 'command': h+'/pre_compact.sh', 'timeout': 30000}]}],
+        'PreToolUse': [{'matcher': 'Edit|Write|NotebookEdit|Bash',
+                        'hooks': [{'type': 'command', 'command': h+'/pre_tool_use.py', 'timeout': 30000}]}],
         'Stop': [{'hooks': [{'type': 'command', 'command': h+'/close_panes.sh', 'timeout': 30000},
-                            {'type': 'command', 'command': h+'/close_finished_panes.mjs', 'timeout': 30000}]}]
+                            {'type': 'command', 'command': node_bin+' '+h+'/close_finished_panes.mjs', 'timeout': 30000}]}]
     })
     with open(p, 'w') as f: json.dump(d, f, indent=2)
     configured.append('Claude')
@@ -130,7 +149,8 @@ if configure_codex(p):
 
 # Gemini
 p = os.path.expanduser('~/.gemini/config/hooks.json')
-if configure(p, {'SessionEnd': h+'/session_end.sh', 'Stop': [h+'/close_panes.sh', h+'/close_finished_panes.mjs']}):
+if configure(p, {'SessionEnd': h+'/session_end.sh',
+                 'Stop': [h+'/close_panes.sh', node_bin+' '+h+'/close_finished_panes.mjs']}):
     configured.append('Gemini')
 
 if configured:

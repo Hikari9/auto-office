@@ -1,10 +1,10 @@
-#!/usr/bin/env node
+#!/opt/homebrew/bin/node
 /**
  * Stop hook. Closes the Herdr panes of delegated agents that have finished.
  *
  * Why a hook and not a rule: the Herdr skill has said for
  * several releases that a dispatch is finished when its pane is gone, and
- * panes still accumulated one dead agent per dispatch, because closing depended
+ * panes still accumulated one dead agent per dispatch because closing depended
  * on the planner choosing to notice. This closes them mechanically, from the
  * ledger the spawn recipe writes.
  *
@@ -12,17 +12,19 @@
  * which is exactly the moment its pane became closable. PostToolUse would run
  * this on every tool call for no additional closures.
  *
- * It closes ONLY panes recorded in the ledger. `herdr pane list` also shows the
- * user's own panes and other sessions' panes, so the listing is never the input.
+ * It closes ONLY panes recorded in the ledger. `herdr agent list` and
+ * `herdr pane list` are the liveness source of truth; the ledger is the
+ * ownership boundary. The pane listing also shows the user's own panes and
+ * other sessions' panes, so the listing is never the candidate set.
  *
- * Closable, with no role exceptions: `done` or gone (herdr answers
- * `agent_not_found`). An idle agent may have dropped its prompt, so it stays
- * open until completion is confirmed. A closed pane is not lost work — the
+ * Closable, with no role exceptions: `done`, an explicit halted/dead status, or
+ * gone (the agent has disappeared from `herdr agent list`). An idle agent may
+ * have dropped its prompt, so it stays open until completion is confirmed. A closed pane is not lost work — the
  * ledger records each agent's session id, so a session is restored by id in a
  * fresh pane. Continuity lives in the id and the agent's written report, never
  * in a pane left open after confirmed completion.
  *
- * Never closable: an agent that is `working`, `blocked`, or `unknown`; a pane
+ * Never closable: an agent that is `working`, `idle`, `blocked`, or `unknown`; a pane
  * whose agent has since moved to a different pane than the ledger recorded; and
  * anything not in the ledger.
  *
@@ -31,7 +33,8 @@
  * mean it is present at run time, and v3 dispatches are not all pane-hosted.
  *
  * The ledger is written by `scripts/office_spawn.sh --pane-id`. A dispatch that
- * does not name a pane never appears here and is never closed.
+ * does not name a pane never appears here and is never closed, even if the
+ * agent list later reports that pane as finished.
  *
  * Contract, same as the eval hooks: never blocks, exits 0 on any internal error,
  * and prints nothing when it closed nothing. A hygiene hook that can fail a turn
@@ -43,7 +46,8 @@ import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
 
 const LEDGER = process.env.OFFICE_PANE_LEDGER || join("/tmp", "office", "panes.jsonl");
-const FINISHED = new Set(["done", "gone"]);
+const FINISHED = new Set(["done", "gone", "halted", "dead", "stopped", "exited", "terminated"]);
+const PROTECTED_NAMES = new Set(["t1", "t2", "t3", "t6", "t7"]);
 
 /** herdr on PATH? Outside a Herdr environment this hook is a no-op. */
 const onPath = (bin) => {
@@ -57,8 +61,8 @@ const onPath = (bin) => {
 /**
  * Every herdr CLI call answers JSON, but a failure exits 1 and puts its
  * `{"error":{"code":...}}` body on **stderr**, not stdout. Reading only stdout
- * turns `agent_not_found` — the single most common case here, an agent whose
- * process is already gone — into "CLI unreachable", and the pane never closes.
+ * turns a closed or already-gone pane into "CLI unreachable", and the ledger
+ * entry never gets retired.
  */
 const herdr = (args) => {
   const parse = (s) => { try { return JSON.parse(s); } catch { return null; } };
@@ -67,6 +71,42 @@ const herdr = (args) => {
   } catch (e) {
     return parse(e?.stdout || "") || parse(e?.stderr || "") || null;
   }
+};
+
+const listItems = (response, key) => {
+  if (!response || response.error) return null;
+  const result = response.result;
+  if (Array.isArray(result)) return result;
+  if (Array.isArray(result?.[key])) return result[key];
+  if (Array.isArray(response[key])) return response[key];
+  return null;
+};
+
+const field = (entry, ...names) => {
+  for (const name of names) {
+    if (entry && entry[name] !== undefined && entry[name] !== null) return entry[name];
+  }
+  return null;
+};
+
+const liveness = (name, pane, agents, panes) => {
+  const agentMatches = agents.filter((entry) => field(entry, "pane_id", "pane") === pane);
+  const agent = agentMatches[0] || null;
+  const namedMatches = agents.filter((entry) => field(entry, "name", "agent", "agent_name") === name);
+
+  if (agent) {
+    const status = field(agent, "agent_status", "status");
+    const paneEntry = panes.find((entry) => field(entry, "pane_id", "pane") === pane) || null;
+    const paneStatus = field(paneEntry, "agent_status", "status");
+    return { status: FINISHED.has(status) ? status : (FINISHED.has(paneStatus) ? paneStatus : status), paneEntry };
+  }
+  if (namedMatches.length > 0) {
+    // The agent moved: its recorded pane is no longer ours to close.
+    return { status: "moved", paneEntry: null };
+  }
+  // No agent row means the recorded agent is gone. A remaining unknown pane is
+  // the shell/terminal left behind by that dead agent, not proof of a live one.
+  return { status: "gone", paneEntry: panes.find((entry) => field(entry, "pane_id", "pane") === pane) || null };
 };
 
 const drainStdin = () =>
@@ -85,13 +125,15 @@ try {
   if (!existsSync(LEDGER)) process.exit(0);
   if (!onPath("herdr")) process.exit(0);
 
+  const agents = listItems(herdr(["agent", "list"]), "agents");
+  const panes = listItems(herdr(["pane", "list"]), "panes");
+  if (!agents || !panes) process.exit(0); // no liveness evidence: fail safe
+
   const raw = readFileSync(LEDGER, "utf8");
   const lines = raw.split("\n").filter((l) => l.trim());
   if (!lines.length) process.exit(0);
 
   const kept = [];
-  const looked = new Map(); // one `agent get` per agent name, however many entries reference it
-
   for (const line of lines) {
     let e;
     try { e = JSON.parse(line); } catch { continue; } // malformed: drop, it names no pane we can act on
@@ -101,34 +143,19 @@ try {
     // A planner that closed explicitly and marked the entry instead of removing
     // it: drop it, and do not announce a close that already happened.
     if (e.closed === true) continue;
-    if (!name) { kept.push(e); continue; } // no name, no status; leave it for the planner
+    if (!name || PROTECTED_NAMES.has(name)) { kept.push(e); continue; }
+    const live = liveness(name, pane, agents, panes);
+    if (!FINISHED.has(live.status)) { kept.push(e); continue; }
 
-    if (!looked.has(name)) {
-      const res = herdr(["agent", "get", name]);
-      if (!res) looked.set(name, { status: null, pane: null, session: null });          // CLI unreachable: decide nothing
-      else if (res.error?.code === "agent_not_found") looked.set(name, { status: "gone", pane: null, session: null });
-      else looked.set(name, {
-        status: res.result?.agent?.agent_status || null,
-        pane: res.result?.agent?.pane_id || null,
-        session: res.result?.agent?.agent_session?.value || null,
-      });
-    }
-    const live = looked.get(name);
+    // Preserve the ledger session id; a gone agent no longer appears in either
+    // list, and the id is the only way back into this session.
+    const session = e.session_id || null;
 
-    // The agent moved panes since it was recorded: the ledger's pane id may now
-    // belong to something else. Not ours to close.
-    const paneMatches = live.status === "gone" || live.pane === null || live.pane === pane;
-
-    if (!(live.status && FINISHED.has(live.status)) || !paneMatches) { kept.push(e); continue; }
-
-    // Last chance to capture the session id: after the pane is gone, `agent get`
-    // no longer answers, and the id is the only way back into this session.
-    const session = e.session_id || live.session || null;
-
-    const res = herdr(["pane", "close", pane]);
+    let res = null;
+    try { res = herdr(["pane", "close", pane]); } catch { /* continue with other panes */ }
     const gone = res?.error?.code && /not_?found/.test(res.error.code);
     if ((res && !res.error) || gone) closed.push({ pane, name, status: live.status, session });
-    else kept.push(e); // close failed for a reason we do not understand: retry next Stop
+    else kept.push(e); // close failed: retain it and continue with other panes
   }
 
   if (kept.length !== lines.length) {
