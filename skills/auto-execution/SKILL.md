@@ -9,7 +9,7 @@ Before dispatch, validate both the run envelope and execution packet. Reject mis
 
 A packet must include base SHA, task scope, observable outcome, blast radius, allowed mutations, protected paths, validation commands, known-bad behavior to exclude, self-review, and rollback/restore notes.
 
-Enter dispatch from `state.json.phase == "approved"`; `intake`, `planned`, or anything else is a hard stop, not a retry. A producer running `approve-plan` on its own behalf, without the user's verbatim words in `--quote`, is a protocol violation — the quote is what makes the approval attributable to the user rather than the agent. The recorded `approval` block is what a future PreToolUse hook will read to gate dispatch, so treat it as authoritative and never fabricate or backfill it.
+Enter dispatch from `state.json.phase == "approved"`; `intake`, `planned`, or anything else is a hard stop, not a retry. A producer running `approve-plan` on its own behalf is a protocol violation. `--quote` carries the user's verbatim words as an audit record of what they approved; nothing authenticates it, so an agent that invents one produces a state that reads `approved` and is not (#94). The invariant therefore rests on the producer, not on a check — treat the `approval` block as authoritative and never fabricate or backfill it.
 
 Acquire the role lease/write scope: one mutable holder per scope. Treat takeover as a holder change requiring stale-state reconciliation.
 

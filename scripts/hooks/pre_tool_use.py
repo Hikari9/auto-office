@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Fail-closed Auto Office mutation gate for PreToolUse hooks."""
+"""Auto Office mutation check for PreToolUse hooks — defence in depth, not a gate.
+
+This raises the cost of mutating below approval; it does not prevent it. It
+decides by classifying Bash source text, an unbounded surface: interpreters
+(`node -p`, `awk ... system()`), script loaders (`source`), write-capable
+options (`sort -o`, `git diff --output=`) and process substitution all pass.
+It also cannot prove which repository an opaque shell string will touch, and
+`--quote` on `approve-plan` is unauthenticated. Issue #94 holds the redesign.
+The enforced boundary lives in office_runtime.py, which refuses to write
+`approved` outside `approve-plan` and invalidates approval on a version bump.
+"""
 
 from __future__ import annotations
 

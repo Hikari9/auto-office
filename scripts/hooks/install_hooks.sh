@@ -101,7 +101,7 @@ cat > "$MANIFEST" << EOF
     },
     {
       "name": "pre_tool_use_approval_gate",
-      "trigger": "dispatch_complete",
+      "trigger": "pre_tool_use",
       "event": "PreToolUse",
       "script": "${HOOKS_DEST}/pre_tool_use.py",
       "idempotent": true,
@@ -160,7 +160,7 @@ if configure(p, {}):
     d['hooks'].update({
         'SessionEnd': [{'hooks': [{'type': 'command', 'command': h+'/session_end.sh', 'timeout': 30000}]}],
         'PreCompact': [{'hooks': [{'type': 'command', 'command': h+'/pre_compact.sh', 'timeout': 30000}]}],
-        'PreToolUse': [{'matcher': 'Edit|Write|NotebookEdit|Bash',
+        'PreToolUse': [{'matcher': 'Edit|MultiEdit|Write|NotebookEdit|ApplyPatch|Bash',
                         'hooks': [{'type': 'command', 'command': h+'/pre_tool_use.py', 'timeout': 30000}]}],
         'Stop': [{'hooks': [{'type': 'command', 'command': h+'/close_panes.sh', 'timeout': 30000},
                             {'type': 'command', 'command': node_bin+' '+h+'/close_finished_panes.mjs', 'timeout': 30000}]}]
