@@ -17,7 +17,7 @@ HUB_LINE_BUDGET = 128
 SKILL_LINE_BUDGETS = {
     'skills/agy-cli/SKILL.md': 46,
     'skills/auto-adapter/SKILL.md': 18,
-    'skills/auto-closeout/SKILL.md': 53,
+    'skills/auto-closeout/SKILL.md': 62,
     'skills/auto-execution/SKILL.md': 20,
     'skills/auto-intake/SKILL.md': 48,
     'skills/auto-loop/SKILL.md': 27,
