@@ -52,11 +52,27 @@ These are unchanged, and they bind the orchestrator:
 - Phase order still governs, and the runtime still refuses to write `approved`
   outside `approve-plan`. That is cheap, deterministic, and costs nothing to keep.
 
-## Consequence for the hook
+## What the hook does now
 
-`scripts/hooks/pre_tool_use.py` classifies Bash source text, which this document
-says not to do. It ships demoted to defence in depth and asserts nothing. Under
-this position its classifier is not an unfinished gate but unwanted machinery: it
-produces false blocks on legitimate read-only work while proving nothing about
-the mutating cases. Removing the classifier and keeping only the phase read is
-the change that agrees with this document.
+`scripts/hooks/pre_tool_use.py` lost its classifier — four command tables, the
+shell parser, the git sub-command analysis, the approval-command exemption, and
+the Bash target inference, about 300 lines. `Bash` came out of the `PreToolUse`
+matcher, so shell commands are never inspected.
+
+What remains decides from the tool name and the run's recorded phase, and nothing
+else:
+
+| Below approval | Result |
+|---|---|
+| `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `ApplyPatch`, any unknown tool | blocked, `approval_required` |
+| `Read`, `Grep`, `Glob`, other read-only tools | allowed |
+| `Bash`, any shell | allowed, uninspected |
+| malformed state while a run is active | blocked, `unreadable_run_state` |
+
+Blocking the structured edit tools survives because it needs no classification:
+no false positives, no unbounded surface, no maintenance. It is worth keeping for
+the same reason the classifier was not.
+
+A reviewer who finds that `rm -rf src` passes below approval has found the
+design, not a bypass. `tests/test_hooks.py::test_pre_tool_use_does_not_inspect_bash`
+asserts it on purpose.
