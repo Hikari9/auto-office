@@ -5,52 +5,20 @@ description: Internal Auto Office v3 loop-driver spoke. Use after plan approval 
 
 # Auto Loop
 
-Dispatch every task in the current wave before waiting on any of them. One worktree per
-dispatch, created off the run's pinned base SHA; workers never share a tree and never run git —
-the orchestrator commits and merges. Two tasks in one wave never touch the same write scope; a
-wave is only real if it can be drawn as disjoint.
+Dispatch every task in the wave before waiting on any of them. One worktree per dispatch, cut from the run's pinned base SHA; the orchestrator commits and merges, workers never touch git. Two tasks in one wave never share a write scope — a wave is only real if it draws as disjoint.
 
-Poll, never block. While a dispatch runs, the orchestrator may only touch write scopes no live
-dispatch holds: planning later waves, reviewing returned output, preparing briefs, reading state.
-A single blocking wait on one worker is a defect whenever another dispatch is live.
-A wave ends when every dispatch in it has returned or been declared dead by two independent
-liveness signals — one signal alone is not a death.
+Polls while any dispatch is live. Between polls the orchestrator only touches write scopes no live dispatch holds: planning later waves, reviewing returned output, preparing briefs, reading state.
 
-Arm a background monitor over every dispatch at or before dispatch time, kept armed for the whole
-run, not per wave — completion is an event from it, never a blocking wait, and it must fire on
-every terminal state (finished, idle, blocked, unknown, disappeared), not just success. Talking to
-the user never suspends it. Lost or unarmed monitor: re-poll before asserting any dispatch state.
-On each completion event, collect the result, close the pane of an agent that actually finished,
-and update the spawn ledger. Leave `blocked` and `unknown` panes open — they are unresolved
-states, not completions, and closing them destroys the evidence needed to recover. See spec
-section 6 for the full rule and the failure it closes.
+Arm a background monitor over every dispatch at or before dispatch time, kept armed for the whole run. Completion is an event from it, not a wait, and it fires on every terminal state — finished, idle, blocked, unknown, disappeared — not just success. Talking to the user never suspends it. If the monitor is lost or unarmed, re-poll before asserting any dispatch's state.
 
-At integration: commit each worker's tree on its own dispatch branch, authored by the
-orchestrator; merge dispatch branches into the run's integration branch in wave order; resolve
-conflicts at the orchestrator, never by re-dispatching a worker into a tree it does not own; then
-run the plan's validation commands on the merged result. A green worker tree is not evidence
-about the merge — the first moment N parallel trees have ever existed together is after it.
+A wave ends when every dispatch in it has returned, or been declared dead by two independent liveness signals — the receipt is both signals; one alone is not a death. On each completion event: collect the result, close the pane of an agent that actually finished, update the spawn ledger. Leave `blocked` and `unknown` panes open — they're unresolved, not completions, and closing one destroys the evidence needed to recover (spec §6).
 
-When a test written against the pinned contract disagrees with an implementation, name which one
-is wrong and why: repo convention outranks an ambiguous contract clause, and a contract clause
-outranks an implementation's convenience. This is an adjudication, not a re-plan.
+At integration: commit each worker's tree on its own dispatch branch, authored by the orchestrator; merge dispatch branches into the run's integration branch in wave order; resolve conflicts at the orchestrator, never by re-dispatching a worker into a tree it no longer owns; then run the plan's validation commands on the merged result. The receipt is that merged-result run — a green worker tree only proves itself, since N parallel trees have never coexisted until then.
 
-Round caps for review live in `auto-review`; do not restate them here.
+When a test against the pinned contract disagrees with the implementation, name which one is wrong and why: repo convention outranks an ambiguous contract clause, and a contract clause outranks an implementation's convenience. This is an adjudication, not a re-plan. Review round caps live in `auto-review`.
 
-After approval the run proceeds end to end with no further go-aheads. It bootstraps a plan-only
-commit, named branch, and draft PR before the first task; commits each wave as it goes green;
-runs verification and review rounds; removes the plan file and marks the PR ready for review at
-closeout; and may merge dispatch branches into its own working branch. It never merges to `main`
-unless the user stated so explicitly, in the approval or in the conversation — absent that
-sentence, the run stops at a ready PR.
+After approval the run proceeds end to end with no further go-aheads: bootstrap a plan-only commit, named branch, and draft PR before the first task; commit each wave as it goes green; run verification and review rounds; remove the plan file and mark the PR ready at closeout; merge dispatch branches into its own working branch as needed. Merging to `main` stays the user's call — their most recent explicit statement, in the approval or the conversation, governs over any earlier default. Absent that sentence, the run stops at a ready PR.
 
-Whether this run may merge to `main` is the user's decision to make, not the run's to rule on.
-Their most recent explicit statement governs over any earlier default or preset. Report blockers
-plainly, then carry out the authorized action; a defect exit pauses and reports, and is not a way
-to decline an authority decision. A defect must concern the artifact it names — a scope objection
-raised to refuse an authority call disguises the real disagreement. When the harness itself blocks
-an action, ask the user rather than rephrasing past the guard. Full statement: spec §9.1, §9.2.
+Report blockers, then carry out the authorized action — a defect exit pauses and reports, it doesn't decline an authority decision. A defect must concern the artifact it names; a scope objection raised to dodge an authority call is really that disagreement in disguise. If the harness itself blocks an action, ask the user instead of rephrasing past the guard (spec §9.1, §9.2).
 
-It stops for exactly two things: an external send, and a user-owned decision the plan did not
-anticipate. Everything the plan named — production applies included — it executes without asking
-again.
+It stops for exactly two things: an external send, and a user-owned decision the plan didn't anticipate. Everything the plan named — production applies included — it executes without asking again.

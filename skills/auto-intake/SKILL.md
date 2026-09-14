@@ -5,7 +5,7 @@ description: Internal Auto Office v3 intake spoke. Use when the orchestrator mus
 
 # Auto Intake
 
-The orchestrator runs this interview directly. The planner never talks to the user (#47).
+The orchestrator conducts this interview directly; the planner is not present (#47).
 
 ## The twelve-item floor
 
@@ -26,28 +26,18 @@ Cover all twelve on every run, delivered as one or two batched question rounds, 
 
 ## Freezing the five fields
 
-`goal`, `done_criteria`, `blast_radius`, `named_actions`, and `non_goals` are **derived**
-from the twelve answers, not asked directly. Freezing a field the user was never asked
-about is the defect this spoke exists to prevent — every frozen value must trace back to
-an answer above.
+`goal`, `done_criteria`, `blast_radius`, `named_actions`, and `non_goals` are **derived** from the twelve answers, not asked directly. Every frozen value traces back to an answer above; one that doesn't is the defect this spoke exists to prevent.
 
 ## Irreversible steps become named_actions
 
-An irreversible step (item 4) must become a `named_actions:` entry with its preconditions
-written out exactly — that entry is what later lets the loop perform it without stopping.
-If you cannot yet write the preconditions out exactly, the interview is not finished; keep
-asking.
+Item 4 becomes a `named_actions:` entry with its preconditions written out exactly — that's the receipt that lets the loop perform it later without stopping. Preconditions you can't yet write exactly mean the interview isn't finished; keep asking.
 
-External sends are never `named_actions`, regardless of preconditions. They always stop
-the loop.
+External sends always stop the loop, regardless of preconditions — never a `named_actions` entry.
 
 ## Exit test
 
-A stranger with no access to this conversation — a routed executor in a separate process
-that cannot ask a follow-up — could build the right thing from the frozen intent alone. If
-they would have to guess, the interview is not done.
+The receipt is frozen intent a stranger could build the right thing from: a routed executor in a separate process, with no access to this conversation and no chance to follow up. Anything they'd have to guess means the interview isn't done.
 
 ## Gear is not a thirteenth question
 
-Gear is declared in the kickoff block, decided by the fit test from blast radius,
-reversibility and size class. Never ask the user for it here.
+Gear is declared in the kickoff block, decided by the fit test from blast radius, reversibility and size class. It ships from there only — this interview never asks for it.
