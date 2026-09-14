@@ -5,7 +5,7 @@ Route-time commands never perform network access. Catalog fetching/normalization
 outside routing and be committed to a content-addressed local snapshot before selection.
 """
 from __future__ import annotations
-import argparse, hashlib, json, math, os, re, sqlite3, sys, uuid
+import argparse, contextlib, hashlib, io, json, math, os, re, sqlite3, subprocess, sys, uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
@@ -498,13 +498,176 @@ def cmd_replay(args):
     dump_json({'rows':len(rows),'flips':flips,'decisions':decisions,'zero_flip_warning':len(rows)>0 and not flips}); return 0
 
 
-def cmd_new_run(args):
+def _new_run_envelope(args):
     now=datetime.now(timezone.utc).isoformat()
-    obj={'run_id':str(uuid.uuid4()),'family_id':args.family_id,'dispatch_id':str(uuid.uuid4()),'role':'orchestrator','holder_id':args.holder_id,'triple':args.triple,'mode':args.gear,'playbook':args.playbook,'base_sha':args.base_sha,'policy_hash':args.policy_hash,'catalog_snapshot_hash':args.catalog_hash,'adapter_snapshot_hash':args.adapter_hash,'effective_config_hash':args.config_hash,'plan_version':1,'packet_version':1,'created_at':now}
+    return {'run_id':getattr(args,'run_id',None) or str(uuid.uuid4()),'family_id':args.family_id,'dispatch_id':str(uuid.uuid4()),'role':'orchestrator','holder_id':args.holder_id,'triple':args.triple,'mode':args.gear,'playbook':args.playbook,'base_sha':args.base_sha,'policy_hash':args.policy_hash,'catalog_snapshot_hash':args.catalog_hash,'adapter_snapshot_hash':args.adapter_hash,'effective_config_hash':args.config_hash,'plan_version':1,'packet_version':1,'created_at':now}
+
+
+def cmd_new_run(args):
+    obj=_new_run_envelope(args)
     errors=validate_with_schema(obj,'run-envelope.schema.json')
     if errors: dump_json({'valid':False,'errors':errors}); return 2
     out=Path(args.out); out.parent.mkdir(parents=True,exist_ok=True); out.write_text(json.dumps(obj,indent=2)+'\n')
     dump_json({'created':str(out),'run_id':obj['run_id']}); return 0
+
+
+def _atomic_write_json(path: Path, obj: Any) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _start_effective_config(repo: Path) -> tuple[dict, str]:
+    captured = io.StringIO()
+    call_args = argparse.Namespace(repo_root=str(repo), overrides=None, set=None, user=None, hash_only=False)
+    with contextlib.redirect_stdout(captured):
+        result = cmd_effective_config(call_args)
+    if result != 0:
+        raise RuntimeError("effective-config failed")
+    data = json.loads(captured.getvalue())
+    return data["config"], data["effective_config_hash"]
+
+
+def _start_catalog_hash() -> str:
+    return sha256_obj(load_data(ROOT / "catalog" / "seed.yaml"))
+
+
+def _start_adapter_hash() -> str:
+    adapter_dir = ROOT / "adapters" / "seed"
+    data = {str(path.relative_to(ROOT)): load_data(path) for path in sorted(adapter_dir.glob("*.yaml"))}
+    return sha256_obj(data)
+
+
+def _start_base_sha(repo: Path) -> str:
+    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), check=True,
+                            capture_output=True, text=True)
+    return result.stdout.strip()
+
+
+def _start_state_root() -> Path:
+    root = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
+    return root.expanduser().resolve() / "auto-office" / "runs"
+
+
+def _start_holder() -> tuple[str, str]:
+    holder_id = os.environ.get("AUTO_OFFICE_HOLDER_ID") or "orchestrator"
+    triple = os.environ.get("AUTO_OFFICE_HOLDER_TRIPLE") or "codex@local/orchestrator@none"
+    return holder_id, triple
+
+
+def _start_gear(args) -> str:
+    if args.gear:
+        return args.gear
+    if getattr(args, "irreversible", False):
+        return "full"
+    return "express" if sum(bool(v) for v in (args.volume, args.interview, args.adversarial)) >= 2 else "direct"
+
+
+def _ensure_repo_gitignore(repo: Path) -> None:
+    path = repo / ".gitignore"
+    if path.exists():
+        text = path.read_text(encoding="utf-8")
+        if any(line.strip() == ".office/" for line in text.splitlines()):
+            return
+        with path.open("a", encoding="utf-8") as fh:
+            if text and not text.endswith("\n"):
+                fh.write("\n")
+            fh.write(".office/\n")
+        return
+    path.write_text(".office/\n", encoding="utf-8")
+
+
+def cmd_start(args):
+    try:
+        repo = Path(args.repo or ".").expanduser().resolve()
+        if not repo.is_dir():
+            dump_json({"error": "invalid_repo", "repo": str(repo)})
+            return 2
+        config, config_hash = _start_effective_config(repo)
+        gear = _start_gear(args)
+        base_sha = _start_base_sha(repo)
+        catalog_hash = _start_catalog_hash()
+        adapter_hash = _start_adapter_hash()
+        holder_id, triple = _start_holder()
+        run_id = str(uuid.uuid4())
+        family_id = str(uuid.uuid4())
+        envelope_args = argparse.Namespace(family_id=family_id, holder_id=holder_id, triple=triple,
+            gear=gear, playbook=args.playbook, base_sha=base_sha, policy_hash=sha256_obj(config),
+            catalog_hash=catalog_hash, adapter_hash=adapter_hash, config_hash=config_hash, run_id=run_id)
+        envelope = _new_run_envelope(envelope_args)
+        envelope["goal"] = args.goal
+        errors = validate_with_schema(envelope, "run-envelope.schema.json")
+        if errors:
+            dump_json({"valid": False, "errors": errors})
+            return 2
+        state_dir = _start_state_root() / run_id
+        state_dir.mkdir(parents=True, exist_ok=True)
+        state = {"run_id": run_id, "family_id": family_id, "phase": "intake", "plan_version": 1,
+                 "packet_version": 1, "updated_at": envelope["created_at"], "goal": args.goal,
+                 "playbook": args.playbook, "gear": gear, "holder_id": holder_id, "triple": triple,
+                 "base_sha": base_sha, "policy_hash": envelope["policy_hash"],
+                 "catalog_snapshot_hash": catalog_hash, "adapter_snapshot_hash": adapter_hash,
+                 "effective_config_hash": config_hash}
+        _atomic_write_json(state_dir / "state.json", state)
+        _atomic_write_json(state_dir / "envelope.json", envelope)
+        pointer = repo / ".office" / "runs" / f"{run_id}.ref"
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_text(str(state_dir.resolve()) + "\n", encoding="utf-8")
+        _ensure_repo_gitignore(repo)
+        kickoff = (f"Auto Office kickoff\nGoal: {args.goal}\nPlaybook: {args.playbook}\n"
+                   f"Gear: {gear}\nRun: {run_id}\nBase SHA: {base_sha}")
+        dump_json({"state_dir": str(state_dir.resolve()), "run_id": run_id, "gear": gear,
+                   "pointer": str(pointer.resolve()), "kickoff": kickoff})
+        return 0
+    except Exception as exc:
+        dump_json({"error": "start_failed", "message": str(exc)})
+        return 2
+
+
+def _plan_file_hash(path: str | None) -> str | None:
+    if not path:
+        return None
+    return "sha256:" + hashlib.sha256(Path(path).expanduser().read_bytes()).hexdigest()
+
+
+def cmd_approve_plan(args):
+    try:
+        state_path = Path(args.state_dir).expanduser() / "state.json"
+        if not state_path.exists():
+            dump_json({"error": "no_state", "state_dir": str(Path(args.state_dir).expanduser())})
+            return 2
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if not args.quote.strip():
+            dump_json({"error": "empty_quote", "message": "--quote must not be empty or whitespace-only"})
+            return 2
+        phase = state.get("phase")
+        plan_version = state.get("plan_version", 1)
+        if phase == "approved" and isinstance(state.get("approval"), dict):
+            approval = state["approval"]
+            if approval.get("plan_version") == plan_version:
+                dump_json({"approved": True, "idempotent": True, "phase": phase,
+                           "plan_version": plan_version})
+                return 0
+            dump_json({"error": "plan_version_mismatch", "phase": phase,
+                       "approved_plan_version": approval.get("plan_version"),
+                       "current_plan_version": plan_version})
+            return 2
+        if phase != "planned":
+            dump_json({"error": "invalid_phase", "phase": phase, "expected": "planned"})
+            return 2
+        approval = {"by": args.approved_by, "quote": args.quote,
+                    "at": datetime.now(timezone.utc).isoformat(),
+                    "plan_version": plan_version, "plan_sha": _plan_file_hash(args.plan_path)}
+        state["phase"] = "approved"
+        state["approval"] = approval
+        state["updated_at"] = approval["at"]
+        _atomic_write_json(state_path, state)
+        dump_json({"approved": True, "idempotent": False, "phase": "approved",
+                   "plan_version": plan_version, "approval": approval})
+        return 0
+    except Exception as exc:
+        dump_json({"error": "approve_plan_failed", "message": str(exc)})
+        return 2
 
 
 def cmd_lease_acquire(args):
@@ -560,9 +723,7 @@ def cmd_state_save(args):
     if args.dispatches: obj["dispatches"] = json.loads(args.dispatches)
     if args.findings: obj["findings"] = json.loads(args.findings)
     if args.lease: obj["lease"] = json.loads(args.lease)
-    tmp_path = state_path.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
-    tmp_path.replace(state_path)
+    _atomic_write_json(state_path, obj)
     hash_obj = {k: v for k, v in obj.items() if k != "updated_at"}
     dump_json({"saved": str(state_path), "content_hash": sha256_obj(hash_obj)}); return 0
 
@@ -578,9 +739,7 @@ def cmd_mark_spoke(args):
     obj = json.loads(state_path.read_text(encoding="utf-8"))
     spokes = obj.setdefault("spokes_loaded", {})
     spokes[args.spoke] = datetime.now(timezone.utc).isoformat()
-    tmp_path = state_path.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
-    tmp_path.replace(state_path)
+    _atomic_write_json(state_path, obj)
     dump_json({"marked": args.spoke, "phase": obj.get("phase")}); return 0
 
 def cmd_check_spoke(args):
@@ -749,12 +908,14 @@ def main():
     q=sp.add_parser('proposal-id'); q.add_argument('--stream',choices=['learned-pattern','catalog-policy'],required=True); q.add_argument('--kind',required=True); g=q.add_mutually_exclusive_group(required=True); g.add_argument('--file'); g.add_argument('--text'); q.set_defaults(func=cmd_proposal_id)
     q=sp.add_parser('replay'); q.add_argument('--dataset',required=True); q.add_argument('--old-policy',required=True); q.add_argument('--new-policy',required=True); q.set_defaults(func=cmd_replay)
     q=sp.add_parser('new-run'); q.add_argument('--family-id',required=True); q.add_argument('--holder-id',required=True); q.add_argument('--triple',required=True); q.add_argument('--gear',required=True); q.add_argument('--playbook',choices=['Change','Restructure','Investigate','Prototype','Visual'],required=True); q.add_argument('--base-sha',required=True); q.add_argument('--policy-hash',required=True); q.add_argument('--catalog-hash',required=True); q.add_argument('--adapter-hash',required=True); q.add_argument('--config-hash',required=True); q.add_argument('--out',required=True); q.set_defaults(func=cmd_new_run)
+    q=sp.add_parser('start'); q.add_argument('--goal',required=True); q.add_argument('--playbook',choices=['Change','Restructure','Investigate','Prototype','Visual'],required=True); q.add_argument('--gear',choices=['direct','direct+review','light','quick','express','full']); q.add_argument('--repo',default='.'); q.add_argument('--volume',action='store_true'); q.add_argument('--interview',action='store_true'); q.add_argument('--adversarial',action='store_true'); q.set_defaults(func=cmd_start)
     q=sp.add_parser('lease-acquire'); q.add_argument('--db',required=True); q.add_argument('--run-id',required=True); q.add_argument('--role',required=True); q.add_argument('--scope',required=True); q.add_argument('--holder-id',required=True); q.add_argument('--ttl',type=int,default=3600); q.set_defaults(func=cmd_lease_acquire)
     q=sp.add_parser('lease-renew'); q.add_argument('--db',required=True); q.add_argument('--lease-id',required=True); q.add_argument('--holder-id',required=True); q.add_argument('--ttl',type=int,default=3600); q.set_defaults(func=cmd_lease_renew)
     q=sp.add_parser('lease-release'); q.add_argument('--db',required=True); q.add_argument('--lease-id',required=True); q.add_argument('--holder-id',required=True); q.set_defaults(func=cmd_lease_release)
     q=sp.add_parser('lease-check'); q.add_argument('--db',required=True); q.add_argument('--run-id',required=True); q.add_argument('--scope',required=True); q.set_defaults(func=cmd_lease_check)
     q=sp.add_parser('state-save'); q.add_argument('--state-dir',required=True); q.add_argument('--run-id',required=True); q.add_argument('--family-id',required=True); q.add_argument('--phase',required=True); q.add_argument('--plan-version',type=int,default=1); q.add_argument('--packet-version',type=int,default=1); q.add_argument('--dispatches'); q.add_argument('--findings'); q.add_argument('--lease'); q.set_defaults(func=cmd_state_save)
     q=sp.add_parser('state-load'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_state_load)
+    q=sp.add_parser('approve-plan'); q.add_argument('--state-dir',required=True); q.add_argument('--approved-by',choices=['user'],required=True); q.add_argument('--quote',required=True); q.add_argument('--plan-path'); q.set_defaults(func=cmd_approve_plan)
     q=sp.add_parser('state-reconcile'); q.add_argument('--state-dir',required=True); q.add_argument('--db'); q.set_defaults(func=cmd_state_reconcile)
     q=sp.add_parser('mark-spoke'); q.add_argument('--state-dir',required=True); q.add_argument('--spoke',required=True); q.set_defaults(func=cmd_mark_spoke)
     q=sp.add_parser('check-spoke'); q.add_argument('--state-dir',required=True); q.add_argument('--spoke',required=True); q.set_defaults(func=cmd_check_spoke)
