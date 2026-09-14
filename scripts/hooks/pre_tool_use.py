@@ -15,8 +15,20 @@ from typing import Any
 HOOK_NAME = "auto-office-approval-gate"
 ALLOWED_PHASES = {"approved", "executing", "reviewed", "closed"}
 BLOCKED_PHASES = {"intake", "planned"}
-DIRECT_MUTATING_TOOLS = {"edit", "write", "notebookedit"}
-FILE_TARGET_TOOLS = DIRECT_MUTATING_TOOLS | {"read"}
+READ_ONLY_TOOLS = {
+    "askuserquestion",
+    "enterplanmode",
+    "exitplanmode",
+    "glob",
+    "grep",
+    "ls",
+    "notebookread",
+    "read",
+    "search",
+    "todoread",
+    "webfetch",
+    "websearch",
+}
 SHELL_OPERATOR_TOKENS = {";", "&", "&&", "|", "||", "(", ")", "<", ">"}
 READ_ONLY_COMMANDS = {
     "awk",
@@ -135,15 +147,15 @@ def _resolve_directory(value: Any, base: Path) -> Path | None:
         return None
 
 
-def _resolve_file_parent(value: Any, base: Path) -> Path | None:
+def _resolve_file_target(value: Any, base: Path) -> Path | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
         path = Path(value).expanduser()
         if not path.is_absolute():
             path = base / path
-        parent = path.parent.resolve()
-        return parent if parent.is_dir() else None
+        target = path.resolve()
+        return target if target.parent.is_dir() else None
     except (OSError, RuntimeError, TypeError, ValueError):
         return None
 
@@ -175,22 +187,21 @@ def _target_repo_root(
 
     file_path_present = False
     file_path_value = None
-    if _tool_name(payload) in FILE_TARGET_TOOLS:
-        for key in ("file_path", "notebook_path"):
-            if key in input_data:
-                file_path_present = True
-                file_path_value = input_data[key]
-                break
+    for key in ("file_path", "notebook_path"):
+        if key in input_data:
+            file_path_present = True
+            file_path_value = input_data[key]
+            break
     if file_path_present:
-        file_parent = _resolve_file_parent(file_path_value, cwd_dir or process_cwd)
-        if file_parent is None:
+        file_target = _resolve_file_target(file_path_value, cwd_dir or process_cwd)
+        if file_target is None:
             return (
                 None,
                 "the payload file path is missing, invalid, or has no existing parent directory",
                 cwd_root or process_root,
                 True,
             )
-        file_root = _repo_root(file_parent)
+        file_root = _repo_root(file_target)
         if file_root is None:
             return None, None, None, True
         if cwd_root is not None and cwd_root != file_root:
@@ -210,12 +221,24 @@ def _target_repo_root(
 
 
 def _office_dir(repo_root: Path | None = None) -> Path:
+    base = (repo_root or Path.cwd()).resolve()
+    trusted = (base / ".office").resolve()
     value = os.environ.get("OFFICE_STATE_DIR")
-    base = repo_root or Path.cwd()
-    path = Path(value).expanduser() if value else base / ".office"
-    if not path.is_absolute():
-        path = base / path
-    return path.resolve()
+    if repo_root is None or not value or not value.strip():
+        return trusted
+
+    supplied = Path(value).expanduser()
+    if not supplied.is_absolute():
+        supplied = base / supplied
+    try:
+        supplied = supplied.resolve()
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("OFFICE_STATE_DIR is invalid") from exc
+    if supplied != trusted:
+        raise ValueError(
+            f"OFFICE_STATE_DIR resolves to {supplied}, but the repository pointer directory is {trusted}"
+        )
+    return trusted
 
 
 def _trusted_runtime(repo_root: Path | None) -> Path | None:
@@ -477,57 +500,104 @@ def _is_mutating(
     trusted_runtime: Path | None = None,
 ) -> bool:
     name = _tool_name(payload)
-    if name in DIRECT_MUTATING_TOOLS:
-        return True
-    if name != "bash":
-        return False
-    command = _command(payload)
-    # The --quote is an AUDIT RECORD, not authentication: a CLI cannot
-    # authenticate a human. Actual enforcement is the human reading the transcript.
-    if _approval_command(command, state_path, trusted_runtime):
-        return False
-    return _bash_is_mutating(command)
+    if name == "bash":
+        command = _command(payload)
+        # The --quote is an AUDIT RECORD, not authentication: a CLI cannot
+        # authenticate a human. Actual enforcement is the human reading the transcript.
+        if _approval_command(command, state_path, trusted_runtime):
+            return False
+        return _bash_is_mutating(command)
+    return name not in READ_ONLY_TOOLS
 
 
-def _current_state(office_dir: Path) -> tuple[Path, dict[str, Any]] | tuple[None, None] | tuple[Path, None]:
+def _current_state(
+    office_dir: Path,
+    repo_root: Path | None = None,
+) -> tuple[Path, dict[str, Any], None] | tuple[None, None, None] | tuple[Path, None, str]:
+    """Resolve the run selected by the repository's own run pointers.
+
+    The pointer is authoritative for where the state lives.  In particular,
+    the state directory created by ``office_runtime.py start`` is normally
+    outside the repository, so discovery must not require the pointed-to
+    directory to be beneath ``office_dir``.
+    """
     runs = office_dir / "runs"
     if not runs.exists():
-        return None, None
+        return None, None, None
     try:
         run_id = os.environ.get("OFFICE_RUN_ID")
-        if run_id:
-            refs = [runs / f"{run_id}.ref"]
-        else:
-            refs = sorted(
-                (path for path in runs.iterdir() if path.is_file() and path.suffix == ".ref"),
-                key=lambda path: (path.stat().st_mtime_ns, path.name),
-                reverse=True,
-            )
+        all_refs = [
+            path
+            for path in sorted(runs.iterdir())
+            if path.is_file() and path.suffix == ".ref"
+        ]
     except OSError:
-        return runs, None
-    if not refs:
-        return None, None
-    pointer = refs[0]
-    try:
-        target_text = pointer.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeError):
-        return pointer, None
-    if not target_text:
-        return pointer, None
-    try:
-        target = Path(target_text).expanduser()
-        if not target.is_absolute():
-            target = pointer.parent / target
-        state_file = target.resolve() / "state.json"
-    except (OSError, TypeError, ValueError):
-        return pointer, None
-    try:
-        state = json.loads(state_file.read_text(encoding="utf-8"))
-        if not isinstance(state, dict):
+        return runs, None, "unreadable_run_state"
+
+    def load_pointer(pointer: Path, expected_run_id: str) -> tuple[Path, dict[str, Any]] | tuple[Path, None]:
+        try:
+            target_text = pointer.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            return pointer, None
+        if not target_text:
+            return pointer, None
+        try:
+            target = Path(target_text).expanduser()
+            if not target.is_absolute():
+                target = pointer.parent / target
+            state_file = target.resolve() / "state.json"
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return pointer, None
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            if not isinstance(state, dict) or state.get("run_id") != expected_run_id:
+                return state_file, None
+            state_repo_root = state.get("repo_root")
+            if state_repo_root is not None:
+                if not isinstance(state_repo_root, str) or not state_repo_root.strip():
+                    return state_file, None
+                try:
+                    if repo_root is not None and Path(state_repo_root).expanduser().resolve() != repo_root.resolve():
+                        return state_file, None
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    return state_file, None
+            return state_file, state
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
             return state_file, None
-        return state_file, state
-    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
-        return state_file, None
+
+    run_id = os.environ.get("OFFICE_RUN_ID")
+    if run_id is not None:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", run_id):
+            return (runs, None, "unreadable_run_state") if all_refs else (None, None, None)
+        pointer = runs / f"{run_id}.ref"
+        if not pointer.is_file():
+            return (runs, None, "unreadable_run_state") if all_refs else (None, None, None)
+        state_path, state = load_pointer(pointer, run_id)
+        if state is None:
+            return state_path, None, "unreadable_run_state"
+        return state_path, state, None
+
+    if not all_refs:
+        return None, None, None
+
+    valid_states: list[tuple[Path, dict[str, Any]]] = []
+    invalid_state_path: Path | None = None
+    for pointer in all_refs:
+        pointer_run_id = pointer.stem
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", pointer_run_id):
+            invalid_state_path = invalid_state_path or pointer
+            continue
+        state_path, state = load_pointer(pointer, pointer_run_id)
+        if state is None:
+            invalid_state_path = invalid_state_path or state_path
+        else:
+            valid_states.append((state_path, state))
+
+    if len(valid_states) > 1:
+        return runs, None, "ambiguous_run_state"
+    if len(valid_states) == 1:
+        return valid_states[0][0], valid_states[0][1], None
+    return invalid_state_path or runs, None, "unreadable_run_state"
 
 
 def main() -> int:
@@ -552,7 +622,14 @@ def main() -> int:
 
     repo_root, target_error, context_root, explicit_target = _target_repo_root(payload)
     if target_error is not None:
-        context_state_path, _ = _current_state(_office_dir(context_root))
+        try:
+            context_office_dir = _office_dir(context_root)
+        except ValueError as exc:
+            return _block(
+                "state_configuration",
+                f"Auto Office mutation gate blocked: {exc}.",
+            )
+        context_state_path, _, _ = _current_state(context_office_dir, context_root)
         if context_state_path is not None:
             return _block(
                 "unresolvable_target",
@@ -561,17 +638,32 @@ def main() -> int:
         return 0
     if explicit_target and repo_root is None:
         return 0
+    if repo_root is None:
+        return 0
 
-    office_dir = _office_dir(repo_root)
-    state_path, state = _current_state(office_dir)
+    try:
+        office_dir = _office_dir(repo_root)
+    except ValueError as exc:
+        return _block(
+            "state_configuration",
+            f"Auto Office mutation gate blocked: {exc}.",
+        )
+    state_path, state, state_reason = _current_state(office_dir, repo_root)
     trusted_runtime = _trusted_runtime(repo_root)
     if not _is_mutating(payload, state_path, trusted_runtime):
         return 0
     if state_path is None:
         return 0
     if state is None:
+        if state_reason == "ambiguous_run_state":
+            return _block(
+                state_reason,
+                f"Auto Office mutation blocked: multiple valid run pointers were found in {office_dir / 'runs'}. "
+                "Set OFFICE_RUN_ID to select exactly one run before mutating.",
+                state_file=str(office_dir / "runs"),
+            )
         return _block(
-            "unreadable_run_state",
+            state_reason or "unreadable_run_state",
             f"Auto Office mutation blocked: the run state at {state_path} is missing, malformed, or unreadable. "
             "The approval gate fails closed until the run state can be read.",
             state_file=str(state_path),
