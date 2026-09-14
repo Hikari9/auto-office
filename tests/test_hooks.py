@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, os, shlex, subprocess, sys, tempfile, unittest, shutil
+import json, os, re, shlex, subprocess, sys, tempfile, unittest, shutil
 from pathlib import Path
 from jsonschema import Draft202012Validator
 
@@ -371,49 +371,37 @@ class TestHooks(unittest.TestCase):
                 )
                 self._assert_blocked(r, 'approval_required')
 
-    def test_pre_tool_use_approval_exemption_requires_standalone_command(self):
-        self._write_run('planned')
-        r = self._run_pre_tool_use(
-            {'tool_name': 'Bash', 'tool_input': {'command': self._approval_command()}},
-            cwd=self.repo,
-        )
-        self._assert_allowed(r)
+    def test_pre_tool_use_does_not_inspect_bash(self):
+        """Bash is uninspected by decision: references/why-trust-not-enforcement.md.
 
-    def test_pre_tool_use_approval_exemption_rejects_chained_mutation(self):
+        These commands mutate. They are allowed below approval because the brief
+        governs the executor, not this hook. A future reviewer who finds one of
+        these and calls it a bypass should read the reference first.
+        """
         self._write_run('planned')
-        command = self._approval_command(' && rm -f victim')
-        r = self._run_pre_tool_use(
-            {'tool_name': 'Bash', 'tool_input': {'command': command}},
-            cwd=self.repo,
-        )
-        self._assert_blocked(r, 'approval_required')
-
-    def test_pre_tool_use_approval_exemption_rejects_untrusted_runtime_path(self):
-        self._write_run('planned')
-        command = (
-            '/tmp/office_runtime.py approve-plan '
-            f'--state-dir {shlex.quote(str(self._run_state_dir()))} '
-            '--approved-by user --quote "I approve this plan."'
-        )
-        r = self._run_pre_tool_use(
-            {'tool_name': 'Bash', 'tool_input': {'command': command}},
-            cwd=self.repo,
-        )
-        self._assert_blocked(r, 'approval_required')
-
-    def test_pre_tool_use_approval_exemption_rejects_shell_injection_shapes(self):
-        self._write_run('planned')
-        commands = [
-            'echo office_runtime.py approve-plan && rm -f victim',
-            'python3 scripts/office_runtime.py approve-plan --quote "$(rm -f victim)"',
-            'python3 scripts/office_runtime.py approve-plan --quote "safe" > victim',
-            'python3 scripts/office_runtime.py approve-plan --quote "safe" 2>&victim',
-            'python3 scripts/office_runtime.py approve-plan --quote "safe"\nrm -f victim',
-        ]
-        for command in commands:
+        for command in (
+            'rm -rf src',
+            'git commit -am wip',
+            self._approval_command(' && rm -f victim'),
+            'echo pwned > victim',
+            'node -p "require(\'fs\').writeFileSync(\'victim\',\'x\')"',
+        ):
             with self.subTest(command=command):
-                r = self._run_pre_tool_use({'tool_name': 'Bash', 'tool_input': {'command': command}})
-                self._assert_blocked(r, 'approval_required')
+                r = self._run_pre_tool_use(
+                    {'tool_name': 'Bash', 'tool_input': {'command': command}},
+                    cwd=self.repo,
+                )
+                self._assert_allowed(r)
+
+    def test_pre_tool_use_matcher_excludes_bash(self):
+        """The installed matcher must not route Bash to a hook that trusts it."""
+        source = (ROOT / 'scripts' / 'hooks' / 'install_hooks.sh').read_text()
+        matcher = re.search(r"'PreToolUse': \[\{'matcher': '([^']+)'", source)
+        self.assertIsNotNone(matcher, 'PreToolUse matcher not found in install_hooks.sh')
+        tools = matcher.group(1).split('|')
+        self.assertNotIn('Bash', tools)
+        for editor in ('Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'ApplyPatch'):
+            self.assertIn(editor, tools)
 
     def test_pre_tool_use_malformed_state_blocks_mutation(self):
         self._write_run('intake', '{not-json')

@@ -168,12 +168,17 @@ Done when: `phase == approved` and `approval.quote` is the verbatim user wording
 
 Phase order is `intake → planned → approved → executing → reviewed → closed`.
 `auto-execution` reads this receipt before dispatch. The `PreToolUse` hook reads it
-too, but as defence in depth only: it classifies Bash source text, which is an
-unbounded surface it cannot decide, so it raises the cost of an unapproved
-mutation without preventing one. What actually holds the boundary is the runtime —
-`state-save` cannot write `approved`, a fabricated state cannot reach `planned`,
-and a plan-version bump invalidates a prior approval. Issue #94 tracks the
-capability-based redesign that would make the hook a gate.
+too, but as defence in depth only. The office does not enforce approval
+mechanically on the executor: it states the rule in the brief and trusts the
+executor to comply, correcting course when it does not
+(`references/why-trust-not-enforcement.md`). What the runtime does hold is cheap
+and deterministic — `state-save` cannot write `approved`, a fabricated state
+cannot reach `planned`, and a plan-version bump invalidates a prior approval.
+
+`--quote` is an audit record of what was approved. It is not a credential, and it
+does not need to be: the orchestrator may approve on the user's behalf toward
+subagents. Merging to `main` is the exception that still requires the user's own
+explicit statement (§9.1).
 
 ## 5.1 Mid-run additions
 
@@ -399,9 +404,9 @@ Each convention has a machine-checkable assertion:
 |---|---|---|
 | Run was actually started | state dir exists for this run | hook state discovery resolved cwd rather than the git root, so a subdirectory command failed open |
 | Spoke was loaded | `check-spoke --spoke <name>` exits 0 |  |
-| Plan was approved by the user | phase == `approved` and `approval.quote` non-empty | `state-save --phase approved` forged an approval; the quote is an audit field, not a credential — a model can supply one (#94) |
+| Plan was approved | phase == `approved` and `approval.quote` non-empty | `state-save --phase approved` forged an approval. The quote is an audit field by design, not a credential; the orchestrator may approve for subagents (why-trust-not-enforcement) |
 | Dispatch requires approval | `auto-execution` refuses below `approved` |  |
-| Mutation requires approval | **unmet.** The `PreToolUse` hook is defence in depth, not an assertion | classifying Bash text cannot decide this: `node -p`, `awk ... system()`, `source`, `sort -o`, `git diff --output=`, `cat <(...)` all passed while `planned`; `cd` retargets the run; the matcher misses `MultiEdit`/`ApplyPatch` (#94) |
+| Mutation requires approval | **not asserted, by decision.** Stated in the brief and trusted to the executor | mechanical enforcement is a non-goal; classifying Bash text cannot decide it and the office does not try (why-trust-not-enforcement) |
 | Waves are disjoint | each file belongs to one task in a wave |  |
 | Integration was validated | validation commands ran on the merged tree |  |
 | Routing slug is real | `check-route-defects` exits 0 |  |
@@ -424,19 +429,18 @@ An empty `Known bypass` cell means nobody attacked that assertion in this review
 - `office_worktree.sh --dispatch-id` was built for per-dispatch isolation and
   referenced only in a tooling bullet list.
 
-### 12.1 Left open
+### 12.1 Closed as a non-goal
 
-Mechanical enforcement of "no mutation below approval" is **not** closed. Five
-review rounds fixed eleven bypasses in the `PreToolUse` hook; the fifth returned
-`PLAN DEFECT`, judging the design whack-a-mole because it classifies arbitrary
-Bash source text. The hook ships as defence in depth and the assertion table
-marks the convention unmet. Issue #94 holds the redesign: deny arbitrary Bash
-below approval, expose structured read capabilities, enforce below the parser
-with filesystem permissions, resolve targets from harness-owned metadata, and
-obtain approval through an authenticated user-originated channel.
+Mechanical enforcement of "no mutation below approval" is not a defect this spec
+leaves open. It is a non-goal. Five review rounds fixed eleven bypasses in the
+`PreToolUse` hook before the fifth returned `PLAN DEFECT`; the conclusion drawn
+was not "redesign the gate" but "stop building one". Non-determinism is the cost
+of using agents, guardrails belong in the brief, and correction belongs to the
+orchestrator. `references/why-trust-not-enforcement.md` holds the reasoning and
+the three decisions it settles; issue #94 is closed against it.
 
 Recorded because a spec that claims a gate it does not have is worse than one
-that names the gap.
+that says plainly it decided not to build one.
 
 ## 13. Conflict register
 
