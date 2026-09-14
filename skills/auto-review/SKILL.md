@@ -17,12 +17,12 @@ Resume the same reviewer session across rounds when possible so it retains prior
 
 A defect exit earns gate-like credit only when it names a contradicted assumption and proves the current artifact was tested enough to expose it.
 
-## Never review a tree another agent is editing
+## A review describes one tree state
 
-A review is a statement about a specific tree state. If the producer is still editing that tree, the reviewer's findings, line numbers, and contamination check all describe something that no longer exists, and you cannot tell afterwards which findings survived.
+A review is a statement about a specific tree state. If the producer is still editing that tree, the reviewer's findings, line numbers, and contamination check all describe something that no longer exists, and afterward nobody can tell which findings survived. Observed pattern: producer and reviewer sharing a working tree at the same time, or a repair round dispatched mid-review, both erode this without either side noticing until the findings stop lining up with the code. Giving a concurrent repair its own worktree, or waiting for the in-flight review to land, avoids the ambiguity; combining several partial repair rounds into one tends to cost less than paying for a full re-review per round.
 
-Serialize producer and reviewer on any shared working tree. If a repair round is needed while a review is in flight, either wait for the review to land, or give the repair its own worktree and review that separately. Dispatching both at once and getting usable findings anyway is luck, not method.
+Scope the contamination check to what changed between the review's start and end snapshot that falls outside the declared review scope — not to file authorship. A reviewer who never writes producer files will otherwise flag nearly every review as contaminated; the signal that actually matters is unscoped drift during the review window, regardless of who wrote it.
 
-The tell is a contamination line that lists modified files the reviewer did not write. Treat that as "this review has unknown scope", not as a clean pass with a footnote.
+## Review round caps
 
-Prefer one combined repair round over several partial ones. Each round costs a full re-review, and findings from different rounds are not additive when they overlap the same code.
+`full`: 5 rounds. `express`: 2 rounds. A second CHANGES REQUIRED on the same task forces an orchestrator disposition, not an automatic re-plan. PLAN DEFECT and BRIEF DEFECT exit without consuming a round.
