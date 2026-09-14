@@ -235,6 +235,8 @@ class StartCommandTests(unittest.TestCase):
         self.tmp = self._tmp.name
         self.repo = _init_git_repo(Path(self.tmp)/'repo')
         self.state_home = Path(self.tmp)/'xdg-state'
+        self.state_home.mkdir(parents=True, exist_ok=True)
+        self.state_home = self.state_home.resolve()
         self._old_xdg = os.environ.get('XDG_STATE_HOME')
         os.environ['XDG_STATE_HOME'] = str(self.state_home)
 
@@ -390,7 +392,7 @@ class ApprovePlanCommandTests(unittest.TestCase):
         _write_state(self.state_dir, phase='planned', plan_version=1)
         code, out = self._approve(plan_path=str(plan_path))
         self.assertEqual(code, 0)
-        self.assertEqual(self._read_state()['approval']['plan_sha'], expected)
+        self.assertEqual(self._read_state()['approval']['plan_sha'], 'sha256:'+expected)
 
     def test_reapproval_at_same_plan_version_is_idempotent_noop(self):
         _write_state(self.state_dir, phase='planned', plan_version=1)
