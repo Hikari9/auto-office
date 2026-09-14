@@ -104,6 +104,11 @@ Rules:
   A parallel producer or reviewer reasoning from unpinned config reasons from
   the wrong policy. Observed: a reviewer concluded "executor has no preferred
   seed" from the repo default because the user config tier was invisible to it.
+- **A dispatch brief's completion criterion is a command whose output settles
+  it, not a target.** "Target under 120 lines" is a wish; "`wc -l` reports
+  under 120" is a receipt. Observed: a worker briefed with a wish did the easy
+  substitutions, skipped the restructuring, and reported done short of the
+  target; rebriefed with the command form, it finished the work.
 
 ## 4.1 The dispatch schedule
 
@@ -218,6 +223,12 @@ The orchestrator stays active while delegated work runs. A blocked orchestrator
 serialises a parallel plan and burns the wall-clock term in the reward (#48).
 
 - Dispatch every task in the current wave before waiting on any of them.
+- **A dispatch counts as in flight only once it has a receipt**, not a status
+  read at dispatch time: an observed transition to working, or output in the
+  pane. Harness readiness semantics differ — codex `idle` and agy `idle` do
+  not mean the same thing. Observed: a worker reported `idle` at dispatch and
+  was prompted, but the prompt never landed; it sat at a bare prompt while the
+  orchestrator believed it was working.
 - While dispatched work runs, the orchestrator does only work that touches no
   write scope held by a live dispatch: planning later waves, reviewing returned
   output, preparing briefs, reading state.
