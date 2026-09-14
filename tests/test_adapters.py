@@ -60,5 +60,59 @@ class TestAdapterConformance(unittest.TestCase):
         self.assertTrue(required.issubset(adapters),
                        f'Missing adapters: {required - adapters}')
 
+    def test_quota_probe_scripts_exist(self):
+        for p in (ROOT/'adapters/seed').glob('*.yaml'):
+            data = yaml.safe_load(p.read_text())
+            probe = data.get('quota_probe', {})
+            cmd = probe.get('command', [])
+            if cmd and len(cmd) >= 2 and cmd[0] == 'python3':
+                script_path = ROOT / cmd[1]
+                self.assertTrue(script_path.exists(), f"{p.name}: probe script {cmd[1]} not found")
+
+    def test_agy_usage_process_quota(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('agy_usage', ROOT / 'scripts/agy-usage.py')
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        # Gemini models filtered, Claude excluded, tightest computed
+        res = mod.process_quota({
+            'buckets': [
+                {'modelId': 'gemini-3.8-flash-high', 'remainingFraction': 0.85, 'resetTime': '2026-09-15T00:00:00Z'},
+                {'modelId': 'gemini-3.8-flash-low', 'remainingFraction': 0.60, 'resetTime': '2026-09-15T00:00:00Z'},
+                {'modelId': 'claude-opus-4-6-thinking', 'remainingFraction': 0.10},
+                {'modelId': 'chat_20706', 'remainingFraction': 0.20}
+            ]
+        })
+        self.assertEqual(res['tightest_remaining_percent'], 60)
+        self.assertIn('gemini-3.8-flash-high', res['models'])
+        self.assertIn('gemini-3.8-flash-low', res['models'])
+        self.assertNotIn('claude-opus-4-6-thinking', res['models'])
+        self.assertNotIn('chat_20706', res['models'])
+
+        # --all flag includes non-Claude models
+        res_all = mod.process_quota({
+            'buckets': [
+                {'modelId': 'gemini-3.8-flash-high', 'remainingFraction': 0.85},
+                {'modelId': 'claude-opus-4-6-thinking', 'remainingFraction': 0.10},
+                {'modelId': 'gpt-oss-120b-medium', 'remainingFraction': 0.40}
+            ]
+        }, all_models=True)
+        self.assertIn('gpt-oss-120b-medium', res_all['models'])
+        self.assertNotIn('claude-opus-4-6-thinking', res_all['models'])
+        self.assertEqual(res_all['tightest_remaining_percent'], 40)
+
+    def test_agy_usage_missing_token_exit_code(self):
+        import subprocess
+        env = {'PATH': '/usr/bin:/bin', 'HOME': '/tmp/nonexistent-home-for-agy-quota-test'}
+        res = subprocess.run(
+            ['python3', str(ROOT / 'scripts/agy-usage.py')],
+            env=env,
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res.returncode, 2)
+        self.assertIn('Token file not found', res.stderr)
+
 if __name__ == '__main__':
     unittest.main()

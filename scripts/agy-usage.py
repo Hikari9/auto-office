@@ -31,62 +31,63 @@ Note:
 import json
 import os
 import sys
-import requests
-
-try:
-    from dotenv import load_dotenv
-    # Look for .env in current script's parent directories or workspace root
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    repo_root = os.path.abspath(os.path.join(script_dir, ".."))
-    env_path = os.path.join(repo_root, ".env")
-    if os.path.exists(env_path):
-        load_dotenv(env_path)
-    else:
-        load_dotenv()
-except ImportError:
-    pass
+import urllib.error
+import urllib.parse
+import urllib.request
 
 TOKEN_PATH = os.path.expanduser("~/.gemini/antigravity-cli/antigravity-oauth-token")
-OAUTH_CLIENT_ID = os.environ.get("AGY_OAUTH_CLIENT_ID", "")
-OAUTH_CLIENT_SECRET = os.environ.get("AGY_OAUTH_CLIENT_SECRET", "")
+
+# Google OAuth2 credentials for the native Antigravity CLI desktop client (RFC 8252)
+DEFAULT_CLIENT_ID = "REMOVED-OAUTH-CLIENT-ID-DISCOVERED-AT-RUNTIME"
+DEFAULT_CLIENT_SECRET = "REMOVED-OAUTH-CLIENT-SECRET-DISCOVERED-AT-RUNTIME"
+
+OAUTH_CLIENT_ID = os.environ.get("AGY_OAUTH_CLIENT_ID") or DEFAULT_CLIENT_ID
+OAUTH_CLIENT_SECRET = os.environ.get("AGY_OAUTH_CLIENT_SECRET") or DEFAULT_CLIENT_SECRET
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 QUOTA_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
+UA = "antigravity-cli"
 
 
 def get_refreshed_access_token():
     if not os.path.exists(TOKEN_PATH):
-        return None, f"Token file not found at {TOKEN_PATH}"
-    
+        return None, f"Token file not found at {TOKEN_PATH} (run `agy` and log in)"
+
     try:
         with open(TOKEN_PATH, "r") as f:
             data = json.load(f)
     except Exception as e:
         return None, f"Failed to read token file: {e}"
-    
+
     tok_obj = data.get("token", {})
     refresh_token = tok_obj.get("refresh_token")
     if not refresh_token:
-        return None, "No refresh_token found in token file"
-    
-    # Try refreshing access token
-    payload = {
+        return None, f"No refresh_token found in {TOKEN_PATH} (run `agy` and log in)"
+
+    payload = urllib.parse.urlencode({
         "client_id": OAUTH_CLIENT_ID,
         "client_secret": OAUTH_CLIENT_SECRET,
         "refresh_token": refresh_token,
         "grant_type": "refresh_token"
-    }
-    
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        TOKEN_URL,
+        data=payload,
+        headers={"User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded"}
+    )
+
     try:
-        res = requests.post(TOKEN_URL, data=payload, timeout=5)
-        if res.status_code != 200:
-            return None, f"OAuth token refresh failed ({res.status_code}): {res.text[:200]}"
-        
-        token_json = res.json()
-        access_token = token_json.get("access_token")
-        if not access_token:
-            return None, "No access_token returned by OAuth refresh"
-        
-        return access_token, None
+        with urllib.request.urlopen(req, timeout=10) as res:
+            token_json = json.load(res)
+            access_token = token_json.get("access_token")
+            if not access_token:
+                return None, "No access_token returned by OAuth refresh"
+            return access_token, None
+    except urllib.error.HTTPError as e:
+        body = e.read()[:200].decode("utf-8", "replace")
+        return None, f"OAuth token refresh failed ({e.code}): {body}"
+    except urllib.error.URLError as e:
+        return None, f"OAuth token refresh unreachable: {e.reason}"
     except Exception as e:
         return None, f"Error refreshing OAuth token: {e}"
 
@@ -95,19 +96,23 @@ def fetch_agy_quota():
     access_token, err = get_refreshed_access_token()
     if err:
         return None, err
-    
+
     headers = {
         "Authorization": f"Bearer {access_token}",
-        "User-Agent": "antigravity-cli",
+        "User-Agent": UA,
         "Content-Type": "application/json"
     }
-    
+
+    req = urllib.request.Request(QUOTA_URL, data=b"{}", headers=headers)
+
     try:
-        res = requests.post(QUOTA_URL, headers=headers, json={}, timeout=5)
-        if res.status_code != 200:
-            return None, f"API returned status {res.status_code}: {res.text[:200]}"
-        
-        return res.json(), None
+        with urllib.request.urlopen(req, timeout=10) as res:
+            return json.load(res), None
+    except urllib.error.HTTPError as e:
+        body = e.read()[:200].decode("utf-8", "replace")
+        return None, f"API returned status {e.code}: {body}"
+    except urllib.error.URLError as e:
+        return None, f"Quota API unreachable: {e.reason}"
     except Exception as e:
         return None, f"Failed to query quota API: {e}"
 
@@ -118,15 +123,15 @@ def process_quota(data, all_models=False):
     filtered_buckets = []
     min_pct = 100.0
     found_target = False
-    
+
     for b in buckets:
         model_id = b.get("modelId") or ""
         model_lower = model_id.lower()
-        
+
         # NEVER produce claude numbers
         if "claude" in model_lower:
             continue
-            
+
         is_gemini = model_lower.startswith("gemini")
         if not all_models and not is_gemini:
             continue
@@ -134,21 +139,21 @@ def process_quota(data, all_models=False):
         frac = b.get("remainingFraction", 1.0)
         pct = round(frac * 100, 1)
         reset_time = b.get("resetTime")
-        
+
         models[model_id] = {
             "remaining_percent": pct,
             "reset_time": reset_time
         }
         filtered_buckets.append(b)
-        
+
         # Track minimum remaining percentage for active model buckets
-        if is_gemini:
+        if is_gemini or all_models:
             if not found_target or pct < min_pct:
                 min_pct = pct
                 found_target = True
         elif not found_target and pct < min_pct:
             min_pct = pct
-            
+
     return {
         "tightest_remaining_percent": int(min_pct) if (found_target or models) else 100,
         "models": models,
@@ -169,11 +174,11 @@ def main(argv):
         else:
             print(f"AGY quota probe UNKNOWN: {err}", file=sys.stderr)
         return 2
-    
+
     all_models = "--all" in argv
     processed = process_quota(raw_data, all_models=all_models)
     tightest_pct = processed["tightest_remaining_percent"]
-    
+
     if "--percent" in argv:
         print(tightest_pct)
         return 0
