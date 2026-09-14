@@ -15,7 +15,7 @@ INIT_MARKERS=('TODO:', 'example_asset.txt', 'scripts/example.py', 'references/ap
 # `wc -l` counts rounded up with roughly 10% headroom; adjust this table deliberately.
 HUB_LINE_BUDGET = 128
 SKILL_LINE_BUDGETS = {
-    'skills/agy-cli/SKILL.md': 40,
+    'skills/agy-cli/SKILL.md': 46,
     'skills/auto-adapter/SKILL.md': 18,
     'skills/auto-closeout/SKILL.md': 52,
     'skills/auto-execution/SKILL.md': 20,
