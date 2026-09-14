@@ -13,29 +13,35 @@ class TestHooks(unittest.TestCase):
         subprocess.run(['git', 'commit', '--allow-empty', '-m', 'init'], cwd=self.repo, capture_output=True)
         self.state_dir = self.repo / '.office'
         self.state_dir.mkdir()
+        runtime_dir = self.repo / 'scripts'
+        runtime_dir.mkdir()
+        (runtime_dir / 'office_runtime.py').symlink_to(ROOT / 'scripts' / 'office_runtime.py')
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _write_run(self, phase, state_text=None, approval_quote=None):
-        run_id = 'run-123'
+    def _write_run(self, phase, state_text=None, approval_quote=None, run_id='run-123', repo_root=None):
         canonical_state = self.repo / 'canonical-state' / run_id
         canonical_state.mkdir(parents=True)
         if state_text is None:
-            state = {'run_id': run_id, 'phase': phase}
+            state = {
+                'run_id': run_id,
+                'phase': phase,
+                'repo_root': str((repo_root or self.repo).resolve()),
+            }
             if approval_quote is not None:
                 state['approval'] = {'quote': approval_quote}
             state_text = json.dumps(state)
         (canonical_state / 'state.json').write_text(state_text)
         pointer_dir = self.state_dir / 'runs'
-        pointer_dir.mkdir()
+        pointer_dir.mkdir(exist_ok=True)
         (pointer_dir / f'{run_id}.ref').write_text(str(canonical_state) + '\n')
 
     def _run_state_dir(self):
         return self.repo / 'canonical-state' / 'run-123'
 
     def _trusted_runtime(self):
-        return ROOT / 'scripts' / 'office_runtime.py'
+        return self.repo / 'scripts' / 'office_runtime.py'
 
     def _approval_command(self, suffix=''):
         return (
@@ -56,13 +62,24 @@ class TestHooks(unittest.TestCase):
         self.assertTrue(node_path.is_file(), f'Node binary does not exist: {node_path}')
         self.assertTrue(os.access(node_path, os.X_OK), f'Node binary is not executable: {node_path}')
 
-    def _run_pre_tool_use(self, payload, cwd=None, with_state_dir=True):
+    def _run_pre_tool_use(
+        self,
+        payload,
+        cwd=None,
+        with_state_dir=True,
+        run_id='run-123',
+        office_state_dir=None,
+    ):
         hook = ROOT / 'scripts' / 'hooks' / 'pre_tool_use.py'
         env = {**os.environ}
         if with_state_dir:
-            env['OFFICE_STATE_DIR'] = str(self.state_dir)
+            env['OFFICE_STATE_DIR'] = str(office_state_dir or self.state_dir)
         else:
             env.pop('OFFICE_STATE_DIR', None)
+        if run_id is None:
+            env.pop('OFFICE_RUN_ID', None)
+        else:
+            env['OFFICE_RUN_ID'] = run_id
         return subprocess.run(
             [sys.executable, str(hook)],
             cwd=cwd or self.repo,
@@ -234,11 +251,81 @@ class TestHooks(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("phase 'planned'", r.stdout)
 
+    def test_pre_tool_use_resolves_complete_symlinked_file_target(self):
+        self._write_run('planned')
+        target = self.repo / 'target.txt'
+        target.write_text('target')
+        with tempfile.TemporaryDirectory(prefix='office-hooks-links-') as outside_dir:
+            link = Path(outside_dir) / 'linked-target.txt'
+            link.symlink_to(target)
+            r = self._run_pre_tool_use(
+                {'tool_name': 'Write', 'tool_input': {'file_path': str(link)}},
+                cwd=ROOT,
+                with_state_dir=False,
+            )
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("phase 'planned'", r.stdout)
+
+    def test_pre_tool_use_rejects_office_state_dir_redirect(self):
+        self._write_run('planned')
+        with tempfile.TemporaryDirectory(prefix='office-hooks-attacker-state-') as redirect_dir:
+            r = self._run_pre_tool_use(
+                {'tool_name': 'Write', 'tool_input': {'file_path': 'target.txt'}},
+                office_state_dir=Path(redirect_dir),
+            )
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('state_configuration', r.stdout)
+
+    def test_pre_tool_use_denies_ambiguous_pointers_without_run_id(self):
+        self._write_run('planned')
+        self._write_run('approved', approval_quote='I approve this plan.', run_id='run-456')
+        r = self._run_pre_tool_use(
+            {'tool_name': 'Write', 'tool_input': {'file_path': 'target.txt'}},
+            run_id=None,
+        )
+        self.assertEqual(r.returncode, 2)
+
+    def test_pre_tool_use_rejects_run_identity_mismatch(self):
+        self._write_run(
+            'approved',
+            state_text=json.dumps({
+                'run_id': 'different-run',
+                'phase': 'approved',
+                'repo_root': str(self.repo.resolve()),
+                'approval': {'quote': 'I approve this plan.'},
+            }),
+        )
+        r = self._run_pre_tool_use({'tool_name': 'Write', 'tool_input': {'file_path': 'target.txt'}})
+        self.assertEqual(r.returncode, 2)
+
+    def test_pre_tool_use_rejects_run_repository_mismatch(self):
+        with tempfile.TemporaryDirectory(prefix='office-hooks-other-repo-') as other_repo_dir:
+            self._write_run(
+                'approved',
+                state_text=json.dumps({
+                    'run_id': 'run-123',
+                    'phase': 'approved',
+                    'repo_root': str(Path(other_repo_dir).resolve()),
+                    'approval': {'quote': 'I approve this plan.'},
+                }),
+            )
+            r = self._run_pre_tool_use({'tool_name': 'Write', 'tool_input': {'file_path': 'target.txt'}})
+        self.assertEqual(r.returncode, 2)
+
+    def test_pre_tool_use_denies_unrecognized_tools_during_unapproved_run(self):
+        self._write_run('planned')
+        for tool_name in ('apply_patch', 'MultiEdit', 'SomeHarnessEditor'):
+            with self.subTest(tool_name=tool_name):
+                r = self._run_pre_tool_use(
+                    {'tool_name': tool_name, 'tool_input': {'file_path': 'target.txt'}},
+                )
+                self.assertEqual(r.returncode, 2)
+
     def test_pre_tool_use_approval_exemption_requires_standalone_command(self):
         self._write_run('planned')
         r = self._run_pre_tool_use(
             {'tool_name': 'Bash', 'tool_input': {'command': self._approval_command()}},
-            cwd=ROOT,
+            cwd=self.repo,
         )
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout, '')
@@ -248,7 +335,7 @@ class TestHooks(unittest.TestCase):
         command = self._approval_command(' && rm -f victim')
         r = self._run_pre_tool_use(
             {'tool_name': 'Bash', 'tool_input': {'command': command}},
-            cwd=ROOT,
+            cwd=self.repo,
         )
         self.assertEqual(r.returncode, 2)
         self.assertIn('approval_required', r.stdout)
@@ -262,7 +349,7 @@ class TestHooks(unittest.TestCase):
         )
         r = self._run_pre_tool_use(
             {'tool_name': 'Bash', 'tool_input': {'command': command}},
-            cwd=ROOT,
+            cwd=self.repo,
         )
         self.assertEqual(r.returncode, 2)
         self.assertIn('approval_required', r.stdout)
