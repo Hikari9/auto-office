@@ -19,9 +19,9 @@ The user has accepted the eight design decisions. This is an implementation plan
 ## Planning envelope
 
 ```yaml
-plan_version: 2
-requirements_version: 1
-routing_version: 2
+plan_version: 3
+requirements_version: 2
+routing_version: 3
 branch: auto-office-v3
 target_branch: main
 implementation_base_sha: 213ba5628f62a818ff62a61e159b770100d3a9ba
@@ -30,6 +30,21 @@ baseline_at_implementation_base_sha:
   check_ecosystem: PASS (16 skills, 8 schemas, 22 evals)
   pytest: 106 passed, 8 subtests passed
 amendment_history:
+  - version: 3
+    kind: requirements
+    reason: >-
+      The orchestrator found that route() decides every dispatch from four values the
+      caller supplies rather than derives: adapter_state (office_runtime.py:212),
+      absolute_floor_pass (:229), advisory_pass (:272) and local_reward (:282). The
+      outcome_labels and lineage tables are created at :374-375 and written by no code
+      path; the labels table holds zero rows. maturity_age() scores --points handed to it
+      on the command line, and nothing converts event_weights into points. v3 shipped the
+      policy constants and the consumption sites without the layer that connects run
+      history to them, so its learning loop cannot learn and its trust gate is
+      honour-system. The user lifted the "do not redesign scoring/rewards/capability
+      floors" non-goal to close this, scoped to structural wiring only.
+    affected_scopes: [T0, T1, T2, T2B, T5, non_goals, done_criteria]
+    resulting_versions: {plan_version: 3, requirements_version: 2, routing_version: 3}
   - version: 2
     kind: plan_contract
     reason: >-
@@ -89,12 +104,15 @@ Done criteria:
 2. Planner/user interaction and requirements freezing, executor-owned review with exceptional consultation, local review funding, and dependency-triggered integration review agree across active instructions and behavior.
 3. Requirements, plan, and routing amend independently; unaffected work continues; durable family state and structured packets support restart without child transcripts.
 4. Claude, Codex, and agy each demonstrate the orchestrator lifecycle, including Herdr-path completion events and continued user interaction.
+4a. `route()` derives adapter trust, capability-floor result and local reward from recorded evidence rather than caller assertion; outcome labels are written; an override of a derived gate requires recorded user attribution.
 4b. One complete self-improvement cycle runs end to end: sanitized dream, isolated proposal, standing-PR/branch lineage, idempotent replay, independent review, and an intact maintainer-merge boundary, against a committed graduation bar.
 5. Current-head verification and independent review pass; PR is ready and merged under explicit merge authority; resulting main passes the smoke checks below.
 
 Blast radius: root skill and lifecycle specs drive every run; state/version/approval helpers in `scripts/office_runtime.py` feed hooks, dispatches, schema validation and takeover; review scripts can record false success; config resolution affects all role routing; completion/pane hooks affect concurrent live workers. These are cross-cutting runtime and instruction changes, hence XL despite a reuse-first approach. Public artifacts must not contain raw transcripts, credentials, personal configuration or private run data.
 
-Protected paths and non-goals: no changes to user-global skill installations, harness settings, credentials, unrelated repositories, or live user runs. `.github/workflows/validate.yml` is protected for the whole run (amendment v2, finding F11), and `scripts/hooks/install_hooks.sh` may be edited but never executed (amendment v2, finding F12). Do not redesign scoring/rewards/capability floors, revive Bash approval enforcement, introduce a heavyweight scheduler, or prove additional harnesses such as Hermes/pi. Do not delete or migrate private telemetry destructively. Do not implement a second independent review merely to satisfy executor count. Any necessary change beyond these boundaries requires a scoped plan amendment.
+Protected paths and non-goals: no changes to user-global skill installations, harness settings, credentials, unrelated repositories, or live user runs. `.github/workflows/validate.yml` is protected for the whole run (amendment v2, finding F11), and `scripts/hooks/install_hooks.sh` may be edited but never executed (amendment v2, finding F12). Do not revive Bash approval enforcement, introduce a heavyweight scheduler, or prove additional harnesses such as Hermes/pi. Do not delete or migrate private telemetry destructively. Do not implement a second independent review merely to satisfy executor count. Any necessary change beyond these boundaries requires a scoped plan amendment.
+
+Scoring, rewards and capability floors (amendment v3). Version 1's non-goal barring this work is withdrawn by explicit user decision, and replaced by a bounded one. **Structural change is in scope**: deriving a value from recorded evidence instead of accepting it as caller input, writing the outcome labels that every scoring path already reads, and expressing the capability floor as a declared per-role minimum evaluated against the pinned catalog snapshot. **Parametric change is out of scope**: no task may alter any numeric value in `config/config.default.yaml` under `maturity`, `replay`, `quota`, `cost_policy` or `exploration`, nor change `maturity_age()`'s curve or the reward model's shape. The reason is evidential, not conservative: `runs.db` currently holds 2 dispatches and 0 outcome labels, so new weights chosen today would carry exactly the same authority as the ones already in the file while consuming a wave, and would additionally destroy the value of `replay.min_labeled_rows_for_refit`, which exists so a policy change is validated against recorded decisions rather than intuition. The first reweighting happens in a later run, through the replay gate, once at least 20 labeled rows exist. A task that finds a weight it believes is wrong records it as a matrix row with evidence and leaves the value untouched.
 
 Named future actions: isolated fixture worktrees and test runs; scoped implementation commits and PR updates after execution is authorized; final merge only under explicit user authority. Billing/payment changes are user-owned and not authorized. This plan commit does not authorize any of these future actions now.
 
@@ -129,23 +147,31 @@ Read current issue comments, branch/PR state, existing helpers and tests. Build 
 
 **Interfaces T0 must pin before Wave 1 (amendment v2, finding F4).** The concept list below is not sufficient for parallel workers. T0 must additionally pin exact JSON schemas and exact Python/CLI signatures for: the dispatch packet (superseding `schemas/execution-packet.schema.json`'s ten generic fields and its `additionalProperties: true`) carrying `requirements_version`, `plan_version`, `routing_version`, `effective_config_hash`, `selection_disclosure`, session and family identity, allowed paths, and validation commands; `start_receipt`; `event_id` and monotonic `sequence`; the observed-status enum; terminal classification; monitor health; the replay cursor and acknowledgement; replacement authority; and the linkage from a dispatch to its landing and checkpoint. `scripts/office_spawn.sh` currently emits none of the version, disclosure, session-identity or event-cursor fields, so this is new surface, not documentation of existing surface.
 
+**Scoring, trust and floor contracts T0 must pin (amendment v3).** Pin, in `docs/v3-runtime-contracts.md`: the derived-trust record (which recorded dispatch and outcome rows count toward `adapter_trust`, how a task shape is identified, what disqualifies a row, and the exact query); the per-role capability-floor declaration format and its evaluation semantics against a pinned catalog row, including what happens when a catalog field needed by the floor is unknown; the outcome-label vocabulary, its required evidence, and its relationship to the existing telemetry vocabulary; the derivation of `local_reward` from labeled rows; and the recorded-override record shape, which must carry user attribution, scope and expiry. Pin these as contracts only. T0 implements none of them.
+
+**Two shared-file blocks T0 must pin verbatim (amendment v3).** Because one file may have only one owning task, T0 pins the exact text of two edits that a different task will consume: (a) the `roles.<role>.floor` block to be inserted into `config/config.default.yaml`, which T2 inserts verbatim and T2B consumes; and (b) the delegation shim in `scripts/office_runtime.py` by which `route()` calls the new routing module, which T2 applies verbatim and T2B implements behind. Both must be pinned precisely enough that T2 can apply them without understanding T2B's internals.
+
 **Runtime commands T0 must pin for T4 (amendment v2, finding F6).** `scripts/office_runtime.py` has no landing, checkpoint, completion or family command today. T0 pins the exact CLI signature and exit semantics of every such command T4 will consume, so that T2 implements them and T4 only calls them.
 
 Receipt: schema tests accept complete examples and reject missing identity/version/evidence; every pinned interface above has a committed schema or signature plus at least one accepting and one rejecting fixture; the acceptance matrix has no row missing a required field and no unexplained requirement. Any newly found material gap outside this plan becomes a versioned plan amendment, not silent additional scope.
 
 ### Wave 1 — parallel, disjoint foundations
 
+Amendment v3 adds T2B here. Wave 1 write scopes remain disjoint: T1 owns instructions and specs, T2 owns `scripts/office_runtime.py`, `scripts/office_family.py`, `scripts/office_packets.py` and `config/config.default.yaml`, T2B owns `scripts/office_routing.py` and `scripts/office_scoring.py`, T3 owns the monitor and pane-hook files. No file has two owners.
+
 **T1: Reconcile active instructions and portable intake.**
 Depends on: T0.
 Touches: `SKILL.md`, `protocol/*.md`, `skills/*/SKILL.md`, skill-local reference markdown, `references/OFFICE-SKILLS-V3-SPEC.md`, `references/OFFICE-SKILLS-V3-LIFECYCLE-SPEC.md`, `references/IMPLEMENTATION-NOTES.md`, `references/why-*.md`, new `tests/test_v3_instruction_contract.py`.
 
-Replace obsolete authority rules with provisional orchestrator intake and interactive planner freeze; preserve executor disposition ownership and exceptional upline consultation. Define local/inline/integration review, amendment ownership, sticky focus and conditional compaction. Specify native Skill loading or complete direct-file loading with the same receipt; structured questions or batched plain text preserve intent coverage. No approval-hook enforcement requirement is reintroduced. Scope tests to critical contradictory instructions and contract examples, not prose snapshots.
+Replace obsolete authority rules with provisional orchestrator intake and interactive planner freeze; preserve executor disposition ownership and exceptional upline consultation. Define local/inline/integration review, amendment ownership, sticky focus and conditional compaction. Specify native Skill loading or complete direct-file loading with the same receipt; structured questions or batched plain text preserve intent coverage. No approval-hook enforcement requirement is reintroduced. Amendment v3: `protocol/routing.md`, `SKILL.md` and `skills/auto-routing/SKILL.md` currently describe the filter order without stating where each filter's input comes from. Update them so adapter trust, the capability floor and local reward are described as derived from recorded evidence, and so the recorded-override path is documented as the only way past a derived gate. Describe the semantics T0 pinned; do not invent different ones. Scope tests to critical contradictory instructions and contract examples, not prose snapshots.
 
 Receipt: `python3 scripts/check_ecosystem.py` and `python3 -m pytest tests/test_v3_instruction_contract.py tests/test_budget.py -q` pass; targeted search finds no active contradictory planner prohibition or unconditional review escalation.
 
 **T2: Implement family state, versions and scoped amendments.**
 Depends on: T0, T1. (Amendment v2, finding F5: T1 owns the normative planner/authority semantics T2 implements, and T0 does not pin all of them, so T2 cannot run in parallel with T1 without implementing against a stale authority model.)
 Touches: `scripts/office_runtime.py`, new `scripts/office_family.py` and `scripts/office_packets.py`, `config/config.default.yaml`, `tests/test_runtime.py`, new `tests/test_families.py`, new `tests/test_amendments.py`, new `tests/test_landings.py` for the command-level contract only.
+
+Amendment v3: T2 additionally applies, verbatim and without redesign, the two shared-file blocks T0 pinned — the `roles.<role>.floor` block into `config/config.default.yaml`, and the `route()` delegation shim into `scripts/office_runtime.py`. T2 owns both files; T2B owns neither and must never edit them. If a pinned block does not apply cleanly, that is a PLAN DEFECT returned to T0's contract, not an improvised edit.
 
 Amendment v2, finding F6: T2 also implements and tests every landing, checkpoint, completion and family command that T0 pinned for T4, because T2 is the sole owner of `scripts/office_runtime.py` and `scripts/office_packets.py`. T4 consumes these commands and must not need to edit either module; if T4 discovers a missing command, that is a plan defect returned to T2, not an out-of-scope edit by T4.
 
@@ -156,6 +182,21 @@ Receipt: tests prove routing-only deltas leave requirements/plan approval intact
 Additional receipt, amendment v2, finding F7 — sticky focus and soft projection. Using two concurrent families A and B, assert: an unqualified command mutates the current focus family only; a named command mutates the named family and, per issue 77, moves focus; an ambiguous command mutates nothing and says why; an explicitly global command applies to both. With finite quota figures, a projected collision emits a warning receipt while leaving unrelated families runnable. Naming two families in an integration test (T5) does not discharge this.
 
 Additional receipt, amendment v2, finding F8 — amendment transition matrix. Assert as an explicit matrix, per issue 35 decision 5: a routing-only delta does not wake the planner; a requirements delta that still fits the plan does not wake the planner; a plan-contract delta wakes the planner and pauses only affected scopes; a running dispatch completes its current atomic unit rather than being interrupted, unless explicitly replaced. Each cell asserts the resulting version numbers and the recorded event, not merely a non-zero exit. Bumping every version on every delta must fail the matrix.
+
+**T2B: Derive trust, capability floors and rewards from recorded evidence.**
+Depends on: T0. Runs in parallel with T2 and T3; its write scope is disjoint from both.
+Touches: new `scripts/office_routing.py`, new `scripts/office_scoring.py`, new `tests/test_scoring.py`, new `tests/test_derived_routing.py`.
+
+Amendment v3. `route()` currently decides every dispatch from four caller-supplied values — `adapter_state` at `scripts/office_runtime.py:212`, `absolute_floor_pass` at `:229`, `advisory_pass` at `:272` and `local_reward` at `:282`. An orchestrator can pass any of them, so the trust gate constrains only an agent that chooses to be constrained. Move `route()` into `scripts/office_routing.py` behind the delegation shim T2 applies, and make those four values derived:
+
+- **Adapter trust.** Compute from recorded dispatches and outcome labels against `adapter_trust.proven_min_successful_dispatches` and `min_task_shapes`, plus the absence of an unresolved adapter-attributed critical failure. Today nothing reads either constant, so `proven` is unreachable by any code path and no adapter can ever graduate. A caller-supplied `adapter_state` must be ignored, not trusted.
+- **Capability floor.** Evaluate the declared per-role floor from `config/config.default.yaml` against the candidate's pinned catalog row. A caller-supplied `absolute_floor_pass` must be ignored. When a catalog field the floor needs is unknown, fail closed and say which field was missing; never treat unknown as passing.
+- **Local reward.** Derive from labeled outcome rows for the exact routable triple. Absent labels, it is unknown and contributes nothing, rather than defaulting to zero as though the evidence were neutral.
+- **Override.** An explicit override of a derived gate is permitted but must be recorded with user attribution, the scope it covers and its expiry, and must surface in `selection_disclosure`. An override present in the request without a recorded authorization is a hard stop.
+
+Never lower a floor for cost or quota. Do not change any numeric value in `config/config.default.yaml`, `maturity_age()`'s curve, or the reward model's shape; parametric change is out of scope per the boundaries above.
+
+Receipt: a candidate asserting `adapter_state: proven`, `absolute_floor_pass: true` or a high `local_reward` in the request is routed exactly as if it had asserted nothing, proven by a test that passes the assertion and asserts the rejection reason, not merely a non-zero exit. Given seeded dispatch and label rows meeting the configured bar, an adapter reaches `proven` and becomes routable for a mutable role; one row short, it does not. A floor whose required catalog field is unknown fails closed and names the field. An unknown reward does not rank as equal to a measured zero. An override without recorded authorization is rejected; with authorization it is honoured and appears in `selection_disclosure`. `replay` over a seeded dataset shows no decision flips attributable to this task, since this task changes where values come from and not what the policy does with them.
 
 **T3: Implement Herdr event delivery and safe reclamation.**
 Depends on: T0.
@@ -173,7 +214,7 @@ Additional receipt, amendment v2, finding F9 — the agy false-done known-bad ca
 Depends on: T1, T2, T3.
 Touches: `scripts/review_loop.sh`, `scripts/review_finding.sh`, `scripts/office_readback.sh`, `scripts/office_spawn.sh`, `scripts/hooks/pre_compact.sh`, `scripts/hooks/compact_advisor.sh`, `scripts/hooks/session_end.sh`, `scripts/hooks/install_hooks.sh` only if optional lifecycle binding needs it and only as a repository-file edit (amendment v2, finding F12: this run may edit that script but must never execute it, because `install_hooks.sh:154-179` writes `~/.claude`, `~/.codex` and `~/.gemini` and lines 189-195 write Hermes profiles, all of which are protected user-global paths; hook tests run against a temporary `HOME` and temporary config roots), `tests/test_review.py`, `tests/test_hooks.py`, new `tests/test_landings.py`.
 
-Connect to actual independent review evidence or retire unused mock behavior according to T0. Never synthesize PASS from an unset environment variable. Local producers own findings; consultation routes unresolved disagreement upward without routine orchestrator override. Integration review is triggered by actual dependent/merging landings, not count alone. Readback retains process diagnostics while validating semantic landing evidence. Serialize checkpoints before requested compaction and resume the same role from the packet. Wire monitor lifecycle into dispatch and closeout; keep optional hooks optional.
+Connect to actual independent review evidence or retire unused mock behavior according to T0. Never synthesize PASS from an unset environment variable. Local producers own findings; consultation routes unresolved disagreement upward without routine orchestrator override. Integration review is triggered by actual dependent/merging landings, not count alone. Readback retains process diagnostics while validating semantic landing evidence. Serialize checkpoints before requested compaction and resume the same role from the packet. Wire monitor lifecycle into dispatch and closeout; keep optional hooks optional. Amendment v3: closeout writes one outcome label per dispatch from the validation and review evidence it already holds, using the vocabulary T0 pinned, and `auto-maintenance` revises a label later when a post-merge defect surfaces. Nothing writes `outcome_labels` today, which is why every scoring path reads an empty table. A label must cite its evidence; a dispatch with no evidence is recorded as unlabeled rather than as a success.
 
 Receipt: unset review source yields explicit unavailable/required review status, never independent PASS; stale tree/version or producer-as-reviewer evidence is rejected; inline paths remain valid.
 
@@ -182,12 +223,12 @@ Additional receipt, amendment v2, finding F3 — positive-path provenance. Negat
 ### Wave 3 — full acceptance, self-improvement, and real portability
 
 **T5: Integrated regression and coverage verification.**
-Depends on: T4.
+Depends on: T4, T2B.
 Touches: `tests/test_integration.py`, `tests/test_dogfood.py`, `docs/v3-acceptance.md`.
 
 Amendment v2, finding F11: `.github/workflows/validate.yml` is removed from this task's write scope and is a protected path for the whole run. It defines the required validation job, and the account's billing lock already prevents that job from running, so an executor holding write access to it could weaken or route around the very gate that is blocked. Any CI change requires a separate plan amendment and explicit user authority, and must never weaken, bypass or alter billing-related enforcement.
 
-Run the complete workflow on isolated fixtures: interactive requirements freeze, two concurrent families, local review, cross-scope integration review, routing-only delta, plan-contract delta, checkpoint/restart and event-driven completion. Assert reasons and state changes, not just exit codes. Verify existing adaptive routing, quota floors, pinned snapshots, private telemetry, replay gates, proposal isolation and retirement coverage from T0 remain intact.
+Run the complete workflow on isolated fixtures: interactive requirements freeze, two concurrent families, local review, cross-scope integration review, routing-only delta, plan-contract delta, checkpoint/restart and event-driven completion. Assert reasons and state changes, not just exit codes. Verify the amendment-v3 derived-routing path end to end: a run that dispatches, labels at closeout, and on a later run routes differently because of what it recorded. Verify existing adaptive routing, quota floors, pinned snapshots, private telemetry, replay gates, proposal isolation and retirement coverage from T0 remain intact.
 
 Receipt: `python3 scripts/check_ecosystem.py`; `python3 -m pytest tests/ -q`; every command in `.github/workflows/validate.yml` run locally against an unmodified workflow file; `git diff --check`. Capture exact tested head and concise results. Do not weaken checks to make the plan fit. The measured baseline to beat is the `213ba56` reading recorded in the planning envelope: ecosystem PASS, 106 tests plus 8 subtests passing. A lower test count at the final head is a regression to explain, not a new baseline.
 
