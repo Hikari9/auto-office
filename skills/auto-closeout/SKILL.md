@@ -44,4 +44,9 @@ supervise the dispatch, which is the entire justification for visible workers.
 
 After closeout, run eligible lazy maintenance and, when justified, hand sanitized proposal candidates to `auto-self-improve` in a separate worktree/branch.
 
-**Cleanup post-merge.** Once the plan is approved, merge the PR to `main` unless there is an active blocker. After merge, clean up the local environment: switch back to `main`, pull the latest changes, remove the temporary worktree (`git worktree remove <path> && git worktree prune`), and delete the local feature branch (`git branch -d <branch>`). Do not remove worktrees or force-delete branches with uncommitted state without explicit instruction.
+**Cleanup post-merge.** The run stops at a ready PR; `main` remains the human boundary. Merging on
+the run's own initiative is prohibited — plan approval alone does not authorize it. Merge only with
+an explicit per-run user statement authorizing it; absent that, mark the PR ready and stop. After an
+authorized merge, clean up: switch back to `main`, pull, remove the temporary worktree
+(`git worktree remove <path> && git worktree prune`), and delete the local branch (`git branch -d
+<branch>`). Do not remove worktrees or force-delete branches with uncommitted state without explicit instruction.

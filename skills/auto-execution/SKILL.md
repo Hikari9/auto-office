@@ -13,6 +13,6 @@ Enter dispatch from `state.json.phase == "approved"`; `intake`, `planned`, or an
 
 Acquire the role lease/write scope: one mutable holder per scope. Treat takeover as a holder change requiring stale-state reconciliation.
 
-Use the selected harness primitive; a primitive never redefines lifecycle authority. The producer self-reviews and self-verifies as its own gate — independent approval is held by an agent that did not produce the work.
+Use the selected harness primitive; a primitive never redefines lifecycle authority. The producer self-reviews and self-verifies, but that is a pass, never an approval (lifecycle spec §8) — independent approval remains held by an agent that did not produce the work.
 
 If evidence contradicts the plan/brief assumption and continuing would violate outcome/safety, raise a supported `PLAN DEFECT` or `BRIEF DEFECT` instead of improvising a requirement change.

@@ -277,8 +277,17 @@ moment N parallel trees have ever existed together is after the merge.
 
 ## 8. Review with N producers
 
-- Every gate is held by an agent that did not produce the work. A producer
-  gating its own delegated output is a protocol violation.
+- Every **independent approval and review** gate is held by an agent that did
+  not produce the work. A producer gating its own delegated output is a
+  protocol violation, with one named exception: the section 5.1/5.2 inline
+  waiver for small or documentation-only orchestrator edits.
+- **Self-verification is a pass, never an approval.** A producer's own
+  self-review/self-verification (required by section 4's execution packet and
+  performed by every producer, including `auto-execution`) confirms the
+  producer's own work meets its own packet — it is not, and cannot stand in
+  for, the independent-approval gate above. This is the single normative
+  statement of that distinction; other skill files point here rather than
+  restating it.
 - The reviewer's scope is the **integrated** diff.
 - Reviewer sessions may run in parallel across independent scopes. One reviewer
   session serialised across N producers is a designed bottleneck.

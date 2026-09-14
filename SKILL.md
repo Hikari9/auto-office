@@ -13,7 +13,9 @@ Load only the protocol/reference needed for the current lifecycle step.
 - Keep the lifecycle order fixed. Gears may fund or omit optional stages; never reorder the lifecycle.
 - Keep merge-to-`main` a boundary no agent lifts on its own initiative; only an explicit
   per-run user statement lifts it (spec 9.1).
-- Every gate is held by an agent that did not produce the work.
+- Every independent approval and review gate is held by an agent that did not produce the work,
+  except the named section 5.1/5.2 inline waiver for small orchestrator edits (lifecycle spec §8).
+  Self-verification is a pass, never an approval (lifecycle spec §8).
 - Pin `plugin_commit`, `policy_hash`, `catalog_snapshot_hash`, `adapter_snapshot_hash`, and `effective_config_hash` for each run.
 - Never let an active run begin using an unmerged self-improvement policy implicitly.
 - Keep raw run evidence private. Public proposals receive only deterministic sanitization, an evidence capsule, privacy lint, and opaque evidence hashes.
