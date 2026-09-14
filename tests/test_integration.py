@@ -276,6 +276,63 @@ class TestLifecycleIntegration(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(out['loaded'])
 
+    def test_state_save_rejects_different_run_identity(self):
+        state_path = self.state_dir / 'state.json'
+        state_path.write_text(json.dumps({
+            'run_id': 'old-run',
+            'family_id': 'family-1',
+            'base_sha': 'old-base',
+            'policy_hash': 'old-policy',
+            'spokes_loaded': {'auto-planning': 'old-time'},
+        }))
+
+        rc, out, err = run_cmd('state-save',
+            '--state-dir', str(self.state_dir),
+            '--run-id', 'new-run',
+            '--family-id', 'family-1',
+            '--phase', 'planned')
+
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(err, '')
+        self.assertEqual(out['error'], 'state identity mismatch')
+        self.assertEqual(out['mismatches']['run_id']['existing'], 'old-run')
+        self.assertEqual(json.loads(state_path.read_text())['run_id'], 'old-run')
+
+        state_path.write_text(json.dumps({
+            'run_id': 'new-run',
+            'family_id': 'old-family',
+        }))
+        rc, out, err = run_cmd('state-save',
+            '--state-dir', str(self.state_dir),
+            '--run-id', 'new-run',
+            '--family-id', 'new-family',
+            '--phase', 'planned')
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(err, '')
+        self.assertEqual(out['error'], 'state identity mismatch')
+        self.assertEqual(out['mismatches']['family_id']['existing'], 'old-family')
+        self.assertEqual(json.loads(state_path.read_text())['family_id'], 'old-family')
+
+    def test_state_save_rejects_malformed_or_non_object_state(self):
+        state_path = self.state_dir / 'state.json'
+        for malformed in ('', '{"run_id":"r1",', '[]', 'null', '1'):
+            state_path.write_text(malformed)
+
+            rc, out, err = run_cmd('state-save',
+                '--state-dir', str(self.state_dir),
+                '--run-id', 'r1',
+                '--family-id', 'f1',
+                '--phase', 'planned')
+
+            self.assertNotEqual(rc, 0)
+            self.assertEqual(err, '')
+            self.assertEqual(out['error'], 'invalid state.json')
+            self.assertEqual(state_path.read_text(), malformed)
+            if malformed in ('[]', 'null', '1'):
+                self.assertEqual(out['reason'], 'state.json must contain a JSON object')
+            else:
+                self.assertEqual(out['reason'], 'malformed JSON')
+
     def test_self_approval_rejected(self):
         # A finding where producer == reviewer should be rejected
         run_cmd('init-db', '--db', str(self.db))
