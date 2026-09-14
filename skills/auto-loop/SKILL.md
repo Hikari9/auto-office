@@ -12,7 +12,7 @@ wave is only real if it can be drawn as disjoint.
 
 Poll, never block. While a dispatch runs, the orchestrator may only touch write scopes no live
 dispatch holds: planning later waves, reviewing returned output, preparing briefs, reading state.
-A single blocking wait on one worker is a defect the moment another worker has already returned.
+A single blocking wait on one worker is a defect whenever another dispatch is live.
 A wave ends when every dispatch in it has returned or been declared dead by two independent
 liveness signals — one signal alone is not a death.
 
@@ -20,8 +20,10 @@ Arm a background monitor over every dispatch at or before dispatch time, kept ar
 run, not per wave — completion is an event from it, never a blocking wait, and it must fire on
 every terminal state (finished, idle, blocked, unknown, disappeared), not just success. Talking to
 the user never suspends it. Lost or unarmed monitor: re-poll before asserting any dispatch state.
-On each completion event, collect the result, close that agent's pane, and update the spawn
-ledger — see spec section 6 for the full rule and the failure it closes.
+On each completion event, collect the result, close the pane of an agent that actually finished,
+and update the spawn ledger. Leave `blocked` and `unknown` panes open — they are unresolved
+states, not completions, and closing them destroys the evidence needed to recover. See spec
+section 6 for the full rule and the failure it closes.
 
 At integration: commit each worker's tree on its own dispatch branch, authored by the
 orchestrator; merge dispatch branches into the run's integration branch in wave order; resolve
