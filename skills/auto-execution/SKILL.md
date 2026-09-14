@@ -9,10 +9,10 @@ Before dispatch, validate both the run envelope and execution packet. Reject mis
 
 A packet must include base SHA, task scope, observable outcome, blast radius, allowed mutations, protected paths, validation commands, known-bad behavior to exclude, self-review, and rollback/restore notes.
 
-Refuse to dispatch any executor or worker unless the run's `state.json` has `phase == "approved"`; a `phase` of `intake`, `planned`, or anything else is a hard stop, not a retry. A producer running `approve-plan` on its own behalf, without the user's verbatim words in `--quote`, is a protocol violation — the quote is what makes the approval attributable to the user rather than the agent. The recorded `approval` block is what a future PreToolUse hook will read to gate dispatch, so treat it as authoritative and never fabricate or backfill it.
+Enter dispatch from `state.json.phase == "approved"`; `intake`, `planned`, or anything else is a hard stop, not a retry. A producer running `approve-plan` on its own behalf, without the user's verbatim words in `--quote`, is a protocol violation — the quote is what makes the approval attributable to the user rather than the agent. The recorded `approval` block is what a future PreToolUse hook will read to gate dispatch, so treat it as authoritative and never fabricate or backfill it.
 
-Acquire the role lease/write scope. Never allow two independent mutable holders for the same scope. Treat takeover as a holder change requiring stale-state reconciliation.
+Acquire the role lease/write scope: one mutable holder per scope. Treat takeover as a holder change requiring stale-state reconciliation.
 
-Use the selected harness primitive; do not let a primitive redefine lifecycle authority. The producer self-reviews and self-verifies, but self-review is never independent approval.
+Use the selected harness primitive; a primitive never redefines lifecycle authority. The producer self-reviews and self-verifies as its own gate — independent approval is held by an agent that did not produce the work.
 
 If evidence contradicts the plan/brief assumption and continuing would violate outcome/safety, raise a supported `PLAN DEFECT` or `BRIEF DEFECT` instead of improvising a requirement change.

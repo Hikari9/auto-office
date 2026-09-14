@@ -17,9 +17,7 @@ Record exact commands/flows and evidence hashes in durable state.
 
 ## A green suite that injects a double at every seam proves the double
 
-When every test substitutes a test double for the same dependency, no test exercises the real construction path. The suite reports the doubles are consistent with each other, which is not the claim anyone wanted.
-
-The failure shape: a shared factory gains a required argument; every call site in the suite passes a double instead, so the suite stays green while every real invocation raises immediately on first contact with the live system. Test count and pass rate are unchanged, so nothing in the report signals the gap.
+See references/verification-failure-modes.md#green-suite-double for the failure shape this section guards against.
 
 Cover the wiring separately from the behavior. Assert what arguments reach the real factory, without opening a connection. When a suite is green but the code has never run against the real dependency, say so in the evidence rather than reporting the pass rate alone.
 
