@@ -17,6 +17,80 @@ VERIFY = ROOT / "scripts" / "verify.sh"
 
 
 class RuntimeDogfoodTests(unittest.TestCase):
+    @staticmethod
+    def _write_node_fixture(repo, *, broken=False):
+        (repo / "scripts").mkdir(parents=True, exist_ok=True)
+        (repo / "src").mkdir(parents=True, exist_ok=True)
+        (repo / "node_modules" / ".bin").mkdir(parents=True, exist_ok=True)
+        (repo / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "dogfood-fixture",
+                    "version": "1.0.0",
+                    "private": True,
+                    "scripts": {
+                        "lint": "node scripts/lint.cjs",
+                        "build": "node scripts/build.cjs",
+                        "test": "node scripts/test.cjs",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (repo / "src" / "index.js").write_text(
+            "module.exports = 42;\n" if not broken else "module.exports = BROKEN;\n",
+            encoding="utf-8",
+        )
+
+        common = (
+            "const fs = require('fs');\n"
+            "const path = require('path');\n"
+            "const source = fs.readFileSync(path.join(process.cwd(), 'src', 'index.js'), 'utf8');\n"
+            "const mark = name => {\n"
+            "  fs.mkdirSync(path.join(process.cwd(), '.dogfood', 'ran'), { recursive: true });\n"
+            "  fs.writeFileSync(path.join(process.cwd(), '.dogfood', 'ran', name), 'executed\\n');\n"
+            "};\n"
+        )
+        (repo / "scripts" / "lint.cjs").write_text(
+            common
+            + "mark('lint');\n"
+            + "if (source.includes('BROKEN')) {\n"
+            + "  console.error('lint rejected the broken fixture');\n"
+            + "  process.exit(1);\n"
+            + "}\n"
+            + "console.log('lint executed');\n",
+            encoding="utf-8",
+        )
+        (repo / "scripts" / "build.cjs").write_text(
+            common
+            + "mark('build');\n"
+            + "fs.mkdirSync(path.join(process.cwd(), 'dist'), { recursive: true });\n"
+            + "fs.writeFileSync(path.join(process.cwd(), 'dist', 'index.js'), source);\n"
+            + "console.log('build executed');\n",
+            encoding="utf-8",
+        )
+        (repo / "scripts" / "test.cjs").write_text(
+            common
+            + "mark('regression_tests');\n"
+            + "if (!source.includes('module.exports')) process.exit(1);\n"
+            + "console.log('regression tests executed');\n",
+            encoding="utf-8",
+        )
+        tsc = (repo / "node_modules" / ".bin" / "tsc")
+        tsc.write_text(
+            "#!/usr/bin/env node\n"
+            + common
+            + "mark('typecheck');\n"
+            + "if (source.includes('BROKEN')) {\n"
+            + "  console.error('typecheck rejected the broken fixture');\n"
+            + "  process.exit(1);\n"
+            + "}\n"
+            + "console.log('typecheck executed');\n",
+            encoding="utf-8",
+        )
+        tsc.chmod(0o755)
+
     def _run(self, env, *args):
         result = subprocess.run(
             [sys.executable, str(RUNTIME), *map(str, args)],
@@ -65,11 +139,46 @@ class RuntimeDogfoodTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, output)
         return output
 
+    def _run_verification(self, env, repo, dispatch_id, state_dir, db):
+        result = subprocess.run(
+            [
+                str(VERIFY),
+                "--worktree",
+                repo,
+                "--dispatch-id",
+                dispatch_id,
+                "--state-dir",
+                state_dir,
+                "--db",
+                db,
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        try:
+            output = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            self.fail(
+                f"verification emitted no JSON receipt (exit {result.returncode}): "
+                f"{exc}\n{result.stdout}\n{result.stderr}"
+            )
+        return result.returncode, output
+
     @staticmethod
     def _state(state_dir):
         return json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
 
     def test_real_run_has_receipt_backed_lifecycle(self):
+        """Prove selected gates execute and a genuinely broken fixture is rejected.
+
+        This exercises verify.sh's Node lint, typecheck, build, and regression
+        commands and checks execution markers, rather than trusting green
+        results from skipped gates. It does not prove the non-applicable gates
+        work for their other project types, nor that a real application passes
+        every possible runtime or browser acceptance path.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             repo = tmp_path / "repo"
@@ -81,6 +190,8 @@ class RuntimeDogfoodTests(unittest.TestCase):
                 ["git", "commit", "--allow-empty", "-q", "-m", "init"],
             ):
                 subprocess.run(command, cwd=repo, check=True, capture_output=True)
+
+            self._write_node_fixture(repo)
 
             env = os.environ.copy()
             env["XDG_STATE_HOME"] = str(tmp_path / "state-home")
@@ -210,21 +321,51 @@ class RuntimeDogfoodTests(unittest.TestCase):
             self.assertEqual((dispatch_dir / "exit_code").read_text(encoding="utf-8").strip(), "0")
             self.assertTrue((dispatch_dir / "output.log").is_file())
 
-            verification = self._run_script_json(
-                env,
-                ROOT,
-                VERIFY,
-                "--worktree",
-                repo,
-                "--dispatch-id",
-                dispatch_id,
-                "--state-dir",
-                state_dir,
-                "--db",
-                db,
+            verification_code, verification = self._run_verification(
+                env, repo, dispatch_id, state_dir, db
             )
+            self.assertEqual(verification_code, 0, verification)
             self.assertTrue(verification["passed"])
             self.assertEqual(len(verification["gates"]), 8)
+            gates = {gate["name"]: gate for gate in verification["gates"]}
+            selected_gates = {"lint", "typecheck", "build", "regression_tests"}
+            self.assertEqual(
+                {name for name, gate in gates.items() if not gate["skip_reason"]},
+                selected_gates,
+            )
+            for name in selected_gates:
+                self.assertFalse(
+                    gates[name]["passed"] and gates[name]["skip_reason"],
+                    f"{name} was marked passed without executing: {gates[name]}",
+                )
+                self.assertTrue(gates[name]["passed"], gates[name])
+                self.assertEqual(gates[name]["skip_reason"], "", gates[name])
+                self.assertTrue((repo / ".dogfood" / "ran" / name).is_file())
+            for name, gate in gates.items():
+                if name not in selected_gates:
+                    self.assertTrue(gate["skip_reason"], gate)
+
+            broken_repo = tmp_path / "broken-repo"
+            broken_repo.mkdir()
+            self._write_node_fixture(broken_repo, broken=True)
+            broken_state_dir = tmp_path / "broken-state"
+            broken_state_dir.mkdir()
+            broken_db = broken_state_dir / "telemetry.db"
+            self._ok(env, "init-db", "--db", broken_db)
+            _, broken_verification = self._run_verification(
+                env, broken_repo, "dogfood-known-bad", broken_state_dir, broken_db
+            )
+            self.assertFalse(broken_verification["passed"])
+            broken_gates = {
+                gate["name"]: gate for gate in broken_verification["gates"]
+            }
+            self.assertFalse(broken_gates["lint"]["passed"], broken_gates["lint"])
+            self.assertEqual(broken_gates["lint"]["skip_reason"], "")
+            self.assertTrue(
+                (broken_repo / ".dogfood" / "ran" / "lint").is_file()
+            )
+            if os.environ.get("DOGFOOD_SHOW_GATES") == "1":
+                print(json.dumps({"good": verification, "known_bad": broken_verification}))
             with sqlite3.connect(db) as connection:
                 validation_count = connection.execute(
                     "SELECT COUNT(*) FROM validations WHERE dispatch_id = ?", (dispatch_id,)
