@@ -51,8 +51,7 @@ authorized merge, propose the sweep below and wait for separate explicit authori
 
 1. Commit what is outstanding, with a message saying why.
 2. Run the gate. Red: commit and document only, open no PR, report and stop.
-3. No PR for the branch yet? Open one — base resolved from the run, never forced to `main` — and
-   arm automerge. An unarmed PR is not shipped.
+3. No PR for the branch yet? Open one, base resolved from the run, never forced to `main`.
 4. Sync the local base branch. A merge lands on the remote only, so `merged` is not done until
    local and `origin/<base>` name the same commit.
 5. Remove only worktrees this run created, `git worktree remove` with no `--force` — a refusal
