@@ -16,6 +16,7 @@ HOOK_NAME = "auto-office-approval-gate"
 ALLOWED_PHASES = {"approved", "executing", "reviewed", "closed"}
 BLOCKED_PHASES = {"intake", "planned"}
 DIRECT_MUTATING_TOOLS = {"edit", "write", "notebookedit"}
+FILE_TARGET_TOOLS = DIRECT_MUTATING_TOOLS | {"read"}
 SHELL_OPERATOR_TOKENS = {";", "&", "&&", "|", "||", "(", ")", "<", ">"}
 READ_ONLY_COMMANDS = {
     "awk",
@@ -110,9 +111,9 @@ MUTATING_GIT_COMMANDS = {
 }
 
 
-def _repo_root() -> Path | None:
+def _repo_root(start: Path | None = None) -> Path | None:
     try:
-        current = Path.cwd().resolve()
+        current = (start if start is not None else Path.cwd()).resolve()
     except OSError:
         return None
     for candidate in (current, *current.parents):
@@ -121,13 +122,109 @@ def _repo_root() -> Path | None:
     return None
 
 
-def _office_dir() -> Path:
+def _resolve_directory(value: Any, base: Path) -> Path | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = base / path
+        path = path.resolve()
+        return path if path.is_dir() else None
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _resolve_file_parent(value: Any, base: Path) -> Path | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = base / path
+        parent = path.parent.resolve()
+        return parent if parent.is_dir() else None
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _target_repo_root(
+    payload: dict[str, Any],
+) -> tuple[Path | None, str | None, Path | None, bool]:
+    try:
+        process_cwd = Path.cwd().resolve()
+    except OSError:
+        return None, "the hook process working directory is unavailable", None, False
+    process_root = _repo_root(process_cwd)
+
+    input_data = _tool_input(payload)
+    cwd_present = "cwd" in payload or "cwd" in input_data
+    cwd_value = payload["cwd"] if "cwd" in payload else input_data.get("cwd")
+    cwd_dir = None
+    cwd_root = None
+    if cwd_present:
+        cwd_dir = _resolve_directory(cwd_value, process_cwd)
+        if cwd_dir is None:
+            return (
+                None,
+                "the payload cwd is missing, invalid, or not an existing directory",
+                process_root,
+                True,
+            )
+        cwd_root = _repo_root(cwd_dir)
+
+    file_path_present = False
+    file_path_value = None
+    if _tool_name(payload) in FILE_TARGET_TOOLS:
+        for key in ("file_path", "notebook_path"):
+            if key in input_data:
+                file_path_present = True
+                file_path_value = input_data[key]
+                break
+    if file_path_present:
+        file_parent = _resolve_file_parent(file_path_value, cwd_dir or process_cwd)
+        if file_parent is None:
+            return (
+                None,
+                "the payload file path is missing, invalid, or has no existing parent directory",
+                cwd_root or process_root,
+                True,
+            )
+        file_root = _repo_root(file_parent)
+        if file_root is None:
+            return None, None, None, True
+        if cwd_root is not None and cwd_root != file_root:
+            return (
+                None,
+                "the payload cwd and file path target different repositories",
+                cwd_root or process_root,
+                True,
+            )
+        return file_root, None, file_root, True
+
+    if cwd_root is not None:
+        return cwd_root, None, cwd_root, True
+    if cwd_present:
+        return None, None, None, True
+    return process_root, None, process_root, False
+
+
+def _office_dir(repo_root: Path | None = None) -> Path:
     value = os.environ.get("OFFICE_STATE_DIR")
-    repo_root = _repo_root()
-    path = Path(value).expanduser() if value else (repo_root or Path.cwd()) / ".office"
+    base = repo_root or Path.cwd()
+    path = Path(value).expanduser() if value else base / ".office"
     if not path.is_absolute():
-        path = (repo_root or Path.cwd()) / path
+        path = base / path
     return path.resolve()
+
+
+def _trusted_runtime(repo_root: Path | None) -> Path | None:
+    if repo_root is None:
+        return None
+    try:
+        return (repo_root / "scripts" / "office_runtime.py").resolve()
+    except (OSError, RuntimeError):
+        return None
 
 
 def _block(reason: str, message: str, **fields: Any) -> int:
@@ -195,9 +292,18 @@ def _shell_tokens(command: str) -> list[str] | None:
         return None
 
 
-def _approval_command(command: str) -> bool:
+def _approval_command(
+    command: str,
+    state_path: Path | None,
+    trusted_runtime: Path | None,
+) -> bool:
     """Return true only for a shell-simple office_runtime approve-plan call."""
-    if not command.strip() or any(character in command for character in "\r\n`\x00"):
+    if (
+        state_path is None
+        or trusted_runtime is None
+        or not command.strip()
+        or any(character in command for character in "\r\n`\x00")
+    ):
         return False
     # Command and process substitutions execute nested shell code even when
     # they occur in a double-quoted argument. A conservative rejection keeps
@@ -210,10 +316,6 @@ def _approval_command(command: str) -> bool:
         for token in tokens
     ):
         return False
-    tokens = _strip_prefix(tokens)
-    if not tokens:
-        return False
-
     first = Path(tokens[0]).name
     if re.fullmatch(r"python(?:3(?:\.\d+)?)?", first):
         if len(tokens) < 3:
@@ -223,7 +325,45 @@ def _approval_command(command: str) -> bool:
         script, args = tokens[0], tokens[1:]
     else:
         return False
-    return Path(script).name == "office_runtime.py" and bool(args) and args[0] == "approve-plan"
+
+    try:
+        script_path = Path(script).expanduser()
+        if not script_path.is_absolute():
+            script_path = Path.cwd() / script_path
+        if script_path.resolve() != trusted_runtime:
+            return False
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+
+    if not args or args[0] != "approve-plan":
+        return False
+
+    options = args[1:]
+    values: dict[str, str] = {}
+    allowed_options = {"--state-dir", "--approved-by", "--quote", "--plan-path"}
+    index = 0
+    while index < len(options):
+        option = options[index]
+        if option not in allowed_options or option in values or index + 1 >= len(options):
+            return False
+        value = options[index + 1]
+        if not value or value.startswith("-"):
+            return False
+        values[option] = value
+        index += 2
+
+    if {"--state-dir", "--approved-by", "--quote"} - values.keys():
+        return False
+    if values["--approved-by"] != "user" or not values["--quote"].strip():
+        return False
+
+    try:
+        state_dir = Path(values["--state-dir"]).expanduser()
+        if not state_dir.is_absolute():
+            state_dir = Path.cwd() / state_dir
+        return state_dir.resolve() == state_path.parent.resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
 
 
 def _has_output_redirection(command: str) -> bool:
@@ -331,14 +471,20 @@ def _bash_is_mutating(command: str) -> bool:
     return any(_segment_is_mutating(segment) for segment in segments)
 
 
-def _is_mutating(payload: dict[str, Any]) -> bool:
+def _is_mutating(
+    payload: dict[str, Any],
+    state_path: Path | None = None,
+    trusted_runtime: Path | None = None,
+) -> bool:
     name = _tool_name(payload)
     if name in DIRECT_MUTATING_TOOLS:
         return True
     if name != "bash":
         return False
     command = _command(payload)
-    if _approval_command(command):
+    # The --quote is an AUDIT RECORD, not authentication: a CLI cannot
+    # authenticate a human. Actual enforcement is the human reading the transcript.
+    if _approval_command(command, state_path, trusted_runtime):
         return False
     return _bash_is_mutating(command)
 
@@ -387,14 +533,40 @@ def _current_state(office_dir: Path) -> tuple[Path, dict[str, Any]] | tuple[None
 def main() -> int:
     try:
         raw = sys.stdin.read()
-        payload = json.loads(raw) if raw.strip() else {}
+        if not raw.strip():
+            return _block(
+                "invalid_payload",
+                "Auto Office mutation gate blocked: the hook payload is empty and cannot be interpreted.",
+            )
+        payload = json.loads(raw)
     except (OSError, UnicodeError, json.JSONDecodeError):
+        return _block(
+            "invalid_payload",
+            "Auto Office mutation gate blocked: the hook payload is not valid JSON and cannot be interpreted.",
+        )
+    if not isinstance(payload, dict):
+        return _block(
+            "invalid_payload",
+            "Auto Office mutation gate blocked: the hook payload must be a JSON object.",
+        )
+
+    repo_root, target_error, context_root, explicit_target = _target_repo_root(payload)
+    if target_error is not None:
+        context_state_path, _ = _current_state(_office_dir(context_root))
+        if context_state_path is not None:
+            return _block(
+                "unresolvable_target",
+                f"Auto Office mutation gate blocked: could not resolve the target repository from the hook payload; {target_error}.",
+            )
         return 0
-    if not isinstance(payload, dict) or not _is_mutating(payload):
+    if explicit_target and repo_root is None:
         return 0
 
-    office_dir = _office_dir()
+    office_dir = _office_dir(repo_root)
     state_path, state = _current_state(office_dir)
+    trusted_runtime = _trusted_runtime(repo_root)
+    if not _is_mutating(payload, state_path, trusted_runtime):
+        return 0
     if state_path is None:
         return 0
     if state is None:
@@ -413,8 +585,8 @@ def main() -> int:
             return _block(
                 "approval_required",
                 f"Auto Office run {state.get('run_id', state_path.parent.name)} is in phase '{phase}' "
-                "but has no recorded non-empty approval.quote. Mutation is blocked until the user's "
-                "verbatim approval is recorded.",
+                "but has no recorded non-empty approval.quote. Mutation is blocked until a non-empty "
+                "approval audit record is recorded.",
                 phase=phase,
                 state_file=str(state_path),
             )
@@ -428,7 +600,7 @@ def main() -> int:
         return _block(
             "approval_required",
             f"Auto Office run {state.get('run_id', state_path.parent.name)} is in phase '{phase}'. "
-            f"Mutation is blocked until the user approves the plan. Run exactly: {command}",
+            f"Mutation is blocked until an approval audit record is recorded for the plan. Run exactly: {command}",
             phase=phase,
             state_file=str(state_path),
             required_command=command,
