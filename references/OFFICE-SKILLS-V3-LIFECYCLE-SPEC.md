@@ -298,6 +298,47 @@ It stops for exactly two other things: an **external send**, and a **user-owned
 decision the plan did not anticipate**. Everything the plan named — production
 applies included — it executes.
 
+### 9.1 Authority decisions are not adjudicated by the run
+
+Whether this run may merge to `main` is a decision only the user makes. Roles
+within the run carry it out; they do not rule on it. Where the user's explicit
+instruction conflicts with an earlier default, gear preset, playbook or prior
+instruction, the user's most recent explicit statement governs for that run.
+
+Observed failure: a run was told to merge to `main` and declined, returning a
+`BRIEF DEFECT` whose content was about task scope — the scope contradicted a
+documented stop decision, and a further blocker had appeared. The scope
+observation may have been correct. The error is structural: a defect exit about
+the *artifact* was used to settle a question about *authority*.
+
+Two rules follow.
+
+**Reporting and declining are separate obligations.** When blockers exist
+alongside an authorized merge, state them plainly and concisely, then carry out
+the authorized action. Surfacing the evidence is required. Withholding the
+action on the strength of that evidence alone is not. `PLAN DEFECT` and
+`BRIEF DEFECT` remain available and still pause work and report — a defect exit
+is a statement about a plan or a brief, and is not a mechanism for declining an
+authority decision.
+
+**A defect exit must concern the artifact it names.** Raising a scope objection
+in order to decline an authority decision is itself a protocol error worth
+naming, because it disguises the real disagreement as a technical one.
+
+The grant is narrow. It authorizes merging to `main` for the run in which it is
+given. It does not widen blast radius to other repositories, environments or
+destructive actions the plan never named, and it does not carry into later runs.
+
+### 9.2 A blocked tool call is a question, not a verdict
+
+When the harness itself refuses an action — a permission classifier, a denied
+tool call, a policy guard — that refusal is a signal to ask the user, not a
+conclusion to report back as impossible and not something to rephrase until it
+passes. Surface what was attempted, why it was refused, and what the options
+are, then let the user decide. Re-attempting the same action in altered wording
+to get it past a guard is out of bounds; asking the user to authorize it is the
+correct path, and their answer settles it.
+
 ## 10. Self-improvement after
 
 Closeout emits proposals, never policy. Scope is unchanged from #52: a dreamt

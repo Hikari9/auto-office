@@ -19,6 +19,9 @@ benchmark_index_notes: >-
   across index versions.
 models:
   - model_id: opus
+    invocation_model_id: claude-opus-5
+    invocation_harness: claude
+    invocation_source: 'documented-model-id: the claude CLI cannot enumerate models, so this slug is documented rather than CLI-proven; record a route-defect if a dispatch rejects it'
     source_identifier: spec:planner-seed-opus
     source_name: office-skills-v3-spec
     effort: medium
@@ -32,6 +35,9 @@ models:
     content_hash: null
     supersession_metadata: null
   - model_id: astra
+    invocation_model_id: gpt-6-astra
+    invocation_harness: codex
+    invocation_source: local-evidence:codex-debug-models-bundled
     source_identifier: spec:planner-fallback-astra
     source_name: office-skills-v3-spec
     effort: low

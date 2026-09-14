@@ -42,6 +42,13 @@ closeout; and may merge dispatch branches into its own working branch. It never 
 unless the user stated so explicitly, in the approval or in the conversation — absent that
 sentence, the run stops at a ready PR.
 
+Whether this run may merge to `main` is the user's decision to make, not the run's to rule on.
+Their most recent explicit statement governs over any earlier default or preset. Report blockers
+plainly, then carry out the authorized action; a defect exit pauses and reports, and is not a way
+to decline an authority decision. A defect must concern the artifact it names — a scope objection
+raised to refuse an authority call disguises the real disagreement. When the harness itself blocks
+an action, ask the user rather than rephrasing past the guard. Full statement: spec §9.1, §9.2.
+
 It stops for exactly two things: an external send, and a user-owned decision the plan did not
 anticipate. Everything the plan named — production applies included — it executes without asking
 again.
