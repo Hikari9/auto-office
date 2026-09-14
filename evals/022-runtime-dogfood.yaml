@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Runtime dogfood has a receipt-backed lifecycle"
+expectation: "real start/state-save/approve-plan execution advances intake through planned, approved, executing, reviewed, and closed while rejecting a direct approved phase and preserving the envelope, pointer, and one .office/ entry"
+source: OFFICE-SKILLS-V3-SPEC
