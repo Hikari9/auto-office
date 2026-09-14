@@ -3,7 +3,8 @@
 
 Exercises the full orchestration runtime without model tokens:
   create synthetic repo
-  → initialize auto-office run
+  → start auto-office run
+  → plan and approve
   → dispatch fake executor
   → persist state
   → simulate interruption
@@ -45,31 +46,51 @@ class TestLifecycleIntegration(unittest.TestCase):
     
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _start_run(self, goal='exercise the lifecycle'):
+        env = os.environ.copy()
+        env['XDG_STATE_HOME'] = str(Path(self.tmpdir) / 'xdg-state')
+        rc, out, err = run_cmd('start',
+            '--goal', goal,
+            '--playbook', 'Change',
+            '--gear', 'direct',
+            '--repo', str(self.repo),
+            env=env)
+        self.assertEqual(rc, 0, err)
+        state_dir = Path(out['state_dir'])
+        state = json.loads((state_dir / 'state.json').read_text())
+        return state_dir, state
+
+    def _save_phase(self, state_dir, state, phase):
+        return run_cmd('state-save',
+            '--state-dir', str(state_dir),
+            '--run-id', state['run_id'],
+            '--family-id', state['family_id'],
+            '--phase', phase)
     
     def test_full_lifecycle(self):
         # 1. Init DB
         rc, out, _ = run_cmd('init-db', '--db', str(self.db))
         self.assertEqual(rc, 0)
         
-        # 2. Create run
-        run_file = self.state_dir / 'run.json'
-        rc, out, _ = run_cmd('new-run',
-            '--family-id', 'test-family-001',
-            '--holder-id', 'test-orchestrator',
-            '--triple', 'fake@1.0/fake-model@medium',
-            '--gear', 'standard',
-            '--playbook', 'Change',
-            '--base-sha', 'abc123',
-            '--policy-hash', 'sha256:deadbeef',
-            '--catalog-hash', 'sha256:cafebabe',
-            '--adapter-hash', 'sha256:feedface',
-            '--config-hash', 'sha256:12345678',
-            '--out', str(run_file))
-        self.assertEqual(rc, 0)
-        self.assertTrue(run_file.exists())
-        run_data = json.loads(run_file.read_text())
-        run_id = run_data['run_id']
-        
+        # 2. Start, plan, and approve the run through the real lifecycle commands.
+        state_dir, state = self._start_run()
+        run_id = state['run_id']
+        family_id = state['family_id']
+        self.assertEqual(state['phase'], 'intake')
+        rc, _, err = self._save_phase(state_dir, state, 'planned')
+        self.assertEqual(rc, 0, err)
+        state = json.loads((state_dir / 'state.json').read_text())
+        rc, out, err = run_cmd('approve-plan',
+            '--state-dir', str(state_dir),
+            '--approved-by', 'user',
+            '--quote', 'I approve this plan as written')
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out['phase'], 'approved')
+        state = json.loads((state_dir / 'state.json').read_text())
+        rc, _, err = self._save_phase(state_dir, state, 'executing')
+        self.assertEqual(rc, 0, err)
+
         # 3. Acquire lease
         rc, out, _ = run_cmd('lease-acquire',
             '--db', str(self.db),
@@ -81,19 +102,12 @@ class TestLifecycleIntegration(unittest.TestCase):
         self.assertTrue(out['acquired'])
         lease_id = out['lease_id']
         
-        # 4. Save state
-        rc, out, _ = run_cmd('state-save',
-            '--state-dir', str(self.state_dir),
-            '--run-id', run_id,
-            '--family-id', 'test-family-001',
-            '--phase', 'executing')
-        self.assertEqual(rc, 0)
-        
-        # 5. Simulate interruption (just verify state can be loaded)
+        # 4. Simulate interruption (just verify state can be loaded)
         rc, out, _ = run_cmd('state-load',
-            '--state-dir', str(self.state_dir))
+            '--state-dir', str(state_dir))
         self.assertEqual(rc, 0)
         self.assertEqual(out['run_id'], run_id)
+        self.assertEqual(out['phase'], 'executing')
         
         # 6. Lease check (should still be active)
         rc, out, _ = run_cmd('lease-check',
@@ -172,8 +186,20 @@ class TestLifecycleIntegration(unittest.TestCase):
             '--holder-id', 'executor-001')
         self.assertEqual(rc, 0)
         self.assertTrue(out['released'])
-        
-        # 12. Verify DB state
+
+        # 12. Mark the review and close the run through adjacent lifecycle phases.
+        state = json.loads((state_dir / 'state.json').read_text())
+        rc, _, err = self._save_phase(state_dir, state, 'reviewed')
+        self.assertEqual(rc, 0, err)
+        state = json.loads((state_dir / 'state.json').read_text())
+        rc, _, err = self._save_phase(state_dir, state, 'closed')
+        self.assertEqual(rc, 0, err)
+        rc, out, _ = run_cmd('state-load', '--state-dir', str(state_dir))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out['phase'], 'closed')
+        self.assertIn('approval', out)
+
+        # 13. Verify DB state
         con = sqlite3.connect(self.db)
         dispatches = con.execute('SELECT COUNT(*) FROM dispatches').fetchone()[0]
         invocation_model_id, selection_reason = con.execute(
@@ -220,59 +246,99 @@ class TestLifecycleIntegration(unittest.TestCase):
         self.assertEqual(out.get('prior_holder'), 'old-holder')
     
     def test_duplicate_hook_idempotency(self):
-        # State save should be idempotent
+        # State save should be idempotent once start has created the state.
         run_cmd('init-db', '--db', str(self.db))
+        state_dir, state = self._start_run()
+        rc0, _, err0 = self._save_phase(state_dir, state, 'planned')
+        self.assertEqual(rc0, 0, err0)
+        state = json.loads((state_dir / 'state.json').read_text())
         rc1, out1, _ = run_cmd('state-save',
-            '--state-dir', str(self.state_dir),
-            '--run-id', 'test-run',
-            '--family-id', 'test-family',
-            '--phase', 'executing')
+            '--state-dir', str(state_dir),
+            '--run-id', state['run_id'],
+            '--family-id', state['family_id'],
+            '--phase', 'planned')
         rc2, out2, _ = run_cmd('state-save',
-            '--state-dir', str(self.state_dir),
-            '--run-id', 'test-run',
-            '--family-id', 'test-family',
-            '--phase', 'executing')
+            '--state-dir', str(state_dir),
+            '--run-id', state['run_id'],
+            '--family-id', state['family_id'],
+            '--phase', 'planned')
         self.assertEqual(rc1, 0)
         self.assertEqual(rc2, 0)
         # Same state should produce same hash
         self.assertEqual(out1['content_hash'], out2['content_hash'])
 
+    def test_state_save_requires_existing_started_state(self):
+        state_dir = Path(self.tmpdir) / 'not-started'
+        rc, out, err = run_cmd('state-save',
+            '--state-dir', str(state_dir),
+            '--run-id', 'missing-run',
+            '--family-id', 'missing-family',
+            '--phase', 'intake')
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(err, '')
+        self.assertEqual(out['error'], 'no_state')
+        self.assertFalse(state_dir.exists())
+
+    def test_state_save_cannot_forge_approval(self):
+        state_dir, state = self._start_run()
+        rc, _, err = self._save_phase(state_dir, state, 'planned')
+        self.assertEqual(rc, 0, err)
+        state = json.loads((state_dir / 'state.json').read_text())
+        rc, out, err = run_cmd('state-save',
+            '--state-dir', str(state_dir),
+            '--run-id', state['run_id'],
+            '--family-id', state['family_id'],
+            '--phase', 'approved')
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(err, '')
+        self.assertEqual(out['error'], 'approval_required')
+        after = json.loads((state_dir / 'state.json').read_text())
+        self.assertEqual(after['phase'], 'planned')
+        self.assertNotIn('approval', after)
+
+    def test_start_cli_can_select_full_fit_path(self):
+        env = os.environ.copy()
+        env['XDG_STATE_HOME'] = str(Path(self.tmpdir) / 'xdg-full')
+        rc, out, err = run_cmd('start',
+            '--goal', 'exercise full risk fit',
+            '--playbook', 'Change',
+            '--repo', str(self.repo),
+            '--irreversible',
+            env=env)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out['gear'], 'full')
+
+    def test_start_pins_independent_plugin_policy_and_effective_hashes(self):
+        state_dir, state = self._start_run()
+        self.assertTrue(state['plugin_commit'])
+        self.assertNotEqual(state['policy_hash'], state['effective_config_hash'])
+        envelope = json.loads((state_dir / 'envelope.json').read_text())
+        self.assertEqual(envelope['plugin_commit'], state['plugin_commit'])
+        self.assertEqual(envelope['policy_hash'], state['policy_hash'])
+
     def test_state_save_preserves_prior_fields(self):
-        # new-run pins base_sha/policy_hash/etc and mark-spoke records spokes_loaded;
-        # a later state-save (e.g. a closeout phase update) must not drop either.
+        # start pins base_sha/policy_hash/etc and mark-spoke records spokes_loaded;
+        # a later state-save must not drop either.
         run_cmd('init-db', '--db', str(self.db))
-        # new-run's --out targets state.json directly, same as real orchestrator usage
-        # (see auto-office SKILL.md's "Start or resume a run"): mark-spoke/check-spoke
-        # only ever look at <state-dir>/state.json.
-        state_path = self.state_dir / 'state.json'
-        rc, out, _ = run_cmd('new-run', '--family-id', 'f1', '--holder-id', 'h1',
-                '--triple', 'fake@1.0/m@medium', '--gear', 'standard',
-                '--playbook', 'Change', '--base-sha', 'abc1234',
-                '--policy-hash', 'sha256:11111111', '--catalog-hash', 'sha256:22222222',
-                '--adapter-hash', 'sha256:33333333', '--config-hash', 'sha256:44444444',
-                '--out', str(state_path))
-        self.assertEqual(rc, 0)
-        run_id = json.loads(state_path.read_text())['run_id']
+        state_dir, before = self._start_run()
+        state_path = state_dir / 'state.json'
 
-        rc, out, _ = run_cmd('mark-spoke', '--state-dir', str(self.state_dir), '--spoke', 'auto-planning')
+        rc, out, _ = run_cmd('mark-spoke', '--state-dir', str(state_dir), '--spoke', 'auto-planning')
         self.assertEqual(rc, 0)
 
-        rc, out, _ = run_cmd('state-save',
-            '--state-dir', str(self.state_dir),
-            '--run-id', run_id,
-            '--family-id', 'f1',
-            '--phase', 'closeout')
-        self.assertEqual(rc, 0)
+        state = json.loads(state_path.read_text())
+        rc, out, err = self._save_phase(state_dir, state, 'planned')
+        self.assertEqual(rc, 0, err)
 
-        rc, out, _ = run_cmd('state-load', '--state-dir', str(self.state_dir))
+        rc, out, _ = run_cmd('state-load', '--state-dir', str(state_dir))
         self.assertEqual(rc, 0)
-        self.assertEqual(out['phase'], 'closeout')
+        self.assertEqual(out['phase'], 'planned')
         self.assertIn('auto-planning', out.get('spokes_loaded', {}))
-        self.assertEqual(out.get('policy_hash'), 'sha256:11111111')
-        self.assertEqual(out.get('base_sha'), 'abc1234')
+        self.assertEqual(out.get('policy_hash'), before['policy_hash'])
+        self.assertEqual(out.get('base_sha'), before['base_sha'])
 
         # check-spoke must still see the earlier mark after the state-save
-        rc, out, _ = run_cmd('check-spoke', '--state-dir', str(self.state_dir), '--spoke', 'auto-planning')
+        rc, out, _ = run_cmd('check-spoke', '--state-dir', str(state_dir), '--spoke', 'auto-planning')
         self.assertEqual(rc, 0)
         self.assertTrue(out['loaded'])
 

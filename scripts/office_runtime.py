@@ -19,6 +19,7 @@ CANON_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
 MUTABLE_TRUST_ROLES = {"executor", "code_reviewer", "browser_verifier", "closeout_verifier"}
 ATTRIBUTIONS = {"model","harness","adapter","quota/account","environment/network","planner","brief","repository","verification","unknown"}
 OUTCOMES = {"pending","verified_no_observed_failure","recurrence_failure","revert_failure","material_post_merge_defect","abandoned","environment_failure"}
+PHASE_ORDER = ("intake", "planned", "approved", "executing", "reviewed", "closed")
 
 
 def load_data(path: str | Path) -> Any:
@@ -39,6 +40,10 @@ def canonical_bytes(obj: Any) -> bytes:
 
 def sha256_obj(obj: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical_bytes(obj)).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def validate_with_schema(data: Any, schema_name: str) -> list[str]:
@@ -500,7 +505,10 @@ def cmd_replay(args):
 
 def _new_run_envelope(args):
     now=datetime.now(timezone.utc).isoformat()
-    return {'run_id':getattr(args,'run_id',None) or str(uuid.uuid4()),'family_id':args.family_id,'dispatch_id':str(uuid.uuid4()),'role':'orchestrator','holder_id':args.holder_id,'triple':args.triple,'mode':args.gear,'playbook':args.playbook,'base_sha':args.base_sha,'policy_hash':args.policy_hash,'catalog_snapshot_hash':args.catalog_hash,'adapter_snapshot_hash':args.adapter_hash,'effective_config_hash':args.config_hash,'plan_version':1,'packet_version':1,'created_at':now}
+    envelope = {'run_id':getattr(args,'run_id',None) or str(uuid.uuid4()),'family_id':args.family_id,'dispatch_id':str(uuid.uuid4()),'role':'orchestrator','holder_id':args.holder_id,'triple':args.triple,'mode':args.gear,'playbook':args.playbook,'base_sha':args.base_sha,'policy_hash':args.policy_hash,'catalog_snapshot_hash':args.catalog_hash,'adapter_snapshot_hash':args.adapter_hash,'effective_config_hash':args.config_hash,'plan_version':1,'packet_version':1,'created_at':now}
+    if getattr(args, "plugin_commit", None):
+        envelope["plugin_commit"] = args.plugin_commit
+    return envelope
 
 
 def cmd_new_run(args):
@@ -536,6 +544,29 @@ def _start_adapter_hash() -> str:
     adapter_dir = ROOT / "adapters" / "seed"
     data = {str(path.relative_to(ROOT)): load_data(path) for path in sorted(adapter_dir.glob("*.yaml"))}
     return sha256_obj(data)
+
+
+def _start_plugin_commit() -> str:
+    configured = os.environ.get("AUTO_OFFICE_PLUGIN_COMMIT")
+    if configured:
+        return configured
+    try:
+        result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(ROOT), check=True,
+                                capture_output=True, text=True)
+        commit = result.stdout.strip()
+        if commit:
+            return commit
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    # Installed plugin bundles may not carry a .git directory.  A content hash
+    # still pins the exact loaded plugin snapshot in that environment.
+    return sha256_file(ROOT / "SKILL.md")
+
+
+def _start_policy_hash() -> str:
+    # This is the policy artifact's byte hash, deliberately independent from
+    # the canonical hash of the fully merged effective configuration.
+    return sha256_file(ROOT / "config" / "config.default.yaml")
 
 
 def _start_base_sha(repo: Path) -> str:
@@ -588,12 +619,15 @@ def cmd_start(args):
         base_sha = _start_base_sha(repo)
         catalog_hash = _start_catalog_hash()
         adapter_hash = _start_adapter_hash()
+        plugin_commit = _start_plugin_commit()
+        policy_hash = _start_policy_hash()
         holder_id, triple = _start_holder()
         run_id = str(uuid.uuid4())
         family_id = str(uuid.uuid4())
         envelope_args = argparse.Namespace(family_id=family_id, holder_id=holder_id, triple=triple,
-            gear=gear, playbook=args.playbook, base_sha=base_sha, policy_hash=sha256_obj(config),
-            catalog_hash=catalog_hash, adapter_hash=adapter_hash, config_hash=config_hash, run_id=run_id)
+            gear=gear, playbook=args.playbook, base_sha=base_sha, plugin_commit=plugin_commit,
+            policy_hash=policy_hash, catalog_hash=catalog_hash, adapter_hash=adapter_hash,
+            config_hash=config_hash, run_id=run_id)
         envelope = _new_run_envelope(envelope_args)
         envelope["goal"] = args.goal
         errors = validate_with_schema(envelope, "run-envelope.schema.json")
@@ -605,7 +639,7 @@ def cmd_start(args):
         state = {"run_id": run_id, "family_id": family_id, "phase": "intake", "plan_version": 1,
                  "packet_version": 1, "updated_at": envelope["created_at"], "goal": args.goal,
                  "playbook": args.playbook, "gear": gear, "holder_id": holder_id, "triple": triple,
-                 "base_sha": base_sha, "policy_hash": envelope["policy_hash"],
+                 "base_sha": base_sha, "plugin_commit": plugin_commit, "policy_hash": policy_hash,
                  "catalog_snapshot_hash": catalog_hash, "adapter_snapshot_hash": adapter_hash,
                  "effective_config_hash": config_hash}
         _atomic_write_json(state_dir / "state.json", state)
@@ -718,34 +752,57 @@ def cmd_lease_check(args):
     dump_json({"active":False}); return 0
 
 def cmd_state_save(args):
-    state_dir = Path(args.state_dir); state_dir.mkdir(parents=True, exist_ok=True); state_path = state_dir / "state.json"
-    if state_path.exists():
-        try:
-            obj = json.loads(state_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            # A malformed state may contain an interrupted write or belong to a
-            # run we cannot safely identify.  Never recover by overwriting it
-            # implicitly: preserve the evidence and require explicit repair.
-            dump_json({"error": "invalid state.json", "reason": "malformed JSON",
-                       "state_path": str(state_path), "detail": str(exc)})
-            return 2
-        if not isinstance(obj, dict):
-            dump_json({"error": "invalid state.json",
-                       "reason": "state.json must contain a JSON object",
-                       "state_path": str(state_path),
-                       "json_type": type(obj).__name__})
-            return 2
-        mismatches = {
-            key: {"existing": obj[key], "incoming": getattr(args, key)}
-            for key in ("run_id", "family_id")
-            if key in obj and obj[key] != getattr(args, key)
-        }
-        if mismatches:
-            dump_json({"error": "state identity mismatch",
-                       "state_path": str(state_path), "mismatches": mismatches})
-            return 2
-    else:
-        obj = {}
+    state_dir = Path(args.state_dir)
+    state_path = state_dir / "state.json"
+    if not state_path.exists():
+        dump_json({"error": "no_state", "state_dir": str(state_dir),
+                   "message": "run start before saving lifecycle state"})
+        return 2
+    try:
+        obj = json.loads(state_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # A malformed state may contain an interrupted write or belong to a
+        # run we cannot safely identify.  Never recover by overwriting it
+        # implicitly: preserve the evidence and require explicit repair.
+        dump_json({"error": "invalid state.json", "reason": "malformed JSON",
+                   "state_path": str(state_path), "detail": str(exc)})
+        return 2
+    if not isinstance(obj, dict):
+        dump_json({"error": "invalid state.json",
+                   "reason": "state.json must contain a JSON object",
+                   "state_path": str(state_path),
+                   "json_type": type(obj).__name__})
+        return 2
+    mismatches = {
+        key: {"existing": obj[key], "incoming": getattr(args, key)}
+        for key in ("run_id", "family_id")
+        if key in obj and obj[key] != getattr(args, key)
+    }
+    if mismatches:
+        dump_json({"error": "state identity mismatch",
+                   "state_path": str(state_path), "mismatches": mismatches})
+        return 2
+    if args.phase == "approved":
+        dump_json({"error": "approval_required", "phase": obj.get("phase"),
+                   "message": "only approve-plan may transition a run to approved"})
+        return 2
+    if args.phase not in PHASE_ORDER:
+        dump_json({"error": "invalid_phase", "phase": args.phase,
+                   "expected": list(PHASE_ORDER)})
+        return 2
+    current_phase = obj.get("phase")
+    if current_phase not in PHASE_ORDER:
+        dump_json({"error": "invalid_phase", "phase": current_phase,
+                   "expected": list(PHASE_ORDER)})
+        return 2
+    current_index = PHASE_ORDER.index(current_phase)
+    requested_index = PHASE_ORDER.index(args.phase)
+    if requested_index != current_index and requested_index != current_index + 1:
+        expected = current_phase if current_index == len(PHASE_ORDER) - 1 else PHASE_ORDER[current_index + 1]
+        dump_json({"error": "invalid_phase_transition", "from": current_phase,
+                   "to": args.phase, "expected": expected,
+                   "message": "lifecycle transitions are monotonic and adjacent"})
+        return 2
     obj.update({"run_id": args.run_id, "family_id": args.family_id, "phase": args.phase, "plan_version": args.plan_version, "packet_version": args.packet_version, "updated_at": datetime.now(timezone.utc).isoformat()})
     if args.dispatches: obj["dispatches"] = json.loads(args.dispatches)
     if args.findings: obj["findings"] = json.loads(args.findings)
@@ -935,7 +992,7 @@ def main():
     q=sp.add_parser('proposal-id'); q.add_argument('--stream',choices=['learned-pattern','catalog-policy'],required=True); q.add_argument('--kind',required=True); g=q.add_mutually_exclusive_group(required=True); g.add_argument('--file'); g.add_argument('--text'); q.set_defaults(func=cmd_proposal_id)
     q=sp.add_parser('replay'); q.add_argument('--dataset',required=True); q.add_argument('--old-policy',required=True); q.add_argument('--new-policy',required=True); q.set_defaults(func=cmd_replay)
     q=sp.add_parser('new-run'); q.add_argument('--family-id',required=True); q.add_argument('--holder-id',required=True); q.add_argument('--triple',required=True); q.add_argument('--gear',required=True); q.add_argument('--playbook',choices=['Change','Restructure','Investigate','Prototype','Visual'],required=True); q.add_argument('--base-sha',required=True); q.add_argument('--policy-hash',required=True); q.add_argument('--catalog-hash',required=True); q.add_argument('--adapter-hash',required=True); q.add_argument('--config-hash',required=True); q.add_argument('--out',required=True); q.set_defaults(func=cmd_new_run)
-    q=sp.add_parser('start'); q.add_argument('--goal',required=True); q.add_argument('--playbook',choices=['Change','Restructure','Investigate','Prototype','Visual'],required=True); q.add_argument('--gear',choices=['direct','direct+review','light','quick','express','full']); q.add_argument('--repo',default='.'); q.add_argument('--volume',action='store_true'); q.add_argument('--interview',action='store_true'); q.add_argument('--adversarial',action='store_true'); q.set_defaults(func=cmd_start)
+    q=sp.add_parser('start'); q.add_argument('--goal',required=True); q.add_argument('--playbook',choices=['Change','Restructure','Investigate','Prototype','Visual'],required=True); q.add_argument('--gear',choices=['direct','direct+review','light','quick','express','full']); q.add_argument('--repo',default='.'); q.add_argument('--volume',action='store_true'); q.add_argument('--interview',action='store_true'); q.add_argument('--adversarial',action='store_true'); q.add_argument('--irreversible',action='store_true'); q.set_defaults(func=cmd_start)
     q=sp.add_parser('lease-acquire'); q.add_argument('--db',required=True); q.add_argument('--run-id',required=True); q.add_argument('--role',required=True); q.add_argument('--scope',required=True); q.add_argument('--holder-id',required=True); q.add_argument('--ttl',type=int,default=3600); q.set_defaults(func=cmd_lease_acquire)
     q=sp.add_parser('lease-renew'); q.add_argument('--db',required=True); q.add_argument('--lease-id',required=True); q.add_argument('--holder-id',required=True); q.add_argument('--ttl',type=int,default=3600); q.set_defaults(func=cmd_lease_renew)
     q=sp.add_parser('lease-release'); q.add_argument('--db',required=True); q.add_argument('--lease-id',required=True); q.add_argument('--holder-id',required=True); q.set_defaults(func=cmd_lease_release)
