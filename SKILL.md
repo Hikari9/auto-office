@@ -92,6 +92,8 @@ Run `check-spoke --spoke auto-execution`; if not loaded, load `skills/auto-execu
 
 Use the harness primitive selected by the adapter (`skills/codex-cli`, `skills/claude-cli`, `skills/agy-cli`, `skills/hermes-cli`, or another conforming primitive). `auto-office` owns the lifecycle; adapters own harness execution. Runs are durable across interruptions via SQLite-backed leases and atomic state snapshots. Harness primitives are mechanics only; they never redefine lifecycle authority.
 
+Before the first executor or reviewer dispatch, check `echo "$HERDR_ENV"` and `which herdr`. When `HERDR_ENV=1` and `herdr` is reachable, dispatch through a Herdr pane (`skills/herdr`) rather than an in-process subagent tool, even when the in-process tool is available and would produce a working result: a visible pane is how the user watches, steers, and interrupts delegated work, and that visibility is the reason this precondition exists, not a preference to weigh against convenience. This was missed for a full multi-PR run despite `HERDR_ENV=1` being set the entire time (herdr on `PATH`, a real workspace/tab/pane present) purely because dispatch defaulted to whatever tool was already loaded, without ever checking. Fall back to an in-process dispatch only when `HERDR_ENV` is genuinely unset or `herdr` is unreachable, and say so explicitly when routing.
+
 ## Operational tooling
 
 - `scripts/office_spawn.sh` — adapter-driven agent spawner supporting stdin/flag/file prompt transport, process logging, and PID management.

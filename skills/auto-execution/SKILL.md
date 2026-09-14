@@ -15,4 +15,6 @@ Acquire the role lease/write scope. Never allow two independent mutable holders 
 
 Use the selected harness primitive; do not let a primitive redefine lifecycle authority. The producer self-reviews and self-verifies, but self-review is never independent approval.
 
+Check `HERDR_ENV`/`herdr` reachability before choosing how to launch that primitive (see the top-level `SKILL.md`'s Dispatch and mutation section) — do not default to an in-process subagent tool just because it is already loaded and works.
+
 If evidence contradicts the plan/brief assumption and continuing would violate outcome/safety, raise a supported `PLAN DEFECT` or `BRIEF DEFECT` instead of improvising a requirement change.
