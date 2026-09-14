@@ -1,4 +1,5 @@
-import importlib.util, json, tempfile, unittest
+import contextlib, hashlib, importlib.util, io, json, os, subprocess, tempfile, unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -200,3 +201,225 @@ class EffectiveConfigTests(unittest.TestCase):
             self.assertFalse(next(t for t in tiers if t['tier'] == 'user')['present'])
             self.assertEqual(warns, [])
             self.assertEqual(cfg['quota']['reserve_percent'], 20)
+
+
+def _invoke(func, **kwargs):
+    class Args:
+        def __init__(self, **kw): self.__dict__.update(kw)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = func(Args(**kwargs))
+    out = buf.getvalue().strip()
+    return code, (json.loads(out) if out else None)
+
+
+def _init_git_repo(path):
+    repo = Path(path); repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(['git', 'init', '-q'], cwd=repo, capture_output=True)
+    subprocess.run(['git', 'config', 'user.email', 'a@b.c'], cwd=repo, capture_output=True)
+    subprocess.run(['git', 'config', 'user.name', 'test'], cwd=repo, capture_output=True)
+    subprocess.run(['git', 'commit', '--allow-empty', '-q', '-m', 'init'], cwd=repo, capture_output=True)
+    return repo
+
+
+def _start_defaults(**overrides):
+    d = dict(goal='do the thing', playbook='Change', gear=None, repo=None,
+              volume=False, interview=False, adversarial=False, irreversible=False)
+    d.update(overrides)
+    return d
+
+
+class StartCommandTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.repo = _init_git_repo(Path(self.tmp)/'repo')
+        self.state_home = Path(self.tmp)/'xdg-state'
+        self._old_xdg = os.environ.get('XDG_STATE_HOME')
+        os.environ['XDG_STATE_HOME'] = str(self.state_home)
+
+    def tearDown(self):
+        if self._old_xdg is None: os.environ.pop('XDG_STATE_HOME', None)
+        else: os.environ['XDG_STATE_HOME'] = self._old_xdg
+        self._tmp.cleanup()
+
+    def _start(self, **overrides):
+        return _invoke(rt.cmd_start, **_start_defaults(repo=str(self.repo), **overrides))
+
+    def test_creates_canonical_state_dir_outside_repo_honouring_xdg_state_home(self):
+        code, out = self._start(gear='direct')
+        self.assertEqual(code, 0)
+        state_dir = Path(out['state_dir'])
+        self.assertTrue(str(state_dir).startswith(str(self.state_home)))
+        self.assertIn(str(self.state_home / 'auto-office' / 'runs'), str(state_dir))
+        self.assertTrue((state_dir/'state.json').exists())
+        self.assertTrue((state_dir/'envelope.json').exists())
+        self.assertNotIn(str(self.repo), str(state_dir))
+
+    def test_writes_pointer_file_inside_target_repo(self):
+        code, out = self._start(gear='direct')
+        self.assertEqual(code, 0)
+        pointer = self.repo/'.office'/'runs'/f"{out['run_id']}.ref"
+        self.assertTrue(pointer.exists())
+        self.assertEqual(pointer.read_text(encoding='utf-8').strip(), out['state_dir'])
+
+    def test_creates_gitignore_when_absent(self):
+        self.assertFalse((self.repo/'.gitignore').exists())
+        code, out = self._start(gear='direct')
+        self.assertEqual(code, 0)
+        self.assertIn('.office/', (self.repo/'.gitignore').read_text(encoding='utf-8').splitlines())
+
+    def test_appends_gitignore_entry_when_missing(self):
+        (self.repo/'.gitignore').write_text('node_modules/\n*.log\n', encoding='utf-8')
+        code, out = self._start(gear='direct')
+        self.assertEqual(code, 0)
+        lines = (self.repo/'.gitignore').read_text(encoding='utf-8').splitlines()
+        self.assertIn('node_modules/', lines)
+        self.assertIn('*.log', lines)
+        self.assertIn('.office/', lines)
+
+    def test_does_not_duplicate_existing_gitignore_entry(self):
+        (self.repo/'.gitignore').write_text('foo\n.office/\nbar\n', encoding='utf-8')
+        code, out = self._start(gear='direct')
+        self.assertEqual(code, 0)
+        lines = (self.repo/'.gitignore').read_text(encoding='utf-8').splitlines()
+        self.assertEqual(lines.count('.office/'), 1)
+        self.assertEqual(lines, ['foo', '.office/', 'bar'])
+
+    def test_phase_is_intake(self):
+        code, out = self._start(gear='direct')
+        state = json.loads((Path(out['state_dir'])/'state.json').read_text(encoding='utf-8'))
+        self.assertEqual(state['phase'], 'intake')
+
+    def test_envelope_validates_against_schema(self):
+        code, out = self._start(gear='direct')
+        self.assertEqual(code, 0)
+        envelope = json.loads((Path(out['state_dir'])/'envelope.json').read_text(encoding='utf-8'))
+        self.assertEqual(rt.validate_with_schema(envelope, 'run-envelope.schema.json'), [])
+
+    def test_stdout_contains_required_keys(self):
+        code, out = self._start(gear='direct')
+        for key in ('state_dir', 'run_id', 'gear', 'pointer', 'kickoff'):
+            self.assertIn(key, out)
+
+    def test_fit_test_irreversible_selects_full(self):
+        code, out = self._start(irreversible=True, volume=False, interview=False, adversarial=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(out['gear'], 'full')
+
+    def test_fit_test_two_of_three_selects_express(self):
+        code, out = self._start(irreversible=False, volume=True, interview=True, adversarial=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(out['gear'], 'express')
+
+    def test_fit_test_at_most_one_of_three_selects_direct(self):
+        code, out = self._start(irreversible=False, volume=True, interview=False, adversarial=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(out['gear'], 'direct')
+
+    def test_fit_test_none_selects_direct(self):
+        code, out = self._start(irreversible=False, volume=False, interview=False, adversarial=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(out['gear'], 'direct')
+
+    def test_explicit_gear_overrides_fit_test(self):
+        code, out = self._start(gear='full', irreversible=False, volume=False, interview=False, adversarial=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(out['gear'], 'full')
+
+
+def _write_state(d, phase='planned', **extra):
+    obj = {'run_id': 'r1', 'phase': phase, 'plan_version': 1,
+           'spokes_loaded': {'planner': '2026-01-01T00:00:00+00:00'},
+           'catalog_snapshot_hash': 'a' * 16, 'adapter_snapshot_hash': 'b' * 16,
+           'policy_hash': 'c' * 16, 'effective_config_hash': 'd' * 16}
+    obj.update(extra)
+    state_path = Path(d)/'state.json'
+    state_path.write_text(json.dumps(obj, indent=2) + '\n', encoding='utf-8')
+    return obj
+
+
+class ApprovePlanCommandTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _read_state(self):
+        return json.loads((Path(self.state_dir)/'state.json').read_text(encoding='utf-8'))
+
+    def _approve(self, **overrides):
+        kw = dict(state_dir=self.state_dir, approved_by='user', quote='ship it as-is', plan_path=None)
+        kw.update(overrides)
+        return _invoke(rt.cmd_approve_plan, **kw)
+
+    def test_refuses_when_phase_is_not_planned(self):
+        before = _write_state(self.state_dir, phase='intake')
+        code, out = self._approve()
+        self.assertEqual(code, 2)
+        self.assertIsInstance(out, dict)
+        self.assertEqual(self._read_state(), before)
+
+    def test_refuses_empty_quote(self):
+        _write_state(self.state_dir, phase='planned')
+        code, out = self._approve(quote='   ')
+        self.assertEqual(code, 2)
+        self.assertIsInstance(out, dict)
+        self.assertEqual(self._read_state()['phase'], 'planned')
+
+    def test_success_sets_phase_approved_and_records_approval(self):
+        _write_state(self.state_dir, phase='planned', plan_version=3)
+        code, out = self._approve(approved_by='user', quote='looks correct, go ahead')
+        self.assertEqual(code, 0)
+        state = self._read_state()
+        self.assertEqual(state['phase'], 'approved')
+        approval = state['approval']
+        self.assertEqual(approval['by'], 'user')
+        self.assertEqual(approval['quote'], 'looks correct, go ahead')
+        self.assertEqual(approval['plan_version'], 3)
+        self.assertIsNone(approval['plan_sha'])
+        # 'at' must be a parseable ISO8601 UTC timestamp
+        datetime.fromisoformat(approval['at'].replace('Z', '+00:00'))
+
+    def test_plan_sha_is_sha256_of_plan_path_contents(self):
+        plan_path = Path(self.state_dir)/'plan.md'
+        plan_path.write_text('the plan body', encoding='utf-8')
+        expected = hashlib.sha256(b'the plan body').hexdigest()
+        _write_state(self.state_dir, phase='planned', plan_version=1)
+        code, out = self._approve(plan_path=str(plan_path))
+        self.assertEqual(code, 0)
+        self.assertEqual(self._read_state()['approval']['plan_sha'], expected)
+
+    def test_reapproval_at_same_plan_version_is_idempotent_noop(self):
+        _write_state(self.state_dir, phase='planned', plan_version=1)
+        code1, _ = self._approve(quote='first approval')
+        self.assertEqual(code1, 0)
+        before = self._read_state()
+        code2, out2 = self._approve(quote='first approval')
+        self.assertEqual(code2, 0)
+        after = self._read_state()
+        self.assertEqual(before, after)
+
+    def test_reapproval_at_different_plan_version_errors(self):
+        _write_state(self.state_dir, phase='planned', plan_version=1)
+        code1, _ = self._approve(quote='first approval')
+        self.assertEqual(code1, 0)
+        state = self._read_state()
+        state['plan_version'] = 2
+        (Path(self.state_dir)/'state.json').write_text(json.dumps(state, indent=2) + '\n', encoding='utf-8')
+        code2, out2 = self._approve(quote='second approval')
+        self.assertEqual(code2, 2)
+        self.assertIsInstance(out2, dict)
+
+    def test_preserves_pinned_fields_not_related_to_approval(self):
+        before = _write_state(self.state_dir, phase='planned', plan_version=1)
+        code, out = self._approve()
+        self.assertEqual(code, 0)
+        state = self._read_state()
+        self.assertEqual(state['spokes_loaded'], before['spokes_loaded'])
+        self.assertEqual(state['catalog_snapshot_hash'], before['catalog_snapshot_hash'])
+        self.assertEqual(state['adapter_snapshot_hash'], before['adapter_snapshot_hash'])
+        self.assertEqual(state['policy_hash'], before['policy_hash'])
+        self.assertEqual(state['effective_config_hash'], before['effective_config_hash'])
