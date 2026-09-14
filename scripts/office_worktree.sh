@@ -108,19 +108,28 @@ EOF
 
     cleanup)
         WORKTREE=""
+        FORCE=0
         while [[ $# -gt 0 ]]; do
             case $1 in
                 --worktree) WORKTREE="$2"; shift 2 ;;
+                --force) FORCE=1; shift ;;
                 *) echo "Unknown arg: $1"; exit 1 ;;
             esac
         done
 
         if [[ -z "$WORKTREE" ]]; then
-            echo "Usage: office-worktree.sh cleanup --worktree <path>" >&2
+            echo "Usage: office-worktree.sh cleanup --worktree <path> [--force]" >&2
             exit 1
         fi
 
-        git worktree remove --force "$WORKTREE"
+        # Removal refuses a dirty tree by default. A refusal reports work that
+        # exists in no other place; --force discards it, so the caller asks for
+        # that explicitly rather than inheriting it.
+        if [[ "$FORCE" -eq 1 ]]; then
+            git worktree remove --force "$WORKTREE"
+        else
+            git worktree remove "$WORKTREE"
+        fi
         ;;
 
     prune)

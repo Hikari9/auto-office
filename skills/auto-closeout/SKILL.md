@@ -47,15 +47,12 @@ an explicit per-run user statement authorizing it; absent that, mark the PR read
 or self-improvement change needs that statement too, and never merges autonomously. After an
 authorized merge, propose the sweep below and wait for separate explicit authorization for it.
 
-**The sweep**, in order, once authorized. Run it here; do not reach for another skill:
+**The sweep** runs inline, in this skill. Why: `references/why-closeout.md`.
 
-1. Commit what is outstanding, with a message saying why.
-2. Run the gate. Red: commit and document only, open no PR, report and stop.
-3. No PR for the branch yet? Open one, base resolved from the run, never forced to `main`.
-4. Sync the local base branch. A merge lands on the remote only, so `merged` is not done until
-   local and `origin/<base>` name the same commit.
-5. Remove only worktrees this run created, `git worktree remove` with no `--force` — a refusal
-   means uncommitted state to look at, not an obstacle to overrule. Then `git worktree prune` and
-   `git branch -d`. Never `-D`: it discards work that may exist nowhere else.
-6. Close the loops — issues whose premise this run changed, scratch files outside the repo, and
+1. Uncommitted work, an un-run gate, or a branch with no PR means `auto-loop` did not finish.
+   Name that as a defect; the pre-merge validation evidence already covers a clean tree.
+2. Sync the local base branch to match `origin/<base>`.
+3. Remove only worktrees this run created:
+   `scripts/office_worktree.sh cleanup --worktree <path>`, then `prune`, then `git branch -d`.
+4. Close the loops — issues whose premise this run changed, scratch files outside the repo, and
    any question put to the user that never got an answer.
