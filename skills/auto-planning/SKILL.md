@@ -5,7 +5,7 @@ description: Internal Auto Office v3 planning spoke. Use when the auto-office or
 
 # Auto Planning
 
-Receive the pinned run envelope and orchestrator-frozen intent. Own **how**, never silently change **what**.
+Receive the pinned run envelope and orchestrator-frozen intent. Own **how**; **what** stays exactly as frozen.
 
 1. Reconcile repository/runtime evidence before planning.
 2. Propose playbook (`Change|Restructure|Investigate|Prototype|Visual`); orchestrator freezes it.
@@ -16,4 +16,4 @@ Receive the pinned run envelope and orchestrator-frozen intent. Own **how**, nev
 7. Emit execution packets only after the plan is accepted at the required gate.
 8. On accepted `PLAN DEFECT`, increment plan version and invalidate dependent packets before revising.
 
-Seed planner preference is Opus Medium then Astra Low; local evidence may supersede. Never route yourself; ask `auto-routing` for the planner route when a dedicated planner is funded.
+Seed planner preference is Opus Medium then Astra Low; local evidence may supersede. `auto-routing` selects the planner route when a dedicated planner is funded — planning never routes itself.

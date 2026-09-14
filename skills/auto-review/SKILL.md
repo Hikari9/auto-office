@@ -5,7 +5,7 @@ description: Internal Auto Office v3 independent review spoke. Use for plan revi
 
 # Auto Review
 
-Use a fresh/different reviewer session from the producer whenever the harness permits it. Never self-approve.
+Every gate is held by an agent that did not produce the work — never self-approve. Use a fresh/different reviewer session from the producer whenever the harness permits it.
 
 Before invoking a plan reviewer or code reviewer, publish the router's `selection_disclosure` to the user and preserve it in the dispatch record/readback. It must name the exact invocation model identifier when available, canonical model ID, effort, harness/version, and the evidence-backed reason this reviewer route won.
 
@@ -19,7 +19,9 @@ A defect exit earns gate-like credit only when it names a contradicted assumptio
 
 ## A review describes one tree state
 
-A review is a statement about a specific tree state. If the producer is still editing that tree, the reviewer's findings, line numbers, and contamination check all describe something that no longer exists, and afterward nobody can tell which findings survived. Observed pattern: producer and reviewer sharing a working tree at the same time, or a repair round dispatched mid-review, both erode this without either side noticing until the findings stop lining up with the code. Giving a concurrent repair its own worktree, or waiting for the in-flight review to land, avoids the ambiguity; combining several partial repair rounds into one tends to cost less than paying for a full re-review per round.
+A review is a statement about a specific tree state. If the producer is still editing that tree, the reviewer's findings, line numbers, and contamination check all describe something that no longer exists, and afterward nobody can tell which findings survived. See references/review-tree-state.md for the observed collision pattern.
+
+Give a concurrent repair its own worktree, or wait for the in-flight review to land; combining several partial repair rounds into one tends to cost less than paying for a full re-review per round.
 
 Scope the contamination check to what changed between the review's start and end snapshot that falls outside the declared review scope — not to file authorship. A reviewer who never writes producer files will otherwise flag nearly every review as contaminated; the signal that actually matters is unscoped drift during the review window, regardless of who wrote it.
 
