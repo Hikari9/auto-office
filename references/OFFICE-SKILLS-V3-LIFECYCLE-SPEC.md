@@ -111,6 +111,48 @@ Rules:
   the wrong policy. Observed: a reviewer concluded "executor has no preferred
   seed" from the repo default because the user config tier was invisible to it.
 
+## 4.1 The dispatch schedule
+
+The plan's wave structure is declared to the user as a schedule, immediately
+before the approval prompt and nowhere else. It is the last thing seen before
+the single gate, because routing and funding are only overrulable while they are
+still free to change.
+
+The schedule names, per task: write scope, routed identity
+(`harness@version × model_id × effort`), the dependency that places it in its
+wave, and its size class. Bars are size classes (#42), never minute estimates —
+a point value the router cannot honestly produce is worse than a class it can.
+
+```
+gear: full · waves: 2 · parallel width: 3 · critical path: T2 → T6
+
+wave 1  T1 catalog/seed.yaml          codex gpt-5.6-luna xhigh   [██  ] M
+        T2 scripts/office_runtime.py  codex gpt-5.6-luna xhigh   [████] L  ← critical
+        T3 skills/auto-review/*       claude claude-sonnet-5 hi  [█   ] S
+wave 2  T6 skills/auto-planning/*     claude claude-sonnet-5 hi  [██  ] M  (after T2)
+        T7 scripts/hooks/*            codex gpt-5.6-luna xhigh   [███ ] L
+
+reviewer: codex gpt-5.6-luna xhigh, fresh per wave, independent of every producer
+quota after this run, projected: codex ~60% weekly · claude ~65% weekly
+```
+
+Required properties:
+
+- **Every task has a named route before approval.** An unassigned task is an
+  unreviewable cost. Routing is not deferred to execution time.
+- **Every route states why it won** in one clause, from the decisive filter —
+  task shape, capability floor, preferred seed, quota, cost or local evidence.
+- **The critical path is marked.** It is the only number that predicts wall
+  clock, and it is what a reader checks when the schedule looks too wide.
+- **Parallel width is stated.** Width above the disjoint-scope limit in section 4
+  is a planning defect, visible here before it becomes a merge conflict.
+- **Projected quota after the run is stated.** Quota is weighed, never a gate
+  (#58), but a run that would drain a window the user needs later is a decision
+  they own, not one the router makes silently.
+
+A schedule that cannot be drawn means the waves are not actually disjoint. That
+is a finding about the plan, not a formatting problem.
+
 ## 5. The single approval
 
 One approval authorises everything through closeout. It is taken after the plan,
