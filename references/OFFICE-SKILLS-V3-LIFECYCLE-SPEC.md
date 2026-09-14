@@ -271,6 +271,14 @@ Between execution and review, the run integrates:
    pinned contract disagrees with an implementation, name which one is wrong and
    why. Repo convention outranks an ambiguous contract clause; a contract clause
    outranks an implementation's convenience.
+6. After reverting a merge, re-merging the same dispatch branch does not reapply
+   it — git treats its changes as already merged and reverted, so the merge
+   produces conflict markers instead of the fix. Observed: a bad merge was
+   reverted on the integration branch; the worker corrected its branch, the
+   orchestrator re-merged it, and the conflict markers landed as a syntax error
+   that broke collection for the whole suite. When the dispatch branch wholly
+   owns the files in question, take the corrected files directly from it instead
+   of merging; otherwise, revert the revert before merging the correction.
 
 Integration is a lifecycle stage with its own validation, because the first
 moment N parallel trees have ever existed together is after the merge.
@@ -294,6 +302,19 @@ moment N parallel trees have ever existed together is after the merge.
 - Round cap: 5 in `full`, 2 in `express`. A second `CHANGES REQUIRED` on one
   task forces an orchestrator disposition.
 - `PLAN DEFECT` and `BRIEF DEFECT` exit without consuming a round.
+
+### 8.1 A receipt for a gate is the reason it gives, not its exit status
+
+A verification matrix that asserts only exit codes cannot tell a gate that blocks correctly from
+one that fails closed on everything, because both share the same code on every case tested.
+Observed: a change to the approval hook passed a nine-case matrix asserting exit codes (five
+expected blocks at exit 2, four expected allows at exit 0) and 103 unit tests, while the hook
+could no longer read any run state and returned `unreadable_run_state` for every repository
+containing `.office/runs`, including correctly approved runs — it would have halted all work in
+every auto-office repo. The allow-cases passed only because those paths had no run state to fail
+on. General form: a check whose output has fewer distinct values than the conditions it must
+distinguish cannot verify them. Assert the reason a gate gives, not only whether it exited nonzero.
+
 ## 9. Autonomy ceiling
 
 After approval the run proceeds end to end under the approved plan. It:
