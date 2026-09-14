@@ -107,6 +107,33 @@ def preferred_rank(c, preferred_seed):
     return None
 
 
+def invocation_provenance(candidate: dict) -> str:
+    """Return the machine-readable provenance state for a candidate's invocation slug.
+
+    States:
+      - 'proven': slug proven against a local harness command
+      - 'documented': slug documented in authoritative sources but unproven against local harness
+      - 'none': no harness invocation slug
+    """
+    invocation = candidate.get("invocation_model_id")
+    if not invocation:
+        return "none"
+    explicit = candidate.get("invocation_provenance")
+    if explicit in ("proven", "documented", "none"):
+        return explicit
+    source = candidate.get("invocation_source")
+    if not source:
+        return "proven"
+    source = str(source).strip()
+    if source.startswith("documented") or source == "unproven":
+        return "documented"
+    if source.startswith("local-evidence") or source.startswith("proven"):
+        return "proven"
+    if source.startswith("unverified") or source == "none":
+        return "none"
+    return "proven"
+
+
 def selection_disclosure(role: str, chosen: dict, preferred_seed, cost_policy: str) -> dict:
     """Build the durable, user-visible explanation for a selected route."""
     rank = preferred_rank(chosen, preferred_seed)
@@ -121,24 +148,29 @@ def selection_disclosure(role: str, chosen: dict, preferred_seed, cost_policy: s
     else:
         reasons.append(f"won the {cost_policy} cost and local-evidence comparison")
     invocation = chosen.get("invocation_model_id")
-    if not invocation:
+    prov = invocation_provenance(chosen)
+    if not invocation or prov == "none":
         # The catalog row carries no harness-specific slug, so the dispatch will
         # be attempted with the canonical model_id. Spec-seed names ("luna") are
         # not harness slugs ("gpt-5.6-luna"), so this fallback is the single
         # largest source of route-time dispatch failures. Say so in the
         # disclosure instead of letting it look like a resolved slug.
         reasons.append("carries no catalog invocation slug, so model_id is being used unverified")
+    elif prov == "documented":
+        reasons.append("catalog invocation slug is documented but unproven against local harness")
     return {
         "role": role,
         "model_id": chosen.get("model_id"),
         "invocation_model_id": invocation or chosen.get("model_id"),
         "invocation_model_id_source": "catalog" if invocation else "fallback:model_id",
+        "invocation_provenance": prov,
         "effort": chosen.get("effort"),
         "harness": chosen.get("harness"),
         "harness_version": chosen.get("harness_version"),
         "triple": candidate_id(chosen),
         "reason": "; ".join(reasons),
     }
+
 
 
 def route(request: dict) -> dict:

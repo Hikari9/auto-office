@@ -69,6 +69,35 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(d['invocation_model_id'],'gpt-5.6-luna')
         self.assertEqual(d['invocation_model_id_source'],'catalog')
         self.assertNotIn('unverified',d['reason'])
+    def test_disclosure_flags_unproven_invocation_slug(self):
+        unproven=cand('claude',model_id='opus',effort='medium')
+        unproven['invocation_model_id']='claude-opus-5'
+        unproven['invocation_source']='documented: the claude CLI cannot enumerate models, so this slug is documented rather than CLI-proven'
+        r=rt.route({'role':'planner','playbook':'Change','candidates':[unproven]})
+        self.assertEqual(r['selected'],rt.candidate_id(unproven))
+        d=r['selection_disclosure']
+        self.assertEqual(d['invocation_model_id'],'claude-opus-5')
+        self.assertEqual(d['invocation_provenance'],'documented')
+        self.assertEqual(d['invocation_model_id_source'],'catalog')
+        self.assertIn('unproven',d['reason'])
+        self.assertNotIn('unverified',d['reason'])
+
+        unproven2=cand('claude',model_id='opus',effort='medium')
+        unproven2['invocation_model_id']='claude-opus-5'
+        unproven2['invocation_source']='documented-model-id: unproven slug'
+        d2=rt.route({'role':'planner','playbook':'Change','candidates':[unproven2]})['selection_disclosure']
+        self.assertEqual(d2['invocation_provenance'],'documented')
+        self.assertIn('unproven',d2['reason'])
+
+        proven=cand('codex',model_id='astra',effort='low')
+        proven['invocation_model_id']='gpt-6-astra'
+        proven['invocation_source']='local-evidence:codex debug models --bundled'
+        r_prov=rt.route({'role':'planner','playbook':'Change','candidates':[proven]})
+        d_prov=r_prov['selection_disclosure']
+        self.assertEqual(d_prov['invocation_model_id'],'gpt-6-astra')
+        self.assertEqual(d_prov['invocation_provenance'],'proven')
+        self.assertNotIn('unproven',d_prov['reason'])
+        self.assertNotIn('unverified',d_prov['reason'])
 
 class RouteDefectTests(unittest.TestCase):
     class Args:
