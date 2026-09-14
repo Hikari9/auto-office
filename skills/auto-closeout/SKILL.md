@@ -27,13 +27,11 @@ out of it. Close, in this order:
 - the run's tab or workspace once every pane in it is closed.
 
 Do this mechanically, not from memory. `scripts/hooks/close_finished_panes.mjs` (a Stop hook from
-`install_hooks.sh`) closes ledger panes whose agent is `done` or gone, and is safe to run by hand.
-Resolve a real binary first — `node` is an nvm shell function here, so bare `node script.mjs` dies
-with `_load_nvm: command not found` and `command -v node` hides it:
-`NODE=$(ls -d ~/.nvm/versions/node/*/bin/node|tail -1); "$NODE" scripts/hooks/close_finished_panes.mjs </dev/null`.
-It reads only the `office_spawn.sh --pane-id` ledger, never `herdr pane list`, so it cannot touch
-the user's own panes, and no-ops without `herdr`. Run it, then read `herdr pane list` yourself —
-a surviving pane needs a reason you can state.
+`install_hooks.sh`) closes ledger panes whose agent is `done` or gone, and is safe to run by hand:
+`node scripts/hooks/close_finished_panes.mjs < /dev/null`. It reads only the
+`office_spawn.sh --pane-id` ledger, never `herdr pane list`, so it cannot touch the user's own
+panes, and no-ops without `herdr`. Run it, then read `herdr pane list` yourself — a surviving pane
+needs a reason you can state.
 
 Keep a pane only while its agent may still be resumed for another round — a reviewer mid-round,
 an executor awaiting fixes. Never close a pane you did not create, and never close one hosting a
