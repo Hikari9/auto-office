@@ -1,4 +1,5 @@
-#!/opt/homebrew/bin/node
+#!/bin/sh
+':' //; NODE_BIN="${OFFICE_NODE_BIN:-$(command -v node 2>/dev/null || true)}"; if [ "$NODE_BIN" = "node" ] || [ ! -x "$NODE_BIN" ]; then NODE_BIN="$(type -P node 2>/dev/null || true)"; fi; if [ -z "$NODE_BIN" ]; then echo "Node.js not found; close_finished_panes is a no-op." >&2; exit 0; fi; "$NODE_BIN" "$0" "$@"; exit $?
 /**
  * Stop hook. Closes the Herdr panes of delegated agents that have finished.
  *
@@ -21,7 +22,7 @@
  * gone (the agent has disappeared from `herdr agent list`). An idle agent may
  * have dropped its prompt, so it stays open until completion is confirmed. A closed pane is not lost work — the
  * ledger records each agent's session id, so a session is restored by id in a
- * fresh pane. Continuity lives in the id and the agent's written report, never
+ * fresh pane. Continuity lives in the session id and the agent's written report, never
  * in a pane left open after confirmed completion.
  *
  * Never closable: an agent that is `working`, `idle`, `blocked`, or `unknown`; a pane
@@ -47,7 +48,8 @@ import { join, delimiter } from "node:path";
 
 const LEDGER = process.env.OFFICE_PANE_LEDGER || join("/tmp", "office", "panes.jsonl");
 const FINISHED = new Set(["done", "gone", "halted", "dead", "stopped", "exited", "terminated"]);
-const PROTECTED_NAMES = new Set(["t1", "t2", "t3", "t6", "t7"]);
+const CURRENT_RUN_ID = process.env.OFFICE_RUN_ID || null;
+const CURRENT_SESSION_ID = process.env.OFFICE_SESSION_ID || process.env.HERDR_SESSION_ID || null;
 
 /** herdr on PATH? Outside a Herdr environment this hook is a no-op. */
 const onPath = (bin) => {
@@ -89,19 +91,36 @@ const field = (entry, ...names) => {
   return null;
 };
 
-const liveness = (name, pane, agents, panes) => {
+const sessionIdentity = (entry) => field(entry, "session_id", "sessionId", "agent_session_id");
+
+const ownsLedgerEntry = (entry) => {
+  const runId = field(entry, "run_id", "office_run_id");
+  const sessionId = sessionIdentity(entry);
+  // A pane is owned only when the ledger carries an explicit run/session
+  // identity; display names are never an ownership signal.
+  if (!runId && !sessionId) return false;
+  if (CURRENT_RUN_ID && runId !== CURRENT_RUN_ID) return false;
+  if (CURRENT_SESSION_ID && sessionId !== CURRENT_SESSION_ID) return false;
+  return true;
+};
+
+const liveness = (pane, expectedSessionId, agents, panes) => {
   const agentMatches = agents.filter((entry) => field(entry, "pane_id", "pane") === pane);
   const agent = agentMatches[0] || null;
-  const namedMatches = agents.filter((entry) => field(entry, "name", "agent", "agent_name") === name);
 
   if (agent) {
+    const actualSessionId = sessionIdentity(agent);
+    if (expectedSessionId && actualSessionId && expectedSessionId !== actualSessionId) {
+      return { status: "moved", paneEntry: null };
+    }
     const status = field(agent, "agent_status", "status");
     const paneEntry = panes.find((entry) => field(entry, "pane_id", "pane") === pane) || null;
     const paneStatus = field(paneEntry, "agent_status", "status");
     return { status: FINISHED.has(status) ? status : (FINISHED.has(paneStatus) ? paneStatus : status), paneEntry };
   }
-  if (namedMatches.length > 0) {
-    // The agent moved: its recorded pane is no longer ours to close.
+
+  if (expectedSessionId && agents.some((entry) => sessionIdentity(entry) === expectedSessionId)) {
+    // The session moved: its recorded pane is no longer ours to close.
     return { status: "moved", paneEntry: null };
   }
   // No agent row means the recorded agent is gone. A remaining unknown pane is
@@ -137,24 +156,24 @@ try {
   for (const line of lines) {
     let e;
     try { e = JSON.parse(line); } catch { continue; } // malformed: drop, it names no pane we can act on
-    const name = e?.agent || e?.name;
+    const displayName = e?.agent || e?.name;
     const pane = e?.pane_id;
     if (!pane) continue;
     // A planner that closed explicitly and marked the entry instead of removing
     // it: drop it, and do not announce a close that already happened.
     if (e.closed === true) continue;
-    if (!name || PROTECTED_NAMES.has(name)) { kept.push(e); continue; }
-    const live = liveness(name, pane, agents, panes);
+    if (!ownsLedgerEntry(e)) { kept.push(e); continue; }
+    const live = liveness(pane, sessionIdentity(e), agents, panes);
     if (!FINISHED.has(live.status)) { kept.push(e); continue; }
 
     // Preserve the ledger session id; a gone agent no longer appears in either
     // list, and the id is the only way back into this session.
-    const session = e.session_id || null;
+    const session = sessionIdentity(e);
 
     let res = null;
     try { res = herdr(["pane", "close", pane]); } catch { /* continue with other panes */ }
     const gone = res?.error?.code && /not_?found/.test(res.error.code);
-    if ((res && !res.error) || gone) closed.push({ pane, name, status: live.status, session });
+    if ((res && !res.error) || gone) closed.push({ pane, name: displayName || "unnamed", status: live.status, session });
     else kept.push(e); // close failed: retain it and continue with other panes
   }
 
