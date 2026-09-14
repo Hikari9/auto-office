@@ -279,6 +279,81 @@ class TestLifecycleIntegration(unittest.TestCase):
         self.assertEqual(out['error'], 'no_state')
         self.assertFalse(state_dir.exists())
 
+    def test_state_save_rejects_minimal_fake_receipt_before_approval(self):
+        state_dir = Path(self.tmpdir) / 'fake-run'
+        state_dir.mkdir()
+        state_path = state_dir / 'state.json'
+        state_path.write_text(json.dumps({
+            'run_id': 'fake-run',
+            'family_id': 'fake-family',
+            'phase': 'intake',
+        }))
+
+        rc, out, err = run_cmd('state-save',
+            '--state-dir', str(state_dir),
+            '--run-id', 'fake-run',
+            '--family-id', 'fake-family',
+            '--phase', 'planned')
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(err, '')
+        self.assertEqual(out['error'], 'invalid_start_receipt')
+        self.assertEqual(json.loads(state_path.read_text())['phase'], 'intake')
+
+        rc, out, err = run_cmd('approve-plan',
+            '--state-dir', str(state_dir),
+            '--approved-by', 'user',
+            '--quote', 'I approve this fake plan')
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(err, '')
+        self.assertEqual(out['error'], 'invalid_phase')
+        self.assertEqual(json.loads(state_path.read_text())['phase'], 'intake')
+
+    def test_state_save_preserves_versions_and_rejects_post_approval_changes(self):
+        state_dir, state = self._start_run()
+        rc, out, err = run_cmd('state-save',
+            '--state-dir', str(state_dir),
+            '--run-id', state['run_id'],
+            '--family-id', state['family_id'],
+            '--phase', 'planned',
+            '--plan-version', '3',
+            '--packet-version', '7')
+        self.assertEqual(rc, 0, err)
+        state = json.loads((state_dir / 'state.json').read_text())
+        self.assertEqual(state['plan_version'], 3)
+        self.assertEqual(state['packet_version'], 7)
+
+        rc, out, err = run_cmd('approve-plan',
+            '--state-dir', str(state_dir),
+            '--approved-by', 'user',
+            '--quote', 'I approve version three')
+        self.assertEqual(rc, 0, err)
+        state = json.loads((state_dir / 'state.json').read_text())
+        self.assertEqual(state['approval']['plan_version'], 3)
+        self.assertEqual(state['approval']['packet_version'], 7)
+
+        rc, out, err = run_cmd('state-save',
+            '--state-dir', str(state_dir),
+            '--run-id', state['run_id'],
+            '--family-id', state['family_id'],
+            '--phase', 'executing')
+        self.assertEqual(rc, 0, err)
+        state = json.loads((state_dir / 'state.json').read_text())
+        self.assertEqual(state['plan_version'], 3)
+        self.assertEqual(state['packet_version'], 7)
+
+        rc, out, err = run_cmd('state-save',
+            '--state-dir', str(state_dir),
+            '--run-id', state['run_id'],
+            '--family-id', state['family_id'],
+            '--phase', 'reviewed',
+            '--plan-version', '4')
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(err, '')
+        self.assertEqual(out['error'], 'version_change_after_approval')
+        after = json.loads((state_dir / 'state.json').read_text())
+        self.assertEqual(after['plan_version'], 3)
+        self.assertEqual(after['phase'], 'executing')
+
     def test_state_save_cannot_forge_approval(self):
         state_dir, state = self._start_run()
         rc, _, err = self._save_phase(state_dir, state, 'planned')
@@ -307,6 +382,23 @@ class TestLifecycleIntegration(unittest.TestCase):
             env=env)
         self.assertEqual(rc, 0, err)
         self.assertEqual(out['gear'], 'full')
+
+    def test_start_normalizes_nested_repo_for_pointer(self):
+        nested = self.repo / 'nested' / 'directory'
+        nested.mkdir(parents=True)
+        env = os.environ.copy()
+        env['XDG_STATE_HOME'] = str(Path(self.tmpdir) / 'xdg-nested')
+        rc, out, err = run_cmd('start',
+            '--goal', 'start from a nested directory',
+            '--playbook', 'Change',
+            '--gear', 'direct',
+            '--repo', str(nested),
+            env=env)
+        self.assertEqual(rc, 0, err)
+        pointer = self.repo / '.office' / 'runs' / f"{out['run_id']}.ref"
+        self.assertTrue(pointer.exists())
+        self.assertFalse((nested / '.office' / 'runs' / f"{out['run_id']}.ref").exists())
+        self.assertEqual(pointer.read_text().strip(), out['state_dir'])
 
     def test_start_pins_independent_plugin_policy_and_effective_hashes(self):
         state_dir, state = self._start_run()

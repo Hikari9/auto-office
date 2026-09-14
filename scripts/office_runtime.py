@@ -20,6 +20,16 @@ MUTABLE_TRUST_ROLES = {"executor", "code_reviewer", "browser_verifier", "closeou
 ATTRIBUTIONS = {"model","harness","adapter","quota/account","environment/network","planner","brief","repository","verification","unknown"}
 OUTCOMES = {"pending","verified_no_observed_failure","recurrence_failure","revert_failure","material_post_merge_defect","abandoned","environment_failure"}
 PHASE_ORDER = ("intake", "planned", "approved", "executing", "reviewed", "closed")
+START_PINNED_FIELDS = (
+    "run_id",
+    "family_id",
+    "base_sha",
+    "policy_hash",
+    "catalog_snapshot_hash",
+    "adapter_snapshot_hash",
+    "effective_config_hash",
+    "plugin_commit",
+)
 
 
 def load_data(path: str | Path) -> Any:
@@ -607,6 +617,15 @@ def _start_base_sha(repo: Path) -> str:
     return result.stdout.strip()
 
 
+def _start_repo_root(repo: Path) -> Path:
+    result = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=str(repo), check=True,
+                            capture_output=True, text=True)
+    root = result.stdout.strip()
+    if not root:
+        raise RuntimeError("git rev-parse --show-toplevel returned an empty path")
+    return Path(root).expanduser().resolve()
+
+
 def _start_state_root() -> Path:
     root = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
     return root.expanduser().resolve() / "auto-office" / "runs"
@@ -646,6 +665,7 @@ def cmd_start(args):
         if not repo.is_dir():
             dump_json({"error": "invalid_repo", "repo": str(repo)})
             return 2
+        repo = _start_repo_root(repo)
         config, config_hash = _start_effective_config(repo)
         gear = _start_gear(args)
         base_sha = _start_base_sha(repo)
@@ -662,6 +682,7 @@ def cmd_start(args):
             config_hash=config_hash, run_id=run_id)
         envelope = _new_run_envelope(envelope_args)
         envelope["goal"] = args.goal
+        envelope["repo_root"] = str(repo)
         errors = validate_with_schema(envelope, "run-envelope.schema.json")
         if errors:
             dump_json({"valid": False, "errors": errors})
@@ -673,7 +694,7 @@ def cmd_start(args):
                  "playbook": args.playbook, "gear": gear, "holder_id": holder_id, "triple": triple,
                  "base_sha": base_sha, "plugin_commit": plugin_commit, "policy_hash": policy_hash,
                  "catalog_snapshot_hash": catalog_hash, "adapter_snapshot_hash": adapter_hash,
-                 "effective_config_hash": config_hash}
+                 "effective_config_hash": config_hash, "repo_root": str(repo)}
         _atomic_write_json(state_dir / "state.json", state)
         _atomic_write_json(state_dir / "envelope.json", envelope)
         pointer = repo / ".office" / "runs" / f"{run_id}.ref"
@@ -723,7 +744,9 @@ def cmd_approve_plan(args):
             return 2
         approval = {"by": args.approved_by, "quote": args.quote,
                     "at": datetime.now(timezone.utc).isoformat(),
-                    "plan_version": plan_version, "plan_sha": _plan_file_hash(args.plan_path)}
+                    "plan_version": plan_version,
+                    "packet_version": state.get("packet_version", 1),
+                    "plan_sha": _plan_file_hash(args.plan_path)}
         state["phase"] = "approved"
         state["approval"] = approval
         state["updated_at"] = approval["at"]
@@ -783,6 +806,79 @@ def cmd_lease_check(args):
         dump_json({"active":not stale,"holder_id":cur[0],"expires_at":cur[1],"stale":stale}); return 0
     dump_json({"active":False}); return 0
 
+def _canonical_state_error(state_dir: Path, state: dict) -> dict | None:
+    required_fields = START_PINNED_FIELDS + ("repo_root", "plan_version", "packet_version")
+    missing = [key for key in required_fields if key not in state]
+    if missing:
+        return {"error": "invalid_start_receipt", "state_path": str(state_dir / "state.json"),
+                "reason": "missing pinned fields", "missing": missing}
+
+    envelope_path = state_dir / "envelope.json"
+    if not envelope_path.exists():
+        return {"error": "invalid_start_receipt", "state_path": str(state_dir / "state.json"),
+                "reason": "missing envelope.json"}
+    try:
+        envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {"error": "invalid_start_receipt", "state_path": str(state_dir / "state.json"),
+                "reason": "invalid envelope.json", "detail": str(exc)}
+    if not isinstance(envelope, dict):
+        return {"error": "invalid_start_receipt", "state_path": str(state_dir / "state.json"),
+                "reason": "envelope.json must contain a JSON object"}
+
+    envelope_errors = validate_with_schema(envelope, "run-envelope.schema.json")
+    if envelope_errors:
+        return {"error": "invalid_start_receipt", "state_path": str(state_dir / "state.json"),
+                "reason": "envelope schema validation failed", "details": envelope_errors}
+
+    mismatches = {
+        key: {"state": state.get(key), "envelope": envelope.get(key)}
+        for key in START_PINNED_FIELDS + ("repo_root",)
+        if state.get(key) != envelope.get(key)
+    }
+    if mismatches:
+        return {"error": "state envelope mismatch", "state_path": str(state_dir / "state.json"),
+                "mismatches": mismatches}
+
+    repo_root = Path(str(state["repo_root"])).expanduser().resolve()
+    pointer = repo_root / ".office" / "runs" / f"{state['run_id']}.ref"
+    if not pointer.is_file():
+        return {"error": "invalid_start_receipt", "state_path": str(state_dir / "state.json"),
+                "reason": "missing run pointer", "pointer": str(pointer)}
+    try:
+        pointer_target_text = pointer.read_text(encoding="utf-8").strip()
+        pointer_target = Path(pointer_target_text).expanduser()
+        if not pointer_target.is_absolute():
+            pointer_target = pointer.parent / pointer_target
+        pointer_target = pointer_target.resolve()
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return {"error": "invalid_start_receipt", "state_path": str(state_dir / "state.json"),
+                "reason": "invalid run pointer", "pointer": str(pointer), "detail": str(exc)}
+    if pointer_target != state_dir.resolve():
+        return {"error": "state pointer mismatch", "state_path": str(state_dir / "state.json"),
+                "pointer": str(pointer), "pointer_target": str(pointer_target),
+                "expected_target": str(state_dir.resolve())}
+    return None
+
+
+def _approval_version_error(state: dict) -> dict | None:
+    approval = state.get("approval")
+    if approval is None:
+        if state.get("phase") in PHASE_ORDER[PHASE_ORDER.index("approved"):]:
+            return {"error": "approval_required", "phase": state.get("phase"),
+                    "message": "approved lifecycle state must contain a recorded approval"}
+        return None
+    if not isinstance(approval, dict) or approval.get("plan_version") != state.get("plan_version"):
+        return {"error": "approval_version_mismatch", "phase": state.get("phase"),
+                "approved_plan_version": approval.get("plan_version") if isinstance(approval, dict) else None,
+                "current_plan_version": state.get("plan_version")}
+    if "packet_version" in approval and approval.get("packet_version") != state.get("packet_version"):
+        return {"error": "approval_version_mismatch", "phase": state.get("phase"),
+                "approved_packet_version": approval.get("packet_version"),
+                "current_packet_version": state.get("packet_version")}
+    return None
+
+
 def cmd_state_save(args):
     state_dir = Path(args.state_dir)
     state_path = state_dir / "state.json"
@@ -814,6 +910,10 @@ def cmd_state_save(args):
         dump_json({"error": "state identity mismatch",
                    "state_path": str(state_path), "mismatches": mismatches})
         return 2
+    receipt_error = _canonical_state_error(state_dir, obj)
+    if receipt_error:
+        dump_json(receipt_error)
+        return 2
     if args.phase == "approved":
         dump_json({"error": "approval_required", "phase": obj.get("phase"),
                    "message": "only approve-plan may transition a run to approved"})
@@ -827,6 +927,10 @@ def cmd_state_save(args):
         dump_json({"error": "invalid_phase", "phase": current_phase,
                    "expected": list(PHASE_ORDER)})
         return 2
+    approval_error = _approval_version_error(obj)
+    if approval_error:
+        dump_json(approval_error)
+        return 2
     current_index = PHASE_ORDER.index(current_phase)
     requested_index = PHASE_ORDER.index(args.phase)
     if requested_index != current_index and requested_index != current_index + 1:
@@ -835,7 +939,22 @@ def cmd_state_save(args):
                    "to": args.phase, "expected": expected,
                    "message": "lifecycle transitions are monotonic and adjacent"})
         return 2
-    obj.update({"run_id": args.run_id, "family_id": args.family_id, "phase": args.phase, "plan_version": args.plan_version, "packet_version": args.packet_version, "updated_at": datetime.now(timezone.utc).isoformat()})
+    current_plan_version = obj["plan_version"]
+    current_packet_version = obj["packet_version"]
+    plan_version = current_plan_version if args.plan_version is None else args.plan_version
+    packet_version = current_packet_version if args.packet_version is None else args.packet_version
+    if current_index >= PHASE_ORDER.index("approved") and (
+        plan_version != current_plan_version or packet_version != current_packet_version
+    ):
+        dump_json({"error": "version_change_after_approval", "phase": current_phase,
+                   "current_plan_version": current_plan_version,
+                   "current_packet_version": current_packet_version,
+                   "requested_plan_version": plan_version,
+                   "requested_packet_version": packet_version})
+        return 2
+    obj.update({"run_id": args.run_id, "family_id": args.family_id, "phase": args.phase,
+                "plan_version": plan_version, "packet_version": packet_version,
+                "updated_at": datetime.now(timezone.utc).isoformat()})
     if args.dispatches: obj["dispatches"] = json.loads(args.dispatches)
     if args.findings: obj["findings"] = json.loads(args.findings)
     if args.lease: obj["lease"] = json.loads(args.lease)
@@ -1029,7 +1148,7 @@ def main():
     q=sp.add_parser('lease-renew'); q.add_argument('--db',required=True); q.add_argument('--lease-id',required=True); q.add_argument('--holder-id',required=True); q.add_argument('--ttl',type=int,default=3600); q.set_defaults(func=cmd_lease_renew)
     q=sp.add_parser('lease-release'); q.add_argument('--db',required=True); q.add_argument('--lease-id',required=True); q.add_argument('--holder-id',required=True); q.set_defaults(func=cmd_lease_release)
     q=sp.add_parser('lease-check'); q.add_argument('--db',required=True); q.add_argument('--run-id',required=True); q.add_argument('--scope',required=True); q.set_defaults(func=cmd_lease_check)
-    q=sp.add_parser('state-save'); q.add_argument('--state-dir',required=True); q.add_argument('--run-id',required=True); q.add_argument('--family-id',required=True); q.add_argument('--phase',required=True); q.add_argument('--plan-version',type=int,default=1); q.add_argument('--packet-version',type=int,default=1); q.add_argument('--dispatches'); q.add_argument('--findings'); q.add_argument('--lease'); q.set_defaults(func=cmd_state_save)
+    q=sp.add_parser('state-save'); q.add_argument('--state-dir',required=True); q.add_argument('--run-id',required=True); q.add_argument('--family-id',required=True); q.add_argument('--phase',required=True); q.add_argument('--plan-version',type=int); q.add_argument('--packet-version',type=int); q.add_argument('--dispatches'); q.add_argument('--findings'); q.add_argument('--lease'); q.set_defaults(func=cmd_state_save)
     q=sp.add_parser('state-load'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_state_load)
     q=sp.add_parser('approve-plan'); q.add_argument('--state-dir',required=True); q.add_argument('--approved-by',choices=['user'],required=True); q.add_argument('--quote',required=True); q.add_argument('--plan-path'); q.set_defaults(func=cmd_approve_plan)
     q=sp.add_parser('state-reconcile'); q.add_argument('--state-dir',required=True); q.add_argument('--db'); q.set_defaults(func=cmd_state_reconcile)
