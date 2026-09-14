@@ -47,6 +47,7 @@ After closeout, run eligible lazy maintenance and, when justified, hand sanitize
 **Cleanup post-merge.** The run stops at a ready PR; `main` remains the human boundary. Merging on
 the run's own initiative is prohibited — plan approval alone does not authorize it. Merge only with
 an explicit per-run user statement authorizing it; absent that, mark the PR ready and stop. After an
-authorized merge, clean up: switch back to `main`, pull, remove the temporary worktree
-(`git worktree remove <path> && git worktree prune`), and delete the local branch (`git branch -d
-<branch>`). Do not remove worktrees or force-delete branches with uncommitted state without explicit instruction.
+authorized merge, propose cleanup and wait for separate explicit authorization: switch to `main`, pull,
+remove the temporary worktree (`git worktree remove <path> && git worktree prune`), and delete the
+local branch (`git branch -d <branch>`). Never clean up automatically or remove worktrees/force-delete
+branches with uncommitted state without explicit cleanup instruction.

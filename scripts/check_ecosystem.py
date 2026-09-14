@@ -17,7 +17,7 @@ HUB_LINE_BUDGET = 128
 SKILL_LINE_BUDGETS = {
     'skills/agy-cli/SKILL.md': 46,
     'skills/auto-adapter/SKILL.md': 18,
-    'skills/auto-closeout/SKILL.md': 52,
+    'skills/auto-closeout/SKILL.md': 53,
     'skills/auto-execution/SKILL.md': 20,
     'skills/auto-intake/SKILL.md': 48,
     'skills/auto-loop/SKILL.md': 27,
@@ -43,14 +43,19 @@ def frontmatter(path):
     if not fm['description'].strip(): return False,'empty description', fm, text
     return True,'ok', fm, text
 
+def discovered_skills(root):
+    return sorted(
+        path for path in root.rglob('SKILL.md')
+        if not any(part.startswith('.') for part in path.relative_to(root).parts)
+    )
+
 def check_skill_budgets(root=ROOT):
     """Return errors for SKILL.md files that exceed their configured budgets."""
-    targets = [(root/'SKILL.md', 'SKILL.md', HUB_LINE_BUDGET)]
-    targets.extend(
-        (path, path.relative_to(root).as_posix(),
-         SKILL_LINE_BUDGETS.get(path.relative_to(root).as_posix()))
-        for path in sorted((root/'skills').glob('*/SKILL.md'))
-    )
+    targets = []
+    for path in discovered_skills(root):
+        relative = path.relative_to(root).as_posix()
+        budget = HUB_LINE_BUDGET if relative == 'SKILL.md' else SKILL_LINE_BUDGETS.get(relative)
+        targets.append((path, relative, budget))
 
     errors=[]
     for path, relative, budget in targets:
@@ -66,7 +71,7 @@ def check_skill_budgets(root=ROOT):
 
 def main():
     errors=[]
-    skills=[p for p in ROOT.rglob('SKILL.md') if not any(part.startswith('.') for part in p.relative_to(ROOT).parts)]
+    skills = discovered_skills(ROOT)
     skill_names = set()
     
     for p in skills:
