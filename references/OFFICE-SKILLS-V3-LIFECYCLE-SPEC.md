@@ -4,11 +4,10 @@ Companion to `OFFICE-SKILLS-V3-SPEC.md`. That document specifies **how a role is
 routed**. This one specifies **how a run is driven**: intake, approval, parallel
 execution, integration, and the autonomy ceiling.
 
-It exists because the v3 map (issue #35) chartered routing, measurement and
-self-improvement, and explicitly deferred execution decomposition. The result
-shipped as a routing engine with no lifecycle driver: `grilled intent` appears
-once in the routing spec as a transfer format and is never produced by any
-procedure, and `parallel`, `wave` and `concurrent` appear nowhere in it at all.
+A **receipt** is an artifact a third party can re-read to confirm a step happened: a state
+dir, an approval quote, pasted command output, an exit code. A claim is not a receipt.
+
+An assertion that cannot run is not a weaker gate. It is no gate.
 
 ## 0. Relationship to issue #35
 
@@ -35,29 +34,27 @@ SHA and holder triple; runs the fit test; creates canonical state under
 `$XDG_STATE_HOME/auto-office/runs/<run-id>/` with a `.office/runs/<run-id>.ref`
 pointer in the target repo; and prints the kickoff block.
 
-Skipping stage 0 is the known failure mode, not an optimisation. Every later
-gate keys off the `state_dir` it returns, so an agent that skips it silently
-disables the entire gate chain — `check-spoke` cannot run without a state dir,
-and a gate that cannot run is a gate that never fails.
+Done when: the returned `state_dir` exists for this run.
 
-Stage 0 is checkable after the fact: no state dir means no run happened.
+`check-spoke --state-dir <state_dir> --spoke <name>`
+
+Done when: exit code is 0; enter planning from this receipt.
 
 ## 2. Stage 1 — grilled intent
 
-The orchestrator owns the interview. The planner never talks to the user (#47).
-`grilled intent` is the output of this stage, not an assumption about the user.
+The orchestrator conducts the interview; the planner receives its serialized
+`grilled intent` output (#47).
 
 The floor is twelve items. All twelve are covered on every run, delivered as one
 or two batched question rounds rather than a conversation:
 
 1. **Outcome** — what is true when this is done, in the user's words.
 2. **Done-criteria** — the exact commands, reads or observations that prove it.
-   A requirement with no nameable verification is not yet specified.
-3. **Blast radius** — repos, environments, live systems. Production named
-   explicitly or excluded explicitly. Never inferred.
+   Every requirement names its verification.
+3. **Blast radius** — repos, environments, live systems. Production is named
+   explicitly or excluded explicitly.
 4. **Irreversible steps** — each becomes a `named_actions:` entry, which is what
-   later lets the loop perform it without stopping. External sends are excluded
-   by definition and always stop the loop.
+  later lets the loop perform it autonomously. External sends always stop the loop.
 5. **Waves** — which done-criteria can proceed simultaneously, and what must
    serialise behind a shared interface. See section 4.
 6. **Interfaces** — signatures, schemas, routes, file boundaries that parallel
@@ -67,45 +64,42 @@ or two batched question rounds rather than a conversation:
 8. **Speed vs correctness** — which one is being bought. Moves the route.
 9. **Executor count** — one repo or several, one slice or several.
 10. **User-owned decisions** — anything that would otherwise be guessed.
-    Recommend, never infer.
+    Record the decision explicitly; recommend where useful.
 11. **Rollback target** — what "undo this" concretely means.
-12. **Prior art** — existing work, branches or PRs this must not duplicate or
-    contradict.
+12. **Prior art** — existing work, branches or PRs to preserve and align with.
 
 The five frozen fields (`goal`, `done_criteria`, `blast_radius`,
 `named_actions`, `non_goals`) are derived from the answers and frozen by the
-orchestrator. Freezing fields the user was never asked about is the defect this
-stage exists to prevent.
+orchestrator. The user answers each field before it is frozen.
 
-## 3. Gear is declared, never asked
+## 3. Gear is declared by the fit test
 
 The fit test decides the gear from blast radius, reversibility and size class
-(#45). It is never a thirteenth interview question. It is always **declared** in
-the kickoff block, which is the cheapest place for the user to overrule it.
+#45). The kickoff block declares it, giving the user the cheapest place to
+overrule it.
 
-Declaring is not asking. A gear the user never sees is a funding decision made
-on their behalf in silence.
+The declared gear is visible before execution, so the user owns any override.
 
 ## 4. Waves, interfaces and worktrees
 
-The plan groups tasks into **waves**. A wave is a set of tasks with no
-write-scope overlap and no unresolved dependency between them. Every task
+The plan groups tasks into **waves**. A wave is a set of tasks with disjoint
+write scopes and satisfied dependencies. Every task
 declares `Depends on:` and `Touches:`; a wave is the transitive closure of tasks
 whose dependencies are already satisfied.
 
 Rules:
 
-- **One mutable holder per write scope.** Two tasks in the same wave may not
-  touch the same file.
+- **One mutable holder per write scope.** Tasks in the same wave have disjoint
+  files.
 - **One worktree per parallel dispatch.** Created via `office_worktree.sh create
-  --dispatch-id <id>`, branched from the run's pinned base SHA. Workers never
-  share a tree.
-- **Workers do not commit.** The orchestrator commits and merges. A worker that
-  runs git commands can move a base the orchestrator pinned.
+  --dispatch-id <id>`, branched from the run's pinned base SHA.
+- **The orchestrator commits and merges worker trees.** A worker that runs git
+  commands can move a base the orchestrator pinned.
 - **A shared interface serialises.** If two tasks must agree on a signature,
   schema or fixture, either the interface is pinned in stage 1 and both proceed,
   or the interface becomes its own task in an earlier wave. Apparent parallelism
-  over an unpinned shared contract becomes a serial integration task.
+  over an unpinned shared contract becomes a serial integration task; packets
+  carry the pinned interface.
 - **Every dispatch brief carries the pinned contract and `effective_config_hash`.**
   A parallel producer or reviewer reasoning from unpinned config reasons from
   the wrong policy. Observed: a reviewer concluded "executor has no preferred
@@ -120,8 +114,8 @@ still free to change.
 
 The schedule names, per task: write scope, routed identity
 (`harness@version × model_id × effort`), the dependency that places it in its
-wave, and its size class. Bars are size classes (#42), never minute estimates —
-a point value the router cannot honestly produce is worse than a class it can.
+wave, and its size class. Bars show size classes (#42); the router produces
+classes rather than honest minute estimates.
 
 ```
 gear: full · waves: 2 · parallel width: 3 · critical path: T2 → T6
@@ -138,82 +132,76 @@ quota after this run, projected: codex ~60% weekly · claude ~65% weekly
 
 Required properties:
 
-- **Every task has a named route before approval.** An unassigned task is an
-  unreviewable cost. Routing is not deferred to execution time.
+- **Every task has a named route before approval.** Routing happens before
+  execution, so every task has a reviewable cost.
 - **Every route states why it won** in one clause, from the decisive filter —
   task shape, capability floor, preferred seed, quota, cost or local evidence.
 - **The critical path is marked.** It is the only number that predicts wall
   clock, and it is what a reader checks when the schedule looks too wide.
 - **Parallel width is stated.** Width above the disjoint-scope limit in section 4
   is a planning defect, visible here before it becomes a merge conflict.
-- **Projected quota after the run is stated.** Quota is weighed, never a gate
-  (#58), but a run that would drain a window the user needs later is a decision
-  they own, not one the router makes silently.
+- **Projected quota after the run is stated.** Quota is a planning weight (#58).
+  A run that would drain a window the user needs later is a decision they own;
+  the router keeps that choice visible.
 
-A schedule that cannot be drawn means the waves are not actually disjoint. That
-is a finding about the plan, not a formatting problem.
+A drawn schedule demonstrates disjoint waves; failure to draw one is a planning
+finding.
 
 ## 5. The single approval
 
-One approval authorises everything through closeout. It is taken after the plan,
-its self-review, and any plan review have resolved.
+One approval authorises everything through closeout. It follows the plan, its
+self-review, and any resolved plan review.
 
-Approval is a recorded state transition, not a sentence in a transcript:
+Approval is a recorded state transition; the receipt is its state and quote:
 
 ```
 python3 scripts/office_runtime.py approve-plan --state-dir <d> \
     --approved-by user --quote "<verbatim user words>"
 ```
 
-Phase order is `intake → planned → approved → executing → reviewed → closed`.
-`auto-execution` refuses to dispatch below `approved`. A producer running
-`approve-plan` without the user's actual words is a protocol violation, and the
-recorded approval is what the fail-closed mutation hook reads.
+Done when: `phase == approved` and `approval.quote` is the verbatim user wording.
 
-Silence is not approval.
+Phase order is `intake → planned → approved → executing → reviewed → closed`.
+`auto-execution` reads this receipt before dispatch, and the fail-closed mutation
+hook reads the recorded approval.
 
 ## 5.1 Mid-run additions
 
-A follow-up that arrives during an active run is routing input, not orchestrator work. The
+A follow-up that arrives during an active run is routing input for the orchestrator. The
 orchestrator classifies it before acting:
 
-- Fits an already-frozen field, no plan change needed → route to an executor as a new execution
+- Fits an already-frozen field → route to an executor as a new execution
   packet in the current or next wave.
 - Needs planning, a new interface, or changes the wave structure → route to the planner, increment
   the plan version, invalidate dependent packets.
 - Changes one of the five frozen fields → re-freeze and take a new approval. The approval
-  authorizes the plan that was approved, not an arbitrarily grown one.
+  authorizes only the approved plan.
 
 The orchestrator announces the route for each addition, the same disclosure as any dispatch
 (section 4.1). Inline execution by the orchestrator is legal only when the fix's brief would
-exceed the edit itself — never for volume, never because the chain looks linear, never because
-it is faster right now.
+exceed the edit itself; this exception stays scoped to that case.
 
 A follow-up whose target write scope is held by a live dispatch waits for that wave, or goes to
-the worker already holding the scope (section 4). It never becomes a second writer.
+the worker already holding the scope (section 4). That worker remains the sole writer.
 
-The orchestrator stays present to do this: it does not occupy itself with work that would leave
-it unresponsive to a mid-run ask, and it polls dispatches rather than blocking on one (section 6).
-A blocked or absorbed orchestrator cannot route, which is what this section exists to prevent.
+The orchestrator keeps capacity for mid-run asks and polls dispatches while any dispatch is live
+(section 6).
 
-An executor holds a task queue for its write scope, not a single task; a follow-up routed to an
+An executor holds a task queue for its write scope; a follow-up routed to an
 executor that already has work appends to that queue rather than replacing it, and its prior
 tasks, findings and constraints stay binding. Resuming that executor's session is preferred over
 spawning a fresh one for the same scope, because the accumulated context is what stops a task
-from being dropped. The executor reports per-task status on completion — which queued tasks it
-finished and which it did not — so three queued tasks yield three outcomes, never one merged
-summary. An unreported queued task counts as not done.
+from being dropped. The executor reports one outcome per queued task on completion.
 
 Observed failure this closes: an orchestrator implemented several streamed follow-ups inline
 because each looked small, making itself the bottleneck, holding write scopes that belonged to
 workers, and dropping the routing and telemetry record that makes a run reviewable.
 
-## 5.2 Ownership does not mean inline typing
+## 5.2 Ownership assigns dispatch
 
 When the user addresses the orchestrator directly — "you write this", "you handle it" — that
 names the office: the orchestrator together with its executors. It assigns ownership and
-dispatch, not personal typing. The inline exception in section 5.1 stays exactly as narrow as
-stated there: never volume, never speed.
+dispatch; the inline exception in section 5.1 stays scoped to that rule.
 
 Observed failure this closes: the orchestrator read "you write this" as an instruction to edit
 files itself; the maintainer corrected it — "by 'you' i always meant you together with your
@@ -221,42 +209,35 @@ executors. You own office."
 
 When the orchestrator takes the section 5.1 inline exception, it alone judges whether that edit
 needs independent review — self-review or none suffices for a small or documentation-only edit,
-and that judgment stands unchallenged. Section 8's no-self-review rule still binds delegated
-production work in full: a producer never gates its own output, and this waiver is not a loophole
-for substantive code.
+and that judgment stands unchallenged. Section 8's independent-review rule governs delegated
+production work; this waiver covers only small or documentation-only inline edits.
 
 ## 6. Non-blocking orchestration
 
-The orchestrator must not idle while delegated work runs. This is a requirement,
-not a style preference: a blocked orchestrator serialises a parallel plan back
-into a sequential one and burns the wall-clock term in the reward (#48).
+The orchestrator stays active while delegated work runs. A blocked orchestrator
+serialises a parallel plan and burns the wall-clock term in the reward (#48).
 
 - Dispatch every task in the current wave before waiting on any of them.
 - While dispatched work runs, the orchestrator does only work that touches no
   write scope held by a live dispatch: planning later waves, reviewing returned
   output, preparing briefs, reading state.
-- Poll; never block. A single blocking wait on one worker is a defect when
-  another worker has already returned.
+- Poll while any dispatch is live.
 - A wave ends when every dispatch in it has returned or been declared dead by
   two independent liveness signals.
 
-**Completion is event-driven, never learned by blocking.** The orchestrator
+**Completion is event-driven.** The orchestrator
 arms a background monitor covering every dispatch at or before the moment it
 dispatches a wave, and completion reaches the orchestrator as an event from
-that monitor, not by waiting on one dispatch at a time. The monitor stays
-armed for the life of the run, not per wave, so a dispatch that finishes
-while the orchestrator is mid-conversation with the user still reports —
-conversing with the user must never suspend monitoring. It must cover every
-terminal state, not only success: finished, idle, blocked, unknown, and
-disappeared all have to fire, because a monitor that only matches the happy
-path is silent through a crash, and silence is indistinguishable from still
-running. A blocking wait on a single dispatch is a defect whenever another
-dispatch is live. If the monitor is lost or was never armed, the orchestrator
-re-polls before making any claim about dispatch state — reporting a status it
-has not re-read since the last known event is reporting stale state as fact.
+that monitor. One monitor stays armed for the life of the run, so a dispatch that finishes
+while the orchestrator is mid-conversation with the user still reports;
+conversation with the user leaves monitoring armed. It covers every
+terminal state: finished, idle, blocked, unknown, and disappeared all have to
+fire, because a monitor that only matches the happy path is silent through a
+crash. When monitoring is unavailable, the orchestrator re-polls before making
+any claim about dispatch state.
 On a completion event the orchestrator collects the result, closes the
 finished agent's pane, and appends or updates the spawn ledger; pane
-reclamation is the orchestrator's job, not the user's to ask for.
+reclamation is orchestrator-owned.
 
 Observed failure this closes: an orchestrator hand-rolled blocking waits to
 learn when delegated agents finished. It occupied the orchestrator's only
@@ -272,10 +253,9 @@ Between execution and review, the run integrates:
 
 1. Commit each worker's tree on its dispatch branch, authored by the orchestrator.
 2. Merge dispatch branches into the run's integration branch in wave order.
-3. Resolve conflicts at the orchestrator, never by re-dispatching a worker into
-   a tree it does not own.
-4. Run the plan's validation commands on the integrated result. A green worker
-   tree is not evidence about the merge.
+3. Resolve conflicts at the orchestrator; each worker retains its own tree.
+4. Run the plan's validation commands on the integrated result. The receipt is
+   validation commands run on the integrated result.
 5. Adjudicate contract disagreements explicitly. When a test written against the
    pinned contract disagrees with an implementation, name which one is wrong and
    why. Repo convention outranks an ambiguous contract clause; a contract clause
@@ -286,18 +266,17 @@ moment N parallel trees have ever existed together is after the merge.
 
 ## 8. Review with N producers
 
-- No producer reviews its own work, including its own merge.
-- The reviewer's scope is the **integrated** diff, not a single worker's tree.
+- Every gate is held by an agent that did not produce the work. A producer
+  gating its own delegated output is a protocol violation.
+- The reviewer's scope is the **integrated** diff.
 - Reviewer sessions may run in parallel across independent scopes. One reviewer
   session serialised across N producers is a designed bottleneck.
 - Round cap: 5 in `full`, 2 in `express`. A second `CHANGES REQUIRED` on one
-  task forces an orchestrator disposition, not an automatic re-plan.
+  task forces an orchestrator disposition.
 - `PLAN DEFECT` and `BRIEF DEFECT` exit without consuming a round.
-- A green suite is never approval on its own.
-
 ## 9. Autonomy ceiling
 
-After approval the run proceeds end to end without further go-aheads. It:
+After approval the run proceeds end to end under the approved plan. It:
 
 - bootstraps a plan-only first commit, named branch and draft PR before the
   first task, so the run is resumable from the moment work starts;
@@ -306,19 +285,17 @@ After approval the run proceeds end to end without further go-aheads. It:
 - removes the plan file and marks the PR **ready for review** at closeout;
 - may merge dispatch branches into its own integration/working branch.
 
-It never merges to `main`. Merge to `main` is the permanent human boundary
-(#35, out of scope) — unless the user states explicitly, in the approval or in
-the conversation, that this run may merge to `main` autonomously. Absent that
-sentence, the run stops at a ready PR.
+The run stops at a ready PR; `main` remains the human boundary (#35, out of
+scope). Merging to `main` on the run's own initiative is prohibited. An explicit
+per-run user statement in the approval or conversation may authorize that merge.
 
-It stops for exactly two other things: an **external send**, and a **user-owned
-decision the plan did not anticipate**. Everything the plan named — production
-applies included — it executes.
+It pauses for an **external send** or a **user-owned decision the plan did not
+anticipate**. Everything the plan named — production applies included — it executes.
 
-### 9.1 Authority decisions are not adjudicated by the run
+### 9.1 Authority decisions belong to the user
 
 Whether this run may merge to `main` is a decision only the user makes. Roles
-within the run carry it out; they do not rule on it. Where the user's explicit
+within the run carry it out; the user owns the decision. Where the user's explicit
 instruction conflicts with an earlier default, gear preset, playbook or prior
 instruction, the user's most recent explicit statement governs for that run.
 
@@ -330,71 +307,61 @@ the *artifact* was used to settle a question about *authority*.
 
 Two rules follow.
 
-**Reporting and declining are separate obligations.** When blockers exist
+**Reporting and carrying out are separate obligations.** When blockers exist
 alongside an authorized merge, state them plainly and concisely, then carry out
-the authorized action. Surfacing the evidence is required. Withholding the
-action on the strength of that evidence alone is not. `PLAN DEFECT` and
+the authorized action. Surfacing the evidence is required. `PLAN DEFECT` and
 `BRIEF DEFECT` remain available and still pause work and report — a defect exit
-is a statement about a plan or a brief, and is not a mechanism for declining an
-authority decision.
+is a statement about a plan or a brief; authority remains with the user.
 
 **A defect exit must concern the artifact it names.** Raising a scope objection
 in order to decline an authority decision is itself a protocol error worth
 naming, because it disguises the real disagreement as a technical one.
 
-The grant is narrow. It authorizes merging to `main` for the run in which it is
-given. It does not widen blast radius to other repositories, environments or
-destructive actions the plan never named, and it does not carry into later runs.
+The grant covers merging to `main` for the run in which it is given. Other
+repositories, environments and destructive actions stay outside the grant, and
+later runs require their own authorization.
 
 ### 9.2 A blocked tool call is a question, not a verdict
 
-When the harness itself refuses an action — a permission classifier, a denied
-tool call, a policy guard — that refusal is a signal to ask the user, not a
-conclusion to report back as impossible and not something to rephrase until it
-passes. Surface what was attempted, why it was refused, and what the options
-are, then let the user decide. Re-attempting the same action in altered wording
-to get it past a guard is out of bounds; asking the user to authorize it is the
-correct path, and their answer settles it.
+When the harness refuses an action — a permission classifier, a denied tool
+call, or a policy guard — surface what was attempted, why it was refused, and
+the available options. Ask the user to authorize it; their answer settles it.
+Re-attempting the same action in altered wording to get it past a guard is out
+of bounds.
 
 ## 10. Self-improvement after
 
-Closeout emits proposals, never policy. Scope is unchanged from #52: a dreamt
-pattern line appended to a reference doc, on the standing PR, citing the run_id
-and recorder rows it came from. Floors, weights and reward definitions stay
-behind the replay gate (#51). Auto-merge on green evals stays permanently ruled
-out (#23).
+Closeout emits proposals; policy changes pass the replay gate (#51). Scope is
+unchanged from #52: a dreamt pattern line appended to a reference doc, on the
+standing PR, citing the run_id and recorder rows it came from. Floors, weights
+and reward definitions stay behind that gate.
 
 A learned pattern that adds an imperative rule to a policy spoke is a policy
-change, not a pattern, regardless of how its metadata is labelled. It goes
-through the replay gate.
+change; metadata labels do not change it. It goes through the replay gate.
 
 ### 10.1 Where a learned lesson lives
 
-A discipline learned during a run that should change future runs' behavior belongs in this spec
-or a spoke — versioned, reviewable, shipped — never in an agent's private session memory, which
-does not ship, does not survive a different agent picking up the repo, and cannot be reviewed.
-The self-improvement path above is the mechanism for proposing it: closeout emits a proposal
-citing the run_id and recorder rows, and an imperative policy rule still goes through the replay
-gate.
+A discipline learned during a run that should change future runs' behavior is persisted in this
+spec or a spoke — versioned, reviewable, shipped. Closeout emits the proposal with its run_id and
+recorder rows; an imperative policy rule passes through the replay gate.
 
 ## 11. Assertable conventions
 
-Conventions that are only prose are conventions agents skip under load. Each of
-these is machine-checkable, and the check is the convention:
+Each convention has a machine-checkable assertion:
 
-| Convention | Assertion |
-|---|---|
-| Run was actually started | state dir exists for this run |
-| Spoke was loaded | `check-spoke --spoke <name>` exits 0 |
-| Plan was approved by the user | phase == `approved` and `approval.quote` non-empty |
-| No dispatch before approval | `auto-execution` refuses below `approved` |
-| No mutation before approval | fail-closed `PreToolUse` hook on Edit/Write |
-| Waves are disjoint | no file appears in two tasks of one wave |
-| Integration was validated | validation commands ran on the merged tree |
-| Routing slug is real | `check-route-defects` exits 0 |
-| Catalog row is dispatchable | row has `invocation_model_id` |
+| Convention | Assertion | Known bypass |
+|---|---|---|
+| Run was actually started | state dir exists for this run | hook state discovery resolved cwd rather than the git root, so a subdirectory command failed open |
+| Spoke was loaded | `check-spoke --spoke <name>` exits 0 |  |
+| Plan was approved by the user | phase == `approved` and `approval.quote` non-empty | `state-save --phase approved` forged an approval |
+| Dispatch requires approval | `auto-execution` refuses below `approved` |  |
+| Mutation requires approval | fail-closed `PreToolUse` hook on Edit/Write | hook exemption matching any command containing 'approve-plan' let 'approve-plan && rm -f victim' through |
+| Waves are disjoint | each file belongs to one task in a wave |  |
+| Integration was validated | validation commands ran on the merged tree |  |
+| Routing slug is real | `check-route-defects` exits 0 |  |
+| Catalog row is dispatchable | row has `invocation_model_id` |  |
 
-An assertion that cannot run is not a weaker gate. It is no gate.
+An empty `Known bypass` cell means nobody attacked that assertion in this review.
 
 ## 12. Known defects this spec closes
 
