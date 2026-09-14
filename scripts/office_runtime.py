@@ -719,7 +719,33 @@ def cmd_lease_check(args):
 
 def cmd_state_save(args):
     state_dir = Path(args.state_dir); state_dir.mkdir(parents=True, exist_ok=True); state_path = state_dir / "state.json"
-    obj = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+    if state_path.exists():
+        try:
+            obj = json.loads(state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # A malformed state may contain an interrupted write or belong to a
+            # run we cannot safely identify.  Never recover by overwriting it
+            # implicitly: preserve the evidence and require explicit repair.
+            dump_json({"error": "invalid state.json", "reason": "malformed JSON",
+                       "state_path": str(state_path), "detail": str(exc)})
+            return 2
+        if not isinstance(obj, dict):
+            dump_json({"error": "invalid state.json",
+                       "reason": "state.json must contain a JSON object",
+                       "state_path": str(state_path),
+                       "json_type": type(obj).__name__})
+            return 2
+        mismatches = {
+            key: {"existing": obj[key], "incoming": getattr(args, key)}
+            for key in ("run_id", "family_id")
+            if key in obj and obj[key] != getattr(args, key)
+        }
+        if mismatches:
+            dump_json({"error": "state identity mismatch",
+                       "state_path": str(state_path), "mismatches": mismatches})
+            return 2
+    else:
+        obj = {}
     obj.update({"run_id": args.run_id, "family_id": args.family_id, "phase": args.phase, "plan_version": args.plan_version, "packet_version": args.packet_version, "updated_at": datetime.now(timezone.utc).isoformat()})
     if args.dispatches: obj["dispatches"] = json.loads(args.dispatches)
     if args.findings: obj["findings"] = json.loads(args.findings)
