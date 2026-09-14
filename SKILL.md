@@ -11,7 +11,8 @@ Load only the protocol/reference needed for the current lifecycle step.
 ## Permanent invariants
 
 - Keep the lifecycle order fixed. Gears may fund or omit optional stages; never reorder the lifecycle.
-- Keep human merge-to-`main` as the permanent authority boundary.
+- Keep merge-to-`main` a boundary no agent lifts on its own initiative; only an explicit
+  per-run user statement lifts it (spec 9.1).
 - Never let a producer approve its own work.
 - Pin `plugin_commit`, `policy_hash`, `catalog_snapshot_hash`, `adapter_snapshot_hash`, and `effective_config_hash` for each run.
 - Never let an active run begin using an unmerged self-improvement policy implicitly.

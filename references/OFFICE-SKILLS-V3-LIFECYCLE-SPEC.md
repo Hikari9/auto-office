@@ -219,10 +219,11 @@ Observed failure this closes: the orchestrator read "you write this" as an instr
 files itself; the maintainer corrected it — "by 'you' i always meant you together with your
 executors. You own office."
 
-When the orchestrator does take the section 5.1 inline exception, it becomes a producer for that
-artifact and is bound by section 8's no-self-review rule: it must route an independent review of
-its own inline edit like any other producer's output, and may not carry that work to closeout
-ungated.
+When the orchestrator takes the section 5.1 inline exception, it alone judges whether that edit
+needs independent review — self-review or none suffices for a small or documentation-only edit,
+and that judgment stands unchallenged. Section 8's no-self-review rule still binds delegated
+production work in full: a producer never gates its own output, and this waiver is not a loophole
+for substantive code.
 
 ## 6. Non-blocking orchestration
 
@@ -418,6 +419,7 @@ An assertion that cannot run is not a weaker gate. It is no gate.
 | #45: fit test is never a user question | Section 3 | Gear is auto-decided and declared, never asked. Declaration is not a question. |
 | #47: planner never talks to the user | Section 2 | The interview is orchestrator-owned. The planner receives grilled intent as a serialized artifact. |
 | Out of scope: unattended self-merge; human merges `main` | Section 9 | Loop stops at a ready PR. Working-branch merges only. `main` requires an explicit per-run statement from the user. |
+| Out of scope: unattended self-merge (redux) | SKILL.md permanent invariants | Reworded to agree with Section 9/9.1: no agent lifts the `main` boundary on its own initiative; only an explicit per-run user statement does. |
 | #24: every role is portable; input is a serialized artifact | Sections 2, 4 | Grilled intent and the pinned contract are files, not agent state, so a compacted or transferred role loses nothing. |
 | #24/single approval: one approval authorizes one plan | Section 5.1 | A mid-run addition is routed as new input to planner or executor, or triggers re-approval; it never becomes ad hoc orchestrator state, so portability and the single-approval boundary both hold. |
 | #23/#51/#52: replay-gated policy, no auto-merge | Section 10 | Unchanged. Section 10 additionally closes the labelling loophole. |
