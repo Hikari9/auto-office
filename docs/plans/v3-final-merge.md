@@ -2,8 +2,9 @@
 
 ## Status and scope
 
-Plan version: 1. Created 2026-09-15. Status: planned, not executed.
-This change authorizes only writing and committing this plan. Stop after the plan commit; do not dispatch implementation, push, mark the PR ready, or merge in this session.
+Plan version: 2. Created 2026-09-15. Amended 2026-09-15 after independent plan review. Status: approved for execution through T7.
+
+Version 1 authorized only the plan commit. The user has since taken over the orchestrator role in a new session and explicitly authorized amending this plan and launching executors. Execution of T0 through T7 is therefore authorized. Merge to `main` (T8) is not: it remains gated on an explicit, current-session user statement, and no agent may lift that gate on its own initiative. Pushing the branch and updating PR #99 are authorized as part of T7; marking the PR ready is authorized only once T7's receipt is satisfied.
 
 Destination: reconcile and complete the existing v3 implementation, demonstrate acceptance, and land `auto-office-v3` into `main` through [Auto Office v3: consolidate lifecycle, routing, and runtime](https://github.com/Hikari9/office-skills/pull/99).
 
@@ -18,34 +19,62 @@ The user has accepted the eight design decisions. This is an implementation plan
 ## Planning envelope
 
 ```yaml
-plan_version: 1
+plan_version: 2
 requirements_version: 1
-routing_version: 1
+routing_version: 2
 branch: auto-office-v3
 target_branch: main
-implementation_base_sha: 37aba7c7b6cdf1c2f10bf8b80e747802e89338f8
+implementation_base_sha: 213ba5628f62a818ff62a61e159b770100d3a9ba
 observed_main_sha: e137cd2ff7f044aeb8984f43f183d6cc1639a954
+baseline_at_implementation_base_sha:
+  check_ecosystem: PASS (16 skills, 8 schemas, 22 evals)
+  pytest: 106 passed, 8 subtests passed
+amendment_history:
+  - version: 2
+    kind: plan_contract
+    reason: >-
+      Independent plan review (codex@local/luna@xhigh) returned CHANGES REQUIRED with
+      twelve accepted-material and one accepted-minor findings. All thirteen were
+      verified against source by the orchestrator and accepted.
+    affected_scopes: [T0, T2, T3, T4, T5, T5S, T6, T8, status_and_scope, routing]
+    resulting_versions: {plan_version: 2, requirements_version: 1, routing_version: 2}
 effective_config_hash: sha256:279b986360e082dcc2136dfc5d29804f6ba1ee3e0ccdf8449612b07d4d7b94a3
 playbook: Change
 size: XL
 execution_status: not_started
 model_assignments:
   orchestrator:
-    invocation_model_id: not_exposed
-    canonical_model_id: GPT-6
+    invocation_model_id: claude-opus-5[1m]
+    canonical_model_id: opus
     effort: not_exposed
-    harness: Codex
-    harness_version: not_exposed
+    harness: claude
+    harness_version: local
     status: inline
-    rationale: User-selected current session owns this bounded planning task.
+    rationale: >-
+      User-directed takeover. Holds intent, dispatch, integration and the merge gate.
+      Produced this amendment, so it may not hold any gate over the work it amends.
   planner:
-    invocation_model_id: not_exposed
-    canonical_model_id: GPT-6
+    invocation_model_id: claude-opus-5[1m]
+    canonical_model_id: opus
     effort: not_exposed
-    harness: Codex
-    harness_version: not_exposed
+    harness: claude
+    harness_version: local
     status: inline
-    rationale: Same session reconciles inspected code and confirmed requirements; no dedicated planner dispatched.
+    rationale: >-
+      Amendment applies accepted findings from an independent reviewer; no new product
+      design was authored, so no dedicated planner was dispatched.
+  plan_reviewer:
+    invocation_model_id: gpt-5.6-luna
+    canonical_model_id: luna
+    effort: xhigh
+    harness: codex
+    harness_version: local
+    status: routed
+    decision_hash: sha256:e1a26b6efe059b8ff0a2ecfc0e7d1883f660e97239ccfae846a0a791b487c266
+    rationale: >-
+      Cleared trust, capability, role-floor and task-shape gates; fit inside the 20%
+      protected quota reserve; matched preferred seed #1, which decided advisory ranking.
+      Did not produce the plan under review.
 ```
 
 Unknown runtime identities are explicitly unknown, not fabricated routable triples. This envelope records planning provenance, not an execution receipt. Before execution, resolve actual role routes through the router, pin plugin/policy/catalog/adapter/config hashes, and generate accepted execution packets. Recompute config for the execution environment; if it differs, record the new routing version and rationale rather than silently using this planning snapshot.
@@ -60,11 +89,12 @@ Done criteria:
 2. Planner/user interaction and requirements freezing, executor-owned review with exceptional consultation, local review funding, and dependency-triggered integration review agree across active instructions and behavior.
 3. Requirements, plan, and routing amend independently; unaffected work continues; durable family state and structured packets support restart without child transcripts.
 4. Claude, Codex, and agy each demonstrate the orchestrator lifecycle, including Herdr-path completion events and continued user interaction.
+4b. One complete self-improvement cycle runs end to end: sanitized dream, isolated proposal, standing-PR/branch lineage, idempotent replay, independent review, and an intact maintainer-merge boundary, against a committed graduation bar.
 5. Current-head verification and independent review pass; PR is ready and merged under explicit merge authority; resulting main passes the smoke checks below.
 
 Blast radius: root skill and lifecycle specs drive every run; state/version/approval helpers in `scripts/office_runtime.py` feed hooks, dispatches, schema validation and takeover; review scripts can record false success; config resolution affects all role routing; completion/pane hooks affect concurrent live workers. These are cross-cutting runtime and instruction changes, hence XL despite a reuse-first approach. Public artifacts must not contain raw transcripts, credentials, personal configuration or private run data.
 
-Protected paths and non-goals: no changes to user-global skill installations, harness settings, credentials, unrelated repositories, or live user runs. Do not redesign scoring/rewards/capability floors, revive Bash approval enforcement, introduce a heavyweight scheduler, or prove additional harnesses such as Hermes/pi. Do not delete or migrate private telemetry destructively. Do not implement a second independent review merely to satisfy executor count. Any necessary change beyond these boundaries requires a scoped plan amendment.
+Protected paths and non-goals: no changes to user-global skill installations, harness settings, credentials, unrelated repositories, or live user runs. `.github/workflows/validate.yml` is protected for the whole run (amendment v2, finding F11), and `scripts/hooks/install_hooks.sh` may be edited but never executed (amendment v2, finding F12). Do not redesign scoring/rewards/capability floors, revive Bash approval enforcement, introduce a heavyweight scheduler, or prove additional harnesses such as Hermes/pi. Do not delete or migrate private telemetry destructively. Do not implement a second independent review merely to satisfy executor count. Any necessary change beyond these boundaries requires a scoped plan amendment.
 
 Named future actions: isolated fixture worktrees and test runs; scoped implementation commits and PR updates after execution is authorized; final merge only under explicit user authority. Billing/payment changes are user-owned and not authorized. This plan commit does not authorize any of these future actions now.
 
@@ -95,7 +125,13 @@ Touches: `docs/v3-acceptance.md`, `docs/v3-runtime-contracts.md`, `schemas/run-e
 
 Read current issue comments, branch/PR state, existing helpers and tests. Build an acceptance matrix covering the original adaptive-routing map as well as the family and portability amendments. Classify each row as existing/verified, instruction conflict, missing behavior, or external blocker. Record superseded requirements explicitly. Inspect review-loop callers before choosing whether to replace its mock callback or retire an unused helper and point callers at the real review path. Pin contract fixtures and legacy-state handling before implementation.
 
-Receipt: schema tests accept complete examples and reject missing identity/version/evidence; acceptance matrix has no unexplained requirement. Any newly found material gap outside this plan becomes a versioned plan amendment, not silent additional scope.
+**Acceptance matrix row format (amendment v2, finding F13).** Prose classification is not a receipt. Every row is a record with all of: source and decision ID (for example `issue-35#decision-5`); the behavior in one falsifiable sentence; the owning task ID; an implementation or spec pointer as `path:line`; the exact verification command or the exact live observation that proves it; an evidence path or hash; status from `verified | missing | conflict | external-blocker | superseded`; and, for `superseded` or `external-blocker`, the explicit user approval or blocker disposition. A row missing any field is incomplete, not verified. Enumerate issue 35's settled acceptance constraints individually rather than as a summary paragraph; the ten earlier findings and this review's thirteen findings are inputs to the inventory, not the inventory.
+
+**Interfaces T0 must pin before Wave 1 (amendment v2, finding F4).** The concept list below is not sufficient for parallel workers. T0 must additionally pin exact JSON schemas and exact Python/CLI signatures for: the dispatch packet (superseding `schemas/execution-packet.schema.json`'s ten generic fields and its `additionalProperties: true`) carrying `requirements_version`, `plan_version`, `routing_version`, `effective_config_hash`, `selection_disclosure`, session and family identity, allowed paths, and validation commands; `start_receipt`; `event_id` and monotonic `sequence`; the observed-status enum; terminal classification; monitor health; the replay cursor and acknowledgement; replacement authority; and the linkage from a dispatch to its landing and checkpoint. `scripts/office_spawn.sh` currently emits none of the version, disclosure, session-identity or event-cursor fields, so this is new surface, not documentation of existing surface.
+
+**Runtime commands T0 must pin for T4 (amendment v2, finding F6).** `scripts/office_runtime.py` has no landing, checkpoint, completion or family command today. T0 pins the exact CLI signature and exit semantics of every such command T4 will consume, so that T2 implements them and T4 only calls them.
+
+Receipt: schema tests accept complete examples and reject missing identity/version/evidence; every pinned interface above has a committed schema or signature plus at least one accepting and one rejecting fixture; the acceptance matrix has no row missing a required field and no unexplained requirement. Any newly found material gap outside this plan becomes a versioned plan amendment, not silent additional scope.
 
 ### Wave 1 — parallel, disjoint foundations
 
@@ -108,12 +144,18 @@ Replace obsolete authority rules with provisional orchestrator intake and intera
 Receipt: `python3 scripts/check_ecosystem.py` and `python3 -m pytest tests/test_v3_instruction_contract.py tests/test_budget.py -q` pass; targeted search finds no active contradictory planner prohibition or unconditional review escalation.
 
 **T2: Implement family state, versions and scoped amendments.**
-Depends on: T0.
-Touches: `scripts/office_runtime.py`, new `scripts/office_family.py` and `scripts/office_packets.py`, `config/config.default.yaml`, `tests/test_runtime.py`, new `tests/test_families.py`, new `tests/test_amendments.py`.
+Depends on: T0, T1. (Amendment v2, finding F5: T1 owns the normative planner/authority semantics T2 implements, and T0 does not pin all of them, so T2 cannot run in parallel with T1 without implementing against a stale authority model.)
+Touches: `scripts/office_runtime.py`, new `scripts/office_family.py` and `scripts/office_packets.py`, `config/config.default.yaml`, `tests/test_runtime.py`, new `tests/test_families.py`, new `tests/test_amendments.py`, new `tests/test_landings.py` for the command-level contract only.
+
+Amendment v2, finding F6: T2 also implements and tests every landing, checkpoint, completion and family command that T0 pinned for T4, because T2 is the sole owner of `scripts/office_runtime.py` and `scripts/office_packets.py`. T4 consumes these commands and must not need to edit either module; if T4 discovers a missing command, that is a plan defect returned to T2, not an out-of-scope edit by T4.
 
 Reuse atomic writes, leases, hashing, state reconciliation and config layering. Add family/session tiers with precedence: dispatch > family/project > repo > session > user > default. Implement durable focus and scoped delta application. Provide advisory current/projected resource-demand summaries; do not block unrelated families for optimization. Integrate version changes with existing monotonic phase and approval validation instead of bypassing those checks. Legacy state must load read-only or migrate explicitly with a backup and recorded version defaults; never silently certify stale packets or grant ownership.
 
 Receipt: tests prove routing-only deltas leave requirements/plan approval intact, stale concurrent deltas fail without partial writes, contract changes invalidate only affected work, ambiguous focus mutates nothing, two sessions do not collide, and restart reconstructs active families. Legacy state preserves unknown fields and evidence.
+
+Additional receipt, amendment v2, finding F7 — sticky focus and soft projection. Using two concurrent families A and B, assert: an unqualified command mutates the current focus family only; a named command mutates the named family and, per issue 77, moves focus; an ambiguous command mutates nothing and says why; an explicitly global command applies to both. With finite quota figures, a projected collision emits a warning receipt while leaving unrelated families runnable. Naming two families in an integration test (T5) does not discharge this.
+
+Additional receipt, amendment v2, finding F8 — amendment transition matrix. Assert as an explicit matrix, per issue 35 decision 5: a routing-only delta does not wake the planner; a requirements delta that still fits the plan does not wake the planner; a plan-contract delta wakes the planner and pauses only affected scopes; a running dispatch completes its current atomic unit rather than being interrupted, unless explicitly replaced. Each cell asserts the resulting version numbers and the recorded event, not merely a non-zero exit. Bumping every version on every delta must fail the matrix.
 
 **T3: Implement Herdr event delivery and safe reclamation.**
 Depends on: T0.
@@ -123,25 +165,31 @@ Discover the actual available completion-delivery mechanism for each required or
 
 Receipt: deterministic harness fakes demonstrate event delivery, duplicate suppression, reconnect/restart replay, monitor loss visibility, concurrent family isolation and no closure on false done. A background process merely producing a file is not sufficient acceptance for waking the orchestrator; live proof follows in T6.
 
+Additional receipt, amendment v2, finding F9 — the agy false-done known-bad case. `scripts/hooks/close_finished_panes.mjs:50` places `done` in its `FINISHED` set and closes on it, which is exactly the behavior issue 93's amendment recorded agy triggering while still working. A generic "no closure on false done" assertion does not exercise this. Build a fixture carrying agy's actual observed status sequence and payload together with evidence the pane is still active (advancing output, live session), and assert the hook closes nothing until a durable terminal event plus independent completion evidence both exist. T6 must reproduce this same known-bad case against live agy.
+
 ### Wave 2 — integrate review and packet consumers
 
 **T4: Wire real review, landings, checkpoints and dispatch.**
 Depends on: T1, T2, T3.
-Touches: `scripts/review_loop.sh`, `scripts/review_finding.sh`, `scripts/office_readback.sh`, `scripts/office_spawn.sh`, `scripts/hooks/pre_compact.sh`, `scripts/hooks/compact_advisor.sh`, `scripts/hooks/session_end.sh`, `scripts/hooks/install_hooks.sh` only if optional lifecycle binding needs it, `tests/test_review.py`, `tests/test_hooks.py`, new `tests/test_landings.py`.
+Touches: `scripts/review_loop.sh`, `scripts/review_finding.sh`, `scripts/office_readback.sh`, `scripts/office_spawn.sh`, `scripts/hooks/pre_compact.sh`, `scripts/hooks/compact_advisor.sh`, `scripts/hooks/session_end.sh`, `scripts/hooks/install_hooks.sh` only if optional lifecycle binding needs it and only as a repository-file edit (amendment v2, finding F12: this run may edit that script but must never execute it, because `install_hooks.sh:154-179` writes `~/.claude`, `~/.codex` and `~/.gemini` and lines 189-195 write Hermes profiles, all of which are protected user-global paths; hook tests run against a temporary `HOME` and temporary config roots), `tests/test_review.py`, `tests/test_hooks.py`, new `tests/test_landings.py`.
 
 Connect to actual independent review evidence or retire unused mock behavior according to T0. Never synthesize PASS from an unset environment variable. Local producers own findings; consultation routes unresolved disagreement upward without routine orchestrator override. Integration review is triggered by actual dependent/merging landings, not count alone. Readback retains process diagnostics while validating semantic landing evidence. Serialize checkpoints before requested compaction and resume the same role from the packet. Wire monitor lifecycle into dispatch and closeout; keep optional hooks optional.
 
-Receipt: unset review source yields explicit unavailable/required review status, never independent PASS; stale tree/version or producer-as-reviewer evidence is rejected; inline paths remain valid. Single executor and independent parallel changes avoid extra final review; dependent landings receive it. Valid evidence-backed refutation lands; unresolved consultation stays unresolved. Exit 0 alone cannot produce a completed landing. Restart preserves checkpoint fields and review round.
+Receipt: unset review source yields explicit unavailable/required review status, never independent PASS; stale tree/version or producer-as-reviewer evidence is rejected; inline paths remain valid.
 
-### Wave 3 — full acceptance and real portability
+Additional receipt, amendment v2, finding F3 — positive-path provenance. Negative-path coverage alone is insufficient while `scripts/review_loop.sh:52-56` defaults its mock reviewer to `PASS` and `scripts/review_finding.sh:40-55` converts any supplied summary into evidence with a fixed hash. A recorded independent-review PASS must be reachable only from a validated reviewer dispatch and readback bound to: producer identity not equal to reviewer identity; the current tree SHA; all three version numbers; the declared review scope; non-empty evidence; and the reviewer's routed identity. An unset, synthetic or unbound source must make PASS unavailable, never successful. Assert this on the success path, not only on the failure path. Single executor and independent parallel changes avoid extra final review; dependent landings receive it. Valid evidence-backed refutation lands; unresolved consultation stays unresolved. Exit 0 alone cannot produce a completed landing. Restart preserves checkpoint fields and review round.
+
+### Wave 3 — full acceptance, self-improvement, and real portability
 
 **T5: Integrated regression and coverage verification.**
 Depends on: T4.
-Touches: `tests/test_integration.py`, `tests/test_dogfood.py`, `docs/v3-acceptance.md`, `.github/workflows/validate.yml` only for justified new checks.
+Touches: `tests/test_integration.py`, `tests/test_dogfood.py`, `docs/v3-acceptance.md`.
+
+Amendment v2, finding F11: `.github/workflows/validate.yml` is removed from this task's write scope and is a protected path for the whole run. It defines the required validation job, and the account's billing lock already prevents that job from running, so an executor holding write access to it could weaken or route around the very gate that is blocked. Any CI change requires a separate plan amendment and explicit user authority, and must never weaken, bypass or alter billing-related enforcement.
 
 Run the complete workflow on isolated fixtures: interactive requirements freeze, two concurrent families, local review, cross-scope integration review, routing-only delta, plan-contract delta, checkpoint/restart and event-driven completion. Assert reasons and state changes, not just exit codes. Verify existing adaptive routing, quota floors, pinned snapshots, private telemetry, replay gates, proposal isolation and retirement coverage from T0 remain intact.
 
-Receipt: `python3 scripts/check_ecosystem.py`; `python3 -m pytest tests/ -q`; all remaining commands in `.github/workflows/validate.yml`; `git diff --check`. Capture exact tested head and concise results. Do not weaken checks to make the plan fit.
+Receipt: `python3 scripts/check_ecosystem.py`; `python3 -m pytest tests/ -q`; every command in `.github/workflows/validate.yml` run locally against an unmodified workflow file; `git diff --check`. Capture exact tested head and concise results. Do not weaken checks to make the plan fit. The measured baseline to beat is the `213ba56` reading recorded in the planning envelope: ecosystem PASS, 106 tests plus 8 subtests passing. A lower test count at the final head is a regression to explain, not a new baseline.
 
 **T6: Demonstrate each required orchestrator harness.**
 Depends on: T5.
@@ -149,12 +197,20 @@ Touches: `docs/v3-portability-evidence.md`, sanitized evidence links in `docs/v3
 
 Run a bounded scratch-repository scenario under Claude, Codex and agy as orchestrators, not just workers. Each must load/mark a spoke, ask/receive user input through its supported path, dispatch via Herdr, remain responsive while work runs, receive terminal events, validate a landing, and restore state after a checkpoint. Exercise an interruption/blocked outcome without losing the pane. Reuse deterministic fakes for destructive/failure cases; never stop unrelated live workers. Record harness/model/version, invocation, commit, event/receipt IDs and outcome without private transcript content.
 
-Receipt: three explicit passing lifecycle records at the candidate head. Missing credentials, missing delivery capability or unavailable user interaction is a reported acceptance blocker, never replaced by an adapter unit test or invented answer. Targeted repairs return to the owning task and rerun affected checks.
+Receipt, amendment v2, finding F2. "Three passing lifecycle records" is a claim, not a receipt: an executor can author three passing JSON files. Each of the three harnesses produces a record containing all of: the resolved executable path and its `--version` output; the exact invocation including model and effort, with effort read back from the harness's own banner rather than from the command that was typed; the spoke `check-spoke`/`mark-spoke` receipt; the actual question asked and the answer received through that harness's supported user-input path; the Herdr pane, agent and session IDs; the start-receipt ID and the terminal event ID with its sequence number; the checkpoint written and the state restored after restart, shown as a before/after comparison; the landing-validation command and its output; and timestamps plus content hashes for each evidence artifact. An independent reviewer verifies these against the durable event store in T7. Deterministic fakes are permitted only for destructive and failure cases and are prohibited on the core success path; a record whose success path is backed by a fake fails this task. The agy false-done case from T3 is reproduced here against live agy. Missing credentials, missing delivery capability or unavailable user interaction is a reported acceptance blocker, never replaced by an adapter unit test or invented answer. Targeted repairs return to the owning task and rerun affected checks.
+
+**T5S: Demonstrate one end-to-end self-improvement cycle.**
+Depends on: T5.
+Touches: new `docs/v3-self-improvement-evidence.md`, `docs/v3-acceptance.md` rows owned by this task, the graduation-bar artifact under `references/` or `config/`; the proposal itself lands in an isolated branch or worktree and never in this branch's history.
+
+Amendment v2, finding F1. Issue 35's destination requires the loop to propose its own improvements to a standing PR against a graduation bar, and no task owned that. T5 verifying "proposal isolation" checks the guard rail, not the outcome, and `references/IMPLEMENTATION-NOTES.md:37-39` records PR creation as orchestration work rather than implemented behavior. Run one complete cycle through `skills/auto-self-improve`: compile a sanitized dream from this run's own private telemetry, produce a proposal in an isolated branch or worktree, append it to the standing PR or branch with recorded lineage, prove the append is idempotent when replayed, obtain independent review of the proposal, and stop at the maintainer-merge boundary without merging. Commit the graduation-bar artifact that decides when a proposal is eligible.
+
+Receipt: privacy lint passes on the public proposal with no raw transcript, credential, personal-configuration or absolute-path leakage; evidence hashes are opaque; lineage links the proposal to this run without exposing it; replaying the same dream appends nothing new; an independent reviewer accepted or rejected the proposal on evidence; the proposal remains unmerged and the merge boundary is intact; the graduation bar is committed and referenced from the acceptance matrix. A proposal that only passes lint but was never actually appended to the standing PR or branch does not satisfy this task.
 
 ### Wave 4 — independent review, PR readiness and final merge
 
 **T7: Review and close the coverage gaps.**
-Depends on: T6.
+Depends on: T6, T5S.
 Touches: `docs/v3-acceptance.md`, `docs/v3-portability-evidence.md`, PR/issue metadata; fixes return to the original file owners.
 
 Have an independent reviewer inspect the frozen requirements, final diff, acceptance matrix, negative controls and real-harness receipts. Review shared-state races, version migration, false review success, lost completion events and unaffected-family behavior. Follow executor-owned disposition with exceptional consultation. Update the PR description to describe final implemented behavior and remove obsolete gap claims. Reconcile map/ticket summaries with authoritative comments without declaring success before proof.
@@ -167,7 +223,9 @@ Receipt: accepted review dispositions, complete acceptance matrix and green curr
 Depends on: T7 and explicit merge authority.
 Touches: integration branch/main through PR merge; linked issue/map state; no unrelated code.
 
-Refresh main and PR head. If main advanced, integrate it and repeat affected verification plus required full checks before merge. Use repository merge convention without force/admin bypass. Preserve private run state and avoid broad branch/worktree cleanup. After merge, verify merge SHA contains the reviewed changes, run ecosystem and test smoke checks on a clean main checkout, and record the PR/merge receipt. Close covered issues and map only once their acceptance is demonstrated; retain any explicitly deferred item with approved scope and a durable pointer.
+Refresh main and PR head. If main advanced, integrate it and repeat affected verification plus required full checks before merge. Use repository merge convention without force/admin bypass. Preserve private run state and avoid broad branch/worktree cleanup. After merge, verify the merge landed exactly the reviewed tree and nothing else, run ecosystem and test smoke checks on a clean main checkout, and record the PR/merge receipt.
+
+Amendment v2, finding F10: containment is too weak a test, because it admits unreviewed additions, silent omissions and rewritten content. Record the reviewed PR head SHA, the approved integration tree hash, the merge SHA and the resulting main tree hash, and assert that the diff from the recorded pre-merge main to the post-merge main equals the approved diff exactly. Any inequality, any advancement of main after review, and any extra change all require re-review before merge rather than an explanation after it. Close covered issues and map only once their acceptance is demonstrated; retain any explicitly deferred item with approved scope and a durable pointer.
 
 ## Rollback and amendments
 
@@ -177,4 +235,12 @@ An accepted PLAN DEFECT must identify the contradicted assumption and evidence. 
 
 ## Planning verification
 
-Baseline inspected: runtime command/phase and config surfaces, current schemas/tests, review helper, authoritative issue amendments and PR status. Historical baseline was 106 tests plus 8 subtests passing; this plan makes no claim that implementation or current-head portability checks have run. No agents or execution packets were dispatched. Validate this plan's formatting and commit only this file, then stop.
+Baseline inspected: runtime command/phase and config surfaces, current schemas/tests, review helper, authoritative issue amendments and PR status. Historical baseline was 106 tests plus 8 subtests passing; this plan makes no claim that implementation or current-head portability checks have run. Version 1 dispatched no agents or execution packets.
+
+Version 2 adds: an independent plan review at `213ba56` (CHANGES REQUIRED, thirteen findings, all
+accepted after the orchestrator independently verified each finding's cited evidence in source);
+a re-measured baseline at `213ba56` (ecosystem PASS; 106 tests plus 8 subtests passing); and
+confirmation that every file T0 through T6 is asked to create is currently absent, so this is a
+from-scratch implementation rather than a reconcile. `origin/main` is unchanged at the recorded
+`observed_main_sha`, and PR #99 is open, draft and mergeable. The amendment makes no claim that
+any implementation task or portability check has run.
