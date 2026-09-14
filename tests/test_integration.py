@@ -236,7 +236,46 @@ class TestLifecycleIntegration(unittest.TestCase):
         self.assertEqual(rc2, 0)
         # Same state should produce same hash
         self.assertEqual(out1['content_hash'], out2['content_hash'])
-    
+
+    def test_state_save_preserves_prior_fields(self):
+        # new-run pins base_sha/policy_hash/etc and mark-spoke records spokes_loaded;
+        # a later state-save (e.g. a closeout phase update) must not drop either.
+        run_cmd('init-db', '--db', str(self.db))
+        # new-run's --out targets state.json directly, same as real orchestrator usage
+        # (see auto-office SKILL.md's "Start or resume a run"): mark-spoke/check-spoke
+        # only ever look at <state-dir>/state.json.
+        state_path = self.state_dir / 'state.json'
+        rc, out, _ = run_cmd('new-run', '--family-id', 'f1', '--holder-id', 'h1',
+                '--triple', 'fake@1.0/m@medium', '--gear', 'standard',
+                '--playbook', 'Change', '--base-sha', 'abc1234',
+                '--policy-hash', 'sha256:11111111', '--catalog-hash', 'sha256:22222222',
+                '--adapter-hash', 'sha256:33333333', '--config-hash', 'sha256:44444444',
+                '--out', str(state_path))
+        self.assertEqual(rc, 0)
+        run_id = json.loads(state_path.read_text())['run_id']
+
+        rc, out, _ = run_cmd('mark-spoke', '--state-dir', str(self.state_dir), '--spoke', 'auto-planning')
+        self.assertEqual(rc, 0)
+
+        rc, out, _ = run_cmd('state-save',
+            '--state-dir', str(self.state_dir),
+            '--run-id', run_id,
+            '--family-id', 'f1',
+            '--phase', 'closeout')
+        self.assertEqual(rc, 0)
+
+        rc, out, _ = run_cmd('state-load', '--state-dir', str(self.state_dir))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out['phase'], 'closeout')
+        self.assertIn('auto-planning', out.get('spokes_loaded', {}))
+        self.assertEqual(out.get('policy_hash'), 'sha256:11111111')
+        self.assertEqual(out.get('base_sha'), 'abc1234')
+
+        # check-spoke must still see the earlier mark after the state-save
+        rc, out, _ = run_cmd('check-spoke', '--state-dir', str(self.state_dir), '--spoke', 'auto-planning')
+        self.assertEqual(rc, 0)
+        self.assertTrue(out['loaded'])
+
     def test_self_approval_rejected(self):
         # A finding where producer == reviewer should be rejected
         run_cmd('init-db', '--db', str(self.db))

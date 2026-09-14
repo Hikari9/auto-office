@@ -556,7 +556,8 @@ def cmd_lease_check(args):
 
 def cmd_state_save(args):
     state_dir = Path(args.state_dir); state_dir.mkdir(parents=True, exist_ok=True); state_path = state_dir / "state.json"
-    obj = {"run_id": args.run_id, "family_id": args.family_id, "phase": args.phase, "plan_version": args.plan_version, "packet_version": args.packet_version, "updated_at": datetime.now(timezone.utc).isoformat()}
+    obj = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+    obj.update({"run_id": args.run_id, "family_id": args.family_id, "phase": args.phase, "plan_version": args.plan_version, "packet_version": args.packet_version, "updated_at": datetime.now(timezone.utc).isoformat()})
     if args.dispatches: obj["dispatches"] = json.loads(args.dispatches)
     if args.findings: obj["findings"] = json.loads(args.findings)
     if args.lease: obj["lease"] = json.loads(args.lease)
