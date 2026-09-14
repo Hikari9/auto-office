@@ -371,6 +371,66 @@ class TestLifecycleIntegration(unittest.TestCase):
         self.assertEqual(after['phase'], 'planned')
         self.assertNotIn('approval', after)
 
+    def test_plan_version_bump_invalidates_prior_approval(self):
+        state_dir, state = self._start_run()
+        rc, _, err = self._save_phase(state_dir, state, 'planned')
+        self.assertEqual(rc, 0, err)
+        rc, out, err = run_cmd('approve-plan',
+            '--state-dir', str(state_dir),
+            '--approved-by', 'user',
+            '--quote', 'I approve version one')
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out['approval']['plan_version'], 1)
+
+        rc, out, err = run_cmd('increment-plan', '--state-dir', str(state_dir))
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(out['approval_invalidated'])
+        self.assertEqual(out['prior'], 1)
+        self.assertEqual(out['plan_version'], 2)
+
+        state = json.loads((state_dir / 'state.json').read_text())
+        self.assertEqual(state['phase'], 'planned')
+        self.assertNotIn('approval', state)
+        self.assertEqual(state['invalidated_approvals'][-1]['plan_version'], 1)
+        self.assertEqual(
+            state['invalidated_approvals'][-1]['invalidated_for']['plan_version'], 2)
+
+        hook = ROOT / 'scripts' / 'hooks' / 'pre_tool_use.py'
+        hook_env = os.environ.copy()
+        hook_env.pop('OFFICE_STATE_DIR', None)
+        hook_result = subprocess.run(
+            [sys.executable, str(hook)],
+            cwd=self.repo,
+            env=hook_env,
+            input=json.dumps({
+                'tool_name': 'Edit',
+                'tool_input': {'file_path': str(self.repo / 'target.py')},
+            }),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(hook_result.returncode, 2)
+        self.assertIn("phase 'planned'", hook_result.stdout)
+
+        rc, out, err = run_cmd('approve-plan',
+            '--state-dir', str(state_dir),
+            '--approved-by', 'user',
+            '--quote', 'I approve version two')
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out['approval']['plan_version'], 2)
+
+    def test_malformed_route_defect_row_fails_closed(self):
+        state_dir, _ = self._start_run()
+        (state_dir / 'route-defects.jsonl').write_text('{malformed row\n')
+
+        rc, out, err = run_cmd('check-route-defects', '--state-dir', str(state_dir))
+        self.assertEqual(rc, 2)
+        self.assertEqual(err, '')
+        self.assertFalse(out['clear'])
+        self.assertEqual(out['error'], 'route_defects_unreadable')
+        self.assertEqual(out['row'], 1)
+        self.assertIn('row 1', out['message'])
+
     def test_start_cli_can_select_full_fit_path(self):
         env = os.environ.copy()
         env['XDG_STATE_HOME'] = str(Path(self.tmpdir) / 'xdg-full')

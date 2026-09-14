@@ -1016,14 +1016,33 @@ def cmd_route_defect(args):
     dump_json({"recorded": row["id"], "file": str(path), "unresolved": len(load_route_defects(state_dir, unresolved_only=True))})
     return 0
 
+
+class RouteDefectsUnreadable(ValueError):
+    """Raised when durable route-defect evidence cannot be read safely."""
+
+    def __init__(self, path: Path, row_number: int | None, detail: str):
+        self.path = path
+        self.row_number = row_number
+        location = f" row {row_number}" if row_number is not None else ""
+        super().__init__(f"{path}{location} is unreadable: {detail}")
+
+
 def load_route_defects(state_dir, unresolved_only=False):
     path = Path(state_dir) / "route-defects.jsonl"
     if not path.exists(): return []
     rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise RouteDefectsUnreadable(path, None, str(exc)) from exc
+    for row_number, line in enumerate(lines, start=1):
         if not line.strip(): continue
-        try: row = json.loads(line)
-        except ValueError: continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RouteDefectsUnreadable(path, row_number, str(exc)) from exc
+        if not isinstance(row, dict):
+            raise RouteDefectsUnreadable(path, row_number, "row must contain a JSON object")
         if unresolved_only and row.get("resolved"): continue
         rows.append(row)
     return rows
@@ -1052,7 +1071,19 @@ def cmd_resolve_route_defect(args):
 
 def cmd_check_route_defects(args):
     """Closeout gate. Exit 2 while any recorded routing defect is unamended."""
-    unresolved = load_route_defects(Path(args.state_dir), unresolved_only=True)
+    try:
+        unresolved = load_route_defects(Path(args.state_dir), unresolved_only=True)
+    except RouteDefectsUnreadable as exc:
+        result = {
+            "clear": False,
+            "unresolved": [],
+            "error": "route_defects_unreadable",
+            "message": str(exc),
+        }
+        if exc.row_number is not None:
+            result["row"] = exc.row_number
+        dump_json(result)
+        return 2
     dump_json({"clear": not unresolved, "unresolved": unresolved})
     return 0 if not unresolved else 2
 
@@ -1100,10 +1131,48 @@ def cmd_invalidate_packets(args):
     if not state_path.exists(): dump_json({"invalidated": 0, "error": "no state.json"}); return 1
     state = json.loads(state_path.read_text(encoding="utf-8"))
     old_version = state.get("plan_version", 1)
+    approval_invalidated = _invalidate_approval_for_version_change(
+        state,
+        plan_version=args.plan_version,
+        packet_version=state.get("packet_version", 1),
+    )
     state["plan_version"] = args.plan_version
-    # Invalidate logic placeholder for state
     state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
-    dump_json({"invalidated": 1, "plan_version": args.plan_version}); return 0
+    dump_json({"invalidated": 1, "plan_version": args.plan_version,
+               "approval_invalidated": approval_invalidated}); return 0
+
+
+def _invalidate_approval_for_version_change(
+    state: dict,
+    *,
+    plan_version: int,
+    packet_version: int,
+) -> bool:
+    """Remove live approval when its approved artifact version no longer matches."""
+    approval = state.get("approval")
+    if not isinstance(approval, dict):
+        return False
+    packet_aligned = (
+        "packet_version" not in approval
+        or approval.get("packet_version") == packet_version
+    )
+    if approval.get("plan_version") == plan_version and packet_aligned:
+        return False
+
+    invalidated_at = datetime.now(timezone.utc).isoformat()
+    state.setdefault("invalidated_approvals", []).append({
+        **approval,
+        "invalidated_at": invalidated_at,
+        "invalidated_for": {
+            "plan_version": plan_version,
+            "packet_version": packet_version,
+        },
+    })
+    state.pop("approval", None)
+    if state.get("phase") in PHASE_ORDER[PHASE_ORDER.index("approved"):]:
+        state["phase"] = "planned"
+    state["updated_at"] = invalidated_at
+    return True
 
 def cmd_increment_plan(args):
     state_path = Path(args.state_dir) / "state.json"
@@ -1111,6 +1180,11 @@ def cmd_increment_plan(args):
     state = json.loads(state_path.read_text(encoding="utf-8"))
     old = state.get("plan_version", 1)
     new = old + 1
+    approval_invalidated = _invalidate_approval_for_version_change(
+        state,
+        plan_version=new,
+        packet_version=state.get("packet_version", 1),
+    )
     state["plan_version"] = new
     state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     if args.db:
@@ -1120,7 +1194,8 @@ def cmd_increment_plan(args):
         con.execute("INSERT INTO artifact_versions(id, run_id, kind, version, content_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                     (str(uuid.uuid4()), run_id, "plan", new, sha256_obj(state), now))
         con.commit(); con.close()
-    dump_json({"plan_version": new, "prior": old}); return 0
+    dump_json({"plan_version": new, "prior": old,
+               "approval_invalidated": approval_invalidated}); return 0
 
 def main():
     p=argparse.ArgumentParser(description='Auto Office v3 deterministic runtime helpers')
