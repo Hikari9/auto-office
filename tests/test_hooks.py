@@ -17,23 +17,30 @@ class TestHooks(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _write_run(self, phase, state_text=None):
+    def _write_run(self, phase, state_text=None, approval_quote=None):
         run_id = 'run-123'
         canonical_state = self.repo / 'canonical-state' / run_id
         canonical_state.mkdir(parents=True)
         if state_text is None:
-            state_text = json.dumps({'run_id': run_id, 'phase': phase})
+            state = {'run_id': run_id, 'phase': phase}
+            if approval_quote is not None:
+                state['approval'] = {'quote': approval_quote}
+            state_text = json.dumps(state)
         (canonical_state / 'state.json').write_text(state_text)
         pointer_dir = self.state_dir / 'runs'
         pointer_dir.mkdir()
         (pointer_dir / f'{run_id}.ref').write_text(str(canonical_state) + '\n')
 
-    def _run_pre_tool_use(self, payload):
+    def _run_pre_tool_use(self, payload, cwd=None, with_state_dir=True):
         hook = ROOT / 'scripts' / 'hooks' / 'pre_tool_use.py'
-        env = {**os.environ, 'OFFICE_STATE_DIR': str(self.state_dir)}
+        env = {**os.environ}
+        if with_state_dir:
+            env['OFFICE_STATE_DIR'] = str(self.state_dir)
+        else:
+            env.pop('OFFICE_STATE_DIR', None)
         return subprocess.run(
             [sys.executable, str(hook)],
-            cwd=self.repo,
+            cwd=cwd or self.repo,
             env=env,
             input=json.dumps(payload),
             capture_output=True,
@@ -60,10 +67,63 @@ class TestHooks(unittest.TestCase):
         self.assertIn("phase 'planned'", r.stdout)
 
     def test_pre_tool_use_approved_allows_mutation(self):
-        self._write_run('approved')
+        self._write_run('approved', approval_quote='I approve this plan.')
         r = self._run_pre_tool_use({'tool_name': 'Edit', 'tool_input': {'file_path': 'x'}})
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout, '')
+
+    def test_pre_tool_use_approved_without_quote_blocks_mutation(self):
+        self._write_run('approved')
+        r = self._run_pre_tool_use({'tool_name': 'Edit', 'tool_input': {'file_path': 'x'}})
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('approval_required', r.stdout)
+        self.assertIn('approval.quote', r.stdout)
+
+    def test_pre_tool_use_default_state_is_found_from_repo_root(self):
+        self._write_run('planned')
+        nested = self.repo / 'nested' / 'directory'
+        nested.mkdir(parents=True)
+        r = self._run_pre_tool_use(
+            {'tool_name': 'Write', 'tool_input': {'file_path': 'x'}},
+            cwd=nested,
+            with_state_dir=False,
+        )
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("phase 'planned'", r.stdout)
+
+    def test_pre_tool_use_approval_exemption_requires_standalone_command(self):
+        self._write_run('planned')
+        command = (
+            'python3 scripts/office_runtime.py approve-plan --state-dir /tmp/state '
+            '--approved-by user --quote "I approve this plan."'
+        )
+        r = self._run_pre_tool_use({'tool_name': 'Bash', 'tool_input': {'command': command}})
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, '')
+
+    def test_pre_tool_use_approval_exemption_rejects_chained_mutation(self):
+        self._write_run('planned')
+        command = (
+            'python3 scripts/office_runtime.py approve-plan --state-dir /tmp/state '
+            '--approved-by user --quote "I approve this plan." && rm -f victim'
+        )
+        r = self._run_pre_tool_use({'tool_name': 'Bash', 'tool_input': {'command': command}})
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('approval_required', r.stdout)
+
+    def test_pre_tool_use_approval_exemption_rejects_shell_injection_shapes(self):
+        self._write_run('planned')
+        commands = [
+            'echo office_runtime.py approve-plan && rm -f victim',
+            'python3 scripts/office_runtime.py approve-plan --quote "$(rm -f victim)"',
+            'python3 scripts/office_runtime.py approve-plan --quote "safe" > victim',
+            'python3 scripts/office_runtime.py approve-plan --quote "safe" 2>&victim',
+            'python3 scripts/office_runtime.py approve-plan --quote "safe"\nrm -f victim',
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                r = self._run_pre_tool_use({'tool_name': 'Bash', 'tool_input': {'command': command}})
+                self.assertEqual(r.returncode, 2)
 
     def test_pre_tool_use_malformed_state_blocks_mutation(self):
         self._write_run('intake', '{not-json')

@@ -16,6 +16,7 @@ HOOK_NAME = "auto-office-approval-gate"
 ALLOWED_PHASES = {"approved", "executing", "reviewed", "closed"}
 BLOCKED_PHASES = {"intake", "planned"}
 DIRECT_MUTATING_TOOLS = {"edit", "write", "notebookedit"}
+SHELL_OPERATOR_TOKENS = {";", "&", "&&", "|", "||", "(", ")", "<", ">"}
 READ_ONLY_COMMANDS = {
     "awk",
     "basename",
@@ -109,11 +110,23 @@ MUTATING_GIT_COMMANDS = {
 }
 
 
+def _repo_root() -> Path | None:
+    try:
+        current = Path.cwd().resolve()
+    except OSError:
+        return None
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
 def _office_dir() -> Path:
     value = os.environ.get("OFFICE_STATE_DIR")
-    path = Path(value).expanduser() if value else Path.cwd() / ".office"
+    repo_root = _repo_root()
+    path = Path(value).expanduser() if value else (repo_root or Path.cwd()) / ".office"
     if not path.is_absolute():
-        path = Path.cwd() / path
+        path = (repo_root or Path.cwd()) / path
     return path.resolve()
 
 
@@ -172,13 +185,45 @@ def _command(payload: dict[str, Any]) -> str:
     return ""
 
 
+def _shell_tokens(command: str) -> list[str] | None:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        return list(lexer)
+    except ValueError:
+        return None
+
+
 def _approval_command(command: str) -> bool:
-    return bool(
-        re.search(
-            r"(?:^|[\s/'\"])(?:[^\s/'\"]*/)?office_runtime\.py[\s/'\"]+approve-plan(?:\s|$)",
-            command,
-        )
-    )
+    """Return true only for a shell-simple office_runtime approve-plan call."""
+    if not command.strip() or any(character in command for character in "\r\n`\x00"):
+        return False
+    # Command and process substitutions execute nested shell code even when
+    # they occur in a double-quoted argument. A conservative rejection keeps
+    # the exemption limited to a plain approval invocation.
+    if "$((" in command or "$(" in command or "${" in command:
+        return False
+    tokens = _shell_tokens(command)
+    if not tokens or any(
+        token in SHELL_OPERATOR_TOKENS or set(token) <= set(";&|()<>")
+        for token in tokens
+    ):
+        return False
+    tokens = _strip_prefix(tokens)
+    if not tokens:
+        return False
+
+    first = Path(tokens[0]).name
+    if re.fullmatch(r"python(?:3(?:\.\d+)?)?", first):
+        if len(tokens) < 3:
+            return False
+        script, args = tokens[1], tokens[2:]
+    elif first == "office_runtime.py":
+        script, args = tokens[0], tokens[1:]
+    else:
+        return False
+    return Path(script).name == "office_runtime.py" and bool(args) and args[0] == "approve-plan"
 
 
 def _has_output_redirection(command: str) -> bool:
@@ -280,6 +325,8 @@ def _bash_is_mutating(command: str) -> bool:
         return False
     if _has_output_redirection(command):
         return True
+    if "$(" in command or "$((" in command or "${" in command or "`" in command:
+        return True
     segments = re.split(r"&&|\|\||[;|\n]", command)
     return any(_segment_is_mutating(segment) for segment in segments)
 
@@ -360,6 +407,17 @@ def main() -> int:
 
     phase = state.get("phase")
     if phase in ALLOWED_PHASES:
+        approval = state.get("approval")
+        quote = approval.get("quote") if isinstance(approval, dict) else None
+        if not isinstance(quote, str) or not quote.strip():
+            return _block(
+                "approval_required",
+                f"Auto Office run {state.get('run_id', state_path.parent.name)} is in phase '{phase}' "
+                "but has no recorded non-empty approval.quote. Mutation is blocked until the user's "
+                "verbatim approval is recorded.",
+                phase=phase,
+                state_file=str(state_path),
+            )
         return 0
     if phase in BLOCKED_PHASES:
         command = (
