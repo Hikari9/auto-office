@@ -223,6 +223,32 @@ into a sequential one and burns the wall-clock term in the reward (#48).
 - A wave ends when every dispatch in it has returned or been declared dead by
   two independent liveness signals.
 
+**Completion is event-driven, never learned by blocking.** The orchestrator
+arms a background monitor covering every dispatch at or before the moment it
+dispatches a wave, and completion reaches the orchestrator as an event from
+that monitor, not by waiting on one dispatch at a time. The monitor stays
+armed for the life of the run, not per wave, so a dispatch that finishes
+while the orchestrator is mid-conversation with the user still reports —
+conversing with the user must never suspend monitoring. It must cover every
+terminal state, not only success: finished, idle, blocked, unknown, and
+disappeared all have to fire, because a monitor that only matches the happy
+path is silent through a crash, and silence is indistinguishable from still
+running. A blocking wait on a single dispatch is a defect whenever another
+dispatch is live. If the monitor is lost or was never armed, the orchestrator
+re-polls before making any claim about dispatch state — reporting a status it
+has not re-read since the last known event is reporting stale state as fact.
+On a completion event the orchestrator collects the result, closes the
+finished agent's pane, and appends or updates the spawn ledger; pane
+reclamation is the orchestrator's job, not the user's to ask for.
+
+Observed failure this closes: an orchestrator hand-rolled blocking waits to
+learn when delegated agents finished. It occupied the orchestrator's only
+execution thread, so it could not respond to the user and serialised a
+parallel wave back into sequence; a user interruption of one wait then cost
+the orchestrator its only completion signal, and it went on to report a
+worker as still running minutes after that worker had actually finished.
+Finished agents' panes accumulated because nothing fired on completion.
+
 ## 7. Integration
 
 Between execution and review, the run integrates:

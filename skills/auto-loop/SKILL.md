@@ -16,6 +16,13 @@ A single blocking wait on one worker is a defect the moment another worker has a
 A wave ends when every dispatch in it has returned or been declared dead by two independent
 liveness signals — one signal alone is not a death.
 
+Arm a background monitor over every dispatch at or before dispatch time, kept armed for the whole
+run, not per wave — completion is an event from it, never a blocking wait, and it must fire on
+every terminal state (finished, idle, blocked, unknown, disappeared), not just success. Talking to
+the user never suspends it. Lost or unarmed monitor: re-poll before asserting any dispatch state.
+On each completion event, collect the result, close that agent's pane, and update the spawn
+ledger — see spec section 6 for the full rule and the failure it closes.
+
 At integration: commit each worker's tree on its own dispatch branch, authored by the
 orchestrator; merge dispatch branches into the run's integration branch in wave order; resolve
 conflicts at the orchestrator, never by re-dispatching a worker into a tree it does not own; then
