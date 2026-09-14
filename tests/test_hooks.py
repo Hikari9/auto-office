@@ -17,6 +17,67 @@ class TestHooks(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    def _write_run(self, phase, state_text=None):
+        run_id = 'run-123'
+        canonical_state = self.repo / 'canonical-state' / run_id
+        canonical_state.mkdir(parents=True)
+        if state_text is None:
+            state_text = json.dumps({'run_id': run_id, 'phase': phase})
+        (canonical_state / 'state.json').write_text(state_text)
+        pointer_dir = self.state_dir / 'runs'
+        pointer_dir.mkdir()
+        (pointer_dir / f'{run_id}.ref').write_text(str(canonical_state) + '\n')
+
+    def _run_pre_tool_use(self, payload):
+        hook = ROOT / 'scripts' / 'hooks' / 'pre_tool_use.py'
+        env = {**os.environ, 'OFFICE_STATE_DIR': str(self.state_dir)}
+        return subprocess.run(
+            [sys.executable, str(hook)],
+            cwd=self.repo,
+            env=env,
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+        )
+
+    def test_pre_tool_use_no_run_state_allows_mutation(self):
+        r = self._run_pre_tool_use({'tool_name': 'Edit', 'tool_input': {'file_path': 'x'}})
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, '')
+
+    def test_pre_tool_use_intake_blocks_mutation(self):
+        self._write_run('intake')
+        r = self._run_pre_tool_use({'tool_name': 'Write', 'tool_input': {'file_path': 'x'}})
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('approve-plan', r.stdout)
+        self.assertIn("phase 'intake'", r.stdout)
+
+    def test_pre_tool_use_planned_blocks_mutation(self):
+        self._write_run('planned')
+        r = self._run_pre_tool_use({'tool_name': 'NotebookEdit', 'tool_input': {'notebook_path': 'x'}})
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('approve-plan', r.stdout)
+        self.assertIn("phase 'planned'", r.stdout)
+
+    def test_pre_tool_use_approved_allows_mutation(self):
+        self._write_run('approved')
+        r = self._run_pre_tool_use({'tool_name': 'Edit', 'tool_input': {'file_path': 'x'}})
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, '')
+
+    def test_pre_tool_use_malformed_state_blocks_mutation(self):
+        self._write_run('intake', '{not-json')
+        r = self._run_pre_tool_use({'tool_name': 'Write', 'tool_input': {'file_path': 'x'}})
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('unreadable_run_state', r.stdout)
+        self.assertIn('fails closed', r.stdout)
+
+    def test_pre_tool_use_non_mutating_tool_allows_with_unapproved_run(self):
+        self._write_run('intake')
+        r = self._run_pre_tool_use({'tool_name': 'Bash', 'tool_input': {'command': 'git status --short'}})
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, '')
+
     def test_install_and_uninstall_hooks(self):
         install_script = ROOT / 'scripts' / 'hooks' / 'install_hooks.sh'
         fake_home = self.repo / 'home'
@@ -52,11 +113,17 @@ class TestHooks(unittest.TestCase):
         validator = Draft202012Validator(schema)
         errors = list(validator.iter_errors(manifest_data))
         self.assertEqual(errors, [])
+        approval_hooks = [h for h in manifest_data['hooks'] if h['name'] == 'pre_tool_use_approval_gate']
+        self.assertEqual(len(approval_hooks), 1)
+        self.assertTrue(approval_hooks[0]['script'].endswith('/pre_tool_use.py'))
 
         for config_path in [fake_home / '.codex' / 'hooks.json', fake_home / '.gemini' / 'config' / 'hooks.json']:
             config = json.loads(config_path.read_text())
             self.assertNotIn('catch-up.mjs', json.dumps(config))
             self.assertIn(str(self.state_dir / 'hooks'), json.dumps(config))
+
+        codex_config = json.loads((fake_home / '.codex' / 'hooks.json').read_text())
+        self.assertIn('pre_tool_use.py', json.dumps(codex_config['hooks']['PreToolUse']))
 
         # Claude Code requires hooks.<Event> to be an array of matchers, not a bare
         # command string (a bare string is silently ignored by Claude Code).
@@ -65,6 +132,10 @@ class TestHooks(unittest.TestCase):
             self.assertIsInstance(claude_config['hooks'][event], list,
                                    f'hooks.{event} must be a matcher array, not a bare string')
             self.assertIn(str(self.state_dir / 'hooks'), json.dumps(claude_config['hooks'][event]))
+        self.assertIn('pre_tool_use.py', json.dumps(claude_config['hooks']['PreToolUse']))
+        self.assertIn('/opt/homebrew/bin/node', json.dumps(claude_config['hooks']['Stop']))
+        gemini_config = json.loads((fake_home / '.gemini' / 'config' / 'hooks.json').read_text())
+        self.assertIn('/opt/homebrew/bin/node', json.dumps(gemini_config['Stop']))
 
         # Test uninstall
         r = subprocess.run([str(install_script), '--uninstall'], cwd=self.repo, env=env, capture_output=True, text=True)
