@@ -172,6 +172,42 @@ recorded approval is what the fail-closed mutation hook reads.
 
 Silence is not approval.
 
+## 5.1 Mid-run additions
+
+A follow-up that arrives during an active run is routing input, not orchestrator work. The
+orchestrator classifies it before acting:
+
+- Fits an already-frozen field, no plan change needed → route to an executor as a new execution
+  packet in the current or next wave.
+- Needs planning, a new interface, or changes the wave structure → route to the planner, increment
+  the plan version, invalidate dependent packets.
+- Changes one of the five frozen fields → re-freeze and take a new approval. The approval
+  authorizes the plan that was approved, not an arbitrarily grown one.
+
+The orchestrator announces the route for each addition, the same disclosure as any dispatch
+(section 4.1). Inline execution by the orchestrator is legal only when the fix's brief would
+exceed the edit itself — never for volume, never because the chain looks linear, never because
+it is faster right now.
+
+A follow-up whose target write scope is held by a live dispatch waits for that wave, or goes to
+the worker already holding the scope (section 4). It never becomes a second writer.
+
+The orchestrator stays present to do this: it does not occupy itself with work that would leave
+it unresponsive to a mid-run ask, and it polls dispatches rather than blocking on one (section 6).
+A blocked or absorbed orchestrator cannot route, which is what this section exists to prevent.
+
+An executor holds a task queue for its write scope, not a single task; a follow-up routed to an
+executor that already has work appends to that queue rather than replacing it, and its prior
+tasks, findings and constraints stay binding. Resuming that executor's session is preferred over
+spawning a fresh one for the same scope, because the accumulated context is what stops a task
+from being dropped. The executor reports per-task status on completion — which queued tasks it
+finished and which it did not — so three queued tasks yield three outcomes, never one merged
+summary. An unreported queued task counts as not done.
+
+Observed failure this closes: an orchestrator implemented several streamed follow-ups inline
+because each looked small, making itself the bottleneck, holding write scopes that belonged to
+workers, and dropping the routing and telemetry record that makes a run reviewable.
+
 ## 6. Non-blocking orchestration
 
 The orchestrator must not idle while delegated work runs. This is a requirement,
@@ -291,6 +327,7 @@ An assertion that cannot run is not a weaker gate. It is no gate.
 | #47: planner never talks to the user | Section 2 | The interview is orchestrator-owned. The planner receives grilled intent as a serialized artifact. |
 | Out of scope: unattended self-merge; human merges `main` | Section 9 | Loop stops at a ready PR. Working-branch merges only. `main` requires an explicit per-run statement from the user. |
 | #24: every role is portable; input is a serialized artifact | Sections 2, 4 | Grilled intent and the pinned contract are files, not agent state, so a compacted or transferred role loses nothing. |
+| #24/single approval: one approval authorizes one plan | Section 5.1 | A mid-run addition is routed as new input to planner or executor, or triggers re-approval; it never becomes ad hoc orchestrator state, so portability and the single-approval boundary both hold. |
 | #23/#51/#52: replay-gated policy, no auto-merge | Section 10 | Unchanged. Section 10 additionally closes the labelling loophole. |
 | #54: size is a guardrail against prompt bloat | Whole document | This spec adds stages that change decisions. Prose that changes no decision is a defect in the document. |
 | #18/#19 completed under retired map #15 | Section 0 | Imported in minimal form rather than re-decided, preserving the prior reasoning. |
