@@ -238,7 +238,7 @@ Receipt: schema tests accept complete examples and reject missing identity/versi
 
 ### Wave 1 — parallel, disjoint foundations
 
-Amendment v3 adds T2B here. Wave 1 write scopes remain disjoint: T1 owns instructions and specs, T2 owns `scripts/office_runtime.py`, `scripts/office_family.py`, `scripts/office_packets.py` and `config/config.default.yaml`, T2B owns `scripts/office_routing.py` and `scripts/office_scoring.py`, T3 owns the monitor and pane-hook files. No file has two owners.
+Amendment v3 adds T2B here. Wave 1 write scopes remain disjoint: T1 owns instructions and specs, T2 owns `scripts/office_runtime.py`, `scripts/office_family.py`, `scripts/office_packets.py` and `config/config.default.yaml`, T2B owns `scripts/office_routing.py` and `scripts/office_scoring.py`, T3 owns the monitor and pane-hook files. No file has two owners. Amendment v6 adds one read-only file: `tests/test_trust_conformance.py` is created by T0 and owned by nobody in Wave 1. T2B must make it pass un-skipped and must never edit it; a case it believes is wrong is a defect reported against T0's contract, not a test to change. A worker that edits the suite to go green has deleted the only artifact proving the trust invariant.
 
 **T1: Reconcile active instructions and portable intake.**
 Depends on: T0.
