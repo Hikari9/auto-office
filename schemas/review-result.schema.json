@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Auto Office v3 review result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "review_id",
+    "dispatch_id",
+    "producer_id",
+    "reviewer_id",
+    "reviewer_triple",
+    "review_mode",
+    "reviewed_head_sha",
+    "requirements_version",
+    "plan_version",
+    "routing_version",
+    "review_scope",
+    "disposition_owner",
+    "overall_status",
+    "findings",
+    "evidence",
+    "evidence_hash",
+    "created_at"
+  ],
+  "properties": {
+    "review_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "dispatch_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "family_id": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "producer_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reviewer_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reviewer_triple": {
+      "type": "string",
+      "minLength": 1
+    },
+    "review_mode": {
+      "enum": [
+        "independent_adversary",
+        "labeled-inline",
+        "integration_adversary"
+      ]
+    },
+    "reviewed_head_sha": {
+      "type": "string",
+      "minLength": 4
+    },
+    "requirements_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "plan_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "routing_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "review_scope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "disposition_owner": {
+      "enum": [
+        "executor",
+        "planner",
+        "orchestrator"
+      ]
+    },
+    "overall_status": {
+      "enum": [
+        "PASS",
+        "CHANGES_REQUIRED",
+        "PLAN_DEFECT",
+        "BRIEF_DEFECT",
+        "UNAVAILABLE"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "finding_id",
+          "status",
+          "severity",
+          "summary",
+          "evidence",
+          "evidence_hash"
+        ],
+        "properties": {
+          "finding_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": [
+              "accepted-material",
+              "accepted-minor",
+              "rejected-on-evidence",
+              "deferred"
+            ]
+          },
+          "severity": {
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_hash": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "evidence": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence_hash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "created_at": {
+      "type": "string",
+      "minLength": 10
+    }
+  }
+}

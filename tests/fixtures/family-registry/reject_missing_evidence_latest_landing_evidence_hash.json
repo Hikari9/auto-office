@@ -1,0 +1,39 @@
+{
+  "session_id": "sess-main-001",
+  "current_focus_family_id": "fam-core",
+  "updated_at": "2026-09-15T00:00:00Z",
+  "families": {
+    "fam-core": {
+      "family_id": "fam-core",
+      "repo": "Hikari9/office-skills",
+      "issue": 35,
+      "phase": "execution",
+      "requirements_version": 1,
+      "plan_version": 2,
+      "routing_version": 2,
+      "ownership": {
+        "holder_id": "holder-001",
+        "role": "orchestrator",
+        "triple": "claude@local/opus@high"
+      },
+      "dependencies": [],
+      "active_dispatches": [
+        "disp-001"
+      ],
+      "latest_landing": {
+        "landing_id": "land-001",
+        "task_id": "T0",
+        "head_sha": "5d7a450",
+        "validation_evidence": "PASS",
+        "timestamp": "2026-09-15T00:00:00Z"
+      },
+      "pending_decisions": [
+        {
+          "decision_id": "dec-01",
+          "summary": "Review loop binding",
+          "status": "approved"
+        }
+      ]
+    }
+  }
+}

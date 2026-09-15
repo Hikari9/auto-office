@@ -110,6 +110,18 @@
       "type": "string",
       "minLength": 8
     },
+    "requirements_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "routing_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
     "plan_version": {
       "type": "integer",
       "minimum": 1

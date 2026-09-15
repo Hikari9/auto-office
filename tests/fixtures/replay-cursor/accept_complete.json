@@ -1,0 +1,10 @@
+{
+  "cursor_id": "cur-001",
+  "session_id": "sess-001",
+  "family_id": "fam-core",
+  "dispatch_id": "disp-exec-001",
+  "last_acknowledged_sequence": 1,
+  "last_acknowledged_event_id": "evt-001",
+  "acknowledgement_hash": "sha256:279b986360e082dcc2136dfc5d29804f6ba1ee3e0ccdf8449612b07d4d7b94a3",
+  "acknowledged_at": "2026-09-15T00:00:00Z"
+}

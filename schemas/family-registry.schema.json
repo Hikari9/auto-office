@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Auto Office v3 family registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "session_id",
+    "current_focus_family_id",
+    "families"
+  ],
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "current_focus_family_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "updated_at": {
+      "type": "string",
+      "minLength": 10
+    },
+    "families": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "family_id",
+          "repo",
+          "issue",
+          "phase",
+          "requirements_version",
+          "plan_version",
+          "routing_version",
+          "ownership",
+          "dependencies",
+          "active_dispatches",
+          "latest_landing",
+          "pending_decisions"
+        ],
+        "properties": {
+          "family_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1
+          },
+          "issue": {
+            "type": [
+              "integer",
+              "string"
+            ]
+          },
+          "phase": {
+            "enum": [
+              "intake",
+              "planning",
+              "execution",
+              "review",
+              "integration",
+              "closed"
+            ]
+          },
+          "requirements_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "plan_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "routing_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "ownership": {
+            "type": "object",
+            "required": [
+              "holder_id",
+              "role",
+              "triple"
+            ],
+            "properties": {
+              "holder_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "role": {
+                "type": "string",
+                "minLength": 1
+              },
+              "triple": {
+                "type": "string",
+                "pattern": ".+@.+/.+@.+"
+              }
+            },
+            "additionalProperties": true
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "active_dispatches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "latest_landing": {
+            "type": "object",
+            "required": [
+              "landing_id",
+              "task_id",
+              "head_sha",
+              "validation_evidence",
+              "evidence_hash"
+            ],
+            "properties": {
+              "landing_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "task_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "head_sha": {
+                "type": "string",
+                "minLength": 4
+              },
+              "validation_evidence": {
+                "type": [
+                  "string",
+                  "object"
+                ]
+              },
+              "evidence_hash": {
+                "type": "string",
+                "minLength": 8
+              },
+              "timestamp": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          },
+          "pending_decisions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "decision_id",
+                "summary",
+                "status"
+              ],
+              "properties": {
+                "decision_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "summary": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "status": {
+                  "enum": [
+                    "pending",
+                    "approved",
+                    "rejected"
+                  ]
+                }
+              },
+              "additionalProperties": true
+            }
+          }
+        }
+      }
+    }
+  }
+}

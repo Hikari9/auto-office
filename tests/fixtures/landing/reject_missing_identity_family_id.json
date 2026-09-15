@@ -1,0 +1,51 @@
+{
+  "landing_id": "land-001",
+  "session_id": "sess-001",
+  "producer": {
+    "dispatch_id": "disp-001",
+    "holder_id": "holder-exec-1",
+    "role": "executor",
+    "triple": "agy@local/gemini-3.8-flash@medium"
+  },
+  "scope": "T0",
+  "requirements_version": 1,
+  "plan_version": 2,
+  "routing_version": 2,
+  "base_sha": "5d7a450",
+  "head_sha": "6e8b561",
+  "diff_stat": "5 files changed, 200 insertions",
+  "completed_tasks": [
+    "T0"
+  ],
+  "decisions": [
+    "Pin schemas as draft 2020-12"
+  ],
+  "changes_and_interfaces": [
+    "Added 10 new schemas"
+  ],
+  "validation_evidence": {
+    "commands": [
+      "python3 scripts/check_ecosystem.py"
+    ],
+    "passed": true,
+    "output_summary": "PASS",
+    "evidence_hash": "sha256:279b986360e082dcc2136dfc5d29804f6ba1ee3e0ccdf8449612b07d4d7b94a3"
+  },
+  "review": {
+    "mode": "labeled-inline",
+    "round": 1,
+    "reviewer_id": "rev-001",
+    "dispositions": [
+      {
+        "finding_id": "find-01",
+        "disposition": "accepted",
+        "rationale": "Addressed missing field"
+      }
+    ]
+  },
+  "deviations": [],
+  "dependencies_and_artifacts": [
+    "schemas/execution-packet.schema.json"
+  ],
+  "blockers": []
+}
