@@ -1070,9 +1070,30 @@ def cmd_resolve_route_defect(args):
     return 0
 
 def cmd_check_route_defects(args):
-    """Closeout gate. Exit 2 while any recorded routing defect is unamended."""
+    """Closeout gate. Exit 2 while any recorded routing defect is unamended.
+
+    Absent run state is not a clean bill of health. `route-defects.jsonl` is only
+    written when a defect is recorded, so its absence is ambiguous: it means
+    either "this run dispatched routes and none failed" or "there is no run here
+    at all" — a run that never called `start`, a mistyped `--state-dir`, or state
+    that was cleaned up. Reporting the second as `clear: true` hands `auto-closeout`
+    an affirmative pass from the one gate that exists to block completion, so a
+    lifecycle that skipped `start` closes out looking gated.
+
+    Resolve the ambiguity the same way `cmd_route_defect` and `cmd_check_spoke`
+    already do — on `state.json` — and fail closed when it is missing.
+    """
+    state_dir = Path(args.state_dir)
+    if not (state_dir / "state.json").exists():
+        dump_json({
+            "clear": False,
+            "unresolved": [],
+            "error": "no_run_state",
+            "message": f"no state.json under {state_dir}; this run was never started, so routing defects cannot be checked",
+        })
+        return 2
     try:
-        unresolved = load_route_defects(Path(args.state_dir), unresolved_only=True)
+        unresolved = load_route_defects(state_dir, unresolved_only=True)
     except RouteDefectsUnreadable as exc:
         result = {
             "clear": False,
