@@ -39,9 +39,11 @@ base_drift:
     owned_by: user, outside every task's Touches list; no wave contends with these files
     rebaselined_pytest: 109 passed, 8 subtests passed
     integration_expectation: >-
-      T0's worktree was cut at 5d7a450 and reports 108 passed / 83 subtests, which is the
-      106/8 baseline plus 2 tests and 75 subtests. Merging T0 onto 487fca8 must therefore
-      yield 111 passed / 83 subtests. Any other number at integration is a regression or a
+      T0's worktree was cut at 5d7a450 and, after remediating 11 independent-review
+      findings, reports 112 passed / 84 subtests, which is the 106/8 baseline plus 6 tests
+      and 76 subtests. Merging T0 onto 487fca8 must therefore yield 115 passed / 84
+      subtests. (The earlier figure of 111/83 described T0 at commit 688246b, before
+      remediation.) Any other number at integration is a regression or a
       collision to explain, not a new baseline. Later dispatches cut from 487fca8 or later
       use the 109/8 baseline instead.
 amendment_history:
