@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Browser acceptance executes real flow"
+expectation: "user-facing reachable runtime is verified through acceptance path not homepage open"
+source: OFFICE-SKILLS-V3-SPEC

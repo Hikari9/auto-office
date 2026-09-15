@@ -1,0 +1,5 @@
+{
+  "label": "verified_no_observed_failure",
+  "evidence_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "contributing_attributions": ["narrative:success", "narrative:partial_success"]
+}

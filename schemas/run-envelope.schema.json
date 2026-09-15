@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Auto Office v3 run envelope",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "run_id",
+    "family_id",
+    "dispatch_id",
+    "role",
+    "holder_id",
+    "triple",
+    "mode",
+    "playbook",
+    "base_sha",
+    "policy_hash",
+    "catalog_snapshot_hash",
+    "adapter_snapshot_hash",
+    "effective_config_hash",
+    "plan_version",
+    "packet_version",
+    "created_at"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "family_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "dispatch_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "role": {
+      "enum": [
+        "orchestrator",
+        "planner",
+        "plan_reviewer",
+        "executor",
+        "worker",
+        "code_reviewer",
+        "browser_verifier",
+        "closeout_verifier"
+      ]
+    },
+    "holder_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "triple": {
+      "type": "string",
+      "pattern": ".+@.+/.+@.+"
+    },
+    "selection_disclosure": {
+      "type": "object",
+      "required": [
+        "role",
+        "model_id",
+        "invocation_model_id",
+        "effort",
+        "harness",
+        "harness_version",
+        "triple",
+        "reason"
+      ],
+      "properties": {
+        "role": {"type": "string", "minLength": 1},
+        "model_id": {"type": "string", "minLength": 1},
+        "invocation_model_id": {"type": "string", "minLength": 1},
+        "effort": {"type": "string", "minLength": 1},
+        "harness": {"type": "string", "minLength": 1},
+        "harness_version": {"type": "string", "minLength": 1},
+        "triple": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "mode": {
+      "type": "string",
+      "minLength": 1
+    },
+    "playbook": {
+      "enum": [
+        "Change",
+        "Restructure",
+        "Investigate",
+        "Prototype",
+        "Visual"
+      ]
+    },
+    "base_sha": {
+      "type": "string",
+      "minLength": 4
+    },
+    "policy_hash": {
+      "type": "string",
+      "minLength": 8
+    },
+    "catalog_snapshot_hash": {
+      "type": "string",
+      "minLength": 8
+    },
+    "adapter_snapshot_hash": {
+      "type": "string",
+      "minLength": 8
+    },
+    "effective_config_hash": {
+      "type": "string",
+      "minLength": 8
+    },
+    "requirements_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "routing_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "plan_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "packet_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "created_at": {
+      "type": "string",
+      "minLength": 10
+    }
+  }
+}

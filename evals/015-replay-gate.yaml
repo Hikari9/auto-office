@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Policy threshold change requires replay"
+expectation: "capability/reward/maturity/major routing threshold changes compare old/new decisions on hot/warm rows"
+source: OFFICE-SKILLS-V3-SPEC

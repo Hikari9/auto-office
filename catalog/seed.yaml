@@ -1,0 +1,770 @@
+schema_version: 3
+kind: shipped-seed-catalog
+notes: >-
+  Identity-only cold-start rows for model names explicitly present in the v3 specification.
+  Benchmark indexes, prices, speed, and release dates are intentionally unknown until refreshed
+  from authoritative sources. These rows do not prove local harness support.
+
+  `model_id` is the spec's canonical name; `invocation_model_id` is the slug the named harness
+  actually accepts on the command line. They are not interchangeable — the spec name `luna` is
+  rejected by codex, which wants `gpt-5.6-luna` — and a row that leaves `invocation_model_id`
+  null makes the router dispatch the canonical name unverified. When a dispatch fails on an
+  unknown model, record it with `office_runtime.py route-defect` and amend the row here through
+  `auto-self-improve`; never hand-patch the slug in a brief and move on.
+
+  `invocation_source` records machine-readable slug provenance across three states:
+  'local-evidence:*' (slug proven against a local harness command),
+  'documented:*' (slug documented in authoritative sources but unproven against local harness),
+  and 'unverified:*' (with null invocation_model_id, canonical name unverified).
+benchmark_index_version: Artificial Analysis Intelligence Index v4.3
+benchmark_index_notes: >-
+  Scores from index version v4.3 (2026-09-07) are NOT comparable to v4.1.1 or v4.2 scores;
+  v4.3 replaced tau3-Banking with AutomationBench-AA and Terminal-Bench v2.1 with v4.0, and
+  v4.2 added AA-Briefcase and GDP.pdf and removed GPQA Diamond. Never compare raw scores
+  across index versions.
+models:
+  - model_id: opus
+    invocation_model_id: claude-opus-5
+    invocation_harness: claude
+    invocation_source: 'documented: the claude CLI cannot enumerate models, so this slug is documented rather than CLI-proven; record a route-defect if a dispatch rejects it'
+    source_identifier: spec:planner-seed-opus
+    source_name: office-skills-v3-spec
+    effort: medium
+    source_effort: Medium
+    effort_confidence: mapped
+    benchmark_indexes: {}
+    price_fields: null
+    speed_fields: null
+    release_date: null
+    source_snapshot_metadata: {kind: normative-seed-preference}
+    content_hash: null
+    supersession_metadata: null
+  - model_id: astra
+    invocation_model_id: gpt-6-astra
+    invocation_harness: codex
+    invocation_source: local-evidence:codex-debug-models-bundled
+    source_identifier: spec:planner-fallback-astra
+    source_name: office-skills-v3-spec
+    effort: low
+    source_effort: Low
+    effort_confidence: mapped
+    benchmark_indexes: {}
+    price_fields: null
+    speed_fields: null
+    release_date: null
+    source_snapshot_metadata: {kind: normative-seed-preference}
+    content_hash: null
+    supersession_metadata: null
+  - model_id: luna
+    invocation_model_id: gpt-5.6-luna
+    invocation_harness: codex
+    invocation_source: local-evidence:dispatch-failure-amendment
+    source_identifier: spec:reviewer-seed-luna
+    source_name: office-skills-v3-spec
+    effort: xhigh
+    source_effort: XHigh
+    effort_confidence: mapped
+    benchmark_indexes: {}
+    price_fields: null
+    speed_fields: null
+    release_date: null
+    source_snapshot_metadata: {kind: normative-seed-preference}
+    content_hash: null
+    supersession_metadata: null
+  - model_id: claude-fable-5-1
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-fable-5-1
+    source_name: artificial-analysis
+    effort: max
+    source_effort: Max Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 53}
+    price_fields: {input_per_mtok: 10.0, output_per_mtok: 50.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 67, ttft_ms: null}
+    release_date: '2026-09'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-fable-5-1', release_url: 'https://artificialanalysis.ai/models/releases/claude-fable-5-1', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 19e6cfa4bf4bed13efa86ff4ad701f389831c3ea5f04f79379f8a40879a87835
+    supersession_metadata: null
+  - model_id: claude-fable-5-1
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-fable-5-1-xhigh
+    source_name: artificial-analysis
+    effort: xhigh
+    source_effort: Xhigh Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 53}
+    price_fields: {input_per_mtok: 10.0, output_per_mtok: 50.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 62, ttft_ms: null}
+    release_date: '2026-09'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-fable-5-1-xhigh', release_url: 'https://artificialanalysis.ai/models/releases/claude-fable-5-1', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 7194db85d8938f921d95ffb94a712eb097092a7595cb02d702c3e8aca6a9771c
+    supersession_metadata: null
+  - model_id: claude-fable-5-1
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-fable-5-1-high
+    source_name: artificial-analysis
+    effort: high
+    source_effort: High Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 51}
+    price_fields: {input_per_mtok: 10.0, output_per_mtok: 50.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 53, ttft_ms: null}
+    release_date: '2026-09'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-fable-5-1-high', release_url: 'https://artificialanalysis.ai/models/releases/claude-fable-5-1', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: dc58d4307a017e0812fbac8df6e0625cfdf0b6b64aee33de5119d8e0bb2c2603
+    supersession_metadata: null
+  - model_id: claude-fable-5-1
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-fable-5-1-medium
+    source_name: artificial-analysis
+    effort: medium
+    source_effort: Medium Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 49}
+    price_fields: {input_per_mtok: 10.0, output_per_mtok: 50.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 54, ttft_ms: null}
+    release_date: '2026-09'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-fable-5-1-medium', release_url: 'https://artificialanalysis.ai/models/releases/claude-fable-5-1', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 793aba2067fd6a7cbae52db1acf8cf1df74e3d4a71d7b016a3bff02bfdf80939
+    supersession_metadata: null
+  - model_id: claude-fable-5-1
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-fable-5-1-low
+    source_name: artificial-analysis
+    effort: low
+    source_effort: Low Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 47}
+    price_fields: {input_per_mtok: 10.0, output_per_mtok: 50.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 53, ttft_ms: null}
+    release_date: '2026-09'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-fable-5-1-low', release_url: 'https://artificialanalysis.ai/models/releases/claude-fable-5-1', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 4fd938d16fdccc4a38493e3a9868fc297132731b410570369da7a6278133968d
+    supersession_metadata: null
+  - model_id: claude-opus-5
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-opus-5
+    source_name: artificial-analysis
+    effort: max
+    source_effort: Max Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 51}
+    price_fields: {input_per_mtok: 5.0, output_per_mtok: 25.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 53, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-opus-5', release_url: 'https://artificialanalysis.ai/models/releases/claude-opus-5', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: ae2dd67372531c435d25ddfdeda8722223fbc33c0bfa723993398093675ae40b
+    supersession_metadata: null
+  - model_id: claude-opus-5
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-opus-5-xhigh
+    source_name: artificial-analysis
+    effort: xhigh
+    source_effort: Xhigh Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 50}
+    price_fields: {input_per_mtok: 5.0, output_per_mtok: 25.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 53, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-opus-5-xhigh', release_url: 'https://artificialanalysis.ai/models/releases/claude-opus-5', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 5ddeaa67c7b0956c7181ea4fca9d3d71bcf406132c578f57cc6f0b03ee255969
+    supersession_metadata: null
+  - model_id: claude-opus-5
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-opus-5-high
+    source_name: artificial-analysis
+    effort: high
+    source_effort: High Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 48}
+    price_fields: {input_per_mtok: 5.0, output_per_mtok: 25.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 52, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-opus-5-high', release_url: 'https://artificialanalysis.ai/models/releases/claude-opus-5', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 7a9136fdf37539b8e2b08b9285d4b6bba8d739524d544b17835f53de94632d31
+    supersession_metadata: null
+  - model_id: claude-opus-5
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-opus-5-medium
+    source_name: artificial-analysis
+    effort: medium
+    source_effort: Medium Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 45}
+    price_fields: {input_per_mtok: 5.0, output_per_mtok: 25.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 52, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-opus-5-medium', release_url: 'https://artificialanalysis.ai/models/releases/claude-opus-5', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 76c55ff4402e6f705c223f6667e0b2b5cf8699ec8c7ab2f6b3e3ca5bcb895619
+    supersession_metadata: null
+  - model_id: claude-opus-5
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-opus-5-low
+    source_name: artificial-analysis
+    effort: low
+    source_effort: Low Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 40}
+    price_fields: {input_per_mtok: 5.0, output_per_mtok: 25.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 54, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-opus-5-low', release_url: 'https://artificialanalysis.ai/models/releases/claude-opus-5', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 9b5ee7efad3ed104070eb0995299a9af1a32005df8ab5eaedf050d6d301868d7
+    supersession_metadata: null
+  - model_id: claude-sonnet-5
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-sonnet-5
+    source_name: artificial-analysis
+    effort: max
+    source_effort: Max Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 38}
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 10.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 74, ttft_ms: null}
+    release_date: '2026-06'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-sonnet-5', release_url: 'https://artificialanalysis.ai/models/releases/claude-sonnet-5', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: d440ef3cda3a85b486d2d74d850d627b93419821ee039ce24d6ab9bbde69acb8
+    supersession_metadata: null
+  - model_id: claude-sonnet-5
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-sonnet-5-xhigh
+    source_name: artificial-analysis
+    effort: xhigh
+    source_effort: Xhigh Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 35}
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 10.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 71, ttft_ms: null}
+    release_date: '2026-06'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-sonnet-5-xhigh', release_url: 'https://artificialanalysis.ai/models/releases/claude-sonnet-5', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 0f11670edcacd04a06c4c89d2117e83fe0249d641ee645de9f50225ff1e8874c
+    supersession_metadata: null
+  - model_id: claude-sonnet-5
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-sonnet-5-high
+    source_name: artificial-analysis
+    effort: high
+    source_effort: High Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 32}
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 10.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 62, ttft_ms: null}
+    release_date: '2026-06'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-sonnet-5-high', release_url: 'https://artificialanalysis.ai/models/releases/claude-sonnet-5', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 87372a57c357abaaec74b29759d818cd32a54002b065c0280bd8e56461c0560d
+    supersession_metadata: null
+  - model_id: claude-sonnet-5
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-sonnet-5-medium
+    source_name: artificial-analysis
+    effort: medium
+    source_effort: Medium Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 28}
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 10.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 62, ttft_ms: null}
+    release_date: '2026-06'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-sonnet-5-medium', release_url: 'https://artificialanalysis.ai/models/releases/claude-sonnet-5', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 1b9613e3fcb7557429ce4a8ac6e0081973cc9e888139efca2869e38e9abc9fdd
+    supersession_metadata: null
+  - model_id: claude-sonnet-5
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-sonnet-5-low
+    source_name: artificial-analysis
+    effort: low
+    source_effort: Low Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 25}
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 10.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 57, ttft_ms: null}
+    release_date: '2026-06'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-sonnet-5-low', release_url: 'https://artificialanalysis.ai/models/releases/claude-sonnet-5', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 2717c520c523c9123b5bacd591f83aa774775e6660305a34c8059a7238cd05da
+    supersession_metadata: null
+  - model_id: claude-sonnet-5
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-sonnet-5-non-reasoning
+    source_name: artificial-analysis
+    effort: none
+    source_effort: Non-reasoning
+    effort_confidence: mapped
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 29}
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 10.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 59, ttft_ms: null}
+    release_date: '2026-06'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-sonnet-5-non-reasoning', release_url: 'https://artificialanalysis.ai/models/releases/claude-sonnet-5', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: f1c99ecb154e020882e1bf1833ef0c65dfd922c4b42d9ef9fa2cbddf29063e7e
+    supersession_metadata: null
+  - model_id: claude-haiku-4-5-20251001
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-4-5-haiku-reasoning
+    source_name: artificial-analysis
+    effort: medium
+    source_effort: Reasoning
+    effort_confidence: unknown
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 18}
+    price_fields: {input_per_mtok: 1.0, output_per_mtok: 5.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 88, ttft_ms: null}
+    release_date: '2025-10'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-4-5-haiku-reasoning', release_url: 'https://artificialanalysis.ai/models/releases/claude-4-5-haiku', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 786b7100028829e892e8a84b45618d7a1b781414e3ac005a360a3008886bd46d
+    supersession_metadata: null
+  - model_id: claude-haiku-4-5-20251001
+    invocation_model_id: null
+    invocation_harness: claude
+    invocation_source: 'unverified: Claude CLI cannot list models; not dispatchable'
+    dispatchable: false
+    source_identifier: claude-4-5-haiku
+    source_name: artificial-analysis
+    effort: none
+    source_effort: Non-reasoning
+    effort_confidence: mapped
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 15}
+    price_fields: {input_per_mtok: 1.0, output_per_mtok: 5.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 80, ttft_ms: null}
+    release_date: '2025-10'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-4-5-haiku', release_url: 'https://artificialanalysis.ai/models/releases/claude-4-5-haiku', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 99c2e00207847652c7fca450e0447a13ffeb480b3b42bc9b10287806bb242189
+    supersession_metadata: null
+  - model_id: gpt-5.6-sol
+    invocation_model_id: gpt-5.6-sol
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-sol
+    source_name: artificial-analysis
+    effort: max
+    source_effort: max
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 47}
+    price_fields: {input_per_mtok: 4.0, output_per_mtok: 20.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 60, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-sol', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-sol', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: d2d06985a5f9086d9ab8b019769d976234df3ed6228464904720ca0a8d48f605
+    supersession_metadata: null
+  - model_id: gpt-5.6-sol
+    invocation_model_id: gpt-5.6-sol
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-sol-xhigh
+    source_name: artificial-analysis
+    effort: xhigh
+    source_effort: xhigh
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 44}
+    price_fields: {input_per_mtok: 4.0, output_per_mtok: 20.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 62, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-sol-xhigh', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-sol', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 81c7646fed62efd566022295f78867d4e2f8b214749fd7df263a6c0dcd8d4881
+    supersession_metadata: null
+  - model_id: gpt-5.6-sol
+    invocation_model_id: gpt-5.6-sol
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-sol-high
+    source_name: artificial-analysis
+    effort: high
+    source_effort: high
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 42}
+    price_fields: {input_per_mtok: 4.0, output_per_mtok: 20.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 60, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-sol-high', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-sol', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 2a00d339df44d8232892dc30ad03a757f5bc4b30cd8a573550f1b4424b02285d
+    supersession_metadata: null
+  - model_id: gpt-5.6-sol
+    invocation_model_id: gpt-5.6-sol
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-sol-medium
+    source_name: artificial-analysis
+    effort: medium
+    source_effort: medium
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 39}
+    price_fields: {input_per_mtok: 4.0, output_per_mtok: 20.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 60, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-sol-medium', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-sol', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: a393ed91f8c93f332702c9c6abd430eebadfe958743b9d94aec4a79143442802
+    supersession_metadata: null
+  - model_id: gpt-5.6-sol
+    invocation_model_id: gpt-5.6-sol
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-sol-low
+    source_name: artificial-analysis
+    effort: low
+    source_effort: low
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 34}
+    price_fields: {input_per_mtok: 4.0, output_per_mtok: 20.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 58, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-sol-low', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-sol', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 06ed61b768f3d1a111055e1b2a06fcb1e46866846d507f5dfb074371b63f5f15
+    supersession_metadata: null
+  - model_id: gpt-5.6-sol
+    invocation_model_id: gpt-5.6-sol
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-sol-non-reasoning
+    source_name: artificial-analysis
+    effort: none
+    source_effort: non-reasoning
+    effort_confidence: mapped
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 28}
+    price_fields: {input_per_mtok: 4.0, output_per_mtok: 20.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 61, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-sol-non-reasoning', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-sol', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: ffc8dd1361112539f9628ee646c59dcc5081d0aab8e7a444d599fb36c76590eb
+    supersession_metadata: null
+  - model_id: gpt-5.6-terra
+    invocation_model_id: gpt-5.6-terra
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-terra
+    source_name: artificial-analysis
+    effort: max
+    source_effort: max
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 42}
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 12.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 108, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-terra', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-terra', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 10c1510378d7d798bb84bfaf64aa980e3d3e156bb50f40d4edb1fbdd455d2d68
+    supersession_metadata: null
+  - model_id: gpt-5.6-terra
+    invocation_model_id: gpt-5.6-terra
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-terra-xhigh
+    source_name: artificial-analysis
+    effort: xhigh
+    source_effort: xhigh
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 38}
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 12.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 100, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-terra-xhigh', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-terra', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: bb7afac0d8b68a9da10af027c40ebc2056c41fd43fd862544cedd9fe8ad443a6
+    supersession_metadata: null
+  - model_id: gpt-5.6-terra
+    invocation_model_id: gpt-5.6-terra
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-terra-high
+    source_name: artificial-analysis
+    effort: high
+    source_effort: high
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 34}
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 12.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 88, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-terra-high', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-terra', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 8762101ef6c47ce90a519e1b7e2f3caa7ef74636eb129388c400b4b35c0e115a
+    supersession_metadata: null
+  - model_id: gpt-5.6-terra
+    invocation_model_id: gpt-5.6-terra
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-terra-medium
+    source_name: artificial-analysis
+    effort: medium
+    source_effort: medium
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 30}
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 12.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 90, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-terra-medium', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-terra', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: e204562766816b5eb07c1f3ec9fc58ef601d227cb046fd7d87e4e01270358bc1
+    supersession_metadata: null
+  - model_id: gpt-5.6-terra
+    invocation_model_id: gpt-5.6-terra
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-terra-low
+    source_name: artificial-analysis
+    effort: low
+    source_effort: low
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 28}
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 12.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 84, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-terra-low', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-terra', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: e5b63c9a9684f25c2ebea618e008b04b858e28c769e6ebb8004c46470e423098
+    supersession_metadata: null
+  - model_id: gpt-5.6-terra
+    invocation_model_id: gpt-5.6-terra
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-terra-non-reasoning
+    source_name: artificial-analysis
+    effort: none
+    source_effort: non-reasoning
+    effort_confidence: mapped
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 22}
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 12.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 93, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-terra-non-reasoning', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-terra', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: cafc32038666e283a6b748057203db20308881830710851dc1c9b2ae5d74a412
+    supersession_metadata: null
+  - model_id: gpt-5.6-luna
+    invocation_model_id: gpt-5.6-luna
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-luna
+    source_name: artificial-analysis
+    effort: max
+    source_effort: max
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 38}
+    price_fields: {input_per_mtok: 0.2, output_per_mtok: 1.2, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 121, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-luna', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-luna', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 9830786db6fe24df6fad7a9742db0cc21f1a01b4faf752e0fcf99341845108d8
+    supersession_metadata: null
+  - model_id: gpt-5.6-luna
+    invocation_model_id: gpt-5.6-luna
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-luna-xhigh
+    source_name: artificial-analysis
+    effort: xhigh
+    source_effort: xhigh
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 35}
+    price_fields: {input_per_mtok: 0.2, output_per_mtok: 1.2, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 122, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-luna-xhigh', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-luna', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 7f736b279a301ff15bddc10acdbc2f69d2f53c081d79721a6789b22a88f9e8a3
+    supersession_metadata: null
+  - model_id: gpt-5.6-luna
+    invocation_model_id: gpt-5.6-luna
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-luna-high
+    source_name: artificial-analysis
+    effort: high
+    source_effort: high
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 32}
+    price_fields: {input_per_mtok: 0.2, output_per_mtok: 1.2, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 101, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-luna-high', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-luna', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 4111dafd7ff6227eb303d8ac062d445185eeb422c6aac8d862cc462c1be77a25
+    supersession_metadata: null
+  - model_id: gpt-5.6-luna
+    invocation_model_id: gpt-5.6-luna
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-luna-medium
+    source_name: artificial-analysis
+    effort: medium
+    source_effort: medium
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 25}
+    price_fields: {input_per_mtok: 0.2, output_per_mtok: 1.2, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 105, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-luna-medium', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-luna', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: a4f5723649fca8c0d2c3cc42560184333e39c95ebdea87a1ddbc4bd2d0c0fcbf
+    supersession_metadata: null
+  - model_id: gpt-5.6-luna
+    invocation_model_id: gpt-5.6-luna
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-luna-low
+    source_name: artificial-analysis
+    effort: low
+    source_effort: low
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 22}
+    price_fields: {input_per_mtok: 0.2, output_per_mtok: 1.2, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 107, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-luna-low', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-luna', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 6c53b9c75c775bbd2245901530ec530af0a54ad20da279992292caefdbd4a87b
+    supersession_metadata: null
+  - model_id: gpt-5.6-luna
+    invocation_model_id: gpt-5.6-luna
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    dispatchable: true
+    source_identifier: gpt-5-6-luna-non-reasoning
+    source_name: artificial-analysis
+    effort: none
+    source_effort: non-reasoning
+    effort_confidence: mapped
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 17}
+    price_fields: {input_per_mtok: 0.2, output_per_mtok: 1.2, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 107, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-luna-non-reasoning', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-luna', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: cba37f1a3ba8ad8379f164f6633be2473400504d6f6d70ec73986b93d02b9082
+    supersession_metadata: null
+  - model_id: gemini-3.8-flash
+    invocation_model_id: gemini-3.8-flash-high
+    invocation_harness: agy
+    invocation_source: 'local-evidence:agy models'
+    dispatchable: true
+    source_identifier: gemini-3-8-flash
+    source_name: artificial-analysis
+    effort: high
+    source_effort: high
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 41}
+    price_fields: {input_per_mtok: 0.75, output_per_mtok: 3.75, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 275, ttft_ms: null}
+    release_date: '2026-09'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gemini-3-8-flash', release_url: 'https://artificialanalysis.ai/models/releases/gemini-3-8-flash', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 96949f51f8585dfb9f2a1fd79f93d95441991ebaa6e25fa77d36dc3e0dfb3cc6
+    supersession_metadata: null
+  - model_id: gemini-3.8-flash
+    invocation_model_id: gemini-3.8-flash-medium
+    invocation_harness: agy
+    invocation_source: 'local-evidence:agy models'
+    dispatchable: true
+    source_identifier: gemini-3-8-flash-medium
+    source_name: artificial-analysis
+    effort: medium
+    source_effort: medium
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 40}
+    price_fields: {input_per_mtok: 0.75, output_per_mtok: 3.75, currency: USD, as_of: '2026-09-13'}
+    speed_fields: null
+    release_date: '2026-09'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gemini-3-8-flash-medium', release_url: 'https://artificialanalysis.ai/models/releases/gemini-3-8-flash', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: edf60bb8ace22d90e893f75c02ebb053bee59fceb1ebf4b79b426845acfe67d2
+    supersession_metadata: null
+  - model_id: gemini-3.8-flash
+    invocation_model_id: gemini-3.8-flash-low
+    invocation_harness: agy
+    invocation_source: 'local-evidence:agy models'
+    dispatchable: true
+    source_identifier: gemini-3-8-flash-low
+    source_name: artificial-analysis
+    effort: low
+    source_effort: low
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 34}
+    price_fields: {input_per_mtok: 0.75, output_per_mtok: 3.75, currency: USD, as_of: '2026-09-13'}
+    speed_fields: null
+    release_date: '2026-09'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gemini-3-8-flash-low', release_url: 'https://artificialanalysis.ai/models/releases/gemini-3-8-flash', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: d6bb96f9b31490cb8287ca2b8eb21a1d041b754d3e30a343c0249b4ddd34b65d
+    supersession_metadata: null
+  - model_id: gemini-3.6-flash
+    invocation_model_id: gemini-3.6-flash-high
+    invocation_harness: agy
+    invocation_source: 'local-evidence:agy models'
+    dispatchable: true
+    source_identifier: gemini-3-6-flash
+    source_name: artificial-analysis
+    effort: high
+    source_effort: high
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 34}
+    price_fields: {input_per_mtok: 0.75, output_per_mtok: 3.75, currency: USD, as_of: '2026-09-13'}
+    speed_fields: {output_tok_per_s: 213.3, ttft_ms: null}
+    release_date: '2026-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gemini-3-6-flash', release_url: 'https://artificialanalysis.ai/models/gemini-3-6-flash', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: 31152cfd580ea998686e8e31667ebdc742cfbb1b298aeeddea68f748df85e9ad
+    supersession_metadata: null
+  - model_id: gpt-5-codex
+    invocation_model_id: openai/gpt-5-codex
+    invocation_harness: pi
+    invocation_source: 'local-evidence:pi --offline --list-models'
+    dispatchable: true
+    source_identifier: gpt-5-codex
+    source_name: artificial-analysis
+    effort: high
+    source_effort: high
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3: 25}
+    price_fields: {input_per_mtok: 1.25, output_per_mtok: 10.0, currency: USD, as_of: '2026-09-13'}
+    speed_fields: null
+    release_date: '2025-09'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-codex', release_url: 'https://artificialanalysis.ai/models/gpt-5-codex', fetched_at: '2026-09-13T05:35:00Z'}
+    content_hash: d205d15be4552fc8f9abc691c633aceccab8006de76e57da12efa55a354ae6ea
+    supersession_metadata: {supersedes: null, reason: deprecated-by-vendor-per-artificial-analysis-model-page}

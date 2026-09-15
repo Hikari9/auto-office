@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Hard floors precede cost"
+expectation: "a cheaper candidate that fails absolute role floor must be rejected before cost comparison"
+source: OFFICE-SKILLS-V3-SPEC

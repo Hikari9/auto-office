@@ -1,0 +1,29 @@
+{
+  "review_id": "rev-res-001",
+  "dispatch_id": "disp-exec-001",
+  "producer_id": "exec-001",
+  "reviewer_id": "rev-001",
+  "reviewer_triple": "codex@local/gpt-5.6-luna@xhigh",
+  "review_mode": "independent_adversary",
+  "reviewed_head_sha": "6e8b561",
+  "requirements_version": 1,
+  "routing_version": 2,
+  "review_scope": [
+    "T0"
+  ],
+  "disposition_owner": "executor",
+  "overall_status": "PASS",
+  "findings": [
+    {
+      "finding_id": "find-001",
+      "status": "rejected-on-evidence",
+      "severity": "medium",
+      "summary": "Verified all constraints satisfied",
+      "evidence": "pytest output matches expectations",
+      "evidence_hash": "sha256:279b986360e082dcc2136dfc5d29804f6ba1ee3e0ccdf8449612b07d4d7b94a3"
+    }
+  ],
+  "evidence": "Full test suite passed cleanly",
+  "evidence_hash": "sha256:279b986360e082dcc2136dfc5d29804f6ba1ee3e0ccdf8449612b07d4d7b94a3",
+  "created_at": "2026-09-15T00:00:00Z"
+}

@@ -1,0 +1,14 @@
+{
+  "event_id": "evt-001",
+  "session_id": "sess-001",
+  "family_id": "fam-core",
+  "sequence": 1,
+  "observed_status": "finish",
+  "terminal_classification": "success",
+  "source": "herdr",
+  "evidence_timestamp": "2026-09-15T00:00:00Z",
+  "evidence_hash": "sha256:279b986360e082dcc2136dfc5d29804f6ba1ee3e0ccdf8449612b07d4d7b94a3",
+  "evidence_payload": {
+    "exit_code": 0
+  }
+}

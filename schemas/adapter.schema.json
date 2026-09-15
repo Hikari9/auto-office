@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Auto Office v3 harness adapter",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "verified_state",
+    "version_fingerprint",
+    "model_source",
+    "effort_mapping",
+    "benchmark_slug_mapping",
+    "invocation",
+    "safe_prompt_passing",
+    "dispatch_forms",
+    "trusted_for",
+    "quota_probe",
+    "shallow_review",
+    "agentic_capability",
+    "failure_signatures",
+    "conformance"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "verified_state": {
+      "enum": [
+        "invalid",
+        "valid-unverified",
+        "proven"
+      ]
+    },
+    "version_fingerprint": {
+      "type": "object"
+    },
+    "model_source": {
+      "type": "object"
+    },
+    "effort_mapping": {
+      "type": "object"
+    },
+    "benchmark_slug_mapping": {
+      "type": "object"
+    },
+    "invocation": {
+      "type": "object"
+    },
+    "safe_prompt_passing": {
+      "type": "object"
+    },
+    "dispatch_forms": {
+      "type": "array"
+    },
+    "trusted_for": {
+      "type": "array"
+    },
+    "quota_probe": {
+      "type": "object"
+    },
+    "shallow_review": {
+      "type": "object"
+    },
+    "agentic_capability": {
+      "type": "object"
+    },
+    "failure_signatures": {
+      "type": "array"
+    },
+    "conformance": {
+      "type": "object"
+    },
+    "source_notes": {
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "harness": "agy",
+  "harness_version": "local",
+  "model_id": "gemini-3.8-flash",
+  "invocation_model_id": "gemini-3.8-flash",
+  "adapter_state": "valid-unverified",
+  "capabilities": ["builder"],
+  "absolute_floor_pass": true,
+  "hard_excluded": false,
+  "advisory_pass": true,
+  "quota": {"tokens_remaining": 100000},
+  "cost": {"money_per_1k_tokens": 0.01}
+}

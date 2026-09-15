@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Quota reserve can change route"
+expectation: "candidate crossing 20 percent reserve is excluded when a qualifying safe candidate exists"
+source: OFFICE-SKILLS-V3-SPEC

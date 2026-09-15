@@ -1,0 +1,23 @@
+{
+  "amendment_id": "amend-001",
+  "family_id": "fam-core",
+  "session_id": "sess-001",
+  "kind": "routing",
+  "affected_scopes": [
+    "T2",
+    "T3"
+  ],
+  "expected_prior_versions": {
+    "requirements_version": 1,
+    "plan_version": 2,
+    "routing_version": 2
+  },
+  "resulting_versions": {
+    "requirements_version": 1,
+    "plan_version": 2,
+    "routing_version": 3
+  },
+  "reason": "Switch executor route to fallback model",
+  "evidence": "Observed quota exhaustion on primary candidate",
+  "applied_at": "2026-09-15T00:00:00Z"
+}

@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Route time uses no network"
+expectation: "router consumes pinned candidate/snapshot data only and performs no fetch"
+source: OFFICE-SKILLS-V3-SPEC

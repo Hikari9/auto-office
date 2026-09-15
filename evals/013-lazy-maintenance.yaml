@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Outcome labels are lazy"
+expectation: "eligible observation is labeled on next Auto Office maintenance invocation"
+source: OFFICE-SKILLS-V3-SPEC

@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Failure moves maturity backward"
+expectation: "negative lineage event lowers cumulative P and age through same curve"
+source: OFFICE-SKILLS-V3-SPEC

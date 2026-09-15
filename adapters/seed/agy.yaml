@@ -1,0 +1,49 @@
+id: agy
+verified_state: valid-unverified
+version_fingerprint:
+  command: [agy, --version]
+  parser: first-line
+model_source:
+  type: cli
+  command: [agy, models]
+effort_mapping:
+  none: null
+  low: low
+  medium: medium
+  high: high
+  xhigh: null
+  max: null
+benchmark_slug_mapping: {}
+invocation:
+  executable: agy
+  argv: [--dangerously-skip-permissions, --print-timeout, 45m, --model, "{model}", --add-dir, "{cwd}", "--print={prompt}"]
+  prompt_transport: argv-bound
+  cwd_transport: add-dir-plus-prompt-pin
+safe_prompt_passing:
+  shell: false
+  supports_prompt_file: true
+  notes: Bind prompt value directly to --print; do not use stdin. Effort support is model-dependent and must be probed/mapped.
+dispatch_forms: [cli]
+trusted_for: [discovery, read-only-investigation, prototype, reversible-sandbox-worker, conformance]
+quota_probe:
+  type: external-primitive
+  command: [python3, scripts/agy-usage.py, --json]
+  unknown_is_unlimited: false
+shallow_review:
+  supported: true
+  minimum_effort: medium
+agentic_capability:
+  default: unknown
+failure_signatures:
+  - {id: swallowed-prompt, attribution: adapter, pattern: "greeting or --print consumed a flag"}
+  - {id: quota-stall, attribution: quota/account, pattern: "narration then no work/no writes"}
+  - {id: slug-vs-display-name-silent-fallback, attribution: adapter, pattern: "--model <slug> accepted without error but session silently launches on account default model"}
+  - {id: effort-unsupported-hard-fail, attribution: adapter, pattern: "--effort is not supported for model \"<slug>\" (Claude/gpt-oss routes)"}
+  - {id: stdin-pipe-ignored, attribution: adapter, pattern: "prompt piped on stdin is not consumed; must bind to --print/--prompt="}
+  - {id: interactive-survey-blocks-status-unreported, attribution: adapter, pattern: "feedback survey blocks the agent mid-session while status still reads idle or working; dismiss with send-keys 0 and re-prompt, the agent has lost its task"}
+  - {id: start-prompt-not-landed, attribution: adapter, pattern: "prompt sent immediately after agent start returns did not land; confirm an observed transition to working plus pane output before treating the task as in flight"}
+  - {id: status-disagrees-with-pane, attribution: false-negative-liveness, pattern: "reported status reads idle while the pane shows active work (e.g. Searching... / esc to cancel); status is not a liveness signal for agy"}
+conformance:
+  deterministic: pending
+  live: pending
+source_notes: Current office-skills Agy mechanics seeded for migration; exact model display names are dynamic and must come from local discovery.

@@ -1,0 +1,29 @@
+name: Validate
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: pip install pyyaml jsonschema pytest
+      - name: Ecosystem check
+        run: python3 scripts/check_ecosystem.py
+      - name: Unit tests
+        run: python3 -m pytest tests/ -v
+      - name: Adapter validation
+        run: |
+          for f in adapters/seed/*.yaml; do
+            python3 scripts/office_runtime.py validate-adapter "$f"
+          done
+      - name: Schema validation
+        run: python3 tests/test_schemas.py
+      - name: Integration test
+        run: python3 tests/test_integration.py -v

@@ -1,9 +1,0 @@
-name: agy-office does not self-trigger on production-adjacent questions
-# This office is described as being for "irreversible or production-facing work",
-# which is exactly the phrasing that over-matches.
-prompt: "Is it safe to run this migration on production, or should I test on preview first?"
-expect_skill: false
-criteria:
-  - "Does not invoke agy-office"
-  - "Answers the question on its merits"
-allowed_tools: ["Read", "Grep", "Glob"]

@@ -1,29 +1,12 @@
-# Slug → real-repo mapping for the routing-outcomes ledger. The committed ledger carries
-# opaque slugs only; this file resolves them locally and must never ship.
-auto-office/references/routing-outcomes.local.md
-
-# Environment variables & secrets
-.env
-.env*.local
-.env.production
-.env.development
-
-.DS_Store
-
-# Backfilled telemetry and the slug -> real-repo map it produces. Derived output
-# and workspace-local; regenerate with `node eval/backfill.mjs`.
-eval/out/
-
-# Python cache
+.auto-office/
+.office/
+*.db
+*.db-wal
+*.db-shm
 __pycache__/
 *.pyc
+.DS_Store
+graft/
 
-# graft's local graph cache — regenerable, not committed (run `graft build`).
-/graft/
-
-# Local agent tooling configuration.
-/.claude/
-/.ignore
-/.mcp.json
-/AGENTS.md
-/opencode.json
+# Herdr spawn ledger: worktree-local run state, never committed
+.herdr/

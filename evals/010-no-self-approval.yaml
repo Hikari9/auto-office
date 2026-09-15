@@ -1,0 +1,4 @@
+schema_version: 3
+title: "No self approval"
+expectation: "producer session cannot serve as its own independent gate"
+source: OFFICE-SKILLS-V3-SPEC

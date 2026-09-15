@@ -1,9 +1,0 @@
-name: codex-office does not self-trigger when Codex is merely mentioned
-# The likeliest false positive for this office is the word "codex" appearing in a
-# prompt that is not a request to run the office.
-prompt: "What's the difference between `codex exec` and `codex` in interactive mode?"
-expect_skill: false
-criteria:
-  - "Does not invoke codex-office"
-  - "Answers the question"
-allowed_tools: []

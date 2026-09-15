@@ -1,9 +1,0 @@
-name: The word "production" alone does not summon an office
-# The hubs describe themselves as being for "irreversible or production-facing work".
-# That phrasing is the likeliest source of over-triggering, so it gets its own control.
-prompt: "What environment does this project deploy to in production?"
-expect_skill: false
-criteria:
-  - "Does not invoke any *-office skill"
-  - "Answers the question"
-allowed_tools: ["Read", "Grep", "Glob"]

@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "harness",
+    "harness_version",
+    "model_id",
+    "effort",
+    "adapter_state",
+    "capabilities",
+    "absolute_floor_pass",
+    "quota",
+    "cost"
+  ],
+  "properties": {
+    "harness": {
+      "type": "string"
+    },
+    "harness_version": {
+      "type": "string"
+    },
+    "model_id": {
+      "type": "string"
+    },
+    "invocation_model_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "effort": {
+      "enum": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    "adapter_state": {
+      "enum": [
+        "invalid",
+        "valid-unverified",
+        "proven"
+      ]
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "absolute_floor_pass": {
+      "type": "boolean"
+    },
+    "hard_excluded": {
+      "type": "boolean"
+    },
+    "local_hard_excluded": {
+      "type": "boolean"
+    },
+    "supported_playbooks": {
+      "type": "array"
+    },
+    "local_reward": {
+      "type": ["number", "null"]
+    },
+    "advisory_pass": {
+      "type": "boolean"
+    },
+    "quota": {
+      "type": "object"
+    },
+    "cost": {
+      "type": "object"
+    },
+    "last_seen": {
+      "type": "string",
+      "minLength": 1
+    },
+    "superseded_by": {
+      "type": ["string", "null"]
+    }
+  }
+}

@@ -1,7 +1,0 @@
-name: Talking about orchestration does not summon an office
-prompt: "Explain the difference between a planner and an executor in agent orchestration."
-expect_skill: false
-criteria:
-  - "Does not invoke any *-office skill"
-  - "Explains the concepts"
-allowed_tools: []

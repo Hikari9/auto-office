@@ -1,0 +1,9 @@
+stream: catalog-policy
+identity_hash: sha256:<computed>
+policy_hash_before: sha256:<before>
+policy_hash_after: sha256:<after>
+replay_required: true
+replay_summary: <old-vs-new decisions and boundary flips>
+evals: <results>
+independent_review: required
+lineage_previous_pr: null

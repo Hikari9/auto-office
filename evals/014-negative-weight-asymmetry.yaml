@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Negative outcomes outweigh no-observed-failure"
+expectation: "recurrence/revert carry stronger negative evidence than absence of observed failure carries positive"
+source: OFFICE-SKILLS-V3-SPEC

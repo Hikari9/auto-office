@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Unknown mandatory adapter data blocks routing"
+expectation: "missing mandatory adapter semantics makes affected triple unroutable"
+source: OFFICE-SKILLS-V3-SPEC

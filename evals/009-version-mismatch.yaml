@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Plan packet mismatch blocks continuation"
+expectation: "stale packet after plan version increment is rejected"
+source: OFFICE-SKILLS-V3-SPEC

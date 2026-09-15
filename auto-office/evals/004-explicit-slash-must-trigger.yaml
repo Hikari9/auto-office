@@ -1,8 +1,0 @@
-name: Explicit invocation triggers auto-office
-prompt: "/auto-office Add a CSV export button to the attendance report page."
-expect_skill: true
-criteria:
-  - "Invokes the auto-office skill"
-  - "Begins planning or interviewing rather than editing code immediately"
-allowed_tools: ["Read", "Grep", "Glob"]
-timeout: 180

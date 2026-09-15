@@ -1,0 +1,12 @@
+{
+  "monitor_id": "mon-001",
+  "session_id": "sess-001",
+  "sequence": 1,
+  "status": "healthy",
+  "active_panes": [
+    "pane-1",
+    "pane-2"
+  ],
+  "event_lag_ms": 15,
+  "timestamp": "2026-09-15T00:00:00Z"
+}

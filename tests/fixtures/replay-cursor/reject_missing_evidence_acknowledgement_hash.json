@@ -1,0 +1,9 @@
+{
+  "cursor_id": "cur-001",
+  "session_id": "sess-001",
+  "family_id": "fam-core",
+  "dispatch_id": "disp-exec-001",
+  "last_acknowledged_sequence": 1,
+  "last_acknowledged_event_id": "evt-001",
+  "acknowledged_at": "2026-09-15T00:00:00Z"
+}

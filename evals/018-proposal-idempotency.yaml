@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Proposal identity is deterministic"
+expectation: "duplicate retry detects same content identity and does not append duplicate"
+source: OFFICE-SKILLS-V3-SPEC

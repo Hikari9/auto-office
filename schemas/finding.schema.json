@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "status",
+    "severity",
+    "summary",
+    "evidence"
+  ],
+  "properties": {
+    "status": {
+      "enum": [
+        "accepted-material",
+        "accepted-minor",
+        "rejected-on-evidence",
+        "pending"
+      ]
+    },
+    "severity": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "evidence": {
+      "type": [
+        "string",
+        "array",
+        "object"
+      ]
+    }
+  }
+}

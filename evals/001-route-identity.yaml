@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Routing identity is harness-specific"
+expectation: "same model_id/effort on two harness versions must remain two routable triples"
+source: OFFICE-SKILLS-V3-SPEC

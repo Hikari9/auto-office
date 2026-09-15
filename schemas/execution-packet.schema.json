@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Auto Office v3 execution packet",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "packet_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "family_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requirements_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "plan_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "routing_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "packet_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "plan_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "plan_sha": {
+      "type": "string",
+      "minLength": 8
+    },
+    "effective_config_hash": {
+      "type": "string",
+      "minLength": 8
+    },
+    "base_sha": {
+      "type": "string",
+      "minLength": 4
+    },
+    "selection_disclosure": {
+      "type": "object",
+      "required": [
+        "role",
+        "triple",
+        "invocation_model_id",
+        "model_id",
+        "effort",
+        "harness",
+        "harness_version",
+        "reason"
+      ],
+      "properties": {
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "triple": {
+          "type": "string",
+          "minLength": 1
+        },
+        "invocation_model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effort": {
+          "type": "string",
+          "minLength": 1
+        },
+        "harness": {
+          "type": "string",
+          "minLength": 1
+        },
+        "harness_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "invocation_model_id_source": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision_hash": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "task_scope": {
+      "type": [
+        "string",
+        "array"
+      ]
+    },
+    "observable_outcome": {
+      "type": "string",
+      "minLength": 1
+    },
+    "blast_radius": {
+      "type": [
+        "string",
+        "object",
+        "array"
+      ]
+    },
+    "allowed_mutations": {
+      "type": "array"
+    },
+    "protected_paths": {
+      "type": "array"
+    },
+    "validation_commands": {
+      "type": "array"
+    },
+    "known_bad_behavior_to_exclude": {
+      "type": [
+        "string",
+        "array"
+      ]
+    },
+    "self_review": {
+      "type": [
+        "string",
+        "object",
+        "array"
+      ]
+    },
+    "rollback_or_restore_notes": {
+      "type": [
+        "string",
+        "object",
+        "array"
+      ]
+    },
+    "escalation": {
+      "type": "string"
+    },
+    "replaced_dispatch_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    }
+  },
+  "required": [
+    "packet_id",
+    "run_id",
+    "session_id",
+    "family_id",
+    "task_id",
+    "requirements_version",
+    "plan_version",
+    "routing_version",
+    "packet_version",
+    "effective_config_hash",
+    "base_sha",
+    "selection_disclosure",
+    "task_scope",
+    "observable_outcome",
+    "blast_radius",
+    "allowed_mutations",
+    "protected_paths",
+    "validation_commands",
+    "known_bad_behavior_to_exclude",
+    "self_review",
+    "rollback_or_restore_notes"
+  ]
+}

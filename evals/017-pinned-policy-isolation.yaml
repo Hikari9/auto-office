@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Current run stays pinned"
+expectation: "self-improvement branch cannot become active policy for current run"
+source: OFFICE-SKILLS-V3-SPEC

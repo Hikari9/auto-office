@@ -1,1 +1,0 @@
-../office-core/scripts/office-spawn.sh

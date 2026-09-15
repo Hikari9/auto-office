@@ -1,0 +1,27 @@
+{
+  "receipt_id": "rec-001",
+  "session_id": "sess-001",
+  "family_id": "fam-core",
+  "dispatch_id": "disp-exec-001",
+  "pid": 12345,
+  "requirements_version": 1,
+  "plan_version": 2,
+  "routing_version": 2,
+  "effective_config_hash": "sha256:279b986360e082dcc2136dfc5d29804f6ba1ee3e0ccdf8449612b07d4d7b94a3",
+  "selection_disclosure": {
+    "role": "executor",
+    "triple": "agy@local/gemini-3.8-flash@medium",
+    "invocation_model_id": "gemini-3.8-flash",
+    "model_id": "gemini-3.8-flash",
+    "effort": "medium",
+    "harness": "agy",
+    "harness_version": "local",
+    "reason": "matched preferred seed #1"
+  },
+  "adapter": "adapters/seed/agy.yaml",
+  "model": "gemini-3.8-flash",
+  "effort": "medium",
+  "worktree": "/workspace/office-skills",
+  "logfile": "/tmp/office/dispatches/disp-exec-001/output.log",
+  "started_at": "2026-09-15T00:00:00Z"
+}

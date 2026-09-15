@@ -1,0 +1,8 @@
+stream: learned-pattern
+identity_hash: sha256:<computed>
+evidence_hash: sha256:<opaque-local-capsule-hash>
+source_count: 0
+schema_version: 3
+pattern: <sanitized generalized non-binding pattern>
+changes_behavioral_policy: false
+privacy_lint: required

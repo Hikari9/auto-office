@@ -1,0 +1,43 @@
+{
+  "packet_id": "pkt-t0-001",
+  "run_id": "run-001",
+  "family_id": "fam-office",
+  "task_id": "T0",
+  "requirements_version": 1,
+  "plan_version": 2,
+  "routing_version": 2,
+  "packet_version": 1,
+  "plan_path": "docs/plans/v3-final-merge.md",
+  "plan_sha": "sha256:1adde66a5efedb01d9c9f432418e8ff7201b89b01f4ba48d7c71a446be4bd958",
+  "base_sha": "5d7a450",
+  "selection_disclosure": {
+    "role": "executor",
+    "triple": "agy@local/gemini-3.8-flash@medium",
+    "invocation_model_id": "gemini-3.8-flash",
+    "model_id": "gemini-3.8-flash",
+    "effort": "medium",
+    "harness": "agy",
+    "harness_version": "local",
+    "reason": "matched preferred seed #1"
+  },
+  "task_scope": "Implement T0 contracts",
+  "observable_outcome": "Schemas and contracts pinned",
+  "blast_radius": {
+    "scope": "Documentation and schemas only"
+  },
+  "allowed_mutations": [
+    "docs/v3-acceptance.md",
+    "docs/v3-runtime-contracts.md"
+  ],
+  "protected_paths": [
+    ".github/workflows/validate.yml"
+  ],
+  "validation_commands": [
+    "python3 scripts/check_ecosystem.py"
+  ],
+  "known_bad_behavior_to_exclude": [
+    "Omitting schemas"
+  ],
+  "self_review": "Run verification commands",
+  "rollback_or_restore_notes": "Clean git worktree"
+}

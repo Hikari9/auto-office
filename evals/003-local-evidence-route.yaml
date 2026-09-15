@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Local evidence can change route"
+expectation: "comparable exact-triple local reward can break a cold-start tie"
+source: OFFICE-SKILLS-V3-SPEC

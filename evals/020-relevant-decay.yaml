@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Decay is lineage scoped"
+expectation: "unrelated harness/model change has multiplier 1.0 and does not decay other evidence"
+source: OFFICE-SKILLS-V3-SPEC

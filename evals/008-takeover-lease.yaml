@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Takeover revokes old holder"
+expectation: "new holder must acquire lease and old holder loses mutation authority"
+source: OFFICE-SKILLS-V3-SPEC

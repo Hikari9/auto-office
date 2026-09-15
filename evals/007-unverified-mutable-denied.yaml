@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Unverified adapter mutable authority denied"
+expectation: "valid-unverified cannot silently become executor/final reviewer"
+source: OFFICE-SKILLS-V3-SPEC

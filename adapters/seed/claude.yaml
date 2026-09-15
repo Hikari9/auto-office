@@ -1,0 +1,48 @@
+id: claude
+verified_state: valid-unverified
+version_fingerprint:
+  command: [claude, --version]
+  parser: first-line
+model_source:
+  type: catalog-plus-probe
+  command: null
+effort_mapping:
+  none: null
+  low: low
+  medium: medium
+  high: high
+  xhigh: null
+  max: null
+benchmark_slug_mapping: {}
+invocation:
+  executable: claude
+  argv: [--bg, --remote-control, "{label}", --model, "{model}", --effort, "{effort}", --add-dir, "{cwd}"]
+  prompt_transport: stdin
+  cwd_transport: add-dir
+safe_prompt_passing:
+  shell: false
+  supports_prompt_file: true
+  notes: Pipe/read prompt on stdin; positional prompt can register an idle agent without starting work on observed versions.
+dispatch_forms: [cli, in-session]
+trusted_for: [discovery, read-only-investigation, prototype, reversible-sandbox-worker, conformance]
+quota_probe:
+  type: external-primitive
+  command: [python3, scripts/claude-usage.py, --json]
+  unknown_is_unlimited: false
+shallow_review:
+  supported: true
+  minimum_effort: low
+agentic_capability:
+  default: unknown
+failure_signatures:
+  - {id: positional-prompt-idle, attribution: adapter, pattern: "idle - send a prompt to start"}
+  - {id: resume-bg-fork, attribution: harness, pattern: "resume against live session creates a new writer"}
+  - {id: allowlist-no-mcp-tools, attribution: adapter, pattern: "--allowedTools grants no MCP server tools unless named explicitly, read back as delegate cannot reach the system"}
+  - {id: add-dir-not-checkout-isolation, attribution: harness, pattern: "dispatched agent git checkout in the shared --add-dir tree moves the branch under the caller"}
+  - {id: pgrep-blind-to-bg-agent, attribution: false-negative-liveness, pattern: "bg agent cmdline is bg-spare socket path, never the worktree path"}
+  - {id: tmp-daemon-dir-sandboxed, attribution: false-negative-liveness, pattern: "ls /tmp/cc-daemon-501 fails from sandboxed Bash tool /tmp, not evidence the daemon is gone"}
+  - {id: logs-only-background-sessions, attribution: adapter, pattern: "claude logs <id> ENOENT/no-job-match for interactive sessions"}
+conformance:
+  deterministic: pending
+  live: pending
+source_notes: Current office-skills Claude mechanics seeded for migration; tool allowlists remain dispatch-specific and must be generated from the packet/environment.

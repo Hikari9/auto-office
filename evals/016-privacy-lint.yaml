@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Privacy lint blocks public leak"
+expectation: "email/url/absolute path/credential-like data fails before public proposal push"
+source: OFFICE-SKILLS-V3-SPEC

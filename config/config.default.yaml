@@ -1,0 +1,134 @@
+schema_version: 3
+config_precedence:
+  - prompt_cli
+  - repo
+  - user
+  - plugin_default
+paths:
+  repo: .auto-office/config.yaml
+  user: ~/.config/auto-office/config.yaml
+  local_data: ~/.local/share/auto-office
+  runs_db: ~/.local/share/auto-office/runs.db
+  catalog_dir: ~/.local/share/auto-office/catalog
+quota:
+  reserve_percent: 20
+cost_policy:
+  default: balanced
+  balanced_money_band_percent: 20
+  available: [money_saver, quota_saver, balanced]
+exploration:
+  max_per_run: 1
+  max_percent_rolling_20: 10
+  max_cost_vs_cheapest_percent: 125
+  allowed_roles: [worker]
+  allowed_playbooks: [Investigate, Prototype]
+adapter_trust:
+  proven_min_successful_dispatches: 5
+  proven_min_task_shapes: 2
+roles:
+  orchestrator:
+    router_selects: false
+  planner:
+    preferred_seed:
+      - {model_id: opus, effort: medium}
+      - {model_id: astra, effort: low}
+    required_capabilities: [planning]
+    floor:
+      min_effort: low
+      allowed_sources: ["local-evidence:", "documented:"]
+  plan_reviewer:
+    preferred_seed:
+      - {model_id: luna, effort: xhigh}
+    required_capabilities: [review]
+    floor:
+      min_effort: high
+      allowed_sources: ["local-evidence:", "documented:"]
+  executor:
+    required_capabilities: [builder]
+    floor:
+      min_effort: medium
+      allowed_sources: ["local-evidence:", "documented:"]
+  worker:
+    required_capabilities: []
+    floor:
+      min_effort: low
+      allowed_sources: ["local-evidence:", "documented:"]
+  code_reviewer:
+    preferred_seed:
+      - {model_id: luna, effort: xhigh}
+    required_capabilities: [review]
+    floor:
+      min_effort: high
+      allowed_sources: ["local-evidence:", "documented:"]
+  browser_verifier:
+    required_capabilities: [browser]
+    floor:
+      min_effort: low
+      allowed_sources: ["local-evidence:"]
+  closeout_verifier:
+    required_capabilities: [verification]
+    floor:
+      min_effort: medium
+      allowed_sources: ["local-evidence:", "documented:"]
+gear_presets:
+  direct:
+    dedicated_planner: false
+    plan_review: false
+    independent_code_review: risk_forced
+    funded_browser_verification: acceptance_forced
+    allow_advisory_undercut: true
+  direct+review:
+    dedicated_planner: false
+    plan_review: false
+    independent_code_review: true
+    funded_browser_verification: acceptance_forced
+    allow_advisory_undercut: true
+  light:
+    dedicated_planner: false
+    plan_review: false
+    independent_code_review: shallow
+    funded_browser_verification: acceptance_forced
+    allow_advisory_undercut: true
+  quick:
+    dedicated_planner: optional
+    plan_review: false
+    independent_code_review: cost_bounded
+    funded_browser_verification: acceptance_forced
+    allow_advisory_undercut: true
+  express:
+    dedicated_planner: optional
+    plan_review: policy_optional
+    independent_code_review: true
+    funded_browser_verification: acceptance_forced
+    allow_advisory_undercut: true
+  full:
+    dedicated_planner: true
+    plan_review: true
+    independent_code_review: true
+    funded_browser_verification: true
+    allow_advisory_undercut: false
+maturity:
+  difficulty_weights: {S: 0.5, M: 1.0, L: 2.0, XL: 3.0}
+  event_weights:
+    verified_no_observed_failure: 1.0
+    accepted_material_reviewer_catch: -0.75
+    material_post_merge_defect: -2.0
+    recurrence_failure: -3.0
+    revert_failure: -4.0
+  scrutiny_bar:
+    min_labeled_runs: 30
+    min_repositories_or_task_shapes: 3
+  decay:
+    minor_harness_release_no_contract_change: 0.9
+    major_harness_or_invocation_change: 0.6
+    new_model_generation: 0.5
+    unrelated_change: 1.0
+replay:
+  min_labeled_rows_for_refit: 20
+  train_fraction_oldest: 0.8
+hard_invariants:
+  - no_self_approval
+  - fixed_lifecycle_order
+  - packet_validation
+  - policy_snapshot_pinning
+  - human_merge_to_main

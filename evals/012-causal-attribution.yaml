@@ -1,0 +1,4 @@
+schema_version: 3
+title: "Causal attribution separates layers"
+expectation: "adapter stdin deadlock is adapter failure not model quality failure"
+source: OFFICE-SKILLS-V3-SPEC
