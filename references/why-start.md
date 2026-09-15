@@ -21,8 +21,8 @@ but ignores the operator's actual preference. Check the user-tier file directly.
 
 ## Why frozen intent fields are compatibility data, not license
 
-The five orchestrator-owned intent fields (`goal`, `done_criteria`, `blast_radius`,
-`named_actions`, `non_goals`) are frozen so downstream stages can rely on them without
-re-confirming intent every step. Freezing them is a compatibility contract for the run, not
-grounds to treat them as authoritative over the normative spec if the two conflict — the spec
-still wins.
+The five planner-frozen intent fields (`goal`, `done_criteria`, `blast_radius`,
+`named_actions`, `non_goals`) are frozen at the end of the planner's interactive discovery
+(issue-35#decision-1) so downstream stages can rely on them without re-confirming intent every
+step. Freezing them is a compatibility contract for the run, not grounds to treat them as
+authoritative over the normative spec if the two conflict — the spec still wins.

@@ -11,6 +11,8 @@ Read `../../protocol/routing.md`, `../../config/config.default.yaml`, the pinned
 
 Apply the exact filter order: hard exclusions → adapter trust → capabilities → absolute floor → task shape → quota safety → advisory anchor → cost → local tie-break.
 
+Adapter trust, the absolute floor, and local tie-break evidence are derived from recorded dispatch/outcome evidence and the pinned catalog row — never from a caller-supplied `adapter_state`/`absolute_floor_pass`/`local_reward`, which `route()` ignores. Trust only ever falls automatically from evidence; only an explicit, attributed `adapter_trust_acts` record ever raises it. An override of a derived gate is honoured only with a valid, unexpired `RecordedOverride` carrying user attribution; otherwise it is a hard stop (`status: "override_not_authorized"`).
+
 Never lower an absolute floor to save money/quota. Unknown quota is not unlimited. If every qualifying candidate crosses protected reserve, return control to the orchestrator instead of quietly spending it.
 
 Probe CLI headroom before it feeds routing — quota reads are network calls and must happen outside `office_runtime.py route`, which stays offline. Each adapter's `quota_probe.command` names the live probe (`scripts/agy-usage.py`, `scripts/claude-usage.py`, `scripts/codex-usage.py`); run the brand's probe at fit-test and again immediately before that brand's dispatch, never reuse a fit-test reading for a later dispatch. Exit `2` means unknown, not low — treat it as no known-safe alternative. Full contract in `../../references/quota-probe.md`.

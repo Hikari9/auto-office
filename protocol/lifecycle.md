@@ -1,6 +1,8 @@
 # Lifecycle and gears
 
-The lifecycle order is fixed: intent → frozen contract → baseline → shape/risk → decisions → plan → plan review when required → execution packets → routed execution → self-verification → independent review when required → browser/runtime verification when user-facing → reconciliation → closeout → telemetry/state → lazy maintenance → optional isolated proposals.
+The lifecycle order is fixed: provisional intent → interactive planner discovery and requirements freeze → baseline → shape/risk → decisions → plan → plan review when required → execution packets → routed execution → self-verification → independent review when required → browser/runtime verification when user-facing → reconciliation → closeout → telemetry/state → lazy maintenance → optional isolated proposals.
+
+Intent capture is two-phase, not one freeze (issue-35#decision-1): the orchestrator captures only provisional intent at kickoff, and the planner interacts directly with the user, may reshape that intent with repository evidence, and freezes the five execution fields at the end of its own discovery — not before planning starts. See `protocol/roles-and-authority.md`.
 
 Gears are funding/intensity presets over this order, never alternate lifecycles. Built-in seeds are `direct`, `direct+review`, `light`, `quick`, `express`, and `full`. A gear can waive an advisory quality anchor but never absolute competence/safety floors, packet validation, no-self-approval, policy pinning, fixed lifecycle order, or human merge-to-main.
 

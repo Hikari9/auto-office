@@ -13,6 +13,8 @@ Focus prompts on concrete bypass paths, blast radius, protected paths, wrong-but
 
 Findings use exactly: `accepted-material`, `accepted-minor`, `rejected-on-evidence`, `pending`. Full gate credit belongs only to accepted-material findings.
 
+Review is local first (`review_mode: independent_adversary`) or inline for cheap/reversible/low-risk work (`labeled-inline`, never claimed as independent). A final `integration_adversary` is triggered only when dependent/merging landings from two or more executors must compose — never by executor count alone. `disposition_owner` stays with the executor (or planner for a plan-scoped finding) except a genuine, unresolved evidence conflict, which escalates through the orchestrator to the user rather than being decided by the reviewer.
+
 Resume the same reviewer session across rounds when possible so it retains prior uncertainty/findings, but never resume into a producer identity.
 
 A defect exit earns gate-like credit only when it names a contradicted assumption and proves the current artifact was tested enough to expose it.
