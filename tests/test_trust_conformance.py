@@ -154,6 +154,61 @@ class TrustConformance(unittest.TestCase):
                         recorded_at="2026-09-20T00:00:00Z")
         self.assertEqual(self._run(con)[1], "quarantined")
 
+    # ---- label-level attribution and the second failure vocabulary ----
+    # Added after independent review of 0ed63a2. Two wrong implementations passed the
+    # original 13 cases: one ignoring outcome_labels.primary_attribution, one recognising
+    # only recurrence_failure. Proving the suite rejects ONE wrong implementation is not
+    # the same as covering the contract's branches; these were untested branches.
+
+    def test_adapter_attributed_label_quarantines_a_model_attributed_dispatch(self):
+        """Section 7.1.3 qualifies on EITHER source of attribution: the dispatch's, or the
+        label's primary_attribution. Every original fixture set attribution on the dispatch
+        and left the label at the 'model' default, so an implementation that ignored
+        primary_attribution entirely passed all 13 cases."""
+        con = self._con()
+        self._dispatch(con, "disp-model-attr", attribution="model")
+        self._label(con, "disp-model-attr", "recurrence_failure",
+                    evidence_hash=self.VALID_HASH, primary_attribution="adapter")
+        self.assertEqual(self._run(con), (1, "quarantined"))
+
+    def test_null_dispatch_attribution_with_adapter_label_quarantines(self):
+        con = self._con()
+        self._dispatch(con, "disp-null-attr", attribution=None)
+        self._label(con, "disp-null-attr", "recurrence_failure",
+                    evidence_hash=self.VALID_HASH, primary_attribution="adapter")
+        self.assertEqual(self._run(con), (1, "quarantined"))
+
+    def test_neither_attribution_adapter_does_not_quarantine(self):
+        """The converse bound: without adapter attribution from either source, a failure
+        label is not an adapter failure and must not quarantine the triple."""
+        con = self._con()
+        self._dispatch(con, "disp-no-attr", attribution="model")
+        self._label(con, "disp-no-attr", "recurrence_failure",
+                    evidence_hash=self.VALID_HASH, primary_attribution="model")
+        self.assertEqual(self._run(con), (0, "valid-unverified"))
+
+    def test_material_post_merge_defect_quarantines(self):
+        """The second contracted failure vocabulary. An implementation recognising only
+        recurrence_failure passed all 13 original cases while silently omitting this one."""
+        con = self._con()
+        self._dispatch(con, "disp-postmerge", attribution="adapter")
+        self._label(con, "disp-postmerge", "material_post_merge_defect",
+                    evidence_hash=self.VALID_HASH)
+        self.assertEqual(self._run(con), (1, "quarantined"))
+
+    def test_material_post_merge_defect_also_latches(self):
+        """The latch property covers every qualifying failure label, not just the first
+        vocabulary to be tested."""
+        con = self._con()
+        self._dispatch(con, "disp-postmerge", attribution="adapter")
+        self._label(con, "disp-postmerge", "material_post_merge_defect",
+                    evidence_hash=self.VALID_HASH, label_id="lab-pm-fail")
+        self._label(con, "disp-postmerge", "verified_no_observed_failure",
+                    evidence_hash=self.VALID_HASH, labeled_at="2026-09-15T06:00:00Z",
+                    label_id="lab-pm-benign")
+        self._trust_act(con, target_state="proven", reason="attempted clear")
+        self.assertEqual(self._run(con), (1, "quarantined"))
+
     # ---- cases 5-9: the explicit act is the only upward path, and it is bounded ----
 
     def test_explicit_trust_act_raises_a_clean_triple_to_proven(self):

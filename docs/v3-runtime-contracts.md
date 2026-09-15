@@ -920,8 +920,13 @@ qualifies a self-reported failure label or a blocking finding as evidence of a r
 
 **Trust-state transition properties (amendment v6 — the defect class the SQL body is replaced
 for).** Beyond evidence validity, an implementation must satisfy every property below.
-`tests/test_trust_conformance.py`'s nine cases are each chosen to reject an implementation that
-violates one of them:
+Every case in `tests/test_trust_conformance.py` is chosen to reject an implementation that
+violates one of them. The suite's authority is that coverage, not its case count, and the count is
+deliberately not pinned here: independent review of `0ed63a2` found two wrong implementations that
+passed the then-current suite by exploiting contracted branches it did not exercise (label-level
+`primary_attribution`, and the `material_post_merge_defect` vocabulary), so cases are added
+whenever a branch is found untested. Rejecting one wrong implementation is not the same as
+covering the contract:
 
 - **Floor.** Absent any explicit trust act and any qualifying failure evidence, the state is
   `valid-unverified` — never `proven`, no matter how many self-reported successes accumulate
