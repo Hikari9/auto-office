@@ -49,3 +49,15 @@
   privacy_lint: passed
   pattern: >-
     A size or format gate must measure the exact serialization that reaches the destination. Independent serialization in the gate and the writer admits documents that overflow the destination and fails after partial writes rather than before the first one.
+
+- name: codex-env-i-strips-herdr-env
+  stream: learned-pattern
+  identity_hash: sha256:0a6056ff43737359263786b89343142fcf8e4d2d73e698aa518ee68e683d9fed
+  evidence_hash: sha256:de2042e215f9520863ee789420f34c604a60e3a058ff425f542b80a70573b91a
+  source_count: 1
+  schema_version: 3
+  target_skill: codex-cli
+  changes_behavioral_policy: false
+  privacy_lint: passed
+  pattern: >-
+    A sanitised child environment used to dodge a shell-profile fault also drops the pane-manager variables. env -i launched to avoid an nvm/FUNCNEST fault on codex exec strips HERDR_ENV and removes herdr from PATH, so the dispatch cannot be caught by a hook keyed on that variable, never reaches a pane, and never enters the pane ledger the closeout hook reads. Check the pane-manager variable in the parent before dispatch and carry it into any allow-listed child environment; prefer the recording spawner over a bare background launch. A headless one-shot also has no session to resume, which a multi-round review gate requires.

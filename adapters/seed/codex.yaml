@@ -43,6 +43,7 @@ failure_signatures:
   - {id: comm-codex-vs-node, attribution: false-negative-liveness, pattern: "nvm-installed codex reports comm==node, not comm==codex"}
   - {id: harness-timeout-default-kill, attribution: harness, pattern: "backgrounded dispatch killed near 120s with no error when timeout was not set to 600000"}
   - {id: piped-tail-head-buffers-output, attribution: harness, pattern: "output file reads 0 bytes for the whole run when piped through tail/head"}
+  - {id: env-i-strips-herdr-env, attribution: adapter, pattern: "env -i launched to dodge the shell-profile fault also drops HERDR_ENV and herdr from PATH, so the dispatch never reaches a pane or the pane ledger"}
 conformance:
   deterministic: pending
   live: pending
