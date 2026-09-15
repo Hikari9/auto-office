@@ -29,6 +29,21 @@ observed_main_sha: e137cd2ff7f044aeb8984f43f183d6cc1639a954
 baseline_at_implementation_base_sha:
   check_ecosystem: PASS (16 skills, 8 schemas, 22 evals)
   pytest: 106 passed, 8 subtests passed
+base_drift:
+  - sha: 487fca85da3fad9dd067e8192587f27746ec360b
+    summary: >-
+      User committed an agy quota-probe fix directly to auto-office-v3 mid-run: rewrote
+      scripts/agy-usage.py onto the stdlib with native desktop OAuth credentials, dropped
+      the requests/python-dotenv dependencies, fixed --all tightest-percent accounting for
+      non-Gemini models, and added quota-probe tests to tests/test_adapters.py.
+    owned_by: user, outside every task's Touches list; no wave contends with these files
+    rebaselined_pytest: 109 passed, 8 subtests passed
+    integration_expectation: >-
+      T0's worktree was cut at 5d7a450 and reports 108 passed / 83 subtests, which is the
+      106/8 baseline plus 2 tests and 75 subtests. Merging T0 onto 487fca8 must therefore
+      yield 111 passed / 83 subtests. Any other number at integration is a regression or a
+      collision to explain, not a new baseline. Later dispatches cut from 487fca8 or later
+      use the 109/8 baseline instead.
 amendment_history:
   - version: 3
     kind: requirements
