@@ -12,7 +12,8 @@ set -euo pipefail
 #     [--state-dir <dir>] [--timeout <seconds>] [--pane-id <id>] [--agent-name <name>]
 #
 # --pane-id/--agent-name record the dispatch in the Herdr pane ledger
-# (OFFICE_PANE_LEDGER, default /tmp/office/panes.jsonl) so the Stop hook
+# (OFFICE_PANE_LEDGER, default <state-dir>/panes.jsonl -- one ledger per run,
+# never a shared global file) so the Stop hook
 # scripts/hooks/close_finished_panes.mjs can close the pane once its agent
 # reports done. A pane-hosted dispatch spawned without these stays open forever,
 # because the hook only ever closes panes it finds in the ledger.
@@ -175,7 +176,7 @@ print(json.dumps({
 # Record the pane in the Herdr ledger, in the same block that spawned it, so it
 # cannot be forgotten separately from spawning.
 if [[ -n "$PANE_ID" ]]; then
-  LEDGER="${OFFICE_PANE_LEDGER:-/tmp/office/panes.jsonl}"
+  LEDGER="${OFFICE_PANE_LEDGER:-${STATE_DIR}/panes.jsonl}"
   mkdir -p "$(dirname "$LEDGER")"
   python3 -c "
 import json, sys

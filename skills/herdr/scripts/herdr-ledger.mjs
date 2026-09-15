@@ -4,11 +4,14 @@
  * herdr-ledger: a small, worktree-local record of the panes one orchestrator
  * spawned, so it can be swept later without touching anyone else's panes.
  *
- * File: $HERDR_LEDGER, else $OFFICE_PANE_LEDGER, else /tmp/office/panes.jsonl.
- * This is the SAME ledger scripts/office_spawn.sh writes and
- * scripts/hooks/close_finished_panes.mjs sweeps. It is deliberately not
- * worktree-local: several agents in different worktrees share one run's panes,
- * so a per-worktree file would let each agent see only its own spawns.
+ * File: $HERDR_LEDGER, else $OFFICE_STATE_DIR/panes.jsonl.
+ * One ledger per office run, living in that run's own state directory. Not
+ * worktree-local, because a run's agents sit in several worktrees and each
+ * would then see only its own spawns. Not a single global file either: a
+ * shared /tmp path accumulates rows from every run that ever executed, so a
+ * sweep has to reason about panes it has no business touching.
+ * With no $OFFICE_STATE_DIR set there is no current run, and the ledger has
+ * no meaningful scope -- the script exits rather than guessing one.
  * One JSON object per line, keyed by pane_id. Fields:
  *   pane_id, agent, kind, session_id, worktree, spawned_at,
  *   orchestrator_pane_id, orchestrator_session_id,
@@ -29,8 +32,16 @@ const SUGGESTIONS = new Set(["closeable", "reusable", "compactable", "keep"]);
 
 function ledgerPath() {
   if (process.env.HERDR_LEDGER) return process.env.HERDR_LEDGER;
-  if (process.env.OFFICE_PANE_LEDGER) return process.env.OFFICE_PANE_LEDGER;
-  return join("/tmp", "office", "panes.jsonl");
+  const stateDir = process.env.OFFICE_STATE_DIR;
+  if (!stateDir) {
+    console.error(
+      "herdr-ledger: no ledger scope. Set OFFICE_STATE_DIR to the current run's " +
+      "state directory (office_runtime.py start returns it as state_dir), or set " +
+      "HERDR_LEDGER explicitly. A pane ledger belongs to one run; there is no global one."
+    );
+    process.exit(2);
+  }
+  return join(stateDir, "panes.jsonl");
 }
 
 function readLedger(path) {

@@ -19,14 +19,16 @@ This skill only *reads and sweeps* the ledger. Recording a spawn belongs to the 
 which owns dispatch; see its spawn recipe. One JSON object per line, one line per spawned pane:
 
 ```
-$HERDR_LEDGER, else $OFFICE_PANE_LEDGER, else /tmp/office/panes.jsonl
+$HERDR_LEDGER, else $OFFICE_STATE_DIR/panes.jsonl
 ```
 
 This is the same ledger `scripts/office_spawn.sh` writes and
-`scripts/hooks/close_finished_panes.mjs` sweeps — one file, not a private copy. It is deliberately
-shared rather than worktree-local: a run's agents sit in several different worktrees, and a
-per-worktree ledger would show each agent only its own spawns, so panes spawned from another
-worktree would never be swept by anyone.
+`scripts/hooks/close_finished_panes.mjs` sweeps — one file, not a private copy, and one per office
+run. It is not worktree-local, because a run's agents sit in several worktrees and each would
+otherwise see only its own spawns. It is not a single global file either: a shared path
+accumulates rows from every run that ever executed, and a sweep should never have to reason about
+panes belonging to a run that ended. With no run state directory set, the script exits rather than
+guessing a scope.
 
 Fields: `pane_id`, `agent`, `kind`, `session_id`, `worktree`, `spawned_at`,
 `orchestrator_pane_id`, `orchestrator_session_id`, `status`

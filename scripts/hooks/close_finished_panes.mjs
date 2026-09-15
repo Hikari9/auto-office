@@ -59,7 +59,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
 
-const LEDGER = process.env.OFFICE_PANE_LEDGER || join("/tmp", "office", "panes.jsonl");
+const LEDGER = process.env.OFFICE_PANE_LEDGER || join(process.env.OFFICE_STATE_DIR || ".office", "panes.jsonl");
 const FINISHED = new Set(["done", "gone", "halted", "dead", "stopped", "exited", "terminated"]);
 const CURRENT_RUN_ID = process.env.OFFICE_RUN_ID || null;
 const CURRENT_SESSION_ID = process.env.OFFICE_SESSION_ID || process.env.HERDR_SESSION_ID || null;

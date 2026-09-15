@@ -198,12 +198,14 @@ a separate bookkeeping pass. This skill owns recording, because recording happen
   --pane <pane-id> --agent <name> --kind <kind> --session <session_id> [--run <run-id>]
 ```
 
-It defaults to `$HERDR_LEDGER`, else `$OFFICE_PANE_LEDGER`, else `/tmp/office/panes.jsonl` — the
-same ledger `scripts/office_spawn.sh` writes and `scripts/hooks/close_finished_panes.mjs` sweeps.
-It is shared rather than worktree-local on purpose: one run's agents sit in several worktrees, and
-a per-worktree ledger would show each agent only its own spawns, leaving panes spawned elsewhere
-unsweepable by anyone. `session_id` is the resume handle for that agent after its pane closes;
-capture it here, not later.
+It defaults to `$HERDR_LEDGER`, else `$OFFICE_STATE_DIR/panes.jsonl` — the same ledger
+`scripts/office_spawn.sh` writes and `scripts/hooks/close_finished_panes.mjs` sweeps. One ledger
+per office run, in that run's own state directory. Not worktree-local, because a run's agents sit
+in several worktrees and each would otherwise see only its own spawns; and not one global file
+either, because a shared path accumulates rows from every run that ever executed and a sweep then
+has to reason about panes it has no business touching. With no run state directory set the script
+exits rather than guessing a scope. `session_id` is the resume handle for that agent after its
+pane closes; capture it here, not later.
 
 Every brief you send to a spawned agent should ask for one line back before that agent's final
 turn ends:
