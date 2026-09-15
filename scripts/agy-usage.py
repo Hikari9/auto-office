@@ -30,6 +30,8 @@ Note:
 
 import json
 import os
+import re
+import shutil
 import sys
 import urllib.error
 import urllib.parse
@@ -37,15 +39,150 @@ import urllib.request
 
 TOKEN_PATH = os.path.expanduser("~/.gemini/antigravity-cli/antigravity-oauth-token")
 
-# Google OAuth2 credentials for the native Antigravity CLI desktop client (RFC 8252)
-DEFAULT_CLIENT_ID = "REMOVED-OAUTH-CLIENT-ID-DISCOVERED-AT-RUNTIME"
-DEFAULT_CLIENT_SECRET = "REMOVED-OAUTH-CLIENT-SECRET-DISCOVERED-AT-RUNTIME"
-
-OAUTH_CLIENT_ID = os.environ.get("AGY_OAUTH_CLIENT_ID") or DEFAULT_CLIENT_ID
-OAUTH_CLIENT_SECRET = os.environ.get("AGY_OAUTH_CLIENT_SECRET") or DEFAULT_CLIENT_SECRET
+# ---------------------------------------------------------------------------
+# OAuth client credentials are DISCOVERED from the installed Antigravity CLI,
+# never hard-coded here.
+#
+# They used to be literals in this file. GitHub push protection blocked a
+# branch over them (Google OAuth Client ID + Secret, 2026-09-15) and it was
+# right to: whatever RFC 8252 says about installed-app secrets not being
+# confidential, a credential committed to a repo cannot be rotated without a
+# commit, and it turns every future push to this repo into a secret-scanning
+# negotiation.
+#
+# `agy` is a single self-contained binary that necessarily carries the client
+# it authenticates as, so the values are already present on any machine that
+# can run this probe at all. Reading them from there keeps exactly one copy on
+# disk, owned by the tool that owns the credential, and picks up a rotation the
+# moment the CLI is upgraded.
+# ---------------------------------------------------------------------------
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 QUOTA_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
 UA = "antigravity-cli"
+
+CLIENT_ID_RE = re.compile(rb"[0-9]{10,}-[a-z0-9]{28,}\.apps\.googleusercontent\.com")
+# Exactly 28 characters after the prefix -- Google's fixed client-secret shape.
+# NOT `{20,}` and NOT a negative lookahead: in the agy binary the secret abuts
+# unrelated string data with no delimiter, so a greedy match runs past the end
+# of the credential, and a lookahead matches nothing at all. Both were observed;
+# the greedy one produced a plausible value the token endpoint simply rejected.
+CLIENT_SECRET_RE = re.compile(rb"GOCSPX-[A-Za-z0-9_-]{28}")
+CREDENTIAL_CACHE = os.path.expanduser("~/.cache/auto-office/agy-oauth-client.json")
+
+
+def _scan_agy_binary(path):
+    """Every (client_id, secret) candidate in the agy binary.
+
+    A LIST, not a pair: the binary carries more than one client id and there is
+    no reliable structural way to tell which is live. Proximity to the secret
+    picks the wrong one, and match order is an implementation detail of
+    whatever bundler produced the binary. Rather than encode a brittle "it is
+    the second one", hand over every candidate and let the token endpoint
+    adjudicate; the winner is cached, so the ambiguity costs one extra request
+    once per agy upgrade.
+
+    Streamed in chunks with an overlap, not read whole: the binary is ~180 MB
+    and this probe sits on the routing path. The overlap is so a match
+    straddling a chunk boundary is not missed -- without it the probe would
+    fail intermittently, on some installs and not others.
+    """
+    ids, secrets = [], []
+    tail_bytes = b""
+    try:
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read(1 << 20)
+                if not chunk:
+                    break
+                buf = tail_bytes + chunk
+                for m in CLIENT_ID_RE.finditer(buf):
+                    v = m.group(0).decode()
+                    if v not in ids:
+                        ids.append(v)
+                for m in CLIENT_SECRET_RE.finditer(buf):
+                    v = m.group(0).decode()
+                    if v not in secrets:
+                        secrets.append(v)
+                tail_bytes = buf[-256:]
+    except OSError:
+        return []
+    return [(i, s) for i in ids for s in secrets]
+
+
+def _binary_key(binary):
+    """Cache key on (path, size, mtime) so an agy upgrade invalidates it.
+    Not a content hash: hashing 180 MB to avoid scanning 180 MB saves nothing."""
+    st = os.stat(binary)
+    return {"path": binary, "size": st.st_size, "mtime": int(st.st_mtime)}
+
+
+def _read_cached_pair(key):
+    try:
+        with open(CREDENTIAL_CACHE, "r") as fh:
+            blob = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if all(blob.get(k) == v for k, v in key.items()):
+        cid, sec = blob.get("client_id"), blob.get("client_secret")
+        if cid and sec:
+            return (cid, sec)
+    return None
+
+
+def _write_cached_pair(key, cid, sec):
+    try:
+        os.makedirs(os.path.dirname(CREDENTIAL_CACHE), exist_ok=True)
+        fd = os.open(CREDENTIAL_CACHE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump({**key, "client_id": cid, "client_secret": sec}, fh)
+    except OSError:
+        pass
+
+
+def resolve_oauth_client():
+    """(candidates, cache_key, error). Never returns a baked-in default.
+
+    EXPLICIT ENVIRONMENT FIRST, then discovery -- a deliberate inversion of
+    "discover, falling back to env". An override that applies only when
+    discovery fails is not an override: with `agy` installed it would silently
+    do nothing, which is the more confusing of the two failures.
+    """
+    env_id = os.environ.get("AGY_OAUTH_CLIENT_ID")
+    env_secret = os.environ.get("AGY_OAUTH_CLIENT_SECRET")
+    if env_id and env_secret:
+        return [(env_id, env_secret)], None, None
+    if env_id or env_secret:
+        return [], None, (
+            "Set BOTH AGY_OAUTH_CLIENT_ID and AGY_OAUTH_CLIENT_SECRET, or neither "
+            "(one alone cannot authenticate, and silently pairing it with a "
+            "discovered value would mix two clients)."
+        )
+
+    binary = shutil.which("agy")
+    if not binary:
+        return [], None, (
+            "`agy` not found on PATH, so OAuth client credentials cannot be "
+            "discovered. Install the Antigravity CLI, or set "
+            "AGY_OAUTH_CLIENT_ID and AGY_OAUTH_CLIENT_SECRET."
+        )
+
+    try:
+        key = _binary_key(binary)
+    except OSError as exc:
+        return [], None, f"Cannot stat {binary}: {exc}"
+
+    cached = _read_cached_pair(key)
+    if cached:
+        return [cached], key, None
+
+    candidates = _scan_agy_binary(binary)
+    if not candidates:
+        return [], key, (
+            f"Could not find OAuth client credentials in {binary}. The CLI's "
+            "internals may have changed; set AGY_OAUTH_CLIENT_ID and "
+            "AGY_OAUTH_CLIENT_SECRET to override."
+        )
+    return candidates, key, None
 
 
 def get_refreshed_access_token():
@@ -63,33 +200,49 @@ def get_refreshed_access_token():
     if not refresh_token:
         return None, f"No refresh_token found in {TOKEN_PATH} (run `agy` and log in)"
 
-    payload = urllib.parse.urlencode({
-        "client_id": OAUTH_CLIENT_ID,
-        "client_secret": OAUTH_CLIENT_SECRET,
-        "refresh_token": refresh_token,
-        "grant_type": "refresh_token"
-    }).encode("utf-8")
+    candidates, cache_key, cred_err = resolve_oauth_client()
+    if cred_err:
+        return None, cred_err
 
-    req = urllib.request.Request(
-        TOKEN_URL,
-        data=payload,
-        headers={"User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded"}
-    )
+    last_error = None
+    for client_id, client_secret in candidates:
+        payload = urllib.parse.urlencode({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token"
+        }).encode("utf-8")
 
-    try:
-        with urllib.request.urlopen(req, timeout=10) as res:
-            token_json = json.load(res)
-            access_token = token_json.get("access_token")
-            if not access_token:
-                return None, "No access_token returned by OAuth refresh"
-            return access_token, None
-    except urllib.error.HTTPError as e:
-        body = e.read()[:200].decode("utf-8", "replace")
-        return None, f"OAuth token refresh failed ({e.code}): {body}"
-    except urllib.error.URLError as e:
-        return None, f"OAuth token refresh unreachable: {e.reason}"
-    except Exception as e:
-        return None, f"Error refreshing OAuth token: {e}"
+        req = urllib.request.Request(
+            TOKEN_URL,
+            data=payload,
+            headers={"User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded"}
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=10) as res:
+                token_json = json.load(res)
+                access_token = token_json.get("access_token")
+                if not access_token:
+                    return None, "No access_token returned by OAuth refresh"
+                if cache_key:
+                    _write_cached_pair(cache_key, client_id, client_secret)
+                return access_token, None
+        except urllib.error.HTTPError as e:
+            body = e.read()[:200].decode("utf-8", "replace")
+            last_error = f"OAuth token refresh failed ({e.code}): {body}"
+            # A rejected CLIENT means this candidate is the wrong one -- try the
+            # next. `invalid_grant` means the user's refresh token is dead, which
+            # no other candidate can fix, so stop.
+            if "invalid_grant" in body:
+                return None, last_error
+            if e.code in (400, 401):
+                continue
+            return None, last_error
+        except urllib.error.URLError as e:
+            return None, f"OAuth token refresh unreachable: {e.reason}"
+
+    return None, last_error or "No OAuth client candidates available"
 
 
 def fetch_agy_quota():
