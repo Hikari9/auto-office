@@ -189,6 +189,15 @@ def route(request: dict) -> dict:
         from scripts import office_routing
     except ImportError:
         try:
+            # Both parents, because neither is guaranteed to be on sys.path: pytest puts
+            # the repo root there, but `python3 tests/test_schemas.py` -- which is exactly
+            # how .github/workflows/validate.yml invokes it -- puts only tests/ there, and
+            # the shim then degraded to routing_module_unavailable in CI while passing
+            # locally under pytest.
+            _here = os.path.dirname(os.path.abspath(__file__))
+            for _p in (_here, os.path.dirname(_here)):
+                if _p not in sys.path:
+                    sys.path.insert(0, _p)
             import office_routing
         except ImportError as exc:
             sys.stderr.write(

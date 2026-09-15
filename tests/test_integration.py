@@ -572,3 +572,130 @@ class TestLifecycleIntegration(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class DerivedRoutingRoundTripTest(unittest.TestCase):
+    """Amendment v3's whole point: evidence recorded at one run's closeout must change a
+    LATER run's route. A label that is written but never consumed proves nothing, so this
+    asserts the round trip rather than either half of it.
+
+    Role is 'worker' deliberately: it sits outside MUTABLE_TRUST_ROLES, so stage 2 does not
+    reject an unpromoted triple and the test isolates the reward path it is actually about.
+    """
+
+    GOOD = 'agy@1/good-model@high'
+    POOR = 'agy@1/poor-model@high'
+
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, 'runs.db')
+        run_cmd('init-db', '--db', self.db)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _candidates(self):
+        # Identical on every cost axis, so the reward tie-break is the only thing that can
+        # separate them. If cost differed, a passing test would prove nothing about reward.
+        def cand(triple):
+            harness, rest = triple.split('@', 1)
+            version, rest = rest.split('/', 1)
+            model_id, effort = rest.split('@', 1)
+            return {
+                'harness': harness, 'harness_version': version,
+                'model_id': model_id, 'effort': effort,
+                'capabilities': [], 'supported_playbooks': ['Change'],
+                'quota': {'status': 'ok', 'tightest_remaining_percent': 90,
+                          'projected_burn_percent': 1},
+                'cost': {'money_estimate': 1, 'quota_burn': 1, 'wall_clock_seconds': 10},
+            }
+        return [cand(self.POOR), cand(self.GOOD)]
+
+    def _route(self):
+        import office_routing as routing
+        return routing.route({'role': 'worker', 'playbook': 'Change',
+                              'runs_db': self.db, 'candidates': self._candidates()})
+
+    def _record_closeout(self, triple, dispatch_id, label, narrative):
+        con = sqlite3.connect(self.db)
+        con.execute(
+            "INSERT INTO dispatches(id, run_id, role, triple, money_estimate, money_actual) "
+            "VALUES (?,?,?,?,?,?)",
+            (dispatch_id, 'run-1', 'worker', triple, 1.0, 1.0))
+        con.execute(
+            "INSERT INTO outcome_labels(id, dispatch_id, label, primary_attribution, "
+            "contributing_attributions, labeled_at, evidence_hash) VALUES (?,?,?,?,?,?,?)",
+            (f'lbl-{dispatch_id}', dispatch_id, label, 'model',
+             json.dumps([narrative]), datetime.now(timezone.utc).isoformat(),
+             'sha256:' + 'b' * 64))
+        con.commit()
+        con.close()
+
+    def test_labels_recorded_at_closeout_change_a_later_runs_route(self):
+        import office_scoring as scoring
+
+        # Run 1: no evidence exists. Both rewards are unknown, so neither triple can be
+        # preferred on evidence and the tie falls to the deterministic candidate_id order.
+        con = sqlite3.connect(self.db)
+        self.assertIsNone(scoring.compute_local_reward(con, self.GOOD))
+        self.assertIsNone(scoring.compute_local_reward(con, self.POOR))
+        con.close()
+
+        first = self._route()
+        self.assertEqual(first['status'], 'selected')
+        self.assertEqual(first['selected'], self.GOOD,
+                         'precondition: with no evidence the tie-break is alphabetical by '
+                         'candidate_id, so GOOD wins for a reason that has nothing to do '
+                         'with quality')
+
+        # Closeout of run 1 records what actually happened on each triple.
+        self._record_closeout(self.POOR, 'd-poor', 'abandoned', 'narrative:failed_verification')
+        self._record_closeout(self.GOOD, 'd-good', 'verified_no_observed_failure',
+                              'narrative:success')
+
+        con = sqlite3.connect(self.db)
+        good_r = scoring.compute_local_reward(con, self.GOOD)
+        poor_r = scoring.compute_local_reward(con, self.POOR)
+        con.close()
+        self.assertIsNotNone(good_r)
+        self.assertIsNotNone(poor_r)
+        self.assertGreater(good_r, poor_r)
+
+        # Run 2: the same request, routed again, now consumes that evidence.
+        second = self._route()
+        self.assertEqual(second['selected'], self.GOOD)
+        self.assertIn('reason', second['selection_disclosure'])
+
+    def test_the_round_trip_can_reverse_a_no_evidence_preference(self):
+        """The previous test's GOOD triple also wins the no-evidence tie, so on its own it
+        cannot distinguish 'evidence decided this' from 'nothing changed'. Here the triple
+        that loses the alphabetical tie is the one evidence favours, so a selection flip is
+        only explicable by the recorded labels."""
+        import office_scoring as scoring
+
+        first = self._route()
+        self.assertEqual(first['selected'], self.GOOD)
+
+        self._record_closeout(self.GOOD, 'd-good-bad', 'abandoned',
+                              'narrative:operator_rejected')
+        self._record_closeout(self.POOR, 'd-poor-good', 'verified_no_observed_failure',
+                              'narrative:success')
+
+        con = sqlite3.connect(self.db)
+        self.assertGreater(scoring.compute_local_reward(con, self.POOR),
+                           scoring.compute_local_reward(con, self.GOOD))
+        con.close()
+
+        second = self._route()
+        self.assertEqual(
+            second['selected'], self.POOR,
+            'a later run must route differently because of what the earlier run recorded; '
+            'if this still selects GOOD, labels are being written and never consumed')
+
+    def test_an_unmeasured_triple_does_not_rank_as_a_measured_zero(self):
+        """§7.4.3: unknown is its own tier above measured-neutral. A triple nobody has
+        measured must not be treated as one that was measured and scored zero."""
+        import office_scoring as scoring
+        self.assertLess(scoring.reward_sort_key(None), scoring.reward_sort_key(0.0))
+        self.assertLess(scoring.reward_sort_key(0.5), scoring.reward_sort_key(None))
