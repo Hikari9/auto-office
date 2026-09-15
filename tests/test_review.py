@@ -61,20 +61,36 @@ class TestReview(unittest.TestCase):
         path.write_text(json.dumps(review), encoding='utf-8')
         return path
 
-    def _run_loop(self, extra_args=(), env=None):
+    def _write_packet(self, commands=("true",)):
+        """A packet carrying real validation commands.
+
+        The fixture repo has no package.json/Cargo.toml/pyproject.toml, so verify.sh cannot
+        infer a command for it. Without a packet nothing executes, and a verification that
+        executed nothing is now reported as failed rather than passed -- so every loop test
+        that wants to reach the review gate has to actually verify something first.
+        """
+        packet = {"validation_commands": list(commands)}
+        path = self.state_dir / 'packet.json'
+        path.write_text(json.dumps(packet), encoding='utf-8')
+        return path
+
+    def _run_loop(self, extra_args=(), env=None, packet=True):
         loop_script = ROOT / 'scripts' / 'review_loop.sh'
         full_env = {**os.environ}
         if env:
             full_env.update(env)
-        return subprocess.run([
+        args = [
             str(loop_script),
             '--state-dir', str(self.state_dir),
             '--dispatch-id', 'disp-001',
             '--reviewer-dispatch-id', 'rev-001',
             '--worktree', str(self.repo),
             '--db', str(self.db),
-            *extra_args,
-        ], cwd=self.repo, capture_output=True, text=True, env=full_env)
+        ]
+        if packet:
+            args += ['--packet', str(self._write_packet())]
+        return subprocess.run([*args, *extra_args],
+                              cwd=self.repo, capture_output=True, text=True, env=full_env)
 
     def test_review_finding_persist(self):
         script = ROOT / 'scripts' / 'review_finding.sh'
@@ -161,6 +177,69 @@ class TestReview(unittest.TestCase):
         r = self._run_loop(extra_args=('--review-file', str(review_path), '--review-scope', 'T99'))
         self.assertEqual(r.returncode, 4)
         self.assertIn('scope_mismatch', r.stdout + r.stderr)
+
+    # ---- F1: a verification that executed nothing is not a pass ----
+
+    def test_verify_reports_failure_when_no_gate_executed(self):
+        """The fixture repo has no project markers and no packet, so nothing can run.
+
+        Reporting that as a pass is how an unknown project type earned a full green without
+        executing a single command -- four gates had a permanently empty command and could
+        never fail.
+        """
+        verify = ROOT / 'scripts' / 'verify.sh'
+        r = subprocess.run([str(verify), '--worktree', str(self.repo), '--dispatch-id', 'v-1',
+                            '--state-dir', str(self.state_dir), '--db', str(self.db)],
+                           capture_output=True, text=True)
+        out = json.loads(r.stdout)
+        self.assertFalse(out['passed'])
+        self.assertEqual(out['reason'], 'no_gate_executed')
+        self.assertEqual(out['executed'], 0)
+        self.assertEqual(out['skipped'], 8)
+
+    def test_a_skipped_gate_records_no_validation_row_and_no_evidence(self):
+        """sha256("") is not proof. A gate that ran nothing produces no receipt at all."""
+        verify = ROOT / 'scripts' / 'verify.sh'
+        subprocess.run([str(verify), '--worktree', str(self.repo), '--dispatch-id', 'v-2',
+                        '--state-dir', str(self.state_dir), '--db', str(self.db)],
+                       capture_output=True, text=True)
+        with sqlite3.connect(self.db) as con:
+            rows = con.execute("SELECT COUNT(*) FROM validations WHERE dispatch_id = 'v-2'").fetchone()[0]
+        self.assertEqual(rows, 0)
+
+    def test_a_packet_command_that_fails_fails_the_verification(self):
+        """The control for the two tests above: with a real command, the gate can fail.
+
+        Without this, `passed: false` might mean the gate merely never runs.
+        """
+        verify = ROOT / 'scripts' / 'verify.sh'
+        packet = self._write_packet(commands=("exit 1",))
+        r = subprocess.run([str(verify), '--worktree', str(self.repo), '--dispatch-id', 'v-3',
+                            '--state-dir', str(self.state_dir), '--db', str(self.db),
+                            '--packet', str(packet)], capture_output=True, text=True)
+        out = json.loads(r.stdout)
+        self.assertFalse(out['passed'])
+        self.assertEqual(out['reason'], 'a gate failed')
+        self.assertEqual(out['executed'], 1)
+        targeted = [g for g in out['gates'] if g['name'] == 'targeted_tests'][0]
+        self.assertFalse(targeted['passed'])
+
+        ok_packet = self._write_packet(commands=("true",))
+        r2 = subprocess.run([str(verify), '--worktree', str(self.repo), '--dispatch-id', 'v-4',
+                             '--state-dir', str(self.state_dir), '--db', str(self.db),
+                             '--packet', str(ok_packet)], capture_output=True, text=True)
+        self.assertTrue(json.loads(r2.stdout)['passed'])
+
+    def test_self_verification_failure_reaches_the_defect_exit(self):
+        """Previously unreachable: every loop test ran against a repo whose verification was
+        a vacuous green, so the IMPLEMENTATION_DEFECT branch could not be entered at all."""
+        failing = self._write_packet(commands=("exit 1",))
+        review_path = self._write_review()
+        r = self._run_loop(packet=False,
+                           extra_args=('--packet', str(failing), '--max-iterations', '1',
+                                       '--review-file', str(review_path)))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('MAX_ITERATIONS reached during self-verification', r.stdout + r.stderr)
 
     def test_review_loop_valid_reviewer_dispatch_passes_and_labels_dispatch(self):
         """The success path: a validated reviewer dispatch and readback bound to

@@ -82,6 +82,65 @@ class CompileDreamTest(unittest.TestCase):
             self.assertEqual(rt.privacy_findings(text), [])
 
 
+class RecorderBackedDreamTest(unittest.TestCase):
+    """The runs.db half of the compiler. Every other compile test passes db=None, so this path
+    -- the one that reads real recorder rows -- was executed by no test at all."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db = Path(self.tmp.name) / "runs.db"
+        rt.init_db(self.db)
+        self.sd = write_state_dir(self.tmp.name, defects=[])
+        con = sqlite3.connect(self.db)
+        con.execute("INSERT INTO runs(id, family_id) VALUES('run-A','fam-A')")
+        con.execute("INSERT INTO runs(id, family_id) VALUES('run-B','fam-B')")
+        con.execute("INSERT INTO dispatches(id, run_id) VALUES('d-A','run-A')")
+        con.execute("INSERT INTO dispatches(id, run_id) VALUES('d-B','run-B')")
+        # Severities as review_finding.sh and office_scoring.py actually write them: the
+        # `material` token lives in the STATUS column, never in severity.
+        for fid, did, status, sev in [
+            ("f-A1", "d-A", "accepted-material", "critical"),
+            ("f-A2", "d-A", "accepted-material", "high"),
+            ("f-A3", "d-A", "accepted-minor", "low"),
+            ("f-B1", "d-B", "accepted-material", "high"),
+            ("f-orphan", None, "accepted-material", "high"),
+        ]:
+            con.execute("INSERT INTO findings(id, dispatch_id, status, severity) VALUES(?,?,?,?)",
+                        (fid, did, status, sev))
+        con.commit()
+        con.close()
+
+    def test_material_findings_are_selected_by_status_not_severity(self):
+        """Nothing in this repo writes severity == 'material'. Selecting on it made this
+        branch dead against every recorder-written row."""
+        dream = prop.compile_dream(str(self.db), self.sd, "r1", family_id="fam-A")
+        patterns = {p["pattern_id"]: p for p in dream["patterns"]}
+        self.assertIn("gate-satisfiable-by-excluded-evidence", patterns)
+        self.assertEqual(patterns["gate-satisfiable-by-excluded-evidence"]["occurrences"], 2)
+        self.assertEqual(patterns["gate-satisfiable-by-excluded-evidence"]["kinds"],
+                         ["critical", "high"])
+
+    def test_a_family_scoped_dream_excludes_other_families_and_orphans(self):
+        """The published occurrence count is family-scoped evidence. A predicate admitting
+        rows with no run row inflated it with another family's findings."""
+        dream = prop.compile_dream(str(self.db), self.sd, "r1", family_id="fam-A")
+        self.assertEqual(dream["source_counts"]["findings"], 3)  # f-A1, f-A2, f-A3 only
+
+        other = prop.compile_dream(str(self.db), self.sd, "r1", family_id="fam-B")
+        self.assertEqual(other["source_counts"]["findings"], 1)
+
+        every = prop.compile_dream(str(self.db), self.sd, "r1", family_id=None)
+        self.assertEqual(every["source_counts"]["findings"], 5)
+
+    def test_a_family_with_no_material_findings_compiles_no_pattern(self):
+        con = sqlite3.connect(self.db)
+        con.execute("UPDATE findings SET status='accepted-minor' WHERE dispatch_id='d-A'")
+        con.commit(); con.close()
+        dream = prop.compile_dream(str(self.db), self.sd, "r1", family_id="fam-A")
+        self.assertEqual(dream["patterns"], [])
+
+
 class AppendTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

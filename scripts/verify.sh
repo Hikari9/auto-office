@@ -45,29 +45,49 @@ elif [[ -f "$WORKTREE/pyproject.toml" || -f "$WORKTREE/requirements.txt" ]]; the
 fi
 
 OVERALL_PASS=true
+EXECUTED=0
+SKIPPED=0
 RESULTS="[]"
 
+# A gate with no command is SKIPPED, not passed. It records no validation row, because a
+# validation row asserts that a command ran -- and it carries no evidence hash, because the
+# sha256 of the empty string is not proof of anything. Previously every empty-command gate
+# reported passed:true with sha256("") as its evidence, so four of the eight gates could never
+# fail and an unknown project type produced a full green that executed nothing.
 run_gate() {
   local kind="$1"
   local cmd="$2"
-  local evidence_hash="sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  local evidence_hash=""
   local passed=true
   local skip_reason=""
-  
+
   if [[ -z "$cmd" ]]; then
-    skip_reason="Not applicable for $PROJECT_TYPE"
-  else
+    skip_reason="no command for $PROJECT_TYPE"
+    SKIPPED=$((SKIPPED + 1))
+    local temp_skipped
+    temp_skipped=$(echo "$RESULTS" | sed 's/]$//')
+    if [[ "$RESULTS" != "[]" ]]; then temp_skipped="${temp_skipped},"; fi
+    RESULTS="${temp_skipped}{\"name\": \"$kind\", \"passed\": null, \"skipped\": true, \"skip_reason\": \"$skip_reason\", \"evidence_hash\": null}]"
+    return 0
+  fi
+
+  EXECUTED=$((EXECUTED + 1))
+  {
     if ! (cd "$WORKTREE" && eval "$cmd" > gate.log 2>&1); then
       passed=false
       OVERALL_PASS=false
     fi
     if [[ -f "$WORKTREE/gate.log" ]]; then
-      evidence_hash=$("$RUNTIME" hash "$WORKTREE/gate.log" | grep -o '"hash": *"[^"]*"' | cut -d'"' -f4 || echo "$evidence_hash")
+      evidence_hash=$("$RUNTIME" hash "$WORKTREE/gate.log" | grep -o '"hash": *"[^"]*"' | cut -d'"' -f4 || echo "")
     fi
-  fi
-  
+  }
+
   local pass_int=1
   if [[ "$passed" == "false" ]]; then pass_int=0; fi
+
+  # known_bad_proven is a claim about this gate only, and only when it really ran.
+  local kb_proven=0
+  if [[ "$kind" == "known_bad_controls" && "$pass_int" == "1" ]]; then kb_proven=1; fi
   
   local val_file="$STATE_DIR/.office/validations/${kind}_${DISPATCH_ID}.json"
   cat <<EOF > "$val_file"
@@ -76,7 +96,7 @@ run_gate() {
   "kind": "$kind",
   "command": "$cmd",
   "passed": $pass_int,
-  "known_bad_proven": 0,
+  "known_bad_proven": $kb_proven,
   "evidence_hash": "$evidence_hash"
 }
 EOF
@@ -97,6 +117,29 @@ cmd_lint=""
 cmd_typecheck=""
 cmd_build=""
 cmd_regression=""
+cmd_targeted=""
+cmd_known_bad=""
+
+# The packet is where a task states what verifying IT means. Without this, targeted_tests and
+# known_bad_controls had no command for any project type and so had no constructible failing
+# case at all.
+if [[ -n "$PACKET" && -f "$PACKET" ]]; then
+  cmd_targeted=$(python3 -c "
+import json,sys
+p=json.load(open(sys.argv[1]))
+cmds=p.get('validation_commands') or []
+print(' && '.join(str(c) for c in cmds))
+" "$PACKET" 2>/dev/null || echo "")
+  cmd_known_bad=$(python3 -c "
+import json,sys
+p=json.load(open(sys.argv[1]))
+kb=p.get('known_bad_behavior_to_exclude') or ''
+if isinstance(kb,list): kb=[str(x) for x in kb]
+else: kb=[str(kb)] if kb else []
+# Only an executable control counts. Prose describing what must not happen is not a command.
+print(' && '.join(c for c in kb if c.startswith('!') is False and ' ' in c and c.split()[0] in ('python3','pytest','npm','npx','bash','sh','make','cargo','go','test')))
+" "$PACKET" 2>/dev/null || echo "")
+fi
 
 case "$PROJECT_TYPE" in
   node)
@@ -122,18 +165,31 @@ esac
 run_gate "lint" "$cmd_lint"
 run_gate "typecheck" "$cmd_typecheck"
 run_gate "build" "$cmd_build"
-run_gate "targeted_tests" ""
+run_gate "targeted_tests" "$cmd_targeted"
 run_gate "regression_tests" "$cmd_regression"
 run_gate "runtime_verification" ""
 run_gate "browser_acceptance" ""
-run_gate "known_bad_controls" ""
+run_gate "known_bad_controls" "$cmd_known_bad"
 
 overall_str="true"
-if [[ "$OVERALL_PASS" == "false" ]]; then overall_str="false"; fi
+reason=""
+if [[ "$OVERALL_PASS" == "false" ]]; then
+  overall_str="false"
+  reason="a gate failed"
+elif [[ "$EXECUTED" -eq 0 ]]; then
+  # Nothing ran, so nothing was verified. Reporting this as a pass is how a project type with no
+  # configured commands used to earn a full green without executing a single command.
+  overall_str="false"
+  reason="no_gate_executed"
+fi
 
 cat <<EOF
 {
   "passed": $overall_str,
+  "reason": "$reason",
+  "executed": $EXECUTED,
+  "skipped": $SKIPPED,
+  "project_type": "$PROJECT_TYPE",
   "dispatch_id": "$DISPATCH_ID",
   "gates": $RESULTS
 }

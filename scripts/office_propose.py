@@ -76,17 +76,25 @@ def _read_route_defects(state_dir):
 
 
 def _read_findings(db, family_id):
+    """Findings for one family, or every finding when no family is named.
+
+    The family predicate is a real filter: a finding whose dispatch has no run row, or no
+    dispatch at all, belongs to no family and is therefore NOT in a family-scoped dream. An
+    earlier `OR r.family_id IS NULL` disjunct admitted exactly those rows, so a scoped dream
+    published occurrence counts inflated by other families' evidence.
+    """
     if not db or not Path(db).exists():
         return []
     con = sqlite3.connect(db)
     try:
-        cur = con.execute(
-            "SELECT f.id, f.status, f.severity, f.summary FROM findings f "
-            "LEFT JOIN dispatches d ON d.id = f.dispatch_id "
-            "LEFT JOIN runs r ON r.id = d.run_id "
-            "WHERE ? IS NULL OR r.family_id = ? OR r.family_id IS NULL "
-            "ORDER BY f.id",
-            (family_id, family_id))
+        sql = ("SELECT f.id, f.status, f.severity, f.summary FROM findings f "
+               "LEFT JOIN dispatches d ON d.id = f.dispatch_id "
+               "LEFT JOIN runs r ON r.id = d.run_id ")
+        params = ()
+        if family_id is not None:
+            sql += "WHERE r.family_id = ? "
+            params = (family_id,)
+        cur = con.execute(sql + "ORDER BY f.id", params)
         return [dict(zip(("id", "status", "severity", "summary"), row)) for row in cur.fetchall()]
     finally:
         con.close()
@@ -121,7 +129,11 @@ def compile_dream(db, state_dir, run_id, family_id=None):
             "evidence_hashes": sorted(digest("route-defect", r.get("id")) for r in rows),
         })
 
-    material = [f for f in findings if f.get("severity") == "material"]
+    # The vocabulary lives in the STATUS column, not severity: review_finding.sh writes
+    # status="accepted-material" with severity in critical/high/medium/low, and office_scoring
+    # reads it the same way. Selecting on severity == "material" matched a value nothing in this
+    # repo ever writes, so this branch was dead against every real recorder row.
+    material = [f for f in findings if f.get("status") == "accepted-material"]
     if material:
         patterns.append({
             "pattern_id": "gate-satisfiable-by-excluded-evidence",
@@ -133,7 +145,7 @@ def compile_dream(db, state_dir, run_id, family_id=None):
                 "evidence at once rather than patching the found instance."
             ),
             "occurrences": len(material),
-            "kinds": sorted({sanitize(f.get("status")) for f in material}),
+            "kinds": sorted({sanitize(f.get("severity") or "unspecified") for f in material}),
             "correction_shape": "enumerate the rejecting cases and test each one",
             "evidence_hashes": sorted(digest("finding", f.get("id")) for f in material),
         })

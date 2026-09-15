@@ -31,6 +31,7 @@ MAX_ITERATIONS=3
 CONFIG=""
 REVIEW_FILE=""
 REVIEW_SCOPE=""
+PACKET=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -43,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     --config) CONFIG="$2"; shift 2 ;;
     --review-file) REVIEW_FILE="$2"; shift 2 ;;
     --review-scope) REVIEW_SCOPE="$2"; shift 2 ;;
+    --packet) PACKET="$2"; shift 2 ;;
     *) echo "Unknown arg: $1"; exit 1 ;;
   esac
 done
@@ -212,7 +214,12 @@ iter=0
 while [[ $iter -lt $MAX_ITERATIONS ]]; do
   iter=$((iter + 1))
 
-  verify_out=$("$VERIFY_SCRIPT" --worktree "$WORKTREE" --dispatch-id "$DISPATCH_ID" --state-dir "$STATE_DIR" --db "$DB")
+  # The packet carries the task's own validation commands. Without it verify.sh has nothing to
+  # run for a project type it cannot detect, and a verification that executed nothing now
+  # reports passed:false ("no_gate_executed") rather than a vacuous green.
+  verify_args=(--worktree "$WORKTREE" --dispatch-id "$DISPATCH_ID" --state-dir "$STATE_DIR" --db "$DB")
+  if [[ -n "$PACKET" ]]; then verify_args+=(--packet "$PACKET"); fi
+  verify_out=$("$VERIFY_SCRIPT" "${verify_args[@]}")
   passed=$(echo "$verify_out" | jq -r '.passed' 2>/dev/null || echo "$verify_out" | grep -o '"passed": *true' || true)
 
   if [[ "$passed" != "true" && "$passed" != "\"passed\": true" ]]; then

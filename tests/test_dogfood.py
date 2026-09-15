@@ -370,7 +370,19 @@ class RuntimeDogfoodTests(unittest.TestCase):
                 validation_count = connection.execute(
                     "SELECT COUNT(*) FROM validations WHERE dispatch_id = ?", (dispatch_id,)
                 ).fetchone()[0]
-            self.assertEqual(validation_count, 8)
+            # One validation row per gate that actually RAN, not one per gate that exists.
+            # A skipped gate records nothing: it previously wrote a row claiming passed=1 with
+            # sha256("") as its evidence, which is a receipt for a command that never executed.
+            executed = [g for g in verification["gates"] if not g.get("skipped")]
+            self.assertEqual(validation_count, len(executed))
+            self.assertEqual(validation_count, 4, [g["name"] for g in executed])
+            skipped = [g["name"] for g in verification["gates"] if g.get("skipped")]
+            self.assertEqual(sorted(skipped), ["browser_acceptance", "known_bad_controls",
+                                               "runtime_verification", "targeted_tests"])
+            for gate in verification["gates"]:
+                if gate.get("skipped"):
+                    self.assertIsNone(gate["passed"])
+                    self.assertIsNone(gate["evidence_hash"])
 
             for phase in ("reviewed", "closed"):
                 save(phase)

@@ -15,23 +15,38 @@ python3 scripts/office_propose.py compile-dream \
   --out dream.json
 ```
 
-Sources: 2 route defects recorded by this run, 8 findings in the recorder database. Two patterns
-compiled:
+Sources: 2 route defects recorded by this run, 0 findings scoped to this run's family. One
+pattern compiled:
 
 | pattern | stream | occurrences |
 |---|---|---|
 | `route-identity-silently-defaulted` | `catalog-policy` | 2 |
-| `gate-satisfiable-by-excluded-evidence` | `learned-pattern` | 5 |
 
-Both are real to this run. The first is the claude harness accepting an under-specified routed
-identity and substituting a default effort instead of failing, observed twice under different
-kinds (`invalid-invocation-slug`, `unsupported-effort`) — so a published route notice named an
-identity the dispatch did not run under. The second is the defect class that survived four
-consecutive correct repairs during review: a gate satisfiable by exactly the evidence it exists
-to exclude.
+It is real to this run: the claude harness accepted an under-specified routed identity and
+substituted a default effort instead of failing, observed twice under different kinds
+(`invalid-invocation-slug`, `unsupported-effort`) — so a published route notice named an identity
+the dispatch did not run under.
 
-A single route defect does **not** compile into the first pattern; two on one harness do. One
-occurrence is an incident, not a pattern. `test_a_single_defect_is_not_a_pattern` holds that line.
+**An earlier version of this document reported 8 findings and a second compiled pattern. Both
+numbers were wrong**, and independent review (T7, findings F4 and F5) is what caught them:
+
+- The family predicate carried an `OR r.family_id IS NULL` disjunct, so a family-scoped dream
+  admitted every finding whose dispatch had no run row. The 8 belonged to other runs entirely.
+  This run's own findings were never written to the recorder with this family id, so the honest
+  count is 0.
+- The compiler selected findings on `severity == "material"`, a value nothing in this repo ever
+  writes. The vocabulary lives in the **status** column (`accepted-material`), with severity in
+  `critical/high/medium/low`. That branch was dead against every real recorder row, and every
+  compile test passed `db=None`, so no test executed the database path at all.
+
+Both are fixed, and `RecorderBackedDreamTest` now exercises the runs.db path directly with rows
+written in the repo's actual vocabulary, asserting family scoping excludes other families and
+orphan rows.
+
+A single route defect does **not** compile into a pattern; two on one harness do. One occurrence
+is an incident, not a pattern.
+
+`test_a_single_defect_is_not_a_pattern` holds that line.
 
 ## 2. Sanitization is real, and the run id never leaves
 
@@ -69,8 +84,8 @@ First append:
 ```
 {
   "appended": true,
-  "identity_hash": "sha256:f3a12df1e1a98054e39692df32a3c02d429201fd0a58687e9da799f696af5148",
-  "path": "proposals/f3a12df1e1a98054e39692df32a3c02d429201fd0a58687e9da799f696af5148.md"
+  "identity_hash": "sha256:0209bc46fdb1e82ca205554b74bef685b6e3c4570ec70afacf0859c6160d7f3b",
+  "path": "proposals/0209bc46fdb1e82ca205554b74bef685b6e3c4570ec70afacf0859c6160d7f3b.md"
 }
 ```
 
@@ -79,8 +94,8 @@ Replay, same dream, same command:
 ```
 {
   "appended": false,
-  "identity_hash": "sha256:f3a12df1e1a98054e39692df32a3c02d429201fd0a58687e9da799f696af5148",
-  "path": "proposals/f3a12df1e1a98054e39692df32a3c02d429201fd0a58687e9da799f696af5148.md",
+  "identity_hash": "sha256:0209bc46fdb1e82ca205554b74bef685b6e3c4570ec70afacf0859c6160d7f3b",
+  "path": "proposals/0209bc46fdb1e82ca205554b74bef685b6e3c4570ec70afacf0859c6160d7f3b.md",
   "reason": "identity_already_present"
 }
 ```
