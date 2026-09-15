@@ -30,6 +30,11 @@ SKILL_LINE_BUDGETS = {
     'skills/claude-cli/SKILL.md': 43,
     'skills/codex-cli/SKILL.md': 61,
     'skills/hermes-cli/SKILL.md': 20,
+    # Vendored from external sources in 9a59305, not authored to this repo's
+    # context-load convention: every skill above fits in 64 lines, these two do not.
+    # Budgeted at their actual size so the gate registers rather than ignores them.
+    'skills/herdr/SKILL.md': 240,
+    'skills/herdr-close-panes/SKILL.md': 150,
 }
 
 def frontmatter(path):
