@@ -19,8 +19,8 @@ The user has accepted the eight design decisions. This is an implementation plan
 ## Planning envelope
 
 ```yaml
-plan_version: 3
-requirements_version: 2
+plan_version: 4
+requirements_version: 3
 routing_version: 3
 branch: auto-office-v3
 target_branch: main
@@ -47,6 +47,17 @@ base_drift:
       collision to explain, not a new baseline. Later dispatches cut from 487fca8 or later
       use the 109/8 baseline instead.
 amendment_history:
+  - version: 4
+    kind: requirements
+    reason: >-
+      Independent review round 3 of T0 found that the issue-35 PR-report requirement was
+      assigned to T5, whose Touches are only tests and documentation, so it could not
+      deliver the deterministic script the requirement names. The matrix reported zero
+      unassigned owners while the requirement was effectively unowned. This is the same
+      class as v2 finding F1: an authoritative requirement with no owning task. Assigned
+      to T4, which already owns the readback and reporting script surface.
+    affected_scopes: [T4, T0]
+    resulting_versions: {plan_version: 4, requirements_version: 3, routing_version: 3}
   - version: 3
     kind: requirements
     reason: >-
@@ -229,7 +240,9 @@ Additional receipt, amendment v2, finding F9 — the agy false-done known-bad ca
 
 **T4: Wire real review, landings, checkpoints and dispatch.**
 Depends on: T1, T2, T3.
-Touches: `scripts/review_loop.sh`, `scripts/review_finding.sh`, `scripts/office_readback.sh`, `scripts/office_spawn.sh`, `scripts/hooks/pre_compact.sh`, `scripts/hooks/compact_advisor.sh`, `scripts/hooks/session_end.sh`, `scripts/hooks/install_hooks.sh` only if optional lifecycle binding needs it and only as a repository-file edit (amendment v2, finding F12: this run may edit that script but must never execute it, because `install_hooks.sh:154-179` writes `~/.claude`, `~/.codex` and `~/.gemini` and lines 189-195 write Hermes profiles, all of which are protected user-global paths; hook tests run against a temporary `HOME` and temporary config roots), `tests/test_review.py`, `tests/test_hooks.py`, new `tests/test_landings.py`.
+Touches: `scripts/review_loop.sh`, `scripts/review_finding.sh`, `scripts/office_readback.sh`, `scripts/office_spawn.sh`, `scripts/hooks/pre_compact.sh`, `scripts/hooks/compact_advisor.sh`, `scripts/hooks/session_end.sh`, `scripts/hooks/install_hooks.sh` only if optional lifecycle binding needs it and only as a repository-file edit (amendment v2, finding F12: this run may edit that script but must never execute it, because `install_hooks.sh:154-179` writes `~/.claude`, `~/.codex` and `~/.gemini` and lines 189-195 write Hermes profiles, all of which are protected user-global paths; hook tests run against a temporary `HOME` and temporary config roots), `tests/test_review.py`, `tests/test_hooks.py`, new `tests/test_landings.py`, and new `scripts/pr_report.py` with new `tests/test_pr_report.py` (amendment v4).
+
+Amendment v4: T4 additionally owns the issue-35 PR-report requirement, which no task previously owned. A deterministic script emits a compact before/after row per PR — shipped size, estimated and actual loaded tokens where available, eval delta, reward delta — comparing each PR both to the immediately previous version and to a fixed version baseline, with no agent-generated narrative. Determinism is the receipt: the same inputs must produce byte-identical output across two runs, asserted by test rather than asserted in prose.
 
 Connect to actual independent review evidence or retire unused mock behavior according to T0. Never synthesize PASS from an unset environment variable. Local producers own findings; consultation routes unresolved disagreement upward without routine orchestrator override. Integration review is triggered by actual dependent/merging landings, not count alone. Readback retains process diagnostics while validating semantic landing evidence. Serialize checkpoints before requested compaction and resume the same role from the packet. Wire monitor lifecycle into dispatch and closeout; keep optional hooks optional. Amendment v3: closeout writes one outcome label per dispatch from the validation and review evidence it already holds, using the vocabulary T0 pinned, and `auto-maintenance` revises a label later when a post-merge defect surfaces. Nothing writes `outcome_labels` today, which is why every scoring path reads an empty table. A label must cite its evidence; a dispatch with no evidence is recorded as unlabeled rather than as a success.
 
