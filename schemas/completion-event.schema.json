@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Auto Office v3 completion event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "session_id",
+    "family_id",
+    "dispatch_id",
+    "sequence",
+    "observed_status",
+    "terminal_classification",
+    "source",
+    "evidence_timestamp",
+    "evidence_hash"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "family_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "dispatch_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "observed_status": {
+      "enum": [
+        "finish",
+        "idle",
+        "blocked",
+        "unknown",
+        "disappeared",
+        "running"
+      ]
+    },
+    "terminal_classification": {
+      "enum": [
+        "success",
+        "failure",
+        "cancelled",
+        "timeout",
+        "non_terminal"
+      ]
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence_timestamp": {
+      "type": "string",
+      "minLength": 10
+    },
+    "evidence_hash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "evidence_payload": {
+      "type": [
+        "object",
+        "string"
+      ]
+    }
+  }
+}

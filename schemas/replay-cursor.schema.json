@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Auto Office v3 replay cursor and acknowledgement",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "cursor_id",
+    "session_id",
+    "family_id",
+    "dispatch_id",
+    "last_acknowledged_sequence",
+    "last_acknowledged_event_id",
+    "acknowledgement_hash",
+    "acknowledged_at"
+  ],
+  "properties": {
+    "cursor_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "family_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "dispatch_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "last_acknowledged_sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "last_acknowledged_event_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "acknowledgement_hash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "acknowledged_at": {
+      "type": "string",
+      "minLength": 10
+    }
+  }
+}

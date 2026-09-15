@@ -62,7 +62,7 @@
       "type": "array"
     },
     "local_reward": {
-      "type": "number"
+      "type": ["number", "null"]
     },
     "advisory_pass": {
       "type": "boolean"
@@ -72,6 +72,13 @@
     },
     "cost": {
       "type": "object"
+    },
+    "last_seen": {
+      "type": "string",
+      "minLength": 1
+    },
+    "superseded_by": {
+      "type": ["string", "null"]
     }
   }
 }

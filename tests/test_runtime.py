@@ -133,8 +133,19 @@ class _MaturityTests(unittest.TestCase):
         f=rt.privacy_findings('mail me at person@example.com and see https://private.example')
         self.assertTrue({x['kind'] for x in f} >= {'email','url'})
     def test_packet_schema(self):
-        p={'base_sha':'abcd','task_scope':'x','observable_outcome':'works','blast_radius':'local','allowed_mutations':[],'protected_paths':[],'validation_commands':[],'known_bad_behavior_to_exclude':'old bug','self_review':'diff','rollback_or_restore_notes':'git restore'}
+        # The v3 packet schema supersedes the legacy ten-field packet: identity,
+        # the three versions, config provenance and selection disclosure are now
+        # required unconditionally. Track the pinned contract via its own
+        # accepting fixture rather than restating the shape here.
+        import json, pathlib as _pl
+        fixture=_pl.Path(__file__).parent/'fixtures'/'execution-packet'/'accept_complete.json'
+        p=json.loads(fixture.read_text())
         self.assertEqual(rt.validate_with_schema(p,'execution-packet.schema.json'),[])
+
+    def test_packet_schema_rejects_legacy_ten_field_packet(self):
+        legacy={'base_sha':'abcd','task_scope':'x','observable_outcome':'works','blast_radius':'local','allowed_mutations':[],'protected_paths':[],'validation_commands':[],'known_bad_behavior_to_exclude':'old bug','self_review':'diff','rollback_or_restore_notes':'git restore'}
+        errors=rt.validate_with_schema(legacy,'execution-packet.schema.json')
+        self.assertTrue(errors, 'legacy ten-field packet must no longer validate')
 
 if __name__=='__main__': unittest.main()
 

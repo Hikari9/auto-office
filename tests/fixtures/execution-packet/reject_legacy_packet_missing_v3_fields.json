@@ -1,0 +1,16 @@
+{
+  "base_sha": "5d7a450",
+  "task_scope": "Implement legacy work",
+  "observable_outcome": "Legacy behavior only",
+  "blast_radius": "unspecified",
+  "allowed_mutations": [
+    "scripts/legacy.py"
+  ],
+  "protected_paths": [],
+  "validation_commands": [
+    "python3 -m pytest tests/ -q"
+  ],
+  "known_bad_behavior_to_exclude": "none",
+  "self_review": "n/a",
+  "rollback_or_restore_notes": "n/a"
+}
