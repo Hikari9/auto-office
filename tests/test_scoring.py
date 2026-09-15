@@ -209,6 +209,38 @@ class TrustActWritePathTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             scoring.record_trust_act(self.db_path, "t@local/m@medium", "invalid", "rico", "a real justification here")
 
+    def test_record_trust_act_rejects_reserved_actor_system(self):
+        with self.assertRaises(ValueError) as ctx:
+            scoring.record_trust_act(self.db_path, "t@local/m@medium", "proven", "system", "a real justification here")
+        self.assertIn("reserved", str(ctx.exception))
+        self.assertIn("system", str(ctx.exception))
+
+    def test_record_trust_act_rejects_reserved_actor_automated(self):
+        with self.assertRaises(ValueError) as ctx:
+            scoring.record_trust_act(self.db_path, "t@local/m@medium", "proven", "automated", "a real justification here")
+        self.assertIn("reserved", str(ctx.exception))
+        self.assertIn("automated", str(ctx.exception))
+
+    def test_record_trust_act_rejects_reserved_actor_case_and_whitespace_insensitive(self):
+        with self.assertRaises(ValueError) as ctx:
+            scoring.record_trust_act(self.db_path, "t@local/m@medium", "proven", "  System  ", "a real justification here")
+        self.assertIn("reserved", str(ctx.exception))
+
+    def test_record_trust_act_rejects_empty_triple(self):
+        with self.assertRaises(ValueError) as ctx:
+            scoring.record_trust_act(self.db_path, "", "proven", "rico", "a real justification here")
+        self.assertIn("triple", str(ctx.exception))
+
+    def test_record_trust_act_rejects_whitespace_only_triple(self):
+        with self.assertRaises(ValueError) as ctx:
+            scoring.record_trust_act(self.db_path, "   ", "proven", "rico", "a real justification here")
+        self.assertIn("triple", str(ctx.exception))
+
+    def test_record_trust_act_accepts_legitimate_actor(self):
+        result = scoring.record_trust_act(self.db_path, "t@local/m@medium", "proven", "rico", "manually verified rollout")
+        self.assertEqual(result["actor_id"], "rico")
+        self.assertEqual(scoring.get_current_trust_state(self.db_path, "t@local/m@medium"), "proven")
+
     def test_act_is_append_only_and_latest_wins(self):
         scoring.record_trust_act(self.db_path, "t@local/m@medium", "proven", "rico", "first rollout decision")
         scoring.record_trust_act(self.db_path, "t@local/m@medium", "valid-unverified", "rico", "walked it back after review")
