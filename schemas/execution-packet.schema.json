@@ -160,56 +160,26 @@
       "type": "string"
     }
   },
-  "if": {
-    "anyOf": [
-      { "required": ["packet_id"] },
-      { "required": ["run_id"] },
-      { "required": ["family_id"] },
-      { "required": ["task_id"] },
-      { "required": ["packet_version"] },
-      { "required": ["requirements_version"] },
-      { "required": ["plan_version"] },
-      { "required": ["routing_version"] },
-      { "required": ["effective_config_hash"] },
-      { "required": ["selection_disclosure"] }
-    ]
-  },
-  "then": {
-    "required": [
-      "packet_id",
-      "run_id",
-      "family_id",
-      "task_id",
-      "requirements_version",
-      "plan_version",
-      "routing_version",
-      "packet_version",
-      "effective_config_hash",
-      "base_sha",
-      "selection_disclosure",
-      "task_scope",
-      "observable_outcome",
-      "blast_radius",
-      "allowed_mutations",
-      "protected_paths",
-      "validation_commands",
-      "known_bad_behavior_to_exclude",
-      "self_review",
-      "rollback_or_restore_notes"
-    ]
-  },
-  "else": {
-    "required": [
-      "base_sha",
-      "task_scope",
-      "observable_outcome",
-      "blast_radius",
-      "allowed_mutations",
-      "protected_paths",
-      "validation_commands",
-      "known_bad_behavior_to_exclude",
-      "self_review",
-      "rollback_or_restore_notes"
-    ]
-  }
+  "required": [
+    "packet_id",
+    "run_id",
+    "family_id",
+    "task_id",
+    "requirements_version",
+    "plan_version",
+    "routing_version",
+    "packet_version",
+    "effective_config_hash",
+    "base_sha",
+    "selection_disclosure",
+    "task_scope",
+    "observable_outcome",
+    "blast_radius",
+    "allowed_mutations",
+    "protected_paths",
+    "validation_commands",
+    "known_bad_behavior_to_exclude",
+    "self_review",
+    "rollback_or_restore_notes"
+  ]
 }

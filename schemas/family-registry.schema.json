@@ -113,7 +113,7 @@
             }
           },
           "latest_landing": {
-            "type": "object",
+            "type": ["object", "null"],
             "required": [
               "landing_id",
               "task_id",

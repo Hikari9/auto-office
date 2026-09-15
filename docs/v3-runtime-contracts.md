@@ -61,11 +61,13 @@ All schemas are pinned in JSON Schema Draft 2020-12 under `schemas/` and validat
 
 ### 2.1 Dispatch Packet (`schemas/execution-packet.schema.json`)
 
-Supersedes the legacy 10-field packet. Dispatches must carry full session and version provenance:
+Supersedes the legacy 10-field packet unconditionally: a packet carrying only the legacy fields
+no longer validates. Dispatches must carry full session and version provenance. (The excerpt below
+omits the `$schema` draft-identifier line for privacy-lint hygiene in this document; the committed
+schema file at `schemas/execution-packet.schema.json` carries it.)
 
 ```json
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Auto Office v3 execution packet",
   "type": "object",
   "additionalProperties": false,
@@ -130,7 +132,10 @@ Maintains durable state for concurrent families managed by one orchestrator:
   - `requirements_version`, `plan_version`, `routing_version`
   - `ownership` (`holder_id`, `role`, `triple`)
   - `dependencies`, `active_dispatches`
-  - `latest_landing` (`landing_id`, `task_id`, `head_sha`, `validation_evidence`, `evidence_hash`)
+  - `latest_landing` (`landing_id`, `task_id`, `head_sha`, `validation_evidence`, `evidence_hash`),
+    which is `null` for a newly registered family that has not yet completed any task (issue-77
+    kickoff registers family state before execution landings exist); once a landing exists, all
+    listed subfields are required and validated strictly
   - `pending_decisions` (`decision_id`, `summary`, `status`)
 
 ### 2.3 Amendment Operation (`schemas/amendment.schema.json`)
@@ -355,7 +360,7 @@ These exact CLI commands will be implemented by T2 in `scripts/office_runtime.py
 #### `family-list`
 - **Invocation:** `python3 scripts/office_runtime.py family-list [--state-dir <dir>]`
 - **Behavior:** Lists all registered families with phase and active versions.
-- **Output (stdout):** `{"current_focus": "<id>", "families": [{"family_id": "...", "phase": "...", "versions": {"requirements": 1, "plan": 2, "routing": 2}}]}`
+- **Output (stdout):** `{"current_focus": "<id>", "families": [{"family_id": "...", "phase": "...", "versions": {"requirements_version": 1, "plan_version": 2, "routing_version": 2}}]}`. Field names inside `versions` match `family-registry.schema.json`'s `requirements_version`/`plan_version`/`routing_version` exactly, so `family-update` and any consumer read the same names the schema requires.
 - **Exit Codes:** `0`: Success; `1`: Error.
 
 #### `family-update`
@@ -427,10 +432,17 @@ These exact CLI commands will be implemented by T2 in `scripts/office_runtime.py
 - **Exit Codes:** `0`: Success.
 
 #### `ack-event`
-- **Invocation:** `python3 scripts/office_runtime.py ack-event --dispatch-id <id> --sequence <n> [--state-dir <dir>]`
-- **Behavior:** Updates replay cursor in `.office/events/cursor.json`.
-- **Output (stdout):** `{"status": "acknowledged", "last_sequence": <n>}`
-- **Exit Codes:** `0`: Success.
+- **Invocation:** `python3 scripts/office_runtime.py ack-event --session-id <id> --family-id <id> --dispatch-id <id> --sequence <n> --event-id <id> [--state-dir <dir>]`
+- **Behavior:** Advances the replay cursor for `(session_id, family_id, dispatch_id)` in `.office/events/cursor.json`, validated against `schemas/replay-cursor.schema.json` (Finding F9). Every field that schema requires is generated or supplied exactly as follows:
+  - `cursor_id`: deterministic, so restart reconstructs the same cursor object rather than creating a duplicate — `"cur-" + sha256(f"{session_id}:{family_id}:{dispatch_id}")[:12]`.
+  - `last_acknowledged_event_id`: the CLI reads the event at `--sequence` from `.office/events/completions.jsonl` and requires its stored `event_id` to equal `--event-id`; a mismatch is an argument error (exit `1`), not a silent overwrite, because it means the caller is acking the wrong event on a sequence collision.
+  - `acknowledgement_hash`: `"sha256:" + sha256(f"{dispatch_id}:{sequence}:{event_id}")` over the acked dispatch/sequence/event triple, so the hash changes if any of the three changes.
+  - `acknowledged_at`: current UTC timestamp at write time, ISO 8601.
+  - **Duplicate acknowledgement** (`--sequence` <= the cursor's current `last_acknowledged_sequence`): idempotent no-op. The existing cursor record is returned unchanged with `"status": "already_acknowledged"` and exit `0`; no new cursor write occurs.
+  - **Out-of-order acknowledgement** (`--sequence` > current `last_acknowledged_sequence + 1`, i.e. it would skip an unacknowledged event): rejected without writing a cursor, exit `3`, `{"status": "sequence_gap", "expected": <current+1>, "got": <n>}`.
+  - **In-order acknowledgement** (`--sequence` == current `last_acknowledged_sequence + 1`, or the first ack when no cursor exists yet): the cursor advances and is persisted.
+- **Output (stdout):** `{"status": "acknowledged" | "already_acknowledged", "cursor_id": "...", "last_acknowledged_sequence": <n>, "last_acknowledged_event_id": "...", "acknowledgement_hash": "sha256:..."}`
+- **Exit Codes:** `0`: Success (including idempotent duplicate); `1`: Argument error or event-ID mismatch at the given sequence; `2`: Schema validation error; `3`: Sequence gap (out-of-order).
 
 #### `completion-status`
 - **Invocation:** `python3 scripts/office_runtime.py completion-status --dispatch-id <id> [--state-dir <dir>]`
@@ -509,37 +521,76 @@ This section defines the authoritative contract specification for Plan v3 Task T
 ### 7.1 Derived Adapter Trust Qualification (Deliverable F1)
 
 #### 7.1.1 Qualification Thresholds
-Under `config/config.default.yaml` (`adapter_trust`), an adapter candidate qualifies for trust-tier elevation from `candidate`/`quarantined` to `proven` (unlocking mutable-gate authority) only when historical dispatches in `runs.db` satisfy all of the following:
-1. **Minimum Successful Dispatches:** At least `proven_min_successful_dispatches` (default: 5) dispatches with terminal outcome label `success` or `verified_no_observed_failure`.
-2. **Minimum Distinct Task Shapes:** Successful dispatches must span at least `proven_min_task_shapes` (default: 2) distinct task shapes (`gear x playbook x route`).
-3. **No Unresolved Adapter-Attributed Critical Failure:** There must be zero unresolved adapter-attributed critical failures in the adapter's direct or inherited lineage.
+Under `config/config.default.yaml` (`adapter_trust`), an adapter candidate qualifies for trust-tier elevation from `candidate`/`quarantined` to `proven` (unlocking mutable-gate authority) only when historical dispatches in `runs.db` satisfy all of the following. Thresholds are **read from config at evaluation time**, never hardcoded, so a config change takes effect without a contract or code change:
+1. **Minimum Successful Dispatches:** At least `proven_min_successful_dispatches` (default: 5) **distinct dispatches** — counted by `COUNT(DISTINCT dispatch_id)`, never by row count — with a terminal outcome label of `verified_no_observed_failure` (the sole canonical "clean success" label; see §7.3.1), a non-empty `evidence_hash` on that label (§7.3.2's mandatory-evidence rule), and zero accepted-material blocking findings.
+2. **Minimum Distinct Task Shapes:** Those same qualifying dispatches must span at least `proven_min_task_shapes` (default: 2) distinct task shapes (`gear x playbook x route`).
+3. **No Unresolved Adapter-Attributed Critical Failure:** There must be zero unresolved adapter-attributed critical failures in the adapter's direct or inherited lineage (§7.1.3).
+
+A dispatch may be labeled more than once over time (`outcome_labels` is append-only, §7.3.3); qualification always evaluates the **latest** label per dispatch, never a duplicate or superseded one, so re-recording the same self-reported label cannot multiply a dispatch's contribution to the successful-dispatch count.
 
 #### 7.1.2 Trust Evaluation SQL Query
-The trust qualification status for a candidate triple (`:target_triple`) is evaluated against `runs.db` using the following query:
+The trust qualification status for a candidate triple (`:target_triple`) is evaluated against `runs.db` using the following query. `:proven_min_successful_dispatches` and `:proven_min_task_shapes` are bound parameters read from `config/config.default.yaml`'s `adapter_trust` block, not literals:
 
 ```sql
-WITH adapter_dispatches AS (
+WITH latest_labels AS (
+    SELECT
+        ol.dispatch_id,
+        ol.label,
+        ol.primary_attribution,
+        ol.evidence_hash,
+        ROW_NUMBER() OVER (
+            PARTITION BY ol.dispatch_id
+            ORDER BY ol.labeled_at DESC, ol.id DESC
+        ) AS rn
+    FROM outcome_labels ol
+),
+adapter_dispatches AS (
     SELECT
         d.id AS dispatch_id,
         d.triple,
         d.task_shape,
         d.attribution,
-        ol.label AS outcome_label,
-        ol.primary_attribution AS label_attribution,
+        ll.label AS outcome_label,
+        ll.primary_attribution AS label_attribution,
+        ll.evidence_hash AS label_evidence_hash,
         (SELECT COUNT(*) FROM findings f
-         WHERE f.dispatch_id = d.id AND f.severity IN ('critical', 'high')) AS blocking_findings
+         WHERE f.dispatch_id = d.id
+           AND f.status = 'accepted-material'
+           AND f.severity IN ('critical', 'high')) AS blocking_findings
     FROM dispatches d
-    LEFT JOIN outcome_labels ol ON ol.dispatch_id = d.id
+    LEFT JOIN latest_labels ll ON ll.dispatch_id = d.id AND ll.rn = 1
     WHERE d.triple = :target_triple
+),
+resolved_adapter_defects AS (
+    -- Finding F3 / §7.1.3: a triple-scoped remediation record, evidenced by a passed
+    -- validation row (not a nonexistent lineage.evidence_hash column), clears quarantine.
+    SELECT COUNT(*) AS n
+    FROM lineage l
+    JOIN validations v ON v.id = l.parent_id
+    WHERE l.component_kind = 'adapter'
+      AND l.component_id = :target_triple
+      AND l.event = 'resolved_adapter_defect'
+      AND l.multiplier > 0
+      AND v.passed = 1
+      AND v.evidence_hash IS NOT NULL
 ),
 qualification_summary AS (
     SELECT
-        COUNT(CASE WHEN outcome_label IN ('success', 'verified_no_observed_failure')
-                        AND blocking_findings = 0 THEN 1 END) AS successful_dispatches,
-        COUNT(DISTINCT CASE WHEN outcome_label IN ('success', 'verified_no_observed_failure')
-                                 AND blocking_findings = 0 THEN task_shape END) AS distinct_task_shapes,
-        COUNT(CASE WHEN outcome_label IN ('recurrence_failure', 'material_post_merge_defect')
-                        AND (attribution = 'adapter' OR label_attribution = 'adapter') THEN 1 END) AS critical_failures
+        COUNT(DISTINCT CASE
+            WHEN outcome_label = 'verified_no_observed_failure'
+                 AND label_evidence_hash IS NOT NULL
+                 AND blocking_findings = 0
+            THEN dispatch_id END) AS successful_dispatches,
+        COUNT(DISTINCT CASE
+            WHEN outcome_label = 'verified_no_observed_failure'
+                 AND label_evidence_hash IS NOT NULL
+                 AND blocking_findings = 0
+            THEN task_shape END) AS distinct_task_shapes,
+        COUNT(DISTINCT CASE
+            WHEN outcome_label IN ('recurrence_failure', 'material_post_merge_defect')
+                 AND label_evidence_hash IS NOT NULL
+                 AND (attribution = 'adapter' OR label_attribution = 'adapter')
+            THEN dispatch_id END) AS critical_failures
     FROM adapter_dispatches
 )
 SELECT
@@ -547,22 +598,27 @@ SELECT
     distinct_task_shapes,
     critical_failures,
     CASE
-        WHEN critical_failures > 0 THEN 'quarantined'
-        WHEN successful_dispatches >= 5 AND distinct_task_shapes >= 2 THEN 'proven'
+        WHEN critical_failures > 0 AND (SELECT n FROM resolved_adapter_defects) = 0 THEN 'quarantined'
+        WHEN successful_dispatches >= :proven_min_successful_dispatches
+             AND distinct_task_shapes >= :proven_min_task_shapes THEN 'proven'
         ELSE 'candidate'
     END AS qualified_trust_state
-FROM qualification_summary;
+FROM qualification_summary, resolved_adapter_defects;
 ```
+
+This resolves finding F3's three defects directly: `COUNT(DISTINCT dispatch_id)` over `latest_labels` (via `rn = 1`) means duplicated or re-recorded self-reported labels for the same dispatch cannot inflate `successful_dispatches`; `label_evidence_hash IS NOT NULL` rejects unsigned/unevidenced labels outright; and the thresholds are bound parameters, not literals.
 
 #### 7.1.3 Unresolved Adapter-Attributed Critical Failure in Lineage
 An unresolved adapter failure permanently blocks qualification. It is defined as:
-- Any record in `runs.db` (`outcome_labels`, `dispatches`, or `findings`) where `primary_attribution = 'adapter'` (or `attribution = 'adapter'`) AND (`severity = 'critical'` OR `label IN ('recurrence_failure', 'material_post_merge_defect')`).
-- **Resolution Requirement:** A critical failure is considered resolved IF AND ONLY IF an explicit remediation record exists in the `lineage` table where:
+- Any dispatch on the target triple whose **latest** outcome label is evidence-backed (`evidence_hash IS NOT NULL`) and is `recurrence_failure` or `material_post_merge_defect`, where either the dispatch's own `attribution` column or the label's `primary_attribution` equals `'adapter'`.
+- **Resolution Requirement:** This condition is cleared for the *whole triple* IF AND ONLY IF an explicit remediation record exists in the `lineage` table where:
   - `component_kind = 'adapter'`
   - `component_id = :target_triple`
   - `event = 'resolved_adapter_defect'`
   - `multiplier > 0`
-  - Accompanied by a non-empty `evidence_hash` referencing an approved regression test verifying the resolution. Without this entry, the adapter remains quarantined indefinitely.
+  - `parent_id` references a row in `validations` with `passed = 1` and a non-empty `evidence_hash`, proving an approved regression test verified the resolution. (The `lineage` table itself has no `evidence_hash` column; evidence is reached through `parent_id` into `validations`, not fabricated on `lineage` directly.)
+
+  Without a qualifying `resolved_adapter_defect` lineage record, the adapter remains quarantined indefinitely — the unresolved-failure check is independent of, and cannot be outrun by, accumulating additional successful dispatches.
 
 ---
 
@@ -586,6 +642,12 @@ roles:
 
 #### 7.2.2 Evaluation Semantics and Fail-Closed Invariant
 Evaluation of candidates against `roles.<role>.floor` proceeds through two primary checks:
+
+**Definition.** `floor.min_effort` is a *configuration* threshold declared under `roles.<role>.floor`
+in `config/config.default.yaml` (§8.1). It is not a catalog field and does not appear in
+`catalog/seed.yaml`. It is compared against `candidate.effort`, which **is** the real, universally
+populated catalog/candidate field (verified: `effort` is present and non-empty on all 44 rows of
+`catalog/seed.yaml`; `min_effort` appears in zero rows there, by design — it lives only in config).
 
 1. **Effort Floor:** The candidate's `effort` is mapped against canonical effort ordering:
    $$\text{none} (0) < \text{low} (1) < \text{medium} (2) < \text{high} (3) < \text{xhigh} (4) < \text{max} (5)$$
@@ -611,7 +673,7 @@ An audit of `catalog/seed.yaml` (44 total model entries) reveals:
 - **The Normative Seed Discovery:** The only 3 entries in `catalog/seed.yaml` with empty `benchmark_indexes: {}` and null price/speed fields are `opus`, `astra`, and `luna`. These three models are the **normative seed preferences** defined in `config/config.default.yaml` (`planner` -> opus, astra; `plan_reviewer` -> luna; `code_reviewer` -> luna).
 
 **Architectural Conclusion on Capability Floor Expressibility:**
-1. **Expressible Floor Today:** A robust, reliable capability floor CAN and MUST be expressed immediately against the fields that universally exist across 100% of catalog rows: `min_effort` and `allowed_sources`. This completely protects gate roles from unverified slugs and inadequate effort without opening exemptions.
+1. **Expressible Floor Today:** A robust, reliable capability floor CAN and MUST be expressed immediately against the catalog/candidate fields that universally exist across 100% of catalog rows: `effort` (checked via the configured `floor.min_effort` threshold) and `invocation_source` (checked via the configured `floor.allowed_sources` prefix list). This completely protects gate roles from unverified slugs and inadequate effort without opening exemptions.
 2. **No Seed Holes:** An automatic exemption (such as `optional_if_seed_preference: true`) would exempt `opus`, `astra`, and `luna`—the exact models routed to on the default path—reopening the very hole Task T2B exists to close. No candidate is exempt from the floor.
 3. **Prerequisite for Benchmark Bands:** An authoritative catalog refresh (`office_runtime.py catalog-snapshot`) that ingests benchmark scores for `opus`, `astra`, and `luna` is the required prerequisite before `min_benchmark_index` can be added to default configuration. Once added, it will fail closed on any candidate lacking benchmark data with zero exemptions.
 
@@ -620,21 +682,41 @@ An audit of `catalog/seed.yaml` (44 total model entries) reveals:
 
 ### 7.3 Outcome Label Pipeline (Deliverable F3)
 
-#### 7.3.1 Label Vocabulary
-Dispatches and runs are classified using an authoritative vocabulary:
-- `success`: Target goal completed; all automated verifications pass; independent review completed with zero unaddressed findings.
-- `partial_success`: Functional goal met; verifications pass; minor non-blocking findings or acceptable deviations recorded.
-- `defect_detected`: Reviewer identified material or blocking defects prior to closeout.
-- `failed_verification`: Automated validations, test suites, or linters failed during execution.
-- `operator_rejected`: Human operator rejected the plan, patch, or proposed action.
+#### 7.3.1 Label Vocabulary (Finding F4: one canonical stored vocabulary)
+Two incompatible vocabularies previously existed in this section and in `schemas/outcome-label.schema.json`.
+This is resolved by making **the schema's vocabulary the sole canonical, stored one** — it is not a
+new invention: it already matches the existing telemetry vocabulary in `config/config.default.yaml`'s
+`maturity.event_weights` (`verified_no_observed_failure`, `material_post_merge_defect`,
+`recurrence_failure`, `revert_failure`) plus `pending`, `abandoned`, `environment_failure`, and it is
+already the exact `OUTCOMES` set hardcoded at `scripts/office_runtime.py:21`. The seven stored values are:
+- `pending`: No terminal outcome recorded yet.
+- `verified_no_observed_failure`: Target goal completed; all automated verifications pass; independent review completed with zero unaddressed accepted-material findings (this is the only "successful" stored label; see the mapping table below for how differing degrees of success collapse into it).
 - `recurrence_failure`: Defect recurred in an area previously modified or flagged.
+- `revert_failure`: Previously landed work was reverted after a regression or defect was discovered post-landing.
 - `material_post_merge_defect`: Defect escaped review and was discovered post-merge or post-closeout.
-- `abandoned`: Run was cancelled, timed out, or superseded before completion.
+- `abandoned`: Run was cancelled, superseded, or otherwise ended without landing verified work (see the mapping table for the narrative causes this covers).
 - `environment_failure`: Infrastructure, network, quota, or local host failure independent of model logic.
 
+**Mapping table** — narrative outcomes referenced elsewhere in this document (§7.4's reward
+formula) do not name new stored values; they map onto the seven above:
+
+| Narrative outcome | Stored label | Evidence | Distinguishing signal |
+|---|---|---|---|
+| Full success, zero findings | `verified_no_observed_failure` | required | zero accepted-material findings |
+| Partial success (non-blocking findings) | `verified_no_observed_failure` | required | `contributing_attributions` records the accepted-minor/medium findings; §7.4's `Δ_findings` penalty (not the label) captures the severity difference |
+| Defect detected pre-merge, unresolved at closeout | `abandoned` | required | `primary_attribution` names the responsible party (e.g. `verification`, `planner`) |
+| Failed verification (tests/linters could not be made to pass) | `abandoned` | required | `primary_attribution = 'model'` or `'harness'` |
+| Operator rejected the plan/patch | `abandoned` | optional (`null` if no test log exists) | `primary_attribution = 'unknown'` unless a specific party is named |
+| Run cancelled, timed out, or superseded before completion | `abandoned` | optional | `primary_attribution = 'unknown'` |
+
+Every row in the mapping table stores `abandoned` because none of these outcomes land verified work;
+`primary_attribution` and `contributing_attributions` (§7.3.3) are what distinguish *why* a given
+`abandoned` dispatch did not land, not a proliferation of stored label values the schema does not
+accept.
+
 #### 7.3.2 Evidence Requirements
-- **Mandatory Evidence:** Labels asserting verified technical status (`success`, `partial_success`, `defect_detected`, `failed_verification`, `recurrence_failure`, `material_post_merge_defect`) **MUST** include a non-empty SHA-256 evidence hash (`evidence_hash` matching `^sha256:[0-9a-f]{64}$`). Any attempt to record these labels without a valid hash is rejected.
-- **Optional Evidence:** External terminations (`operator_rejected`, `abandoned`, `environment_failure`) may provide `evidence_hash = null` when no test log was generated.
+- **Mandatory Evidence:** Labels asserting verified technical status (`verified_no_observed_failure`, `recurrence_failure`, `revert_failure`, `material_post_merge_defect`, and any `abandoned` label whose narrative cause is "defect detected" or "failed verification" per the mapping table above) **MUST** include a non-empty SHA-256 evidence hash (`evidence_hash` matching `^sha256:[0-9a-f]{64}$`). Any attempt to record these labels without a valid hash is rejected.
+- **Optional Evidence:** External terminations (`abandoned` for operator-rejection/cancellation causes, and `environment_failure`) may provide `evidence_hash = null` when no test log was generated. `pending` never carries evidence.
 
 #### 7.3.3 Table Schema and Write Lifecycle
 Outcome labels are persisted in the `outcome_labels` table in `runs.db`:
@@ -659,16 +741,14 @@ CREATE TABLE IF NOT EXISTS outcome_labels (
 The derived local reward $R \in [-1.0, 1.0]$ summarizes historical outcome quality, review findings, and execution efficiency for a model/adapter candidate on a specific task shape:
 $$R = \text{clamp}\left(R_{\text{base}} + \Delta_{\text{findings}} + \Delta_{\text{efficiency}}, -1.0, 1.0\right)$$
 
-1. **Base Component ($R_{\text{base}}$):**
-   - `success`: $+0.8$
-   - `partial_success`: $+0.4$
+1. **Base Component ($R_{\text{base}}$), keyed by the canonical stored label from §7.3.1 (Finding F4):**
+   - `verified_no_observed_failure`: $+0.8$ (covers both the "full success" and "partial success" narrative outcomes; §7.4.1.2's findings penalty differentiates them by `N_medium`)
    - `environment_failure`: $0.0$ (neutral, unpenalized)
-   - `abandoned`: $-0.4$
-   - `defect_detected`: $-0.5$
-   - `failed_verification`: $-0.6$
-   - `operator_rejected`: $-0.7$
+   - `abandoned`: $-0.7$ (covers the "abandoned/cancelled", "operator rejected", "failed verification", and "defect detected pre-merge" narrative outcomes from §7.3.1's mapping table; the collapse uses the **least-favorable** of those four previously-distinct values so that a genuine operator rejection is never under-penalized by ambiguity about which narrative cause produced the `abandoned` label)
    - `recurrence_failure`: $-0.9$
+   - `revert_failure`: $-1.0$ (landed work later reverted; as severe as a post-merge defect because it consumed a merge slot and required a second corrective action)
    - `material_post_merge_defect`: $-1.0$
+   - `pending`: not scored; a candidate with only `pending` labels contributes no `R_base` sample (see §7.4.2)
 
 2. **Findings Penalty ($\Delta_{\text{findings}}$):**
    $$\Delta_{\text{findings}} = - \left( 0.20 \times N_{\text{critical}} + 0.10 \times N_{\text{high}} + 0.02 \times N_{\text{medium}} \right)$$
@@ -706,10 +786,13 @@ def reward_sort_key(c):
 ### 7.5 Recorded Override Mechanism (Deliverable F5)
 
 #### 7.5.1 Override Record Schema
-An override record grants explicit authorization to bypass Stage 2 (adapter unproven), Stage 4 (capability floor), or Stage 7 (advisory anchor undercut). It conforms to:
+An override record grants explicit authorization to bypass Stage 2 (adapter unproven), Stage 4 (capability floor), or Stage 7 (advisory anchor undercut). This record shape is pinned here as a
+contract only; T0 does not add a standalone `schemas/*.schema.json` file for it, matching the plan's
+instruction that T0 pins Deliverable F contracts as text, not implementation. It conforms to
+JSON Schema Draft 2020-12 (excerpt below omits the `$schema` draft-identifier line for privacy-lint
+hygiene in this document):
 ```json
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "RecordedOverride",
   "type": "object",
   "required": [
@@ -772,7 +855,18 @@ Plan v3 strictly assigns `config/config.default.yaml` and `scripts/office_runtim
 
 ### 8.1 Literal YAML Block for `config/config.default.yaml` (Deliverable G1)
 
-In `config/config.default.yaml`, under the `roles:` dictionary, **Task T2** inserts the `floor:` specifications verbatim across standard roles (`planner`, `plan_reviewer`, `executor`, `worker`, `code_reviewer`, `browser_verifier`, and `closeout_verifier`). Task T2B reads this configuration but must never edit `config/config.default.yaml`.
+**Finding F10 correction:** the block below is a complete top-level `roles:` mapping, not a fragment
+to insert under the existing `roles:` key — inserting it *under* the existing mapping produces a
+nested `roles.roles` key and silently drops every floor. **Task T2 replaces the entire existing
+top-level `roles:` mapping in `config/config.default.yaml` (from the `roles:` key through the last
+role entry) with the block below verbatim.** This is a safe full replacement, not a lossy one: the
+block carries the same eight existing role keys (`orchestrator`, `planner`, `plan_reviewer`,
+`executor`, `worker`, `code_reviewer`, `browser_verifier`, `closeout_verifier`) with the same
+`preferred_seed`/`required_capabilities` values already shipped, with `floor:` added underneath each.
+Simulated verbatim replacement against the current file reproduces valid YAML with every role
+present and a `floor:` attached to each non-orchestrator role (`orchestrator` correctly has none,
+since `router_selects: false` means it is never evaluated against a floor). Task T2B reads this
+configuration but must never edit `config/config.default.yaml`.
 
 ```yaml
 roles:

@@ -37,6 +37,47 @@ class TestSchemas(unittest.TestCase):
             errors = list(validator.iter_errors(data))
             self.assertEqual(errors, [], f'{p.name}: {errors}')
 
+    def test_capability_floor_candidate_effort_fail_closed(self):
+        # Deliverable F1: `effort` (not `min_effort`) is the real, universally-populated
+        # catalog/candidate field the capability floor evaluates. A candidate missing it
+        # must fail closed, not be treated as passing.
+        schema = json.loads((ROOT / 'schemas/routing-candidate.schema.json').read_text())
+        validator = Draft202012Validator(schema)
+
+        accept = json.loads((FIXTURES_DIR / 'routing-candidate/accept_complete.json').read_text())
+        self.assertEqual(list(validator.iter_errors(accept)), [])
+
+        reject = json.loads((FIXTURES_DIR / 'routing-candidate/reject_missing_effort.json').read_text())
+        errors = list(validator.iter_errors(reject))
+        self.assertGreater(len(errors), 0, 'candidate missing effort must fail closed')
+        self.assertTrue(
+            any('effort' in e.message for e in errors),
+            f'rejection must name the missing effort field, got: {[e.message for e in errors]}',
+        )
+
+    def test_catalog_effort_field_is_universally_populated(self):
+        # Deliverable F1 empirical audit: `effort` (not `min_effort`) is 44/44 on
+        # catalog/seed.yaml, and `min_effort` does not appear there at all (it is a
+        # config-only threshold under roles.<role>.floor.min_effort).
+        catalog = yaml.safe_load((ROOT / 'catalog/seed.yaml').read_text())['models']
+        self.assertEqual(len(catalog), 44)
+        self.assertEqual(sum(1 for m in catalog if m.get('effort')), 44)
+        self.assertEqual(sum(1 for m in catalog if 'min_effort' in m), 0)
+
+    def test_family_registry_permits_null_latest_landing_pre_landing(self):
+        # Finding F8: a newly created family (issue-77 kickoff) has no landing yet.
+        # latest_landing must accept null pre-landing while staying strict once populated.
+        schema = json.loads((ROOT / 'schemas/family-registry.schema.json').read_text())
+        validator = Draft202012Validator(schema)
+
+        initial = json.loads((FIXTURES_DIR / 'family-registry/accept_initial_family_no_landing.json').read_text())
+        self.assertEqual(list(validator.iter_errors(initial)), [])
+
+        incomplete = json.loads(
+            (FIXTURES_DIR / 'family-registry/reject_missing_evidence_latest_landing_evidence_hash.json').read_text()
+        )
+        self.assertGreater(len(list(validator.iter_errors(incomplete))), 0)
+
     def test_v3_contract_fixtures_accept_complete(self):
         for schema_name in CONTRACT_SCHEMAS:
             with self.subTest(schema=schema_name, case='accept_complete'):

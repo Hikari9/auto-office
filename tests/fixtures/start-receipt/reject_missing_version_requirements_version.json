@@ -20,7 +20,7 @@
   "adapter": "adapters/seed/agy.yaml",
   "model": "gemini-3.8-flash",
   "effort": "medium",
-  "worktree": "/Users/rico/Git/office-skills-t0",
+  "worktree": "/workspace/office-skills",
   "logfile": "/tmp/office/dispatches/disp-exec-001/output.log",
   "started_at": "2026-09-15T00:00:00Z"
 }
