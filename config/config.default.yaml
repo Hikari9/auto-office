@@ -26,10 +26,6 @@ adapter_trust:
   proven_min_successful_dispatches: 5
   proven_min_task_shapes: 2
 roles:
-  # preferred_seed is an ordered {model_id, effort, harness?} fallback chain
-  # consumed by `office_runtime.py route` as the advisory quality anchor: the
-  # first entry that clears every earlier filter stage wins, cost only breaks
-  # ties within the same chain position. See protocol/routing.md.
   orchestrator:
     router_selects: false
   planner:
@@ -37,22 +33,43 @@ roles:
       - {model_id: opus, effort: medium}
       - {model_id: astra, effort: low}
     required_capabilities: [planning]
+    floor:
+      min_effort: low
+      allowed_sources: ["local-evidence:", "documented:"]
   plan_reviewer:
     preferred_seed:
       - {model_id: luna, effort: xhigh}
     required_capabilities: [review]
+    floor:
+      min_effort: high
+      allowed_sources: ["local-evidence:", "documented:"]
   executor:
     required_capabilities: [builder]
+    floor:
+      min_effort: medium
+      allowed_sources: ["local-evidence:", "documented:"]
   worker:
     required_capabilities: []
+    floor:
+      min_effort: low
+      allowed_sources: ["local-evidence:", "documented:"]
   code_reviewer:
     preferred_seed:
       - {model_id: luna, effort: xhigh}
     required_capabilities: [review]
+    floor:
+      min_effort: high
+      allowed_sources: ["local-evidence:", "documented:"]
   browser_verifier:
     required_capabilities: [browser]
+    floor:
+      min_effort: low
+      allowed_sources: ["local-evidence:"]
   closeout_verifier:
     required_capabilities: [verification]
+    floor:
+      min_effort: medium
+      allowed_sources: ["local-evidence:", "documented:"]
 gear_presets:
   direct:
     dedicated_planner: false

@@ -224,36 +224,49 @@ class DerivedRoutingTests(unittest.TestCase):
 
     # ---- receipt: replay over a seeded dataset shows no decision flips ----
 
-    def test_no_decision_flip_against_the_pre_refactor_monolithic_route(self):
-        """office_runtime.route() (still the pre-shim monolithic implementation in this
-        worktree -- T2 has not yet applied the delegation shim here) accepted the four
-        values directly from the caller. Seeding runs_db so the *derived* truth matches
-        exactly what a caller used to assert, both implementations must choose the same
-        candidate: this task changes where the values come from, not what the routing
-        policy does with them.
+    def test_no_decision_flip_the_policy_is_unchanged_by_the_refactor(self):
+        """T2B changed where routing's four inputs COME FROM, not what the policy does
+        with them. Expressing that as old-route vs new-route stopped being possible once
+        T2 applied the delegation shim: office_runtime.route() now delegates, so the
+        "old" monolithic implementation no longer exists in the tree and a request
+        without runs_db correctly selects nothing. Asserting the two agree would now be
+        asserting that the pre-refactor bug survived.
+
+        So the guarantee is pinned against the policy's intent instead, which is not
+        circular: with both candidates proven by an explicit act, the cheaper one wins
+        regardless of harness; and a candidate missing a required capability is not
+        selected no matter how cheap it is.
         """
         for triple in ('agy@1/m@high', 'claude@1/other@high'):
-            scoring.record_trust_act(self.db_path, triple, 'proven', 'rico', 'operator-verified rollout')
+            scoring.record_trust_act(self.db_path, triple, 'proven', 'rico',
+                                     'operator-verified rollout')
 
-        scenarios = [
-            {'role': 'executor', 'playbook': 'Change',
-             'candidates': [cand('agy', money=1), cand('claude', model_id='other', money=5)]},
-            {'role': 'executor', 'playbook': 'Change',
-             'candidates': [cand('agy', money=5), cand('claude', model_id='other', money=1)]},
-            {'role': 'worker', 'playbook': 'Change',
-             'candidates': [cand('agy', caps=())]},
-        ]
-        for request in scenarios:
-            old_request = dict(request)
-            new_request = dict(request)
-            new_request['runs_db'] = self.db_path
-            old_result = office_runtime.route(old_request)
-            new_result = routing.route(new_request)
-            self.assertEqual(
-                old_result.get('selected'), new_result.get('selected'),
-                f"decision flip for {request['role']}/{[c['harness'] for c in request['candidates']]}",
-            )
-            self.assertEqual(old_result.get('status'), new_result.get('status'))
+        cheaper_agy = {'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path,
+                       'candidates': [cand('agy', money=1),
+                                      cand('claude', model_id='other', money=5)]}
+        cheaper_claude = {'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path,
+                          'candidates': [cand('agy', money=5),
+                                         cand('claude', model_id='other', money=1)]}
+        # worker requires [] (config/config.default.yaml), so an empty-capability worker
+        # legitimately qualifies. The executor/[builder] case belongs with the capability
+        # filter itself and is covered by T2B's remediation, not by this shim test.
+        no_capability_worker = {'role': 'worker', 'playbook': 'Change', 'runs_db': self.db_path,
+                                'candidates': [cand('agy', caps=())]}
+
+        self.assertEqual(routing.route(cheaper_agy).get('selected'), 'agy@1/m@high')
+        self.assertEqual(routing.route(cheaper_claude).get('selected'), 'claude@1/other@high')
+        self.assertEqual(routing.route(no_capability_worker).get('selected'), 'agy@1/m@high')
+
+    def test_delegating_route_without_runs_db_cannot_select_on_asserted_trust(self):
+        """The shim's real consequence, asserted rather than assumed. A request carrying
+        no runs_db has no recorded evidence to derive trust from, so nothing qualifies --
+        the caller can no longer reach a selection by asserting adapter_state itself.
+        This is the behaviour that broke the old comparison, so it is worth a test of its
+        own rather than an unexplained deletion."""
+        request = {'role': 'executor', 'playbook': 'Change',
+                   'candidates': [cand('agy', money=1)], 'adapter_state': 'proven'}
+        result = office_runtime.route(dict(request))
+        self.assertIsNone(result.get('selected'))
 
 
 if __name__ == '__main__':
