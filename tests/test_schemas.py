@@ -101,6 +101,26 @@ class TestSchemas(unittest.TestCase):
         del event['dispatch_id']
         self.assertGreater(len(list(validator.iter_errors(event))), 0)
 
+    def test_routing_candidate_triple_pinning_hard_exclusion_and_expiry(self):
+        # Finding F28 / issue-39 "Routability rules": a numeric prior (effort, and by the
+        # same rule intelligence_index/price/speed) is pinned to one exact routable
+        # triple; "effort unparseable" is a hard exclusion ("a mis-keyed triple corrupts
+        # every prior attached to it") enforced by the schema's strict effort enum. A
+        # superseded triple is retained, not deleted (issue-39 "Expiry and
+        # reproducibility": last_seen/superseded_by), so it must remain schema-valid --
+        # expiry is a routing decision, not a schema violation.
+        schema = json.loads((ROOT / 'schemas/routing-candidate.schema.json').read_text())
+        validator = Draft202012Validator(schema)
+
+        reject = json.loads((FIXTURES_DIR / 'routing-candidate/reject_unparseable_effort.json').read_text())
+        errors = list(validator.iter_errors(reject))
+        self.assertGreater(len(errors), 0, 'a candidate with an unparseable effort must be hard-excluded')
+
+        accept = json.loads((FIXTURES_DIR / 'routing-candidate/accept_superseded_still_valid.json').read_text())
+        self.assertEqual(list(validator.iter_errors(accept)), [])
+        self.assertIn('superseded_by', accept)
+        self.assertIn('last_seen', accept)
+
     def test_routing_candidate_permits_null_local_reward(self):
         # Finding F14: the contract requires local_reward=null to represent unmeasured
         # evidence (§7.4.2), but the schema declared type: number, rejecting it outright.
@@ -447,6 +467,7 @@ class TestTrustQuery(unittest.TestCase):
         CREATE TABLE validations(id TEXT PRIMARY KEY, dispatch_id TEXT, kind TEXT, command TEXT, passed INTEGER, known_bad_proven INTEGER, evidence_hash TEXT, created_at TEXT);
         CREATE TABLE outcome_labels(id TEXT PRIMARY KEY, dispatch_id TEXT, label TEXT, primary_attribution TEXT, contributing_attributions TEXT, labeled_at TEXT, evidence_hash TEXT);
         CREATE TABLE lineage(id TEXT PRIMARY KEY, component_kind TEXT, component_id TEXT, parent_id TEXT, event TEXT, multiplier REAL, created_at TEXT);
+        CREATE TABLE artifact_versions(id TEXT PRIMARY KEY, run_id TEXT, kind TEXT, version INTEGER, content_hash TEXT, created_at TEXT);
         """)
         return con
 
@@ -457,15 +478,37 @@ class TestTrustQuery(unittest.TestCase):
             "proven_min_task_shapes": min_shapes,
         }).fetchone()
 
-    def _dispatch(self, con, did, task_shape="shapeA", attribution=None):
+    def _dispatch(self, con, did, task_shape="shapeA", attribution=None, run_id="run-1"):
         con.execute("INSERT INTO dispatches VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (did, "run-1", "executor", "h1", self.TRIPLE, "m1", "r", task_shape, "M",
+                    (did, run_id, "executor", "h1", self.TRIPLE, "m1", "r", task_shape, "M",
                      "t", "t", 0, 0, 0, 0, 0, attribution, None))
 
-    def _label(self, con, did, label, evidence_hash=None, primary_attribution="model"):
+    def _label(self, con, did, label, evidence_hash=None, primary_attribution="model",
+               labeled_at="2026-09-15T00:00:00Z"):
         con.execute("INSERT INTO outcome_labels VALUES (?,?,?,?,?,?,?)",
                     (f"lab-{did}-{label}", did, label, primary_attribution, None,
-                     "2026-09-15T00:00:00Z", evidence_hash))
+                     labeled_at, evidence_hash))
+
+    def _resolve(self, con, lineage_id="lin-1", run_id="run-fix", val_id="val-fix",
+                 passed=1, known_bad_proven=1, kind="known-bad-regression",
+                 evidence_hash=None, created_at="2026-09-16T00:00:00Z",
+                 bind_artifact=True):
+        # Finding F27: a qualifying resolution needs a dispatch (for its run_id), a
+        # validation row, and (unless bind_artifact=False, to test the unbound case) a
+        # matching artifact_versions row in the same run whose content_hash equals the
+        # validation's evidence_hash.
+        evidence_hash = evidence_hash or self.VALID_HASH
+        fixup_id = f"disp-fixup-{val_id}"
+        self._dispatch(con, fixup_id, run_id=run_id)
+        con.execute("INSERT INTO validations VALUES (?,?,?,?,?,?,?,?)",
+                    (val_id, fixup_id, kind, "pytest ...", passed, known_bad_proven,
+                     evidence_hash, created_at))
+        if bind_artifact:
+            con.execute("INSERT INTO artifact_versions VALUES (?,?,?,?,?,?)",
+                        (f"art-{val_id}", run_id, "test-log", 1, evidence_hash, created_at))
+        con.execute("INSERT INTO lineage VALUES (?,?,?,?,?,?,?)",
+                    (lineage_id, "adapter", self.TRIPLE, val_id, "resolved_adapter_defect",
+                     1.0, created_at))
 
     def _seed_five_evidenced_successes(self, con):
         shapes = ["shapeA", "shapeA", "shapeA", "shapeB", "shapeB"]
@@ -528,13 +571,60 @@ class TestTrustQuery(unittest.TestCase):
         self._seed_five_evidenced_successes(con)
         self._dispatch(con, "disp-bad2", attribution="adapter")
         self._label(con, "disp-bad2", "recurrence_failure", evidence_hash=self.VALID_HASH)
-        con.execute("INSERT INTO validations VALUES (?,?,?,?,?,?,?,?)",
-                    ("val-fake", "disp-fixup", "regression-test", "pytest ...", 1, 1, "",
-                     "2026-09-16T00:00:00Z"))
-        con.execute("INSERT INTO lineage VALUES (?,?,?,?,?,?,?)",
-                    ("lin-2", "adapter", self.TRIPLE, "val-fake", "resolved_adapter_defect",
-                     1.0, "2026-09-16T00:00:00Z"))
+        self._resolve(con, val_id="val-fake", evidence_hash="", bind_artifact=False)
         self.assertEqual(self._run(con)[3], "quarantined")
+
+    def test_resolution_with_known_bad_proven_false_does_not_clear_quarantine(self):
+        # Finding F27 property 7 (relevance): passed=1 with a form-valid hash is not
+        # enough -- the validation must have actually proven the known-bad case.
+        con = self._con()
+        self._seed_five_evidenced_successes(con)
+        self._dispatch(con, "disp-bad3", attribution="adapter")
+        self._label(con, "disp-bad3", "recurrence_failure", evidence_hash=self.VALID_HASH)
+        self._resolve(con, val_id="val-unproven", known_bad_proven=0)
+        self.assertEqual(self._run(con)[3], "quarantined")
+
+    def test_resolution_with_wrong_kind_does_not_clear_quarantine(self):
+        # Finding F27 property 7: only the approved kind for a resolution-proving
+        # validation qualifies; an arbitrary passing check does not.
+        con = self._con()
+        self._seed_five_evidenced_successes(con)
+        self._dispatch(con, "disp-bad4", attribution="adapter")
+        self._label(con, "disp-bad4", "recurrence_failure", evidence_hash=self.VALID_HASH)
+        self._resolve(con, val_id="val-wrongkind", kind="pytest")
+        self.assertEqual(self._run(con)[3], "quarantined")
+
+    def test_resolution_hash_not_bound_to_real_artifact_does_not_clear_quarantine(self):
+        # Finding F27 property 7: the evidence_hash must be matched against a real,
+        # independently recorded artifact_versions.content_hash, not trusted as a string.
+        con = self._con()
+        self._seed_five_evidenced_successes(con)
+        self._dispatch(con, "disp-bad5", attribution="adapter")
+        self._label(con, "disp-bad5", "recurrence_failure", evidence_hash=self.VALID_HASH)
+        self._resolve(con, val_id="val-unbound", bind_artifact=False)
+        self.assertEqual(self._run(con)[3], "quarantined")
+
+    def test_backdated_resolution_does_not_clear_quarantine(self):
+        # Finding F27 property 8 (recency): a validation dated before the failure it
+        # claims to resolve cannot have tested the fix for it.
+        con = self._con()
+        self._seed_five_evidenced_successes(con)
+        self._dispatch(con, "disp-bad6", attribution="adapter")
+        self._label(con, "disp-bad6", "recurrence_failure", evidence_hash=self.VALID_HASH,
+                    labeled_at="2026-09-20T00:00:00Z")
+        self._resolve(con, val_id="val-backdated", created_at="2026-09-10T00:00:00Z")
+        self.assertEqual(self._run(con)[3], "quarantined")
+
+    def test_fully_qualifying_resolution_clears_quarantine(self):
+        # Finding F27: with relevance and recency both satisfied (in addition to the
+        # pre-existing form/scope checks), resolution genuinely clears quarantine.
+        con = self._con()
+        self._seed_five_evidenced_successes(con)
+        self._dispatch(con, "disp-bad7", attribution="adapter")
+        self._label(con, "disp-bad7", "recurrence_failure", evidence_hash=self.VALID_HASH,
+                    labeled_at="2026-09-10T00:00:00Z")
+        self._resolve(con, val_id="val-good", created_at="2026-09-20T00:00:00Z")
+        self.assertEqual(self._run(con)[3], "proven")
 
     def test_legit_evidenced_case_still_proves(self):
         con = self._con()
@@ -551,14 +641,10 @@ class TestTrustQuery(unittest.TestCase):
         con = self._con()
         self._seed_five_evidenced_successes(con)
         self._dispatch(con, "disp-bad", attribution="adapter")
-        self._label(con, "disp-bad", "recurrence_failure", evidence_hash=self.VALID_HASH)
+        self._label(con, "disp-bad", "recurrence_failure", evidence_hash=self.VALID_HASH,
+                    labeled_at="2026-09-15T00:00:00Z")
         self.assertEqual(self._run(con)[3], "quarantined")
-        con.execute("INSERT INTO validations VALUES (?,?,?,?,?,?,?,?)",
-                    ("val-fix", "disp-fixup", "regression-test", "pytest ...", 1, 1,
-                     self.VALID_HASH, "2026-09-16T00:00:00Z"))
-        con.execute("INSERT INTO lineage VALUES (?,?,?,?,?,?,?)",
-                    ("lin-1", "adapter", self.TRIPLE, "val-fix", "resolved_adapter_defect",
-                     1.0, "2026-09-16T00:00:00Z"))
+        self._resolve(con, val_id="val-fix", created_at="2026-09-16T00:00:00Z")
         self.assertEqual(self._run(con)[3], "proven")
 
 

@@ -540,11 +540,14 @@ A dispatch may be labeled more than once over time (`outcome_labels` is append-o
 #### 7.1.2 Trust Evaluation SQL Query
 The trust qualification status for a candidate triple (`:target_triple`) is evaluated against `runs.db` using the following query. `:proven_min_successful_dispatches` and `:proven_min_task_shapes` are bound parameters read from `config/config.default.yaml`'s `adapter_trust` block, not literals:
 
-**Finding F21 — the complete evidence-validity checklist.** This gate has been narrowed four times
-running (duplicates, then unsigned labels, then empty hashes, then malformed hashes), each fix
-correct but each leaving a narrower hole, because each round patched the instance found rather than
-the whole property list. The full list, checked together from this point on, wherever "valid
-evidence" is required anywhere in this query:
+**Finding F21/F27 — the complete evidence-validity checklist.** This gate has been narrowed five
+times running (duplicates, then unsigned labels, then empty hashes, then malformed hashes, then
+form-valid-but-irrelevant evidence), each fix correct but each leaving a narrower hole, because
+each of the first four rounds patched the instance found rather than the whole property list. F21
+stopped that pattern by enumerating properties instead of patching instances; F27 found the eighth
+dimension the six-property enumeration hadn't yet named — relevance and recency — by asking not "is
+the hash well-formed and attributable" but "does what it points at actually prove what it claims."
+The full list, checked together wherever "valid evidence" is required anywhere in this query:
 
 1. **Present** — the column is not `NULL`.
 2. **Correctly prefixed** — begins with the literal `sha256:`.
@@ -555,8 +558,50 @@ evidence" is required anywhere in this query:
 5. **Attributable to a distinct qualifying dispatch** — counted via `COUNT(DISTINCT dispatch_id)`
    over `latest_labels` (`rn = 1`), so a duplicated or re-recorded label cannot multiply a
    dispatch's contribution (Finding F3).
-6. **Not superseded by an unresolved adapter-attributed failure** — `critical_failures = 0 OR`
-   a qualifying `resolved_adapter_defects` record exists (Finding F3/F12).
+6. **Scoped to the exact target triple** — a remediation record for a *different* adapter or a
+   different triple of the same adapter family must not clear this triple's quarantine
+   (`lineage.component_id = :target_triple`, already enforced structurally since F3/F12; named
+   explicitly here because Finding F27 asked whether scope was a distinct, unconsidered dimension —
+   it is not unconsidered, it was already load-bearing, it just hadn't been named).
+7. **Relevant, not merely well-formed (Finding F27)** — for a claimed `resolved_adapter_defect`
+   specifically, form (properties 1-4) and scope (property 6) are not enough: a validation with a
+   syntactically perfect hash, `passed = 1`, that never actually exercised the known-bad case is
+   not evidence of resolution. A qualifying resolution validation must additionally have
+   `known_bad_proven = 1` (`scripts/office_runtime.py:370` already stores this column; no runtime
+   change is needed) and `kind = 'known-bad-regression'`, the approved kind this contract defines
+   for a resolution-proving validation, and its `evidence_hash` must equal a real
+   `artifact_versions.content_hash` recorded for the same run (`JOIN artifact_versions av ON
+   av.run_id = vd.run_id AND av.content_hash = v.evidence_hash`) — the hash is matched against a
+   hash the runtime actually computed from a real artifact, never trusted as an opaque string
+   nobody computed.
+8. **Temporally coherent (Finding F27's self-review)** — a resolution validation dated *before* the
+   failure(s) it claims to resolve cannot have tested the fix for them and must not clear
+   quarantine. The resolving validation's `created_at` must be on or after the latest disqualifying
+   evidence timestamp for that triple (the latest evidence-backed adapter-attributed
+   `recurrence_failure`/`material_post_merge_defect` label, or the latest qualifying blocking
+   finding on an adapter-attributed `abandoned` dispatch).
+
+**On completeness.** Re-reading 1-8 as a definition against the three dimensions this round asked
+about directly:
+- **Recency** — was missing; property 8 closes it.
+- **Scope** — was already enforced (`component_id = :target_triple`) but unnamed; property 6 names
+  it explicitly so a future round does not mistake "structurally present" for "not considered."
+- **Authority over the artifact** — deliberately *not* added as a ninth property. "Authority" here
+  would mean requiring an independent reviewer identity (producer ≠ reviewer) on the resolution
+  validation, the way `review-result.schema.json` already requires for adversarial review
+  (Deliverable E, §6). Reusing that exact concept here would blur two already-separately-specified
+  gates: this query's `validations` rows are self-run verification (build/test commands), not
+  adversarial review, and `kind = 'known-bad-regression'` (property 7) already establishes that the
+  validation is the artifact-of-record designated for defect resolution, not an arbitrary passing
+  check. If a future decision requires independent-reviewer sign-off before a quarantine clears,
+  that is a new decision to route through `review-result`, not a property this query's evidence
+  checklist should silently absorb.
+- Conclusion: **1-8 are complete for what this query needs to prove** — presence, form (2-4),
+  attribution (5), scope (6), relevance (7), and recency (8) jointly account for every way a piece
+  of evidence could look valid while proving nothing, given what this query is actually deciding
+  (has the triple demonstrated success, and is any disqualifying failure actually resolved). A
+  future *decision* (e.g. requiring independent review of a resolution) would add a ninth property;
+  no further *gap in the current definition* is evident.
 
 Properties 1-4 are combined into one SQL fragment, `IS NOT NULL AND LIKE 'sha256:%' AND
 length(...) = 71 AND substr(..., 8) NOT GLOB '*[^0-9a-f]*'` (SQLite has no native regex; `LIKE` plus
@@ -573,6 +618,7 @@ WITH latest_labels AS (
         ol.label,
         ol.primary_attribution,
         ol.evidence_hash,
+        ol.labeled_at,
         (
             ol.evidence_hash IS NOT NULL
             AND ol.evidence_hash LIKE 'sha256:%'
@@ -609,18 +655,53 @@ adapter_dispatches AS (
 resolved_adapter_defects AS (
     -- Finding F3 / §7.1.3: a triple-scoped remediation record, evidenced by a passed
     -- validation row (not a nonexistent lineage.evidence_hash column), clears quarantine.
+    -- Finding F27: form (1-4) and scope (6) are not relevance (7) or recency (8). A qualifying
+    -- resolution must be the approved kind, must have actually proven the known-bad case
+    -- (known_bad_proven=1), must bind its hash to a real artifact_versions row from the same
+    -- run (not trust the string), and must not be dated before the failure it resolves.
     SELECT COUNT(*) AS n
     FROM lineage l
     JOIN validations v ON v.id = l.parent_id
+    JOIN dispatches vd ON vd.id = v.dispatch_id
+    JOIN artifact_versions av ON av.run_id = vd.run_id AND av.content_hash = v.evidence_hash
     WHERE l.component_kind = 'adapter'
       AND l.component_id = :target_triple
       AND l.event = 'resolved_adapter_defect'
       AND l.multiplier > 0
       AND v.passed = 1
+      AND v.known_bad_proven = 1
+      AND v.kind = 'known-bad-regression'
       AND v.evidence_hash IS NOT NULL
       AND v.evidence_hash LIKE 'sha256:%'
       AND length(v.evidence_hash) = 71
       AND substr(v.evidence_hash, 8) NOT GLOB '*[^0-9a-f]*'
+      AND v.created_at >= COALESCE(
+          (SELECT MAX(t) FROM (
+              SELECT ll2.labeled_at AS t
+              FROM latest_labels ll2
+              JOIN dispatches d2 ON d2.id = ll2.dispatch_id
+              WHERE d2.triple = :target_triple
+                AND ll2.rn = 1
+                AND ll2.label IN ('recurrence_failure', 'material_post_merge_defect')
+                AND ll2.evidence_valid
+                AND (d2.attribution = 'adapter' OR ll2.primary_attribution = 'adapter')
+              UNION ALL
+              SELECT f2.created_at AS t
+              FROM findings f2
+              JOIN dispatches d3 ON d3.id = f2.dispatch_id
+              LEFT JOIN latest_labels ll3 ON ll3.dispatch_id = d3.id AND ll3.rn = 1
+              WHERE d3.triple = :target_triple
+                AND d3.attribution = 'adapter'
+                AND ll3.label = 'abandoned'
+                AND f2.status = 'accepted-material'
+                AND f2.severity IN ('critical', 'high')
+                AND f2.evidence_hash IS NOT NULL
+                AND f2.evidence_hash LIKE 'sha256:%'
+                AND length(f2.evidence_hash) = 71
+                AND substr(f2.evidence_hash, 8) NOT GLOB '*[^0-9a-f]*'
+          )),
+          v.created_at
+      )
 ),
 qualification_summary AS (
     SELECT
@@ -664,7 +745,7 @@ SELECT
 FROM qualification_summary, resolved_adapter_defects;
 ```
 
-This resolves finding F3's three defects directly: `COUNT(DISTINCT dispatch_id)` over `latest_labels` (via `rn = 1`) means duplicated or re-recorded self-reported labels for the same dispatch cannot inflate `successful_dispatches`; the thresholds are bound parameters, not literals; and every evidence check requires the full checklist above, not a partial version of it.
+This resolves finding F3's three defects directly: `COUNT(DISTINCT dispatch_id)` over `latest_labels` (via `rn = 1`) means duplicated or re-recorded self-reported labels for the same dispatch cannot inflate `successful_dispatches`; the thresholds are bound parameters, not literals; and every evidence check requires the full eight-property checklist above, not a partial version of it — including, for a claimed resolution specifically, that it is relevant (property 7) and not backdated (property 8).
 
 **Finding F12 correction (superseded by F21's checklist above, kept here for history).** Round 1's
 `label_evidence_hash IS NOT NULL` admitted an empty-string hash, because in SQL `'' IS NOT NULL` is
@@ -684,7 +765,15 @@ An unresolved adapter failure permanently blocks qualification. It is defined as
   - `component_id = :target_triple`
   - `event = 'resolved_adapter_defect'`
   - `multiplier > 0`
-  - `parent_id` references a row in `validations` with `passed = 1` and a non-empty `evidence_hash`, proving an approved regression test verified the resolution. (The `lineage` table itself has no `evidence_hash` column; evidence is reached through `parent_id` into `validations`, not fabricated on `lineage` directly.)
+  - `parent_id` references a row in `validations` satisfying the full evidence checklist in §7.1.2
+    (properties 1-8): `passed = 1`, `known_bad_proven = 1`, `kind = 'known-bad-regression'`, a
+    well-formed `evidence_hash` bound to a real `artifact_versions.content_hash` from the same run,
+    and `created_at` on or after the latest disqualifying evidence for that triple. (The `lineage`
+    table itself has no `evidence_hash` column; evidence is reached through `parent_id` into
+    `validations`, not fabricated on `lineage` directly.) **Finding F27:** a validation that is
+    merely `passed = 1` with a syntactically valid hash is not sufficient — it must have actually
+    proven the known-bad case, be the approved kind, point at a real recomputed artifact, and not
+    predate the failure it claims to resolve.
 
   Without a qualifying `resolved_adapter_defect` lineage record, the adapter remains quarantined indefinitely — the unresolved-failure check is independent of, and cannot be outrun by, accumulating additional successful dispatches.
 

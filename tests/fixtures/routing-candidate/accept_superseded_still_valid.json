@@ -1,0 +1,16 @@
+{
+  "harness": "claude",
+  "harness_version": "local",
+  "model_id": "claude-opus-4-9",
+  "invocation_model_id": "claude-opus-4-9",
+  "effort": "high",
+  "adapter_state": "proven",
+  "capabilities": ["builder"],
+  "absolute_floor_pass": true,
+  "hard_excluded": false,
+  "advisory_pass": true,
+  "quota": {"tokens_remaining": 100000},
+  "cost": {"money_per_1k_tokens": 0.02},
+  "last_seen": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "superseded_by": "claude@local/claude-opus-5@high"
+}

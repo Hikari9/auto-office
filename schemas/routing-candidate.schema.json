@@ -72,6 +72,13 @@
     },
     "cost": {
       "type": "object"
+    },
+    "last_seen": {
+      "type": "string",
+      "minLength": 1
+    },
+    "superseded_by": {
+      "type": ["string", "null"]
     }
   }
 }
