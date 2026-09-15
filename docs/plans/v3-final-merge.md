@@ -19,8 +19,8 @@ The user has accepted the eight design decisions. This is an implementation plan
 ## Planning envelope
 
 ```yaml
-plan_version: 5
-requirements_version: 4
+plan_version: 6
+requirements_version: 5
 routing_version: 3
 branch: auto-office-v3
 target_branch: main
@@ -47,6 +47,30 @@ base_drift:
       collision to explain, not a new baseline. Later dispatches cut from 487fca8 or later
       use the 109/8 baseline instead.
 amendment_history:
+  - version: 6
+    kind: plan_contract
+    reason: >-
+      The confirm-only review of 1787d67 reproduced R1 and R3 through a mechanism amendment
+      v5 did not close. `latest_labels` selects `rn = 1`, reading an append-only log as a
+      level rather than a latch, so appending one benign `verified_no_observed_failure` row
+      to a failed dispatch moves the failure off `rn = 1`, drops `critical_failures` to 0 and
+      returns an upward state. `outcome_labels` requires no `actor_id` and no authority,
+      while `adapter_trust_acts` requires both. The orchestrator reproduced it directly
+      against the committed fixture: (1, 'quarantined') becomes (0, 'proven') after a single
+      unauthenticated INSERT. v5's invariant was therefore violated through label recency
+      rather than through a promotion branch.
+      The pattern across four rounds is the diagnosis, not this instance. T0 was shipping a
+      correct SQL implementation inside a prose contract, and every round found another bug
+      in that body. A document is the wrong artifact in which to debug a query.
+      By user decision the normative artifact changes: THE TESTS ARE THE CONTRACT. T0 pins
+      the invariant, the `outcome_labels` and `adapter_trust_acts` schemas, and an executable
+      conformance suite whose rejecting cases include both laundering counterexamples. T0
+      ships no normative SQL body. T2B writes the query in `scripts/office_scoring.py` and
+      its completion criterion is that the conformance suite passes un-skipped. This does not
+      relax the invariant: a query may lower adapter trust and may never raise it, and the
+      suite is what proves it rather than a reviewer reading SQL.
+    affected_scopes: [T0, T2B]
+    resulting_versions: {plan_version: 6, requirements_version: 5, routing_version: 3}
   - version: 5
     kind: requirements
     reason: >-
@@ -169,7 +193,7 @@ Protected paths and non-goals: no changes to user-global skill installations, ha
 
 Scoring, rewards and capability floors (amendment v3). Version 1's non-goal barring this work is withdrawn by explicit user decision, and replaced by a bounded one. **Structural change is in scope**: deriving a value from recorded evidence instead of accepting it as caller input, writing the outcome labels that every scoring path already reads, and expressing the capability floor as a declared per-role minimum evaluated against the pinned catalog snapshot. **Parametric change is out of scope**: no task may alter any numeric value in `config/config.default.yaml` under `maturity`, `replay`, `quota`, `cost_policy` or `exploration`, nor change `maturity_age()`'s curve or the reward model's shape. The reason is evidential, not conservative: `runs.db` currently holds 2 dispatches and 0 outcome labels, so new weights chosen today would carry exactly the same authority as the ones already in the file while consuming a wave, and would additionally destroy the value of `replay.min_labeled_rows_for_refit`, which exists so a policy change is validated against recorded decisions rather than intuition. The first reweighting happens in a later run, through the replay gate, once at least 20 labeled rows exist. A task that finds a weight it believes is wrong records it as a matrix row with evidence and leaves the value untouched.
 
-Adapter trust moves down automatically, never up (amendment v5). Structural derivation of adapter trust is retained for demotion only. An observed failure quarantines a triple from recorded evidence with no human action, and routing stage 2 consumes that derived state. Promotion to `proven` is NOT computed from a dispatch count or any query over `outcome_labels`: it is an explicit recorded act with its own attribution. T0 therefore does not pin a promotion query, and T2B does not implement one. The reason is that a promotion gate must be un-gameable to be worth anything, and five rounds of independent review produced four correct narrowings and a runnable counterexample that still returned `proven` from five self-reported labels. A gate that can only lower trust has no such failure mode, because the evidence an attacker would forge moves the value in the direction they do not want. This is a scope narrowing, not a deferral: no later task inherits a requirement to compute promotion.
+Adapter trust moves down automatically, never up (amendment v5). Structural derivation of adapter trust is retained for demotion only. An observed failure quarantines a triple from recorded evidence with no human action, and routing stage 2 consumes that derived state. Promotion to `proven` is NOT computed from a dispatch count or any query over `outcome_labels`: it is an explicit recorded act with its own attribution. T0 therefore does not pin a promotion query, and T2B does not implement one. Amendment v6 goes further: T0 pins no normative trust SQL at all. It pins the invariant, the label and trust-act schemas, and an executable conformance suite; T2B writes the query body in `scripts/office_scoring.py` and must pass that suite un-skipped. The reason is that a promotion gate must be un-gameable to be worth anything, and five rounds of independent review produced four correct narrowings and a runnable counterexample that still returned `proven` from five self-reported labels. A gate that can only lower trust has no such failure mode, because the evidence an attacker would forge moves the value in the direction they do not want. This is a scope narrowing, not a deferral: no later task inherits a requirement to compute promotion.
 
 Named future actions: isolated fixture worktrees and test runs; scoped implementation commits and PR updates after execution is authorized; final merge only under explicit user authority. Billing/payment changes are user-owned and not authorized. This plan commit does not authorize any of these future actions now.
 
