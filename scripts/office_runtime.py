@@ -967,15 +967,116 @@ def cmd_state_load(args):
     if not state_path.exists(): dump_json({"exists": False}); return 0
     dump_json(json.loads(state_path.read_text(encoding="utf-8"))); return 0
 
+SPOKE_DIGEST_PREFIX_LEN = 16
+
+
+def spoke_skill_path(spoke):
+    """On-disk SKILL.md for a spoke, resolved relative to this script."""
+    return Path(__file__).resolve().parents[1] / "skills" / spoke / "SKILL.md"
+
+
+def spoke_digest(spoke):
+    """Short sha256 of the spoke's SKILL.md as it exists right now.
+
+    Short, not full: this value is transcribed by hand into a CLI call, and a
+    64-char hex string invites copy-paste of a remembered value from an earlier
+    run. 16 hex chars is 64 bits -- far beyond collision risk for a handful of
+    files, and short enough to read off a terminal.
+    """
+    path = spoke_skill_path(spoke)
+    if not path.exists():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:SPOKE_DIGEST_PREFIX_LEN]
+
+
 def cmd_mark_spoke(args):
+    """Record that a spoke was loaded, requiring proof it was located first.
+
+    WHY THIS IS NOT A BARE FLAG (incident 2026-09-15, run e6167374): the
+    previous implementation recorded a timestamp from a spoke NAME alone. That
+    made the receipt self-attesting -- the same agent the gate constrains could
+    satisfy the gate by typing the spoke's name, with no coupling whatsoever to
+    having loaded its content. It happened exactly that way: an orchestrator
+    batch-marked `auto-routing` and `auto-execution` in a single shell call as
+    a convenience, having loaded neither, and `check-spoke` then returned 0 for
+    both. The drift was caught by the USER reading the transcript, which is the
+    one detector this runtime is supposed to make unnecessary.
+
+    `--digest` does NOT prove the agent comprehended the spoke; nothing a CLI
+    can check does. What it proves is that the caller located this specific
+    file at its current version. That is enough to convert the failure mode
+    from an accident anyone can have into a deliberate act: you can no longer
+    mark a spoke you never found, mark a spoke whose name you guessed, mark a
+    renamed or stale spoke, or batch-mark five spokes in one keystroke.
+
+    A mark without a verified digest is still permitted (`--unverified`), so an
+    unusual layout cannot hard-block a run -- but it is recorded as such, and
+    auto-closeout surfaces it. Fail-soft and visible beats fail-closed and
+    routed around.
+    """
     state_path = Path(args.state_dir) / "state.json"
     if not state_path.exists():
         dump_json({"error": "no state.json; run new-run/state-save first"}); return 1
+
+    expected = spoke_digest(args.spoke)
+    verified = False
+
+    if args.digest:
+        if expected is None:
+            dump_json({
+                "error": "spoke_not_found",
+                "spoke": args.spoke,
+                "looked_in": str(spoke_skill_path(args.spoke)),
+                "hint": "a --digest was supplied for a spoke that does not exist on disk; "
+                        "check the spoke name against skills/",
+            })
+            return 2
+        if args.digest.strip().lower() != expected:
+            dump_json({
+                "error": "digest_mismatch",
+                "spoke": args.spoke,
+                "supplied": args.digest.strip().lower(),
+                "hint": "the digest does not match the spoke's SKILL.md as it exists now. "
+                        "Either the spoke changed since you read it, or this digest came "
+                        "from a different spoke or an earlier run. Re-read the spoke and "
+                        "recompute.",
+            })
+            return 2
+        verified = True
+    elif not args.unverified:
+        dump_json({
+            "error": "digest_required",
+            "spoke": args.spoke,
+            "skill_path": str(spoke_skill_path(args.spoke)),
+            "hint": "mark-spoke now requires --digest <short-sha256 of that spoke's "
+                    "SKILL.md>, so a receipt cannot be produced for a spoke that was "
+                    "never located. Pass --unverified only when the spoke genuinely is "
+                    "not on disk; closeout will report it.",
+        })
+        return 2
+
     obj = json.loads(state_path.read_text(encoding="utf-8"))
     spokes = obj.setdefault("spokes_loaded", {})
-    spokes[args.spoke] = datetime.now(timezone.utc).isoformat()
+    spokes[args.spoke] = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "verified": verified,
+        "digest": expected if verified else None,
+    }
     _atomic_write_json(state_path, obj)
-    dump_json({"marked": args.spoke, "phase": obj.get("phase")}); return 0
+    dump_json({"marked": args.spoke, "verified": verified, "phase": obj.get("phase")})
+    return 0
+
+
+def cmd_spoke_digest(args):
+    """Print the digest to pass to `mark-spoke --digest` for a spoke."""
+    d = spoke_digest(args.spoke)
+    if d is None:
+        dump_json({"error": "spoke_not_found", "spoke": args.spoke,
+                   "looked_in": str(spoke_skill_path(args.spoke))})
+        return 2
+    dump_json({"spoke": args.spoke, "digest": d,
+               "skill_path": str(spoke_skill_path(args.spoke))})
+    return 0
 
 def cmd_check_spoke(args):
     state_path = Path(args.state_dir) / "state.json"
@@ -984,7 +1085,16 @@ def cmd_check_spoke(args):
     obj = json.loads(state_path.read_text(encoding="utf-8"))
     spokes = obj.get("spokes_loaded", {})
     loaded = args.spoke in spokes
-    dump_json({"loaded": loaded, "spoke": args.spoke, "marked_at": spokes.get(args.spoke)})
+    # Rows written before the digest requirement are plain ISO strings; rows
+    # written after are dicts. A resumed run must not be re-gated just because
+    # its state predates this change, so both shapes read as loaded.
+    row = spokes.get(args.spoke)
+    if isinstance(row, dict):
+        marked_at, verified = row.get("at"), row.get("verified", False)
+    else:
+        marked_at, verified = row, False
+    dump_json({"loaded": loaded, "spoke": args.spoke,
+               "marked_at": marked_at, "verified": verified})
     return 0 if loaded else 2
 
 def cmd_route_defect(args):
@@ -1227,7 +1337,8 @@ def main():
     q=sp.add_parser('state-load'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_state_load)
     q=sp.add_parser('approve-plan'); q.add_argument('--state-dir',required=True); q.add_argument('--approved-by',choices=['user'],required=True); q.add_argument('--quote',required=True); q.add_argument('--plan-path'); q.set_defaults(func=cmd_approve_plan)
     q=sp.add_parser('state-reconcile'); q.add_argument('--state-dir',required=True); q.add_argument('--db'); q.set_defaults(func=cmd_state_reconcile)
-    q=sp.add_parser('mark-spoke'); q.add_argument('--state-dir',required=True); q.add_argument('--spoke',required=True); q.set_defaults(func=cmd_mark_spoke)
+    q=sp.add_parser('mark-spoke'); q.add_argument('--state-dir',required=True); q.add_argument('--spoke',required=True); q.add_argument('--digest'); q.add_argument('--unverified',action='store_true'); q.set_defaults(func=cmd_mark_spoke)
+    q=sp.add_parser('spoke-digest'); q.add_argument('--spoke',required=True); q.set_defaults(func=cmd_spoke_digest)
     q=sp.add_parser('check-spoke'); q.add_argument('--state-dir',required=True); q.add_argument('--spoke',required=True); q.set_defaults(func=cmd_check_spoke)
     q=sp.add_parser('route-defect'); q.add_argument('--state-dir',required=True); q.add_argument('--kind',choices=['invalid-invocation-slug','unsupported-effort','missing-adapter','other'],default='invalid-invocation-slug'); q.add_argument('--attempted',required=True); q.add_argument('--observed',required=True); q.add_argument('--correction'); q.add_argument('--harness'); q.set_defaults(func=cmd_route_defect)
     q=sp.add_parser('resolve-route-defect'); q.add_argument('--state-dir',required=True); q.add_argument('--id',required=True); q.add_argument('--proposal-ref',required=True); q.set_defaults(func=cmd_resolve_route_defect)

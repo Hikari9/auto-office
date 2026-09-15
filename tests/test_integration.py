@@ -475,7 +475,14 @@ class TestLifecycleIntegration(unittest.TestCase):
         state_dir, before = self._start_run()
         state_path = state_dir / 'state.json'
 
-        rc, out, _ = run_cmd('mark-spoke', '--state-dir', str(state_dir), '--spoke', 'auto-planning')
+        # mark-spoke now requires proof the spoke was located (--digest), so
+        # this call carries one. The assertion under test is unchanged: it is
+        # about state-save preserving spokes_loaded, not about the receipt
+        # contract, which tests/test_spoke_receipt_integrity.py owns.
+        rc, out, _ = run_cmd('spoke-digest', '--spoke', 'auto-planning')
+        self.assertEqual(rc, 0)
+        rc, out, _ = run_cmd('mark-spoke', '--state-dir', str(state_dir),
+                             '--spoke', 'auto-planning', '--digest', out['digest'])
         self.assertEqual(rc, 0)
 
         state = json.loads(state_path.read_text())
