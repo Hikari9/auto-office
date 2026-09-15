@@ -40,13 +40,19 @@ Done when: the returned `state_dir` exists for this run.
 
 Done when: exit code is 0; enter planning from this receipt.
 
-## 2. Stage 1 — grilled intent
+## 2. Stage 1 — provisional intent, then interactive planner freeze
 
-The orchestrator conducts the interview; the planner receives its serialized
-`grilled intent` output (#47).
+**This supersedes #47.** The orchestrator no longer conducts the grilled interview or freezes
+intent before planning starts. It captures only the provisional intent needed to understand the
+request and decide whether planning is required — a hypothesis for the planner, not a frozen
+contract. The planner then performs repository reconnaissance, interacts directly with the user
+(including through a Herdr pane when available), may reshape any pre-freeze field when evidence
+contradicts the provisional framing, and freezes the five fields only at the end of that
+interactive discovery (issue-35#decision-1, issue-77 §1-2).
 
-The floor is twelve items. All twelve are covered on every run, delivered as one
-or two batched question rounds rather than a conversation:
+The floor is twelve items, run by the planner. All twelve are covered on every run, delivered as
+one or two batched question rounds — or a structured-question tool where the harness has one —
+rather than an unbounded back-and-forth:
 
 1. **Outcome** — what is true when this is done, in the user's words.
 2. **Done-criteria** — the exact commands, reads or observations that prove it.
@@ -70,7 +76,7 @@ or two batched question rounds rather than a conversation:
 
 The five frozen fields (`goal`, `done_criteria`, `blast_radius`,
 `named_actions`, `non_goals`) are derived from the answers and frozen by the
-orchestrator. The user answers each field before it is frozen.
+planner, at the end of this interactive discovery. The user answers each field before it is frozen.
 
 ## 3. Gear is declared by the fit test
 
@@ -227,6 +233,37 @@ needs independent review — self-review or none suffices for a small or documen
 and that judgment stands unchallenged. Section 8's independent-review rule governs delegated
 production work; this waiver covers only small or documentation-only inline edits.
 
+## 5.3 Amendment kinds, and concurrent families with sticky focus
+
+`requirements_version`, `plan_version`, and `routing_version` amend independently
+(issue-35#decision-5). Section 5.1 classifies a follow-up by which of the three it changes:
+
+- **Routing-only** (model/reviewer/parallelism/depth change): the orchestrator updates routing
+  state and informs affected executors; a not-yet-started dispatch uses the new route immediately;
+  the planner never wakes.
+- **Requirements delta that still fits the plan** (architecture, interfaces, dependency order,
+  milestones, and done criteria remain valid): the orchestrator versions requirements and sends a
+  delta packet to the affected executor(s); the planner never wakes.
+- **Plan-contract delta** (architecture, interfaces, dependency ordering, milestone structure, done
+  criteria, or a plan assumption invalidated): only affected scopes pause; the planner wakes for
+  interactive delta-planning, self-reviews, runs its plan adversary, and emits a new plan version;
+  the orchestrator redistributes only what changed.
+
+A running dispatch normally completes its current atomic unit or round before a new route or plan
+applies, unless the user explicitly requests immediate replacement (section 5's approval covers the
+plan it approved, not an unbounded license to bump every version on every delta — doing so on a
+routing-only change is itself a defect).
+
+One orchestrator may supervise multiple independent families concurrently through a durable family
+registry holding, per family: repo/issue, phase, the three version counters, ownership, active
+dispatches, latest landing, and pending user decisions (issue-35#decision-6). Use **sticky focus**:
+exactly one family is the current conversational focus; an unqualified command applies there;
+naming another family switches focus and applies there; an explicit global command applies
+session-wide; a genuinely ambiguous command mutates nothing and states why rather than guessing.
+Families run independently by default — the orchestrator projects quota/resource collisions and
+warns the user without delaying unrelated work, and an explicit user routing command always
+outranks a projected-collision warning. Full contract in `protocol/families-and-amendments.md`.
+
 ## 6. Non-blocking orchestration
 
 The orchestrator stays active while delegated work runs. A blocked orchestrator
@@ -306,6 +343,25 @@ moment N parallel trees have ever existed together is after the merge.
   for, the independent-approval gate above. This is the single normative
   statement of that distinction; other skill files point here rather than
   restating it.
+- **Review is local first; a final adversary is integration-boundary-triggered,
+  not a default second pass (issue-35#decision-4, issue-77 §4-5,7).** Each
+  executor owns its own implementation and review loop and may accept a
+  finding and fix it, or reject it with stronger evidence
+  (`disposition_owner: executor`). Cheap, reversible, low-risk work may use
+  inline self-review instead of an independent adversary
+  (`review_mode: labeled-inline`, never represented as
+  `independent_adversary`). A final orchestrator-spawned integration adversary
+  exists only when two or more executors produce dependent or merging
+  landings that must compose across a shared interface — never merely because
+  a family has more than one executor.
+- **Executor disposition ownership with exceptional upline consultation
+  (issue-35#decision-3).** The executor decides review dispositions.
+  It escalates to the orchestrator only when it and its reviewer cannot
+  responsibly resolve a disagreement; this is exceptional, not a routine
+  approval chain. If evidence is genuinely conflicting, the executor emits a
+  structured `TRUE_CONFLICT`/`USER_DECISION_REQUIRED` state and the
+  orchestrator surfaces it to the user rather than acting as the higher-tier
+  technical judge.
 - The reviewer's scope is the **integrated** diff.
 - Reviewer sessions may run in parallel across independent scopes. One reviewer
   session serialised across N producers is a designed bottleneck.
@@ -324,6 +380,28 @@ containing `.office/runs`, including correctly approved runs — it would have h
 every auto-office repo. The allow-cases passed only because those paths had no run state to fail
 on. General form: a check whose output has fewer distinct values than the conditions it must
 distinguish cannot verify them. Assert the reason a gate gives, not only whether it exited nonzero.
+
+### 8.2 Compaction before adversarial review (issue-77 addendum)
+
+Long-lived roles may compact at semantic phase boundaries, after first serializing the state the
+next phase needs. This is conditional, not mandatory for every task:
+
+```text
+inline review / tiny task                        -> no compaction needed
+adversarial review + executor context still small -> optional
+adversarial review + substantial implementation   -> checkpoint + compact before reviewer
+very long review/fix loop                          -> compact again at later phase boundaries
+```
+
+The checkpoint (`schemas/checkpoint.schema.json`) preserves only what the executor needs to defend
+or modify its work: requirements/plan/routing versions, task scope, current commit/diff and changed
+files, key implementation decisions and tradeoffs, tests/validation already run, interfaces
+touched, deviations from plan, unresolved concerns, and current review round/state. The repository,
+diff, tests, and serialized packet remain the source of truth — a role does not pay to retain a
+transcript of exploratory reads, failed attempts, or routine tool history to answer a reviewer
+later. The reviewer receives a fresh independent packet (plan/requirements, repository/diff,
+validation evidence, review scope) rather than the executor's transcript, preserving adversarial
+independence.
 
 ## 9. Autonomy ceiling
 
@@ -448,7 +526,12 @@ that says plainly it decided not to build one.
 |---|---|---|
 | Out of scope: parallelism is not this destination | Sections 4, 6, 7 | Explicitly reopened per #35's preamble, limited to waves, worktrees and integration. Milestone-scoped discovery planning stays out. |
 | #45: fit test is never a user question | Section 3 | Gear is auto-decided and declared, never asked. Declaration is not a question. |
-| #47: planner never talks to the user | Section 2 | The interview is orchestrator-owned. The planner receives grilled intent as a serialized artifact. |
+| #47: planner never talks to the user | Section 2 | **Overturned by issue-35#decision-1.** The planner owns the interview and talks to the user directly; the orchestrator holds only provisional, pre-planning intent. |
+| issue-35#decision-4: review is local first, integration-triggered | Section 8, `protocol/verification-review.md` | Local/inline review is the default; a final adversary fires only on dependent/merging multi-executor landings, never by executor count alone. |
+| issue-35#decision-5: requirements/plan/routing amend independently | `protocol/families-and-amendments.md` | Three independent version counters; only a plan-contract delta wakes the planner; a running dispatch finishes its atomic unit before a new route applies unless immediate replacement is explicitly requested. |
+| issue-35#decision-6: concurrent families, sticky focus | `protocol/families-and-amendments.md` | Durable family registry; unqualified commands target the current focus family; explicit global commands apply session-wide; ambiguous commands mutate nothing. |
+| issue-35#decision-7: structured packets, conditional compaction | `protocol/families-and-amendments.md`, §8.2 (this document) | Landing/checkpoint packets are durable truth; compaction is conditional on substantial implementation history, not mandatory for inline/small work. |
+| issue-93: approval-hook enforcement | `references/why-trust-not-enforcement.md`, §12.1 | **Void by issue-93's own amendment.** Not part of acceptance; do not reintroduce a mechanical enforcement requirement for either harness. |
 | Out of scope: unattended self-merge; human merges `main` | Section 9 | Loop stops at a ready PR. Working-branch merges only. `main` requires an explicit per-run statement from the user. |
 | Out of scope: unattended self-merge (redux) | SKILL.md permanent invariants | Reworded to agree with Section 9/9.1: no agent lifts the `main` boundary on its own initiative; only an explicit per-run user statement does. |
 | #24: every role is portable; input is a serialized artifact | Sections 2, 4 | Grilled intent and the pinned contract are files, not agent state, so a compacted or transferred role loses nothing. |

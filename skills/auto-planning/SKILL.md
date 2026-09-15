@@ -1,11 +1,11 @@
 ---
 name: auto-planning
-description: Internal Auto Office v3 planning spoke. Use when the auto-office orchestrator needs to resolve product decisions, classify playbook/blast radius/size, produce or refresh a serialized implementation plan, freeze observable outcomes, or revise a plan after an accepted PLAN DEFECT. Do not use as a separate lifecycle or to change user intent silently.
+description: Internal Auto Office v3 planning spoke. Use when the auto-office orchestrator needs to run interactive requirements discovery directly with the user, freeze the five execution fields, resolve product decisions, classify playbook/blast radius/size, produce or refresh a serialized implementation plan, or revise a plan after an accepted PLAN DEFECT. Do not use as a separate lifecycle or to change frozen requirements silently after freeze.
 ---
 
 # Auto Planning
 
-Receive the pinned run envelope and orchestrator-frozen intent. Own **how**; **what** stays exactly as frozen.
+Receive the pinned run envelope and the orchestrator's provisional intent. Own **what** up to freeze, then **how** (issue-35#decision-1, issue-77 §2): run `skills/auto-intake/SKILL.md`'s interview directly with the user, reshape goal/scope/done-criteria/blast-radius/named-actions/non-goals when repository evidence contradicts the provisional framing, then freeze the five fields.
 
 1. Reconcile repository/runtime evidence before planning.
 2. Propose playbook (`Change|Restructure|Investigate|Prototype|Visual`); orchestrator freezes it.

@@ -161,8 +161,8 @@ One coherent implementation work unit, normally an issue or equivalent scoped ch
 
 The lifecycle order is fixed. Gears fund or omit optional stages; they do not reorder the lifecycle.
 
-1. Resolve user intent and scope.
-2. Freeze the orchestrator contract.
+1. Capture provisional user intent and scope.
+2. Interactive planner discovery and requirements freeze (§6.2).
 3. Establish repository/runtime baseline.
 4. Classify task shape and risk.
 5. Resolve unresolved product decisions.
@@ -189,19 +189,19 @@ The lifecycle itself is not user-configurable.
 
 The orchestrator owns:
 
-- user intent;
-- scope;
+- provisional user intent and scope, captured at kickoff as a hypothesis for the planner, not a frozen contract (issue-35#decision-1);
 - explicit user choices;
-- the five frozen execution fields defined by the implementation packet contract;
 - gear;
 - playbook;
 - route approval;
 - all lifecycle gates;
 - dispatch coordination;
 - plan acceptance or rejection;
+- the family registry and sticky conversational focus across concurrent families (§6.6);
+- amendment classification for routing/requirements/plan-contract deltas (§6.6);
 - final escalation to the user.
 
-The orchestrator is the user's entry model. v3 may advise that another model/harness would be a better orchestrator, but it does not silently replace the selected entry model.
+The orchestrator does not run the requirements interview and does not freeze the five execution fields itself — see §6.2. The orchestrator is the user's entry model. v3 may advise that another model/harness would be a better orchestrator, but it does not silently replace the selected entry model.
 
 The orchestrator is still scored.
 
@@ -209,14 +209,18 @@ Every serialized plan declares the orchestrator's model assignment: canonical `m
 
 ### 6.2 Planner
 
-The planner owns **how** to implement the already-frozen intent.
+The planner owns **what**, up to freeze, as well as **how** (issue-35#decision-1, issue-77 §2 — this supersedes issue-47's rule that the planner never talks to the user and owns only implementation).
 
 The planner:
 
-- does not silently change product requirements;
-- does not talk directly to the user unless explicitly elevated by the orchestrator;
+- performs repository/runtime reconnaissance before interviewing;
+- interacts directly with the user — including through a Herdr pane when available — running the twelve-item interview (`skills/auto-intake/SKILL.md`) as one or two batched question rounds, or a structured-question tool where the harness has one;
+- may reshape goal, scope, done criteria, blast radius, named actions, non-goals, interfaces, and milestones when repository evidence shows the orchestrator's provisional framing was wrong; the provisional intent is a hypothesis, not an immutable contract;
+- freezes the five execution fields only at the end of this interactive discovery, never before it;
+- does not silently change frozen requirements after freeze;
 - may be inline or separately routed;
-- emits a serialized plan artifact;
+- self-reviews the plan and runs its own plan adversary before returning it;
+- emits a serialized plan artifact carrying the frozen requirements;
 - must revise the plan when an accepted `PLAN DEFECT` invalidates an assumption.
 
 The serialized plan contains a `model_assignments` block for both orchestrator and planner. Each entry records canonical `model_id`, exact invocation model identifier when available, effort, harness/version, selection rationale, and whether the planner is inline or separately routed. Sharing one session never makes either declaration implicit.
@@ -243,11 +247,21 @@ Executors and workers are selected by task shape plus current routing evidence, 
 
 Builder roles are subject to hard capability floors.
 
+The executor owns disposition of its own review findings (issue-35#decision-3, issue-77 §4): it may accept a finding and fix it, or reject it with stronger evidence. It consults the orchestrator only exceptionally, when it and its reviewer cannot responsibly resolve a disagreement; this is not a mandatory approval chain. Ordinarily the orchestrator manages requirements, decision-passing, and routing rather than technical disagreements. If evidence is genuinely conflicting, the executor emits a structured `TRUE_CONFLICT`/`USER_DECISION_REQUIRED` state and the orchestrator surfaces it to the user rather than acting as a higher-tier technical judge.
+
 ### 6.5 Browser verifier
 
 The browser verifier independently validates the user-observable acceptance path.
 
 It may be a subagent or separate process according to config and gear, but browser verification itself is required whenever the acceptance criteria materially depend on rendered or interactive behavior and a reachable runtime can reasonably be produced.
+
+### 6.6 Families, amendments, and compaction
+
+One orchestrator may supervise multiple independent families concurrently through a durable family registry (`schemas/family-registry.schema.json`); families run independently by default with sticky conversational focus — an unqualified command targets the current focus family, naming another switches focus, an explicit global command applies to all, and a genuinely ambiguous command mutates nothing (issue-35#decision-6, issue-77).
+
+`requirements_version`, `plan_version`, and `routing_version` amend independently (issue-35#decision-5): a routing-only delta never wakes the planner; a requirements delta that still fits the plan versions requirements and sends a delta packet without waking the planner; a plan-contract delta pauses only affected scopes and wakes the planner for interactive delta-planning. A running dispatch finishes its current atomic unit before a new route or plan applies unless the user explicitly requests immediate replacement.
+
+Long-lived roles may compact at semantic phase boundaries after first serializing the state the next phase needs — most commonly an executor checkpointing before an adversarial reviewer is launched (issue-77 addendum); this is conditional, not mandatory for inline review or small tasks. Full detail and the routing-precedence order live in `protocol/families-and-amendments.md`.
 
 ---
 
@@ -271,7 +285,9 @@ policy_hash: <sha256>
 catalog_snapshot_hash: <sha256>
 adapter_snapshot_hash: <sha256>
 effective_config_hash: <sha256>
+requirements_version: <integer>  # optional: not yet decided at kickoff
 plan_version: <integer>
+routing_version: <integer>  # optional: not yet decided at kickoff
 packet_version: <integer>
 created_at: <iso8601>
 ```
@@ -282,8 +298,8 @@ Each routed envelope also carries the router's `selection_disclosure`: role, can
 
 Examples:
 
-- orchestrator: grilled intent + frozen fields;
-- planner: plan artifact;
+- orchestrator: provisional intent;
+- planner: frozen fields (from its own interview with the user) + plan artifact;
 - executor: task scope, blast radius, allowed mutations, protected paths, validation commands, self-review requirements;
 - reviewer: round number, prior findings, disposition state;
 - verifier: acceptance criteria and exact runtime checks.
@@ -564,20 +580,17 @@ A user may explicitly override this restriction.
 
 #### proven
 
-Has passed deterministic conformance and the configured runtime evidence bar.
+Reached only through an explicit recorded trust act; never computed from a dispatch count or query (amendment v5, made executable by v6).
 
 Eligible for normal routing subject to role floors and quota.
 
-### 12.3 Proven threshold
+### 12.3 Trust only falls automatically; it never rises without a recorded act
 
-Initial default:
+A query may lower adapter trust and may never raise it. Any unresolved adapter-attributed critical failure — an evidence-backed `recurrence_failure`/`material_post_merge_defect` label, or an `abandoned` dispatch carrying an accepted-material critical/high finding — quarantines the triple automatically from recorded dispatch/outcome-label evidence, with no human action, and that failure evidence latches: no later label of any kind, on the same dispatch, retracts it.
 
-- at least 5 successful dispatches;
-- at least 2 task shapes;
-- no unresolved adapter-attributed critical failure;
-- required evidence capabilities independently validated.
+The floor absent any explicit trust act is `valid-unverified`, never `proven`, regardless of accumulated successful dispatches. The only way trust ever rises — `quarantined` → `valid-unverified`, or anything → `proven` — is an explicit `adapter_trust_acts` record carrying its own `actor_id` and a substantive reason; it is never inferred, backfilled, or computed from `outcome_labels`, `validations`, or any count over them.
 
-This threshold is policy data and may evolve only through replayed policy changes.
+`adapter_trust.proven_min_successful_dispatches` (5) and `proven_min_task_shapes` (2) remain in `config/config.default.yaml` as advisory reference numbers an actor may consult before recording a `proven` act. No query binds them, and that nothing reads them automatically is correct, not an unimplemented gap. `tests/test_trust_conformance.py` is the normative artifact for every property in this section; no SQL in this document is normative.
 
 ---
 
@@ -631,6 +644,14 @@ The router evaluates in this order:
 7. preferred/advisory quality anchor;
 8. cost;
 9. local tie-break evidence.
+
+**Where each filter's input comes from (amendment v3, narrowed by v5/v6).** Stages 2, 4, and 9 consume values `route()` derives itself, never a caller-supplied `adapter_state`, `absolute_floor_pass`, or `local_reward` — a request asserting any of those three is routed exactly as if it had asserted nothing:
+
+- Stage 2 (adapter trust): derived downward-only from recorded dispatch/outcome-label evidence (§12.3). Upward movement requires an explicit recorded trust act.
+- Stage 4 (absolute role floor): evaluated against the candidate's pinned catalog row against the declared `roles.<role>.floor`; an unknown required catalog field fails closed and names the field.
+- Stage 9 (local tie-break evidence): derived from labeled outcome rows for the exact routable triple; an unmeasured reward is `None`, never a measured zero.
+
+An explicit override of stage 2, 4, or 7 is honoured only with a valid, unexpired `RecordedOverride` carrying user attribution, scope, and expiry, surfaced in `selection_disclosure`; an override asserted without one is a hard stop. See `docs/v3-runtime-contracts.md` §7 for the full contract and `tests/test_trust_conformance.py` for the normative trust properties.
 
 ---
 
@@ -990,6 +1011,12 @@ Reviewer rounds should resume the same reviewer session when possible so the rev
 A fresh reviewer session is preferred over the producer session.
 
 Review prompts should ask pointed blast-radius and bypass questions rather than generic "review correctness" prompts.
+
+### 23.1 Review tiers and disposition ownership (issue-35#decision-4, issue-77 §4-5,7)
+
+Review funding is local first: each executor's own implementation and review loop (`review_mode: independent_adversary`) is the default for funded independent review; inline self-review/validation (`review_mode: labeled-inline`, never represented as independent) covers cheap/reversible/low-risk work. A final `integration_adversary` is triggered only when two or more executors produce dependent or merging landings that must compose across a shared interface — never by executor count alone; a single-executor family, or independent parallel changes with no cross-scope dependency, receives no mandatory second review, and its scope is the integrated diff rather than a re-review of each executor's code.
+
+`disposition_owner` (`executor | planner | orchestrator`) records who is authoritative for a finding's next action. Ordinarily the executor decides: accept and fix, or reject with stronger evidence. It consults the orchestrator only exceptionally when it cannot responsibly resolve a disagreement with its reviewer — this is not a routine approval chain. A local code defect returns to its responsible executor; a plan/spec defect wakes the planner; an unresolved cross-executor conflict goes to the orchestrator for integration coordination; a genuinely unresolved evidence conflict or user-owned decision escalates to the user.
 
 ---
 

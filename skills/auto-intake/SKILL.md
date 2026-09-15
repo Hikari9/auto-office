@@ -1,11 +1,11 @@
 ---
 name: auto-intake
-description: Internal Auto Office v3 intake spoke. Use when the orchestrator must run the grilled-intent interview before freezing intent — covering the twelve-item floor in one or two batched question rounds and deriving the five frozen fields from the answers. The planner never talks to the user; this spoke is orchestrator-owned. Do not use to ask about gear, which is declared, not interviewed.
+description: Internal Auto Office v3 intake spoke. Use when the planner runs the interactive requirements interview before freezing intent — covering the twelve-item floor in one or two batched question rounds (or a structured-question tool, per harness) and deriving the five frozen fields from the answers. This spoke is planner-owned and requires talking to the user directly; it supersedes the older orchestrator-owned, planner-silent interview (issue-35#decision-1, overturning issue-47). Do not use to ask about gear, which is declared, not interviewed.
 ---
 
 # Auto Intake
 
-The orchestrator conducts this interview directly; the planner is not present (#47).
+The planner conducts this interview directly with the user (issue-35#decision-1, issue-77 §2), after repository reconnaissance and using the orchestrator's provisional intent only as a starting hypothesis it may revise. Use a structured question tool when the harness has one; batched plain text otherwise — either form satisfies intent coverage as long as all twelve items are covered before freezing.
 
 ## The twelve-item floor
 

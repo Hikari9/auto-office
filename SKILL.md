@@ -32,17 +32,15 @@ Echo the returned `kickoff` block to the user, then use its `state_dir` for ever
 
 `start` resolves effective config (`prompt/CLI > repo > user > plugin default`, emitting `effective_config_hash`; check `~/.config/auto-office/config.yaml` directly), pins the catalog/adapter snapshot hashes, policy hash, and base SHA, runs the gear fit test when `--gear` is omitted, and creates durable run state with `phase = "intake"`. Why: `references/why-start.md`.
 
-Before freezing intent, run `check-spoke --state-dir <state_dir> --spoke auto-intake`; if it exits nonzero, load `skills/auto-intake/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-intake` before interviewing the user. The orchestrator owns this interview; the planner never talks to the user.
-
-Still manual, after `start` returns: freeze the five orchestrator-owned intent fields — `goal`, `done_criteria`, `blast_radius`, `named_actions`, `non_goals` — then run `check-spoke --state-dir <state_dir> --spoke auto-planning`; if it exits nonzero, load `skills/auto-planning/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-planning` before any planning work. Why: `references/why-start.md`.
+Still manual, after `start` returns: capture only provisional intent from the user's request — do not interview or freeze anything yet (issue-35#decision-1) — then run `check-spoke --state-dir <state_dir> --spoke auto-planning`; if it exits nonzero, load `skills/auto-planning/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-planning` before any planning work. The planner interacts directly with the user, runs the twelve-item interview from `skills/auto-intake/SKILL.md` (`check-spoke`/`mark-spoke --spoke auto-intake`), and freezes the five execution fields — `goal`, `done_criteria`, `blast_radius`, `named_actions`, `non_goals` — at the end of that discovery, not before it. Why: `references/why-start.md`.
 
 After the plan is approved, run `check-spoke --state-dir <state_dir> --spoke auto-loop`; if it exits nonzero, load `skills/auto-loop/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-loop` before driving waves, integration, and the autonomy ceiling.
 
-For takeover/resume, load `protocol/state-and-takeover.md` before any mutable action.
+For takeover/resume, load `protocol/state-and-takeover.md` before any mutable action. For concurrent families, sticky focus, or an amendment mid-run, load `protocol/families-and-amendments.md`.
 
 ## Fixed lifecycle
 
-Run this order: 1. resolve intent and scope; 2. freeze orchestrator contract; 3. establish baseline; 4. classify task shape and risk; 5. resolve product decisions; 6. produce/refresh plan; 7. review plan when gear/risk requires it; 8. generate machine-checkable execution packets; 9. route and dispatch executors/workers; 10. self-verify changed work; 11. integrate — commit and merge dispatch branches in wave order, validate the merged result; 12. run independent review when funded/required; 13. run browser/runtime verification for user-facing acceptance paths when reachable; 14. reconcile findings and amendments; 15. run closeout checks; 16. record telemetry and durable state; 17. perform lazy maintenance on eligible rows; 18. optionally create isolated improvement proposals.
+Run this order: 1. capture provisional intent and scope; 2. interactive planner discovery and requirements freeze; 3. establish baseline; 4. classify task shape and risk; 5. resolve product decisions; 6. produce/refresh plan; 7. review plan when gear/risk requires it; 8. generate machine-checkable execution packets; 9. route and dispatch executors/workers; 10. self-verify changed work; 11. integrate — commit and merge dispatch branches in wave order, validate the merged result; 12. run independent review when funded/required; 13. run browser/runtime verification for user-facing acceptance paths when reachable; 14. reconcile findings and amendments; 15. run closeout checks; 16. record telemetry and durable state; 17. perform lazy maintenance on eligible rows; 18. optionally create isolated improvement proposals.
 
 ## Role routing
 
@@ -50,7 +48,7 @@ Before every routed role, run `check-spoke --spoke auto-routing`; if not loaded,
 
 `harness@version × model_id × effort`
 
-Use the mandatory filter order: 1. explicit hard exclusions; 2. adapter validity/trust; 3. required capabilities; 4. absolute role floor; 5. task-shape requirements; 6. quota safety; 7. preferred/advisory quality anchor; 8. cost; 9. local tie-break evidence.
+Use the mandatory filter order: 1. explicit hard exclusions; 2. adapter validity/trust; 3. required capabilities; 4. absolute role floor; 5. task-shape requirements; 6. quota safety; 7. preferred/advisory quality anchor; 8. cost; 9. local tie-break evidence. Adapter trust, the absolute floor, and tie-break evidence are derived from recorded evidence, never caller-supplied; trust only ever falls automatically, and only a recorded, attributed act ever raises it or overrides a derived gate. Why: `protocol/routing.md`.
 
 A harness rejecting the routed model/effort identity is a routing defect, not a retry: record it with `office_runtime.py route-defect`, re-dispatch corrected, and hand the amendment to an `auto-self-improve` subagent. `auto-closeout` gates on `check-route-defects`, so an unamended slug blocks completion.
 
@@ -107,6 +105,7 @@ Use `python3 scripts/check_ecosystem.py` before packaging or proposing plugin ch
 - `protocol/roles-and-authority.md` — authority, no-self-approval, frozen intent.
 - `protocol/state-and-takeover.md` — durable state, leases, resume/takeover.
 - `protocol/routing.md` — route identity, filters, quota, cost, exploration.
+- `protocol/families-and-amendments.md` — family registry, sticky focus, amendment ownership, conditional compaction.
 - `protocol/adapters.md` — adapter contract and trust states.
 - `protocol/verification-review.md` — verification floor, findings, defect exits.
 - `protocol/telemetry-learning.md` — recorder, attribution, outcomes, rewards, maturity, replay.
