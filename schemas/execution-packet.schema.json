@@ -158,6 +158,13 @@
     },
     "escalation": {
       "type": "string"
+    },
+    "replaced_dispatch_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
     }
   },
   "required": [

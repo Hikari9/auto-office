@@ -64,62 +64,221 @@ All schemas are pinned in JSON Schema Draft 2020-12 under `schemas/` and validat
 Supersedes the legacy 10-field packet unconditionally: a packet carrying only the legacy fields
 no longer validates. Dispatches must carry full session and version provenance — including
 `session_id` itself, which Finding F13 identified as declared but not required in round 1 (a
-packet could omit it and still validate clean, defeating "full session provenance"). (The excerpt
-below omits the `$schema` draft-identifier line for privacy-lint hygiene in this document; the
-committed schema file at `schemas/execution-packet.schema.json` carries it.)
+packet could omit it and still validate clean, defeating "full session provenance").
+
+**Finding R7 correction:** an earlier revision of this section claimed the excerpt below differed
+from the committed schema only by the omitted `$schema` line, but array item constraints,
+`selection_disclosure`'s optional fields, and `plan_path`/`plan_sha`'s `minLength` had drifted out
+of sync with `schemas/execution-packet.schema.json`. The block below is regenerated directly from
+the committed schema file (`json.dumps(schema_minus_dollar_schema, indent=2)`), so the claim is now
+mechanical rather than asserted: `TestSchemas.test_packet_doc_excerpt_matches_committed_schema`
+re-parses this block, adds back `$schema`, and asserts dict equality against the loaded schema
+file on every test run, so the two cannot drift again without the test catching it. (The excerpt
+still omits the `$schema` draft-identifier line itself for privacy-lint hygiene in this document;
+the committed schema file carries it.)
+
+**Finding R4 addition:** `replaced_dispatch_id` (optional, `string | null`) is required — non-null
+— whenever this packet is issued as a replacement per §3.1 step 4 ("A replacement dispatch packet
+is generated with incremented `routing_version`, citing `replaced_dispatch_id`"); it is omitted or
+`null` for an initial (non-replacement) dispatch. It is schema-optional rather than
+conditionally-required because the packet carries no separate boolean discriminator field for
+"this is a replacement" — the presence of a non-null `replaced_dispatch_id` *is* that signal, so a
+schema-level `if/then` would be circular. `office_packets.py` is the enforcement point: T2's
+`create_execution_packet` must reject a call that claims `routing_version` was incremented due to
+replacement (per the amendment that triggered it) without also passing `replaced_dispatch_id`.
 
 ```json
 {
   "title": "Auto Office v3 execution packet",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "packet_id", "run_id", "session_id", "family_id", "task_id",
-    "requirements_version", "plan_version", "routing_version", "packet_version",
-    "effective_config_hash", "base_sha", "selection_disclosure",
-    "task_scope", "observable_outcome", "blast_radius",
-    "allowed_mutations", "protected_paths", "validation_commands",
-    "known_bad_behavior_to_exclude", "self_review", "rollback_or_restore_notes"
-  ],
   "properties": {
-    "packet_id": { "type": "string", "minLength": 1 },
-    "run_id": { "type": "string", "minLength": 1 },
-    "session_id": { "type": "string", "minLength": 1 },
-    "family_id": { "type": "string", "minLength": 1 },
-    "task_id": { "type": "string", "minLength": 1 },
-    "requirements_version": { "type": "integer", "minimum": 1 },
-    "plan_version": { "type": "integer", "minimum": 1 },
-    "routing_version": { "type": "integer", "minimum": 1 },
-    "packet_version": { "type": "integer", "minimum": 1 },
-    "plan_path": { "type": "string" },
-    "plan_sha": { "type": "string" },
-    "effective_config_hash": { "type": "string", "minLength": 8 },
-    "base_sha": { "type": "string", "minLength": 4 },
+    "packet_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "family_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requirements_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "plan_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "routing_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "packet_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "plan_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "plan_sha": {
+      "type": "string",
+      "minLength": 8
+    },
+    "effective_config_hash": {
+      "type": "string",
+      "minLength": 8
+    },
+    "base_sha": {
+      "type": "string",
+      "minLength": 4
+    },
     "selection_disclosure": {
       "type": "object",
-      "required": ["role", "triple", "invocation_model_id", "model_id", "effort", "harness", "harness_version", "reason"],
+      "required": [
+        "role",
+        "triple",
+        "invocation_model_id",
+        "model_id",
+        "effort",
+        "harness",
+        "harness_version",
+        "reason"
+      ],
       "properties": {
-        "role": { "type": "string" },
-        "triple": { "type": "string" },
-        "invocation_model_id": { "type": "string" },
-        "model_id": { "type": "string" },
-        "effort": { "type": "string" },
-        "harness": { "type": "string" },
-        "harness_version": { "type": "string" },
-        "reason": { "type": "string" }
-      }
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "triple": {
+          "type": "string",
+          "minLength": 1
+        },
+        "invocation_model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effort": {
+          "type": "string",
+          "minLength": 1
+        },
+        "harness": {
+          "type": "string",
+          "minLength": 1
+        },
+        "harness_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "invocation_model_id_source": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision_hash": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
     },
-    "task_scope": { "type": ["string", "array"] },
-    "observable_outcome": { "type": "string", "minLength": 1 },
-    "blast_radius": { "type": ["string", "object", "array"] },
-    "allowed_mutations": { "type": "array", "items": { "type": "string" } },
-    "protected_paths": { "type": "array", "items": { "type": "string" } },
-    "validation_commands": { "type": "array", "items": { "type": "string" } },
-    "known_bad_behavior_to_exclude": { "type": ["string", "array"] },
-    "self_review": { "type": ["string", "object", "array"] },
-    "rollback_or_restore_notes": { "type": ["string", "object", "array"] },
-    "escalation": { "type": "string" }
-  }
+    "task_scope": {
+      "type": [
+        "string",
+        "array"
+      ]
+    },
+    "observable_outcome": {
+      "type": "string",
+      "minLength": 1
+    },
+    "blast_radius": {
+      "type": [
+        "string",
+        "object",
+        "array"
+      ]
+    },
+    "allowed_mutations": {
+      "type": "array"
+    },
+    "protected_paths": {
+      "type": "array"
+    },
+    "validation_commands": {
+      "type": "array"
+    },
+    "known_bad_behavior_to_exclude": {
+      "type": [
+        "string",
+        "array"
+      ]
+    },
+    "self_review": {
+      "type": [
+        "string",
+        "object",
+        "array"
+      ]
+    },
+    "rollback_or_restore_notes": {
+      "type": [
+        "string",
+        "object",
+        "array"
+      ]
+    },
+    "escalation": {
+      "type": "string"
+    },
+    "replaced_dispatch_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    }
+  },
+  "required": [
+    "packet_id",
+    "run_id",
+    "session_id",
+    "family_id",
+    "task_id",
+    "requirements_version",
+    "plan_version",
+    "routing_version",
+    "packet_version",
+    "effective_config_hash",
+    "base_sha",
+    "selection_disclosure",
+    "task_scope",
+    "observable_outcome",
+    "blast_radius",
+    "allowed_mutations",
+    "protected_paths",
+    "validation_commands",
+    "known_bad_behavior_to_exclude",
+    "self_review",
+    "rollback_or_restore_notes"
+  ]
 }
 ```
 
@@ -130,7 +289,15 @@ Maintains durable state for concurrent families managed by one orchestrator:
 - `session_id`: ID of the supervising session.
 - `current_focus_family_id`: The currently focused family for unqualified conversational interaction.
 - `families`: Dictionary of family records keyed by `family_id`, containing:
-  - `repo`, `issue`, `phase` (`intake | planning | execution | review | integration | closed`)
+  - `repo`, `issue`, `phase` (`intake | planned | approved | executing | reviewed | closed` —
+    **Finding R6 correction:** an earlier revision used a distinct, invented six-value vocabulary
+    (`intake | planning | execution | review | integration | closed`) that diverged from the
+    runtime's own authoritative lifecycle order. The runtime is authoritative for lifecycle phase;
+    this enum is now exactly `PHASE_ORDER` from `scripts/office_runtime.py`, in the same order,
+    with no schema-side renaming or reinterpretation.
+    `TestSchemas.test_family_phase_enum_matches_runtime_phase_order` reads `PHASE_ORDER` from the
+    real parent-repo `scripts/office_runtime.py` (not a copy) and asserts this schema's enum
+    equals it exactly, so the two cannot diverge again silently.)
   - `requirements_version`, `plan_version`, `routing_version`
   - `ownership` (`holder_id`, `role`, `triple`)
   - `dependencies`, `active_dispatches`
@@ -229,6 +396,40 @@ Tracks orchestrator event consumption:
 - `cursor_id`, `session_id`, `family_id`, `dispatch_id`
 - `last_acknowledged_sequence`, `last_acknowledged_event_id`, `acknowledgement_hash`, `acknowledged_at`
 
+### 2.11 Run Envelope (`schemas/run-envelope.schema.json`)
+
+Per-invocation record binding a dispatch to the exact policy, catalog, and adapter state it ran
+under; written alongside `packet.json` at spawn time (`.office/dispatches/<dispatch_id>/`,
+implicit in the layout in §1.3):
+
+- `run_id`, `family_id`, `dispatch_id`, `role`, `holder_id`, `triple`
+- `mode`, `playbook`, `base_sha`
+- `policy_hash`, `catalog_snapshot_hash`, `adapter_snapshot_hash`, `effective_config_hash`
+- `requirements_version`, `plan_version`, `routing_version`, `packet_version`
+- `selection_disclosure` (optional; mirrors the packet's own `selection_disclosure` object)
+- `session_id` (optional), `created_at`
+
+**Finding R4 — partially rejected on evidence:** `requirements_version` and `routing_version` are
+declared as properties but absent from `required`, unlike every other handoff artifact that
+carries the version identity triple. Making them required, as R4 asks, is the wrong fix here: the
+real `office_runtime.py::_new_run_envelope` (called from `cmd_start`) writes `envelope.json`
+exactly once, at run kickoff, before planning or routing has run — `requirements_version` and
+`routing_version` do not exist yet at that point, only `plan_version` (hardcoded `1`) and
+`packet_version` (hardcoded `1`) do, and nothing ever rewrites `envelope.json` afterward to add
+them once planning/routing establish real values. Requiring them unconditionally makes every
+`start` call schema-invalid and was verified to break 25 previously-passing tests
+(`python3 -m pytest tests/test_runtime.py tests/test_integration.py tests/test_dogfood.py -q`,
+e.g. `StartCommandTests::test_envelope_validates_against_schema`,
+`TestLifecycleIntegration::test_full_lifecycle`) — this is scripts/ behavior, outside this task's
+write scope, and it is exercised, working code, not a bug to route around. `requirements_version`
+and `routing_version` remain optional here by design: the run envelope pins the policy/catalog/
+adapter snapshot a run started under, not the requirements/routing generation, which is why
+`plan_version`/`packet_version` (fixed at kickoff) are required and `requirements_version`/
+`routing_version` (not yet decided at kickoff) are not. If a later task wants the envelope to also
+record requirements/routing generation, that requires a runtime change (rewriting `envelope.json`
+once those versions are known) that is out of scope for a schema-only edit and belongs to whichever
+task owns `scripts/office_runtime.py`.
+
 ---
 
 ## 3. Linkage and Traceability Architecture
@@ -249,8 +450,43 @@ When an amendment or operator command replaces a running dispatch:
 1. Orchestrator emits an amendment (`kind: "routing"` or `"plan_contract"`).
 2. If replacement is immediate, orchestrator records a completion event with `observed_status: "disappeared"` and `terminal_classification: "cancelled"`.
 3. The running pane/process is terminated via signal or Herdr kill.
-4. A replacement dispatch packet is generated with incremented `routing_version`, citing `replaced_dispatch_id`.
+4. A replacement dispatch packet is generated with incremented `routing_version`, citing
+   `replaced_dispatch_id` (the superseded dispatch's `dispatch_id`) — required non-null on any
+   packet issued through this path; see the Finding R4 note in §2.1.
 5. Running workers not explicitly marked for immediate replacement complete their current atomic round before the new route is applied.
+
+### 3.2 Review Finding Status vs. Landing Disposition (Finding R6)
+
+`review-result.schema.json`'s `findings[].status` (`accepted-material | accepted-minor |
+rejected-on-evidence | deferred`) and `landing.schema.json`'s `review.dispositions[].disposition`
+(`accepted | refuted | deferred | none`) are two vocabularies for the same RR→LP edge in the §3
+diagram and had no pinned mapping, leaving T4 to invent one at integration time. The two are not
+peers: `status` is the reviewer's authoritative assessment of a finding as of a given review round;
+`disposition` is the executor's response to that assessment, recorded on the landing the executor
+submits in reply.
+
+| Review round assigns `status`... | ...executor's next landing must record `disposition` | Meaning |
+|---|---|---|
+| `accepted-material` | `accepted` | Executor agrees the defect is real and material; fixes it. |
+| `accepted-minor` | `accepted` | Executor agrees the defect is real but minor; fixes or explicitly defers it (see below). |
+| `rejected-on-evidence` | `none` | Reviewer (or orchestrator adjudicating on the executor's behalf) already determined the finding does not hold; no executor action is recorded against it. |
+| `deferred` | `deferred` | Reviewer could not resolve the finding without a plan or requirements decision; executor takes no unilateral action and the finding rides to the next round unchanged. |
+| *(any accepted-* status, contested)* | `refuted` | Executor disagrees with an `accepted-material`/`accepted-minor` status and submits counter-evidence instead of a fix. |
+
+Transition rules:
+- A `disposition: "refuted"` landing does not itself change the finding's `status`. The *next*
+  review round must re-adjudicate that finding_id and record exactly one of `accepted-material`,
+  `accepted-minor` (refutation rejected, defect stands — the executor must then land a
+  same-finding `accepted` disposition), or `rejected-on-evidence` (refutation accepted, defect
+  struck). A finding cannot stay `accepted-*` across two consecutive rounds while its most recent
+  landing recorded `refuted` for it — that combination means the review loop stalled and must be
+  escalated as a plan defect, not silently re-reviewed forever.
+- `disposition: "none"` is valid only in response to `rejected-on-evidence` or to a finding_id not
+  present in the round's `review-result` at all. Recording `none` against a live
+  `accepted-material`/`accepted-minor` finding is itself a landing defect (a disguised, unrecorded
+  refutation) and `record-landing` should reject it if `--strict` provenance checking is enabled.
+- `deferred` is non-terminal on both sides: a `status: "deferred"` finding must resolve to one of
+  the other three statuses before the family may transition its `phase` (§2.2) to `closed`.
 
 ---
 
@@ -263,9 +499,11 @@ The following signatures must be implemented in the respective modules:
 ```python
 def create_execution_packet(
     run_id: str,
+    session_id: str,
     family_id: str,
     task_id: str,
     versions: tuple[int, int, int],  # (req, plan, route)
+    packet_version: int,
     task_scope: str | list[str],
     observable_outcome: str,
     blast_radius: dict | str,
@@ -275,9 +513,17 @@ def create_execution_packet(
     selection_disclosure: dict,
     effective_config_hash: str,
     base_sha: str,
+    replaced_dispatch_id: str | None = None,
     **kwargs
 ) -> dict:
-    """Constructs and validates a v3 execution packet against execution-packet.schema.json."""
+    """Constructs and validates a v3 execution packet against execution-packet.schema.json.
+
+    Finding R4 correction: `session_id` and `packet_version` were previously reachable only via
+    `**kwargs`, so a caller could omit them and get a TypeError from schema validation deep inside
+    the function instead of a missing-argument error at the call site. Both are named parameters
+    now, matching their presence in `execution-packet.schema.json`'s `required` list. `**kwargs`
+    remains for truly optional fields (`plan_path`, `plan_sha`, `escalation`).
+    """
     ...
 
 def validate_packet(packet_data: dict, schema_name: str = "execution-packet.schema.json") -> list[str]:
@@ -316,26 +562,72 @@ def apply_amendment(
 
 ### 4.3 `scripts/office_monitor.py` (Owned by T3)
 
+**Finding R5 correction:** this section previously omitted `event_id`, `evidence_timestamp`, and
+`evidence_hash` from `record_completion_event`, and omitted `family_id` from both cursor functions
+and `event_id` from `acknowledge_events` — even though `completion-event.schema.json` requires all
+three of the first group and `replay-cursor.schema.json` keys its cursor on `(session_id,
+family_id, dispatch_id)` and requires `last_acknowledged_event_id`. A T3 implementation following
+only the earlier signatures could not construct a schema-valid event or a correctly-keyed cursor.
+All four are now named parameters, matching the CLI flag forms already pinned in §5.5.
+
 ```python
 def record_completion_event(
+    state_dir: Path,
+    event_id: str,
+    session_id: str,
+    family_id: str,
+    dispatch_id: str,
+    sequence: int,
+    observed_status: str,
+    terminal_classification: str,
+    source: str,
+    evidence_timestamp: str,
+    evidence_hash: str,
+    evidence_payload: dict | None = None
+) -> dict:
+    """Appends a sequence-numbered event to events/completions.jsonl with deduplication.
+
+    `event_id` is caller-supplied but must equal the deterministic derivation
+    `"evt-" + sha256(f"{dispatch_id}:{sequence}")[:16]` (Finding R5); a caller-supplied value that
+    does not match is a schema/argument error (CLI exit 1), not silently accepted. Two calls for
+    the same `(dispatch_id, sequence)` therefore always compute the same `event_id`, which is what
+    makes "with deduplication" concrete: a second call for an already-recorded `(dispatch_id,
+    sequence)` is a no-op that returns the existing row rather than appending a duplicate.
+    Recording a *different* `sequence` for the same `dispatch_id` is a new event, never a mutation
+    of a prior one — `completions.jsonl` is append-only.
+    """
+    ...
+
+def get_event_cursor(state_dir: Path, session_id: str, family_id: str, dispatch_id: str) -> int:
+    """Returns last acknowledged sequence number for (session_id, family_id, dispatch_id).
+
+    The cursor is keyed by all three (Finding R5) because `cursor_id` in §5.5 is
+    `"cur-" + sha256(f"{session_id}:{family_id}:{dispatch_id}")[:12]` — a lookup missing
+    `family_id` cannot reconstruct the same `cursor_id` and would silently read the wrong cursor
+    (or none) whenever a session runs more than one family, which is the normal case.
+    """
+    ...
+
+def acknowledge_events(
     state_dir: Path,
     session_id: str,
     family_id: str,
     dispatch_id: str,
-    observed_status: str,
-    terminal_classification: str,
-    source: str,
-    evidence_payload: dict | None = None
+    sequence: int,
+    event_id: str
 ) -> dict:
-    """Appends a sequence-numbered event to events/completions.jsonl with deduplication."""
-    ...
+    """Advances the replay cursor for (session_id, family_id, dispatch_id) up to sequence.
 
-def get_event_cursor(state_dir: Path, session_id: str, dispatch_id: str) -> int:
-    """Returns last acknowledged sequence number for dispatch."""
-    ...
-
-def acknowledge_events(state_dir: Path, session_id: str, dispatch_id: str, sequence: int) -> None:
-    """Advances acknowledgement cursor up to sequence."""
+    `event_id` is required (Finding R5) because §5.5's `ack-event` contract validates it against
+    the stored event at `sequence` and rejects a mismatch as an argument error rather than silently
+    acking the wrong event on a sequence collision; this function is that validation's only
+    implementation point, so it must receive `event_id` to perform the check. Duplicate
+    (`sequence` <= current `last_acknowledged_sequence`) and out-of-order (`sequence` > current + 1)
+    handling, and the exact `cursor_id`/`acknowledgement_hash` generation formulas, are pinned once
+    in §5.5's `ack-event` and not repeated here to avoid the two drifting apart; this function
+    implements that contract exactly, including its return shape (`status`,
+    `last_acknowledged_sequence`, `last_acknowledged_event_id`, `acknowledgement_hash`).
+    """
     ...
 ```
 
@@ -431,6 +723,10 @@ These exact CLI commands will be implemented by T2 in `scripts/office_runtime.py
   previously-documented flags cannot pass schema validation, forcing T3 to invent undocumented
   flags to produce a valid event. All three identity flags are now listed above and are mandatory
   in the flag form exactly as they are in `--file` form.
+  **Finding R5 addition:** `--event-id` must equal `"evt-" + sha256(f"{dispatch_id}:{sequence}")[:16]`
+  (see §4.3); a caller-supplied value that does not match this derivation is an argument error
+  (exit `1`), so `--event-id` is a required, checked echo of a deterministic value rather than an
+  independent identifier the caller is free to choose.
 - **Output (stdout):** `{"status": "recorded", "event_id": "...", "sequence": <int>}`
 - **Exit Codes:** `0`: Success; `1`: Argument error; `2`: Schema error; `3`: Sequence out of order.
 
@@ -1195,5 +1491,3 @@ def cmd_route(args):
         return 1
     return 0
 ```
-
-

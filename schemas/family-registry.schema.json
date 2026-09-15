@@ -58,10 +58,10 @@
           "phase": {
             "enum": [
               "intake",
-              "planning",
-              "execution",
-              "review",
-              "integration",
+              "planned",
+              "approved",
+              "executing",
+              "reviewed",
               "closed"
             ]
           },

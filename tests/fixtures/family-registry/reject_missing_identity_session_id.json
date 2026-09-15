@@ -6,7 +6,7 @@
       "family_id": "fam-core",
       "repo": "acme-corp/office-skills-example",
       "issue": 35,
-      "phase": "execution",
+      "phase": "executing",
       "requirements_version": 1,
       "plan_version": 2,
       "routing_version": 2,

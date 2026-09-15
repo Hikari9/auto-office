@@ -121,6 +121,157 @@ class TestSchemas(unittest.TestCase):
         self.assertIn('superseded_by', accept)
         self.assertIn('last_seen', accept)
 
+    def test_packet_doc_excerpt_matches_committed_schema(self):
+        # Finding R7: the doc excerpt in Sec 2.1 previously claimed to differ from the
+        # committed schema only by the omitted $schema line, but item constraints,
+        # selection_disclosure's optional fields, and minLengths had drifted. Assert
+        # byte-for-structure equality (modulo the omitted $schema key) so the two cannot
+        # silently diverge again.
+        text = (ROOT / 'docs/v3-runtime-contracts.md').read_text()
+        m = re.search(r'### 2\.1 Dispatch Packet.*?```json\n(.*?)\n```', text, re.S)
+        self.assertTrue(m, 'execution packet doc excerpt not found')
+        doc_schema = json.loads(m.group(1))
+        real_schema = json.loads((ROOT / 'schemas/execution-packet.schema.json').read_text())
+        doc_schema['$schema'] = real_schema['$schema']
+        self.assertEqual(doc_schema, real_schema)
+
+    def test_execution_packet_replaced_dispatch_id(self):
+        # Finding R4: replaced_dispatch_id is now an explicit optional field so a
+        # replacement packet (per Sec 3.1 step 4) can actually express citing the
+        # dispatch it supersedes; empty string still fails closed like every other
+        # identity field in this schema.
+        schema = json.loads((ROOT / 'schemas/execution-packet.schema.json').read_text())
+        validator = Draft202012Validator(schema)
+        self.assertNotIn('replaced_dispatch_id', schema['required'])
+
+        accept = json.loads((FIXTURES_DIR / 'execution-packet/accept_replacement_packet.json').read_text())
+        self.assertEqual(list(validator.iter_errors(accept)), [])
+
+        reject = json.loads((FIXTURES_DIR / 'execution-packet/reject_empty_replaced_dispatch_id.json').read_text())
+        self.assertGreater(len(list(validator.iter_errors(reject))), 0)
+
+    def test_create_execution_packet_names_session_id_and_packet_version(self):
+        # Finding R4: session_id and packet_version were reachable only through **kwargs,
+        # so a caller could omit two schema-required fields with no signature-level
+        # signal. Both must now be explicit named parameters.
+        text = (ROOT / 'docs/v3-runtime-contracts.md').read_text()
+        m = re.search(r'def create_execution_packet\((.*?)\n\) -> dict:', text, re.S)
+        self.assertTrue(m, 'create_execution_packet signature not found')
+        sig = m.group(1)
+        self.assertIn('session_id: str', sig)
+        self.assertIn('packet_version: int', sig)
+        self.assertIn('replaced_dispatch_id', sig)
+
+    def test_run_envelope_version_requiredness_matches_real_kickoff_shape(self):
+        # Finding R4, partially rejected on evidence: requirements_version/routing_version
+        # must stay optional on the run envelope because the real
+        # office_runtime.py::_new_run_envelope writes envelope.json once, at kickoff,
+        # before planning/routing exist -- only plan_version/packet_version (both
+        # hardcoded 1 at that point) are ever populated. Prove both directions: the
+        # two are still declared properties (so a later writer *can* record them), but
+        # not required, and a kickoff-shaped envelope missing both still validates.
+        schema = json.loads((ROOT / 'schemas/run-envelope.schema.json').read_text())
+        self.assertIn('plan_version', schema['required'])
+        self.assertIn('packet_version', schema['required'])
+        self.assertNotIn('requirements_version', schema['required'])
+        self.assertNotIn('routing_version', schema['required'])
+        self.assertIn('requirements_version', schema['properties'])
+        self.assertIn('routing_version', schema['properties'])
+
+        validator = Draft202012Validator(schema)
+        kickoff_envelope = {
+            'run_id': 'run-001', 'family_id': 'fam-office', 'dispatch_id': 'disp-001',
+            'role': 'orchestrator', 'holder_id': 'holder-1',
+            'triple': 'agy@local/gemini-3.8-flash@medium', 'mode': 'direct',
+            'playbook': 'Change', 'base_sha': '5d7a450', 'policy_hash': 'a' * 8,
+            'catalog_snapshot_hash': 'b' * 8, 'adapter_snapshot_hash': 'c' * 8,
+            'effective_config_hash': 'd' * 8, 'plan_version': 1, 'packet_version': 1,
+            'created_at': '2026-09-15T00:00:00Z',
+        }
+        self.assertEqual(list(validator.iter_errors(kickoff_envelope)), [])
+
+    def test_monitor_signatures_pin_event_identity_params(self):
+        # Finding R5: record_completion_event lacked event_id/evidence_timestamp/
+        # evidence_hash, and both cursor functions lacked family_id (the cursor is
+        # keyed on session_id+family_id+dispatch_id per Sec 5.5's cursor_id formula).
+        text = (ROOT / 'docs/v3-runtime-contracts.md').read_text()
+
+        m = re.search(r'def record_completion_event\((.*?)\n\) -> dict:', text, re.S)
+        self.assertTrue(m, 'record_completion_event signature not found')
+        sig = m.group(1)
+        for param in ('event_id: str', 'family_id: str', 'evidence_timestamp: str', 'evidence_hash: str'):
+            self.assertIn(param, sig, f'{param} missing from record_completion_event')
+
+        m2 = re.search(r'def get_event_cursor\((.*?)\) -> int:', text, re.S)
+        self.assertTrue(m2, 'get_event_cursor signature not found')
+        self.assertIn('family_id: str', m2.group(1))
+
+        m3 = re.search(r'def acknowledge_events\((.*?)\n\) -> dict:', text, re.S)
+        self.assertTrue(m3, 'acknowledge_events signature not found')
+        for param in ('family_id: str', 'event_id: str'):
+            self.assertIn(param, m3.group(1), f'{param} missing from acknowledge_events')
+
+    def test_event_id_deterministic_formula_produces_schema_valid_event(self):
+        # Finding R5: event_id must be a pinned deterministic derivation so a repeated
+        # (dispatch_id, sequence) always yields the same event_id -- that identity is
+        # what makes "dedup" concrete rather than a hand-waved word.
+        import hashlib
+        dispatch_id, sequence = 'disp-001', 3
+        event_id = 'evt-' + hashlib.sha256(f'{dispatch_id}:{sequence}'.encode()).hexdigest()[:16]
+        event_id_again = 'evt-' + hashlib.sha256(f'{dispatch_id}:{sequence}'.encode()).hexdigest()[:16]
+        self.assertEqual(event_id, event_id_again)
+
+        event = {
+            'event_id': event_id, 'session_id': 'sess-001', 'family_id': 'fam-office',
+            'dispatch_id': dispatch_id, 'sequence': sequence, 'observed_status': 'finish',
+            'terminal_classification': 'success', 'source': 'herdr',
+            'evidence_timestamp': '2026-09-15T00:00:00Z', 'evidence_hash': 'sha256:' + 'a' * 64,
+        }
+        schema = json.loads((ROOT / 'schemas/completion-event.schema.json').read_text())
+        validator = Draft202012Validator(schema)
+        self.assertEqual(list(validator.iter_errors(event)), [])
+
+    def test_family_phase_enum_matches_runtime_phase_order(self):
+        # Finding R6: the schema's phase enum must equal the real runtime's PHASE_ORDER
+        # tuple, read from the actual parent-repo file (not a copy pasted into this
+        # worktree), so the two cannot silently diverge again.
+        import subprocess
+        common_dir = subprocess.check_output(
+            ['git', '-C', str(ROOT), 'rev-parse', '--git-common-dir'], text=True
+        ).strip()
+        main_root = Path(common_dir).resolve().parent
+        runtime_path = main_root / 'scripts' / 'office_runtime.py'
+        self.assertTrue(runtime_path.exists(), f'parent runtime not found at {runtime_path}')
+        source = runtime_path.read_text()
+        m = re.search(r'PHASE_ORDER\s*=\s*\(([^)]*)\)', source)
+        self.assertTrue(m, 'PHASE_ORDER tuple not found in real office_runtime.py')
+        phase_order = tuple(x.strip().strip('"\'') for x in m.group(1).split(',') if x.strip())
+
+        schema = json.loads((ROOT / 'schemas/family-registry.schema.json').read_text())
+        phase_enum = schema['properties']['families']['additionalProperties']['properties']['phase']['enum']
+        self.assertEqual(tuple(phase_enum), phase_order)
+
+    def test_review_status_to_landing_disposition_mapping_is_pinned(self):
+        # Finding R6: landing dispositions had no mapping to review finding statuses.
+        # Every value of both enums must appear in the pinned conversion table.
+        text = (ROOT / 'docs/v3-runtime-contracts.md').read_text()
+        m = re.search(
+            r'### 3\.2 Review Finding Status vs\. Landing Disposition.*?(?=\n---\n|\n## )',
+            text, re.S,
+        )
+        self.assertTrue(m, 'R6 mapping section not found')
+        section = m.group(0)
+
+        rr_schema = json.loads((ROOT / 'schemas/review-result.schema.json').read_text())
+        landing_schema = json.loads((ROOT / 'schemas/landing.schema.json').read_text())
+        status_enum = rr_schema['properties']['findings']['items']['properties']['status']['enum']
+        disposition_enum = landing_schema['properties']['review']['properties']['dispositions']['items']['properties']['disposition']['enum']
+
+        for status in status_enum:
+            self.assertIn(status, section, f'review status {status} missing from R6 mapping table')
+        for disposition in disposition_enum:
+            self.assertIn(disposition, section, f'landing disposition {disposition} missing from R6 mapping table')
+
     def test_routing_candidate_permits_null_local_reward(self):
         # Finding F14: the contract requires local_reward=null to represent unmeasured
         # evidence (§7.4.2), but the schema declared type: number, rejecting it outright.
