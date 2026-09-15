@@ -16,6 +16,17 @@ set -euo pipefail
 # scripts/hooks/close_finished_panes.mjs can close the pane once its agent
 # reports done. A pane-hosted dispatch spawned without these stays open forever,
 # because the hook only ever closes panes it finds in the ledger.
+#
+# --session-id/--family-id/--requirements-version/--plan-version/
+# --routing-version/--effective-config-hash/--selection-disclosure are
+# optional. When ALL of them are supplied, office-spawn wires the monitor
+# lifecycle into this dispatch by recording a start receipt
+# (schemas/start-receipt.schema.json) via `office_runtime.py
+# record-start-receipt` in the same block that spawns the process, so a
+# dispatch is never left without a start receipt separately from being
+# spawned. Omitting any of them skips receipt recording entirely (this
+# lifecycle wiring stays optional, per docs/plans/v3-final-merge.md's T4
+# body: "keep optional hooks optional").
 
 ADAPTER=""
 MODEL=""
@@ -28,6 +39,13 @@ STATE_DIR=""
 TIMEOUT=30
 PANE_ID=""
 AGENT_NAME=""
+SESSION_ID=""
+FAMILY_ID=""
+REQUIREMENTS_VERSION=""
+PLAN_VERSION=""
+ROUTING_VERSION=""
+EFFECTIVE_CONFIG_HASH=""
+SELECTION_DISCLOSURE=""
 
 
 while [[ $# -gt 0 ]]; do
@@ -43,6 +61,13 @@ while [[ $# -gt 0 ]]; do
     --timeout) TIMEOUT="$2"; shift 2 ;;
     --pane-id) PANE_ID="$2"; shift 2 ;;
     --agent-name) AGENT_NAME="$2"; shift 2 ;;
+    --session-id) SESSION_ID="$2"; shift 2 ;;
+    --family-id) FAMILY_ID="$2"; shift 2 ;;
+    --requirements-version) REQUIREMENTS_VERSION="$2"; shift 2 ;;
+    --plan-version) PLAN_VERSION="$2"; shift 2 ;;
+    --routing-version) ROUTING_VERSION="$2"; shift 2 ;;
+    --effective-config-hash) EFFECTIVE_CONFIG_HASH="$2"; shift 2 ;;
+    --selection-disclosure) SELECTION_DISCLOSURE="$2"; shift 2 ;;
     *) echo "office-spawn: unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -162,6 +187,46 @@ print(json.dumps({
     'recorded_at': sys.argv[5],
 }))
 " "$PANE_ID" "$AGENT_NAME" "$DISPATCH_ID" "$RUN_ID" "$NOW" >> "$LEDGER"
+fi
+
+# Record a start receipt when the full identity/version/disclosure surface is
+# available. Recording happens here, in the same block that spawned the
+# process, so a dispatch is never spawned without a receipt separately from
+# being spawned.
+if [[ -n "$SESSION_ID" && -n "$FAMILY_ID" && -n "$REQUIREMENTS_VERSION" && -n "$PLAN_VERSION" \
+      && -n "$ROUTING_VERSION" && -n "$EFFECTIVE_CONFIG_HASH" && -n "$SELECTION_DISCLOSURE" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  RUNTIME="${SCRIPT_DIR}/office_runtime.py"
+  RECEIPT_FILE="${DISPATCH_DIR}/start_receipt_input.json"
+  python3 -c "
+import json, sys
+(session_id, family_id, dispatch_id, pid, req_v, plan_v, route_v, config_hash,
+ disclosure_raw, adapter, model, effort, worktree, logfile, started_at, out_path) = sys.argv[1:17]
+disclosure = json.loads(disclosure_raw)
+receipt = {
+    'receipt_id': 'rec-' + dispatch_id,
+    'session_id': session_id,
+    'family_id': family_id,
+    'dispatch_id': dispatch_id,
+    'pid': int(pid),
+    'requirements_version': int(req_v),
+    'plan_version': int(plan_v),
+    'routing_version': int(route_v),
+    'effective_config_hash': config_hash,
+    'selection_disclosure': disclosure,
+    'adapter': adapter,
+    'model': model,
+    'effort': effort,
+    'worktree': worktree,
+    'logfile': logfile,
+    'started_at': started_at,
+}
+with open(out_path, 'w', encoding='utf-8') as f:
+    json.dump(receipt, f, indent=2, sort_keys=True)
+" "$SESSION_ID" "$FAMILY_ID" "$DISPATCH_ID" "$PID" "$REQUIREMENTS_VERSION" "$PLAN_VERSION" \
+  "$ROUTING_VERSION" "$EFFECTIVE_CONFIG_HASH" "$SELECTION_DISCLOSURE" "$ADAPTER" "$MODEL" \
+  "$EFFORT" "${WORKTREE:-.}" "$LOGFILE" "$NOW" "$RECEIPT_FILE"
+  "$RUNTIME" record-start-receipt --file "$RECEIPT_FILE" --state-dir "$STATE_DIR" > /dev/null
 fi
 
 # Startup check: wait briefly and verify process didn't die immediately

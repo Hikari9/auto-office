@@ -1,8 +1,22 @@
 #!/usr/bin/env python3
-import json, os, subprocess, sys, tempfile, unittest, shutil
+import hashlib, importlib.util, json, os, sqlite3, subprocess, sys, tempfile, unittest, shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load(name, relpath):
+    spec = importlib.util.spec_from_file_location(name, ROOT / relpath)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+fam = _load("office_family", "scripts/office_family.py")
+rt = _load("office_runtime", "scripts/office_runtime.py")
+
+FIXED_EMPTY_HASH = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
 
 class TestReview(unittest.TestCase):
     def setUp(self):
@@ -17,6 +31,50 @@ class TestReview(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _head_sha(self):
+        return subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=self.repo, capture_output=True,
+                               text=True, check=True).stdout.strip()
+
+    def _write_review(self, **overrides):
+        review = {
+            "review_id": "rev-res-001",
+            "dispatch_id": "disp-001",
+            "producer_id": "disp-001",
+            "reviewer_id": "rev-001",
+            "reviewer_triple": "codex@local/gpt-5.6-luna@xhigh",
+            "review_mode": "independent_adversary",
+            "reviewed_head_sha": self._head_sha(),
+            "requirements_version": 1,
+            "plan_version": 1,
+            "routing_version": 1,
+            "review_scope": ["T4"],
+            "disposition_owner": "executor",
+            "overall_status": "PASS",
+            "findings": [],
+            "evidence": "Full test suite passed cleanly under independent review.",
+            "evidence_hash": "sha256:" + hashlib.sha256(b"independent review evidence").hexdigest(),
+            "created_at": "2026-09-15T00:00:00Z",
+        }
+        review.update(overrides)
+        path = self.state_dir / f"review-{review['review_id']}.json"
+        path.write_text(json.dumps(review), encoding='utf-8')
+        return path
+
+    def _run_loop(self, extra_args=(), env=None):
+        loop_script = ROOT / 'scripts' / 'review_loop.sh'
+        full_env = {**os.environ}
+        if env:
+            full_env.update(env)
+        return subprocess.run([
+            str(loop_script),
+            '--state-dir', str(self.state_dir),
+            '--dispatch-id', 'disp-001',
+            '--reviewer-dispatch-id', 'rev-001',
+            '--worktree', str(self.repo),
+            '--db', str(self.db),
+            *extra_args,
+        ], cwd=self.repo, capture_output=True, text=True, env=full_env)
 
     def test_review_finding_persist(self):
         script = ROOT / 'scripts' / 'review_finding.sh'
@@ -61,6 +119,198 @@ class TestReview(unittest.TestCase):
         out = json.loads(r.stdout)
         self.assertIn('passed', out)
         self.assertIn('gates', out)
+
+    # ---- amendment v2 finding F3: positive-path provenance ----
+
+    def test_review_loop_unset_review_source_is_unavailable(self):
+        """No --review-file at all: PASS must be unavailable, never granted."""
+        r = self._run_loop()
+        self.assertEqual(r.returncode, 4)
+        self.assertIn('unset_review_source', r.stdout + r.stderr)
+        self.assertNotIn('"PASS"', r.stdout + r.stderr)
+
+    def test_review_loop_review_status_env_var_is_ignored(self):
+        """The exact original defect: REVIEW_STATUS=PASS must have no effect
+        now that run_review() no longer reads any environment variable."""
+        r = self._run_loop(env={'REVIEW_STATUS': 'PASS'})
+        self.assertEqual(r.returncode, 4)
+        self.assertIn('unset_review_source', r.stdout + r.stderr)
+
+    def test_review_loop_reviewer_identity_mismatch_is_unavailable(self):
+        review_path = self._write_review(reviewer_id='someone-else')
+        r = self._run_loop(extra_args=('--review-file', str(review_path)))
+        self.assertEqual(r.returncode, 4)
+        self.assertIn('reviewer_identity_mismatch', r.stdout + r.stderr)
+
+    def test_review_loop_stale_tree_sha_is_rejected(self):
+        review_path = self._write_review(reviewed_head_sha='0' * 40)
+        r = self._run_loop(extra_args=('--review-file', str(review_path)))
+        self.assertEqual(r.returncode, 4)
+        self.assertIn('stale_tree_sha', r.stdout + r.stderr)
+
+    def test_review_loop_mismatched_version_is_rejected(self):
+        fam.register_family(self.state_dir, 'sess-001', 'fam-t4', 'acme/repo', 1,
+                             requirements_version=1, plan_version=1, routing_version=1)
+        review_path = self._write_review(family_id='fam-t4', plan_version=2)
+        r = self._run_loop(extra_args=('--review-file', str(review_path), '--review-scope', 'T4'))
+        self.assertEqual(r.returncode, 4)
+        self.assertIn('version_mismatch', r.stdout + r.stderr)
+
+    def test_review_loop_scope_mismatch_is_rejected(self):
+        review_path = self._write_review()
+        r = self._run_loop(extra_args=('--review-file', str(review_path), '--review-scope', 'T99'))
+        self.assertEqual(r.returncode, 4)
+        self.assertIn('scope_mismatch', r.stdout + r.stderr)
+
+    def test_review_loop_valid_reviewer_dispatch_passes_and_labels_dispatch(self):
+        """The success path: a validated reviewer dispatch and readback bound to
+        distinct producer/reviewer identity, current tree SHA, all three
+        versions, declared scope and non-empty evidence produces a real PASS
+        -- and amendment v3 closeout records exactly one outcome label citing
+        that same evidence, never a fixed/empty-string hash."""
+        fam.register_family(self.state_dir, 'sess-001', 'fam-t4', 'acme/repo', 1,
+                             requirements_version=1, plan_version=1, routing_version=1)
+        review_path = self._write_review(family_id='fam-t4')
+        r = self._run_loop(extra_args=('--review-file', str(review_path), '--review-scope', 'T4'))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+        con = sqlite3.connect(self.db)
+        rows = con.execute(
+            "SELECT dispatch_id, label, evidence_hash FROM outcome_labels"
+        ).fetchall()
+        con.close()
+        self.assertEqual(len(rows), 1)
+        dispatch_id, label, evidence_hash = rows[0]
+        self.assertEqual(dispatch_id, 'disp-001')
+        self.assertEqual(label, 'verified_no_observed_failure')
+        self.assertTrue(evidence_hash)
+        self.assertNotEqual(evidence_hash, FIXED_EMPTY_HASH)
+        self.assertRegex(evidence_hash, r'^sha256:[0-9a-f]{64}$')
+
+    # ---- office_readback.sh: process diagnostics + semantic landing evidence ----
+
+    def _readback_dispatch_dir(self, dispatch_id, exit_code=0, log_text="all good\n"):
+        d = self.state_dir / 'dispatches' / dispatch_id
+        d.mkdir(parents=True)
+        (d / 'meta.json').write_text(json.dumps({'adapter': 'adapters/seed/claude.yaml'}), encoding='utf-8')
+        (d / 'output.log').write_text(log_text, encoding='utf-8')
+        (d / 'exit_code').write_text(str(exit_code), encoding='utf-8')
+        return d
+
+    def _run_readback(self, dispatch_id, landing_file=None):
+        script = ROOT / 'scripts' / 'office_readback.sh'
+        args = [str(script), '--dispatch-id', dispatch_id, '--state-dir', str(self.state_dir)]
+        if landing_file:
+            args += ['--landing-file', str(landing_file)]
+        return subprocess.run(args, capture_output=True, text=True)
+
+    def test_office_readback_classifies_success_without_crashing(self):
+        """Regression: every check_signature() chain used to leave a non-zero
+        exit status behind when no failure signature matched (the common
+        case), which set -e turned into a full script abort before
+        classification ever ran."""
+        self._readback_dispatch_dir('disp-ok')
+        r = self._run_readback('disp-ok')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(out['classification'], 'SUCCESS')
+        self.assertIsNone(out['landing_verified'])
+
+    def _write_landing(self, dispatch_id, head_sha):
+        landing = {
+            'landing_id': 'land-001',
+            'family_id': 'fam-t4',
+            'producer': {'dispatch_id': dispatch_id, 'holder_id': 'h1', 'role': 'executor',
+                         'triple': 'agy@local/m@medium'},
+            'scope': 'T4',
+            'requirements_version': 1,
+            'plan_version': 1,
+            'routing_version': 1,
+            'base_sha': 'a' * 7,
+            'head_sha': head_sha,
+            'diff_stat': '1 file changed',
+            'completed_tasks': ['T4'],
+            'decisions': [],
+            'changes_and_interfaces': [],
+            'validation_evidence': {'commands': ['echo ok'], 'passed': True,
+                                     'evidence_hash': 'sha256:' + 'a' * 64},
+            'review': {'mode': 'exempt', 'round': 1, 'dispositions': []},
+            'deviations': [],
+            'dependencies_and_artifacts': [],
+            'blockers': [],
+            'created_at': '2026-09-15T00:00:00Z',
+        }
+        path = self.state_dir / 'landing.json'
+        path.write_text(json.dumps(landing), encoding='utf-8')
+        return path
+
+    def test_office_readback_validates_semantic_landing_evidence(self):
+        self._readback_dispatch_dir('disp-ok')
+        landing_path = self._write_landing('disp-ok', rt._start_base_sha(ROOT))
+        r = self._run_readback('disp-ok', landing_file=landing_path)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(out['classification'], 'SUCCESS')
+        self.assertTrue(out['landing_verified'])
+
+    def test_office_readback_flags_unverifiable_landing_without_hiding_success(self):
+        self._readback_dispatch_dir('disp-ok')
+        landing_path = self._write_landing('disp-ok', 'stale' + '0' * 34)
+        r = self._run_readback('disp-ok', landing_file=landing_path)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        out = json.loads(r.stdout)
+        # process diagnostics are retained even though the landing is bad evidence
+        self.assertEqual(out['classification'], 'SUCCESS')
+        self.assertFalse(out['landing_verified'])
+        self.assertTrue(out['landing_reason'])
+
+    # ---- office_spawn.sh: optional start-receipt wiring ----
+
+    def test_office_spawn_without_receipt_flags_is_unchanged(self):
+        """Backward compatibility: omitting the new optional flags must not
+        attempt to record a start receipt (existing callers, e.g.
+        tests/test_dogfood.py, never pass them)."""
+        adapter = self.repo / 'adapter.yaml'
+        adapter.write_text(
+            "invocation:\n  executable: /bin/sleep\n  argv:\n    - \"2\"\n  prompt_transport: argv\n",
+            encoding='utf-8',
+        )
+        r = subprocess.run([
+            str(ROOT / 'scripts' / 'office_spawn.sh'),
+            '--adapter', str(adapter), '--model', 'm', '--effort', 'low',
+            '--worktree', str(self.repo), '--dispatch-id', 'disp-nospawn',
+            '--run-id', 'run-1', '--state-dir', str(self.state_dir), '--timeout', '5',
+        ], cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse((self.state_dir / 'dispatches' / 'disp-nospawn' / 'start_receipt.json').exists())
+
+    def test_office_spawn_with_full_disclosure_records_start_receipt(self):
+        adapter = self.repo / 'adapter.yaml'
+        adapter.write_text(
+            "invocation:\n  executable: /bin/sleep\n  argv:\n    - \"2\"\n  prompt_transport: argv\n",
+            encoding='utf-8',
+        )
+        disclosure = json.dumps({
+            "role": "executor", "triple": "agy@local/gemini@medium",
+            "invocation_model_id": "gemini", "model_id": "gemini", "effort": "medium",
+            "harness": "agy", "harness_version": "local", "reason": "test",
+        })
+        r = subprocess.run([
+            str(ROOT / 'scripts' / 'office_spawn.sh'),
+            '--adapter', str(adapter), '--model', 'gemini', '--effort', 'medium',
+            '--worktree', str(self.repo), '--dispatch-id', 'disp-recpt', '--run-id', 'run-1',
+            '--state-dir', str(self.state_dir), '--timeout', '5',
+            '--session-id', 'sess-1', '--family-id', 'fam-1',
+            '--requirements-version', '1', '--plan-version', '1', '--routing-version', '1',
+            '--effective-config-hash', 'sha256:' + ('a' * 64),
+            '--selection-disclosure', disclosure,
+        ], cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        receipt = json.loads((self.state_dir / 'dispatches' / 'disp-recpt' / 'start_receipt.json').read_text())
+        self.assertEqual(receipt['dispatch_id'], 'disp-recpt')
+        self.assertEqual(receipt['session_id'], 'sess-1')
+        self.assertEqual(receipt['family_id'], 'fam-1')
+        self.assertEqual(receipt['selection_disclosure']['harness'], 'agy')
 
 if __name__ == '__main__':
     unittest.main()

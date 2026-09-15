@@ -42,7 +42,11 @@ if [ -d "${OFFICE_STATE_DIR}/dispatches" ]; then
     done
 fi
 
-cat << EOF > /tmp/dispatch.json
+# A shared, fixed /tmp path here would let two concurrent sessions'
+# session_end hooks race on the same file; this dispatch record is scoped
+# under this run's own state dir instead.
+DISPATCH_RECORD="${OFFICE_STATE_DIR}/session_end_dispatch.json"
+cat << EOF > "$DISPATCH_RECORD"
 {
   "run_id": "$RUN_ID",
   "role": "system",
@@ -51,5 +55,5 @@ cat << EOF > /tmp/dispatch.json
   "outcome": "pending"
 }
 EOF
-"$RUNTIME_SCRIPT" record-dispatch --db "$DB" /tmp/dispatch.json || true
+"$RUNTIME_SCRIPT" record-dispatch --db "$DB" "$DISPATCH_RECORD" || true
 exit 0
