@@ -10,9 +10,17 @@ def cand(name, money=1, quota=1, reward=0, state='proven', caps=('builder',), fl
     return {'harness':name,'harness_version':'1','model_id':model_id,'effort':effort,'adapter_state':state,'capabilities':list(caps),'absolute_floor_pass':floor,'supported_playbooks':['Change'],'advisory_pass':advisory,'local_reward':reward,'quota':{'status':'ok','tightest_remaining_percent':remaining,'projected_burn_percent':quota},'cost':{'money_estimate':money,'quota_burn':quota,'wall_clock_seconds':10}}
 
 class RuntimeTests(unittest.TestCase):
+    # Amendment v3 (T2B) moved adapter_state/absolute_floor_pass/advisory_pass/local_reward
+    # from caller-asserted request fields to values office_routing.py derives from runs.db
+    # and the pinned roles.<role>.floor config; route() here only delegates (§8.2 shim).
+    # Tests below that are not themselves about trust/floor/reward derivation use the
+    # 'worker' role (outside MUTABLE_TRUST_ROLES) so they keep exercising route()'s
+    # pipeline-ordering/cost/preferred_seed/disclosure behavior without needing a seeded
+    # runs.db; derivation itself is covered by tests/test_derived_routing.py and
+    # tests/test_scoring.py (T2B).
     def test_floor_before_cost(self):
-        bad=cand('cheap',money=.01,floor=False); good=cand('good',money=2)
-        r=rt.route({'role':'executor','playbook':'Change','candidates':[bad,good]})
+        bad=cand('cheap',money=.01,effort='low'); good=cand('good',money=2,effort='high')
+        r=rt.route({'role':'worker','playbook':'Change','policy':{'floor':{'min_effort':'high'}},'candidates':[bad,good]})
         self.assertTrue(r['selected'].startswith('good@'))
         self.assertTrue(any(x['stage']==4 for x in r['rejected']))
     def test_unverified_denied_for_executor(self):
@@ -20,15 +28,11 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsNone(r['selected']); self.assertEqual(r['status'],'no_qualifying_candidate')
     def test_quota_reserve_changes_route(self):
         low=cand('low',money=.5,remaining=21,quota=3); safe=cand('safe',money=.6,remaining=80,quota=10)
-        r=rt.route({'role':'executor','playbook':'Change','candidates':[low,safe]})
+        r=rt.route({'role':'worker','playbook':'Change','candidates':[low,safe]})
         self.assertTrue(r['selected'].startswith('safe@'))
     def test_balanced_prefers_quota_within_money_band(self):
         a=cand('a',money=10,quota=10); b=cand('b',money=11,quota=2)
-        r=rt.route({'role':'executor','playbook':'Change','candidates':[a,b]})
-        self.assertTrue(r['selected'].startswith('b@'))
-    def test_local_reward_tiebreak(self):
-        a=cand('a',reward=1); b=cand('b',reward=5)
-        r=rt.route({'role':'executor','playbook':'Change','candidates':[a,b]})
+        r=rt.route({'role':'worker','playbook':'Change','candidates':[a,b]})
         self.assertTrue(r['selected'].startswith('b@'))
     def test_preferred_seed_picks_first_choice_even_if_pricier(self):
         first=cand('agy',model_id='gemini-3.8-flash',effort='medium',money=5)
@@ -36,36 +40,36 @@ class RuntimeTests(unittest.TestCase):
         second=cand('claude',model_id='claude-sonnet-5',effort='high',money=1)
         seed=[{'harness':'agy','model_id':'gemini-3.8-flash','effort':'medium'},
               {'harness':'claude','model_id':'claude-sonnet-5','effort':'high'}]
-        r=rt.route({'role':'executor','playbook':'Change','preferred_seed':seed,'candidates':[second,first]})
+        r=rt.route({'role':'worker','playbook':'Change','preferred_seed':seed,'candidates':[second,first]})
         self.assertTrue(r['selected'].startswith('agy@'))
         disclosure=r['selection_disclosure']
-        self.assertEqual(disclosure['role'],'executor')
+        self.assertEqual(disclosure['role'],'worker')
         self.assertEqual(disclosure['model_id'],'gemini-3.8-flash')
         self.assertEqual(disclosure['invocation_model_id'],'gemini-3.8-flash-preview')
         self.assertIn('preferred seed #1',disclosure['reason'])
     def test_preferred_seed_falls_back_when_first_choice_excluded(self):
-        first=cand('agy',model_id='gemini-3.8-flash',effort='medium',floor=False)
+        first=cand('agy',model_id='gemini-3.8-flash',effort='low')
         second=cand('claude',model_id='claude-sonnet-5',effort='high')
         seed=[{'harness':'agy','model_id':'gemini-3.8-flash','effort':'medium'},
               {'harness':'claude','model_id':'claude-sonnet-5','effort':'high'}]
-        r=rt.route({'role':'executor','playbook':'Change','preferred_seed':seed,'candidates':[first,second]})
+        r=rt.route({'role':'worker','playbook':'Change','policy':{'floor':{'min_effort':'medium'}},'preferred_seed':seed,'candidates':[first,second]})
         self.assertTrue(r['selected'].startswith('claude@'))
     def test_preferred_seed_ignores_unmatched_candidates_when_a_match_exists(self):
         matched=cand('agy',model_id='gemini-3.8-flash',effort='medium',money=5)
         unmatched=cand('other',model_id='other-model',effort='high',money=.01)
         seed=[{'harness':'agy','model_id':'gemini-3.8-flash','effort':'medium'}]
-        r=rt.route({'role':'executor','playbook':'Change','preferred_seed':seed,'candidates':[unmatched,matched]})
+        r=rt.route({'role':'worker','playbook':'Change','preferred_seed':seed,'candidates':[unmatched,matched]})
         self.assertTrue(r['selected'].startswith('agy@'))
     def test_disclosure_flags_unverified_invocation_slug(self):
         only=cand('codex',model_id='luna')
-        r=rt.route({'role':'executor','playbook':'Change','candidates':[only]})
+        r=rt.route({'role':'worker','playbook':'Change','candidates':[only]})
         d=r['selection_disclosure']
         self.assertEqual(d['invocation_model_id'],'luna')
         self.assertEqual(d['invocation_model_id_source'],'fallback:model_id')
         self.assertIn('unverified',d['reason'])
     def test_disclosure_marks_catalog_slug_verified(self):
         only=cand('codex',model_id='luna'); only['invocation_model_id']='gpt-5.6-luna'
-        d=rt.route({'role':'executor','playbook':'Change','candidates':[only]})['selection_disclosure']
+        d=rt.route({'role':'worker','playbook':'Change','candidates':[only]})['selection_disclosure']
         self.assertEqual(d['invocation_model_id'],'gpt-5.6-luna')
         self.assertEqual(d['invocation_model_id_source'],'catalog')
         self.assertNotIn('unverified',d['reason'])

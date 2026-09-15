@@ -5,7 +5,7 @@ Route-time commands never perform network access. Catalog fetching/normalization
 outside routing and be committed to a content-addressed local snapshot before selection.
 """
 from __future__ import annotations
-import argparse, contextlib, hashlib, io, json, math, os, re, sqlite3, subprocess, sys, uuid
+import argparse, contextlib, hashlib, io, json, math, os, re, shlex, sqlite3, subprocess, sys, uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
@@ -184,139 +184,57 @@ def selection_disclosure(role: str, chosen: dict, preferred_seed, cost_policy: s
 
 
 def route(request: dict) -> dict:
-    role = request["role"]
-    playbook = request.get("playbook")
-    policy = request.get("policy", {})
-    required = set(request.get("required_capabilities", policy.get("required_capabilities", [])))
-    reserve = float(policy.get("quota_reserve_percent", 20))
-    cost_policy = request.get("cost_policy", policy.get("cost_policy", "balanced"))
-    allow_override = bool(request.get("allow_unverified_override", False))
-    allow_advisory_undercut = bool(request.get("allow_advisory_undercut", True))
-    preferred_seed = request.get("preferred_seed") or policy.get("preferred_seed")
-    rejected = []
-    stage = []
+    """Route a role dispatch request, delegating to scripts.office_routing."""
+    try:
+        from scripts import office_routing
+    except ImportError:
+        try:
+            import office_routing
+        except ImportError as exc:
+            sys.stderr.write(
+                f"ERROR: office_routing module unavailable ({exc}). "
+                "Task T2B implementation of scripts/office_routing.py is required.\n"
+            )
+            return {
+                "selected": None,
+                "status": "routing_module_unavailable",
+                "error": str(exc),
+                "rejected": [],
+            }
 
-    # 1 hard exclusions
-    for c in request.get("candidates", []):
-        cid = candidate_id(c)
-        if c.get("hard_excluded") or c.get("local_hard_excluded"):
-            rejected.append({"candidate":cid,"stage":1,"reason":"hard exclusion"})
-        else:
-            stage.append(c)
+    # Hard stop: verify recorded override if unverified override requested
+    if request.get("allow_unverified_override") or request.get("allow_override"):
+        override_record = request.get("recorded_override")
+        db_path = request.get("runs_db")
+        if not hasattr(office_routing, "validate_override_record") or not office_routing.validate_override_record(
+            override_record, request, db_path=db_path
+        ):
+            return {
+                "selected": None,
+                "status": "override_not_authorized",
+                "reason": (
+                    "Execution requested unverified override without a valid, unexpired "
+                    "recorded override authorization in runs.db."
+                ),
+                "rejected": [],
+            }
 
-    # 2 adapter validity/trust
-    nxt=[]
-    for c in stage:
-        cid=candidate_id(c); st=c.get("adapter_state")
-        if st == "invalid": rejected.append({"candidate":cid,"stage":2,"reason":"invalid adapter"}); continue
-        if role in MUTABLE_TRUST_ROLES and st != "proven" and not allow_override:
-            rejected.append({"candidate":cid,"stage":2,"reason":"adapter is not proven for normal mutable/gate authority"}); continue
-        nxt.append(c)
-    stage=nxt
-
-    # 3 required capabilities
-    nxt=[]
-    for c in stage:
-        cid=candidate_id(c); caps=set(c.get("capabilities", []))
-        if not required.issubset(caps): rejected.append({"candidate":cid,"stage":3,"reason":f"missing capabilities {sorted(required-caps)}"}); continue
-        nxt.append(c)
-    stage=nxt
-
-    # 4 absolute role floor
-    nxt=[]
-    for c in stage:
-        cid=candidate_id(c)
-        if not c.get("absolute_floor_pass", False): rejected.append({"candidate":cid,"stage":4,"reason":"absolute role floor failed"}); continue
-        nxt.append(c)
-    stage=nxt
-
-    # 5 task shape
-    nxt=[]
-    for c in stage:
-        cid=candidate_id(c); supported=c.get("supported_playbooks")
-        if supported and playbook and playbook not in supported: rejected.append({"candidate":cid,"stage":5,"reason":"task shape unsupported"}); continue
-        nxt.append(c)
-    stage=nxt
-
-    if not stage:
-        return {"selected":None,"status":"no_qualifying_candidate","rejected":rejected}
-
-    # 6 quota safety. Unknown is not unlimited: it is allowed but ranked as uncertain only when no safe-known alternative.
-    safe=[]; unknown=[]; unsafe=[]
-    for c in stage:
-        q=c.get("quota",{}); status=q.get("status","unknown")
-        if status != "ok" or q.get("tightest_remaining_percent") is None:
-            unknown.append(c); continue
-        remaining=float(q["tightest_remaining_percent"]); burn=float(q.get("projected_burn_percent") or 0)
-        (safe if remaining-burn >= reserve else unsafe).append(c)
-    if safe:
-        for c in unsafe: rejected.append({"candidate":candidate_id(c),"stage":6,"reason":"projected quota crosses reserve while safe alternative exists"})
-        # Unknown quota is not silently unlimited; prefer known-safe unless user permits uncertainty.
-        if not request.get("allow_unknown_quota_with_safe_alternative", False):
-            for c in unknown: rejected.append({"candidate":candidate_id(c),"stage":6,"reason":"quota unknown while known-safe alternative exists"})
-            stage=safe
-        else:
-            stage=safe+unknown
-    elif unknown:
-        for c in unsafe: rejected.append({"candidate":candidate_id(c),"stage":6,"reason":"known quota crosses reserve; only unknown candidates remain"})
-        stage=unknown
-    else:
-        return {"selected":None,"status":"protected_quota_would_be_consumed","rejected":rejected,
-                "action":"choose a smaller/cheaper valid strategy, propose another route, or obtain explicit user authority"}
-
-    # 7 advisory quality anchor
-    if preferred_seed:
-        matched=[c for c in stage if preferred_rank(c, preferred_seed) is not None]
-        advisory=matched if matched else stage
-    else:
-        advisory=[c for c in stage if c.get("advisory_pass", True)]
-    if advisory and not allow_advisory_undercut:
-        for c in stage:
-            if c not in advisory: rejected.append({"candidate":candidate_id(c),"stage":7,"reason":"advisory anchor retained by gear/policy"})
-        stage=advisory
-
-    # 8 cost, 9 local tie-break
-    def quota_burn(c): return _num(c.get("cost",{}).get("quota_burn"))
-    def money(c): return _num(c.get("cost",{}).get("money_estimate"))
-    def wall(c): return _num(c.get("cost",{}).get("wall_clock_seconds"))
-    def reward(c): return -float(c.get("local_reward",0))
-
-    if preferred_seed:
-        # preferred_seed is an ordered fallback chain (first entry = first
-        # choice): the chain itself already encodes the user's cost/quality
-        # tradeoff, so rank outranks cost_policy's money-band elimination;
-        # cost only breaks ties between candidates matching the same entry.
-        default_rank=len(preferred_seed)
-        stage.sort(key=lambda c:(preferred_rank(c, preferred_seed) if preferred_rank(c, preferred_seed) is not None else default_rank,
-                                  quota_burn(c), money(c), wall(c), reward(c), candidate_id(c)))
-    elif cost_policy == "quota_saver":
-        stage.sort(key=lambda c:(quota_burn(c), money(c), wall(c), reward(c), candidate_id(c)))
-    elif cost_policy == "money_saver":
-        stage.sort(key=lambda c:(money(c), quota_burn(c), wall(c), reward(c), candidate_id(c)))
-    else:
-        known_money=[money(c) for c in stage if math.isfinite(money(c))]
-        if known_money:
-            cheapest=min(known_money); band=cheapest*1.20
-            in_band=[c for c in stage if money(c) <= band]
-            if in_band:
-                out_band=[c for c in stage if c not in in_band]
-                for c in out_band: rejected.append({"candidate":candidate_id(c),"stage":8,"reason":"outside balanced 20% cheapest-money band"})
-                stage=in_band
-                stage.sort(key=lambda c:(quota_burn(c), wall(c), reward(c), money(c), candidate_id(c)))
-            else:
-                stage.sort(key=lambda c:(quota_burn(c), wall(c), reward(c), money(c), candidate_id(c)))
-        else:
-            stage.sort(key=lambda c:(quota_burn(c), wall(c), reward(c), candidate_id(c)))
-
-    chosen=stage[0]
-    return {"selected":candidate_id(chosen),"status":"selected","candidate":chosen,"rejected":rejected,
-            "selection_disclosure":selection_disclosure(role, chosen, preferred_seed, cost_policy),
-            "decision_hash":sha256_obj({"role":role,"playbook":playbook,"selected":candidate_id(chosen),"policy":policy,"candidate":chosen})}
+    return office_routing.route(request)
 
 
 def cmd_route(args):
-    req=load_data(args.request)
-    dump_json(route(req)); return 0
+    """CLI handler for `office_runtime.py route <request_file>`."""
+    req = load_data(args.request)
+    result = route(req)
+    dump_json(result)
+    if result.get("status") in (
+        "no_qualifying_candidate",
+        "protected_quota_would_be_consumed",
+        "override_not_authorized",
+        "routing_module_unavailable",
+    ):
+        return 1
+    return 0
 
 
 def cmd_hash(args):
@@ -697,6 +615,15 @@ def cmd_start(args):
                  "effective_config_hash": config_hash, "repo_root": str(repo)}
         _atomic_write_json(state_dir / "state.json", state)
         _atomic_write_json(state_dir / "envelope.json", envelope)
+        # issue-77 kickoff registers family state before execution landings exist
+        # (schema comment, family-registry.schema.json). Never fatal to `start`: family
+        # registration is supplementary durable bookkeeping, not part of this command's
+        # own long-established contract.
+        try:
+            session_id = os.environ.get("AUTO_OFFICE_SESSION_ID") or run_id
+            _office_family().register_family(state_dir, session_id, family_id, str(repo), 0)
+        except Exception:
+            pass
         pointer = repo / ".office" / "runs" / f"{run_id}.ref"
         pointer.parent.mkdir(parents=True, exist_ok=True)
         pointer.write_text(str(state_dir.resolve()) + "\n", encoding="utf-8")
@@ -1197,6 +1124,264 @@ def cmd_increment_plan(args):
     dump_json({"plan_version": new, "prior": old,
                "approval_invalidated": approval_invalidated}); return 0
 
+
+# --------------------------------------------------------------------------
+# Family/amendment/landing/checkpoint/completion CLI commands (amendment v2
+# finding F6): T2 implements every command T0 pinned in §5 for T4, so T4 never
+# needs to edit office_runtime.py or office_packets.py directly. Family/amendment
+# logic lives in scripts/office_family.py; packet logic in scripts/office_packets.py;
+# completion-event/replay-cursor logic is reused from scripts/office_monitor.py (T3)
+# rather than reimplemented here, matching the route() delegation-shim pattern.
+# --------------------------------------------------------------------------
+
+def _office_family():
+    try:
+        from scripts import office_family
+    except ImportError:
+        import office_family
+    return office_family
+
+
+def _office_packets():
+    try:
+        from scripts import office_packets
+    except ImportError:
+        import office_packets
+    return office_packets
+
+
+def _office_monitor():
+    try:
+        from scripts import office_monitor
+    except ImportError:
+        import office_monitor
+    return office_monitor
+
+
+def cmd_family_show(args):
+    fam = _office_family()
+    state_dir = Path(args.state_dir)
+    family_id = args.family_id
+    if not family_id:
+        target = fam.resolve_focus_target(state_dir)
+        if target["status"] != "ok":
+            dump_json({"error": "ambiguous_focus", "reason": target.get("reason")})
+            return 3
+        family_id = target["family_id"]
+    registry = fam.load_family_registry(state_dir)
+    entry = registry.get("families", {}).get(family_id)
+    if entry is None:
+        dump_json({"error": "family_not_found", "family_id": family_id})
+        return 2
+    dump_json(entry)
+    return 0
+
+
+def cmd_family_focus(args):
+    fam = _office_family()
+    result = fam.update_family_focus(Path(args.state_dir), args.family_id)
+    dump_json(result)
+    return 2 if result.get("status") == "error" else 0
+
+
+def cmd_family_list(args):
+    fam = _office_family()
+    registry = fam.load_family_registry(Path(args.state_dir))
+    families = [
+        {
+            "family_id": fid,
+            "phase": entry.get("phase"),
+            "versions": {
+                "requirements_version": entry.get("requirements_version"),
+                "plan_version": entry.get("plan_version"),
+                "routing_version": entry.get("routing_version"),
+            },
+        }
+        for fid, entry in sorted(registry.get("families", {}).items())
+    ]
+    dump_json({"current_focus": registry.get("current_focus_family_id"), "families": families})
+    return 0
+
+
+def cmd_family_update(args):
+    fam = _office_family()
+    latest_landing = load_data(args.latest_landing) if args.latest_landing else None
+    result = fam.update_family(Path(args.state_dir), args.family_id, phase=args.phase,
+                                latest_landing=latest_landing)
+    dump_json(result)
+    return 2 if result.get("status") == "error" else 0
+
+
+def cmd_amend(args):
+    fam = _office_family()
+    delta = load_data(args.delta_file)
+    errors = validate_with_schema(delta, "amendment.schema.json")
+    if errors:
+        dump_json({"error": "schema_invalid", "errors": errors})
+        return 2
+    family_id = args.family_id or delta.get("family_id")
+    if not family_id:
+        dump_json({"error": "missing_family_id"})
+        return 1
+    kind = delta["kind"]
+    owned_field = fam.KIND_VERSION_FIELD.get(kind)
+    resulting = delta.get("resulting_versions", {})
+    version_bumps = {owned_field: resulting[owned_field]} if owned_field in resulting else {}
+    result = fam.apply_amendment(
+        Path(args.state_dir), family_id, kind, delta["affected_scopes"], delta["reason"],
+        delta["evidence"], delta["evidence_hash"], version_bumps,
+        expected_prior_versions=delta.get("expected_prior_versions"),
+        session_id=delta.get("session_id"), amendment_id=delta.get("amendment_id"),
+    )
+    dump_json(result)
+    if result.get("status") == "conflict":
+        return 3
+    if result.get("status") == "error":
+        return 2
+    return 0
+
+
+def cmd_save_checkpoint(args):
+    fam = _office_family()
+    data = load_data(args.file)
+    family_id = args.family_id or data.get("family_id")
+    result = fam.save_checkpoint(Path(args.state_dir), family_id, data)
+    dump_json(result)
+    return 2 if result.get("status") == "error" else 0
+
+
+def cmd_load_checkpoint(args):
+    fam = _office_family()
+    if args.file:
+        data = load_data(args.file)
+        errors = fam.validate_checkpoint(data)
+        if errors:
+            dump_json({"error": "schema_invalid", "errors": errors})
+            return 2
+        dump_json(data)
+        return 0
+    data = fam.load_checkpoint(Path(args.state_dir), checkpoint_id=args.checkpoint_id)
+    if data is None:
+        dump_json({"error": "not_found", "checkpoint_id": args.checkpoint_id})
+        return 1
+    dump_json(data)
+    return 0
+
+
+def cmd_validate_checkpoint(args):
+    fam = _office_family()
+    data = load_data(args.file)
+    errors = fam.validate_checkpoint(data)
+    if errors:
+        dump_json({"valid": False, "errors": errors})
+        return 2
+    dump_json({"valid": True})
+    return 0
+
+
+def cmd_record_landing(args):
+    fam = _office_family()
+    data = load_data(args.file)
+    family_id = args.family_id or data.get("family_id")
+    result = fam.record_landing(Path(args.state_dir), family_id, data)
+    dump_json(result)
+    if result.get("status") == "error":
+        return 4 if result.get("reason") == "missing_validation_evidence" else 2
+    return 0
+
+
+def cmd_validate_landing(args):
+    data = load_data(args.file)
+    errors = validate_with_schema(data, "landing.schema.json")
+    if errors:
+        dump_json({"valid": False, "errors": errors})
+        return 2
+    dump_json({"valid": True})
+    return 0
+
+
+def cmd_verify_landing(args):
+    data = load_data(args.file)
+    errors = validate_with_schema(data, "landing.schema.json")
+    if errors:
+        dump_json({"verified": False, "errors": errors})
+        return 4
+    commands = (data.get("validation_evidence") or {}).get("commands") or []
+    if not commands:
+        dump_json({"verified": False, "reason": "no validation commands recorded"})
+        return 4
+    if getattr(args, "strict", False):
+        for command in commands:
+            proc = subprocess.run(shlex.split(command), cwd=str(ROOT), capture_output=True)
+            if proc.returncode != 0:
+                dump_json({"verified": False, "reason": f"command failed: {command}",
+                           "exit_code": proc.returncode})
+                return 4
+    else:
+        try:
+            head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(ROOT), check=True,
+                                   capture_output=True, text=True).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            head = None
+        head_sha = data.get("head_sha")
+        if head and head_sha and not head.startswith(head_sha) and not head_sha.startswith(head):
+            dump_json({"verified": False, "reason": "head_sha does not match current commit tree",
+                       "head_sha": head})
+            return 4
+    dump_json({"verified": True, "head_sha": data.get("head_sha")})
+    return 0
+
+
+def cmd_record_event(args):
+    return _office_monitor().cmd_record_event(args)
+
+
+def cmd_list_events(args):
+    return _office_monitor().cmd_list_events(args)
+
+
+def cmd_ack_event(args):
+    return _office_monitor().cmd_ack_event(args)
+
+
+def cmd_completion_status(args):
+    return _office_monitor().cmd_completion_status(args)
+
+
+def cmd_record_start_receipt(args):
+    data = load_data(args.file)
+    errors = validate_with_schema(data, "start-receipt.schema.json")
+    if errors:
+        dump_json({"error": "schema_invalid", "errors": errors})
+        return 2
+    dispatch_id = data["dispatch_id"]
+    out_dir = Path(args.state_dir) / "dispatches" / dispatch_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(out_dir / "start_receipt.json", data)
+    dump_json({"status": "recorded", "receipt_id": data["receipt_id"]})
+    return 0
+
+
+def cmd_record_review(args):
+    fam = _office_family()
+    data = load_data(args.file)
+    result = fam.record_review(Path(args.state_dir), data)
+    dump_json(result)
+    if result.get("status") == "error":
+        return 2 if result.get("reason") == "schema_invalid" else 4
+    return 0
+
+
+def cmd_validate_review(args):
+    data = load_data(args.file)
+    errors = validate_with_schema(data, "review-result.schema.json")
+    if errors:
+        dump_json({"valid": False, "errors": errors})
+        return 2
+    dump_json({"valid": True})
+    return 0
+
+
 def main():
     p=argparse.ArgumentParser(description='Auto Office v3 deterministic runtime helpers')
     sp=p.add_subparsers(dest='cmd',required=True)
@@ -1232,6 +1417,27 @@ def main():
     q=sp.add_parser('route-defect'); q.add_argument('--state-dir',required=True); q.add_argument('--kind',choices=['invalid-invocation-slug','unsupported-effort','missing-adapter','other'],default='invalid-invocation-slug'); q.add_argument('--attempted',required=True); q.add_argument('--observed',required=True); q.add_argument('--correction'); q.add_argument('--harness'); q.set_defaults(func=cmd_route_defect)
     q=sp.add_parser('resolve-route-defect'); q.add_argument('--state-dir',required=True); q.add_argument('--id',required=True); q.add_argument('--proposal-ref',required=True); q.set_defaults(func=cmd_resolve_route_defect)
     q=sp.add_parser('check-route-defects'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_check_route_defects)
+
+    # --- family / amendment / checkpoint / landing / completion / review (§5) ---
+    q=sp.add_parser('family-show'); q.add_argument('--family-id'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_family_show)
+    q=sp.add_parser('family-focus'); q.add_argument('--family-id',required=True); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_family_focus)
+    q=sp.add_parser('family-list'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_family_list)
+    q=sp.add_parser('family-update'); q.add_argument('--family-id',required=True); q.add_argument('--phase'); q.add_argument('--latest-landing'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_family_update)
+    q=sp.add_parser('amend'); q.add_argument('--kind',choices=['routing','requirements','plan_contract'],required=True); q.add_argument('--delta-file',required=True); q.add_argument('--family-id'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_amend)
+    q=sp.add_parser('save-checkpoint'); q.add_argument('--file',required=True); q.add_argument('--family-id'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_save_checkpoint)
+    q=sp.add_parser('load-checkpoint'); g=q.add_mutually_exclusive_group(required=True); g.add_argument('--file'); g.add_argument('--checkpoint-id'); q.add_argument('--state-dir'); q.set_defaults(func=cmd_load_checkpoint)
+    q=sp.add_parser('validate-checkpoint'); q.add_argument('file'); q.set_defaults(func=cmd_validate_checkpoint)
+    q=sp.add_parser('record-landing'); q.add_argument('--file',required=True); q.add_argument('--family-id'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_record_landing)
+    q=sp.add_parser('validate-landing'); q.add_argument('file'); q.set_defaults(func=cmd_validate_landing)
+    q=sp.add_parser('verify-landing'); q.add_argument('--file',required=True); q.add_argument('--strict',action='store_true'); q.set_defaults(func=cmd_verify_landing)
+    q=sp.add_parser('record-event'); q.add_argument('--file'); q.add_argument('--event-id'); q.add_argument('--session-id'); q.add_argument('--family-id'); q.add_argument('--dispatch-id'); q.add_argument('--sequence',type=int); q.add_argument('--observed-status'); q.add_argument('--terminal-classification'); q.add_argument('--source'); q.add_argument('--evidence-timestamp'); q.add_argument('--evidence-hash'); q.add_argument('--evidence-payload'); q.add_argument('--state-dir',default='.office'); q.set_defaults(func=cmd_record_event)
+    q=sp.add_parser('list-events'); q.add_argument('--dispatch-id'); q.add_argument('--since-seq',type=int); q.add_argument('--state-dir',default='.office'); q.set_defaults(func=cmd_list_events)
+    q=sp.add_parser('ack-event'); q.add_argument('--session-id',required=True); q.add_argument('--family-id',required=True); q.add_argument('--dispatch-id',required=True); q.add_argument('--sequence',type=int,required=True); q.add_argument('--event-id',required=True); q.add_argument('--state-dir',default='.office'); q.set_defaults(func=cmd_ack_event)
+    q=sp.add_parser('completion-status'); q.add_argument('--dispatch-id',required=True); q.add_argument('--state-dir',default='.office'); q.set_defaults(func=cmd_completion_status)
+    q=sp.add_parser('record-start-receipt'); q.add_argument('--file',required=True); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_record_start_receipt)
+    q=sp.add_parser('record-review'); q.add_argument('--file',required=True); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_record_review)
+    q=sp.add_parser('validate-review'); q.add_argument('file'); q.set_defaults(func=cmd_validate_review)
+
     args=p.parse_args(); sys.exit(args.func(args))
 
 if __name__=='__main__': main()
