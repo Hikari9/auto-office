@@ -21,6 +21,24 @@ set -euo pipefail
 #     file carries a family_id, non-empty evidence)
 # Missing, unset, synthetic, or unbound review evidence makes PASS
 # UNAVAILABLE -- never PASS -- and the loop exits 4 (fail closed).
+#
+# --packet supplies the task's validation commands to verify.sh. Without it a
+# repo whose project type cannot be inferred has nothing to run, and a
+# verification that executed nothing is UNVERIFIABLE, not a pass and not an
+# implementation defect.
+#
+# Exit codes -- 4 is deliberately broad, covering every "this cannot be decided
+# here" condition, which is why each one prints a distinct reason on stdout.
+# Discriminate on the reason string, not on the code alone:
+#   0  review PASS recorded
+#   1  review or self-verification failed on the merits (IMPLEMENTATION_DEFECT
+#      or CHANGES_REQUIRED at max iterations)
+#   2  PLAN DEFECT -- plan version incremented, packets invalidated
+#   3  BRIEF DEFECT
+#   4  cannot be decided here. Reasons: missing required arguments;
+#      self-approval (producer == reviewer); unset_review_source;
+#      reviewer_identity_mismatch; stale_tree_sha; version_mismatch;
+#      scope_mismatch; UNVERIFIABLE: no_gate_executed; unknown review status.
 
 STATE_DIR=""
 DISPATCH_ID=""
@@ -220,8 +238,20 @@ while [[ $iter -lt $MAX_ITERATIONS ]]; do
   verify_args=(--worktree "$WORKTREE" --dispatch-id "$DISPATCH_ID" --state-dir "$STATE_DIR" --db "$DB")
   if [[ -n "$PACKET" ]]; then verify_args+=(--packet "$PACKET"); fi
   verify_out=$("$VERIFY_SCRIPT" "${verify_args[@]}")
-  passed=$(echo "$verify_out" | jq -r '.passed' 2>/dev/null || echo "$verify_out" | grep -o '"passed": *true' || true)
-  verify_reason=$(echo "$verify_out" | jq -r '.reason // ""' 2>/dev/null || true)
+  # Parsed with python3, not jq. jq is not a declared dependency -- validate.yml installs only
+  # pyyaml, jsonschema and pytest -- and a jq-less host silently produced an empty reason, which
+  # put the loop straight back on the path that labels an unverifiable run as abandoned. The
+  # line below it already carried a grep fallback for exactly that case; this one did not.
+  verify_parsed=$(printf '%s' "$verify_out" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('unparseable	'); raise SystemExit(0)
+print(('true' if d.get('passed') else 'false') + '	' + str(d.get('reason') or ''))
+" 2>/dev/null || printf 'unparseable	')
+  passed="${verify_parsed%%$'\t'*}"
+  verify_reason="${verify_parsed#*$'\t'}"
 
   # A verification that executed nothing is UNVERIFIABLE, not a failed implementation. Recording
   # it as a defect wrote an `abandoned` outcome label attributed to the producer, which lowers
@@ -234,7 +264,7 @@ while [[ $iter -lt $MAX_ITERATIONS ]]; do
     exit 4
   fi
 
-  if [[ "$passed" != "true" && "$passed" != "\"passed\": true" ]]; then
+  if [[ "$passed" != "true" ]]; then
     finding_id=$("$REVIEW_FINDING_SCRIPT" --dispatch-id "$DISPATCH_ID" --reviewer-dispatch-id "$REVIEWER_ID" \
       --status "IMPLEMENTATION_DEFECT" --summary "Self-verification failed at iteration $iter" \
       --state-dir "$STATE_DIR" --db "$DB")

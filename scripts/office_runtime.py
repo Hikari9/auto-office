@@ -624,6 +624,14 @@ def cmd_start(args):
                  "effective_config_hash": config_hash, "repo_root": str(repo)}
         _atomic_write_json(state_dir / "state.json", state)
         _atomic_write_json(state_dir / "envelope.json", envelope)
+        # Create the run's recorder here, so `<state_dir>/runs.db` -- the default every later
+        # command resolves -- actually exists. Nothing used to create it, so record-landing's
+        # mandatory cross-check resolved a path that was never written and rejected the
+        # contract-documented invocation outright.
+        try:
+            init_db(state_dir / "runs.db")
+        except Exception:
+            pass
         # issue-77 kickoff registers family state before execution landings exist
         # (schema comment, family-registry.schema.json). Never fatal to `start`: family
         # registration is supplementary durable bookkeeping, not part of this command's
@@ -1300,8 +1308,11 @@ def cmd_record_landing(args):
         # Silently skipping the cross-check when no recorder is reachable would make the strongest
         # check on this path the easiest one to switch off -- point --state-dir somewhere without
         # a runs.db and an invented evidence hash is accepted again.
+        # Exit 1, not 4: the contract pins record-landing's exit 4 to "missing validation
+        # evidence", which is a statement about the landing. An unreachable recorder is a
+        # statement about the environment.
         dump_json({"status": "error", "reason": "recorder_unreachable", "db": str(db_path)})
-        return 4
+        return 1
     result = fam.record_landing(Path(args.state_dir), family_id, data, db_path=db_path)
     dump_json(result)
     if result.get("status") == "error":
