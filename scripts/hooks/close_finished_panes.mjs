@@ -19,15 +19,28 @@
  * other sessions' panes, so the listing is never the candidate set.
  *
  * Closable, with no role exceptions: `done`, an explicit halted/dead status, or
- * gone (the agent has disappeared from `herdr agent list`). An idle agent may
- * have dropped its prompt, so it stays open until completion is confirmed. A closed pane is not lost work — the
- * ledger records each agent's session id, so a session is restored by id in a
- * fresh pane. Continuity lives in the session id and the agent's written report, never
- * in a pane left open after confirmed completion.
+ * gone (the agent has disappeared from `herdr agent list`) — but a reported
+ * status alone is a *candidate* for closure, never proof of it (issue 93 / plan
+ * v2 finding F9: `herdr agent prompt --wait` and the `agent_status` field have
+ * both been observed reporting a settled/done state while the pane was still
+ * actively working). Before closing, this hook additionally requires a durable,
+ * independently corroborated terminal completion event for the ledger entry's
+ * `dispatch_id` in `${OFFICE_STATE_DIR:-.office}/events/completions.jsonl`,
+ * written by `scripts/office_monitor.py` with `source` in `monitor_bridge`
+ * (multiple consistent samples) or `process_exit` (the OS's own exit code) —
+ * never a raw, single `source: "herdr"` read, which is recorded only for
+ * replay visibility and is never trusted alone. No event, or a dispatch_id not
+ * in the log yet, means no independent evidence yet: the pane stays open. An
+ * idle agent may have dropped its prompt, so it stays open until completion is
+ * confirmed. A closed pane is not lost work — the ledger records each agent's
+ * session id, so a session is restored by id in a fresh pane. Continuity lives
+ * in the session id and the agent's written report, never in a pane left open
+ * after confirmed completion.
  *
  * Never closable: an agent that is `working`, `idle`, `blocked`, or `unknown`; a pane
- * whose agent has since moved to a different pane than the ledger recorded; and
- * anything not in the ledger.
+ * whose agent has since moved to a different pane than the ledger recorded;
+ * anything not in the ledger; and a reported-finished pane with no durable,
+ * independently corroborated terminal event backing it.
  *
  * Installed by `scripts/hooks/install_hooks.sh` as a Stop hook. The runtime
  * guard below is kept regardless — Herdr being present at install time does not
@@ -50,6 +63,38 @@ const LEDGER = process.env.OFFICE_PANE_LEDGER || join("/tmp", "office", "panes.j
 const FINISHED = new Set(["done", "gone", "halted", "dead", "stopped", "exited", "terminated"]);
 const CURRENT_RUN_ID = process.env.OFFICE_RUN_ID || null;
 const CURRENT_SESSION_ID = process.env.OFFICE_SESSION_ID || process.env.HERDR_SESSION_ID || null;
+const STATE_DIR = process.env.OFFICE_STATE_DIR || ".office";
+// Sources office_monitor.py treats as independently corroborated, not a raw
+// single reported status. Keep in sync with TRUSTED_SOURCES in
+// scripts/office_monitor.py.
+const TRUSTED_EVENT_SOURCES = new Set(["monitor_bridge", "process_exit"]);
+
+/**
+ * Latest completion event for `dispatchId` that is both terminal
+ * (`terminal_classification !== "non_terminal"`) and from a trusted,
+ * independently corroborated source. Returns null on any missing/unreadable
+ * state — a hook that cannot find durable evidence must fail closed (keep the
+ * pane), never treat "I couldn't check" as "it's done".
+ */
+const latestTrustedTerminalEvent = (dispatchId) => {
+  if (!dispatchId) return null;
+  const path = join(STATE_DIR, "events", "completions.jsonl");
+  if (!existsSync(path)) return null;
+  let raw;
+  try { raw = readFileSync(path, "utf8"); } catch { return null; }
+  let best = null;
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let e;
+    try { e = JSON.parse(trimmed); } catch { continue; }
+    if (e.dispatch_id !== dispatchId) continue;
+    if (e.terminal_classification === "non_terminal") continue;
+    if (!TRUSTED_EVENT_SOURCES.has(e.source)) continue;
+    if (!best || (e.sequence || 0) > (best.sequence || 0)) best = e;
+  }
+  return best;
+};
 
 /** herdr on PATH? Outside a Herdr environment this hook is a no-op. */
 const onPath = (bin) => {
@@ -165,6 +210,15 @@ try {
     if (!ownsLedgerEntry(e)) { kept.push(e); continue; }
     const live = liveness(pane, sessionIdentity(e), agents, panes);
     if (!FINISHED.has(live.status)) { kept.push(e); continue; }
+
+    // A reported terminal status is a candidate, never proof: require a
+    // durable, independently corroborated terminal event for this dispatch
+    // before treating the reported status as verified completion. This is
+    // the agy false-done gate (issue 93 / plan v2 finding F9) — without it, a
+    // single unreliable `done`/`gone` read is enough to reclaim a pane whose
+    // agent is still working.
+    const durableEvent = latestTrustedTerminalEvent(e?.dispatch_id || null);
+    if (!durableEvent) { kept.push(e); continue; }
 
     // Preserve the ledger session id; a gone agent no longer appears in either
     // list, and the id is the only way back into this session.
