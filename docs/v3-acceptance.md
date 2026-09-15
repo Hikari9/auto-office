@@ -81,7 +81,8 @@ Per the plan specification (amendment v2 finding F13, amendment v3), every requi
 | `plan-v2#finding-F3` | Recorded independent-review PASS requires validated reviewer dispatch and readback bound to distinct producer/reviewer identity, tree SHA, all 3 versions, review scope, and non-empty evidence. | T4 | `docs/v3-runtime-contracts.md:380` | `python3 -m pytest tests/test_review.py -k test_positive_provenance -q` | `none (pending T4)` | `missing` | N/A |
 | `plan-v2#finding-F10` | Final merge verification asserts reviewed PR head SHA, integration tree hash, and exact diff equality between pre-merge main and post-merge main rather than mere containment. | T8 | `docs/plans/v3-final-merge.md:228` | `git log -1 --stat` | `none (pending T8)` | `missing` | N/A |
 | `plan-v2#ci-billing-lock` | Remote GitHub Actions CI validation workflow validate.yml runs on GitHub infrastructure. | T7 | `.github/workflows/validate.yml:1` | `gh run list --workflow=validate.yml` | `Account locked for billing` | `external-blocker` | GitHub Actions execution blocked by account billing lock; documented in plan v2 and issue comments. Must be resolved by account owner; local validation commands run in lieu of remote CI. |
-| `t2b#derived-adapter-trust` | Adapter trust state (proven vs valid-unverified) is derived from runs.db dispatches and outcome labels meeting proven_min_successful_dispatches and min_task_shapes without unresolved critical defects. | T2B | `scripts/office_runtime.py:212` | `python3 -m pytest tests/test_scoring.py -k test_derived_adapter_trust -q` | `none (pending T2B)` | `missing` | N/A |
+| `t2b#derived-adapter-trust-quarantine` | Adapter trust state moves to `quarantined` automatically, derived from an unresolved adapter-attributed critical failure in runs.db; no query may derive `proven` or clear a standing `quarantined` result (amendment v5). | T2B | `docs/v3-runtime-contracts.md:867` | `python3 -m pytest tests/test_schemas.py -k TestTrustQuery -q` | `tests/test_schemas.py::TestTrustQuery` | `missing` | N/A |
+| `t2b#explicit-adapter-trust-act` | Adapter trust rises to `valid-unverified` from `quarantined`, or to `proven` from any state, only via an explicit, attributed `record_trust_act` write (amendment v5); it is never inferred or backfilled from dispatch counts, labels, or validation rows. | T2B | `docs/v3-runtime-contracts.md:1062` | `python3 -m pytest tests/test_schemas.py -k test_explicit_trust_act -q` | `none (pending T2B implementation of scripts/office_trust.py)` | `missing` | N/A |
 | `t2b#per-role-capability-floor` | Per-role capability floor is derived from config roles.<role>.floor against pinned catalog row, failing closed with named missing field if required attributes are absent. | T2B | `scripts/office_runtime.py:229` | `python3 -m pytest tests/test_scoring.py -k test_capability_floor -q` | `none (pending T2B)` | `missing` | N/A |
 | `t2b#derived-advisory-floor` | Advisory quality anchor evaluates candidate against role floor and preferred_seed criteria rather than caller-supplied advisory_pass boolean. | T2B | `scripts/office_runtime.py:272` | `python3 -m pytest tests/test_scoring.py -k test_advisory_floor -q` | `none (pending T2B)` | `missing` | N/A |
 | `t2b#derived-local-reward` | Local reward is computed from labeled outcome rows in runs.db for the exact triple, representing unknown/unlabeled candidates as None rather than neutral zero. | T2B | `scripts/office_runtime.py:282` | `python3 -m pytest tests/test_scoring.py -k test_local_reward -q` | `none (pending T2B)` | `missing` | N/A |
@@ -109,9 +110,9 @@ Per the plan specification (amendment v2 finding F13, amendment v3), every requi
 
 ## Status Breakdown
 
-- **Total Requirements:** 79
+- **Total Requirements:** 80
 - **Verified:** 2
-- **Missing (Pending Implementation in Waves 1–4):** 73
+- **Missing (Pending Implementation in Waves 1–4):** 74
 - **Superseded (with recorded user approval / withdrawal):** 3
 - **External Blocker:** 1
 - **Conflict:** 0

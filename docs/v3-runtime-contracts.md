@@ -823,27 +823,66 @@ A search across the repository found:
 
 This section defines the authoritative contract specification for Plan v3 Task T2B (`docs/plans/v3-final-merge.md`), establishing requirements for adapter trust qualification, per-role capability floors, outcome labelling, derived local rewards, and recorded override authorization.
 
-### 7.1 Derived Adapter Trust Qualification (Deliverable F1)
+### 7.1 Derived Adapter Trust Qualification (Deliverable F1, narrowed by Amendment v5)
 
-#### 7.1.1 Qualification Thresholds
-Under `config/config.default.yaml` (`adapter_trust`), an adapter candidate qualifies for trust-tier elevation from `candidate`/`quarantined` to `proven` (unlocking mutable-gate authority) only when historical dispatches in `runs.db` satisfy all of the following. Thresholds are **read from config at evaluation time**, never hardcoded, so a config change takes effect without a contract or code change:
-1. **Minimum Successful Dispatches:** At least `proven_min_successful_dispatches` (default: 5) **distinct dispatches** — counted by `COUNT(DISTINCT dispatch_id)`, never by row count — with a terminal outcome label of `verified_no_observed_failure` (the sole canonical "clean success" label; see §7.3.1), a non-empty `evidence_hash` on that label (§7.3.2's mandatory-evidence rule), and zero accepted-material blocking findings.
-2. **Minimum Distinct Task Shapes:** Those same qualifying dispatches must span at least `proven_min_task_shapes` (default: 2) distinct task shapes (`gear x playbook x route`).
-3. **No Unresolved Adapter-Attributed Critical Failure:** There must be zero unresolved adapter-attributed critical failures in the adapter's direct or inherited lineage (§7.1.3).
+**Amendment v5 (`docs/plans/v3-final-merge.md`, `version: 5`; authority: commit `56b4155` on
+`auto-office-v3`, user disposition) is the governing requirement for this section.** Five rounds of
+independent review (F3, F12, F21, F27, and finally R1/R2/R3 in review round 5) each found the trust
+query's promotion path satisfiable by evidence it was supposed to require — self-reported labels,
+misattributed validations, unscoped resolutions — and each fix was a correct, narrower patch that
+still left an upward-from-evidence path for the next round to find. Amendment v5's disposition is
+to stop narrowing and remove the class: **a query may lower adapter trust and it may never raise
+it.** Concretely:
+- Any **downward** transition (anything → `quarantined`) is derived from recorded evidence by
+  query, with no human action — this is what §7.1.2 below still computes.
+- Any **upward** transition (`quarantined` → `valid-unverified`, anything → `proven`) is an
+  **explicit recorded act** carrying its own attribution (§7.1.4). It is never computed from a
+  count, a label, a validation row, or any other query result. R1 (self-reported labels), R2
+  (unscoped resolution), and R3 (no independent authority before clearing quarantine) are all
+  attacks that move trust upward using forged or misattributed evidence; under this rule there is
+  no upward path reachable by evidence at all, so none of the three has a target. This is not a
+  narrower version of the old promotion query — the promotion query is deleted, not patched.
 
-A dispatch may be labeled more than once over time (`outcome_labels` is append-only, §7.3.3); qualification always evaluates the **latest** label per dispatch, never a duplicate or superseded one, so re-recording the same self-reported label cannot multiply a dispatch's contribution to the successful-dispatch count.
+#### 7.1.1 Quarantine Trigger and the Trust-State Floor
+Under `config/config.default.yaml` (`adapter_trust`), an adapter's trust state can only ever be
+automatically *lowered*, never raised, by the query in §7.1.2:
+1. **No Unresolved Adapter-Attributed Critical Failure:** There must be zero unresolved
+   adapter-attributed critical failures in the adapter's direct or inherited lineage (§7.1.3). This
+   is the sole automatic quarantine trigger.
+2. **The floor, absent any explicit trust act, is `valid-unverified`** — never `proven`, no matter
+   how many successful dispatches or how many distinct task shapes an adapter has accumulated. A
+   trust act is required to reach `proven` even from a spotless dispatch history (§7.1.4).
+
+`adapter_trust.proven_min_successful_dispatches` (default: 5) and `adapter_trust.proven_min_task_shapes`
+(default: 2) remain defined in `config/config.default.yaml` — amendment v5 bars parametric changes
+to config values, and these are not evidential thresholds a query evaluates automatically anymore.
+They are **advisory reference numbers** an actor may consult before recording an explicit `proven`
+trust act (§7.1.4); no query binds them, and meeting or exceeding them has no automatic effect.
+
+A dispatch may be labeled more than once over time (`outcome_labels` is append-only, §7.3.3);
+quarantine derivation always evaluates the **latest** label per dispatch, never a duplicate or
+superseded one, so re-recording the same self-reported label cannot multiply a dispatch's
+contribution to any derived count.
 
 #### 7.1.2 Trust Evaluation SQL Query
-The trust qualification status for a candidate triple (`:target_triple`) is evaluated against `runs.db` using the following query. `:proven_min_successful_dispatches` and `:proven_min_task_shapes` are bound parameters read from `config/config.default.yaml`'s `adapter_trust` block, not literals:
 
-**Finding F21/F27 — the complete evidence-validity checklist.** This gate has been narrowed five
-times running (duplicates, then unsigned labels, then empty hashes, then malformed hashes, then
-form-valid-but-irrelevant evidence), each fix correct but each leaving a narrower hole, because
-each of the first four rounds patched the instance found rather than the whole property list. F21
-stopped that pattern by enumerating properties instead of patching instances; F27 found the eighth
-dimension the six-property enumeration hadn't yet named — relevance and recency — by asking not "is
-the hash well-formed and attributable" but "does what it points at actually prove what it claims."
-The full list, checked together wherever "valid evidence" is required anywhere in this query:
+**A query may lower adapter trust and may never raise it.** The query below derives only
+`quarantined`; it has no branch, CTE, or expression that can produce `proven`, and the literal
+string `'proven'` does not appear anywhere in it.
+
+The trust qualification status for a candidate triple (`:target_triple`) is evaluated against
+`runs.db` using the following query.
+
+**Finding F21 — the evidence-validity checklist (narrowed by Amendment v5).** This gate was
+narrowed four times running before F21 stopped patching instances and enumerated the whole property
+list instead (duplicates, then unsigned labels, then empty hashes, then malformed hashes). F27 later
+added two more properties — relevance and recency — but those two applied specifically to the
+*resolution-validation* evidence that cleared quarantine, and amendment v5 deletes that evidence
+path entirely: clearing quarantine is now an explicit act (§7.1.4), not a validation row a query
+inspects. Properties 7 and 8 are retired along with the query branch they described. The six
+properties below remain the complete list for what this (demotion-only) query still evaluates —
+whether a self-reported failure label or a blocking finding is well-formed enough to count as
+evidence of a real failure:
 
 1. **Present** — the column is not `NULL`.
 2. **Correctly prefixed** — begins with the literal `sha256:`.
@@ -854,58 +893,26 @@ The full list, checked together wherever "valid evidence" is required anywhere i
 5. **Attributable to a distinct qualifying dispatch** — counted via `COUNT(DISTINCT dispatch_id)`
    over `latest_labels` (`rn = 1`), so a duplicated or re-recorded label cannot multiply a
    dispatch's contribution (Finding F3).
-6. **Scoped to the exact target triple** — a remediation record for a *different* adapter or a
-   different triple of the same adapter family must not clear this triple's quarantine
-   (`lineage.component_id = :target_triple`, already enforced structurally since F3/F12; named
-   explicitly here because Finding F27 asked whether scope was a distinct, unconsidered dimension —
-   it is not unconsidered, it was already load-bearing, it just hadn't been named).
-7. **Relevant, not merely well-formed (Finding F27)** — for a claimed `resolved_adapter_defect`
-   specifically, form (properties 1-4) and scope (property 6) are not enough: a validation with a
-   syntactically perfect hash, `passed = 1`, that never actually exercised the known-bad case is
-   not evidence of resolution. A qualifying resolution validation must additionally have
-   `known_bad_proven = 1` (`scripts/office_runtime.py:370` already stores this column; no runtime
-   change is needed) and `kind = 'known-bad-regression'`, the approved kind this contract defines
-   for a resolution-proving validation, and its `evidence_hash` must equal a real
-   `artifact_versions.content_hash` recorded for the same run (`JOIN artifact_versions av ON
-   av.run_id = vd.run_id AND av.content_hash = v.evidence_hash`) — the hash is matched against a
-   hash the runtime actually computed from a real artifact, never trusted as an opaque string
-   nobody computed.
-8. **Temporally coherent (Finding F27's self-review)** — a resolution validation dated *before* the
-   failure(s) it claims to resolve cannot have tested the fix for them and must not clear
-   quarantine. The resolving validation's `created_at` must be on or after the latest disqualifying
-   evidence timestamp for that triple (the latest evidence-backed adapter-attributed
-   `recurrence_failure`/`material_post_merge_defect` label, or the latest qualifying blocking
-   finding on an adapter-attributed `abandoned` dispatch).
+6. **Scoped to the exact target triple** — a finding or label recorded against a *different*
+   adapter, or a different triple of the same adapter family, must not quarantine this triple
+   (`d.triple = :target_triple` in `adapter_dispatches`, enforced structurally since F3/F12).
 
-**On completeness.** Re-reading 1-8 as a definition against the three dimensions this round asked
-about directly:
-- **Recency** — was missing; property 8 closes it.
-- **Scope** — was already enforced (`component_id = :target_triple`) but unnamed; property 6 names
-  it explicitly so a future round does not mistake "structurally present" for "not considered."
-- **Authority over the artifact** — deliberately *not* added as a ninth property. "Authority" here
-  would mean requiring an independent reviewer identity (producer ≠ reviewer) on the resolution
-  validation, the way `review-result.schema.json` already requires for adversarial review
-  (Deliverable E, §6). Reusing that exact concept here would blur two already-separately-specified
-  gates: this query's `validations` rows are self-run verification (build/test commands), not
-  adversarial review, and `kind = 'known-bad-regression'` (property 7) already establishes that the
-  validation is the artifact-of-record designated for defect resolution, not an arbitrary passing
-  check. If a future decision requires independent-reviewer sign-off before a quarantine clears,
-  that is a new decision to route through `review-result`, not a property this query's evidence
-  checklist should silently absorb.
-- Conclusion: **1-8 are complete for what this query needs to prove** — presence, form (2-4),
-  attribution (5), scope (6), relevance (7), and recency (8) jointly account for every way a piece
-  of evidence could look valid while proving nothing, given what this query is actually deciding
-  (has the triple demonstrated success, and is any disqualifying failure actually resolved). A
-  future *decision* (e.g. requiring independent review of a resolution) would add a ninth property;
-  no further *gap in the current definition* is evident.
+**On completeness for this query's narrowed job.** This query now only ever derives `quarantined`
+from failure evidence (labels and blocking findings); it no longer evaluates any evidence about
+resolution, relevance to a specific defect claim, or recency of a fix, because there is no longer a
+resolution branch for those properties to guard. Properties 1-6 — presence, form (2-4), attribution
+(5), and scope (6) — are complete for that narrower job. If a future decision reintroduces any
+query-derived upward transition, it would need to re-derive F27's relevance/recency properties for
+whatever evidence it reads; amendment v5's position is that no such decision is anticipated, because
+the upward path itself, not merely its evidence checklist, is the defect class being removed.
 
 Properties 1-4 are combined into one SQL fragment, `IS NOT NULL AND LIKE 'sha256:%' AND
 length(...) = 71 AND substr(..., 8) NOT GLOB '*[^0-9a-f]*'` (SQLite has no native regex; `LIKE` plus
 `length` plus a `GLOB` character-class negation together are the portable equivalent of
 `^sha256:[0-9a-f]{64}$`), computed **once** per evidence source as a named boolean column
-(`evidence_valid` in `latest_labels`, inlined identically in the `findings` and `validations`
-evidence checks) so every consumer of that evidence reads the same already-validated flag rather
-than re-deriving a partial version of the check:
+(`evidence_valid` in `latest_labels`, inlined identically in the `findings` evidence check) so every
+consumer of that evidence reads the same already-validated flag rather than re-deriving a partial
+version of the check:
 
 ```sql
 WITH latest_labels AS (
@@ -948,69 +955,12 @@ adapter_dispatches AS (
     LEFT JOIN latest_labels ll ON ll.dispatch_id = d.id AND ll.rn = 1
     WHERE d.triple = :target_triple
 ),
-resolved_adapter_defects AS (
-    -- Finding F3 / §7.1.3: a triple-scoped remediation record, evidenced by a passed
-    -- validation row (not a nonexistent lineage.evidence_hash column), clears quarantine.
-    -- Finding F27: form (1-4) and scope (6) are not relevance (7) or recency (8). A qualifying
-    -- resolution must be the approved kind, must have actually proven the known-bad case
-    -- (known_bad_proven=1), must bind its hash to a real artifact_versions row from the same
-    -- run (not trust the string), and must not be dated before the failure it resolves.
-    SELECT COUNT(*) AS n
-    FROM lineage l
-    JOIN validations v ON v.id = l.parent_id
-    JOIN dispatches vd ON vd.id = v.dispatch_id
-    JOIN artifact_versions av ON av.run_id = vd.run_id AND av.content_hash = v.evidence_hash
-    WHERE l.component_kind = 'adapter'
-      AND l.component_id = :target_triple
-      AND l.event = 'resolved_adapter_defect'
-      AND l.multiplier > 0
-      AND v.passed = 1
-      AND v.known_bad_proven = 1
-      AND v.kind = 'known-bad-regression'
-      AND v.evidence_hash IS NOT NULL
-      AND v.evidence_hash LIKE 'sha256:%'
-      AND length(v.evidence_hash) = 71
-      AND substr(v.evidence_hash, 8) NOT GLOB '*[^0-9a-f]*'
-      AND v.created_at >= COALESCE(
-          (SELECT MAX(t) FROM (
-              SELECT ll2.labeled_at AS t
-              FROM latest_labels ll2
-              JOIN dispatches d2 ON d2.id = ll2.dispatch_id
-              WHERE d2.triple = :target_triple
-                AND ll2.rn = 1
-                AND ll2.label IN ('recurrence_failure', 'material_post_merge_defect')
-                AND ll2.evidence_valid
-                AND (d2.attribution = 'adapter' OR ll2.primary_attribution = 'adapter')
-              UNION ALL
-              SELECT f2.created_at AS t
-              FROM findings f2
-              JOIN dispatches d3 ON d3.id = f2.dispatch_id
-              LEFT JOIN latest_labels ll3 ON ll3.dispatch_id = d3.id AND ll3.rn = 1
-              WHERE d3.triple = :target_triple
-                AND d3.attribution = 'adapter'
-                AND ll3.label = 'abandoned'
-                AND f2.status = 'accepted-material'
-                AND f2.severity IN ('critical', 'high')
-                AND f2.evidence_hash IS NOT NULL
-                AND f2.evidence_hash LIKE 'sha256:%'
-                AND length(f2.evidence_hash) = 71
-                AND substr(f2.evidence_hash, 8) NOT GLOB '*[^0-9a-f]*'
-          )),
-          v.created_at
-      )
-),
 qualification_summary AS (
+    -- Amendment v5: the prior triple-scoped lineage/validation-join CTE that used to clear
+    -- quarantine automatically is deleted, not narrowed. Clearing quarantine is now
+    -- §7.1.4's explicit trust act; this CTE derives only the failure-side counter that
+    -- feeds a downward transition.
     SELECT
-        COUNT(DISTINCT CASE
-            WHEN outcome_label = 'verified_no_observed_failure'
-                 AND label_evidence_valid
-                 AND blocking_findings = 0
-            THEN dispatch_id END) AS successful_dispatches,
-        COUNT(DISTINCT CASE
-            WHEN outcome_label = 'verified_no_observed_failure'
-                 AND label_evidence_valid
-                 AND blocking_findings = 0
-            THEN task_shape END) AS distinct_task_shapes,
         COUNT(DISTINCT CASE
             WHEN (attribution = 'adapter' OR label_attribution = 'adapter')
                  AND (
@@ -1027,51 +977,196 @@ qualification_summary AS (
                  )
             THEN dispatch_id END) AS critical_failures
     FROM adapter_dispatches
+),
+explicit_trust_act AS (
+    -- §7.1.4: the only source an upward (or an operator-recorded downward) transition can
+    -- ever come from. Never populated, joined, or inferred from outcome_labels, findings,
+    -- validations, or any other evidence table -- it is fed exclusively by record_trust_act
+    -- writes to adapter_trust_acts (§7.1.4.3), an append-only log this query only reads.
+    SELECT target_state
+    FROM adapter_trust_acts
+    WHERE triple = :target_triple
+    ORDER BY recorded_at DESC, id DESC
+    LIMIT 1
 )
 SELECT
-    successful_dispatches,
-    distinct_task_shapes,
     critical_failures,
     CASE
-        WHEN critical_failures > 0 AND (SELECT n FROM resolved_adapter_defects) = 0 THEN 'quarantined'
-        WHEN successful_dispatches >= :proven_min_successful_dispatches
-             AND distinct_task_shapes >= :proven_min_task_shapes THEN 'proven'
-        ELSE 'candidate'
+        -- (a) `invalid` is not evaluated by this query at all -- it comes from adapter
+        --     schema/mandatory-semantics validation, upstream of and unrelated to runs.db
+        --     dispatch history, and is unchanged by amendment v5.
+        -- (b) The only state this query may derive from evidence. Checked first: no
+        --     explicit act, however recent, can paper over a standing derived failure.
+        WHEN critical_failures > 0 THEN 'quarantined'
+        -- (c) Otherwise, the most recently recorded explicit act for this exact triple wins,
+        --     whatever state it names. This is never computed -- it is a straight read of
+        --     the latest attributed act.
+        WHEN (SELECT target_state FROM explicit_trust_act) IS NOT NULL
+            THEN (SELECT target_state FROM explicit_trust_act)
+        -- (d) The floor. Absent any explicit act and any derived failure, an adapter is
+        --     never better than valid-unverified, no matter its dispatch history.
+        ELSE 'valid-unverified'
     END AS qualified_trust_state
-FROM qualification_summary, resolved_adapter_defects;
+FROM qualification_summary;
 ```
 
-This resolves finding F3's three defects directly: `COUNT(DISTINCT dispatch_id)` over `latest_labels` (via `rn = 1`) means duplicated or re-recorded self-reported labels for the same dispatch cannot inflate `successful_dispatches`; the thresholds are bound parameters, not literals; and every evidence check requires the full eight-property checklist above, not a partial version of it — including, for a claimed resolution specifically, that it is relevant (property 7) and not backdated (property 8).
+Because (b) is checked before (c), a standing derived `quarantined` result cannot be overridden by
+an explicit act recorded before, or even after, the disqualifying evidence — evidence attached to
+a triple is permanent and this query never re-derives an upward state from it. This is deliberate,
+not an oversight: an act that could override live failure evidence through this same query path
+would reopen exactly the class of attack amendment v5 removes (a way to reach a higher state that
+is one hop away from the evidence itself, rather than genuinely independent of it). The way an
+operator gives an adapter a fresh evaluation once an issue is genuinely fixed is the mechanism
+already pinned for exactly this purpose in issue-39 (`docs/v3-acceptance.md`'s
+`issue-39#finding-hard-exclusion-and-prior-pinning` row, F28): evidence is pinned to the exact
+triple string it was recorded against, so a new triple (a `routing_version` bump, a different
+`model_id`/`effort`/`harness` combination, or `superseded_by`) starts with no attached evidence and
+a clean `valid-unverified` floor, and can then receive its own explicit trust act on its own
+history. The old triple's quarantine is not "cleared" — it is superseded.
 
-**Finding F12 correction (superseded by F21's checklist above, kept here for history).** Round 1's
-`label_evidence_hash IS NOT NULL` admitted an empty-string hash, because in SQL `'' IS NOT NULL` is
-true. Round 2 added the `LIKE`/`length` check but still admitted a non-hex suffix (e.g.
-`"sha256:" + "z"*64`), which is what F21 closes. Round 1's `critical_failures` also only recognized
-`recurrence_failure`/`material_post_merge_defect` labels, so an adapter-attributed `abandoned`
-dispatch that never landed — but that also carries an accepted-material critical/high finding —
-passed through unnoticed; `critical_failures` now also counts that case, qualified by the finding's
-own evidence (not the `abandoned` label's, since several `abandoned` narrative subtypes carry
-optional evidence per §7.3.2).
+This resolves finding F3's original defects on the surviving demotion path directly:
+`COUNT(DISTINCT dispatch_id)` over `latest_labels` (via `rn = 1`) means duplicated or re-recorded
+self-reported labels cannot inflate any derived count, and every evidence check requires the full
+six-property checklist above, not a partial version of it.
+
+**Finding F12 correction (kept here for history).** Round 1's `label_evidence_hash IS NOT NULL`
+admitted an empty-string hash, because in SQL `'' IS NOT NULL` is true. Round 2 added the
+`LIKE`/`length` check but still admitted a non-hex suffix (e.g. `"sha256:" + "z"*64`), which F21
+closed. Round 1's `critical_failures` also only recognized `recurrence_failure`/
+`material_post_merge_defect` labels, so an adapter-attributed `abandoned` dispatch that never
+landed — but that also carries an accepted-material critical/high finding — passed through
+unnoticed; `critical_failures` now also counts that case, qualified by the finding's own evidence
+(not the `abandoned` label's, since several `abandoned` narrative subtypes carry optional evidence
+per §7.3.2).
 
 #### 7.1.3 Unresolved Adapter-Attributed Critical Failure in Lineage
-An unresolved adapter failure permanently blocks qualification. It is defined as:
+An unresolved adapter failure quarantines the whole triple. It is defined as:
 - Any dispatch on the target triple whose **latest** outcome label is evidence-backed (`evidence_hash IS NOT NULL`) and is `recurrence_failure` or `material_post_merge_defect`, where either the dispatch's own `attribution` column or the label's `primary_attribution` equals `'adapter'`.
-- **Resolution Requirement:** This condition is cleared for the *whole triple* IF AND ONLY IF an explicit remediation record exists in the `lineage` table where:
-  - `component_kind = 'adapter'`
-  - `component_id = :target_triple`
-  - `event = 'resolved_adapter_defect'`
-  - `multiplier > 0`
-  - `parent_id` references a row in `validations` satisfying the full evidence checklist in §7.1.2
-    (properties 1-8): `passed = 1`, `known_bad_proven = 1`, `kind = 'known-bad-regression'`, a
-    well-formed `evidence_hash` bound to a real `artifact_versions.content_hash` from the same run,
-    and `created_at` on or after the latest disqualifying evidence for that triple. (The `lineage`
-    table itself has no `evidence_hash` column; evidence is reached through `parent_id` into
-    `validations`, not fabricated on `lineage` directly.) **Finding F27:** a validation that is
-    merely `passed = 1` with a syntactically valid hash is not sufficient — it must have actually
-    proven the known-bad case, be the approved kind, point at a real recomputed artifact, and not
-    predate the failure it claims to resolve.
 
-  Without a qualifying `resolved_adapter_defect` lineage record, the adapter remains quarantined indefinitely — the unresolved-failure check is independent of, and cannot be outrun by, accumulating additional successful dispatches.
+**Amendment v5 — this condition is not cleared by any query.** Round 1 through F27 each defined a
+progressively stricter `lineage`/`validations`-joined "Resolution Requirement" that could clear this
+condition automatically from evidence (properties 1-8 in the pre-amendment-v5 §7.1.2). Amendment v5
+deletes that mechanism rather than narrowing it further: there is no `lineage` record, `validations`
+row, or any other evidence this query reads that clears an unresolved failure. The only way trust
+rises for this triple afterward is an explicit trust act (§7.1.4), and per §7.1.2's evaluation order
+that act still loses to a *standing* unresolved failure the next time the query runs — see the note
+immediately below the §7.1.2 query for why, and for how an operator actually gives an adapter a
+fresh start (a new triple, not a cleared one). `component_kind = 'adapter'`, `component_id =
+:target_triple`, and `event = 'resolved_adapter_defect'` no longer appear anywhere in this
+contract's SQL; a `lineage` row using them has no effect on `qualified_trust_state`.
+
+Without a recorded, more-recent-than-nothing explicit trust act (subject to §7.1.2's evaluation
+order), the adapter remains quarantined indefinitely — the unresolved-failure check is independent
+of, and cannot be outrun by, accumulating additional successful dispatches.
+
+#### 7.1.4 Explicit Adapter Trust Act (Amendment v5)
+
+The only way adapter trust ever moves to `valid-unverified` from `quarantined`, or to `proven` from
+anything, is this record. It carries its own attribution and is never inferred, computed, or
+backfilled from any other table.
+
+##### 7.1.4.1 Trust Act Record Shape
+
+Pinned here as a contract only, the same way §7.5's `RecordedOverride` is pinned — T0 does not add
+a standalone `schemas/*.schema.json` file for it, matching the plan's instruction that T0 pins
+Deliverable F contracts as text, not implementation (excerpt omits the `$schema` line for
+privacy-lint hygiene):
+```json
+{
+  "title": "AdapterTrustAct",
+  "type": "object",
+  "required": [
+    "trust_act_id",
+    "triple",
+    "target_state",
+    "actor_id",
+    "reason",
+    "recorded_at"
+  ],
+  "properties": {
+    "trust_act_id": {"type": "string", "format": "uuid"},
+    "triple": {"type": "string", "minLength": 1},
+    "target_state": {"enum": ["valid-unverified", "proven"]},
+    "actor_id": {"type": "string", "minLength": 1},
+    "reason": {"type": "string", "minLength": 10},
+    "evidence_reference": {"type": ["string", "null"]},
+    "recorded_at": {"type": "string", "format": "date-time"}
+  },
+  "additionalProperties": false
+}
+```
+- `triple` — the exact routable triple this act applies to; never a family, adapter name, or
+  pattern (matching §7.1.2 property 6's scoping rule for evidence).
+- `target_state` — `valid-unverified` or `proven` only. There is no act to record `quarantined` or
+  `invalid`; those are always query-derived or upstream-validated, never an act.
+- `actor_id` — required, non-empty, identifies who performed the act. This is what makes an act an
+  act and not a self-report: it is always attributable to a specific holder, never to `"system"`,
+  `"automated"`, or a dispatch/label/validation row's own identity.
+- `reason` — required, $\ge 10$ non-whitespace characters, mirroring `RecordedOverride.rationale`
+  (§7.5.2 rule 4): a one-word or empty reason is not a substantive attribution.
+- `evidence_reference` — optional, free-text pointer (a run ID, an issue URL, a validation ID) an
+  actor may cite in support of the act. It is **never validated, joined, or dereferenced by any
+  query** — the moment a query started checking whether `evidence_reference` "actually proves"
+  the act, this contract would have reintroduced the exact evidence-computed-promotion path
+  amendment v5 removes. It exists for human audit trail only.
+- `recorded_at` — stamped by the write path at call time (§7.1.4.3), never caller-supplied,
+  matching the existing convention for `acknowledged_at`/`labeled_at`/`created_at` elsewhere in
+  this contract: a caller cannot backdate an act to win the `ORDER BY recorded_at DESC` tiebreak in
+  §7.1.2 against a later, more authoritative act.
+
+##### 7.1.4.2 Validation Rules
+
+A trust act record is valid if and only if:
+1. `target_state` is exactly `valid-unverified` or `proven`. No other value is a legal act target.
+2. `actor_id` identifies a real holder, never `"system"` or empty.
+3. `reason` contains a substantive justification ($\ge 10$ non-whitespace characters).
+4. The record is append-only: an act is never edited or deleted once recorded. A mistaken act is
+   corrected by recording a new, later act with the intended state and a reason that says so, never
+   by mutating history.
+5. **A trust act can never be inferred or backfilled.** No migration, replay, or seed script may
+   synthesize a historical `adapter_trust_acts` row from `outcome_labels`, `validations`,
+   `lineage`, or any count over them. If a triple has no recorded act, §7.1.2 correctly returns
+   `valid-unverified` (or `quarantined`) rather than a script's guess at what an act "would have
+   said."
+
+##### 7.1.4.3 Write Path
+
+`scripts/office_trust.py` (owned by T2B; new module, not `office_runtime.py`, matching the existing
+Deliverable F boundary that T2B implements behind `scripts/office_routing.py` and
+`scripts/office_scoring.py` and never edits the two T2-owned shared files) is the **only** write
+path permitted to append to `adapter_trust_acts`:
+
+```python
+def record_trust_act(
+    state_dir: Path,
+    triple: str,
+    target_state: str,  # 'valid-unverified' | 'proven'
+    actor_id: str,
+    reason: str,
+    evidence_reference: str | None = None,
+) -> dict:
+    """Appends an explicit, attributed trust act for `triple` to the append-only
+    adapter_trust_acts log. This is the only function in the codebase permitted to raise a
+    triple's trust state; `recorded_at` is stamped here at call time and is never accepted
+    as a caller-supplied argument, so an act cannot be backdated.
+    """
+    ...
+
+def get_current_trust_state(db_path: Path, triple: str) -> str:
+    """Evaluates the §7.1.2 trust-state expression for `triple`: derives `quarantined` from
+    runs.db evidence if it qualifies, otherwise returns the most recently recorded trust
+    act's target_state for `triple`, otherwise 'valid-unverified'. Never derives 'proven'
+    from evidence -- there is no code path in this function that can produce it without a
+    recorded act.
+    """
+    ...
+```
+
+No CLI command in §5 fronts `record_trust_act`; it is deliberately not exposed as a flag-driven
+`office_runtime.py` subcommand (that file is T2-exclusive per §8's boundary, and adding a trust-act
+CLI there would put an upward-trust write path in the same shared file amendment v5 is narrowing
+away from). T2B exposes it however `office_trust.py`'s own CLI or caller does, subject to the
+validation rules in §7.1.4.2.
 
 ---
 
@@ -1366,7 +1461,7 @@ When a routing request contains `allow_unverified_override: true` or `allow_over
 
 ## 8. Verbatim Shared-File Blocks Owned Exclusively by Task T2 (Deliverable G)
 
-Plan v3 strictly assigns `config/config.default.yaml` and `scripts/office_runtime.py` to **Task T2 exclusively**. Task T2 applies the blocks below verbatim as the sole owner of these two shared files. **Task T2B must NEVER edit or mutate either file**, and implements solely behind the delegation shim (within `scripts/office_routing.py`, `scripts/office_scoring.py`, `tests/test_scoring.py`, and `tests/test_derived_routing.py`). This strict task boundary ensures zero concurrent-write merge collisions in Wave 1.
+Plan v3 strictly assigns `config/config.default.yaml` and `scripts/office_runtime.py` to **Task T2 exclusively**. Task T2 applies the blocks below verbatim as the sole owner of these two shared files. **Task T2B must NEVER edit or mutate either file**, and implements solely behind the delegation shim (within `scripts/office_routing.py`, `scripts/office_scoring.py`, `scripts/office_trust.py` (§7.1.4.3), `tests/test_scoring.py`, and `tests/test_derived_routing.py`). This strict task boundary ensures zero concurrent-write merge collisions in Wave 1.
 
 ### 8.1 Literal YAML Block for `config/config.default.yaml` (Deliverable G1)
 

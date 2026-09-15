@@ -562,6 +562,93 @@ class TestSchemas(unittest.TestCase):
                     f'Schema {schema_name} must have at least one rejecting fixture for category {cat}'
                 )
 
+    def test_adapter_trust_act_schema_shape_and_validation_rules(self):
+        # Amendment v5, §7.1.4.1: the AdapterTrustAct record shape is pinned as a text
+        # contract (no standalone schemas/*.schema.json file, matching §7.5's
+        # RecordedOverride precedent) -- extract it directly from the doc and prove it
+        # is well-formed Draft 2020-12 and enforces the validation rules in §7.1.4.2.
+        text = (ROOT / 'docs/v3-runtime-contracts.md').read_text()
+        block = re.search(r'```json\n(\{\s*"title": "AdapterTrustAct".*?\n\})\n```', text, re.S)
+        self.assertTrue(block, 'AdapterTrustAct fenced json block not found')
+        schema = json.loads(block.group(1))
+        Draft202012Validator.check_schema(schema)
+        validator = Draft202012Validator(schema)
+
+        valid_act = {
+            'trust_act_id': 'act-' + 'a' * 8, 'triple': 'agy@local/gemini-3.8-flash@medium',
+            'target_state': 'proven', 'actor_id': 'rico',
+            'reason': 'operator-verified after manual regression pass',
+            'evidence_reference': 'run-123', 'recorded_at': '2026-09-16T00:00:00Z',
+        }
+        self.assertEqual(list(validator.iter_errors(valid_act)), [])
+
+        bad_state = dict(valid_act, target_state='quarantined')
+        self.assertGreater(len(list(validator.iter_errors(bad_state))), 0,
+                            'target_state must reject quarantined/invalid -- those are never an act')
+
+        short_reason = dict(valid_act, reason='ok')
+        self.assertGreater(len(list(validator.iter_errors(short_reason))), 0,
+                            'reason under minLength 10 must fail closed')
+
+        missing_actor = {k: v for k, v in valid_act.items() if k != 'actor_id'}
+        self.assertGreater(len(list(validator.iter_errors(missing_actor))), 0,
+                            'actor_id is required -- an act with no attributed actor is not an act')
+
+    def test_trust_act_write_path_never_accepts_a_caller_supplied_timestamp(self):
+        # §7.1.4.3 / R1-R3: record_trust_act must pin triple/target_state/actor_id/reason
+        # as named parameters, and recorded_at must NOT be one of them -- a caller-supplied
+        # timestamp would let an act be backdated to win the ORDER BY recorded_at DESC
+        # tiebreak in §7.1.2 against a later, more authoritative act.
+        text = (ROOT / 'docs/v3-runtime-contracts.md').read_text()
+        m = re.search(r'def record_trust_act\((.*?)\n\) -> dict:', text, re.S)
+        self.assertTrue(m, 'record_trust_act signature not found')
+        sig = m.group(1)
+        for param in ('triple: str', 'target_state: str', 'actor_id: str', 'reason: str'):
+            self.assertIn(param, sig, f'{param} missing from record_trust_act')
+        self.assertNotIn('recorded_at', sig,
+                          'recorded_at must be stamped internally, never caller-supplied')
+
+        m2 = re.search(r'def get_current_trust_state\((.*?)\) -> str:', text, re.S)
+        self.assertTrue(m2, 'get_current_trust_state signature not found')
+        self.assertIn('triple: str', m2.group(1))
+
+    def test_adapter_trust_config_thresholds_unchanged_and_advisory_only(self):
+        # Amendment v5 bars parametric changes to config/config.default.yaml. The two
+        # adapter_trust thresholds must survive with their original values even though
+        # no query binds them anymore -- they are documented as advisory-only in §7.1.1.
+        config = yaml.safe_load((ROOT / 'config/config.default.yaml').read_text())
+        self.assertEqual(config['adapter_trust']['proven_min_successful_dispatches'], 5)
+        self.assertEqual(config['adapter_trust']['proven_min_task_shapes'], 2)
+
+        text = (ROOT / 'docs/v3-runtime-contracts.md').read_text()
+        query_block = re.search(r"```sql\n(WITH latest_labels AS \(.*?)\n```", text, re.S).group(1)
+        self.assertNotIn(':proven_min_successful_dispatches', query_block)
+        self.assertNotIn(':proven_min_task_shapes', query_block)
+
+    def test_evidence_checklist_trimmed_to_six_properties(self):
+        # F27's properties 7 (relevance) and 8 (recency) described the resolution-
+        # validation evidence path amendment v5 deletes; they must not remain listed as
+        # active properties of the still-live demotion-only checklist.
+        text = (ROOT / 'docs/v3-runtime-contracts.md').read_text()
+        m = re.search(r'#### 7\.1\.2 Trust Evaluation SQL Query.*?(?=```sql)', text, re.S)
+        self.assertTrue(m, '7.1.2 intro section not found')
+        section = m.group(0)
+        for n in range(1, 7):
+            self.assertIn(f'{n}. **', section, f'property {n} missing from the trimmed checklist')
+        self.assertNotIn('7. **Relevant', section)
+        self.assertNotIn('8. **Temporally coherent', section)
+
+    def test_acceptance_matrix_trust_rows_reclassified(self):
+        # Round 7 consequential edit: the acceptance row describing automatic promotion
+        # must be gone, replaced by rows describing the explicit-act requirement.
+        text = (ROOT / 'docs/v3-acceptance.md').read_text()
+        self.assertIn('t2b#derived-adapter-trust-quarantine', text)
+        self.assertIn('t2b#explicit-adapter-trust-act', text)
+        self.assertNotIn(
+            'meeting proven_min_successful_dispatches and min_task_shapes without unresolved critical defects',
+            text,
+        )
+
 class TestRouteNoNetworkAccess(unittest.TestCase):
     """Finding F25: issue-40's resolution requires routing to consume a reproducible
     local catalog snapshot and never perform live network discovery at route time.
@@ -596,9 +683,14 @@ class TestRouteNoNetworkAccess(unittest.TestCase):
 
 
 class TestTrustQuery(unittest.TestCase):
-    """Findings F3/F12: extract the pinned trust-evaluation SQL directly out of
+    """Amendment v5 (docs/plans/v3-final-merge.md `version: 5`): a query may lower adapter
+    trust and may never raise it. Extract the pinned trust-evaluation SQL directly out of
     docs/v3-runtime-contracts.md and exercise it against a real sqlite schema, so the
-    contract's own query text (not a hand-copied stand-in) is what gets proven closed."""
+    contract's own query text (not a hand-copied stand-in) is what gets proven closed. The
+    promotion-path tests from F3/F12/F21/F27 are gone along with the resolved_adapter_defects
+    CTE and the successful_dispatches/distinct_task_shapes counters they exercised -- that
+    behavior is deleted by amendment v5, not weakened; see docs/v3-runtime-contracts.md
+    section 7.1 and /tmp/aoffice-0b3e/t0-r7-report.md for the authority and the reasoning."""
 
     TRIPLE = "agy@local/gemini-3.8-flash@medium"
     VALID_HASH = "sha256:" + "a" * 64
@@ -609,25 +701,21 @@ class TestTrustQuery(unittest.TestCase):
         m = re.search(r"```sql\n(WITH latest_labels AS \(.*?)\n```", text, re.S)
         assert m, "trust evaluation SQL block not found in docs/v3-runtime-contracts.md"
         cls.QUERY = m.group(1)
+        assert 'resolved_adapter_defects' not in cls.QUERY
+        assert 'proven' not in cls.QUERY.lower()
 
     def _con(self):
         con = sqlite3.connect(":memory:")
         con.executescript("""
         CREATE TABLE dispatches(id TEXT PRIMARY KEY, run_id TEXT, role TEXT, holder_id TEXT, triple TEXT, invocation_model_id TEXT, selection_reason TEXT, task_shape TEXT, size_class TEXT, started_at TEXT, ended_at TEXT, money_estimate REAL, money_actual REAL, quota_estimate REAL, quota_delta REAL, wall_clock_seconds REAL, attribution TEXT, outcome TEXT);
         CREATE TABLE findings(id TEXT PRIMARY KEY, dispatch_id TEXT, reviewer_dispatch_id TEXT, status TEXT, severity TEXT, summary TEXT, evidence_hash TEXT, created_at TEXT);
-        CREATE TABLE validations(id TEXT PRIMARY KEY, dispatch_id TEXT, kind TEXT, command TEXT, passed INTEGER, known_bad_proven INTEGER, evidence_hash TEXT, created_at TEXT);
         CREATE TABLE outcome_labels(id TEXT PRIMARY KEY, dispatch_id TEXT, label TEXT, primary_attribution TEXT, contributing_attributions TEXT, labeled_at TEXT, evidence_hash TEXT);
-        CREATE TABLE lineage(id TEXT PRIMARY KEY, component_kind TEXT, component_id TEXT, parent_id TEXT, event TEXT, multiplier REAL, created_at TEXT);
-        CREATE TABLE artifact_versions(id TEXT PRIMARY KEY, run_id TEXT, kind TEXT, version INTEGER, content_hash TEXT, created_at TEXT);
+        CREATE TABLE adapter_trust_acts(id TEXT PRIMARY KEY, triple TEXT, target_state TEXT, actor_id TEXT, reason TEXT, evidence_reference TEXT, recorded_at TEXT);
         """)
         return con
 
-    def _run(self, con, min_successful=5, min_shapes=2):
-        return con.execute(self.QUERY, {
-            "target_triple": self.TRIPLE,
-            "proven_min_successful_dispatches": min_successful,
-            "proven_min_task_shapes": min_shapes,
-        }).fetchone()
+    def _run(self, con):
+        return con.execute(self.QUERY, {"target_triple": self.TRIPLE}).fetchone()
 
     def _dispatch(self, con, did, task_shape="shapeA", attribution=None, run_id="run-1"):
         con.execute("INSERT INTO dispatches VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -640,67 +728,52 @@ class TestTrustQuery(unittest.TestCase):
                     (f"lab-{did}-{label}", did, label, primary_attribution, None,
                      labeled_at, evidence_hash))
 
-    def _resolve(self, con, lineage_id="lin-1", run_id="run-fix", val_id="val-fix",
-                 passed=1, known_bad_proven=1, kind="known-bad-regression",
-                 evidence_hash=None, created_at="2026-09-16T00:00:00Z",
-                 bind_artifact=True):
-        # Finding F27: a qualifying resolution needs a dispatch (for its run_id), a
-        # validation row, and (unless bind_artifact=False, to test the unbound case) a
-        # matching artifact_versions row in the same run whose content_hash equals the
-        # validation's evidence_hash.
-        evidence_hash = evidence_hash or self.VALID_HASH
-        fixup_id = f"disp-fixup-{val_id}"
-        self._dispatch(con, fixup_id, run_id=run_id)
-        con.execute("INSERT INTO validations VALUES (?,?,?,?,?,?,?,?)",
-                    (val_id, fixup_id, kind, "pytest ...", passed, known_bad_proven,
-                     evidence_hash, created_at))
-        if bind_artifact:
-            con.execute("INSERT INTO artifact_versions VALUES (?,?,?,?,?,?)",
-                        (f"art-{val_id}", run_id, "test-log", 1, evidence_hash, created_at))
-        con.execute("INSERT INTO lineage VALUES (?,?,?,?,?,?,?)",
-                    (lineage_id, "adapter", self.TRIPLE, val_id, "resolved_adapter_defect",
-                     1.0, created_at))
+    def _trust_act(self, con, triple=None, target_state="proven", actor_id="rico",
+                    reason="manually reviewed and reinstated", evidence_reference=None,
+                    recorded_at="2026-09-16T00:00:00Z", act_id=None):
+        con.execute("INSERT INTO adapter_trust_acts VALUES (?,?,?,?,?,?,?)",
+                    (act_id or f"act-{recorded_at}", triple or self.TRIPLE, target_state,
+                     actor_id, reason, evidence_reference, recorded_at))
 
     def _seed_five_evidenced_successes(self, con):
+        # Reviewer's exact counterexample shape (round-5 R1): five self-reported
+        # verified_no_observed_failure labels, well-formed hashes, no supporting
+        # artifacts, across two task shapes.
         shapes = ["shapeA", "shapeA", "shapeA", "shapeB", "shapeB"]
         for i, shape in enumerate(shapes):
             did = f"disp-ok-{i}"
             self._dispatch(con, did, task_shape=shape)
             self._label(con, did, "verified_no_observed_failure", evidence_hash=self.VALID_HASH)
 
-    def test_empty_string_evidence_hash_does_not_qualify(self):
-        # Finding F12: SQL "IS NOT NULL" is true for '', so an unsigned self-report with
-        # evidence_hash='' must not count toward successful_dispatches.
+    def test_empty_string_evidence_hash_does_not_quarantine(self):
+        # Finding F12, retargeted at the surviving demotion path (amendment v5 deletes
+        # the promotion path these tests used to exercise): SQL "IS NOT NULL" is true
+        # for '', so an adapter-attributed recurrence_failure with evidence_hash='' must
+        # not count toward critical_failures.
         con = self._con()
-        for i in range(6):
-            did = f"disp-empty-{i}"
-            self._dispatch(con, did)
-            self._label(con, did, "verified_no_observed_failure", evidence_hash="")
-        self.assertEqual(self._run(con)[3], "candidate")
+        self._dispatch(con, "disp-empty", attribution="adapter")
+        self._label(con, "disp-empty", "recurrence_failure", evidence_hash="")
+        self.assertEqual(self._run(con)[1], "valid-unverified")
 
-    def test_non_hex_evidence_hash_does_not_qualify(self):
-        # Finding F21: correct prefix and length are not enough -- a suffix containing a
-        # non-hex character (here 'z', repeated to keep the length exactly 71) must not
-        # be treated as valid evidence.
+    def test_non_hex_evidence_hash_does_not_quarantine(self):
+        # Finding F21, retargeted: correct prefix and length are not enough -- a suffix
+        # containing a non-hex character (here 'z') must not be treated as valid
+        # evidence of an adapter failure either.
         con = self._con()
-        for i in range(6):
-            did = f"disp-nonhex-{i}"
-            self._dispatch(con, did)
-            self._label(con, did, "verified_no_observed_failure",
-                        evidence_hash="sha256:" + "z" * 64)
-        self.assertEqual(self._run(con)[3], "candidate")
+        self._dispatch(con, "disp-nonhex", attribution="adapter")
+        self._label(con, "disp-nonhex", "recurrence_failure",
+                    evidence_hash="sha256:" + "z" * 64)
+        self.assertEqual(self._run(con)[1], "valid-unverified")
 
-    def test_uppercase_hex_evidence_hash_does_not_qualify(self):
-        # Finding F21: the schema pattern ^sha256:[0-9a-f]{64}$ is lowercase-only; an
-        # uppercase-hex suffix has the right length and character class casing mismatch
-        # must still be rejected, not silently case-folded into acceptance.
+    def test_uppercase_hex_evidence_hash_does_not_quarantine(self):
+        # Finding F21, retargeted: the schema pattern ^sha256:[0-9a-f]{64}$ is
+        # lowercase-only; an uppercase-hex suffix must still be rejected as failure
+        # evidence, not silently case-folded into counting.
         con = self._con()
-        for i in range(6):
-            did = f"disp-upper-{i}"
-            self._dispatch(con, did)
-            self._label(con, did, "verified_no_observed_failure",
-                        evidence_hash="sha256:" + "A" * 64)
-        self.assertEqual(self._run(con)[3], "candidate")
+        self._dispatch(con, "disp-upper", attribution="adapter")
+        self._label(con, "disp-upper", "recurrence_failure",
+                    evidence_hash="sha256:" + "A" * 64)
+        self.assertEqual(self._run(con)[1], "valid-unverified")
 
     def test_adapter_abandoned_with_critical_finding_quarantines(self):
         # Finding F12: an adapter-attributed dispatch that never landed but carries an
@@ -713,90 +786,73 @@ class TestTrustQuery(unittest.TestCase):
         con.execute("INSERT INTO findings VALUES (?,?,?,?,?,?,?,?)",
                     ("f1", "disp-bad-abandoned", "rev-1", "accepted-material", "critical",
                      "broke prod", self.VALID_HASH, "2026-09-15T00:00:00Z"))
-        self.assertEqual(self._run(con)[3], "quarantined")
+        self.assertEqual(self._run(con)[1], "quarantined")
 
-    def test_resolution_record_with_empty_hash_does_not_clear_quarantine(self):
-        # Finding F12: the resolved_adapter_defects lookup must reject an empty-string
-        # validation evidence_hash the same way the label check does.
+    def test_five_self_reported_labels_two_shapes_never_produce_proven(self):
+        # Round-5 review R1 / amendment v5's own counterexample: five self-reported
+        # verified_no_observed_failure labels across two task shapes, well-formed
+        # sha256: hashes, and no supporting artifacts. Against 8e90ef0's query this
+        # returned 'proven' with nothing behind it (see t0-r7-report.md for the
+        # fail-before/pass-after proof). Under amendment v5 there is no branch of this
+        # query that can produce 'proven' at all -- self-reported success evidence,
+        # however much of it accumulates, never raises trust.
         con = self._con()
         self._seed_five_evidenced_successes(con)
-        self._dispatch(con, "disp-bad2", attribution="adapter")
-        self._label(con, "disp-bad2", "recurrence_failure", evidence_hash=self.VALID_HASH)
-        self._resolve(con, val_id="val-fake", evidence_hash="", bind_artifact=False)
-        self.assertEqual(self._run(con)[3], "quarantined")
+        state = self._run(con)[1]
+        self.assertNotEqual(state, "proven")
+        self.assertEqual(state, "valid-unverified")
 
-    def test_resolution_with_known_bad_proven_false_does_not_clear_quarantine(self):
-        # Finding F27 property 7 (relevance): passed=1 with a form-valid hash is not
-        # enough -- the validation must have actually proven the known-bad case.
+    def test_qualifying_failure_quarantines_with_no_human_action(self):
+        # Round-7 criterion 4: demotion must still be fully automatic. A single
+        # adapter-attributed, evidence-backed recurrence_failure label quarantines with
+        # no trust act, no lineage record, and no validation row of any kind recorded.
         con = self._con()
-        self._seed_five_evidenced_successes(con)
-        self._dispatch(con, "disp-bad3", attribution="adapter")
-        self._label(con, "disp-bad3", "recurrence_failure", evidence_hash=self.VALID_HASH)
-        self._resolve(con, val_id="val-unproven", known_bad_proven=0)
-        self.assertEqual(self._run(con)[3], "quarantined")
-
-    def test_resolution_with_wrong_kind_does_not_clear_quarantine(self):
-        # Finding F27 property 7: only the approved kind for a resolution-proving
-        # validation qualifies; an arbitrary passing check does not.
-        con = self._con()
-        self._seed_five_evidenced_successes(con)
-        self._dispatch(con, "disp-bad4", attribution="adapter")
-        self._label(con, "disp-bad4", "recurrence_failure", evidence_hash=self.VALID_HASH)
-        self._resolve(con, val_id="val-wrongkind", kind="pytest")
-        self.assertEqual(self._run(con)[3], "quarantined")
-
-    def test_resolution_hash_not_bound_to_real_artifact_does_not_clear_quarantine(self):
-        # Finding F27 property 7: the evidence_hash must be matched against a real,
-        # independently recorded artifact_versions.content_hash, not trusted as a string.
-        con = self._con()
-        self._seed_five_evidenced_successes(con)
-        self._dispatch(con, "disp-bad5", attribution="adapter")
-        self._label(con, "disp-bad5", "recurrence_failure", evidence_hash=self.VALID_HASH)
-        self._resolve(con, val_id="val-unbound", bind_artifact=False)
-        self.assertEqual(self._run(con)[3], "quarantined")
-
-    def test_backdated_resolution_does_not_clear_quarantine(self):
-        # Finding F27 property 8 (recency): a validation dated before the failure it
-        # claims to resolve cannot have tested the fix for it.
-        con = self._con()
-        self._seed_five_evidenced_successes(con)
-        self._dispatch(con, "disp-bad6", attribution="adapter")
-        self._label(con, "disp-bad6", "recurrence_failure", evidence_hash=self.VALID_HASH,
-                    labeled_at="2026-09-20T00:00:00Z")
-        self._resolve(con, val_id="val-backdated", created_at="2026-09-10T00:00:00Z")
-        self.assertEqual(self._run(con)[3], "quarantined")
-
-    def test_fully_qualifying_resolution_clears_quarantine(self):
-        # Finding F27: with relevance and recency both satisfied (in addition to the
-        # pre-existing form/scope checks), resolution genuinely clears quarantine.
-        con = self._con()
-        self._seed_five_evidenced_successes(con)
-        self._dispatch(con, "disp-bad7", attribution="adapter")
-        self._label(con, "disp-bad7", "recurrence_failure", evidence_hash=self.VALID_HASH,
-                    labeled_at="2026-09-10T00:00:00Z")
-        self._resolve(con, val_id="val-good", created_at="2026-09-20T00:00:00Z")
-        self.assertEqual(self._run(con)[3], "proven")
-
-    def test_legit_evidenced_case_still_proves(self):
-        con = self._con()
-        self._seed_five_evidenced_successes(con)
-        self.assertEqual(self._run(con), (5, 2, 0, "proven"))
-
-    def test_one_dispatch_short_stays_candidate(self):
-        con = self._con()
-        self._seed_five_evidenced_successes(con)
-        con.execute("DELETE FROM dispatches WHERE id='disp-ok-4'")
-        self.assertEqual(self._run(con)[3], "candidate")
-
-    def test_unresolved_recurrence_quarantines_then_resolution_clears_it(self):
-        con = self._con()
-        self._seed_five_evidenced_successes(con)
         self._dispatch(con, "disp-bad", attribution="adapter")
         self._label(con, "disp-bad", "recurrence_failure", evidence_hash=self.VALID_HASH,
                     labeled_at="2026-09-15T00:00:00Z")
-        self.assertEqual(self._run(con)[3], "quarantined")
-        self._resolve(con, val_id="val-fix", created_at="2026-09-16T00:00:00Z")
-        self.assertEqual(self._run(con)[3], "proven")
+        critical_failures, state = self._run(con)
+        self.assertEqual(critical_failures, 1)
+        self.assertEqual(state, "quarantined")
+
+    def test_explicit_trust_act_raises_a_clean_triple_to_proven(self):
+        # §7.1.4: with no derived failure evidence at all, a recorded trust act (not
+        # any count or label) is what raises trust -- and it is the *only* thing that
+        # can, since test_five_self_reported_labels_two_shapes_never_produce_proven
+        # proves evidence alone cannot.
+        con = self._con()
+        self._trust_act(con, target_state="proven", reason="operator-verified rollout")
+        self.assertEqual(self._run(con), (0, "proven"))
+
+    def test_explicit_trust_act_cannot_override_a_standing_quarantine(self):
+        # §7.1.2 evaluates (b) quarantined before (c) the explicit act, on purpose: an
+        # act recorded *after* a standing, unresolved failure must not silently clear
+        # it through this query, or the act-recording path would reopen exactly the
+        # evidence-laundering class amendment v5 removes.
+        con = self._con()
+        self._dispatch(con, "disp-bad", attribution="adapter")
+        self._label(con, "disp-bad", "recurrence_failure", evidence_hash=self.VALID_HASH,
+                    labeled_at="2026-09-15T00:00:00Z")
+        self._trust_act(con, target_state="proven",
+                         reason="attempted override after the failure",
+                         recorded_at="2026-09-20T00:00:00Z")
+        self.assertEqual(self._run(con)[1], "quarantined")
+
+    def test_most_recent_trust_act_wins_over_an_older_one(self):
+        con = self._con()
+        self._trust_act(con, target_state="proven", act_id="act-1",
+                         recorded_at="2026-09-10T00:00:00Z")
+        self._trust_act(con, target_state="valid-unverified", act_id="act-2",
+                         recorded_at="2026-09-15T00:00:00Z")
+        self.assertEqual(self._run(con)[1], "valid-unverified")
+
+    def test_trust_act_for_a_different_triple_does_not_apply(self):
+        con = self._con()
+        self._trust_act(con, triple="other@local/other@medium", target_state="proven")
+        self.assertEqual(self._run(con)[1], "valid-unverified")
+
+    def test_no_evidence_and_no_act_floors_at_valid_unverified(self):
+        con = self._con()
+        self.assertEqual(self._run(con), (0, "valid-unverified"))
 
 
 if __name__ == '__main__':
