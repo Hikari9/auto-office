@@ -19,8 +19,8 @@ The user has accepted the eight design decisions. This is an implementation plan
 ## Planning envelope
 
 ```yaml
-plan_version: 4
-requirements_version: 3
+plan_version: 5
+requirements_version: 4
 routing_version: 3
 branch: auto-office-v3
 target_branch: main
@@ -47,6 +47,33 @@ base_drift:
       collision to explain, not a new baseline. Later dispatches cut from 487fca8 or later
       use the 109/8 baseline instead.
 amendment_history:
+  - version: 5
+    kind: requirements
+    reason: >-
+      Independent review round 5 of T0 (fresh reviewer, codex gpt-5.6-luna@xhigh) returned
+      CHANGES REQUIRED with R1, R2 and R3 all in the same defect class that rounds 1-4 had
+      already addressed four times: a trust gate satisfiable by the evidence it exists to
+      exclude. The orchestrator verified the claim by reading the SQL rather than accepting
+      the finding. In docs/v3-runtime-contracts.md the quarantine-CLEARING path is bound
+      correctly (it joins validations and artifact_versions and requires known_bad_proven),
+      while the PROMOTION path below it tests only that outcome_labels.evidence_hash is a
+      well-formed sha256 string and joins nothing. The reviewer demonstrated it with a
+      runnable SQLite case: five self-reported labels across two task shapes returned
+      "proven" with no supporting artifact. R2 additionally showed the resolution query
+      never requires vd.triple = :target_triple, so another triple's validation clears
+      quarantine. Four successive fixes were each correct and each left a narrower hole,
+      and the material-finding trend stopped converging (11, 9, 4, 2, 6).
+      The user's disposition is to remove the class rather than narrow it again.
+      TRUST MOVES DOWN AUTOMATICALLY, NEVER UP. Automatic derivation from recorded evidence
+      is retained for demotion only: an observed failure quarantines a triple without human
+      action. Promotion to `proven` is no longer computed from a dispatch count and is
+      instead an explicit recorded act. A gate that can only lower trust cannot be gamed
+      into granting it, so R1, R2 and R3 cease to be reachable rather than being patched.
+      Nothing in this run depends on automated promotion: the user granted
+      allow_unverified_override for this run, and routing stage 2 consumes adapter_state
+      whichever way it was set.
+    affected_scopes: [T0, T2B]
+    resulting_versions: {plan_version: 5, requirements_version: 4, routing_version: 3}
   - version: 4
     kind: requirements
     reason: >-
@@ -141,6 +168,8 @@ Blast radius: root skill and lifecycle specs drive every run; state/version/appr
 Protected paths and non-goals: no changes to user-global skill installations, harness settings, credentials, unrelated repositories, or live user runs. `.github/workflows/validate.yml` is protected for the whole run (amendment v2, finding F11), and `scripts/hooks/install_hooks.sh` may be edited but never executed (amendment v2, finding F12). Do not revive Bash approval enforcement, introduce a heavyweight scheduler, or prove additional harnesses such as Hermes/pi. Do not delete or migrate private telemetry destructively. Do not implement a second independent review merely to satisfy executor count. Any necessary change beyond these boundaries requires a scoped plan amendment.
 
 Scoring, rewards and capability floors (amendment v3). Version 1's non-goal barring this work is withdrawn by explicit user decision, and replaced by a bounded one. **Structural change is in scope**: deriving a value from recorded evidence instead of accepting it as caller input, writing the outcome labels that every scoring path already reads, and expressing the capability floor as a declared per-role minimum evaluated against the pinned catalog snapshot. **Parametric change is out of scope**: no task may alter any numeric value in `config/config.default.yaml` under `maturity`, `replay`, `quota`, `cost_policy` or `exploration`, nor change `maturity_age()`'s curve or the reward model's shape. The reason is evidential, not conservative: `runs.db` currently holds 2 dispatches and 0 outcome labels, so new weights chosen today would carry exactly the same authority as the ones already in the file while consuming a wave, and would additionally destroy the value of `replay.min_labeled_rows_for_refit`, which exists so a policy change is validated against recorded decisions rather than intuition. The first reweighting happens in a later run, through the replay gate, once at least 20 labeled rows exist. A task that finds a weight it believes is wrong records it as a matrix row with evidence and leaves the value untouched.
+
+Adapter trust moves down automatically, never up (amendment v5). Structural derivation of adapter trust is retained for demotion only. An observed failure quarantines a triple from recorded evidence with no human action, and routing stage 2 consumes that derived state. Promotion to `proven` is NOT computed from a dispatch count or any query over `outcome_labels`: it is an explicit recorded act with its own attribution. T0 therefore does not pin a promotion query, and T2B does not implement one. The reason is that a promotion gate must be un-gameable to be worth anything, and five rounds of independent review produced four correct narrowings and a runnable counterexample that still returned `proven` from five self-reported labels. A gate that can only lower trust has no such failure mode, because the evidence an attacker would forge moves the value in the direction they do not want. This is a scope narrowing, not a deferral: no later task inherits a requirement to compute promotion.
 
 Named future actions: isolated fixture worktrees and test runs; scoped implementation commits and PR updates after execution is authorized; final merge only under explicit user authority. Billing/payment changes are user-owned and not authorized. This plan commit does not authorize any of these future actions now.
 
