@@ -190,7 +190,9 @@ class LandingCliTests(unittest.TestCase):
         path = self._write_tmp(landing)
         code, out = _invoke(rt.cmd_record_landing, file=path, family_id=None,
                             state_dir=str(self.state_dir), db=str(self.state_dir / "absent.db"))
-        self.assertEqual(code, 4)
+        # Exit 1, not 4: exit 4 is pinned to "missing validation evidence", a statement about
+        # the landing. This is a statement about the environment.
+        self.assertEqual(code, 1)
         self.assertEqual(out["reason"], "recorder_unreachable")
 
     def test_record_landing_then_validate_and_verify(self):

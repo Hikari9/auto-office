@@ -305,6 +305,25 @@ class StartCommandTests(unittest.TestCase):
         self.assertTrue((state_dir/'envelope.json').exists())
         self.assertNotIn(str(self.repo), str(state_dir))
 
+    def test_start_creates_the_recorder_every_later_command_defaults_to(self):
+        """`<state_dir>/runs.db` is the default `record-landing` resolves when no --db is given.
+
+        Nothing created it, so the contract-documented invocation resolved a path that had
+        never been written and rejected the landing outright once the recorder cross-check
+        became mandatory. The test that covers that rejection passes --db explicitly, so it
+        never exercised the default.
+        """
+        code, out = self._start(gear='direct')
+        self.assertEqual(code, 0)
+        db = Path(out['state_dir']) / 'runs.db'
+        self.assertTrue(db.exists(), f"start did not create {db}")
+        import sqlite3
+        with sqlite3.connect(db) as con:
+            tables = {r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        self.assertIn('validations', tables)
+        self.assertIn('outcome_labels', tables)
+
     def test_writes_pointer_file_inside_target_repo(self):
         code, out = self._start(gear='direct')
         self.assertEqual(code, 0)
