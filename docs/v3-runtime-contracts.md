@@ -864,170 +864,109 @@ quarantine derivation always evaluates the **latest** label per dispatch, never 
 superseded one, so re-recording the same self-reported label cannot multiply a dispatch's
 contribution to any derived count.
 
-#### 7.1.2 Trust Evaluation SQL Query
+#### 7.1.2 Trust Evaluation Contract (Amendment v6 — No Normative SQL)
 
-**A query may lower adapter trust and may never raise it.** The query below derives only
-`quarantined`; it has no branch, CTE, or expression that can produce `proven`, and the literal
-string `'proven'` does not appear anywhere in it.
+**The invariant, in one sentence: a query may lower adapter trust and it may never raise it.**
 
-The trust qualification status for a candidate triple (`:target_triple`) is evaluated against
-`runs.db` using the following query.
+**Amendment v6 (`docs/plans/v3-final-merge.md`, `version: 6`; authority: commit `b8577a3` on
+`auto-office-v3`, user decision) removes the SQL query previously pinned in this section.** Four
+rounds of independent review (F3, F12, F21, F27) each found a real defect inside a correct-looking
+SQL body committed to this document, and a fifth review round found a fifth: `latest_labels`
+selected only the most recent label per dispatch (`rn = 1`), so appending one benign, self-reported
+`verified_no_observed_failure` label to a dispatch that already carried a qualifying failure moved
+that failure off the newest row, dropped `critical_failures` to 0, and returned an upward transition
+from a single unauthenticated `INSERT` — reproduced directly against the committed fixture:
+`(1, 'quarantined')` became `(0, 'proven')` after that one appended row. The pattern across five
+rounds is the diagnosis, not any one instance of it: a document is the wrong place to debug a query,
+because prose review can confirm a query *reads* correctly without ever *executing* it against an
+adversarial fixture.
 
-**Finding F21 — the evidence-validity checklist (narrowed by Amendment v5).** This gate was
-narrowed four times running before F21 stopped patching instances and enumerated the whole property
-list instead (duplicates, then unsigned labels, then empty hashes, then malformed hashes). F27 later
-added two more properties — relevance and recency — but those two applied specifically to the
-*resolution-validation* evidence that cleared quarantine, and amendment v5 deletes that evidence
-path entirely: clearing quarantine is now an explicit act (§7.1.4), not a validation row a query
-inspects. Properties 7 and 8 are retired along with the query branch they described. The six
-properties below remain the complete list for what this (demotion-only) query still evaluates —
-whether a self-reported failure label or a blocking finding is well-formed enough to count as
-evidence of a real failure:
+By this amendment, T0 pins no query body and ships no normative SQL for this section. It pins the
+invariant, the properties below, and the `outcome_labels` (§7.3.3) and `adapter_trust_acts`
+(§7.1.4.1) schemas the properties are evaluated over. **`tests/test_trust_conformance.py` is the
+normative artifact for this section** — it proves the properties below against a real
+implementation rather than against document text. T2B implements the query behind
+`evaluate_trust_state` (signature pinned below) in `scripts/office_scoring.py`; T2B's completion
+criterion is that suite passing un-skipped and green, not a reviewer reading SQL.
 
-1. **Present** — the column is not `NULL`.
+**No SQL in this document is normative.** This section contains none. If SQL is ever added here
+again as illustration, it must be labeled non-normative in the same breath it appears, or it must
+not be added at all — a reader must never be left able to mistake illustrative SQL for the contract.
+
+**Evidence-validity checklist (Finding F21, retained — still the complete list for what qualifies
+as evidence of a real failure).** This gate was narrowed four times running before F21 stopped
+patching instances and enumerated the whole property list instead (duplicates, then unsigned
+labels, then empty hashes, then malformed hashes). F27 later added two more properties — relevance
+and recency — but those two applied specifically to the *resolution-validation* evidence that used
+to clear quarantine, and amendment v5 deleted that evidence path entirely: clearing quarantine is
+now an explicit act (§7.1.4), not a validation row a query inspects. Properties 7 and 8 are retired
+along with the branch they described. The six properties below are the complete list for what
+qualifies a self-reported failure label or a blocking finding as evidence of a real failure:
+
+1. **Present** — the evidence column is not `NULL`.
 2. **Correctly prefixed** — begins with the literal `sha256:`.
 3. **Correct length** — exactly 71 characters total (`"sha256:"` is 7, a hash body is 64).
 4. **Hex-only body** — the 64 characters after the prefix contain only `0-9a-f` (a non-hex
    character, e.g. `"z"` or an uppercase letter, must not pass merely because the prefix and
    length are right).
-5. **Attributable to a distinct qualifying dispatch** — counted via `COUNT(DISTINCT dispatch_id)`
-   over `latest_labels` (`rn = 1`), so a duplicated or re-recorded label cannot multiply a
-   dispatch's contribution (Finding F3).
+5. **Attributable to a distinct qualifying dispatch** — a duplicated or re-recorded label must not
+   multiply a dispatch's contribution to any derived failure count; the implementation counts
+   distinct dispatches carrying qualifying evidence, never distinct label rows (Finding F3).
 6. **Scoped to the exact target triple** — a finding or label recorded against a *different*
-   adapter, or a different triple of the same adapter family, must not quarantine this triple
-   (`d.triple = :target_triple` in `adapter_dispatches`, enforced structurally since F3/F12).
+   adapter, or a different triple of the same adapter family, must never quarantine this triple.
 
-**On completeness for this query's narrowed job.** This query now only ever derives `quarantined`
-from failure evidence (labels and blocking findings); it no longer evaluates any evidence about
-resolution, relevance to a specific defect claim, or recency of a fix, because there is no longer a
-resolution branch for those properties to guard. Properties 1-6 — presence, form (2-4), attribution
-(5), and scope (6) — are complete for that narrower job. If a future decision reintroduces any
-query-derived upward transition, it would need to re-derive F27's relevance/recency properties for
-whatever evidence it reads; amendment v5's position is that no such decision is anticipated, because
-the upward path itself, not merely its evidence checklist, is the defect class being removed.
+**Trust-state transition properties (amendment v6 — the defect class the SQL body is replaced
+for).** Beyond evidence validity, an implementation must satisfy every property below.
+`tests/test_trust_conformance.py`'s nine cases are each chosen to reject an implementation that
+violates one of them:
 
-Properties 1-4 are combined into one SQL fragment, `IS NOT NULL AND LIKE 'sha256:%' AND
-length(...) = 71 AND substr(..., 8) NOT GLOB '*[^0-9a-f]*'` (SQLite has no native regex; `LIKE` plus
-`length` plus a `GLOB` character-class negation together are the portable equivalent of
-`^sha256:[0-9a-f]{64}$`), computed **once** per evidence source as a named boolean column
-(`evidence_valid` in `latest_labels`, inlined identically in the `findings` evidence check) so every
-consumer of that evidence reads the same already-validated flag rather than re-deriving a partial
-version of the check:
+- **Floor.** Absent any explicit trust act and any qualifying failure evidence, the state is
+  `valid-unverified` — never `proven`, no matter how many self-reported successes accumulate
+  (§7.1.1). No accumulation of `verified_no_observed_failure` labels, by itself, may ever reach
+  `proven`.
+- **Downward transitions are automatic.** A single adapter-attributed, evidence-backed
+  `recurrence_failure` or `material_post_merge_defect` label — or an `abandoned` dispatch carrying
+  an accepted-material critical/high finding with valid evidence (Finding F12) — quarantines the
+  triple with no human action and no recorded trust act.
+- **Failure evidence latches.** Once a dispatch has qualifying failure evidence recorded against
+  it, no later label of any kind recorded against that same dispatch may retract it from the
+  failure count. An implementation that reads only the most recent label per dispatch — rather
+  than every qualifying label ever recorded against it — reopens exactly the laundering path this
+  amendment exists to close: a second, benign self-reported label is a contract-legal append, and
+  it must not un-quarantine anything.
+- **Quarantine is not query-clearable, and no act clears it either.** A standing quarantine (the
+  property immediately above) is never cleared merely by evaluating the query again, and clearing
+  it is never a side effect of recording an explicit trust act — however recent that act is, or
+  whatever state it names. This contract defines no act that names the specific failure evidence
+  it retires; absent such a mechanism, a quarantined triple stays quarantined until an operator
+  routes dispatches under a new, unencumbered triple (§7.1.3's supersession path, which starts
+  with no attached evidence — the mechanism already pinned for this purpose in issue-39,
+  `docs/v3-acceptance.md`'s `issue-39#finding-hard-exclusion-and-prior-pinning` row, F28: evidence
+  is pinned to the exact triple string it was recorded against, so a new triple, e.g. a
+  `routing_version` bump, a different `model_id`/`effort`/`harness` combination, or
+  `superseded_by`, starts with no attached evidence and a clean `valid-unverified` floor). The old
+  triple's quarantine is not "cleared" — it is superseded.
+- **An explicit trust act is the only way trust ever rises**, and only when no qualifying failure
+  currently stands (the property above takes precedence). The most recently recorded act for the
+  exact target triple wins over an older one, and an act recorded for a different triple never
+  applies to this one.
 
-```sql
-WITH latest_labels AS (
-    SELECT
-        ol.dispatch_id,
-        ol.label,
-        ol.primary_attribution,
-        ol.evidence_hash,
-        ol.labeled_at,
-        (
-            ol.evidence_hash IS NOT NULL
-            AND ol.evidence_hash LIKE 'sha256:%'
-            AND length(ol.evidence_hash) = 71
-            AND substr(ol.evidence_hash, 8) NOT GLOB '*[^0-9a-f]*'
-        ) AS evidence_valid,
-        ROW_NUMBER() OVER (
-            PARTITION BY ol.dispatch_id
-            ORDER BY ol.labeled_at DESC, ol.id DESC
-        ) AS rn
-    FROM outcome_labels ol
-),
-adapter_dispatches AS (
-    SELECT
-        d.id AS dispatch_id,
-        d.triple,
-        d.task_shape,
-        d.attribution,
-        ll.label AS outcome_label,
-        ll.primary_attribution AS label_attribution,
-        ll.evidence_valid AS label_evidence_valid,
-        (SELECT COUNT(*) FROM findings f
-         WHERE f.dispatch_id = d.id
-           AND f.status = 'accepted-material'
-           AND f.severity IN ('critical', 'high')
-           AND f.evidence_hash IS NOT NULL
-           AND f.evidence_hash LIKE 'sha256:%'
-           AND length(f.evidence_hash) = 71
-           AND substr(f.evidence_hash, 8) NOT GLOB '*[^0-9a-f]*') AS blocking_findings
-    FROM dispatches d
-    LEFT JOIN latest_labels ll ON ll.dispatch_id = d.id AND ll.rn = 1
-    WHERE d.triple = :target_triple
-),
-qualification_summary AS (
-    -- Amendment v5: the prior triple-scoped lineage/validation-join CTE that used to clear
-    -- quarantine automatically is deleted, not narrowed. Clearing quarantine is now
-    -- §7.1.4's explicit trust act; this CTE derives only the failure-side counter that
-    -- feeds a downward transition.
-    SELECT
-        COUNT(DISTINCT CASE
-            WHEN (attribution = 'adapter' OR label_attribution = 'adapter')
-                 AND (
-                     -- Evidence-backed adapter-attributed recurrence/post-merge label.
-                     (outcome_label IN ('recurrence_failure', 'material_post_merge_defect')
-                      AND label_evidence_valid)
-                     -- Finding F12: an adapter-attributed dispatch that never landed
-                     -- (`abandoned`, any narrative subtype) and also carries an
-                     -- accepted-material critical/high finding is an unresolved adapter
-                     -- failure too — the finding's own evidence_hash, not the label's, is
-                     -- what qualifies it, since an `abandoned` label's own evidence is
-                     -- optional for several narrative subtypes (§7.3.2).
-                     OR (outcome_label = 'abandoned' AND blocking_findings > 0)
-                 )
-            THEN dispatch_id END) AS critical_failures
-    FROM adapter_dispatches
-),
-explicit_trust_act AS (
-    -- §7.1.4: the only source an upward (or an operator-recorded downward) transition can
-    -- ever come from. Never populated, joined, or inferred from outcome_labels, findings,
-    -- validations, or any other evidence table -- it is fed exclusively by record_trust_act
-    -- writes to adapter_trust_acts (§7.1.4.3), an append-only log this query only reads.
-    SELECT target_state
-    FROM adapter_trust_acts
-    WHERE triple = :target_triple
-    ORDER BY recorded_at DESC, id DESC
-    LIMIT 1
-)
-SELECT
-    critical_failures,
-    CASE
-        -- (a) `invalid` is not evaluated by this query at all -- it comes from adapter
-        --     schema/mandatory-semantics validation, upstream of and unrelated to runs.db
-        --     dispatch history, and is unchanged by amendment v5.
-        -- (b) The only state this query may derive from evidence. Checked first: no
-        --     explicit act, however recent, can paper over a standing derived failure.
-        WHEN critical_failures > 0 THEN 'quarantined'
-        -- (c) Otherwise, the most recently recorded explicit act for this exact triple wins,
-        --     whatever state it names. This is never computed -- it is a straight read of
-        --     the latest attributed act.
-        WHEN (SELECT target_state FROM explicit_trust_act) IS NOT NULL
-            THEN (SELECT target_state FROM explicit_trust_act)
-        -- (d) The floor. Absent any explicit act and any derived failure, an adapter is
-        --     never better than valid-unverified, no matter its dispatch history.
-        ELSE 'valid-unverified'
-    END AS qualified_trust_state
-FROM qualification_summary;
+**Pinned callable — `scripts/office_scoring.py` (owned by T2B):**
+```python
+def evaluate_trust_state(con: sqlite3.Connection, target_triple: str) -> tuple[int, str]:
+    """Evaluates the §7.1.2 trust-state properties for `target_triple` against the
+    dispatches/findings/outcome_labels/adapter_trust_acts tables reachable on `con`.
+    Returns (critical_failures, qualified_trust_state): `critical_failures` is the count of
+    distinct dispatches on this triple carrying latched, unresolved adapter-attributed failure
+    evidence, and `qualified_trust_state` is one of `quarantined`, `proven`, or
+    `valid-unverified` (never `invalid`, which is upstream schema/mandatory-semantics
+    validation and unrelated to runs.db history). This is the sole entry point
+    `tests/test_trust_conformance.py` imports; T2B may implement it in SQL, Python, or a mix,
+    behind this signature. `scripts/office_trust.py`'s `get_current_trust_state` (§7.1.4.3) is
+    expected to call this function for its derived-quarantine half.
+    """
+    ...
 ```
-
-Because (b) is checked before (c), a standing derived `quarantined` result cannot be overridden by
-an explicit act recorded before, or even after, the disqualifying evidence — evidence attached to
-a triple is permanent and this query never re-derives an upward state from it. This is deliberate,
-not an oversight: an act that could override live failure evidence through this same query path
-would reopen exactly the class of attack amendment v5 removes (a way to reach a higher state that
-is one hop away from the evidence itself, rather than genuinely independent of it). The way an
-operator gives an adapter a fresh evaluation once an issue is genuinely fixed is the mechanism
-already pinned for exactly this purpose in issue-39 (`docs/v3-acceptance.md`'s
-`issue-39#finding-hard-exclusion-and-prior-pinning` row, F28): evidence is pinned to the exact
-triple string it was recorded against, so a new triple (a `routing_version` bump, a different
-`model_id`/`effort`/`harness` combination, or `superseded_by`) starts with no attached evidence and
-a clean `valid-unverified` floor, and can then receive its own explicit trust act on its own
-history. The old triple's quarantine is not "cleared" — it is superseded.
-
-This resolves finding F3's original defects on the surviving demotion path directly:
-`COUNT(DISTINCT dispatch_id)` over `latest_labels` (via `rn = 1`) means duplicated or re-recorded
-self-reported labels cannot inflate any derived count, and every evidence check requires the full
-six-property checklist above, not a partial version of it.
 
 **Finding F12 correction (kept here for history).** Round 1's `label_evidence_hash IS NOT NULL`
 admitted an empty-string hash, because in SQL `'' IS NOT NULL` is true. Round 2 added the
@@ -1035,25 +974,32 @@ admitted an empty-string hash, because in SQL `'' IS NOT NULL` is true. Round 2 
 closed. Round 1's `critical_failures` also only recognized `recurrence_failure`/
 `material_post_merge_defect` labels, so an adapter-attributed `abandoned` dispatch that never
 landed — but that also carries an accepted-material critical/high finding — passed through
-unnoticed; `critical_failures` now also counts that case, qualified by the finding's own evidence
+unnoticed; the implementation must also count that case, qualified by the finding's own evidence
 (not the `abandoned` label's, since several `abandoned` narrative subtypes carry optional evidence
 per §7.3.2).
 
 #### 7.1.3 Unresolved Adapter-Attributed Critical Failure in Lineage
 An unresolved adapter failure quarantines the whole triple. It is defined as:
-- Any dispatch on the target triple whose **latest** outcome label is evidence-backed (`evidence_hash IS NOT NULL`) and is `recurrence_failure` or `material_post_merge_defect`, where either the dispatch's own `attribution` column or the label's `primary_attribution` equals `'adapter'`.
+- Any dispatch on the target triple that has **ever** received an evidence-backed
+  (`evidence_hash IS NOT NULL` and valid per the checklist in §7.1.2) outcome label of
+  `recurrence_failure` or `material_post_merge_defect`, where either the dispatch's own
+  `attribution` column or that label's `primary_attribution` equals `'adapter'` — regardless of
+  any later label recorded against the same dispatch (§7.1.2's latch property). **Amendment v6:**
+  evaluating only the *latest* label per dispatch, rather than every qualifying label ever recorded
+  against it, is precisely the laundering defect amendment v6 exists to close — a later, benign
+  self-reported label is a contract-legal append and must not retract this condition.
 
 **Amendment v5 — this condition is not cleared by any query.** Round 1 through F27 each defined a
 progressively stricter `lineage`/`validations`-joined "Resolution Requirement" that could clear this
 condition automatically from evidence (properties 1-8 in the pre-amendment-v5 §7.1.2). Amendment v5
 deletes that mechanism rather than narrowing it further: there is no `lineage` record, `validations`
-row, or any other evidence this query reads that clears an unresolved failure. The only way trust
-rises for this triple afterward is an explicit trust act (§7.1.4), and per §7.1.2's evaluation order
-that act still loses to a *standing* unresolved failure the next time the query runs — see the note
-immediately below the §7.1.2 query for why, and for how an operator actually gives an adapter a
-fresh start (a new triple, not a cleared one). `component_kind = 'adapter'`, `component_id =
-:target_triple`, and `event = 'resolved_adapter_defect'` no longer appear anywhere in this
-contract's SQL; a `lineage` row using them has no effect on `qualified_trust_state`.
+row, or any other evidence the implementation reads that clears an unresolved failure. The only way
+trust rises for this triple afterward is an explicit trust act (§7.1.4), and per §7.1.2's evaluation
+order that act still loses to a *standing* unresolved failure the next time it is evaluated — see
+the "Quarantine is not query-clearable" property in §7.1.2 for why, and for how an operator actually
+gives an adapter a fresh start (a new triple, not a cleared one). `component_kind = 'adapter'`,
+`component_id = :target_triple`, and `event = 'resolved_adapter_defect'` no longer appear anywhere
+in this contract; a `lineage` row using them has no effect on `qualified_trust_state`.
 
 Without a recorded, more-recent-than-nothing explicit trust act (subject to §7.1.2's evaluation
 order), the adapter remains quarantined indefinitely — the unresolved-failure check is independent
@@ -1321,8 +1267,11 @@ question, not a documentation default.
 - This is enforced at the schema level (`schemas/outcome-label.schema.json`), not by convention alone, because a label that passes validation with no evidence defeats the trust query's evidence gate (§7.1.2) one layer down — the same failure mode F12/F21 named at the query level.
 
 #### 7.3.3 Table Schema and Write Lifecycle
-Outcome labels are persisted in the `outcome_labels` table in `runs.db`:
-```sql
+Outcome labels are persisted in the `outcome_labels` table in `runs.db` (schema DDL below is
+normative for the table shape; it is not the trust-evaluation query amendment v6 removes from
+§7.1.2, and this document fences it as plain text rather than as SQL, so nothing here can be
+mistaken for that removed query):
+```
 CREATE TABLE IF NOT EXISTS outcome_labels (
     id TEXT PRIMARY KEY,
     dispatch_id TEXT NOT NULL REFERENCES dispatches(id),

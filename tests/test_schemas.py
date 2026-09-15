@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import importlib.util, json, re, sqlite3, unittest
+import importlib.util, json, re, unittest
 from pathlib import Path
 from jsonschema import Draft202012Validator
 import yaml
@@ -616,22 +616,20 @@ class TestSchemas(unittest.TestCase):
         # Amendment v5 bars parametric changes to config/config.default.yaml. The two
         # adapter_trust thresholds must survive with their original values even though
         # no query binds them anymore -- they are documented as advisory-only in §7.1.1.
+        # Amendment v6 removed the normative SQL these used to be checked against (T0 ships
+        # no query body); the doc-side guarantee is that no query is pinned here at all, so
+        # this test now only pins the config values themselves.
         config = yaml.safe_load((ROOT / 'config/config.default.yaml').read_text())
         self.assertEqual(config['adapter_trust']['proven_min_successful_dispatches'], 5)
         self.assertEqual(config['adapter_trust']['proven_min_task_shapes'], 2)
-
-        text = (ROOT / 'docs/v3-runtime-contracts.md').read_text()
-        query_block = re.search(r"```sql\n(WITH latest_labels AS \(.*?)\n```", text, re.S).group(1)
-        self.assertNotIn(':proven_min_successful_dispatches', query_block)
-        self.assertNotIn(':proven_min_task_shapes', query_block)
 
     def test_evidence_checklist_trimmed_to_six_properties(self):
         # F27's properties 7 (relevance) and 8 (recency) described the resolution-
         # validation evidence path amendment v5 deletes; they must not remain listed as
         # active properties of the still-live demotion-only checklist.
         text = (ROOT / 'docs/v3-runtime-contracts.md').read_text()
-        m = re.search(r'#### 7\.1\.2 Trust Evaluation SQL Query.*?(?=```sql)', text, re.S)
-        self.assertTrue(m, '7.1.2 intro section not found')
+        m = re.search(r'#### 7\.1\.2 Trust Evaluation Contract.*?(?=#### 7\.1\.3)', text, re.S)
+        self.assertTrue(m, '7.1.2 section not found')
         section = m.group(0)
         for n in range(1, 7):
             self.assertIn(f'{n}. **', section, f'property {n} missing from the trimmed checklist')
@@ -680,179 +678,6 @@ class TestRouteNoNetworkAccess(unittest.TestCase):
 
         self.assertEqual(result['status'], 'selected')
         self.assertEqual(result['selected'], 'agy@local/gemini-3.8-flash@medium')
-
-
-class TestTrustQuery(unittest.TestCase):
-    """Amendment v5 (docs/plans/v3-final-merge.md `version: 5`): a query may lower adapter
-    trust and may never raise it. Extract the pinned trust-evaluation SQL directly out of
-    docs/v3-runtime-contracts.md and exercise it against a real sqlite schema, so the
-    contract's own query text (not a hand-copied stand-in) is what gets proven closed. The
-    promotion-path tests from F3/F12/F21/F27 are gone along with the resolved_adapter_defects
-    CTE and the successful_dispatches/distinct_task_shapes counters they exercised -- that
-    behavior is deleted by amendment v5, not weakened; see docs/v3-runtime-contracts.md
-    section 7.1 and /tmp/aoffice-0b3e/t0-r7-report.md for the authority and the reasoning."""
-
-    TRIPLE = "agy@local/gemini-3.8-flash@medium"
-    VALID_HASH = "sha256:" + "a" * 64
-
-    @classmethod
-    def setUpClass(cls):
-        text = (ROOT / 'docs/v3-runtime-contracts.md').read_text()
-        m = re.search(r"```sql\n(WITH latest_labels AS \(.*?)\n```", text, re.S)
-        assert m, "trust evaluation SQL block not found in docs/v3-runtime-contracts.md"
-        cls.QUERY = m.group(1)
-        assert 'resolved_adapter_defects' not in cls.QUERY
-        assert 'proven' not in cls.QUERY.lower()
-
-    def _con(self):
-        con = sqlite3.connect(":memory:")
-        con.executescript("""
-        CREATE TABLE dispatches(id TEXT PRIMARY KEY, run_id TEXT, role TEXT, holder_id TEXT, triple TEXT, invocation_model_id TEXT, selection_reason TEXT, task_shape TEXT, size_class TEXT, started_at TEXT, ended_at TEXT, money_estimate REAL, money_actual REAL, quota_estimate REAL, quota_delta REAL, wall_clock_seconds REAL, attribution TEXT, outcome TEXT);
-        CREATE TABLE findings(id TEXT PRIMARY KEY, dispatch_id TEXT, reviewer_dispatch_id TEXT, status TEXT, severity TEXT, summary TEXT, evidence_hash TEXT, created_at TEXT);
-        CREATE TABLE outcome_labels(id TEXT PRIMARY KEY, dispatch_id TEXT, label TEXT, primary_attribution TEXT, contributing_attributions TEXT, labeled_at TEXT, evidence_hash TEXT);
-        CREATE TABLE adapter_trust_acts(id TEXT PRIMARY KEY, triple TEXT, target_state TEXT, actor_id TEXT, reason TEXT, evidence_reference TEXT, recorded_at TEXT);
-        """)
-        return con
-
-    def _run(self, con):
-        return con.execute(self.QUERY, {"target_triple": self.TRIPLE}).fetchone()
-
-    def _dispatch(self, con, did, task_shape="shapeA", attribution=None, run_id="run-1"):
-        con.execute("INSERT INTO dispatches VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (did, run_id, "executor", "h1", self.TRIPLE, "m1", "r", task_shape, "M",
-                     "t", "t", 0, 0, 0, 0, 0, attribution, None))
-
-    def _label(self, con, did, label, evidence_hash=None, primary_attribution="model",
-               labeled_at="2026-09-15T00:00:00Z"):
-        con.execute("INSERT INTO outcome_labels VALUES (?,?,?,?,?,?,?)",
-                    (f"lab-{did}-{label}", did, label, primary_attribution, None,
-                     labeled_at, evidence_hash))
-
-    def _trust_act(self, con, triple=None, target_state="proven", actor_id="rico",
-                    reason="manually reviewed and reinstated", evidence_reference=None,
-                    recorded_at="2026-09-16T00:00:00Z", act_id=None):
-        con.execute("INSERT INTO adapter_trust_acts VALUES (?,?,?,?,?,?,?)",
-                    (act_id or f"act-{recorded_at}", triple or self.TRIPLE, target_state,
-                     actor_id, reason, evidence_reference, recorded_at))
-
-    def _seed_five_evidenced_successes(self, con):
-        # Reviewer's exact counterexample shape (round-5 R1): five self-reported
-        # verified_no_observed_failure labels, well-formed hashes, no supporting
-        # artifacts, across two task shapes.
-        shapes = ["shapeA", "shapeA", "shapeA", "shapeB", "shapeB"]
-        for i, shape in enumerate(shapes):
-            did = f"disp-ok-{i}"
-            self._dispatch(con, did, task_shape=shape)
-            self._label(con, did, "verified_no_observed_failure", evidence_hash=self.VALID_HASH)
-
-    def test_empty_string_evidence_hash_does_not_quarantine(self):
-        # Finding F12, retargeted at the surviving demotion path (amendment v5 deletes
-        # the promotion path these tests used to exercise): SQL "IS NOT NULL" is true
-        # for '', so an adapter-attributed recurrence_failure with evidence_hash='' must
-        # not count toward critical_failures.
-        con = self._con()
-        self._dispatch(con, "disp-empty", attribution="adapter")
-        self._label(con, "disp-empty", "recurrence_failure", evidence_hash="")
-        self.assertEqual(self._run(con)[1], "valid-unverified")
-
-    def test_non_hex_evidence_hash_does_not_quarantine(self):
-        # Finding F21, retargeted: correct prefix and length are not enough -- a suffix
-        # containing a non-hex character (here 'z') must not be treated as valid
-        # evidence of an adapter failure either.
-        con = self._con()
-        self._dispatch(con, "disp-nonhex", attribution="adapter")
-        self._label(con, "disp-nonhex", "recurrence_failure",
-                    evidence_hash="sha256:" + "z" * 64)
-        self.assertEqual(self._run(con)[1], "valid-unverified")
-
-    def test_uppercase_hex_evidence_hash_does_not_quarantine(self):
-        # Finding F21, retargeted: the schema pattern ^sha256:[0-9a-f]{64}$ is
-        # lowercase-only; an uppercase-hex suffix must still be rejected as failure
-        # evidence, not silently case-folded into counting.
-        con = self._con()
-        self._dispatch(con, "disp-upper", attribution="adapter")
-        self._label(con, "disp-upper", "recurrence_failure",
-                    evidence_hash="sha256:" + "A" * 64)
-        self.assertEqual(self._run(con)[1], "valid-unverified")
-
-    def test_adapter_abandoned_with_critical_finding_quarantines(self):
-        # Finding F12: an adapter-attributed dispatch that never landed but carries an
-        # accepted-material critical finding must quarantine even without a
-        # recurrence_failure/material_post_merge_defect label.
-        con = self._con()
-        self._seed_five_evidenced_successes(con)
-        self._dispatch(con, "disp-bad-abandoned", attribution="adapter")
-        self._label(con, "disp-bad-abandoned", "abandoned", evidence_hash=None)
-        con.execute("INSERT INTO findings VALUES (?,?,?,?,?,?,?,?)",
-                    ("f1", "disp-bad-abandoned", "rev-1", "accepted-material", "critical",
-                     "broke prod", self.VALID_HASH, "2026-09-15T00:00:00Z"))
-        self.assertEqual(self._run(con)[1], "quarantined")
-
-    def test_five_self_reported_labels_two_shapes_never_produce_proven(self):
-        # Round-5 review R1 / amendment v5's own counterexample: five self-reported
-        # verified_no_observed_failure labels across two task shapes, well-formed
-        # sha256: hashes, and no supporting artifacts. Against 8e90ef0's query this
-        # returned 'proven' with nothing behind it (see t0-r7-report.md for the
-        # fail-before/pass-after proof). Under amendment v5 there is no branch of this
-        # query that can produce 'proven' at all -- self-reported success evidence,
-        # however much of it accumulates, never raises trust.
-        con = self._con()
-        self._seed_five_evidenced_successes(con)
-        state = self._run(con)[1]
-        self.assertNotEqual(state, "proven")
-        self.assertEqual(state, "valid-unverified")
-
-    def test_qualifying_failure_quarantines_with_no_human_action(self):
-        # Round-7 criterion 4: demotion must still be fully automatic. A single
-        # adapter-attributed, evidence-backed recurrence_failure label quarantines with
-        # no trust act, no lineage record, and no validation row of any kind recorded.
-        con = self._con()
-        self._dispatch(con, "disp-bad", attribution="adapter")
-        self._label(con, "disp-bad", "recurrence_failure", evidence_hash=self.VALID_HASH,
-                    labeled_at="2026-09-15T00:00:00Z")
-        critical_failures, state = self._run(con)
-        self.assertEqual(critical_failures, 1)
-        self.assertEqual(state, "quarantined")
-
-    def test_explicit_trust_act_raises_a_clean_triple_to_proven(self):
-        # §7.1.4: with no derived failure evidence at all, a recorded trust act (not
-        # any count or label) is what raises trust -- and it is the *only* thing that
-        # can, since test_five_self_reported_labels_two_shapes_never_produce_proven
-        # proves evidence alone cannot.
-        con = self._con()
-        self._trust_act(con, target_state="proven", reason="operator-verified rollout")
-        self.assertEqual(self._run(con), (0, "proven"))
-
-    def test_explicit_trust_act_cannot_override_a_standing_quarantine(self):
-        # §7.1.2 evaluates (b) quarantined before (c) the explicit act, on purpose: an
-        # act recorded *after* a standing, unresolved failure must not silently clear
-        # it through this query, or the act-recording path would reopen exactly the
-        # evidence-laundering class amendment v5 removes.
-        con = self._con()
-        self._dispatch(con, "disp-bad", attribution="adapter")
-        self._label(con, "disp-bad", "recurrence_failure", evidence_hash=self.VALID_HASH,
-                    labeled_at="2026-09-15T00:00:00Z")
-        self._trust_act(con, target_state="proven",
-                         reason="attempted override after the failure",
-                         recorded_at="2026-09-20T00:00:00Z")
-        self.assertEqual(self._run(con)[1], "quarantined")
-
-    def test_most_recent_trust_act_wins_over_an_older_one(self):
-        con = self._con()
-        self._trust_act(con, target_state="proven", act_id="act-1",
-                         recorded_at="2026-09-10T00:00:00Z")
-        self._trust_act(con, target_state="valid-unverified", act_id="act-2",
-                         recorded_at="2026-09-15T00:00:00Z")
-        self.assertEqual(self._run(con)[1], "valid-unverified")
-
-    def test_trust_act_for_a_different_triple_does_not_apply(self):
-        con = self._con()
-        self._trust_act(con, triple="other@local/other@medium", target_state="proven")
-        self.assertEqual(self._run(con)[1], "valid-unverified")
-
-    def test_no_evidence_and_no_act_floors_at_valid_unverified(self):
-        con = self._con()
-        self.assertEqual(self._run(con), (0, "valid-unverified"))
 
 
 if __name__ == '__main__':
