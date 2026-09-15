@@ -104,9 +104,15 @@ class TestAdapterConformance(unittest.TestCase):
 
     def test_agy_usage_missing_token_exit_code(self):
         import subprocess
+        import sys as _sys
+        # sys.executable, not a bare 'python3' resolved against a stripped PATH: on macOS
+        # /usr/bin/python3 is Apple's stub, which exits 69 with an Xcode-license notice
+        # without ever running the probe. The assertion below then describes the stub's
+        # exit code rather than agy-usage.py's, so the test passed or failed on the
+        # machine's Xcode state instead of on the behavior it names.
         env = {'PATH': '/usr/bin:/bin', 'HOME': '/tmp/nonexistent-home-for-agy-quota-test'}
         res = subprocess.run(
-            ['python3', str(ROOT / 'scripts/agy-usage.py')],
+            [_sys.executable, str(ROOT / 'scripts/agy-usage.py')],
             env=env,
             capture_output=True,
             text=True
