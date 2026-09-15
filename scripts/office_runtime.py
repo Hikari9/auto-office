@@ -1292,10 +1292,17 @@ def cmd_record_landing(args):
     fam = _office_family()
     data = load_data(args.file)
     family_id = args.family_id or data.get("family_id")
-    result = fam.record_landing(Path(args.state_dir), family_id, data)
+    # Cross-check the cited evidence against the recorder when one is reachable: explicitly via
+    # --db, else the run state dir's own runs.db. A landing's `passed` boolean is the producer
+    # describing itself; the validations table is the record of a command having run.
+    db_path = Path(args.db) if getattr(args, "db", None) else Path(args.state_dir) / "runs.db"
+    if not db_path.exists():
+        db_path = None
+    result = fam.record_landing(Path(args.state_dir), family_id, data, db_path=db_path)
     dump_json(result)
     if result.get("status") == "error":
-        return 4 if result.get("reason") == "missing_validation_evidence" else 2
+        return 4 if result.get("reason") in (
+            "missing_validation_evidence", "empty_evidence_hash", "evidence_not_recorded") else 2
     return 0
 
 
@@ -1436,7 +1443,7 @@ def main():
     q=sp.add_parser('save-checkpoint'); q.add_argument('--file',required=True); q.add_argument('--family-id'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_save_checkpoint)
     q=sp.add_parser('load-checkpoint'); g=q.add_mutually_exclusive_group(required=True); g.add_argument('--file'); g.add_argument('--checkpoint-id'); q.add_argument('--state-dir'); q.set_defaults(func=cmd_load_checkpoint)
     q=sp.add_parser('validate-checkpoint'); q.add_argument('file'); q.set_defaults(func=cmd_validate_checkpoint)
-    q=sp.add_parser('record-landing'); q.add_argument('--file',required=True); q.add_argument('--family-id'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_record_landing)
+    q=sp.add_parser('record-landing'); q.add_argument('--file',required=True); q.add_argument('--family-id'); q.add_argument('--state-dir',required=True); q.add_argument('--db'); q.set_defaults(func=cmd_record_landing)
     q=sp.add_parser('validate-landing'); q.add_argument('file'); q.set_defaults(func=cmd_validate_landing)
     q=sp.add_parser('verify-landing'); q.add_argument('--file',required=True); q.add_argument('--strict',action='store_true'); q.set_defaults(func=cmd_verify_landing)
     q=sp.add_parser('record-event'); q.add_argument('--file'); q.add_argument('--event-id'); q.add_argument('--session-id'); q.add_argument('--family-id'); q.add_argument('--dispatch-id'); q.add_argument('--sequence',type=int); q.add_argument('--observed-status'); q.add_argument('--terminal-classification'); q.add_argument('--source'); q.add_argument('--evidence-timestamp'); q.add_argument('--evidence-hash'); q.add_argument('--evidence-payload'); q.add_argument('--state-dir',default='.office'); q.set_defaults(func=cmd_record_event)

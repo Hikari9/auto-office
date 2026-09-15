@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import sqlite3
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -539,13 +540,49 @@ def project_family_collisions(quota_snapshots: dict[str, dict], reserve_percent:
 # landings / checkpoints / reviews (amendment v2 finding F6)
 # --------------------------------------------------------------------------
 
-def record_landing(state_dir, family_id: str, landing: dict) -> dict:
+# sha256 of the empty string. A landing citing this is citing the hash of nothing -- which is
+# exactly what verify.sh used to emit for a gate that ran no command.
+EMPTY_SHA256 = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def _evidence_is_recorded(db_path, dispatch_id: str, evidence_hash: str) -> bool:
+    """True when runs.db holds a passing validation row carrying this evidence hash.
+
+    The landing's own `passed` boolean is the producer's claim about itself. This is the
+    independent record: a row written by `record-validation` when a command actually ran.
+    """
+    try:
+        con = sqlite3.connect(str(db_path))
+    except sqlite3.Error:
+        return False
+    try:
+        row = con.execute(
+            "SELECT 1 FROM validations WHERE dispatch_id = ? AND evidence_hash = ? AND passed = 1"
+            " LIMIT 1", (dispatch_id, evidence_hash)).fetchone()
+    except sqlite3.Error:
+        return False
+    finally:
+        con.close()
+    return row is not None
+
+
+def record_landing(state_dir, family_id: str, landing: dict, db_path=None) -> dict:
     errors = rt.validate_with_schema(landing, "landing.schema.json")
     if errors:
         return {"status": "error", "reason": "schema_invalid", "errors": errors}
     validation_evidence = landing.get("validation_evidence") or {}
     if not validation_evidence.get("passed"):
         return {"status": "error", "reason": "missing_validation_evidence"}
+    evidence_hash = validation_evidence.get("evidence_hash")
+    if evidence_hash == EMPTY_SHA256:
+        return {"status": "error", "reason": "empty_evidence_hash"}
+    if db_path is not None:
+        dispatch_id = ((landing.get("producer") or {}).get("dispatch_id")) or ""
+        if not _evidence_is_recorded(db_path, dispatch_id, evidence_hash):
+            # The producer says it passed; the recorder has no row saying a command ran and
+            # produced that evidence. Self-declared is not recorded.
+            return {"status": "error", "reason": "evidence_not_recorded",
+                    "dispatch_id": dispatch_id, "evidence_hash": evidence_hash}
     with _locked(state_dir):
         full = _read_json(_family_json_path(state_dir, family_id))
         if full is None:

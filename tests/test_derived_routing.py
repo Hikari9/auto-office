@@ -206,23 +206,82 @@ class DerivedRoutingTests(unittest.TestCase):
 
     # ---- receipt: override rejected without authorization, honoured with it ----
 
-    def test_override_without_recorded_authorization_is_a_hard_stop(self):
-        c = cand('agy')
-        request = {
-            'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path, 'candidates': [c],
-            'allow_unverified_override': True,
-            'recorded_override': {
-                'override_id': 'ov-1', 'run_id': 'run-1', 'family_id': 'fam-1', 'task_id': 'task-1',
-                'role': 'executor', 'candidate_id': 'agy@1/m@high', 'bypass_stage': 2,
-                'rationale': 'forged, never logged into runs.db',
-                'authorized_by': 'user',
-                'authorized_at': datetime.now(timezone.utc).isoformat(),
-                'expires_at': (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
-            },
+    def _override(self, **overrides):
+        """An override that is valid in EVERY respect except the one a test changes.
+
+        Built as a helper because the earlier version of the test below hand-rolled a request
+        missing run_id/family_id/task_id: it rejected at the context-match check and never
+        reached the rule under test, so the rule could have been deleted with the test still
+        green. Each rejecting test now differs from the honoured case by exactly one field.
+        """
+        record = {
+            'override_id': 'ov-x', 'run_id': 'run-1', 'family_id': 'fam-1', 'task_id': 'task-1',
+            'role': 'executor', 'candidate_id': 'agy@1/m@high', 'bypass_stage': 2,
+            'rationale': 'user explicitly authorized this exact triple for today only',
+            'authorized_by': 'user',
+            'authorized_at': datetime.now(timezone.utc).isoformat(),
+            'expires_at': (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
         }
+        record.update(overrides)
+        return record
+
+    def _request_with(self, override, record_it=True):
+        if record_it:
+            routing.record_override(self.db_path, override)
+        return {
+            'role': 'executor', 'playbook': 'Change', 'run_id': 'run-1', 'family_id': 'fam-1',
+            'task_id': 'task-1', 'runs_db': self.db_path, 'candidates': [cand('agy')],
+            'allow_unverified_override': True, 'recorded_override': override,
+        }
+
+    def test_override_without_recorded_authorization_is_a_hard_stop(self):
+        """Rule 5: the row must exist in runs.db.
+
+        Every other field matches the request, so the ONLY thing separating this from the
+        honoured case is that the record was never written. Previously this test omitted
+        run_id/family_id/task_id and so rejected at the context check instead -- it passed
+        whether or not rule 5 existed.
+        """
+        override = self._override(override_id='ov-unlogged',
+                                  rationale='never logged into runs.db, otherwise identical')
+        request = self._request_with(override, record_it=False)
         result = routing.route(request)
         self.assertEqual(result['status'], 'override_not_authorized')
         self.assertIsNone(result['selected'])
+
+        # The control: record that same row and the identical request is honoured. Without this
+        # the test above could pass for any reason at all.
+        routing.record_override(self.db_path, override)
+        honoured = routing.route(request)
+        self.assertEqual(honoured['status'], 'selected')
+
+    def test_override_not_authorized_by_the_user_is_rejected(self):
+        """Rule 1: `authorized_by` must be `user`. An agent cannot authorize its own bypass."""
+        override = self._override(override_id='ov-selfauth', authorized_by='orchestrator')
+        result = routing.route(self._request_with(override))
+        self.assertEqual(result['status'], 'override_not_authorized')
+
+    def test_override_of_the_quota_stage_is_rejected(self):
+        """bypass_stage is pinned to [2, 4, 7]. Stage 6 -- quota safety -- is NOT overridable.
+
+        This is the rule that stops a run from authorizing its way into the protected reserve,
+        so it is the one most worth a rejecting test.
+        """
+        override = self._override(override_id='ov-quota', bypass_stage=6)
+        result = routing.route(self._request_with(override))
+        self.assertEqual(result['status'], 'override_not_authorized')
+
+    def test_override_with_a_token_rationale_is_rejected(self):
+        """Rule 4: a rationale under 10 non-whitespace characters is not a reason."""
+        override = self._override(override_id='ov-terse', rationale='ok   ')
+        result = routing.route(self._request_with(override))
+        self.assertEqual(result['status'], 'override_not_authorized')
+
+    def test_override_for_a_candidate_not_in_the_request_is_rejected(self):
+        """An override authorizes one triple, not the request it happens to arrive with."""
+        override = self._override(override_id='ov-othercand', candidate_id='agy@1/other@high')
+        result = routing.route(self._request_with(override))
+        self.assertEqual(result['status'], 'override_not_authorized')
 
     def test_recorded_override_bypasses_trust_gate_and_is_disclosed(self):
         c = cand('agy')

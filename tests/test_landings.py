@@ -189,6 +189,72 @@ class LandingCliTests(unittest.TestCase):
         code, out = _invoke(rt.cmd_record_landing, file=path, family_id=None, state_dir=str(self.state_dir))
         self.assertEqual(code, 4)
 
+    # ---- F2: a landing's own PASS boolean is a claim, not a record ----
+
+    EMPTY_SHA256 = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+    def test_record_landing_rejects_the_hash_of_nothing(self):
+        """sha256("") was what verify.sh emitted for a gate that ran no command.
+
+        A landing citing it is citing the hash of an empty file as proof its validation ran.
+        """
+        landing = _fixture("landing")
+        landing["validation_evidence"]["evidence_hash"] = self.EMPTY_SHA256
+        path = self._write_tmp(landing)
+        code, out = _invoke(rt.cmd_record_landing, file=path, family_id=None,
+                            state_dir=str(self.state_dir), db=None)
+        self.assertEqual(code, 4)
+        self.assertEqual(out["reason"], "empty_evidence_hash")
+
+    def test_record_landing_rejects_a_pass_the_recorder_never_saw(self):
+        """The forged case: a landing whose only command is `exit 1`, self-declaring a pass.
+
+        Without the cross-check this was accepted outright -- the caller-asserted-value defect
+        that T2B removed from routing, still standing on the landing path.
+        """
+        db = self.state_dir / "runs.db"
+        rt.init_db(db)
+        landing = _fixture("landing")
+        landing["validation_evidence"] = {
+            "commands": ["exit 1  # forged: never executed"],
+            "passed": True,
+            "output_summary": "PASS",
+            "evidence_hash": "sha256:" + "a" * 64,
+        }
+        path = self._write_tmp(landing)
+        code, out = _invoke(rt.cmd_record_landing, file=path, family_id=None,
+                            state_dir=str(self.state_dir), db=str(db))
+        self.assertEqual(code, 4)
+        self.assertEqual(out["reason"], "evidence_not_recorded")
+
+    def test_record_landing_accepts_a_pass_the_recorder_did_see(self):
+        """The control. Without it, `evidence_not_recorded` could be rejecting everything."""
+        db = self.state_dir / "runs.db"
+        rt.init_db(db)
+        landing = _fixture("landing")
+        evidence_hash = "sha256:" + "b" * 64
+        landing["validation_evidence"] = {
+            "commands": ["python3 scripts/check_ecosystem.py"],
+            "passed": True,
+            "output_summary": "PASS",
+            "evidence_hash": evidence_hash,
+        }
+        val = self.state_dir / "val.json"
+        val.write_text(json.dumps({
+            "dispatch_id": landing["producer"]["dispatch_id"],
+            "kind": "regression_tests",
+            "command": "python3 scripts/check_ecosystem.py",
+            "passed": 1,
+            "known_bad_proven": 0,
+            "evidence_hash": evidence_hash,
+        }), encoding="utf-8")
+        _invoke(rt.cmd_record_validation, db=str(db), file=str(val))
+        path = self._write_tmp(landing)
+        code, out = _invoke(rt.cmd_record_landing, file=path, family_id=None,
+                            state_dir=str(self.state_dir), db=str(db))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["status"], "recorded")
+
     def test_verify_landing_rejects_mismatched_head_sha(self):
         landing = _fixture("landing")
         landing["head_sha"] = "0000000"
