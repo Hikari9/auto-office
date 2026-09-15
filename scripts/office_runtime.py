@@ -70,8 +70,49 @@ def cmd_validate_packet(args):
     data = load_data(args.file)
     schema = "execution-packet.schema.json" if args.kind == "execution" else "run-envelope.schema.json"
     errors = validate_with_schema(data, schema)
+    if args.kind == "execution":
+        errors.extend(_packet_semantic_errors(data))
     dump_json({"valid": not errors, "errors": errors})
     return 0 if not errors else 2
+
+
+def _packet_semantic_errors(data):
+    """Checks the JSON shape cannot express.
+
+    ASKING A READ-ONLY DISPATCH TO WRITE A FILE (incident 2026-09-15, run
+    e6167374): a code reviewer was dispatched `--sandbox read-only` with a
+    brief ending "write your findings to /tmp/office/review-findings.md and
+    reply with only that path". It reviewed correctly for ~16 minutes at xhigh
+    effort, then could not deliver: the write was refused, and it burned
+    further turns trying TextEdit, Terminal, an IDE and a browser as write
+    fallbacks before giving up. The findings -- four real defects -- were
+    recovered only because the orchestrator went and read the pane. Nothing in
+    the packet was malformed; the brief simply asked for an output channel the
+    sandbox forbade.
+
+    The packet already declares `allowed_mutations`. A delivery path outside
+    it is the same contradiction the validator exists to catch, so catch it
+    before dispatch rather than after the reasoning budget is spent.
+    """
+    errors = []
+    delivery = (data.get("output") or {}).get("delivery")
+    mutations = data.get("allowed_mutations")
+    if delivery == "file":
+        if mutations in (None, [], "none"):
+            errors.append(
+                "output.delivery: 'file' contradicts allowed_mutations "
+                "(none) -- a dispatch that may not write cannot deliver its "
+                "result as a file; use delivery 'reply'"
+            )
+        elif isinstance(mutations, list):
+            target = (data.get("output") or {}).get("path")
+            if target and not any(str(target).startswith(str(m)) for m in mutations):
+                errors.append(
+                    f"output.path {target!r} is outside allowed_mutations "
+                    f"{mutations} -- the dispatch cannot write where it is "
+                    "told to deliver"
+                )
+    return errors
 
 
 def cmd_validate_adapter(args):
