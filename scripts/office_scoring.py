@@ -186,8 +186,18 @@ def record_trust_act(
     """
     if target_state not in ("valid-unverified", "proven"):
         raise ValueError(f"illegal trust act target_state: {target_state!r}")
+    if not isinstance(triple, str) or not triple.strip():
+        raise ValueError(
+            "trust act triple must be a non-empty string identifying the exact "
+            "routable triple"
+        )
     if not actor_id or not str(actor_id).strip():
         raise ValueError("trust act actor_id must identify a real, non-empty holder")
+    if str(actor_id).strip().lower() in ("system", "automated"):
+        raise ValueError(
+            "trust act actor_id must identify a real holder, not the reserved "
+            "'system' or 'automated' value"
+        )
     if len(re.sub(r"\s+", "", reason or "")) < 10:
         raise ValueError(
             "trust act reason must contain a substantive justification "
