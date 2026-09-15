@@ -859,10 +859,13 @@ to config values, and these are not evidential thresholds a query evaluates auto
 They are **advisory reference numbers** an actor may consult before recording an explicit `proven`
 trust act (§7.1.4); no query binds them, and meeting or exceeding them has no automatic effect.
 
-A dispatch may be labeled more than once over time (`outcome_labels` is append-only, §7.3.3);
-quarantine derivation always evaluates the **latest** label per dispatch, never a duplicate or
-superseded one, so re-recording the same self-reported label cannot multiply a dispatch's
-contribution to any derived count.
+A dispatch may be labeled more than once over time (`outcome_labels` is append-only, §7.3.3).
+Quarantine derivation evaluates **every** qualifying label ever recorded against a dispatch, not
+the latest one: failure evidence latches (§7.1.2), and reading only the newest row is the exact
+laundering path amendment v6 exists to close. De-duplication is by **distinct dispatch**, not by
+recency — property 5 of the evidence checklist — so re-recording the same self-reported label
+cannot multiply a dispatch's contribution to any derived count, while a later benign label cannot
+retract an earlier failure either.
 
 #### 7.1.2 Trust Evaluation Contract (Amendment v6 — No Normative SQL)
 
