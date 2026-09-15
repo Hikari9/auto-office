@@ -47,6 +47,7 @@ fi
 OVERALL_PASS=true
 EXECUTED=0
 SKIPPED=0
+RECORD_FAILURES=0
 RESULTS="[]"
 
 # A gate with no command is SKIPPED, not passed. It records no validation row, because a
@@ -85,23 +86,40 @@ run_gate() {
   local pass_int=1
   if [[ "$passed" == "false" ]]; then pass_int=0; fi
 
-  # known_bad_proven is a claim about this gate only, and only when it really ran.
+  # known_bad_proven records that the packet's declared known-bad control RAN and passed. It is
+  # not a claim that the control can detect the behaviour it names -- one green run shows the
+  # behaviour is absent now, not that the control would go red if it returned. Treat it as
+  # "the declared control executed and was satisfied", nothing stronger.
   local kb_proven=0
   if [[ "$kind" == "known_bad_controls" && "$pass_int" == "1" ]]; then kb_proven=1; fi
   
+  # Built by json.dump, not a heredoc. Now that $cmd comes from a packet it routinely contains
+  # double quotes (python3 -c "...", pytest -k "a or b"), and interpolating it into hand-written
+  # JSON produced a malformed file -- record-validation then failed and `|| true` swallowed it,
+  # so the gate reported a pass with no row in runs.db. That row is exactly what record_landing
+  # now requires before a landing can be recorded, so the evidence was lost silently.
   local val_file="$STATE_DIR/.office/validations/${kind}_${DISPATCH_ID}.json"
-  cat <<EOF > "$val_file"
-{
-  "dispatch_id": "$DISPATCH_ID",
-  "kind": "$kind",
-  "command": "$cmd",
-  "passed": $pass_int,
-  "known_bad_proven": $kb_proven,
-  "evidence_hash": "$evidence_hash"
+  python3 -c "
+import json, sys
+dispatch_id, kind, cmd, passed, kb_proven, evidence_hash, out_path = sys.argv[1:8]
+row = {
+    'dispatch_id': dispatch_id,
+    'kind': kind,
+    'command': cmd,
+    'passed': int(passed),
+    'known_bad_proven': int(kb_proven),
+    'evidence_hash': evidence_hash,
 }
-EOF
+with open(out_path, 'w', encoding='utf-8') as f:
+    json.dump(row, f, indent=2, sort_keys=True)
+" "$DISPATCH_ID" "$kind" "$cmd" "$pass_int" "$kb_proven" "$evidence_hash" "$val_file"
 
-  "$RUNTIME" record-validation --db "$DB" "$val_file" > /dev/null || true
+  # A validation row that fails to record is a lost receipt, not a detail to swallow.
+  if ! "$RUNTIME" record-validation --db "$DB" "$val_file" > /dev/null; then
+    echo "verify: failed to record validation row for gate $kind" >&2
+    RECORD_FAILURES=$((RECORD_FAILURES + 1))
+    OVERALL_PASS=false
+  fi
 
   local p_str="true"
   if [[ "$passed" == "false" ]]; then p_str="false"; fi
@@ -173,7 +191,10 @@ run_gate "known_bad_controls" "$cmd_known_bad"
 
 overall_str="true"
 reason=""
-if [[ "$OVERALL_PASS" == "false" ]]; then
+if [[ "$RECORD_FAILURES" -gt 0 ]]; then
+  overall_str="false"
+  reason="validation_row_not_recorded"
+elif [[ "$OVERALL_PASS" == "false" ]]; then
   overall_str="false"
   reason="a gate failed"
 elif [[ "$EXECUTED" -eq 0 ]]; then

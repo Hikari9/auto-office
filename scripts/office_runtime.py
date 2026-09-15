@@ -1297,7 +1297,11 @@ def cmd_record_landing(args):
     # describing itself; the validations table is the record of a command having run.
     db_path = Path(args.db) if getattr(args, "db", None) else Path(args.state_dir) / "runs.db"
     if not db_path.exists():
-        db_path = None
+        # Silently skipping the cross-check when no recorder is reachable would make the strongest
+        # check on this path the easiest one to switch off -- point --state-dir somewhere without
+        # a runs.db and an invented evidence hash is accepted again.
+        dump_json({"status": "error", "reason": "recorder_unreachable", "db": str(db_path)})
+        return 4
     result = fam.record_landing(Path(args.state_dir), family_id, data, db_path=db_path)
     dump_json(result)
     if result.get("status") == "error":
