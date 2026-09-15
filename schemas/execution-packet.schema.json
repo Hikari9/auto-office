@@ -163,6 +163,7 @@
   "required": [
     "packet_id",
     "run_id",
+    "session_id",
     "family_id",
     "task_id",
     "requirements_version",

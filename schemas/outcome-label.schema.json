@@ -29,6 +29,67 @@
         "verification",
         "unknown"
       ]
+    },
+    "contributing_attributions": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_hash": {
+      "type": ["string", "null"],
+      "pattern": "^sha256:[0-9a-f]{64}$"
     }
-  }
+  },
+  "allOf": [
+    {
+      "$comment": "Finding F20: technical labels always require a full, valid SHA-256 hash. `type: string` plus the pattern rejects null, empty, and malformed hashes alike; `required` rejects a missing key outright.",
+      "if": {
+        "required": ["label"],
+        "properties": {
+          "label": {
+            "enum": [
+              "verified_no_observed_failure",
+              "recurrence_failure",
+              "revert_failure",
+              "material_post_merge_defect"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": ["evidence_hash"],
+        "properties": {
+          "evidence_hash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "Finding F15: an `abandoned` label tagged with the defect_detected or failed_verification narrative subtype (docs/v3-runtime-contracts.md §7.3.1/7.3.2) is also always-mandatory evidence, matching its restored pre-migration reward weight.",
+      "if": {
+        "required": ["label", "contributing_attributions"],
+        "properties": {
+          "label": { "const": "abandoned" },
+          "contributing_attributions": {
+            "type": "array",
+            "contains": {
+              "enum": ["narrative:defect_detected", "narrative:failed_verification"]
+            }
+          }
+        }
+      },
+      "then": {
+        "required": ["evidence_hash"],
+        "properties": {
+          "evidence_hash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        }
+      }
+    }
+  ]
 }

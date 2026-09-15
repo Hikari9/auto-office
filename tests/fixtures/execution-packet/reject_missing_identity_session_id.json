@@ -1,7 +1,6 @@
 {
   "packet_id": "pkt-t0-001",
   "run_id": "run-001",
-  "session_id": "sess-001",
   "family_id": "fam-office",
   "task_id": "T0",
   "requirements_version": 1,

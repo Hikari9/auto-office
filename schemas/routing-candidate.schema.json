@@ -62,7 +62,7 @@
       "type": "array"
     },
     "local_reward": {
-      "type": "number"
+      "type": ["number", "null"]
     },
     "advisory_pass": {
       "type": "boolean"

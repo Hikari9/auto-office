@@ -62,9 +62,11 @@ All schemas are pinned in JSON Schema Draft 2020-12 under `schemas/` and validat
 ### 2.1 Dispatch Packet (`schemas/execution-packet.schema.json`)
 
 Supersedes the legacy 10-field packet unconditionally: a packet carrying only the legacy fields
-no longer validates. Dispatches must carry full session and version provenance. (The excerpt below
-omits the `$schema` draft-identifier line for privacy-lint hygiene in this document; the committed
-schema file at `schemas/execution-packet.schema.json` carries it.)
+no longer validates. Dispatches must carry full session and version provenance — including
+`session_id` itself, which Finding F13 identified as declared but not required in round 1 (a
+packet could omit it and still validate clean, defeating "full session provenance"). (The excerpt
+below omits the `$schema` draft-identifier line for privacy-lint hygiene in this document; the
+committed schema file at `schemas/execution-packet.schema.json` carries it.)
 
 ```json
 {
@@ -72,7 +74,7 @@ schema file at `schemas/execution-packet.schema.json` carries it.)
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "packet_id", "run_id", "family_id", "task_id",
+    "packet_id", "run_id", "session_id", "family_id", "task_id",
     "requirements_version", "plan_version", "routing_version", "packet_version",
     "effective_config_hash", "base_sha", "selection_disclosure",
     "task_scope", "observable_outcome", "blast_radius",
@@ -420,8 +422,15 @@ These exact CLI commands will be implemented by T2 in `scripts/office_runtime.py
 ### 5.5 Completion and Event Commands
 
 #### `record-event`
-- **Invocation:** `python3 scripts/office_runtime.py record-event (--file <file> | --event-id <id> --sequence <seq> --observed-status <status> --terminal-classification <class> --source <src> --evidence-timestamp <ts> --evidence-hash <hash>) [--state-dir <dir>]`
+- **Invocation:** `python3 scripts/office_runtime.py record-event (--file <file> | --event-id <id> --session-id <id> --family-id <id> --dispatch-id <id> --sequence <seq> --observed-status <status> --terminal-classification <class> --source <src> --evidence-timestamp <ts> --evidence-hash <hash>) [--evidence-payload <json>] [--state-dir <dir>]`
 - **Behavior:** Validates against `schemas/completion-event.schema.json`. Appends to `.office/events/completions.jsonl`.
+  **Finding F19 correction:** round 1's flag form omitted `--session-id`, `--family-id`, and
+  `--dispatch-id`, all three of which the schema requires (`event_id`, `session_id`, `family_id`,
+  `dispatch_id`, `sequence`, `observed_status`, `terminal_classification`, `source`,
+  `evidence_timestamp`, `evidence_hash` are all required); a flag-form invocation using only the
+  previously-documented flags cannot pass schema validation, forcing T3 to invent undocumented
+  flags to produce a valid event. All three identity flags are now listed above and are mandatory
+  in the flag form exactly as they are in `--file` form.
 - **Output (stdout):** `{"status": "recorded", "event_id": "...", "sequence": <int>}`
 - **Exit Codes:** `0`: Success; `1`: Argument error; `2`: Schema error; `3`: Sequence out of order.
 
@@ -556,7 +565,10 @@ adapter_dispatches AS (
         (SELECT COUNT(*) FROM findings f
          WHERE f.dispatch_id = d.id
            AND f.status = 'accepted-material'
-           AND f.severity IN ('critical', 'high')) AS blocking_findings
+           AND f.severity IN ('critical', 'high')
+           AND f.evidence_hash IS NOT NULL
+           AND f.evidence_hash LIKE 'sha256:%'
+           AND length(f.evidence_hash) = 71) AS blocking_findings
     FROM dispatches d
     LEFT JOIN latest_labels ll ON ll.dispatch_id = d.id AND ll.rn = 1
     WHERE d.triple = :target_triple
@@ -564,6 +576,8 @@ adapter_dispatches AS (
 resolved_adapter_defects AS (
     -- Finding F3 / §7.1.3: a triple-scoped remediation record, evidenced by a passed
     -- validation row (not a nonexistent lineage.evidence_hash column), clears quarantine.
+    -- Finding F12: "IS NOT NULL" alone admits an empty-string hash; every evidence check
+    -- in this query requires the full "sha256:" + 64 hex chars shape, not mere non-nullness.
     SELECT COUNT(*) AS n
     FROM lineage l
     JOIN validations v ON v.id = l.parent_id
@@ -573,23 +587,41 @@ resolved_adapter_defects AS (
       AND l.multiplier > 0
       AND v.passed = 1
       AND v.evidence_hash IS NOT NULL
+      AND v.evidence_hash LIKE 'sha256:%'
+      AND length(v.evidence_hash) = 71
 ),
 qualification_summary AS (
     SELECT
         COUNT(DISTINCT CASE
             WHEN outcome_label = 'verified_no_observed_failure'
                  AND label_evidence_hash IS NOT NULL
+                 AND label_evidence_hash LIKE 'sha256:%'
+                 AND length(label_evidence_hash) = 71
                  AND blocking_findings = 0
             THEN dispatch_id END) AS successful_dispatches,
         COUNT(DISTINCT CASE
             WHEN outcome_label = 'verified_no_observed_failure'
                  AND label_evidence_hash IS NOT NULL
+                 AND label_evidence_hash LIKE 'sha256:%'
+                 AND length(label_evidence_hash) = 71
                  AND blocking_findings = 0
             THEN task_shape END) AS distinct_task_shapes,
         COUNT(DISTINCT CASE
-            WHEN outcome_label IN ('recurrence_failure', 'material_post_merge_defect')
-                 AND label_evidence_hash IS NOT NULL
-                 AND (attribution = 'adapter' OR label_attribution = 'adapter')
+            WHEN (attribution = 'adapter' OR label_attribution = 'adapter')
+                 AND (
+                     -- Evidence-backed adapter-attributed recurrence/post-merge label.
+                     (outcome_label IN ('recurrence_failure', 'material_post_merge_defect')
+                      AND label_evidence_hash IS NOT NULL
+                      AND label_evidence_hash LIKE 'sha256:%'
+                      AND length(label_evidence_hash) = 71)
+                     -- Finding F12: an adapter-attributed dispatch that never landed
+                     -- (`abandoned`, any narrative subtype) and also carries an
+                     -- accepted-material critical/high finding is an unresolved adapter
+                     -- failure too — the finding's own evidence_hash, not the label's, is
+                     -- what qualifies it, since an `abandoned` label's own evidence is
+                     -- optional for several narrative subtypes (§7.3.2).
+                     OR (outcome_label = 'abandoned' AND blocking_findings > 0)
+                 )
             THEN dispatch_id END) AS critical_failures
     FROM adapter_dispatches
 )
@@ -606,7 +638,23 @@ SELECT
 FROM qualification_summary, resolved_adapter_defects;
 ```
 
-This resolves finding F3's three defects directly: `COUNT(DISTINCT dispatch_id)` over `latest_labels` (via `rn = 1`) means duplicated or re-recorded self-reported labels for the same dispatch cannot inflate `successful_dispatches`; `label_evidence_hash IS NOT NULL` rejects unsigned/unevidenced labels outright; and the thresholds are bound parameters, not literals.
+This resolves finding F3's three defects directly: `COUNT(DISTINCT dispatch_id)` over `latest_labels` (via `rn = 1`) means duplicated or re-recorded self-reported labels for the same dispatch cannot inflate `successful_dispatches`; the thresholds are bound parameters, not literals; and every evidence check requires the full `sha256:` + 64-hex-character shape.
+
+**Finding F12 correction.** Round 1's `label_evidence_hash IS NOT NULL` admitted an empty-string
+hash, because in SQL `'' IS NOT NULL` is true — a caller could self-report a label with
+`evidence_hash: ""` and still qualify. Every evidence check in this query (successful-dispatch
+count, distinct-task-shape count, critical-failure detection, and the `resolved_adapter_defects`
+lookup) now requires `IS NOT NULL AND LIKE 'sha256:%' AND length(...) = 71`, matching
+`schemas/outcome-label.schema.json`'s `^sha256:[0-9a-f]{64}$` pattern exactly (SQLite has no native
+regex; the prefix-plus-length check is the portable equivalent, since `"sha256:"` is 7 characters
+and a valid hash is 64 hex characters, for 71 total). Round 1's `critical_failures` also only
+recognized `recurrence_failure`/`material_post_merge_defect` labels, so an adapter-attributed
+`abandoned` dispatch that never landed — but that also carries an accepted-material critical/high
+finding — passed through unnoticed; `critical_failures` now also counts that case, qualified by the
+finding's own evidence (not the `abandoned` label's, since several `abandoned` narrative subtypes
+carry optional evidence per §7.3.2). The `findings` blocking-count subquery itself is likewise
+tightened to require a well-formed `evidence_hash`, so an unevidenced "accepted-material" finding
+cannot silently qualify or disqualify anything either.
 
 #### 7.1.3 Unresolved Adapter-Attributed Critical Failure in Lineage
 An unresolved adapter failure permanently blocks qualification. It is defined as:
@@ -697,26 +745,50 @@ already the exact `OUTCOMES` set hardcoded at `scripts/office_runtime.py:21`. Th
 - `abandoned`: Run was cancelled, superseded, or otherwise ended without landing verified work (see the mapping table for the narrative causes this covers).
 - `environment_failure`: Infrastructure, network, quota, or local host failure independent of model logic.
 
-**Mapping table** — narrative outcomes referenced elsewhere in this document (§7.4's reward
-formula) do not name new stored values; they map onto the seven above:
+**Mapping table and narrative subtype (Finding F15 correction).** Round 1 of this task collapsed four
+distinct, previously-weighted narrative outcomes into the single stored label `abandoned` (and two
+into `verified_no_observed_failure`), and picked new reward numbers for the collapsed buckets. That
+picked a number where none was authorized: `runs.db` holds 2 dispatches and 0 labels today, so no
+weight chosen now — old or new — can be validated against evidence, and `replay.min_labeled_rows_for_refit`
+exists precisely so a weight changes through replay evidence, not a documentation pass. The fix
+keeps the schema's stored `label` canonical (unchanged from the F4 fix — no sixth or seventh value is
+added to `schemas/outcome-label.schema.json`) while adding a **narrative subtype**, carried as a
+tagged string inside the existing `contributing_attributions` JSON array (§7.3.3; this column already
+exists and needs no runtime change), so the original nine narrative outcomes — and their original
+nine reward numbers from the pre-migration contract — remain fully reconstructible and untouched:
 
-| Narrative outcome | Stored label | Evidence | Distinguishing signal |
-|---|---|---|---|
-| Full success, zero findings | `verified_no_observed_failure` | required | zero accepted-material findings |
-| Partial success (non-blocking findings) | `verified_no_observed_failure` | required | `contributing_attributions` records the accepted-minor/medium findings; §7.4's `Δ_findings` penalty (not the label) captures the severity difference |
-| Defect detected pre-merge, unresolved at closeout | `abandoned` | required | `primary_attribution` names the responsible party (e.g. `verification`, `planner`) |
-| Failed verification (tests/linters could not be made to pass) | `abandoned` | required | `primary_attribution = 'model'` or `'harness'` |
-| Operator rejected the plan/patch | `abandoned` | optional (`null` if no test log exists) | `primary_attribution = 'unknown'` unless a specific party is named |
-| Run cancelled, timed out, or superseded before completion | `abandoned` | optional | `primary_attribution = 'unknown'` |
+| Narrative outcome | Stored label | `contributing_attributions` tag | Evidence | Original $R_{\text{base}}$ (unchanged) |
+|---|---|---|---|---|
+| Full success, zero findings | `verified_no_observed_failure` | `narrative:success` (or absent — this is the default) | required | $+0.8$ |
+| Partial success (non-blocking findings) | `verified_no_observed_failure` | `narrative:partial_success` | required | $+0.4$ |
+| Environment/infra/quota failure | `environment_failure` | (none needed; 1:1 mapping) | optional | $0.0$ |
+| Run cancelled, timed out, or superseded before completion | `abandoned` | `narrative:abandoned` (or absent — this is the default) | optional | $-0.4$ |
+| Defect detected pre-merge, unresolved at closeout | `abandoned` | `narrative:defect_detected` | required | $-0.5$ |
+| Failed verification (tests/linters could not be made to pass) | `abandoned` | `narrative:failed_verification` | required | $-0.6$ |
+| Operator rejected the plan/patch | `abandoned` | `narrative:operator_rejected` | optional (`null` if no test log exists) | $-0.7$ |
+| Defect recurred in a previously-modified/flagged area | `recurrence_failure` | (none needed; 1:1 mapping) | required | $-0.9$ |
+| Defect escaped review, discovered post-merge/post-closeout | `material_post_merge_defect` | (none needed; 1:1 mapping) | required | $-1.0$ |
 
-Every row in the mapping table stores `abandoned` because none of these outcomes land verified work;
-`primary_attribution` and `contributing_attributions` (§7.3.3) are what distinguish *why* a given
-`abandoned` dispatch did not land, not a proliferation of stored label values the schema does not
-accept.
+A reader (or `office_routing.py`, when T2B implements it) recovers the exact pre-migration reward by
+reading `label` plus the `narrative:*` tag in `contributing_attributions`, defaulting to the tag shown
+as "(or absent — this is the default)" when no `narrative:*` tag is present, so a labeler that only
+ever wrote the plain stored label (no subtype) reproduces the least-severe member of its bucket,
+never a fabricated blend.
 
-#### 7.3.2 Evidence Requirements
-- **Mandatory Evidence:** Labels asserting verified technical status (`verified_no_observed_failure`, `recurrence_failure`, `revert_failure`, `material_post_merge_defect`, and any `abandoned` label whose narrative cause is "defect detected" or "failed verification" per the mapping table above) **MUST** include a non-empty SHA-256 evidence hash (`evidence_hash` matching `^sha256:[0-9a-f]{64}$`). Any attempt to record these labels without a valid hash is rejected.
-- **Optional Evidence:** External terminations (`abandoned` for operator-rejection/cancellation causes, and `environment_failure`) may provide `evidence_hash = null` when no test log was generated. `pending` never carries evidence.
+`revert_failure` is a stored label that already existed in `schemas/outcome-label.schema.json`
+before this task and has **no corresponding entry anywhere in the pre-migration reward table** —
+the original nine-value table this section is restoring never covered it. Assigning it a number now
+would be exactly the defect this correction exists to fix: a judgment call standing in for evidence.
+**`revert_failure` is therefore explicitly unscored** (see §7.4.1's base-component list) until a
+weight is proposed through the replay gate once qualifying labeled rows exist; this is a plan
+question, not a documentation default.
+
+#### 7.3.2 Evidence Requirements (Finding F20: enforced by schema, not prose alone)
+- **Always mandatory, regardless of `contributing_attributions` tag:** `verified_no_observed_failure`, `recurrence_failure`, `revert_failure`, `material_post_merge_defect`. These **MUST** include a non-empty SHA-256 evidence hash matching `^sha256:[0-9a-f]{64}$` exactly (not merely non-null/non-empty — a malformed or truncated hash is rejected identically to a missing one).
+- **Mandatory for two `abandoned` subtypes:** `abandoned` tagged `narrative:defect_detected` or `narrative:failed_verification` **MUST** carry the same valid `sha256:` hash.
+- **Optional for two `abandoned` subtypes and `environment_failure`:** `abandoned` tagged `narrative:abandoned` (or untagged) or `narrative:operator_rejected`, and `environment_failure`, may have `evidence_hash = null` when no test log was generated.
+- **Never carries evidence:** `pending`.
+- This is enforced at the schema level (`schemas/outcome-label.schema.json`), not by convention alone, because a label that passes validation with no evidence defeats the trust query's evidence gate (§7.1.2) one layer down — the same failure mode F12 named at the query level.
 
 #### 7.3.3 Table Schema and Write Lifecycle
 Outcome labels are persisted in the `outcome_labels` table in `runs.db`:
@@ -741,13 +813,21 @@ CREATE TABLE IF NOT EXISTS outcome_labels (
 The derived local reward $R \in [-1.0, 1.0]$ summarizes historical outcome quality, review findings, and execution efficiency for a model/adapter candidate on a specific task shape:
 $$R = \text{clamp}\left(R_{\text{base}} + \Delta_{\text{findings}} + \Delta_{\text{efficiency}}, -1.0, 1.0\right)$$
 
-1. **Base Component ($R_{\text{base}}$), keyed by the canonical stored label from §7.3.1 (Finding F4):**
-   - `verified_no_observed_failure`: $+0.8$ (covers both the "full success" and "partial success" narrative outcomes; §7.4.1.2's findings penalty differentiates them by `N_medium`)
+1. **Base Component ($R_{\text{base}}$), keyed by (stored label, narrative subtype) per §7.3.1's
+   mapping table (Finding F15: these are the original, pre-migration values, unchanged by the F4
+   vocabulary consolidation):**
+   - `verified_no_observed_failure` + `narrative:success` (or no tag): $+0.8$
+   - `verified_no_observed_failure` + `narrative:partial_success`: $+0.4$
    - `environment_failure`: $0.0$ (neutral, unpenalized)
-   - `abandoned`: $-0.7$ (covers the "abandoned/cancelled", "operator rejected", "failed verification", and "defect detected pre-merge" narrative outcomes from §7.3.1's mapping table; the collapse uses the **least-favorable** of those four previously-distinct values so that a genuine operator rejection is never under-penalized by ambiguity about which narrative cause produced the `abandoned` label)
+   - `abandoned` + `narrative:abandoned` (or no tag): $-0.4$
+   - `abandoned` + `narrative:defect_detected`: $-0.5$
+   - `abandoned` + `narrative:failed_verification`: $-0.6$
+   - `abandoned` + `narrative:operator_rejected`: $-0.7$
    - `recurrence_failure`: $-0.9$
-   - `revert_failure`: $-1.0$ (landed work later reverted; as severe as a post-merge defect because it consumed a merge slot and required a second corrective action)
    - `material_post_merge_defect`: $-1.0$
+   - `revert_failure`: **not scored** — no pre-migration weight exists for this label (§7.3.1); a
+     candidate whose only qualifying labels are `revert_failure` contributes no `R_base` sample
+     (same treatment as `pending`) until the replay gate admits an evidence-derived weight
    - `pending`: not scored; a candidate with only `pending` labels contributes no `R_base` sample (see §7.4.2)
 
 2. **Findings Penalty ($\Delta_{\text{findings}}$):**
