@@ -7,3 +7,6 @@ __pycache__/
 *.pyc
 .DS_Store
 graft/
+
+# Herdr spawn ledger: worktree-local run state, never committed
+.herdr/
