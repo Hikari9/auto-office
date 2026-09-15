@@ -162,11 +162,44 @@ class LandingCliTests(unittest.TestCase):
 
     # ---- landing ----
 
-    def test_record_landing_then_validate_and_verify(self):
+    def _recorder_with(self, landing, passed=1):
+        """A runs.db holding the validation row the landing cites.
+
+        record-landing refuses to run without a reachable recorder, so every positive landing
+        test has to supply the record it claims -- which is the point of the cross-check.
+        """
+        db = self.state_dir / "runs.db"
+        if not db.exists():
+            rt.init_db(db)
+        ev = landing["validation_evidence"]
+        val = self.state_dir / "val.json"
+        val.write_text(json.dumps({
+            "dispatch_id": landing["producer"]["dispatch_id"],
+            "kind": "regression_tests",
+            "command": ev["commands"][0],
+            "passed": passed,
+            "known_bad_proven": 0,
+            "evidence_hash": ev["evidence_hash"],
+        }), encoding="utf-8")
+        _invoke(rt.cmd_record_validation, db=str(db), file=str(val))
+        return db
+
+    def test_record_landing_requires_a_reachable_recorder(self):
+        """An unreachable recorder is an error, not a reason to skip the check."""
         landing = _fixture("landing")
         path = self._write_tmp(landing)
-        code, out = _invoke(rt.cmd_record_landing, file=path, family_id=None, state_dir=str(self.state_dir))
-        self.assertEqual(code, 0)
+        code, out = _invoke(rt.cmd_record_landing, file=path, family_id=None,
+                            state_dir=str(self.state_dir), db=str(self.state_dir / "absent.db"))
+        self.assertEqual(code, 4)
+        self.assertEqual(out["reason"], "recorder_unreachable")
+
+    def test_record_landing_then_validate_and_verify(self):
+        landing = _fixture("landing")
+        db = self._recorder_with(landing)
+        path = self._write_tmp(landing)
+        code, out = _invoke(rt.cmd_record_landing, file=path, family_id=None,
+                            state_dir=str(self.state_dir), db=str(db))
+        self.assertEqual(code, 0, out)
         self.assertEqual(out["status"], "recorded")
         self.assertEqual(fam.get_family(self.state_dir, "fam-core")["latest_landing"]["landing_id"],
                           landing["landing_id"])
@@ -184,9 +217,11 @@ class LandingCliTests(unittest.TestCase):
 
     def test_record_landing_missing_validation_evidence_is_exit_4(self):
         landing = _fixture("landing")
+        db = self._recorder_with(landing)
         landing["validation_evidence"]["passed"] = False
         path = self._write_tmp(landing)
-        code, out = _invoke(rt.cmd_record_landing, file=path, family_id=None, state_dir=str(self.state_dir))
+        code, out = _invoke(rt.cmd_record_landing, file=path, family_id=None,
+                            state_dir=str(self.state_dir), db=str(db))
         self.assertEqual(code, 4)
 
     # ---- F2: a landing's own PASS boolean is a claim, not a record ----
@@ -199,10 +234,11 @@ class LandingCliTests(unittest.TestCase):
         A landing citing it is citing the hash of an empty file as proof its validation ran.
         """
         landing = _fixture("landing")
+        db = self._recorder_with(landing)
         landing["validation_evidence"]["evidence_hash"] = self.EMPTY_SHA256
         path = self._write_tmp(landing)
         code, out = _invoke(rt.cmd_record_landing, file=path, family_id=None,
-                            state_dir=str(self.state_dir), db=None)
+                            state_dir=str(self.state_dir), db=str(db))
         self.assertEqual(code, 4)
         self.assertEqual(out["reason"], "empty_evidence_hash")
 
@@ -221,6 +257,17 @@ class LandingCliTests(unittest.TestCase):
             "output_summary": "PASS",
             "evidence_hash": "sha256:" + "a" * 64,
         }
+        path = self._write_tmp(landing)
+        code, out = _invoke(rt.cmd_record_landing, file=path, family_id=None,
+                            state_dir=str(self.state_dir), db=str(db))
+        self.assertEqual(code, 4)
+        self.assertEqual(out["reason"], "evidence_not_recorded")
+
+    def test_record_landing_rejects_evidence_the_recorder_saw_fail(self):
+        """A row exists, but it records a FAILING run. Matching on the hash alone is not enough."""
+        landing = _fixture("landing")
+        landing["validation_evidence"]["evidence_hash"] = "sha256:" + "c" * 64
+        db = self._recorder_with(landing, passed=0)
         path = self._write_tmp(landing)
         code, out = _invoke(rt.cmd_record_landing, file=path, family_id=None,
                             state_dir=str(self.state_dir), db=str(db))

@@ -230,6 +230,59 @@ class TestReview(unittest.TestCase):
                              '--packet', str(ok_packet)], capture_output=True, text=True)
         self.assertTrue(json.loads(r2.stdout)['passed'])
 
+    def test_a_quoted_packet_command_still_records_its_validation_row(self):
+        """R1: the validation row was hand-written JSON with $cmd interpolated raw.
+
+        A packet command containing a double quote -- python3 -c "...", pytest -k "a or b" --
+        produced malformed JSON, record-validation failed, and `|| true` swallowed it. The gate
+        reported a pass with no row in runs.db, which is exactly the row record_landing now
+        requires before a landing can be recorded.
+        """
+        verify = ROOT / 'scripts' / 'verify.sh'
+        packet = self._write_packet(commands=('python3 -c "print(1)"',))
+        r = subprocess.run([str(verify), '--worktree', str(self.repo), '--dispatch-id', 'q-1',
+                            '--state-dir', str(self.state_dir), '--db', str(self.db),
+                            '--packet', str(packet)], capture_output=True, text=True)
+        out = json.loads(r.stdout)
+        self.assertTrue(out['passed'], r.stdout + r.stderr)
+        with sqlite3.connect(self.db) as con:
+            rows = con.execute(
+                "SELECT command FROM validations WHERE dispatch_id = 'q-1'").fetchall()
+        self.assertEqual(len(rows), 1, "gate passed but recorded no validation row")
+        self.assertEqual(rows[0][0], 'python3 -c "print(1)"')
+
+    def test_no_gate_executed_is_unverifiable_not_an_implementation_defect(self):
+        """R2: the loop turned "nothing ran" into an IMPLEMENTATION_DEFECT finding and an
+        `abandoned` outcome label attributed to the producer, which lowers that harness
+        triple's derived reward. A forgotten --packet must not degrade a harness's routing
+        score for a run in which it was never measured.
+        """
+        review_path = self._write_review()
+        r = self._run_loop(packet=False,
+                           extra_args=('--max-iterations', '1', '--review-file', str(review_path)))
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn('UNVERIFIABLE', r.stdout + r.stderr)
+        self.assertNotIn('MAX_ITERATIONS', r.stdout + r.stderr)
+        with sqlite3.connect(self.db) as con:
+            labels = con.execute("SELECT label FROM outcome_labels").fetchall()
+            findings = con.execute("SELECT id FROM findings").fetchall()
+        self.assertEqual(labels, [], "an unverifiable run was labelled anyway")
+        self.assertEqual(findings, [], "an unverifiable run was recorded as a defect")
+
+    def test_known_bad_proven_is_zero_when_no_control_was_declared(self):
+        """R3: `known_bad_proven` asserts the declared control ran and passed -- nothing more,
+        and nothing at all when the packet declares no control."""
+        verify = ROOT / 'scripts' / 'verify.sh'
+        packet = self._write_packet(commands=("true",))
+        subprocess.run([str(verify), '--worktree', str(self.repo), '--dispatch-id', 'kb-1',
+                        '--state-dir', str(self.state_dir), '--db', str(self.db),
+                        '--packet', str(packet)], capture_output=True, text=True)
+        with sqlite3.connect(self.db) as con:
+            rows = con.execute(
+                "SELECT kind, known_bad_proven FROM validations WHERE dispatch_id = 'kb-1'").fetchall()
+        self.assertNotIn('known_bad_controls', [k for k, _ in rows])
+        self.assertTrue(all(v == 0 for _, v in rows), rows)
+
     def test_self_verification_failure_reaches_the_defect_exit(self):
         """Previously unreachable: every loop test ran against a repo whose verification was
         a vacuous green, so the IMPLEMENTATION_DEFECT branch could not be entered at all."""

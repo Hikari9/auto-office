@@ -221,6 +221,18 @@ while [[ $iter -lt $MAX_ITERATIONS ]]; do
   if [[ -n "$PACKET" ]]; then verify_args+=(--packet "$PACKET"); fi
   verify_out=$("$VERIFY_SCRIPT" "${verify_args[@]}")
   passed=$(echo "$verify_out" | jq -r '.passed' 2>/dev/null || echo "$verify_out" | grep -o '"passed": *true' || true)
+  verify_reason=$(echo "$verify_out" | jq -r '.reason // ""' 2>/dev/null || true)
+
+  # A verification that executed nothing is UNVERIFIABLE, not a failed implementation. Recording
+  # it as a defect wrote an `abandoned` outcome label attributed to the producer, which lowers
+  # that harness triple's derived reward -- so a forgotten --packet would permanently degrade a
+  # harness's routing score for a run in which it was never actually measured. verify.sh already
+  # distinguishes no_gate_executed from a real failure; this stops the loop discarding it.
+  if [[ "$verify_reason" == "no_gate_executed" ]]; then
+    echo "Self-verification is unverifiable: no gate executed. Supply --packet with the task's validation commands." >&2
+    echo "UNVERIFIABLE: no_gate_executed"
+    exit 4
+  fi
 
   if [[ "$passed" != "true" && "$passed" != "\"passed\": true" ]]; then
     finding_id=$("$REVIEW_FINDING_SCRIPT" --dispatch-id "$DISPATCH_ID" --reviewer-dispatch-id "$REVIEWER_ID" \
