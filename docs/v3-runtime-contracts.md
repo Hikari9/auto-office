@@ -540,6 +540,32 @@ A dispatch may be labeled more than once over time (`outcome_labels` is append-o
 #### 7.1.2 Trust Evaluation SQL Query
 The trust qualification status for a candidate triple (`:target_triple`) is evaluated against `runs.db` using the following query. `:proven_min_successful_dispatches` and `:proven_min_task_shapes` are bound parameters read from `config/config.default.yaml`'s `adapter_trust` block, not literals:
 
+**Finding F21 — the complete evidence-validity checklist.** This gate has been narrowed four times
+running (duplicates, then unsigned labels, then empty hashes, then malformed hashes), each fix
+correct but each leaving a narrower hole, because each round patched the instance found rather than
+the whole property list. The full list, checked together from this point on, wherever "valid
+evidence" is required anywhere in this query:
+
+1. **Present** — the column is not `NULL`.
+2. **Correctly prefixed** — begins with the literal `sha256:`.
+3. **Correct length** — exactly 71 characters total (`"sha256:"` is 7, a hash body is 64).
+4. **Hex-only body** — the 64 characters after the prefix contain only `0-9a-f` (a non-hex
+   character, e.g. `"z"` or an uppercase letter, must not pass merely because the prefix and
+   length are right).
+5. **Attributable to a distinct qualifying dispatch** — counted via `COUNT(DISTINCT dispatch_id)`
+   over `latest_labels` (`rn = 1`), so a duplicated or re-recorded label cannot multiply a
+   dispatch's contribution (Finding F3).
+6. **Not superseded by an unresolved adapter-attributed failure** — `critical_failures = 0 OR`
+   a qualifying `resolved_adapter_defects` record exists (Finding F3/F12).
+
+Properties 1-4 are combined into one SQL fragment, `IS NOT NULL AND LIKE 'sha256:%' AND
+length(...) = 71 AND substr(..., 8) NOT GLOB '*[^0-9a-f]*'` (SQLite has no native regex; `LIKE` plus
+`length` plus a `GLOB` character-class negation together are the portable equivalent of
+`^sha256:[0-9a-f]{64}$`), computed **once** per evidence source as a named boolean column
+(`evidence_valid` in `latest_labels`, inlined identically in the `findings` and `validations`
+evidence checks) so every consumer of that evidence reads the same already-validated flag rather
+than re-deriving a partial version of the check:
+
 ```sql
 WITH latest_labels AS (
     SELECT
@@ -547,6 +573,12 @@ WITH latest_labels AS (
         ol.label,
         ol.primary_attribution,
         ol.evidence_hash,
+        (
+            ol.evidence_hash IS NOT NULL
+            AND ol.evidence_hash LIKE 'sha256:%'
+            AND length(ol.evidence_hash) = 71
+            AND substr(ol.evidence_hash, 8) NOT GLOB '*[^0-9a-f]*'
+        ) AS evidence_valid,
         ROW_NUMBER() OVER (
             PARTITION BY ol.dispatch_id
             ORDER BY ol.labeled_at DESC, ol.id DESC
@@ -561,14 +593,15 @@ adapter_dispatches AS (
         d.attribution,
         ll.label AS outcome_label,
         ll.primary_attribution AS label_attribution,
-        ll.evidence_hash AS label_evidence_hash,
+        ll.evidence_valid AS label_evidence_valid,
         (SELECT COUNT(*) FROM findings f
          WHERE f.dispatch_id = d.id
            AND f.status = 'accepted-material'
            AND f.severity IN ('critical', 'high')
            AND f.evidence_hash IS NOT NULL
            AND f.evidence_hash LIKE 'sha256:%'
-           AND length(f.evidence_hash) = 71) AS blocking_findings
+           AND length(f.evidence_hash) = 71
+           AND substr(f.evidence_hash, 8) NOT GLOB '*[^0-9a-f]*') AS blocking_findings
     FROM dispatches d
     LEFT JOIN latest_labels ll ON ll.dispatch_id = d.id AND ll.rn = 1
     WHERE d.triple = :target_triple
@@ -576,8 +609,6 @@ adapter_dispatches AS (
 resolved_adapter_defects AS (
     -- Finding F3 / §7.1.3: a triple-scoped remediation record, evidenced by a passed
     -- validation row (not a nonexistent lineage.evidence_hash column), clears quarantine.
-    -- Finding F12: "IS NOT NULL" alone admits an empty-string hash; every evidence check
-    -- in this query requires the full "sha256:" + 64 hex chars shape, not mere non-nullness.
     SELECT COUNT(*) AS n
     FROM lineage l
     JOIN validations v ON v.id = l.parent_id
@@ -589,21 +620,18 @@ resolved_adapter_defects AS (
       AND v.evidence_hash IS NOT NULL
       AND v.evidence_hash LIKE 'sha256:%'
       AND length(v.evidence_hash) = 71
+      AND substr(v.evidence_hash, 8) NOT GLOB '*[^0-9a-f]*'
 ),
 qualification_summary AS (
     SELECT
         COUNT(DISTINCT CASE
             WHEN outcome_label = 'verified_no_observed_failure'
-                 AND label_evidence_hash IS NOT NULL
-                 AND label_evidence_hash LIKE 'sha256:%'
-                 AND length(label_evidence_hash) = 71
+                 AND label_evidence_valid
                  AND blocking_findings = 0
             THEN dispatch_id END) AS successful_dispatches,
         COUNT(DISTINCT CASE
             WHEN outcome_label = 'verified_no_observed_failure'
-                 AND label_evidence_hash IS NOT NULL
-                 AND label_evidence_hash LIKE 'sha256:%'
-                 AND length(label_evidence_hash) = 71
+                 AND label_evidence_valid
                  AND blocking_findings = 0
             THEN task_shape END) AS distinct_task_shapes,
         COUNT(DISTINCT CASE
@@ -611,9 +639,7 @@ qualification_summary AS (
                  AND (
                      -- Evidence-backed adapter-attributed recurrence/post-merge label.
                      (outcome_label IN ('recurrence_failure', 'material_post_merge_defect')
-                      AND label_evidence_hash IS NOT NULL
-                      AND label_evidence_hash LIKE 'sha256:%'
-                      AND length(label_evidence_hash) = 71)
+                      AND label_evidence_valid)
                      -- Finding F12: an adapter-attributed dispatch that never landed
                      -- (`abandoned`, any narrative subtype) and also carries an
                      -- accepted-material critical/high finding is an unresolved adapter
@@ -638,23 +664,17 @@ SELECT
 FROM qualification_summary, resolved_adapter_defects;
 ```
 
-This resolves finding F3's three defects directly: `COUNT(DISTINCT dispatch_id)` over `latest_labels` (via `rn = 1`) means duplicated or re-recorded self-reported labels for the same dispatch cannot inflate `successful_dispatches`; the thresholds are bound parameters, not literals; and every evidence check requires the full `sha256:` + 64-hex-character shape.
+This resolves finding F3's three defects directly: `COUNT(DISTINCT dispatch_id)` over `latest_labels` (via `rn = 1`) means duplicated or re-recorded self-reported labels for the same dispatch cannot inflate `successful_dispatches`; the thresholds are bound parameters, not literals; and every evidence check requires the full checklist above, not a partial version of it.
 
-**Finding F12 correction.** Round 1's `label_evidence_hash IS NOT NULL` admitted an empty-string
-hash, because in SQL `'' IS NOT NULL` is true — a caller could self-report a label with
-`evidence_hash: ""` and still qualify. Every evidence check in this query (successful-dispatch
-count, distinct-task-shape count, critical-failure detection, and the `resolved_adapter_defects`
-lookup) now requires `IS NOT NULL AND LIKE 'sha256:%' AND length(...) = 71`, matching
-`schemas/outcome-label.schema.json`'s `^sha256:[0-9a-f]{64}$` pattern exactly (SQLite has no native
-regex; the prefix-plus-length check is the portable equivalent, since `"sha256:"` is 7 characters
-and a valid hash is 64 hex characters, for 71 total). Round 1's `critical_failures` also only
-recognized `recurrence_failure`/`material_post_merge_defect` labels, so an adapter-attributed
-`abandoned` dispatch that never landed — but that also carries an accepted-material critical/high
-finding — passed through unnoticed; `critical_failures` now also counts that case, qualified by the
-finding's own evidence (not the `abandoned` label's, since several `abandoned` narrative subtypes
-carry optional evidence per §7.3.2). The `findings` blocking-count subquery itself is likewise
-tightened to require a well-formed `evidence_hash`, so an unevidenced "accepted-material" finding
-cannot silently qualify or disqualify anything either.
+**Finding F12 correction (superseded by F21's checklist above, kept here for history).** Round 1's
+`label_evidence_hash IS NOT NULL` admitted an empty-string hash, because in SQL `'' IS NOT NULL` is
+true. Round 2 added the `LIKE`/`length` check but still admitted a non-hex suffix (e.g.
+`"sha256:" + "z"*64`), which is what F21 closes. Round 1's `critical_failures` also only recognized
+`recurrence_failure`/`material_post_merge_defect` labels, so an adapter-attributed `abandoned`
+dispatch that never landed — but that also carries an accepted-material critical/high finding —
+passed through unnoticed; `critical_failures` now also counts that case, qualified by the finding's
+own evidence (not the `abandoned` label's, since several `abandoned` narrative subtypes carry
+optional evidence per §7.3.2).
 
 #### 7.1.3 Unresolved Adapter-Attributed Critical Failure in Lineage
 An unresolved adapter failure permanently blocks qualification. It is defined as:
@@ -775,6 +795,31 @@ as "(or absent — this is the default)" when no `narrative:*` tag is present, s
 ever wrote the plain stored label (no subtype) reproduces the least-severe member of its bucket,
 never a fabricated blend.
 
+**Finding F22 — totality and compatibility rules, enforced by `schemas/outcome-label.schema.json`,
+not by convention alone.** Round 2 defined the tag scheme but left `contributing_attributions` an
+unconstrained array of arbitrary strings, so nothing stopped a caller from attaching an unrecognised
+tag or two conflicting tags to the same label, both of which reopen F15 by making the recovered
+reward depend on tag order or a guess. Reconstruction is total and unambiguous under these rules:
+
+1. **At most one narrative tag.** `contributing_attributions` may contain zero or one item matching
+   `^narrative:`; two (whether the same tag repeated or genuinely conflicting) fail validation
+   outright. There is no defined tie-break, because there is nothing to break a tie over — the
+   record is invalid.
+2. **No unknown tags.** Any array item matching `^narrative:` must be one of the six recognised
+   values from the table above; `narrative:` followed by anything else fails validation. A reader
+   never has to guess what an unrecognised tag meant.
+3. **Label/tag compatibility.** `narrative:success`/`narrative:partial_success` are only valid when
+   `label = verified_no_observed_failure`; the four `abandoned` subtypes are only valid when
+   `label = abandoned`. An off-label tag (e.g. `narrative:success` on an `abandoned` record) fails
+   validation rather than being silently ignored or applied to the wrong bucket.
+4. **Non-narrative strings are unaffected.** `contributing_attributions` may still carry ordinary
+   free-text attribution notes alongside at most one narrative tag; only strings that begin with
+   the `narrative:` prefix are constrained by rules 1-3.
+
+Because reconstruction is schema-enforced rather than convention-enforced, "guess" is never a
+runtime code path: a record that would require guessing was already rejected before it reached
+`runs.db`.
+
 `revert_failure` is a stored label that already existed in `schemas/outcome-label.schema.json`
 before this task and has **no corresponding entry anywhere in the pre-migration reward table** —
 the original nine-value table this section is restoring never covered it. Assigning it a number now
@@ -787,8 +832,13 @@ question, not a documentation default.
 - **Always mandatory, regardless of `contributing_attributions` tag:** `verified_no_observed_failure`, `recurrence_failure`, `revert_failure`, `material_post_merge_defect`. These **MUST** include a non-empty SHA-256 evidence hash matching `^sha256:[0-9a-f]{64}$` exactly (not merely non-null/non-empty — a malformed or truncated hash is rejected identically to a missing one).
 - **Mandatory for two `abandoned` subtypes:** `abandoned` tagged `narrative:defect_detected` or `narrative:failed_verification` **MUST** carry the same valid `sha256:` hash.
 - **Optional for two `abandoned` subtypes and `environment_failure`:** `abandoned` tagged `narrative:abandoned` (or untagged) or `narrative:operator_rejected`, and `environment_failure`, may have `evidence_hash = null` when no test log was generated.
-- **Never carries evidence:** `pending`.
-- This is enforced at the schema level (`schemas/outcome-label.schema.json`), not by convention alone, because a label that passes validation with no evidence defeats the trust query's evidence gate (§7.1.2) one layer down — the same failure mode F12 named at the query level.
+- **Never carries evidence:** `pending`. **Finding F26:** round 2 stated this rule in prose but the
+  schema declared `evidence_hash` on every label including `pending`, so a `pending` record with a
+  fully-formed `evidence_hash` still validated. `schemas/outcome-label.schema.json` now forbids the
+  `evidence_hash` **and** `contributing_attributions` keys outright (not merely their value) when
+  `label = pending` — `pending` is a placeholder for "not yet terminal," and a placeholder carrying
+  evidence or a narrative subtype is a contradiction the schema now catches instead of describing.
+- This is enforced at the schema level (`schemas/outcome-label.schema.json`), not by convention alone, because a label that passes validation with no evidence defeats the trust query's evidence gate (§7.1.2) one layer down — the same failure mode F12/F21 named at the query level.
 
 #### 7.3.3 Table Schema and Write Lifecycle
 Outcome labels are persisted in the `outcome_labels` table in `runs.db`:

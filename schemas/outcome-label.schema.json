@@ -33,8 +33,24 @@
     "contributing_attributions": {
       "type": ["array", "null"],
       "items": {
-        "type": "string"
-      }
+        "type": "string",
+        "anyOf": [
+          { "not": { "pattern": "^narrative:" } },
+          {
+            "enum": [
+              "narrative:success",
+              "narrative:partial_success",
+              "narrative:abandoned",
+              "narrative:defect_detected",
+              "narrative:failed_verification",
+              "narrative:operator_rejected"
+            ]
+          }
+        ]
+      },
+      "contains": { "pattern": "^narrative:" },
+      "minContains": 0,
+      "maxContains": 1
     },
     "evidence_hash": {
       "type": ["string", "null"],
@@ -88,6 +104,66 @@
             "type": "string",
             "pattern": "^sha256:[0-9a-f]{64}$"
           }
+        }
+      }
+    },
+    {
+      "$comment": "Finding F22: narrative:success / narrative:partial_success reconstruct a reward only for verified_no_observed_failure; on any other label they are an unknown/off-label tag and must be rejected outright, not silently ignored.",
+      "if": {
+        "required": ["label"],
+        "properties": {
+          "label": { "not": { "const": "verified_no_observed_failure" } }
+        }
+      },
+      "then": {
+        "properties": {
+          "contributing_attributions": {
+            "not": {
+              "contains": {
+                "enum": ["narrative:success", "narrative:partial_success"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "Finding F22: narrative:abandoned / narrative:defect_detected / narrative:failed_verification / narrative:operator_rejected reconstruct a reward only for abandoned; on any other label they are off-label and must be rejected.",
+      "if": {
+        "required": ["label"],
+        "properties": {
+          "label": { "not": { "const": "abandoned" } }
+        }
+      },
+      "then": {
+        "properties": {
+          "contributing_attributions": {
+            "not": {
+              "contains": {
+                "enum": [
+                  "narrative:abandoned",
+                  "narrative:defect_detected",
+                  "narrative:failed_verification",
+                  "narrative:operator_rejected"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "Finding F26: pending is a non-terminal placeholder and never carries evidence or a narrative subtype tag.",
+      "if": {
+        "required": ["label"],
+        "properties": {
+          "label": { "const": "pending" }
+        }
+      },
+      "then": {
+        "properties": {
+          "evidence_hash": false,
+          "contributing_attributions": false
         }
       }
     }

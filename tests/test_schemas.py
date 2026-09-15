@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, re, sqlite3, unittest
+import importlib.util, json, re, sqlite3, unittest
 from pathlib import Path
 from jsonschema import Draft202012Validator
 import yaml
@@ -202,6 +202,86 @@ class TestSchemas(unittest.TestCase):
                 data = json.loads((FIXTURES_DIR / 'outcome-label' / f'{name}.json').read_text())
                 self.assertGreater(len(list(validator.iter_errors(data))), 0)
 
+    def test_outcome_label_narrative_subtype_reconstruction_is_total(self):
+        # Finding F22: narrative-subtype reconstruction must be total and unambiguous --
+        # absent, a single on-label recognised tag, a single off-label tag, an unknown
+        # tag, and two tags (conflicting or duplicated) are all covered explicitly rather
+        # than left to guesswork.
+        schema = json.loads((ROOT / 'schemas/outcome-label.schema.json').read_text())
+        validator = Draft202012Validator(schema)
+        valid_hash = 'sha256:' + 'a' * 64
+
+        def is_valid(obj):
+            return list(validator.iter_errors(obj)) == []
+
+        # Absent: fine.
+        self.assertTrue(is_valid({'label': 'verified_no_observed_failure', 'evidence_hash': valid_hash}))
+
+        # Single, on-label, recognised tag: fine.
+        self.assertTrue(is_valid({
+            'label': 'verified_no_observed_failure', 'evidence_hash': valid_hash,
+            'contributing_attributions': ['narrative:success'],
+        }))
+        self.assertTrue(is_valid({
+            'label': 'abandoned', 'contributing_attributions': ['narrative:abandoned'],
+        }))
+
+        # Off-label tag (recognised elsewhere, wrong label here): rejected.
+        self.assertFalse(is_valid({
+            'label': 'verified_no_observed_failure', 'evidence_hash': valid_hash,
+            'contributing_attributions': ['narrative:abandoned'],
+        }))
+        self.assertFalse(is_valid({
+            'label': 'recurrence_failure', 'evidence_hash': valid_hash,
+            'contributing_attributions': ['narrative:success'],
+        }))
+
+        # Unknown tag: rejected, not silently ignored.
+        self.assertFalse(is_valid({
+            'label': 'verified_no_observed_failure', 'evidence_hash': valid_hash,
+            'contributing_attributions': ['narrative:bogus'],
+        }))
+
+        # Conflicting (or merely duplicated) tags: rejected -- at most one narrative tag.
+        self.assertFalse(is_valid({
+            'label': 'verified_no_observed_failure', 'evidence_hash': valid_hash,
+            'contributing_attributions': ['narrative:success', 'narrative:partial_success'],
+        }))
+        self.assertFalse(is_valid({
+            'label': 'verified_no_observed_failure', 'evidence_hash': valid_hash,
+            'contributing_attributions': ['narrative:success', 'narrative:success'],
+        }))
+
+        # A non-narrative attribution string alongside a single narrative tag: still fine.
+        self.assertTrue(is_valid({
+            'label': 'verified_no_observed_failure', 'evidence_hash': valid_hash,
+            'contributing_attributions': ['some-note', 'narrative:success'],
+        }))
+
+        for name in ('reject_two_narrative_tags', 'reject_unknown_narrative_tag',
+                     'reject_off_label_narrative_tag'):
+            with self.subTest(fixture=name):
+                data = json.loads((FIXTURES_DIR / 'outcome-label' / f'{name}.json').read_text())
+                self.assertGreater(len(list(validator.iter_errors(data))), 0)
+
+    def test_pending_label_never_carries_evidence(self):
+        # Finding F26: the contract says pending never carries evidence; the schema must
+        # enforce that, not merely describe it.
+        schema = json.loads((ROOT / 'schemas/outcome-label.schema.json').read_text())
+        validator = Draft202012Validator(schema)
+        valid_hash = 'sha256:' + 'a' * 64
+
+        def is_valid(obj):
+            return list(validator.iter_errors(obj)) == []
+
+        self.assertTrue(is_valid({'label': 'pending'}))
+        self.assertFalse(is_valid({'label': 'pending', 'evidence_hash': valid_hash}))
+        self.assertFalse(is_valid({'label': 'pending', 'evidence_hash': None}))
+        self.assertFalse(is_valid({'label': 'pending', 'contributing_attributions': ['narrative:success']}))
+
+        data = json.loads((FIXTURES_DIR / 'outcome-label/reject_pending_with_evidence.json').read_text())
+        self.assertGreater(len(list(validator.iter_errors(data))), 0)
+
     def test_reward_migration_no_policy_flip(self):
         # Finding F15: the F4 vocabulary consolidation must not change any reward number.
         # OLD_BASE_REWARD is docs/v3-runtime-contracts.md as pinned at commit 688246b
@@ -311,6 +391,39 @@ class TestSchemas(unittest.TestCase):
                     f'Schema {schema_name} must have at least one rejecting fixture for category {cat}'
                 )
 
+class TestRouteNoNetworkAccess(unittest.TestCase):
+    """Finding F25: issue-40's resolution requires routing to consume a reproducible
+    local catalog snapshot and never perform live network discovery at route time.
+    Prove it by banning socket construction for the duration of a real route() call
+    that runs the full candidate pipeline through to a selection."""
+
+    def test_route_selects_without_opening_a_socket(self):
+        import socket
+        original_socket = socket.socket
+
+        def _forbidden(*args, **kwargs):
+            raise AssertionError('route() must not open a socket')
+
+        candidate = {
+            'harness': 'agy', 'harness_version': 'local', 'model_id': 'gemini-3.8-flash',
+            'effort': 'medium', 'adapter_state': 'proven', 'capabilities': [],
+            'absolute_floor_pass': True,
+            'quota': {'status': 'ok', 'tightest_remaining_percent': 50},
+            'cost': {}, 'local_reward': 0,
+        }
+        socket.socket = _forbidden
+        try:
+            spec = importlib.util.spec_from_file_location('office_runtime', ROOT / 'scripts/office_runtime.py')
+            rt = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(rt)
+            result = rt.route({'role': 'worker', 'candidates': [candidate]})
+        finally:
+            socket.socket = original_socket
+
+        self.assertEqual(result['status'], 'selected')
+        self.assertEqual(result['selected'], 'agy@local/gemini-3.8-flash@medium')
+
+
 class TestTrustQuery(unittest.TestCase):
     """Findings F3/F12: extract the pinned trust-evaluation SQL directly out of
     docs/v3-runtime-contracts.md and exercise it against a real sqlite schema, so the
@@ -369,6 +482,30 @@ class TestTrustQuery(unittest.TestCase):
             did = f"disp-empty-{i}"
             self._dispatch(con, did)
             self._label(con, did, "verified_no_observed_failure", evidence_hash="")
+        self.assertEqual(self._run(con)[3], "candidate")
+
+    def test_non_hex_evidence_hash_does_not_qualify(self):
+        # Finding F21: correct prefix and length are not enough -- a suffix containing a
+        # non-hex character (here 'z', repeated to keep the length exactly 71) must not
+        # be treated as valid evidence.
+        con = self._con()
+        for i in range(6):
+            did = f"disp-nonhex-{i}"
+            self._dispatch(con, did)
+            self._label(con, did, "verified_no_observed_failure",
+                        evidence_hash="sha256:" + "z" * 64)
+        self.assertEqual(self._run(con)[3], "candidate")
+
+    def test_uppercase_hex_evidence_hash_does_not_qualify(self):
+        # Finding F21: the schema pattern ^sha256:[0-9a-f]{64}$ is lowercase-only; an
+        # uppercase-hex suffix has the right length and character class casing mismatch
+        # must still be rejected, not silently case-folded into acceptance.
+        con = self._con()
+        for i in range(6):
+            did = f"disp-upper-{i}"
+            self._dispatch(con, did)
+            self._label(con, did, "verified_no_observed_failure",
+                        evidence_hash="sha256:" + "A" * 64)
         self.assertEqual(self._run(con)[3], "candidate")
 
     def test_adapter_abandoned_with_critical_finding_quarantines(self):
