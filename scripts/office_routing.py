@@ -43,6 +43,17 @@ def _num(v, default=float("inf")):
     return default if v is None else float(v)
 
 
+def _default_required_capabilities(role: str) -> list:
+    """Reads (never edits) `config/config.default.yaml`'s `roles.<role>.required_capabilities`
+    as the fallback for stage 3 when the caller doesn't explicitly supply one. Without this,
+    stage 3 silently no-ops for any caller -- including the real dispatch path, which never
+    threads `required_capabilities` through `policy` -- because an unset requirement defaults
+    to the empty set, which every candidate trivially satisfies."""
+    cfg = rt.load_data(rt.config_default_path()) or {}
+    role_cfg = (cfg.get("roles", {}) or {}).get(role, {}) or {}
+    return list(role_cfg.get("required_capabilities", []))
+
+
 def ensure_override_schema(con: sqlite3.Connection) -> None:
     """Creates `recorded_overrides` if not already present on `con`. No table for this
     is pinned in T0's contract (unlike `outcome_labels`, which has an explicit DDL in
@@ -158,7 +169,12 @@ def route(request: dict) -> dict:
     role = request["role"]
     playbook = request.get("playbook")
     policy = request.get("policy", {})
-    required = set(request.get("required_capabilities", policy.get("required_capabilities", [])))
+    if "required_capabilities" in request:
+        required = set(request["required_capabilities"])
+    elif "required_capabilities" in policy:
+        required = set(policy["required_capabilities"])
+    else:
+        required = set(_default_required_capabilities(role))
     reserve = float(policy.get("quota_reserve_percent", 20))
     cost_policy = request.get("cost_policy", policy.get("cost_policy", "balanced"))
     allow_advisory_undercut = bool(request.get("allow_advisory_undercut", True))

@@ -74,7 +74,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(d['invocation_model_id_source'],'catalog')
         self.assertNotIn('unverified',d['reason'])
     def test_disclosure_flags_unproven_invocation_slug(self):
-        unproven=cand('claude',model_id='opus',effort='medium')
+        # caps includes 'planning' because stage 3 now enforces
+        # roles.planner.required_capabilities; this test is about slug disclosure,
+        # not about the capability filter.
+        unproven=cand('claude',model_id='opus',effort='medium',caps=('builder','planning'))
         unproven['invocation_model_id']='claude-opus-5'
         unproven['invocation_source']='documented: the claude CLI cannot enumerate models, so this slug is documented rather than CLI-proven'
         r=rt.route({'role':'planner','playbook':'Change','candidates':[unproven]})
@@ -86,14 +89,14 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn('unproven',d['reason'])
         self.assertNotIn('unverified',d['reason'])
 
-        unproven2=cand('claude',model_id='opus',effort='medium')
+        unproven2=cand('claude',model_id='opus',effort='medium',caps=('builder','planning'))
         unproven2['invocation_model_id']='claude-opus-5'
         unproven2['invocation_source']='documented-model-id: unproven slug'
         d2=rt.route({'role':'planner','playbook':'Change','candidates':[unproven2]})['selection_disclosure']
         self.assertEqual(d2['invocation_provenance'],'documented')
         self.assertIn('unproven',d2['reason'])
 
-        proven=cand('codex',model_id='astra',effort='low')
+        proven=cand('codex',model_id='astra',effort='low',caps=('builder','planning'))
         proven['invocation_model_id']='gpt-6-astra'
         proven['invocation_source']='local-evidence:codex debug models --bundled'
         r_prov=rt.route({'role':'planner','playbook':'Change','candidates':[proven]})

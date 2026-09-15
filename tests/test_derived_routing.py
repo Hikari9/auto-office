@@ -93,6 +93,49 @@ class DerivedRoutingTests(unittest.TestCase):
         self.assertEqual(result['selected'], triple)
         self.assertEqual(result['status'], 'selected')
 
+    # ---- receipt: stage 3 required_capabilities actually rejects (ADDED FINDING) ----
+
+    def test_executor_missing_all_capabilities_is_rejected_by_stage_3(self):
+        """config.default.yaml declares executor.required_capabilities: [builder]. A
+        candidate that carries no capabilities must be rejected at stage 3, not waved
+        through because no `policy.required_capabilities` was explicitly passed."""
+        triple = 'agy@1/m@high'
+        scoring.record_trust_act(self.db_path, triple, 'proven', 'rico', 'operator-verified rollout')
+        c = cand('agy', caps=())
+        request = {'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path, 'candidates': [c]}
+        result = routing.route(request)
+        self.assertIsNone(result['selected'])
+        self.assertEqual(result['status'], 'no_qualifying_candidate')
+        reasons = [r['reason'] for r in result['rejected'] if r['stage'] == 3]
+        self.assertTrue(reasons, "expected a stage-3 rejection for a capability-less candidate")
+        self.assertIn('builder', reasons[0])
+
+    def test_executor_with_wrong_capability_is_rejected_by_stage_3(self):
+        """A candidate carrying an unrelated capability (`review`, not `builder`) must
+        still be rejected -- stage 3 checks for the required capability, not merely
+        that the candidate has *some* capability."""
+        triple = 'agy@1/m@high'
+        scoring.record_trust_act(self.db_path, triple, 'proven', 'rico', 'operator-verified rollout')
+        c = cand('agy', caps=('review',))
+        request = {'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path, 'candidates': [c]}
+        result = routing.route(request)
+        self.assertIsNone(result['selected'])
+        self.assertEqual(result['status'], 'no_qualifying_candidate')
+        reasons = [r['reason'] for r in result['rejected'] if r['stage'] == 3]
+        self.assertTrue(reasons, "expected a stage-3 rejection for a wrongly-capable candidate")
+        self.assertIn('builder', reasons[0])
+
+    def test_worker_with_no_capabilities_is_still_selected(self):
+        """config.default.yaml declares worker.required_capabilities: []. An empty
+        requirement is legitimate -- worker must NOT be rejected at stage 3 just
+        because it lacks capabilities. Fixing stage 3 must not turn into rejecting
+        everything regardless of role."""
+        c = cand('agy', caps=())
+        request = {'role': 'worker', 'playbook': 'Change', 'runs_db': self.db_path, 'candidates': [c]}
+        result = routing.route(request)
+        self.assertEqual(result['selected'], 'agy@1/m@high')
+        self.assertEqual(result['status'], 'selected')
+
     def test_seeded_success_labels_alone_never_promote(self):
         """No count of self-reported successes may promote -- amendments v5/v6."""
         triple = 'agy@1/m@high'
