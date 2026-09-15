@@ -4,7 +4,11 @@
  * herdr-ledger: a small, worktree-local record of the panes one orchestrator
  * spawned, so it can be swept later without touching anyone else's panes.
  *
- * File: $HERDR_LEDGER, else <git toplevel or cwd>/.herdr/ledger.jsonl.
+ * File: $HERDR_LEDGER, else $OFFICE_PANE_LEDGER, else /tmp/office/panes.jsonl.
+ * This is the SAME ledger scripts/office_spawn.sh writes and
+ * scripts/hooks/close_finished_panes.mjs sweeps. It is deliberately not
+ * worktree-local: several agents in different worktrees share one run's panes,
+ * so a per-worktree file would let each agent see only its own spawns.
  * One JSON object per line, keyed by pane_id. Fields:
  *   pane_id, agent, kind, session_id, worktree, spawned_at,
  *   orchestrator_pane_id, orchestrator_session_id,
@@ -25,11 +29,8 @@ const SUGGESTIONS = new Set(["closeable", "reusable", "compactable", "keep"]);
 
 function ledgerPath() {
   if (process.env.HERDR_LEDGER) return process.env.HERDR_LEDGER;
-  let root = null;
-  try {
-    root = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-  } catch { /* not a git worktree: fall back to cwd */ }
-  return join(root || process.cwd(), ".herdr", "ledger.jsonl");
+  if (process.env.OFFICE_PANE_LEDGER) return process.env.OFFICE_PANE_LEDGER;
+  return join("/tmp", "office", "panes.jsonl");
 }
 
 function readLedger(path) {
@@ -107,8 +108,12 @@ function cmdAdd(flags) {
     session_id: flags.session || null,
     worktree: flags.worktree || process.cwd(),
     spawned_at: nowIso(),
+    // close_finished_panes.mjs reads recorded_at; office_spawn.sh writes it.
+    recorded_at: nowIso(),
     orchestrator_pane_id: flags["orchestrator-pane"] || process.env.HERDR_PANE_ID || null,
     orchestrator_session_id: flags["orchestrator-session"] || process.env.HERDR_SESSION_ID || null,
+    run_id: flags.run || process.env.OFFICE_RUN_ID || null,
+    dispatch_id: flags.dispatch || null,
     status: "working",
     suggestion: null,
     note: null,

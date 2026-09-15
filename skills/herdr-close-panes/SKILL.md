@@ -1,6 +1,6 @@
 ---
 name: herdr-close-panes
-description: "Sweep Herdr panes that this same orchestrating pane spawned and that have finished, using the worktree-local herdr ledger. Use only when the user explicitly asks to close/sweep/clean up done Herdr panes, or when the herdr skill's spawn recipe tells you to. Requires HERDR_ENV=1 and the herdr skill already loaded."
+description: "Sweep Herdr panes that this same orchestrating pane spawned and that have finished, using the shared auto-office pane ledger. Use only when the user explicitly asks to close/sweep/clean up done Herdr panes, or when the herdr skill's spawn recipe tells you to. Requires HERDR_ENV=1 and the herdr skill already loaded."
 ---
 
 # Herdr Close Panes
@@ -15,15 +15,18 @@ has ever called `herdr-ledger.mjs add`, there is nothing to sweep — that is no
 
 ## The ledger
 
-One JSON object per line, one line per pane this orchestrator spawned:
+This skill only *reads and sweeps* the ledger. Recording a spawn belongs to the `herdr` skill,
+which owns dispatch; see its spawn recipe. One JSON object per line, one line per spawned pane:
 
 ```
-$HERDR_LEDGER, else <git toplevel or cwd>/.herdr/ledger.jsonl
+$HERDR_LEDGER, else $OFFICE_PANE_LEDGER, else /tmp/office/panes.jsonl
 ```
 
-It lives in the orchestrator's own worktree, not in `/tmp` — a `git status`/`ls .herdr/` in that
-worktree is enough to see what it's still holding open. Add `.herdr/` to that worktree's
-`.gitignore`; it is run state, not a committed artifact.
+This is the same ledger `scripts/office_spawn.sh` writes and
+`scripts/hooks/close_finished_panes.mjs` sweeps — one file, not a private copy. It is deliberately
+shared rather than worktree-local: a run's agents sit in several different worktrees, and a
+per-worktree ledger would show each agent only its own spawns, so panes spawned from another
+worktree would never be swept by anyone.
 
 Fields: `pane_id`, `agent`, `kind`, `session_id`, `worktree`, `spawned_at`,
 `orchestrator_pane_id`, `orchestrator_session_id`, `status`
@@ -40,55 +43,14 @@ A helper script does the reading, matching, and atomic rewrite so no caller hand
 against a file another process might be writing at the same time:
 
 ```bash
-NODE_SCRIPT=<this skill's directory>/scripts/herdr-ledger.mjs
+NODE_SCRIPT=<the herdr skill's directory>/scripts/herdr-ledger.mjs
 ```
 
-## Recording a spawn (do this at spawn time, not later)
+## What this skill does NOT do
 
-Right after `herdr agent start` succeeds and you have read back `session_id` (see the herdr
-skill's spawn recipe), record the row in the same step:
-
-```bash
-"$NODE_SCRIPT" add --pane <pane-id> --agent <name> --kind <claude|codex|gemini|...> \
-  --session <session_id-or-omit>
-```
-
-`orchestrator_pane_id` defaults to `$HERDR_PANE_ID` and `orchestrator_session_id` to
-`$HERDR_SESSION_ID` — both already set in your own environment as the spawning pane. Only pass
-`--orchestrator-pane`/`--orchestrator-session` explicitly when recording a spawn on behalf of a
-different pane than the one you're running in.
-
-An entry without `session_id` is incomplete, not merely terse: the session id is the only way back
-into that agent after its pane closes. If it wasn't available yet, re-run `add` (it upserts by
-`pane_id`) once a follow-up `herdr agent get` returns it.
-
-## Making self-report reliable: every brief asks for one line back
-
-Do not rely on remembering to sweep, and do not rely on the spawned agent remembering either.
-Every brief you send to a spawned agent restates one short, literal instruction — the same way the
-herdr skill's dispatch rule says every executor brief restates "no in-session subagents":
-
-> Before you end your final turn, run exactly one command to report your own status into the
-> ledger:
-> ```bash
-> "$NODE_SCRIPT" update --pane "$HERDR_PANE_ID" --status done --suggestion <closeable|reusable|compactable>
-> ```
-> Use `closeable` when your work is fully handed off and nothing about you needs to persist.
-> Use `reusable` when the orchestrator may want to resume this same session for a follow-up round
-> with no special handling needed first. Use `compactable` when you'd be resumable but your
-> context is large enough that the orchestrator should compact before reusing you. When unsure,
-> use `closeable` — it is the safe default; an orchestrator that actually wanted to reuse you reads
-> your written report either way.
-
-This is a command the spawned agent runs itself, in its own pane, with its own `$HERDR_PANE_ID` —
-it works the same for any `kind` that can run a shell command, not just Claude Code. `update`
-refuses to guess: passing no `--pane` and having no `$HERDR_PANE_ID` set is a hard error, not a
-silent no-op, so a misconfigured pane fails loud instead of writing nothing.
-
-**A self-report is a candidate, never proof by itself.** `sweep` (below) still cross-checks
-`herdr agent list`/`herdr pane list` before closing anything — an agent that reported `done` and
-then kept working (the same false-done failure mode the office's own pane hygiene hook was built
-to catch) is not closed just because the ledger says so.
+Recording a spawn, and the brief line that makes a spawned agent self-report, both belong to the
+`herdr` skill's spawn recipe. They happen at dispatch time, in the dispatching pane. This skill is
+the sweep half only: it reads rows someone else wrote and closes the finished ones.
 
 ## Sweeping: `herdr-ledger.mjs sweep`
 

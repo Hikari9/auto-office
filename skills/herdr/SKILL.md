@@ -190,24 +190,26 @@ A dispatch is not finished when its result is read; it is finished when its pane
 accumulate silently otherwise — you read a report, move on, and the dead pane stays in the layout
 until the user notices.
 
-Record every pane you spawn in a worktree-local ledger, in the same step as `agent start` — not as
-a separate bookkeeping pass:
+Record every pane you spawn in the shared pane ledger, in the same step as `agent start` — not as
+a separate bookkeeping pass. This skill owns recording, because recording happens at dispatch:
 
 ```bash
-../herdr-close-panes/scripts/herdr-ledger.mjs add \
-  --pane <pane-id> --agent <name> --kind <kind> --session <session_id>
+<this skill's directory>/scripts/herdr-ledger.mjs add \
+  --pane <pane-id> --agent <name> --kind <kind> --session <session_id> [--run <run-id>]
 ```
 
-It defaults to `$HERDR_LEDGER`, else `<git toplevel or cwd>/.herdr/ledger.jsonl` — local to your
-own worktree, not `/tmp`, so `ls .herdr/` in the orchestrator's own checkout shows exactly what it
-is still holding open. `session_id` is the resume handle for that agent after its pane closes;
+It defaults to `$HERDR_LEDGER`, else `$OFFICE_PANE_LEDGER`, else `/tmp/office/panes.jsonl` — the
+same ledger `scripts/office_spawn.sh` writes and `scripts/hooks/close_finished_panes.mjs` sweeps.
+It is shared rather than worktree-local on purpose: one run's agents sit in several worktrees, and
+a per-worktree ledger would show each agent only its own spawns, leaving panes spawned elsewhere
+unsweepable by anyone. `session_id` is the resume handle for that agent after its pane closes;
 capture it here, not later.
 
 Every brief you send to a spawned agent should ask for one line back before that agent's final
 turn ends:
 
 ```bash
-../herdr-close-panes/scripts/herdr-ledger.mjs update \
+<the herdr skill's directory>/scripts/herdr-ledger.mjs update \
   --pane "$HERDR_PANE_ID" --status done --suggestion closeable|reusable|compactable
 ```
 
@@ -218,6 +220,7 @@ have to notice from outside — but treat a self-report as a candidate, never pr
 other reported lifecycle state.
 
 When you're ready to reclaim finished panes, load the `herdr-close-panes` skill and run its sweep.
+That skill closes panes and nothing else; it reads this ledger but never writes a spawn into it.
 It closes only panes this same pane spawned (via the ledger's `orchestrator_pane_id`), cross-checks
 liveness through `herdr agent list`/`pane list` before closing anything, and reports back any
 survivor that flagged itself `reusable` or `compactable` instead of closing it.

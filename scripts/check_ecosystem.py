@@ -34,7 +34,7 @@ SKILL_LINE_BUDGETS = {
     # context-load convention: every skill above fits in 64 lines, these two do not.
     # Budgeted at their actual size so the gate registers rather than ignores them.
     'skills/herdr/SKILL.md': 240,
-    'skills/herdr-close-panes/SKILL.md': 150,
+    'skills/herdr-close-panes/SKILL.md': 115,
 }
 
 def frontmatter(path):
