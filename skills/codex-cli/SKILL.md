@@ -20,6 +20,34 @@ codex exec --yolo -m <model> -c model_reasoning_effort="<effort>" \
 - Pass an explicit `timeout: 600000` on every backgrounded dispatch. The Bash tool's default (`120000`) kills a codex run mid-work — long enough to look like real work, too short for a build plus test suite. Do not misattribute a killed-at-~180s run to an external process cap or a context limit; measure with a throwaway sleep loop before believing that.
 - Never pipe through `tail`/`head` — both buffer the entire stream until exit, so the harness's output file reads empty the whole run.
 
+## A pane and a clean environment are not alternatives
+
+A `codex exec` launched from a login shell can die before it runs, on an `_load_nvm`/FUNCNEST fault
+inherited from the user's shell profile. The usual mitigation is `env -i`. **`env -i` also strips
+`HERDR_ENV` and removes `herdr` from `PATH`** — so the fix for the profile fault silently defeats
+the Herdr-pane precondition in the top-level `SKILL.md`, and any hook keyed on `HERDR_ENV` that
+would have blocked a bare CLI launch. The dispatch succeeds, does correct work, and is invisible:
+absent from `herdr agent list`, from the pane ledger, and therefore from closeout pane accounting,
+which closes only panes it finds in the ledger.
+
+Observed: a reviewer dispatched as `nohup env -i HOME=… PATH=… TERM=dumb codex exec --yolo …` while
+the parent had `HERDR_ENV` set throughout. `echo $HERDR_ENV` prints the parent's value and empty
+under that child, where `herdr` is also off `PATH`. Two sibling runs' reviewers were visible in
+`herdr agent list` at that moment; this one was not.
+
+Carry the environment through instead of discarding it, and prefer the spawner that records the pane:
+
+```bash
+scripts/office_spawn.sh --pane-id <pane> --agent-name <name> …   # pane-hosted, in the ledger
+env -i HOME="$HOME" PATH="$PATH" TERM=dumb HERDR_ENV="$HERDR_ENV" codex exec …  # bare, if required
+```
+
+An `env -i` allow-list is a decision about which variables matter; dropping `HERDR_ENV` is the
+difference between a dispatch the user can watch and one they cannot. If you must drop it, say so
+in the route notice so the invisibility is a stated cost. A headless one-shot also cannot be
+resumed, which `auto-review` asks for explicitly: round 2 is meant to retain round 1's uncertainty,
+and `codex exec` has no session to resume into.
+
 ## Quota
 
 Probe before dispatch: `python3 ../../scripts/codex-usage.py --json` (bare for human-readable, `--percent` for routing math only). Reads `~/.codex/auth.json`; reports the tighter of the 5-hour/weekly windows. Exit `2` means unknown, not low. Full contract in `../../references/quota-probe.md`.

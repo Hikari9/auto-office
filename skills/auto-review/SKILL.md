@@ -5,7 +5,7 @@ description: Internal Auto Office v3 independent review spoke. Use for plan revi
 
 # Auto Review
 
-Every gate is held by an agent that did not produce the work — never self-approve. Use a fresh/different reviewer session from the producer whenever the harness permits it.
+Every gate is held by an agent that did not produce the work — never self-approve. Use a fresh/different reviewer session from the producer whenever the harness permits it. When `HERDR_ENV=1` and `herdr` is reachable, that fresh session is a Herdr pane, not an in-process subagent tool (see the top-level `SKILL.md`'s Dispatch and mutation section) — check this before dispatching, not after defaulting to whatever tool is already loaded.
 
 Before invoking a plan reviewer or code reviewer, publish the router's `selection_disclosure` to the user and preserve it in the dispatch record/readback. It must name the exact invocation model identifier when available, canonical model ID, effort, harness/version, and the evidence-backed reason this reviewer route won.
 
