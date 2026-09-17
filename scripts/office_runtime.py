@@ -599,6 +599,12 @@ def _start_state_root() -> Path:
     return root.expanduser().resolve() / "auto-office" / "runs"
 
 
+def _runs_tmp_dir() -> Path:
+    tmp = _start_state_root() / "tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    return tmp
+
+
 def _start_holder() -> tuple[str, str]:
     holder_id = os.environ.get("AUTO_OFFICE_HOLDER_ID") or "orchestrator"
     triple = os.environ.get("AUTO_OFFICE_HOLDER_TRIPLE") or "codex@local/orchestrator@none"
@@ -657,12 +663,16 @@ def cmd_start(args):
             return 2
         state_dir = _start_state_root() / run_id
         state_dir.mkdir(parents=True, exist_ok=True)
+        tmp_dir = state_dir / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        _runs_tmp_dir()
         state = {"run_id": run_id, "family_id": family_id, "phase": "intake", "plan_version": 1,
                  "packet_version": 1, "updated_at": envelope["created_at"], "goal": args.goal,
                  "playbook": args.playbook, "gear": gear, "holder_id": holder_id, "triple": triple,
                  "base_sha": base_sha, "plugin_commit": plugin_commit, "policy_hash": policy_hash,
                  "catalog_snapshot_hash": catalog_hash, "adapter_snapshot_hash": adapter_hash,
-                 "effective_config_hash": config_hash, "repo_root": str(repo)}
+                 "effective_config_hash": config_hash, "repo_root": str(repo),
+                 "tmp_dir": str(tmp_dir.resolve())}
         _atomic_write_json(state_dir / "state.json", state)
         _atomic_write_json(state_dir / "envelope.json", envelope)
         # Create the run's recorder here, so `<state_dir>/runs.db` -- the default every later
@@ -689,7 +699,7 @@ def cmd_start(args):
         kickoff = (f"Auto Office kickoff\nGoal: {args.goal}\nPlaybook: {args.playbook}\n"
                    f"Gear: {gear}\nRun: {run_id}\nBase SHA: {base_sha}")
         dump_json({"state_dir": str(state_dir.resolve()), "run_id": run_id, "gear": gear,
-                   "pointer": str(pointer.resolve()), "kickoff": kickoff})
+                   "pointer": str(pointer.resolve()), "kickoff": kickoff, "tmp_dir": str(tmp_dir.resolve())})
         return 0
     except Exception as exc:
         dump_json({"error": "start_failed", "message": str(exc)})
@@ -1585,6 +1595,134 @@ def cmd_validate_review(args):
     return 0
 
 
+def cmd_tmp_dir(args):
+    try:
+        if args.state_dir:
+            p = Path(args.state_dir).expanduser().resolve() / "tmp"
+        else:
+            p = _runs_tmp_dir()
+        p.mkdir(parents=True, exist_ok=True)
+        dump_json({"tmp_dir": str(p.resolve())})
+        return 0
+    except Exception as exc:
+        dump_json({"error": "tmp_dir_failed", "message": str(exc)})
+        return 2
+
+
+def cmd_cleanup_worktrees(args):
+    """Auto-delete used worktrees and merged branches for a run."""
+    try:
+        state_dir = Path(args.state_dir).expanduser().resolve()
+        state_path = state_dir / "state.json"
+        if not state_path.exists():
+            dump_json({"error": "no_state", "state_dir": str(state_dir)})
+            return 2
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        run_id = state.get("run_id", "")
+        repo_root = Path(args.repo or state.get("repo_root") or ".").expanduser().resolve()
+
+        worktrees_to_remove = set()
+        branches_to_delete = set()
+
+        # 1. Discover worktrees from dispatches
+        dispatches_dir = state_dir / "dispatches"
+        if dispatches_dir.is_dir():
+            for meta_file in dispatches_dir.glob("*/meta.json"):
+                try:
+                    meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                    wt = meta.get("worktree")
+                    if wt and Path(wt).resolve() != repo_root and Path(wt).exists():
+                        wt_resolved = str(Path(wt).resolve())
+                        worktrees_to_remove.add(wt_resolved)
+                        try:
+                            res_br = subprocess.run(["git", "-C", wt_resolved, "rev-parse", "--abbrev-ref", "HEAD"],
+                                                    capture_output=True, text=True, check=True)
+                            br = res_br.stdout.strip()
+                            if br and br != "HEAD" and br.startswith("office/"):
+                                branches_to_delete.add(br)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+        # 2. Discover worktrees from git worktree list matching run_id
+        if run_id:
+            try:
+                res = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=str(repo_root),
+                                     capture_output=True, text=True, check=True)
+                current_wt = None
+                for line in res.stdout.splitlines():
+                    if line.startswith("worktree "):
+                        current_wt = line[len("worktree "):].strip()
+                    elif line.startswith("branch refs/heads/"):
+                        br = line[len("branch refs/heads/"):].strip()
+                        if current_wt and Path(current_wt).resolve() != repo_root:
+                            if f"/{run_id}/" in br or br.endswith(f"/{run_id}"):
+                                worktrees_to_remove.add(str(Path(current_wt).resolve()))
+                                branches_to_delete.add(br)
+            except Exception:
+                pass
+
+        removed_worktrees = []
+        skipped_dirty = []
+        deleted_branches = []
+        errors = []
+
+        for wt in sorted(worktrees_to_remove):
+            wt_path = Path(wt)
+            if not wt_path.exists():
+                continue
+            if not args.force:
+                try:
+                    st = subprocess.run(["git", "status", "--porcelain"], cwd=str(wt_path),
+                                        capture_output=True, text=True)
+                    if st.stdout.strip():
+                        skipped_dirty.append(wt)
+                        continue
+                except Exception:
+                    pass
+
+            cmd = ["git", "worktree", "remove"]
+            if args.force:
+                cmd.append("--force")
+            cmd.append(str(wt_path))
+            try:
+                res = subprocess.run(cmd, cwd=str(repo_root), capture_output=True, text=True)
+                if res.returncode == 0:
+                    removed_worktrees.append(wt)
+                else:
+                    errors.append(f"Failed to remove {wt}: {res.stderr.strip()}")
+            except Exception as exc:
+                errors.append(f"Error removing {wt}: {exc}")
+
+        try:
+            subprocess.run(["git", "worktree", "prune"], cwd=str(repo_root),
+                           capture_output=True, text=True)
+        except Exception:
+            pass
+
+        for br in sorted(branches_to_delete):
+            try:
+                res = subprocess.run(["git", "branch", "-d", br], cwd=str(repo_root),
+                                     capture_output=True, text=True)
+                if res.returncode == 0:
+                    deleted_branches.append(br)
+            except Exception:
+                pass
+
+        dump_json({
+            "cleaned": True,
+            "removed_worktrees": removed_worktrees,
+            "skipped_dirty": skipped_dirty,
+            "deleted_branches": deleted_branches,
+            "errors": errors
+        })
+        return 0
+    except Exception as exc:
+        dump_json({"error": "cleanup_worktrees_failed", "message": str(exc)})
+        return 2
+
+
 def main():
     p=argparse.ArgumentParser(description='Auto Office v3 deterministic runtime helpers')
     sp=p.add_subparsers(dest='cmd',required=True)
@@ -1641,6 +1779,8 @@ def main():
     q=sp.add_parser('record-start-receipt'); q.add_argument('--file',required=True); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_record_start_receipt)
     q=sp.add_parser('record-review'); q.add_argument('--file',required=True); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_record_review)
     q=sp.add_parser('validate-review'); q.add_argument('file'); q.set_defaults(func=cmd_validate_review)
+    q=sp.add_parser('tmp-dir'); q.add_argument('--state-dir'); q.set_defaults(func=cmd_tmp_dir)
+    q=sp.add_parser('cleanup-worktrees'); q.add_argument('--state-dir',required=True); q.add_argument('--repo'); q.add_argument('--force',action='store_true'); q.set_defaults(func=cmd_cleanup_worktrees)
 
     args=p.parse_args(); sys.exit(args.func(args))
 

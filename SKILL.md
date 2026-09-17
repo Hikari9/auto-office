@@ -21,6 +21,7 @@ Load only the protocol/reference needed for the current lifecycle step.
 - Keep raw run evidence private. Public proposals receive only deterministic sanitization, an evidence capsule, privacy lint, and opaque evidence hashes.
 - Treat unknown mandatory adapter semantics, missing packet fields, stale ownership, plan/packet version mismatch, privacy-lint failure, protected-path violation, and destructive actions without authority as hard stops.
 - Treat stale catalog refresh, missing optional public data, and non-critical telemetry failure as fail-soft conditions that are surfaced and recorded.
+- Do not use the system `/tmp` directory. Prefer the runs directory with a `tmp` subfolder (`<state_dir>/tmp` or `<runs_dir>/tmp`) for temporary files, scratch artifacts, and worker buffers.
 
 ## Start or resume a run
 
@@ -30,7 +31,7 @@ Step zero, always, before any other action: run
 
 Echo the returned `kickoff` block to the user, then use its `state_dir` for every later `check-spoke`/`mark-spoke --state-dir` call. Why: `references/why-start.md`.
 
-`start` resolves effective config (`prompt/CLI > repo > user > plugin default`, emitting `effective_config_hash`; check `~/.config/auto-office/config.yaml` directly), pins the catalog/adapter snapshot hashes, policy hash, and base SHA, runs the gear fit test when `--gear` is omitted, and creates durable run state with `phase = "intake"`. Why: `references/why-start.md`.
+`start` resolves effective config (`prompt/CLI > repo > user > plugin default`, emitting `effective_config_hash`; check `~/.config/auto-office/config.yaml` directly), pins the catalog/adapter snapshot hashes, policy hash, and base SHA, runs the gear fit test when `--gear` is omitted, creates `state_dir` with a `tmp/` subfolder (avoiding `/tmp`), and creates durable run state with `phase = "intake"`. Why: `references/why-start.md`.
 
 After `start` returns, capture only provisional intent from the user's request — do not interview or freeze anything yet (issue-35#decision-1). Before any repository reconnaissance, interview, or planning-spoke check, automatically load the `file-issue` skill and create or reuse exactly one tracking GitHub issue from that raw request. Do not ask for a draft or routine approval: run the skill's duplicate searches, file immediately when the repository and GitHub access are available, and stop before planning if an external blocker prevents safe filing. Record the issue number or URL on the family registry with `python3 scripts/office_runtime.py family-update --family-id <family_id> --state-dir <state_dir> --issue <number-or-url>`.
 
@@ -91,7 +92,7 @@ An accepted `PLAN DEFECT` or `BRIEF DEFECT` must name the contradicted assumptio
 
 ## Closeout and learning
 
-Reorganize the dispatch surface on every closeout: run `node scripts/hooks/close_finished_panes.mjs < /dev/null` to close finished Herdr panes from the spawn ledger, then account for whatever pane remains open. Run `check-spoke --spoke auto-closeout`; if not loaded, load `skills/auto-closeout/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-closeout`. If a tracking issue exists, include `Closes #N` in the PR body when the work is complete; leave the issue open when the run stops short or remains unresolved. Do not report implementation complete until the required outcome, validation, review, runtime/browser evidence, PR/branch state, blockers, and pinned hashes exist. Why: `references/why-closeout.md`.
+Reorganize the dispatch surface on every closeout: run `node scripts/hooks/close_finished_panes.mjs < /dev/null` to close finished Herdr panes from the spawn ledger, then account for whatever pane remains open. Auto-delete used worktrees created for the run after merging (`python3 scripts/office_runtime.py cleanup-worktrees --state-dir <state_dir>`). Run `check-spoke --spoke auto-closeout`; if not loaded, load `skills/auto-closeout/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-closeout`. If a tracking issue exists, include `Closes #N` in the PR body when the work is complete; leave the issue open when the run stops short or remains unresolved. Do not report implementation complete until the required outcome, validation, review, runtime/browser evidence, PR/branch state, blockers, and pinned hashes exist. Why: `references/why-closeout.md`.
 
 At the beginning/closeout of later invocations, run `check-spoke --spoke auto-maintenance`; if not loaded, load `skills/auto-maintenance/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-maintenance`, for lazy labeling, maturity, catalog freshness, and structured local evidence. Create public self-improvement proposals only through `skills/auto-self-improve/SKILL.md` (run `check-spoke`/`mark-spoke --spoke auto-self-improve` the same way) and only in an isolated branch/worktree. Why: `references/why-closeout.md`.
 

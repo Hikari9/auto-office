@@ -88,6 +88,11 @@ fi
 DISPATCH_DIR="${STATE_DIR}/dispatches/${DISPATCH_ID}"
 mkdir -p "$DISPATCH_DIR"
 
+# Ensure run's tmp subfolder exists and set TMPDIR to prefer runs tmp subfolder over /tmp
+TMP_DIR="${STATE_DIR}/tmp"
+mkdir -p "$TMP_DIR"
+export TMPDIR="$TMP_DIR"
+
 LOGFILE="${DISPATCH_DIR}/output.log"
 PIDFILE="${DISPATCH_DIR}/pid"
 
@@ -146,10 +151,10 @@ print(' '.join(shlex.quote(a) for a in d['argv']))
 
 # Spawn based on prompt transport
 if [[ "$PROMPT_TRANSPORT" == "stdin" && -n "$PROMPT_CONTENT" ]]; then
-  ( echo "$PROMPT_CONTENT" | eval "$LAUNCH_CMD" > "$LOGFILE" 2>&1; echo $? > "${DISPATCH_DIR}/exit_code" ) &
+  ( export TMPDIR="$TMP_DIR"; echo "$PROMPT_CONTENT" | eval "$LAUNCH_CMD" > "$LOGFILE" 2>&1; echo $? > "${DISPATCH_DIR}/exit_code" ) &
   PID=$!
 else
-  ( eval "$LAUNCH_CMD" > "$LOGFILE" 2>&1; echo $? > "${DISPATCH_DIR}/exit_code" ) &
+  ( export TMPDIR="$TMP_DIR"; eval "$LAUNCH_CMD" > "$LOGFILE" 2>&1; echo $? > "${DISPATCH_DIR}/exit_code" ) &
   PID=$!
 fi
 
@@ -169,8 +174,9 @@ print(json.dumps({
     'worktree': sys.argv[7],
     'started_at': sys.argv[8],
     'logfile': sys.argv[9],
+    'tmp_dir': sys.argv[10],
 }, indent=2))
-" "$PID" "$DISPATCH_ID" "$RUN_ID" "$MODEL" "$EFFORT" "$ADAPTER" "${WORKTREE:-.}" "$NOW" "$LOGFILE" \
+" "$PID" "$DISPATCH_ID" "$RUN_ID" "$MODEL" "$EFFORT" "$ADAPTER" "${WORKTREE:-.}" "$NOW" "$LOGFILE" "$TMP_DIR" \
   > "${DISPATCH_DIR}/meta.json"
 
 # Record the pane in the Herdr ledger, in the same block that spawned it, so it

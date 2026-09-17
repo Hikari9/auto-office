@@ -29,6 +29,15 @@ branch, and on 2026-09-14 that refusal was the only thing standing between
 `office_worktree.sh cleanup` took `--force` unconditionally until this was noticed, which meant
 the documented tool did the opposite of the documented rule.
 
+## Why closeout auto-deletes used worktrees after merging
+
+Once a dispatch branch has been merged into the integration branch / base branch, its work is safely
+recorded in git history and its dedicated worktree is no longer needed. Leaving used worktrees
+parked accumulates stale worktrees, consumes disk space, and clutters `git worktree list`.
+Auto-deleting used worktrees after merging ensures the dispatch surface is fully reclaimed while
+retaining safety: removal without `--force` continues to refuse dirty trees, and `git branch -d`
+refuses unmerged branches.
+
 ## Why self-improvement is propose-and-prove, not propose-and-ship
 
 Agents may propose a policy change and prove it with replay evidence, but the maintainer decides
