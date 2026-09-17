@@ -1,6 +1,6 @@
 # Families, amendments, and compaction
 
-## Concurrent families and sticky focus (issue-35#decision-6, issue-77)
+## Concurrent families and sticky focus
 
 One orchestrator may supervise multiple independent planner/executor/reviewer families across
 projects/repositories. A durable family registry (`schemas/family-registry.schema.json`) holds,
@@ -22,7 +22,7 @@ user routing commands always outrank a projected-collision warning.
 Live routing precedence: `explicit dispatch command > family/project override > repo config >
 orchestrator-session policy > user-global config > plugin default`.
 
-## Amendment ownership (issue-35#decision-5, issue-77)
+## Amendment ownership
 
 `requirements_version`, `plan_version`, and `routing_version` amend independently
 (`schemas/amendment.schema.json`, `kind: routing | requirements | plan_contract`):
@@ -38,7 +38,7 @@ applies; immediate replacement requires an explicit user request (`protocol/stat
 § replacement authority; `docs/v3-runtime-contracts.md` §3.1). Bumping every version on every delta
 is itself a defect — a routing-only change must never invalidate requirements or plan approval.
 
-## Conditional compaction (issue-77 addendum)
+## Conditional compaction
 
 Long-lived roles may compact at semantic phase boundaries, after first serializing the state the
 next phase needs (`schemas/checkpoint.schema.json`). This is conditional, not mandatory for every

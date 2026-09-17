@@ -23,6 +23,12 @@ Load only the protocol/reference needed for the current lifecycle step.
 - Treat stale catalog refresh, missing optional public data, and non-critical telemetry failure as fail-soft conditions that are surfaced and recorded.
 - Do not use the system `/tmp` directory. Prefer the runs directory with a `tmp` subfolder (`<state_dir>/tmp` or `<runs_dir>/tmp`) for temporary files, scratch artifacts, and worker buffers.
 
+## Spoke receipts
+
+Stage lines below name a spoke only; this protocol applies to each. Before doing that stage's work, run `check-spoke --state-dir <run-state-dir> --spoke <name>`; if it exits nonzero, load `skills/<name>/SKILL.md` via the Skill tool and record `mark-spoke --state-dir <run-state-dir> --spoke <name> --digest <value from spoke-digest --spoke <name>>`. The receipt is `check-spoke`'s exit code, not a memory of having loaded the spoke.
+
+`mark-spoke` requires the digest because a receipt you can mint by typing a spoke's name is the gated agent attesting to its own compliance. The digest does not prove you understood the spoke — nothing here can — it proves you located that file at its current version, which is what makes batch-marking spokes you never opened a deliberate act rather than a convenience. **Mark one spoke per invocation, immediately after loading it**, never several in one shell call. `--unverified` exists for a spoke genuinely absent from disk and is reported at closeout.
+
 ## Start or resume a run
 
 Step zero, always, before any other action: run
@@ -33,25 +39,25 @@ Echo the returned `kickoff` block to the user, then use its `state_dir` for ever
 
 `start` resolves effective config (`prompt/CLI > repo > user > plugin default`, emitting `effective_config_hash`; check `~/.config/auto-office/config.yaml` directly), pins the catalog/adapter snapshot hashes, policy hash, and base SHA, runs the gear fit test when `--gear` is omitted, creates `state_dir` with a `tmp/` subfolder (avoiding `/tmp`), and creates durable run state with `phase = "intake"`. Why: `references/why-start.md`.
 
-After `start` returns, capture only provisional intent from the user's request — do not interview or freeze anything yet (issue-35#decision-1). Before any repository reconnaissance, interview, or planning-spoke check, automatically load the `file-issue` skill and create or reuse exactly one tracking GitHub issue from that raw request. Do not ask for a draft or routine approval: run the skill's duplicate searches, file immediately when the repository and GitHub access are available, and stop before planning if an external blocker prevents safe filing. Record the issue number or URL on the family registry with `python3 scripts/office_runtime.py family-update --family-id <family_id> --state-dir <state_dir> --issue <number-or-url>`.
+After `start` returns, capture only provisional intent from the user's request — do not interview or freeze anything yet. Before any repository reconnaissance, interview, or planning-spoke check, automatically load the `file-issue` skill and create or reuse exactly one tracking GitHub issue from that raw request. Do not ask for a draft or routine approval: run the skill's duplicate searches, file immediately when the repository and GitHub access are available, and stop before planning if an external blocker prevents safe filing. Record the issue number or URL on the family registry with `python3 scripts/office_runtime.py family-update --family-id <family_id> --state-dir <state_dir> --issue <number-or-url>`.
 
-Only after the tracking issue is recorded, run `check-spoke --state-dir <state_dir> --spoke auto-planning`; if it exits nonzero, load `skills/auto-planning/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-planning` before any planning work. The planner interacts directly with the user, runs the twelve-item interview from `skills/auto-intake/SKILL.md` (`check-spoke`/`mark-spoke --spoke auto-intake`), updates the tracking issue body with the approved plan summary or plan link, and freezes the five execution fields — `goal`, `done_criteria`, `blast_radius`, `named_actions`, `non_goals` — at the end of that discovery, not before it. Why: `references/why-start.md`.
+Only after the tracking issue is recorded, take the `auto-planning` receipt. The planner interacts directly with the user, runs the twelve-item interview from `skills/auto-intake/SKILL.md` (`check-spoke`/`mark-spoke --spoke auto-intake`), updates the tracking issue body with the approved plan summary or plan link, and freezes the five execution fields — `goal`, `done_criteria`, `blast_radius`, `named_actions`, `non_goals` — at the end of that discovery, not before it. Why: `references/why-start.md`.
 
-After the plan is approved, run `check-spoke --state-dir <state_dir> --spoke auto-loop`; if it exits nonzero, load `skills/auto-loop/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-loop` before driving waves, integration, and the autonomy ceiling.
+After the plan is approved, take the `auto-loop` receipt before driving waves, integration, and the autonomy ceiling.
 
 For takeover/resume, load `protocol/state-and-takeover.md` before any mutable action. For concurrent families, sticky focus, or an amendment mid-run, load `protocol/families-and-amendments.md`.
 
 ## Fixed lifecycle
 
-Run this order: 1. capture provisional intent and scope; 2. create or reuse the tracking GitHub issue and record it on the family; 3. interactive planner discovery and requirements freeze; 4. establish baseline; 5. classify task shape and risk; 6. resolve product decisions; 7. produce/refresh plan; 8. review plan when gear/risk requires it; 9. generate machine-checkable execution packets; 10. route and dispatch executors/workers; 11. self-verify changed work; 12. integrate — commit and merge dispatch branches in wave order, validate the merged result; 13. run independent review when funded/required; 14. run browser/runtime verification for user-facing acceptance paths when reachable; 15. reconcile findings and amendments; 16. update the tracking issue with the approved plan or final status; 17. run closeout checks; 18. record telemetry and durable state; 19. perform lazy maintenance on eligible rows; 20. optionally create isolated improvement proposals.
+The order is fixed and lives in one place: `protocol/lifecycle.md`. Gears may fund or omit optional stages; nothing reorders it.
 
 ## Role routing
 
-Before every routed role, run `check-spoke --spoke auto-routing`; if not loaded, load `skills/auto-routing/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-routing`. Route the exact identity:
+Before every routed role, take the `auto-routing` receipt. Route the exact identity:
 
 `harness@version × model_id × effort`
 
-Use the mandatory filter order: 1. explicit hard exclusions; 2. adapter validity/trust; 3. required capabilities; 4. absolute role floor; 5. task-shape requirements; 6. quota safety; 7. preferred/advisory quality anchor; 8. cost; 9. local tie-break evidence. Adapter trust, the absolute floor, and tie-break evidence are derived from recorded evidence, never caller-supplied; trust only ever falls automatically, and only a recorded, attributed act ever raises it or overrides a derived gate. Why: `protocol/routing.md`.
+The mandatory filter order lives in `protocol/routing.md`. Hold one invariant without loading it: adapter trust, the absolute floor, and tie-break evidence are derived from recorded evidence and never caller-supplied — trust only ever falls automatically, and only a recorded, attributed act raises it or overrides a derived gate.
 
 A harness rejecting the routed model/effort identity is a routing defect, not a retry: record it with `office_runtime.py route-defect`, re-dispatch corrected, and hand the amendment to an `auto-self-improve` subagent. `auto-closeout` gates on `check-route-defects`, so an unamended slug blocks completion.
 
@@ -63,9 +69,9 @@ Immediately before invoking an executor or reviewer, publish a route notice nami
 
 ## Dispatch and mutation
 
-Run `check-spoke --spoke auto-execution`; if not loaded, load `skills/auto-execution/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-execution`. Validate every packet before dispatch. One mutable holder owns a write scope at a time; a holder change is a takeover requiring lease acquisition and stale-state reconciliation. Use the harness primitive selected by the adapter (`skills/codex-cli`, `skills/claude-cli`, `skills/agy-cli`, `skills/hermes-cli`, or another conforming primitive): `auto-office` owns the lifecycle, adapters own harness execution only. Why: `references/why-dispatch.md`.
+Take the `auto-execution` receipt. Validate every packet before dispatch. One mutable holder owns a write scope at a time; a holder change is a takeover requiring lease acquisition and stale-state reconciliation. Use the harness primitive selected by the adapter (`skills/codex-cli`, `skills/claude-cli`, `skills/agy-cli`, `skills/hermes-cli`, or another conforming primitive): `auto-office` owns the lifecycle, adapters own harness execution only. Why: `references/why-dispatch.md`.
 
-Before the first executor or reviewer dispatch, check `echo "$HERDR_ENV"` and `which herdr`. When `HERDR_ENV=1` and `herdr` is reachable, dispatch through a Herdr pane (`skills/herdr`) rather than an in-process subagent tool, even when the in-process tool is available and would produce a working result: a visible pane is how the user watches, steers, and interrupts delegated work, and that visibility is the reason this precondition exists, not a preference to weigh against convenience. This was missed for a full multi-PR run despite `HERDR_ENV=1` being set the entire time (herdr on `PATH`, a real workspace/tab/pane present) purely because dispatch defaulted to whatever tool was already loaded, without ever checking. Fall back to an in-process dispatch only when `HERDR_ENV` is genuinely unset or `herdr` is unreachable, and say so explicitly when routing. This applies to EVERY dispatch mechanism, not just in-process subagent tools: a backgrounded bare CLI launch is equally invisible, and a launch wrapped in `env -i` strips `HERDR_ENV` and `herdr` from the child's `PATH`, so it cannot be caught by a hook keyed on that variable and will not appear in `herdr agent list` or the pane ledger. Check `HERDR_ENV` in the PARENT before dispatch, and carry it into any sanitised child environment.
+Before the first executor or reviewer dispatch, check `echo "$HERDR_ENV"` and `which herdr`. When `HERDR_ENV=1` and `herdr` is reachable, dispatch through a Herdr pane (`skills/herdr`) rather than an in-process subagent tool, even when the in-process tool is available and would produce a working result: a visible pane is how the user watches, steers, and interrupts delegated work, and that visibility is the reason this precondition exists, not a preference to weigh against convenience. The failure mode is defaulting to whatever dispatch tool is already loaded without ever checking. Fall back to an in-process dispatch only when `HERDR_ENV` is genuinely unset or `herdr` is unreachable, and say so explicitly when routing. This applies to every dispatch mechanism, not just in-process subagent tools: a backgrounded bare CLI launch is equally invisible, and a launch wrapped in `env -i` strips `HERDR_ENV` and `herdr` from the child's `PATH`, so it cannot be caught by a hook keyed on that variable and will not appear in `herdr agent list` or the pane ledger. Check `HERDR_ENV` in the parent before dispatch, and carry it into any sanitised child environment.
 
 ## Operational tooling
 
@@ -81,8 +87,8 @@ Before the first executor or reviewer dispatch, check `echo "$HERDR_ENV"` and `w
 
 ## Review and verification
 
-- Run `check-spoke --spoke auto-review`; if not loaded, load `skills/auto-review/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-review`, for plan/code gates and defect exits.
-- Run `check-spoke --spoke auto-verification`; if not loaded, load `skills/auto-verification/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-verification`, for targeted tests, known-bad validation, browser/runtime acceptance flows, and evidence quality.
+- `auto-review` — plan/code gates and defect exits.
+- `auto-verification` — targeted tests, known-bad validation, browser/runtime acceptance flows, evidence quality.
 - Require self-verification for every mutable run.
 - Require independent verification/review when risk, gear, playbook, repository policy, or user-facing acceptance requires it.
 
@@ -92,17 +98,13 @@ An accepted `PLAN DEFECT` or `BRIEF DEFECT` must name the contradicted assumptio
 
 ## Closeout and learning
 
-Reorganize the dispatch surface on every closeout: run `node scripts/hooks/close_finished_panes.mjs < /dev/null` to close finished Herdr panes from the spawn ledger, then account for whatever pane remains open. Auto-delete used worktrees created for the run after merging (`python3 scripts/office_runtime.py cleanup-worktrees --state-dir <state_dir>`). Run `check-spoke --spoke auto-closeout`; if not loaded, load `skills/auto-closeout/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-closeout`. If a tracking issue exists, include `Closes #N` in the PR body when the work is complete; leave the issue open when the run stops short or remains unresolved. Do not report implementation complete until the required outcome, validation, review, runtime/browser evidence, PR/branch state, blockers, and pinned hashes exist. Why: `references/why-closeout.md`.
+Reorganize the dispatch surface on every closeout: run `node scripts/hooks/close_finished_panes.mjs < /dev/null` to close finished Herdr panes from the spawn ledger, then account for whatever pane remains open. Auto-delete used worktrees created for the run after merging (`python3 scripts/office_runtime.py cleanup-worktrees --state-dir <state_dir>`). Take the `auto-closeout` receipt. If a tracking issue exists, include `Closes #N` in the PR body when the work is complete; leave the issue open when the run stops short or remains unresolved. Do not report implementation complete until the required outcome, validation, review, runtime/browser evidence, PR/branch state, blockers, and pinned hashes exist. Why: `references/why-closeout.md`.
 
-At the beginning/closeout of later invocations, run `check-spoke --spoke auto-maintenance`; if not loaded, load `skills/auto-maintenance/SKILL.md` via the Skill tool and `mark-spoke --spoke auto-maintenance`, for lazy labeling, maturity, catalog freshness, and structured local evidence. Create public self-improvement proposals only through `skills/auto-self-improve/SKILL.md` (run `check-spoke`/`mark-spoke --spoke auto-self-improve` the same way) and only in an isolated branch/worktree. Why: `references/why-closeout.md`.
+At the beginning/closeout of later invocations, take the `auto-maintenance` receipt for lazy labeling, maturity, catalog freshness, and structured local evidence. Create public self-improvement proposals only through the `auto-self-improve` spoke, and only in an isolated branch/worktree. Why: `references/why-closeout.md`.
 
 ## Deterministic helpers
 
 Use `python3 scripts/office_runtime.py --help` for packet validation, adapter validation/scaffolding, route selection, snapshot hashing, SQLite recorder initialization, maturity calculation, replay comparison, privacy linting, catalog snapshot creation, and proposal identity hashing.
-
-No receipt, no gate: `check-spoke --state-dir <run-state-dir> --spoke <name>` (all `check-spoke`/`mark-spoke` references above elide the shared `--state-dir <run-state-dir>` for brevity) exits 0 only if `mark-spoke --spoke <name>` was already recorded for this run's `state.json`. The receipt is `check-spoke`'s exit code, not a memory of having loaded the spoke — if it exits nonzero, load the spoke via the Skill tool and mark it before doing that stage's work.
-
-`mark-spoke` requires `--digest <value from spoke-digest --spoke <name>>`. A receipt you can mint by typing a spoke's name is not a receipt: it is the gated agent attesting to its own compliance, and a run has already reached dispatch with two spokes marked and neither loaded. The digest does not prove you understood the spoke — nothing here can — it proves you located that file at its current version, which is what makes batch-marking spokes you never opened a deliberate act rather than a convenience. **Mark one spoke per invocation, immediately after loading it.** Never batch marks into one shell call; that is the exact shape the incident took. `--unverified` exists for a spoke genuinely absent from disk and is reported at closeout.
 
 Use `python3 scripts/check_ecosystem.py` before packaging or proposing plugin changes.
 

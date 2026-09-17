@@ -1,6 +1,6 @@
 ---
 name: auto-self-improve
-description: Internal Auto Office v3 self-improvement primitive. Use only to create isolated learned-pattern or catalog/policy proposal work from historical evidence after deterministic sanitization, replay/evals where required, privacy lint, deterministic proposal identity, independent review, and lineage metadata. Never activate unmerged policy into the current run or merge its own proposal to main.
+description: Internal Auto Office v3 self-improvement primitive. Use only to create isolated learned-pattern or catalog/policy proposal work from historical evidence after deterministic sanitization, replay/evals where required, privacy lint, deterministic proposal identity, independent review, and lineage metadata.
 ---
 
 # Auto Self Improve
