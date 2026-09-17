@@ -97,6 +97,8 @@ Use `python3 scripts/office_runtime.py --help` for packet validation, adapter va
 
 No receipt, no gate: `check-spoke --state-dir <run-state-dir> --spoke <name>` (all `check-spoke`/`mark-spoke` references above elide the shared `--state-dir <run-state-dir>` for brevity) exits 0 only if `mark-spoke --spoke <name>` was already recorded for this run's `state.json`. The receipt is `check-spoke`'s exit code, not a memory of having loaded the spoke — if it exits nonzero, load the spoke via the Skill tool and mark it before doing that stage's work.
 
+`mark-spoke` requires `--digest <value from spoke-digest --spoke <name>>`. A receipt you can mint by typing a spoke's name is not a receipt: it is the gated agent attesting to its own compliance, and a run has already reached dispatch with two spokes marked and neither loaded. The digest does not prove you understood the spoke — nothing here can — it proves you located that file at its current version, which is what makes batch-marking spokes you never opened a deliberate act rather than a convenience. **Mark one spoke per invocation, immediately after loading it.** Never batch marks into one shell call; that is the exact shape the incident took. `--unverified` exists for a spoke genuinely absent from disk and is reported at closeout.
+
 Use `python3 scripts/check_ecosystem.py` before packaging or proposing plugin changes.
 
 ## Reference map

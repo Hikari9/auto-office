@@ -16,6 +16,8 @@ Record telemetry/outcomes before declaring completion when the recorder is avail
 nothing has amended the catalog yet: dispatch the `auto-self-improve` subagent, then
 `resolve-route-defect --id <id> --proposal-ref <branch-or-PR>`. Do not report complete on exit 2.
 
+**Report unverified spoke receipts.** Read `spokes_loaded` in `state.json` and name any row with `verified: false` — a spoke marked with `--unverified`, or a row carried over from a run that predates the digest requirement. These are not failures, but a gate satisfied without proof that its spoke was located is exactly the condition that let a run reach dispatch with `auto-routing` and `auto-execution` marked and neither loaded. State them; do not quietly pass them.
+
 **Reclaim the dispatch surface.** A run that ends leaving its workers parked is not closed out.
 Once a ticket's work is merged and its evidence lives somewhere durable (the PR body, the
 resolution comment, a findings file), close the panes that produced it — a finished worker's
