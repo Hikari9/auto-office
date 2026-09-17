@@ -19,6 +19,11 @@ invocation:
   argv: [--bg, --remote-control, "{label}", --model, "{model}", --effort, "{effort}", --add-dir, "{cwd}"]
   prompt_transport: stdin
   cwd_transport: add-dir
+  effort_readback:
+    source: session-transcript
+    path_template: "~/.claude/projects/{project_slug}/{session_id}.jsonl"
+    command: ["grep", "-o", "\"effort\":\"[a-z]*\""]
+    notes: claude agents --json exposes no effort field; the transcript record is the only readback.
 safe_prompt_passing:
   shell: false
   supports_prompt_file: true
@@ -36,6 +41,7 @@ agentic_capability:
   default: unknown
 failure_signatures:
   - {id: positional-prompt-idle, attribution: adapter, pattern: "idle - send a prompt to start"}
+  - {id: effort-silently-inherited-from-settings, attribution: adapter, pattern: "launch without --effort inherits modelSettings.<model>.effortLevel from ~/.claude/settings.json, overriding both the top-level effortLevel and the routed tier with no error"}
   - {id: resume-bg-fork, attribution: harness, pattern: "resume against live session creates a new writer"}
   - {id: allowlist-no-mcp-tools, attribution: adapter, pattern: "--allowedTools grants no MCP server tools unless named explicitly, read back as delegate cannot reach the system"}
   - {id: add-dir-not-checkout-isolation, attribution: harness, pattern: "dispatched agent git checkout in the shared --add-dir tree moves the branch under the caller"}
