@@ -131,6 +131,19 @@ class RouteDefectTests(unittest.TestCase):
             self.assertEqual(rt.cmd_route_defect(self.Args(state_dir=d,kind='other',
                 attempted='x',observed='y',correction=None,harness=None)),1)
 
+    def test_check_fails_closed_without_run_state(self):
+        # route-defects.jsonl is absent both when a started run recorded no
+        # defects and when there is no run at all. Only the first is clear; the
+        # second must not hand auto-closeout a pass, or a lifecycle that skipped
+        # `start` closes out looking gated.
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(rt.cmd_check_route_defects(self.Args(state_dir=d)),2)
+
+    def test_check_fails_closed_on_missing_state_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            missing=str(Path(d)/'never-created')
+            self.assertEqual(rt.cmd_check_route_defects(self.Args(state_dir=missing)),2)
+
 class _MaturityTests(unittest.TestCase):
     def test_maturity_curve(self):
         self.assertAlmostEqual(rt.maturity_age(0),0)

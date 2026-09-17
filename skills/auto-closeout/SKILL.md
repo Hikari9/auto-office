@@ -12,9 +12,14 @@ Reconcile all pending findings and dispositions, stale holders/leases, plan/pack
 Record telemetry/outcomes before declaring completion when the recorder is available; telemetry write failure may fail soft, but surface it.
 
 **Close recorded routing defects.** Run `python3 scripts/office_runtime.py check-route-defects
---state-dir <run-state-dir>`. Exit 2 means this run emitted a route the harness could not invoke and
-nothing has amended the catalog yet: dispatch the `auto-self-improve` subagent, then
-`resolve-route-defect --id <id> --proposal-ref <branch-or-PR>`. Do not report complete on exit 2.
+--state-dir <run-state-dir>`. Never report complete on exit 2, and read which exit 2 it is.
+`error: no_run_state`: no `state.json` at that path, so nothing was gated — no pinned hashes, no
+spoke receipts, no defect record. Either `--state-dir` is wrong or the lifecycle never ran `start`.
+Say plainly that run state is absent and which gates did not apply; never report closeout as
+gated. An `unresolved` list: this run emitted a route the harness could not invoke and nothing has
+amended the catalog — dispatch `auto-self-improve`, then `resolve-route-defect --id <id>
+--proposal-ref <branch-or-PR>`. Exit 0 means a started run with every defect amended; it never
+means "no run here".
 
 **Report unverified spoke receipts.** Read `spokes_loaded` in `state.json` and name any row with `verified: false` — a spoke marked with `--unverified`, or a row carried over from a run that predates the digest requirement. These are not failures, but a gate satisfied without proof that its spoke was located is exactly the condition that let a run reach dispatch with `auto-routing` and `auto-execution` marked and neither loaded. State them; do not quietly pass them.
 
