@@ -687,7 +687,16 @@ models:
     invocation_model_id: gemini-3.8-flash-high
     invocation_harness: agy
     invocation_source: 'local-evidence:agy models'
-    dispatchable: true
+    # ROUTING DEFECT 3fe80434 (run 4c056f1e, 2026-09-15): `agy` accepts
+    # `--model` / `--effort` at launch WITHOUT error and does not apply them --
+    # the session stayed on its configured default (Gemini 3.7 Flash, low) while
+    # the router believed it had dispatched claude-sonnet-4-6 at medium. The
+    # subsequent prompt then returned `agent_prompt_stalled`. A route is a
+    # promise about the identity that runs; agy cannot honour that promise at
+    # dispatch time, so these rows are not dispatchable until a means of pinning
+    # the invocation identity is verified. Set back to true only with recorded
+    # evidence that a launched agy session reports the routed model.
+    dispatchable: false
     source_identifier: gemini-3-8-flash
     source_name: artificial-analysis
     effort: high
@@ -704,7 +713,16 @@ models:
     invocation_model_id: gemini-3.8-flash-medium
     invocation_harness: agy
     invocation_source: 'local-evidence:agy models'
-    dispatchable: true
+    # ROUTING DEFECT 3fe80434 (run 4c056f1e, 2026-09-15): `agy` accepts
+    # `--model` / `--effort` at launch WITHOUT error and does not apply them --
+    # the session stayed on its configured default (Gemini 3.7 Flash, low) while
+    # the router believed it had dispatched claude-sonnet-4-6 at medium. The
+    # subsequent prompt then returned `agent_prompt_stalled`. A route is a
+    # promise about the identity that runs; agy cannot honour that promise at
+    # dispatch time, so these rows are not dispatchable until a means of pinning
+    # the invocation identity is verified. Set back to true only with recorded
+    # evidence that a launched agy session reports the routed model.
+    dispatchable: false
     source_identifier: gemini-3-8-flash-medium
     source_name: artificial-analysis
     effort: medium
@@ -721,7 +739,16 @@ models:
     invocation_model_id: gemini-3.8-flash-low
     invocation_harness: agy
     invocation_source: 'local-evidence:agy models'
-    dispatchable: true
+    # ROUTING DEFECT 3fe80434 (run 4c056f1e, 2026-09-15): `agy` accepts
+    # `--model` / `--effort` at launch WITHOUT error and does not apply them --
+    # the session stayed on its configured default (Gemini 3.7 Flash, low) while
+    # the router believed it had dispatched claude-sonnet-4-6 at medium. The
+    # subsequent prompt then returned `agent_prompt_stalled`. A route is a
+    # promise about the identity that runs; agy cannot honour that promise at
+    # dispatch time, so these rows are not dispatchable until a means of pinning
+    # the invocation identity is verified. Set back to true only with recorded
+    # evidence that a launched agy session reports the routed model.
+    dispatchable: false
     source_identifier: gemini-3-8-flash-low
     source_name: artificial-analysis
     effort: low
@@ -738,7 +765,16 @@ models:
     invocation_model_id: gemini-3.6-flash-high
     invocation_harness: agy
     invocation_source: 'local-evidence:agy models'
-    dispatchable: true
+    # ROUTING DEFECT 3fe80434 (run 4c056f1e, 2026-09-15): `agy` accepts
+    # `--model` / `--effort` at launch WITHOUT error and does not apply them --
+    # the session stayed on its configured default (Gemini 3.7 Flash, low) while
+    # the router believed it had dispatched claude-sonnet-4-6 at medium. The
+    # subsequent prompt then returned `agent_prompt_stalled`. A route is a
+    # promise about the identity that runs; agy cannot honour that promise at
+    # dispatch time, so these rows are not dispatchable until a means of pinning
+    # the invocation identity is verified. Set back to true only with recorded
+    # evidence that a launched agy session reports the routed model.
+    dispatchable: false
     source_identifier: gemini-3-6-flash
     source_name: artificial-analysis
     effort: high
