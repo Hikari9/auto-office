@@ -1396,7 +1396,7 @@ def cmd_family_update(args):
     fam = _office_family()
     latest_landing = load_data(args.latest_landing) if args.latest_landing else None
     result = fam.update_family(Path(args.state_dir), args.family_id, phase=args.phase,
-                                latest_landing=latest_landing)
+                                latest_landing=latest_landing, issue=getattr(args, "issue", None))
     dump_json(result)
     return 2 if result.get("status") == "error" else 0
 
@@ -1626,7 +1626,7 @@ def main():
     q=sp.add_parser('family-show'); q.add_argument('--family-id'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_family_show)
     q=sp.add_parser('family-focus'); q.add_argument('--family-id',required=True); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_family_focus)
     q=sp.add_parser('family-list'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_family_list)
-    q=sp.add_parser('family-update'); q.add_argument('--family-id',required=True); q.add_argument('--phase'); q.add_argument('--latest-landing'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_family_update)
+    q=sp.add_parser('family-update'); q.add_argument('--family-id',required=True); q.add_argument('--phase'); q.add_argument('--latest-landing'); q.add_argument('--issue'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_family_update)
     q=sp.add_parser('amend'); q.add_argument('--kind',choices=['routing','requirements','plan_contract'],required=True); q.add_argument('--delta-file',required=True); q.add_argument('--family-id'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_amend)
     q=sp.add_parser('save-checkpoint'); q.add_argument('--file',required=True); q.add_argument('--family-id'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_save_checkpoint)
     q=sp.add_parser('load-checkpoint'); g=q.add_mutually_exclusive_group(required=True); g.add_argument('--file'); g.add_argument('--checkpoint-id'); q.add_argument('--state-dir'); q.set_defaults(func=cmd_load_checkpoint)

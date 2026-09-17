@@ -100,6 +100,15 @@ class LandingCliTests(unittest.TestCase):
         self.assertEqual(out["status"], "updated")
         self.assertEqual(fam.get_family(self.state_dir, "fam-core")["phase"], "planned")
 
+    def test_family_update_records_tracking_issue(self):
+        issue = "https://github.com/acme-corp/office-skills-example/issues/42"
+        code, out = _invoke(rt.cmd_family_update, family_id="fam-core", phase=None,
+                             latest_landing=None, issue=issue, state_dir=str(self.state_dir))
+        self.assertEqual(code, 0)
+        self.assertEqual(out["status"], "updated")
+        self.assertEqual(fam.get_family(self.state_dir, "fam-core")["issue"], issue)
+        self.assertEqual(fam.load_family_registry(self.state_dir)["families"]["fam-core"]["issue"], issue)
+
     def test_family_update_rejects_non_adjacent_phase_jump(self):
         code, out = _invoke(rt.cmd_family_update, family_id="fam-core", phase="closed",
                              latest_landing=None, state_dir=str(self.state_dir))

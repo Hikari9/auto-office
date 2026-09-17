@@ -100,6 +100,23 @@ class TestNoPlannerUserProhibitionSurvives(unittest.TestCase):
         self.assertRegex(m.group(1), r'(directly with|talks? directly to) the user')
 
 
+class TestTrackingIssuePrecedesPlanning(unittest.TestCase):
+    """The v2 tracking guarantee is restored without moving the v3 planner's intent freeze."""
+
+    def test_tracking_issue_is_required_before_planning_spoke(self):
+        text = (ROOT / 'SKILL.md').read_text(encoding='utf-8')
+        issue_pos = text.index('file-issue')
+        planning_pos = text.index('check-spoke --state-dir <state_dir> --spoke auto-planning')
+        self.assertLess(issue_pos, planning_pos)
+        self.assertRegex(text[issue_pos:planning_pos], r'create or reuse exactly one tracking GitHub issue')
+        self.assertRegex(text[issue_pos:planning_pos], r'family-update .*--issue')
+
+    def test_tracking_issue_is_not_waiting_for_routine_approval(self):
+        text = (ROOT / 'SKILL.md').read_text(encoding='utf-8')
+        section = text[text.index('file-issue'):text.index('## Fixed lifecycle')]
+        self.assertRegex(section, r'Do not ask for a draft or routine approval')
+
+
 class TestNoUnconditionalReviewEscalation(unittest.TestCase):
     """issue-35#decision-4 / issue-77 §4-5,7: a final/integration adversary is triggered by the
     integration boundary (dependent/merging multi-executor landings), never by executor count
