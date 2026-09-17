@@ -658,8 +658,8 @@ These exact CLI commands will be implemented by T2 in `scripts/office_runtime.py
 - **Exit Codes:** `0`: Success; `1`: Error.
 
 #### `family-update`
-- **Invocation:** `python3 scripts/office_runtime.py family-update --family-id <id> [--phase <phase>] [--latest-landing <file>] [--state-dir <dir>]`
-- **Behavior:** Updates phase or latest landing for the family.
+- **Invocation:** `python3 scripts/office_runtime.py family-update --family-id <id> [--phase <phase>] [--latest-landing <file>] [--issue <number-or-url>] [--state-dir <dir>]`
+- **Behavior:** Updates the family's phase, latest landing, or tracking issue number/URL.
 - **Output (stdout):** `{"status": "updated", "family_id": "<id>"}`
 - **Exit Codes:** `0`: Success; `1`: Argument error; `2`: Validation error.
 

@@ -26,3 +26,14 @@ The five planner-frozen intent fields (`goal`, `done_criteria`, `blast_radius`,
 (issue-35#decision-1) so downstream stages can rely on them without re-confirming intent every
 step. Freezing them is a compatibility contract for the run, not grounds to treat them as
 authoritative over the normative spec if the two conflict — the spec still wins.
+
+## Why the tracking issue is filed before planning
+
+The tracking issue is created or reused immediately after `start`, from the raw request before
+the planner's interview, so the run has a durable public record even if discovery stalls, quota
+is exhausted, or execution stops short. This preserves the useful v2 behavior without moving the
+v3 planner's interactive ownership or freezing intent early. The `file-issue` skill owns duplicate
+searches and repository/access checks; a missing issue is a blocker, not a reason to invent a
+number. Once the issue exists, record its number or URL on the family registry, update its body
+after the plan is approved, and leave it open when the run is unresolved; completed work references
+it with `Closes #N` in the PR body.

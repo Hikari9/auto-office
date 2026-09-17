@@ -36,13 +36,20 @@ pointer in the target repo; and prints the kickoff block.
 
 Done when: the returned `state_dir` exists for this run.
 
+Before entering planning, the orchestrator loads the `file-issue` skill and creates or reuses
+exactly one tracking GitHub issue from the raw request/provisional intent. The issue is filed
+without a draft or routine approval after the skill's duplicate and access checks. If safe filing
+is blocked by missing repository or GitHub access, planning does not begin. Record the issue
+number or URL on the family registry with `family-update --issue <number-or-url>`.
+
 `check-spoke --state-dir <state_dir> --spoke <name>`
 
 Done when: exit code is 0; enter planning from this receipt.
 
 ## 2. Stage 1 — provisional intent, then interactive planner freeze
 
-**This supersedes #47.** The orchestrator no longer conducts the grilled interview or freezes
+**This supersedes #47.** The orchestrator files/reuses the tracking issue before exploration or
+interview, then no longer conducts the grilled interview or freezes
 intent before planning starts. It captures only the provisional intent needed to understand the
 request and decide whether planning is required — a hypothesis for the planner, not a frozen
 contract. The planner then performs repository reconnaissance, interacts directly with the user

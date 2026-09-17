@@ -340,7 +340,8 @@ def resolve_focus_target(state_dir, requested_family_id: str | None = None,
 
 
 def update_family(state_dir, family_id: str, *, phase: str | None = None,
-                   latest_landing: dict | None = None) -> dict:
+                   latest_landing: dict | None = None,
+                   issue: int | str | None = None) -> dict:
     """Backing implementation for the `family-update` CLI command (§5.1)."""
     with _locked(state_dir):
         full = _read_json(_family_json_path(state_dir, family_id))
@@ -363,6 +364,8 @@ def update_family(state_dir, family_id: str, *, phase: str | None = None,
             if missing:
                 return {"status": "error", "reason": "invalid_latest_landing", "missing": missing}
             full["latest_landing"] = latest_landing
+        if issue is not None:
+            full["issue"] = issue
         full["updated_at"] = _now()
         _write_json_atomic(_family_json_path(state_dir, family_id), full)
         registry = _load_registry_locked(state_dir)
