@@ -8,6 +8,7 @@ https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota
 Usage:
     ./agy-usage.py           # human-readable (Gemini models by default)
     ./agy-usage.py --all     # include other non-Claude models
+    ./agy-usage.py --claude  # ALSO include Claude buckets (opt-in, see Note)
     ./agy-usage.py --json    # machine-readable, for routing
     ./agy-usage.py --percent # bare integer percentage (lowest remaining among Gemini models)
 
@@ -16,7 +17,18 @@ Exit codes:
     2  headroom unknown / error reading credentials
 
 Note:
-    Produces Gemini numbers by default, and never Claude numbers.
+    Produces Gemini numbers by default, and never Claude numbers unless --claude
+    is passed. agy is used here for Gemini-based models only; a Claude model is
+    routed through the claude harness, which has its own quota. The Claude
+    buckets on this endpoint are a separate allowance on a different reset
+    schedule (observed 2026-09-17: gemini 20 buckets at one shared percentage
+    and reset, claude 2 buckets at 0% with a reset six hours later), so folding
+    them into the default headroom number would let an allowance nobody is
+    routing against veto a Gemini dispatch.
+
+    --all is for inspection, not routing. It admits buckets such as
+    gpt-oss-120b-medium that sit at 0% and would drive tightest_remaining_percent
+    to 0, refusing every dispatch. Route off the default output.
 
     The model list below is NOT an exhaustive catalog of valid agy models. It only
     contains models for which the CloudCode quota endpoint returned a bucket in
@@ -270,7 +282,7 @@ def fetch_agy_quota():
         return None, f"Failed to query quota API: {e}"
 
 
-def process_quota(data, all_models=False):
+def process_quota(data, all_models=False, include_claude=False):
     buckets = data.get("buckets", [])
     models = {}
     filtered_buckets = []
@@ -281,12 +293,14 @@ def process_quota(data, all_models=False):
         model_id = b.get("modelId") or ""
         model_lower = model_id.lower()
 
-        # NEVER produce claude numbers
-        if "claude" in model_lower:
+        # Claude is a separate allowance on a separate reset, and agy is used
+        # here for Gemini only -- so it is excluded unless asked for explicitly.
+        is_claude = "claude" in model_lower
+        if is_claude and not include_claude:
             continue
 
         is_gemini = model_lower.startswith("gemini")
-        if not all_models and not is_gemini:
+        if not all_models and not (is_gemini or is_claude):
             continue
 
         frac = b.get("remainingFraction", 1.0)
@@ -300,7 +314,7 @@ def process_quota(data, all_models=False):
         filtered_buckets.append(b)
 
         # Track minimum remaining percentage for active model buckets
-        if is_gemini or all_models:
+        if is_gemini or is_claude or all_models:
             if not found_target or pct < min_pct:
                 min_pct = pct
                 found_target = True
@@ -329,7 +343,13 @@ def main(argv):
         return 2
 
     all_models = "--all" in argv
-    processed = process_quota(raw_data, all_models=all_models)
+    include_claude = "--claude" in argv
+    processed = process_quota(
+        raw_data, all_models=all_models, include_claude=include_claude
+    )
+    processed["scope"] = "gemini+claude" if include_claude else (
+        "gemini+other" if all_models else "gemini"
+    )
     tightest_pct = processed["tightest_remaining_percent"]
 
     if "--percent" in argv:
@@ -340,6 +360,8 @@ def main(argv):
         return 0
     else:
         print("=== AGY (Antigravity/Gemini) Quota ===")
+        print(f"Scope: {processed['scope']}"
+              + ("" if include_claude else "  (Claude excluded; pass --claude to include)"))
         print(f"Overall Tightest Headroom: {tightest_pct}% left")
         print("\nModel Breakdown (quota-tracked models only — NOT an exhaustive catalog;")
         print("a model missing here may still be valid, check `agy models` before ruling it out):")
