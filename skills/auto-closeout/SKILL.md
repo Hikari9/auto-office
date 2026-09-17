@@ -51,14 +51,14 @@ After closeout, run eligible lazy maintenance and, when justified, hand sanitize
 the run's own initiative is prohibited — plan approval alone does not authorize it. Merge only with
 an explicit per-run user statement authorizing it; absent that, mark the PR ready and stop. A policy
 or self-improvement change needs that statement too, and never merges autonomously. After an
-authorized merge, propose the sweep below and wait for separate explicit authorization for it.
+authorized merge, auto-delete used worktrees created for the run and execute the post-merge sweep.
 
 **The sweep** runs inline, in this skill. Why: `references/why-closeout.md`.
 
 1. Uncommitted work, an un-run gate, or a branch with no PR means `auto-loop` did not finish.
    Name that as a defect; the pre-merge validation evidence already covers a clean tree.
 2. Sync the local base branch to match `origin/<base>`.
-3. Remove only worktrees this run created:
-   `scripts/office_worktree.sh cleanup --worktree <path>`, then `prune`, then `git branch -d`.
-4. Close the loops — issues whose premise this run changed, scratch files outside the repo, and
-   any question put to the user that never got an answer.
+3. Auto-delete used worktrees this run created:
+   `python3 scripts/office_runtime.py cleanup-worktrees --state-dir <path>`, or `office_worktree.sh cleanup-run --state-dir <path>`, then `prune`, then `git branch -d`.
+4. Close loops: issues this run changed, scratch files in `<state_dir>/tmp` (never `/tmp`), and
+   unanswered user questions.

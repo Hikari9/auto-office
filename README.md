@@ -26,7 +26,7 @@ The uploaded spec references “the five frozen execution fields” without nami
 ```bash
 python3 scripts/check_ecosystem.py
 python3 -m unittest discover -s tests -v
-python3 scripts/office_runtime.py init-db --db /tmp/auto-office-runs.db
+python3 scripts/office_runtime.py init-db --db ~/.local/state/auto-office/runs/runs.db
 python3 scripts/office_runtime.py maturity --points 60
 ```
 

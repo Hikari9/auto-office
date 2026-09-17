@@ -380,8 +380,76 @@ class StartCommandTests(unittest.TestCase):
 
     def test_stdout_contains_required_keys(self):
         code, out = self._start(gear='direct')
-        for key in ('state_dir', 'run_id', 'gear', 'pointer', 'kickoff'):
+        for key in ('state_dir', 'run_id', 'gear', 'pointer', 'kickoff', 'tmp_dir'):
             self.assertIn(key, out)
+
+    def test_start_creates_tmp_dir_in_runs_directory(self):
+        code, out = self._start(gear='direct')
+        self.assertEqual(code, 0)
+        tmp_dir = Path(out['tmp_dir'])
+        state_dir = Path(out['state_dir'])
+        self.assertTrue(tmp_dir.is_dir())
+        self.assertEqual(tmp_dir, state_dir / 'tmp')
+        self.assertTrue((self.state_home / 'auto-office' / 'runs' / 'tmp').is_dir())
+        state = json.loads((state_dir / 'state.json').read_text(encoding='utf-8'))
+        self.assertEqual(state.get('tmp_dir'), str(tmp_dir.resolve()))
+        self.assertNotEqual(Path('/tmp').resolve(), tmp_dir.resolve())
+
+    def test_tmp_dir_command(self):
+        code, out = self._start(gear='direct')
+        self.assertEqual(code, 0)
+        c, res = _invoke(rt.cmd_tmp_dir, state_dir=out['state_dir'])
+        self.assertEqual(c, 0)
+        self.assertEqual(res['tmp_dir'], out['tmp_dir'])
+        c2, res2 = _invoke(rt.cmd_tmp_dir, state_dir=None)
+        self.assertEqual(c2, 0)
+        self.assertEqual(res2['tmp_dir'], str((self.state_home / 'auto-office' / 'runs' / 'tmp').resolve()))
+
+    def test_cleanup_worktrees_removes_clean_worktrees_and_deletes_branch(self):
+        code, out = self._start(gear='direct')
+        state_dir = Path(out['state_dir'])
+        run_id = out['run_id']
+        wt_dir = self.repo.parent / f"wt-{run_id}"
+        branch_name = f"office/fam1/{run_id}/disp1"
+        subprocess.run(['git', 'worktree', 'add', '-b', branch_name, str(wt_dir), 'HEAD'],
+                       cwd=str(self.repo), check=True, capture_output=True)
+        # Record dispatch
+        disp_dir = state_dir / 'dispatches' / 'disp1'
+        disp_dir.mkdir(parents=True, exist_ok=True)
+        (disp_dir / 'meta.json').write_text(json.dumps({'worktree': str(wt_dir)}), encoding='utf-8')
+        # Merge the branch so git branch -d will succeed
+        subprocess.run(['git', 'merge', '--no-ff', '-m', 'merge disp1', branch_name],
+                       cwd=str(self.repo), check=True, capture_output=True)
+        # Run cleanup-worktrees
+        c, res = _invoke(rt.cmd_cleanup_worktrees, state_dir=str(state_dir), repo=str(self.repo), force=False)
+        self.assertEqual(c, 0)
+        self.assertIn(str(wt_dir.resolve()), res['removed_worktrees'])
+        self.assertIn(branch_name, res['deleted_branches'])
+        self.assertFalse(wt_dir.exists())
+
+    def test_cleanup_worktrees_skips_dirty_worktree_unless_forced(self):
+        code, out = self._start(gear='direct')
+        state_dir = Path(out['state_dir'])
+        run_id = out['run_id']
+        wt_dir = self.repo.parent / f"wt-dirty-{run_id}"
+        branch_name = f"office/fam1/{run_id}/disp2"
+        subprocess.run(['git', 'worktree', 'add', '-b', branch_name, str(wt_dir), 'HEAD'],
+                       cwd=str(self.repo), check=True, capture_output=True)
+        disp_dir = state_dir / 'dispatches' / 'disp2'
+        disp_dir.mkdir(parents=True, exist_ok=True)
+        (disp_dir / 'meta.json').write_text(json.dumps({'worktree': str(wt_dir)}), encoding='utf-8')
+        # Make dirty
+        (wt_dir / 'dirty.txt').write_text('dirty content')
+        # Run cleanup without force
+        c, res = _invoke(rt.cmd_cleanup_worktrees, state_dir=str(state_dir), repo=str(self.repo), force=False)
+        self.assertEqual(c, 0)
+        self.assertIn(str(wt_dir.resolve()), res['skipped_dirty'])
+        self.assertTrue(wt_dir.exists())
+        # Run cleanup with force
+        c2, res2 = _invoke(rt.cmd_cleanup_worktrees, state_dir=str(state_dir), repo=str(self.repo), force=True)
+        self.assertEqual(c2, 0)
+        self.assertIn(str(wt_dir.resolve()), res2['removed_worktrees'])
+        self.assertFalse(wt_dir.exists())
 
     def test_fit_test_irreversible_selects_full(self):
         code, out = self._start(irreversible=True, volume=False, interview=False, adversarial=False)
