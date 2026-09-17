@@ -20,7 +20,7 @@ say so plainly and name which gates did not apply, rather than reporting closeou
 the catalog — dispatch `auto-self-improve`, then `resolve-route-defect --id <id> --proposal-ref
 <branch-or-PR>`. Exit 0 means a started run with every defect amended; it never means "no run".
 
-**Report unverified spoke receipts.** Read `spokes_loaded` in `state.json` and name any row with `verified: false` — a spoke marked with `--unverified`, or a row carried over from a run that predates the digest requirement. These are not failures, but a gate satisfied without proof that its spoke was located is exactly the condition that let a run reach dispatch with `auto-routing` and `auto-execution` marked and neither loaded. State them; do not quietly pass them.
+**Report unverified spoke receipts.** Read `spokes_loaded` in `state.json` and name any row with `verified: false` — a spoke marked with `--unverified`, or a row carried over from a run that predates the digest requirement. These are not failures, but a gate satisfied without proof that its spoke was located is how a run reaches dispatch with spokes marked and none loaded. State them; do not quietly pass them.
 
 **Reclaim the dispatch surface.** A run that ends leaving its workers parked is not closed out.
 Once a ticket's work is merged and its evidence lives somewhere durable (the PR body, the

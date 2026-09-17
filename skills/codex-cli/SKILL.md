@@ -30,10 +30,8 @@ would have blocked a bare CLI launch. The dispatch succeeds, does correct work, 
 absent from `herdr agent list`, from the pane ledger, and therefore from closeout pane accounting,
 which closes only panes it finds in the ledger.
 
-Observed: a reviewer dispatched as `nohup env -i HOME=… PATH=… TERM=dumb codex exec --yolo …` while
-the parent had `HERDR_ENV` set throughout. `echo $HERDR_ENV` prints the parent's value and empty
-under that child, where `herdr` is also off `PATH`. Two sibling runs' reviewers were visible in
-`herdr agent list` at that moment; this one was not.
+`echo $HERDR_ENV` prints the parent's value and empty under an `env -i` child, where `herdr` is
+also off `PATH` — so such a dispatch never appears in `herdr agent list`.
 
 Carry the environment through instead of discarding it, and prefer the spawner that records the pane:
 

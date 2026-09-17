@@ -106,7 +106,7 @@ class TestTrackingIssuePrecedesPlanning(unittest.TestCase):
     def test_tracking_issue_is_required_before_planning_spoke(self):
         text = (ROOT / 'SKILL.md').read_text(encoding='utf-8')
         issue_pos = text.index('file-issue')
-        planning_pos = text.index('check-spoke --state-dir <state_dir> --spoke auto-planning')
+        planning_pos = text.index('take the `auto-planning` receipt')
         self.assertLess(issue_pos, planning_pos)
         self.assertRegex(text[issue_pos:planning_pos], r'create or reuse exactly one tracking GitHub issue')
         self.assertRegex(text[issue_pos:planning_pos], r'family-update .*--issue')

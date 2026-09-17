@@ -6,7 +6,7 @@ Prefer targeted tests → regression tests → type/lint/static → build/packag
 
 User-facing work requires browser validation when a reachable local/preview runtime can reasonably be produced. Execute the actual acceptance flow, not merely the homepage.
 
-## Review tiers (issue-35#decision-4)
+## Review tiers
 
 Review is local first; a final/integration adversary is boundary-triggered, never a default second pass:
 
