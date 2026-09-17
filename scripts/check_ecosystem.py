@@ -28,7 +28,9 @@ SKILL_LINE_BUDGETS = {
     'skills/auto-self-improve/SKILL.md': 26,
     'skills/auto-verification/SKILL.md': 50,
     'skills/claude-cli/SKILL.md': 43,
-    'skills/codex-cli/SKILL.md': 61,
+    # Raised from 61 for the env -i / HERDR_ENV invisibility section: a recorded
+    # failure mode with a reproduction, compressed to 28 lines before raising.
+    'skills/codex-cli/SKILL.md': 92,
     'skills/hermes-cli/SKILL.md': 20,
     # Vendored from external sources in 9a59305, not authored to this repo's
     # context-load convention: every skill above fits in 64 lines, these two do not.

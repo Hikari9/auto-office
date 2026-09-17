@@ -22,43 +22,31 @@ codex exec --yolo -m <model> -c model_reasoning_effort="<effort>" \
 
 ## A pane and a clean environment are not alternatives
 
-A `codex exec` launched from a login shell can die before it runs, on an
-`_load_nvm`/FUNCNEST fault inherited from the user's shell profile. The usual
-mitigation is `env -i`. **`env -i` also strips `HERDR_ENV` and removes `herdr`
-from `PATH`** — so the mitigation for the profile fault silently defeats the
-Herdr-pane precondition in the top-level `SKILL.md`, and defeats any hook keyed
-on `HERDR_ENV` that would otherwise have blocked a bare CLI launch. The dispatch
-succeeds, does correct work, and is invisible: absent from `herdr agent list`,
-absent from the pane ledger, and therefore absent from the closeout pane
-accounting, which closes only panes it finds in the ledger.
+A `codex exec` launched from a login shell can die before it runs, on an `_load_nvm`/FUNCNEST fault
+inherited from the user's shell profile. The usual mitigation is `env -i`. **`env -i` also strips
+`HERDR_ENV` and removes `herdr` from `PATH`** — so the fix for the profile fault silently defeats
+the Herdr-pane precondition in the top-level `SKILL.md`, and any hook keyed on `HERDR_ENV` that
+would have blocked a bare CLI launch. The dispatch succeeds, does correct work, and is invisible:
+absent from `herdr agent list`, from the pane ledger, and therefore from closeout pane accounting,
+which closes only panes it finds in the ledger.
 
-Observed: an independent code reviewer dispatched as
-`nohup env -i HOME=… PATH=… TERM=dumb codex exec --yolo -m <model> … > out.log &`
-while `HERDR_ENV=1` was set in the parent the whole time. Confirmed directly —
-`echo $HERDR_ENV` prints `1` in the parent and empty under that `env -i` child,
-where `herdr` is also not on `PATH`. Two sibling runs' reviewers were visible in
-`herdr agent list` at the same moment; this one was not.
+Observed: a reviewer dispatched as `nohup env -i HOME=… PATH=… TERM=dumb codex exec --yolo …` while
+the parent had `HERDR_ENV` set throughout. `echo $HERDR_ENV` prints the parent's value and empty
+under that child, where `herdr` is also off `PATH`. Two sibling runs' reviewers were visible in
+`herdr agent list` at that moment; this one was not.
 
-Carry the environment through instead of discarding it, and prefer the spawner
-that records the pane:
+Carry the environment through instead of discarding it, and prefer the spawner that records the pane:
 
 ```bash
-# Preferred: pane-hosted, recorded in the ledger, closeable at closeout.
-scripts/office_spawn.sh --pane-id <pane> --agent-name <name> …
-
-# If a bare launch is genuinely required, preserve the Herdr variables.
-env -i HOME="$HOME" PATH="$PATH" TERM=dumb HERDR_ENV="$HERDR_ENV" codex exec …
+scripts/office_spawn.sh --pane-id <pane> --agent-name <name> …   # pane-hosted, in the ledger
+env -i HOME="$HOME" PATH="$PATH" TERM=dumb HERDR_ENV="$HERDR_ENV" codex exec …  # bare, if required
 ```
 
-`env -i` with an allow-list is a decision about which variables matter. Dropping
-`HERDR_ENV` from that list is not a neutral omission — it is the difference
-between a dispatch the user can watch and one they cannot. If you must drop it,
-say so when you publish the route notice, so the invisibility is a stated cost
-rather than a surprise.
-
-A headless one-shot also cannot be resumed, which `auto-review` asks for
-explicitly: round 2 of a review is supposed to retain round 1's uncertainty, and
-`codex exec` has no session to resume into.
+An `env -i` allow-list is a decision about which variables matter; dropping `HERDR_ENV` is the
+difference between a dispatch the user can watch and one they cannot. If you must drop it, say so
+in the route notice so the invisibility is a stated cost. A headless one-shot also cannot be
+resumed, which `auto-review` asks for explicitly: round 2 is meant to retain round 1's uncertainty,
+and `codex exec` has no session to resume into.
 
 ## Quota
 
