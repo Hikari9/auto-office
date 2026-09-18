@@ -693,9 +693,24 @@ models:
     # the router believed it had dispatched claude-sonnet-4-6 at medium. The
     # subsequent prompt then returned `agent_prompt_stalled`. A route is a
     # promise about the identity that runs; agy cannot honour that promise at
-    # dispatch time, so these rows are not dispatchable until a means of pinning
-    # the invocation identity is verified. Set back to true only with recorded
-    # evidence that a launched agy session reports the routed model.
+    # dispatch time.
+    #
+    # ROUTING DEFECT a0b7c519 (run e4dfb916, 2026-09-17) CONFIRMS the launch-flag
+    # half and SUPPLIES a working correction. A bare `agy` launch reported
+    # "Gemini 3.8 Flash - medium" against a routed ...-high; sending `/effort high`
+    # into the pane changed the footer to "Gemini 3.8 Flash - high", matching the
+    # routed identity. So the identity IS pinnable, just not at launch: it must be
+    # set in-session and then READ BACK off the pane footer before dispatch.
+    # These rows stay `dispatchable: false` because `office_spawn.sh` cannot
+    # perform that post-launch step; a caller that does it manually and verifies
+    # the footer has a dispatchable identity, which is what run e4dfb916 did.
+    #
+    # ROUTING DEFECT f34dd8ae (run e4dfb916, 2026-09-17): agy credits were
+    # exhausted mid-run and two dispatches stalled producing zero changes.
+    # `scripts/agy-usage.py` had reported 9.5% remaining and was overridden by the
+    # user as under-reporting; the probe was directionally correct. Treat a
+    # single-digit agy reading as real and do not override it without evidence
+    # stronger than recollection.
     dispatchable: false
     source_identifier: gemini-3-8-flash
     source_name: artificial-analysis
@@ -719,9 +734,24 @@ models:
     # the router believed it had dispatched claude-sonnet-4-6 at medium. The
     # subsequent prompt then returned `agent_prompt_stalled`. A route is a
     # promise about the identity that runs; agy cannot honour that promise at
-    # dispatch time, so these rows are not dispatchable until a means of pinning
-    # the invocation identity is verified. Set back to true only with recorded
-    # evidence that a launched agy session reports the routed model.
+    # dispatch time.
+    #
+    # ROUTING DEFECT a0b7c519 (run e4dfb916, 2026-09-17) CONFIRMS the launch-flag
+    # half and SUPPLIES a working correction. A bare `agy` launch reported
+    # "Gemini 3.8 Flash - medium" against a routed ...-high; sending `/effort high`
+    # into the pane changed the footer to "Gemini 3.8 Flash - high", matching the
+    # routed identity. So the identity IS pinnable, just not at launch: it must be
+    # set in-session and then READ BACK off the pane footer before dispatch.
+    # These rows stay `dispatchable: false` because `office_spawn.sh` cannot
+    # perform that post-launch step; a caller that does it manually and verifies
+    # the footer has a dispatchable identity, which is what run e4dfb916 did.
+    #
+    # ROUTING DEFECT f34dd8ae (run e4dfb916, 2026-09-17): agy credits were
+    # exhausted mid-run and two dispatches stalled producing zero changes.
+    # `scripts/agy-usage.py` had reported 9.5% remaining and was overridden by the
+    # user as under-reporting; the probe was directionally correct. Treat a
+    # single-digit agy reading as real and do not override it without evidence
+    # stronger than recollection.
     dispatchable: false
     source_identifier: gemini-3-8-flash-medium
     source_name: artificial-analysis
@@ -745,9 +775,24 @@ models:
     # the router believed it had dispatched claude-sonnet-4-6 at medium. The
     # subsequent prompt then returned `agent_prompt_stalled`. A route is a
     # promise about the identity that runs; agy cannot honour that promise at
-    # dispatch time, so these rows are not dispatchable until a means of pinning
-    # the invocation identity is verified. Set back to true only with recorded
-    # evidence that a launched agy session reports the routed model.
+    # dispatch time.
+    #
+    # ROUTING DEFECT a0b7c519 (run e4dfb916, 2026-09-17) CONFIRMS the launch-flag
+    # half and SUPPLIES a working correction. A bare `agy` launch reported
+    # "Gemini 3.8 Flash - medium" against a routed ...-high; sending `/effort high`
+    # into the pane changed the footer to "Gemini 3.8 Flash - high", matching the
+    # routed identity. So the identity IS pinnable, just not at launch: it must be
+    # set in-session and then READ BACK off the pane footer before dispatch.
+    # These rows stay `dispatchable: false` because `office_spawn.sh` cannot
+    # perform that post-launch step; a caller that does it manually and verifies
+    # the footer has a dispatchable identity, which is what run e4dfb916 did.
+    #
+    # ROUTING DEFECT f34dd8ae (run e4dfb916, 2026-09-17): agy credits were
+    # exhausted mid-run and two dispatches stalled producing zero changes.
+    # `scripts/agy-usage.py` had reported 9.5% remaining and was overridden by the
+    # user as under-reporting; the probe was directionally correct. Treat a
+    # single-digit agy reading as real and do not override it without evidence
+    # stronger than recollection.
     dispatchable: false
     source_identifier: gemini-3-8-flash-low
     source_name: artificial-analysis
@@ -771,9 +816,24 @@ models:
     # the router believed it had dispatched claude-sonnet-4-6 at medium. The
     # subsequent prompt then returned `agent_prompt_stalled`. A route is a
     # promise about the identity that runs; agy cannot honour that promise at
-    # dispatch time, so these rows are not dispatchable until a means of pinning
-    # the invocation identity is verified. Set back to true only with recorded
-    # evidence that a launched agy session reports the routed model.
+    # dispatch time.
+    #
+    # ROUTING DEFECT a0b7c519 (run e4dfb916, 2026-09-17) CONFIRMS the launch-flag
+    # half and SUPPLIES a working correction. A bare `agy` launch reported
+    # "Gemini 3.8 Flash - medium" against a routed ...-high; sending `/effort high`
+    # into the pane changed the footer to "Gemini 3.8 Flash - high", matching the
+    # routed identity. So the identity IS pinnable, just not at launch: it must be
+    # set in-session and then READ BACK off the pane footer before dispatch.
+    # These rows stay `dispatchable: false` because `office_spawn.sh` cannot
+    # perform that post-launch step; a caller that does it manually and verifies
+    # the footer has a dispatchable identity, which is what run e4dfb916 did.
+    #
+    # ROUTING DEFECT f34dd8ae (run e4dfb916, 2026-09-17): agy credits were
+    # exhausted mid-run and two dispatches stalled producing zero changes.
+    # `scripts/agy-usage.py` had reported 9.5% remaining and was overridden by the
+    # user as under-reporting; the probe was directionally correct. Treat a
+    # single-digit agy reading as real and do not override it without evidence
+    # stronger than recollection.
     dispatchable: false
     source_identifier: gemini-3-6-flash
     source_name: artificial-analysis
