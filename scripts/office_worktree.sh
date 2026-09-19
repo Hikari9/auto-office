@@ -4,11 +4,21 @@ set -euo pipefail
 #
 # Usage:
 #   office-worktree.sh create --family-id <id> --run-id <id> --dispatch-id <id> [--base-ref <ref>] [--worktree-path <path>]
-#   office-worktree.sh check --worktree <path>
-#   office-worktree.sh snapshot-diff --worktree <path> --output <file>
+#   office-worktree.sh check --worktree <path> [--base-ref <ref>]
+#   office-worktree.sh snapshot-diff --worktree <path> --output <file> [--base-ref <ref>]
 #   office-worktree.sh cleanup --worktree <path> [--force]
 #   office-worktree.sh cleanup-run [--state-dir <dir>] [--run-id <id>] [--force]
 #   office-worktree.sh prune
+#
+# --base-ref on check/snapshot-diff: executors now commit their own work
+# locally to their dispatch branch as a checkpoint (see skills/auto-loop and
+# skills/herdr) rather than leaving it uncommitted. Once a dispatch has
+# commits, a bare `git diff HEAD`/`diff-index HEAD` is empty even though real,
+# unmerged work exists on the branch -- it only ever saw working-tree
+# dirtiness, never the branch's own commits. Pass --base-ref (the SHA/ref the
+# dispatch branch was cut from, e.g. the run's pinned base_sha) to see the
+# dispatch's full contribution, committed and uncommitted together. Omit it
+# and both subcommands fall back to their original HEAD-relative behavior.
 
 ACTION=${1:-}
 shift || true
@@ -50,22 +60,24 @@ case "$ACTION" in
     
     check)
         WORKTREE=""
+        BASE_REF=""
         while [[ $# -gt 0 ]]; do
             case $1 in
                 --worktree) WORKTREE="$2"; shift 2 ;;
+                --base-ref) BASE_REF="$2"; shift 2 ;;
                 *) echo "Unknown arg: $1"; exit 1 ;;
             esac
         done
 
         if [[ -z "$WORKTREE" ]]; then
-            echo "Usage: office-worktree.sh check --worktree <path>" >&2
+            echo "Usage: office-worktree.sh check --worktree <path> [--base-ref <ref>]" >&2
             exit 1
         fi
 
         cd "$WORKTREE"
         DIRTY=false
         UNCOMMITTED=false
-        
+
         if ! git diff-index --quiet HEAD --; then
             DIRTY=true
             UNCOMMITTED=true
@@ -77,33 +89,53 @@ case "$ACTION" in
             UNCOMMITTED=true
         fi
 
-        cat <<EOF
+        if [[ -n "$BASE_REF" ]]; then
+            COMMITS_AHEAD=$(git rev-list --count "$BASE_REF"..HEAD 2>/dev/null || echo 0)
+            cat <<EOF
+{
+  "dirty": $DIRTY,
+  "uncommitted": $UNCOMMITTED,
+  "commits_ahead_of_base": $COMMITS_AHEAD
+}
+EOF
+        else
+            cat <<EOF
 {
   "dirty": $DIRTY,
   "uncommitted": $UNCOMMITTED
 }
 EOF
+        fi
         ;;
     
     snapshot-diff)
         WORKTREE=""
         OUTPUT=""
+        BASE_REF=""
         while [[ $# -gt 0 ]]; do
             case $1 in
                 --worktree) WORKTREE="$2"; shift 2 ;;
                 --output) OUTPUT="$2"; shift 2 ;;
+                --base-ref) BASE_REF="$2"; shift 2 ;;
                 *) echo "Unknown arg: $1"; exit 1 ;;
             esac
         done
 
         if [[ -z "$WORKTREE" || -z "$OUTPUT" ]]; then
-            echo "Usage: office-worktree.sh snapshot-diff --worktree <path> --output <file>" >&2
+            echo "Usage: office-worktree.sh snapshot-diff --worktree <path> --output <file> [--base-ref <ref>]" >&2
             exit 1
         fi
 
         cd "$WORKTREE"
-        # Include staged and unstaged changes
-        git diff HEAD > "$OUTPUT"
+        if [[ -n "$BASE_REF" ]]; then
+            # Committed + uncommitted contribution since the dispatch branch's
+            # own base -- the only diff that still shows a checkpointed
+            # executor's work (see the --base-ref note in the header comment).
+            git diff "$BASE_REF" > "$OUTPUT"
+        else
+            # Include staged and unstaged changes
+            git diff HEAD > "$OUTPUT"
+        fi
         # Untracked files can also be added to diff, but standard diff doesn't include them.
         # So we can add them to index temporarily or just leave it out. The prompt says "diff of uncommitted changes to a patch file".
         # Sticking to git diff HEAD is best.
@@ -130,9 +162,16 @@ EOF
             BRANCH_NAME=$(git -C "$WORKTREE" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
         fi
 
-        # Removal refuses a dirty tree by default. A refusal reports work that
-        # exists in no other place; --force discards it, so the caller asks for
-        # that explicitly rather than inheriting it.
+        # Removal refuses a dirty (uncommitted) tree by default. A refusal
+        # reports work that exists in no other place; --force discards it, so
+        # the caller asks for that explicitly rather than inheriting it. This
+        # only catches *uncommitted* work -- an executor that already
+        # committed its own checkpoint (see skills/auto-loop) leaves a clean
+        # tree here even with real unmerged commits sitting on its branch, so
+        # `git branch -d` just below is the only remaining backstop for that
+        # case. Its refusal must not be swallowed silently, or an unmerged
+        # branch's existence becomes invisible right after its worktree is
+        # gone.
         if [[ "$FORCE" -eq 1 ]]; then
             git worktree remove --force "$WORKTREE"
         else
@@ -140,7 +179,9 @@ EOF
         fi
         git worktree prune
         if [[ -n "$BRANCH_NAME" && "$BRANCH_NAME" != "HEAD" && "$BRANCH_NAME" == office/* ]]; then
-            git branch -d "$BRANCH_NAME" 2>/dev/null || true
+            if ! BRANCH_DELETE_ERR=$(git branch -d "$BRANCH_NAME" 2>&1); then
+                echo "warning: kept branch '$BRANCH_NAME' -- delete refused (commit(s) not yet merged?): $BRANCH_DELETE_ERR" >&2
+            fi
         fi
         ;;
 
@@ -216,7 +257,9 @@ EOF
             while IFS= read -r br; do
                 if [[ -n "$br" ]]; then
                     echo "Deleting branch: $br"
-                    git branch -d "$br" 2>/dev/null || true
+                    if ! BRANCH_DELETE_ERR=$(git branch -d "$br" 2>&1); then
+                        echo "warning: kept branch '$br' -- delete refused (commit(s) not yet merged?): $BRANCH_DELETE_ERR" >&2
+                    fi
                 fi
             done < <(printf "%s\n" "${BRANCHES[@]}" | sort -u)
         fi

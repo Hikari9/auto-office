@@ -163,6 +163,108 @@ class WorktreeScriptTests(unittest.TestCase):
         self.assertNotIn("office/fam1/runB/dispB", branches)
         self.assertIn("office/fam1/runA/dispA", branches)
 
+    def test_check_reports_commits_ahead_of_base_ref(self):
+        # An executor that commits its own checkpoint (per skills/auto-loop)
+        # leaves a *clean* tree with real, unmerged work on the branch --
+        # `check` without --base-ref can't see it (dirty/uncommitted both
+        # false), so --base-ref must surface it separately.
+        wt_path = self.tmp / "wt_committed"
+        base_ref = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(self.repo), capture_output=True, text=True, check=True
+        ).stdout.strip()
+        subprocess.run([
+            str(WORKTREE_SH), "create",
+            "--family-id", "famE", "--run-id", "runE", "--dispatch-id", "dispE",
+            "--worktree-path", str(wt_path), "--base-ref", base_ref,
+        ], cwd=str(self.repo), check=True)
+
+        (wt_path / "new_file.txt").write_text("executor's checkpointed work\n")
+        subprocess.run(["git", "add", "new_file.txt"], cwd=str(wt_path), check=True)
+        subprocess.run(["git", "commit", "-m", "executor checkpoint"], cwd=str(wt_path), check=True, capture_output=True)
+
+        # Without --base-ref: tree is clean, committed work is invisible.
+        res_plain = subprocess.run(
+            [str(WORKTREE_SH), "check", "--worktree", str(wt_path)],
+            cwd=str(self.repo), capture_output=True, text=True,
+        )
+        self.assertEqual(res_plain.returncode, 0)
+        status_plain = json.loads(res_plain.stdout)
+        self.assertFalse(status_plain["dirty"])
+        self.assertNotIn("commits_ahead_of_base", status_plain)
+
+        # With --base-ref: the checkpoint commit is visible.
+        res_base = subprocess.run(
+            [str(WORKTREE_SH), "check", "--worktree", str(wt_path), "--base-ref", base_ref],
+            cwd=str(self.repo), capture_output=True, text=True,
+        )
+        self.assertEqual(res_base.returncode, 0)
+        status_base = json.loads(res_base.stdout)
+        self.assertFalse(status_base["dirty"])
+        self.assertEqual(status_base["commits_ahead_of_base"], 1)
+
+    def test_snapshot_diff_with_base_ref_sees_committed_checkpoint(self):
+        wt_path = self.tmp / "wt_snapshot"
+        base_ref = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(self.repo), capture_output=True, text=True, check=True
+        ).stdout.strip()
+        subprocess.run([
+            str(WORKTREE_SH), "create",
+            "--family-id", "famF", "--run-id", "runF", "--dispatch-id", "dispF",
+            "--worktree-path", str(wt_path), "--base-ref", base_ref,
+        ], cwd=str(self.repo), check=True)
+
+        (wt_path / "checkpointed.txt").write_text("committed contribution\n")
+        subprocess.run(["git", "add", "checkpointed.txt"], cwd=str(wt_path), check=True)
+        subprocess.run(["git", "commit", "-m", "checkpoint"], cwd=str(wt_path), check=True, capture_output=True)
+
+        out_plain = self.tmp / "plain.diff"
+        subprocess.run(
+            [str(WORKTREE_SH), "snapshot-diff", "--worktree", str(wt_path), "--output", str(out_plain)],
+            cwd=str(self.repo), check=True,
+        )
+        # Old behavior (no --base-ref): diff against HEAD of the branch itself
+        # is empty once the work is committed.
+        self.assertEqual(out_plain.read_text().strip(), "")
+
+        out_base = self.tmp / "base.diff"
+        subprocess.run(
+            [str(WORKTREE_SH), "snapshot-diff", "--worktree", str(wt_path), "--output", str(out_base),
+             "--base-ref", base_ref],
+            cwd=str(self.repo), check=True,
+        )
+        self.assertIn("checkpointed.txt", out_base.read_text())
+
+    def test_cleanup_warns_instead_of_silently_dropping_unmerged_branch(self):
+        # Worktree tree is clean (executor committed its checkpoint), so
+        # `git worktree remove` succeeds without --force; `git branch -d`
+        # must then refuse (branch unmerged) and that refusal must be
+        # reported, not swallowed.
+        wt_path = self.tmp / "wt_unmerged"
+        res_create = subprocess.run([
+            str(WORKTREE_SH), "create",
+            "--family-id", "famG", "--run-id", "runG", "--dispatch-id", "dispG",
+            "--worktree-path", str(wt_path),
+        ], cwd=str(self.repo), capture_output=True, text=True)
+        self.assertEqual(res_create.returncode, 0, res_create.stderr)
+
+        (wt_path / "unmerged.txt").write_text("checkpoint, never merged\n")
+        subprocess.run(["git", "add", "unmerged.txt"], cwd=str(wt_path), check=True)
+        subprocess.run(["git", "commit", "-m", "checkpoint"], cwd=str(wt_path), check=True, capture_output=True)
+
+        res_clean = subprocess.run(
+            [str(WORKTREE_SH), "cleanup", "--worktree", str(wt_path)],
+            cwd=str(self.repo), capture_output=True, text=True,
+        )
+        self.assertEqual(res_clean.returncode, 0, res_clean.stderr)
+        self.assertFalse(wt_path.exists())  # worktree dir is gone
+        self.assertIn("warning:", res_clean.stderr)
+        self.assertIn("delete refused", res_clean.stderr)
+
+        # The branch and its commit must still exist -- nothing was lost.
+        branches = subprocess.run(["git", "branch", "--list", "office/famG/runG/dispG"],
+                                  cwd=str(self.repo), capture_output=True, text=True).stdout
+        self.assertIn("office/famG/runG/dispG", branches)
+
     def test_cleanup_run_skips_dirty_worktree_unless_forced(self):
         wt_path = self.tmp / "wt_dirty"
         subprocess.run([
