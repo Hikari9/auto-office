@@ -29,4 +29,32 @@ Scope the contamination check to what changed between the review's start and end
 
 ## Review round caps
 
-`full`: 5 rounds. `express`: 2 rounds. A second CHANGES REQUIRED on the same task forces an orchestrator disposition, not an automatic re-plan. PLAN DEFECT and BRIEF DEFECT exit without consuming a round.
+`full`: 5 rounds. `express`: 2 rounds. Gear presets with `plan_review: false` (`direct`,
+`direct+review`, `light`, `quick`) that fund plan review anyway on explicit user request inherit
+`express`'s 2-round cap unless the user names a different one — a gear having no native review
+budget is not license to run one unbounded.
+
+A second CHANGES REQUIRED on the same task forces an orchestrator disposition, not an automatic
+re-plan. "Forces a disposition" means stating one of the following, to the user, before any
+further round is dispatched — not silently revising the plan again and resubmitting:
+
+- **escalate** — hand the two rounds of findings to the user and let them decide whether to
+  continue, change reviewers, or stop;
+- **accept with named residual risk** — proceed past the cap with the specific unresolved finding
+  named, not merely implied by a passing verdict;
+- **widen the replan** — the findings indicate the plan's shape itself is wrong, not a fixable
+  detail, so return to intake rather than patching forward;
+- **stop** — the artifact cannot be made to pass this reviewer; end the review loop and report why.
+
+Continuing straight to round 3 without one of these being stated is the failure this section
+exists to name: an orchestrator can satisfy "revise the plan" and "resubmit for review" every
+round and never notice it skipped the disposition step, because nothing about producing a
+compliant-looking v3 and re-dispatching requires stopping to choose. Observed 2026-09-19 on gear
+`light` (no native cap, plan review added by explicit user request): three completed rounds plus
+a fourth in progress, each returning CHANGES REQUIRED with genuine, evidence-backed findings, none
+followed by a stated disposition — the loop only stopped because the user interrupted it, and then
+asked why a "one round" mandate (which does not exist in this doc) had been exceeded. The real gap
+wasn't a missing round number; it was that this section described a required stop without giving
+the orchestrator anything to actually say at that stop, so there was nothing to notice omitting.
+
+PLAN DEFECT and BRIEF DEFECT exit without consuming a round.
