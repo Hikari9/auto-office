@@ -728,31 +728,26 @@ models:
     invocation_model_id: gemini-3.8-flash-medium
     invocation_harness: agy
     invocation_source: 'local-evidence:agy models'
-    # ROUTING DEFECT 3fe80434 (run 4c056f1e, 2026-09-15): `agy` accepts
-    # `--model` / `--effort` at launch WITHOUT error and does not apply them --
-    # the session stayed on its configured default (Gemini 3.7 Flash, low) while
-    # the router believed it had dispatched claude-sonnet-4-6 at medium. The
-    # subsequent prompt then returned `agent_prompt_stalled`. A route is a
-    # promise about the identity that runs; agy cannot honour that promise at
-    # dispatch time.
-    #
-    # ROUTING DEFECT a0b7c519 (run e4dfb916, 2026-09-17) CONFIRMS the launch-flag
-    # half and SUPPLIES a working correction. A bare `agy` launch reported
-    # "Gemini 3.8 Flash - medium" against a routed ...-high; sending `/effort high`
-    # into the pane changed the footer to "Gemini 3.8 Flash - high", matching the
-    # routed identity. So the identity IS pinnable, just not at launch: it must be
-    # set in-session and then READ BACK off the pane footer before dispatch.
-    # These rows stay `dispatchable: false` because `office_spawn.sh` cannot
-    # perform that post-launch step; a caller that does it manually and verifies
-    # the footer has a dispatchable identity, which is what run e4dfb916 did.
-    #
-    # ROUTING DEFECT f34dd8ae (run e4dfb916, 2026-09-17): agy credits were
-    # exhausted mid-run and two dispatches stalled producing zero changes.
-    # `scripts/agy-usage.py` had reported 9.5% remaining and was overridden by the
-    # user as under-reporting; the probe was directionally correct. Treat a
-    # single-digit agy reading as real and do not override it without evidence
-    # stronger than recollection.
-    dispatchable: false
+    # ROUTING DEFECT 3fe80434 (run 4c056f1e, 2026-09-15) RESOLVED for this exact
+    # row only (route-defect 72bd4fba, run 0e85aa20, 2026-09-19). The original
+    # defect's own evidence was a Claude model routed THROUGH agy
+    # (claude-sonnet-4-6) -- that is the already-documented, still-valid
+    # gotcha in `skills/agy-cli/SKILL.md` (Claude/gpt-oss slugs silently fall
+    # back; only the `agy models` display name selects them, verified on agy
+    # 1.2.2). This row is a native Gemini model, a different case: launching
+    # with the bare slug from `agy models`' first column
+    # (`--model gemini-3.8-flash-medium`, no separate `--effort`) launched
+    # correctly on agy 1.2.7 -- banner confirmed "Gemini 3.8 Flash · medium" --
+    # and the resulting session went on to correctly execute two real tasks
+    # (connect.favor.church#385 T0/T1), independently verified by the
+    # dispatching orchestrator (diffs, typecheck, test runs). Do not
+    # generalize this to the Claude/gpt-oss-via-agy rows elsewhere in this
+    # file, and do not flip the three sibling Gemini rows below (-high, -low,
+    # gemini-3.6-flash-high) on this evidence alone -- only this exact slug
+    # was tested. Verify each independently before flipping; the mechanism
+    # likely generalizes across Gemini-native slugs but that is a hypothesis,
+    # not evidence, until each row has its own launch+banner confirmation.
+    dispatchable: true
     source_identifier: gemini-3-8-flash-medium
     source_name: artificial-analysis
     effort: medium

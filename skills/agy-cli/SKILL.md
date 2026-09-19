@@ -14,7 +14,16 @@ agy --dangerously-skip-permissions --print-timeout 45m \
 ```
 
 - `--print-timeout 45m` — defaults to 5m; always raise it or the run dies mid-task.
-- `--model` — resolve from local `agy models` at dispatch; agy publishes no `latest` alias, so a hardcoded slug is pinned to the day it was written. **Pass the display name from the second column, not the slug from the first.** Verified 2026-09-12 on agy 1.2.2: `--model claude-sonnet-4-6` (the slug) is accepted without error and silently falls back to the account default; `--model "Claude Sonnet 4.6 (Thinking)"` selects correctly. There is no unknown-model error, so the only way to catch this is to read the startup banner's model line before prompting — treat a banner mismatch as adapter invocation failure and restart rather than prompting the wrong route.
+- `--model` — resolve from local `agy models` at dispatch; agy publishes no `latest` alias, so a hardcoded slug is pinned to the day it was written. **For a Claude/gpt-oss model routed through agy, pass the display name from the second column, not the slug from the first.** Verified 2026-09-12 on agy 1.2.2: `--model claude-sonnet-4-6` (the slug) is accepted without error and silently falls back to the account default; `--model "Claude Sonnet 4.6 (Thinking)"` selects correctly. There is no unknown-model error, so the only way to catch this is to read the startup banner's model line before prompting — treat a banner mismatch as adapter invocation failure and restart rather than prompting the wrong route.
+  For a **native Gemini** model, the opposite convention verified correct: pass the exact combined
+  model+effort slug from `agy models`' first column as a single `--model` value (e.g.
+  `--model gemini-3.8-flash-medium`), with **no separate `--effort` flag**. Verified 2026-09-19 on
+  agy 1.2.7: this launched correctly (banner confirmed "Gemini 3.8 Flash · medium") and the
+  session went on to correctly complete real work. Splitting it into `--model gemini-3.8-flash
+  --effort medium` is the claude/codex convention and is a strong suspect for why earlier Gemini
+  rows were marked `dispatchable: false` under routing defect 3fe80434 — that defect's own
+  original evidence, though, was a Claude-routed model, so treat the fix as verified per-slug
+  (see `catalog/seed.yaml`'s per-row notes), not as a blanket rule across every Gemini row yet.
 - **Prefer `--prompt=<value>` (the `=` form) over `--print <value>`.** `--print` must be the last flag immediately before the prompt or the prompt is silently swallowed and you get a greeting/banner back with exit 0 — that is invocation failure, not a routing signal; nothing was done. The `=` form binds the value to the flag and makes ordering irrelevant.
 - **Stdin piping does not work.** The prompt must be bound to `--print`/`--prompt=`, never piped.
 - `--add-dir` does not reliably select the workspace by itself — pin the absolute workspace root (and forbid the scratch dir) in the prompt text itself.
