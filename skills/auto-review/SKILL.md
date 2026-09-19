@@ -29,4 +29,31 @@ Scope the contamination check to what changed between the review's start and end
 
 ## Review round caps
 
-`full`: 5 rounds. `express`: 2 rounds. A second CHANGES REQUIRED on the same task forces an orchestrator disposition, not an automatic re-plan. PLAN DEFECT and BRIEF DEFECT exit without consuming a round.
+`full`: 5 rounds. `express`: 2 rounds. Any gear whose preset does not fund `plan_review`
+(`direct`, `direct+review`, `light`, `quick`) has no plan-review round budget of its own — an
+ad-hoc plan review the user asks for on top of such a gear inherits `express`'s cap (2 rounds),
+not an unbounded one, unless the user names a higher cap explicitly. PLAN DEFECT and BRIEF DEFECT
+exit without consuming a round.
+
+**A second CHANGES REQUIRED on the same task is a hard stop, not a checkpoint to notice and keep
+going past.** The moment a second consecutive CHANGES REQUIRED lands on the same artifact: stop.
+Do not draft the next plan/code version. Do not requeue the reviewer. Before anything else, write
+down — to the user, or in the run record if the user is not present to read it yet — one explicit
+disposition:
+
+- **escalate** — put the unresolved tension in front of the user and wait;
+- **accept with named gaps** — proceed, but state exactly which findings are being carried forward
+  unresolved and why that's acceptable now; or
+- **re-scope** — the findings show the task/brief itself was wrong, not just the artifact, so the
+  fix is upstream of another revise-and-resubmit cycle.
+
+Producing v3 and immediately sending it back to the same reviewer is not a disposition — it is the
+exact behavior this stop exists to interrupt. If the fix is obviously correct and small, "accept
+with named gaps: none, proceeding" is a legitimate one-line disposition — the requirement is that
+you stop and say which one, not that every second CHANGES REQUIRED must escalate.
+
+This was skipped once in practice: a plan under `light` gear (no default plan-review budget, the
+user added an ad-hoc reviewer) took a second CHANGES REQUIRED at round 2 and rolled straight into
+rounds 3 and 4 with no disposition recorded, on a gear with no stated cap to catch it either. Both
+gaps are closed above — the cap now defaults instead of being silently absent, and the stop is
+stated as an action to take, not a fact to know.
