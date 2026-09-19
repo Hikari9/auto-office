@@ -207,8 +207,7 @@ has to reason about panes it has no business touching. With no run state directo
 exits rather than guessing a scope. `session_id` is the resume handle for that agent after its
 pane closes; capture it here, not later.
 
-Every brief you send to a spawned agent should ask for one line back before that agent's final
-turn ends:
+A brief for a dispatch that edits files should tell the agent to commit locally to its own dispatch branch (never push) right before its final report, so the work survives a later orchestrator mistake instead of depending on staying uncommitted and lucky — the orchestrator still owns final authorship and may amend/squash that commit. Every brief should also ask for one line back before that agent's final turn ends:
 
 ```bash
 <the herdr skill's directory>/scripts/herdr-ledger.mjs update \
