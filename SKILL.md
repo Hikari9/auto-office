@@ -84,6 +84,7 @@ Before the first executor or reviewer dispatch, check `echo "$HERDR_ENV"` and `w
 - `scripts/review_finding.sh` — structured review finding recording and telemetry persistence.
 - `scripts/hooks/` — lifecycle hooks (`session_end.sh`, `pre_compact.sh`, `compact_advisor.sh`, `close_panes.sh`, `close_finished_panes.mjs`, `install_hooks.sh`) ensuring runs remain durable across interruptions and context compaction.
 - `scripts/agy-usage.py`, `scripts/claude-usage.py`, `scripts/codex-usage.py` — live per-brand quota probes (stdlib/OAuth reads against each vendor's usage API); each adapter's `quota_probe.command` names its probe. See `references/quota-probe.md`.
+- `scripts/office_shortcut.sh` — per-repo shorthand for `office_runtime.py --state-dir` calls (`check-spoke`, `mark-spoke`, raw passthrough). Copy it into a consuming repo at `<repo>/.office/bin/office` to resolve the current run's state-dir automatically instead of retyping `python3 .../office_runtime.py <subcommand> --state-dir <path>` for every call.
 
 ## Review and verification
 
