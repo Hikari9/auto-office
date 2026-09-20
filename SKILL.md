@@ -33,11 +33,11 @@ Stage lines below name a spoke only; this protocol applies to each. Before doing
 
 Step zero, always, before any other action: run
 
-`python3 scripts/office_runtime.py start --goal <text> --playbook <Change|Restructure|Investigate|Prototype|Visual> [--gear <direct|direct+review|light|quick|express|full>] [--repo <path>]`
+`python3 scripts/office_runtime.py start --goal <text> --playbook <Change|Restructure|Investigate|Prototype|Visual> [--gear <direct|direct+review|light|quick|express|full>] [--repo <path>] [--blast-radius <local|repo|production|production-data>] [--size-class <S|M|L|XL>]`
 
 Echo the returned `kickoff` block to the user, then use its `state_dir` for every later `check-spoke`/`mark-spoke --state-dir` call. Why: `references/why-start.md`.
 
-`start` resolves effective config (`prompt/CLI > repo > user > plugin default`, emitting `effective_config_hash`; check `~/.config/auto-office/config.yaml` directly), pins the catalog/adapter snapshot hashes, policy hash, and base SHA, runs the gear fit test when `--gear` is omitted, creates `state_dir` with a `tmp/` subfolder (avoiding `/tmp`), and creates durable run state with `phase = "intake"`. Why: `references/why-start.md`.
+`start` resolves effective config (`prompt/CLI > repo > user > plugin default`, emitting `effective_config_hash`; check `~/.config/auto-office/config.yaml` directly), pins the catalog/adapter snapshot hashes, policy hash, and base SHA, runs the gear fit test when `--gear` is omitted, creates `state_dir` with a `tmp/` subfolder (avoiding `/tmp`), and creates durable run state with `phase = "intake"`. Why: `references/why-start.md`. Pass `--blast-radius`/`--size-class` from whatever provisional intent is in hand (a best guess, unset is never low risk); `production`/`production-data` or `L`/`XL` escalates the fit test into `express` and forces `direct`'s `risk_forced` review gates even under an explicit `--gear` pin — re-run `resolve-gates --state-dir <dir>` once the planner freezes the real `blast_radius` so a plan riskier than the kickoff guess gets its gates recomputed before packets ship.
 
 After `start` returns, capture only provisional intent from the user's request — do not interview or freeze anything yet. Before any repository reconnaissance, interview, or planning-spoke check, automatically load the `file-issue` skill and create or reuse exactly one tracking GitHub issue from that raw request. Do not ask for a draft or routine approval: run the skill's duplicate searches, file immediately when the repository and GitHub access are available, and stop before planning if an external blocker prevents safe filing. Record the issue number or URL on the family registry with `python3 scripts/office_runtime.py family-update --family-id <family_id> --state-dir <state_dir> --issue <number-or-url>`.
 
@@ -107,7 +107,7 @@ At the beginning/closeout of later invocations, take the `auto-maintenance` rece
 
 ## Deterministic helpers
 
-Use `python3 scripts/office_runtime.py --help` for packet validation, adapter validation/scaffolding, route selection, snapshot hashing, SQLite recorder initialization, maturity calculation, replay comparison, privacy linting, catalog snapshot creation, and proposal identity hashing.
+Use `python3 scripts/office_runtime.py --help` for packet validation, adapter validation/scaffolding, route selection, snapshot hashing, SQLite recorder initialization, maturity calculation, replay comparison, privacy linting, catalog snapshot creation, proposal identity hashing, and `resolve-gates` (re-derive `plan_review`/`independent_code_review` funding and round caps from a run's current gear plus risk inputs, without re-running `start`).
 
 Use `python3 scripts/check_ecosystem.py` before packaging or proposing plugin changes.
 

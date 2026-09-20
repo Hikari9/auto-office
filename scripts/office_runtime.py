@@ -611,12 +611,86 @@ def _start_holder() -> tuple[str, str]:
     return holder_id, triple
 
 
-def _start_gear(args) -> str:
+def _resolve_risk(args, config: dict) -> dict:
+    """Deterministic risk classification from explicit `start` inputs.
+
+    Absence is never risk. A caller who passes neither `--blast-radius` nor
+    `--size-class` gets `high: False` — this function widens uncertainty by
+    refusing to guess, not by defaulting to safe. It never inspects the repo
+    itself; that stays evidence the planner gathers and can use to *raise*
+    blast_radius/size_class on a later `amend`, never something this function
+    infers on its own from a diff.
+    """
+    signals = (config.get("risk_signals") or {})
+    high_blast = set(signals.get("high_blast_radius") or ["production", "production-data"])
+    high_size = set(signals.get("high_size_class") or ["L", "XL"])
+    blast_radius = getattr(args, "blast_radius", None)
+    size_class = getattr(args, "size_class", None)
+    irreversible = bool(getattr(args, "irreversible", False))
+    high = irreversible or (blast_radius in high_blast) or (size_class in high_size)
+    return {"blast_radius": blast_radius, "size_class": size_class, "irreversible": irreversible, "high": high}
+
+
+def _start_gear(args, risk: dict | None = None) -> str:
     if args.gear:
         return args.gear
     if getattr(args, "irreversible", False):
         return "full"
-    return "express" if sum(bool(v) for v in (args.volume, args.interview, args.adversarial)) >= 2 else "direct"
+    base = "express" if sum(bool(v) for v in (args.volume, args.interview, args.adversarial)) >= 2 else "direct"
+    # issue-66 (runsheet.favor.church#66 self-improve): the fit test used to stop here,
+    # deciding gear from three opt-in CLI flags alone and never from blast radius or size
+    # class despite skills/auto-planning and docs/v3-acceptance.md both describing it as
+    # risk-evaluating. A size-M, multi-surface, production-facing change with none of the
+    # three flags set landed on `direct` -- the cheapest gear -- purely because nobody
+    # opted a boolean in. `direct`/`direct+review`/`light`/`quick` never fund plan_review
+    # on their own (skills/auto-review/SKILL.md); only escalating past them gives a
+    # default-routed run any chance at a plan reviewer without the user asking ad hoc.
+    if risk and risk.get("high") and base in ("direct", "direct+review", "light", "quick"):
+        return "express"
+    return base
+
+
+def resolve_gates(gear: str, risk_high: bool, config: dict) -> dict:
+    """Turn a gear preset row plus a risk verdict into concrete gate decisions.
+
+    `risk_forced` was, before this change, a token that appeared exactly once in
+    config.default.yaml with no definition anywhere in code, protocol, or skills --
+    every gate resolution was left to an LLM orchestrator's unguided interpretation
+    of the bare word. This is the definition: `risk_forced` resolves to `risk_high`.
+    `True`/`False` pass through unchanged. Any other string (`shallow`,
+    `cost_bounded`, `policy_optional`, `acceptance_forced`) is returned as-is --
+    those already carry established advisory meaning elsewhere and are out of this
+    fix's scope.
+    """
+    presets = (config.get("gear_presets") or {})
+    preset = presets.get(gear, {})
+    ad_hoc_cap = config.get("ad_hoc_review_max_rounds")
+
+    def resolve_value(value):
+        if value == "risk_forced":
+            return bool(risk_high)
+        return value
+
+    plan_review = resolve_value(preset.get("plan_review", False))
+    code_review = resolve_value(preset.get("independent_code_review", False))
+    plan_rounds = preset.get("plan_review_max_rounds")
+    code_rounds = preset.get("code_review_max_rounds")
+    # A gate that only fired because risk forced it (the preset's own row funds
+    # nothing) draws the ad-hoc round budget, not an unbounded loop -- same rule
+    # skills/auto-review/SKILL.md already states in prose for a user-requested
+    # plan review on top of a gear with no budget of its own.
+    if plan_review and plan_rounds is None:
+        plan_rounds = ad_hoc_cap
+    if code_review and code_rounds is None:
+        code_rounds = ad_hoc_cap
+
+    return {
+        "plan_review": plan_review,
+        "independent_code_review": code_review,
+        "funded_browser_verification": resolve_value(preset.get("funded_browser_verification", False)),
+        "plan_review_max_rounds": plan_rounds,
+        "code_review_max_rounds": code_rounds,
+    }
 
 
 def _ensure_repo_gitignore(repo: Path) -> None:
@@ -641,7 +715,9 @@ def cmd_start(args):
             return 2
         repo = _start_repo_root(repo)
         config, config_hash = _start_effective_config(repo)
-        gear = _start_gear(args)
+        risk = _resolve_risk(args, config)
+        gear = _start_gear(args, risk)
+        gates = resolve_gates(gear, risk["high"], config)
         base_sha = _start_base_sha(repo)
         catalog_hash = _start_catalog_hash()
         adapter_hash = _start_adapter_hash()
@@ -672,7 +748,7 @@ def cmd_start(args):
                  "base_sha": base_sha, "plugin_commit": plugin_commit, "policy_hash": policy_hash,
                  "catalog_snapshot_hash": catalog_hash, "adapter_snapshot_hash": adapter_hash,
                  "effective_config_hash": config_hash, "repo_root": str(repo),
-                 "tmp_dir": str(tmp_dir.resolve())}
+                 "tmp_dir": str(tmp_dir.resolve()), "risk": risk, "gates": gates}
         _atomic_write_json(state_dir / "state.json", state)
         _atomic_write_json(state_dir / "envelope.json", envelope)
         # Create the run's recorder here, so `<state_dir>/runs.db` -- the default every later
@@ -696,10 +772,14 @@ def cmd_start(args):
         pointer.parent.mkdir(parents=True, exist_ok=True)
         pointer.write_text(str(state_dir.resolve()) + "\n", encoding="utf-8")
         _ensure_repo_gitignore(repo)
+        gate_note = ""
+        if risk["high"] and gates["plan_review"]:
+            gate_note = "\nPlan review: FUNDED (risk-forced)"
         kickoff = (f"Auto Office kickoff\nGoal: {args.goal}\nPlaybook: {args.playbook}\n"
-                   f"Gear: {gear}\nRun: {run_id}\nBase SHA: {base_sha}")
+                   f"Gear: {gear}\nRun: {run_id}\nBase SHA: {base_sha}{gate_note}")
         dump_json({"state_dir": str(state_dir.resolve()), "run_id": run_id, "gear": gear,
-                   "pointer": str(pointer.resolve()), "kickoff": kickoff, "tmp_dir": str(tmp_dir.resolve())})
+                   "pointer": str(pointer.resolve()), "kickoff": kickoff, "tmp_dir": str(tmp_dir.resolve()),
+                   "risk": risk, "gates": gates})
         return 0
     except Exception as exc:
         dump_json({"error": "start_failed", "message": str(exc)})
@@ -710,6 +790,34 @@ def _plan_file_hash(path: str | None) -> str | None:
     if not path:
         return None
     return "sha256:" + hashlib.sha256(Path(path).expanduser().read_bytes()).hexdigest()
+
+
+def cmd_resolve_gates(args):
+    try:
+        state_dir = Path(args.state_dir).expanduser()
+        state_path = state_dir / "state.json"
+        if not state_path.exists():
+            dump_json({"error": "no_state", "state_dir": str(state_dir)})
+            return 2
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        repo = Path(state.get("repo_root") or ".").expanduser().resolve()
+        config, _ = _start_effective_config(repo)
+        risk_args = argparse.Namespace(
+            blast_radius=getattr(args, "blast_radius", None) or (state.get("risk") or {}).get("blast_radius"),
+            size_class=getattr(args, "size_class", None) or (state.get("risk") or {}).get("size_class"),
+            irreversible=getattr(args, "irreversible", False) or bool((state.get("risk") or {}).get("irreversible")),
+        )
+        risk = _resolve_risk(risk_args, config)
+        gear = state.get("gear")
+        gates = resolve_gates(gear, risk["high"], config)
+        # Re-resolution never writes state.json on its own -- a widened blast_radius/size_class
+        # after intake is a PLAN DEFECT/amendment event with its own owner, not a side effect of
+        # asking what the gates currently say. The caller decides whether to persist it.
+        dump_json({"gear": gear, "risk": risk, "gates": gates})
+        return 0
+    except Exception as exc:
+        dump_json({"error": "resolve_gates_failed", "message": str(exc)})
+        return 2
 
 
 def cmd_approve_plan(args):
@@ -1744,13 +1852,14 @@ def main():
     q=sp.add_parser('proposal-id'); q.add_argument('--stream',choices=['learned-pattern','catalog-policy'],required=True); q.add_argument('--kind',required=True); g=q.add_mutually_exclusive_group(required=True); g.add_argument('--file'); g.add_argument('--text'); q.set_defaults(func=cmd_proposal_id)
     q=sp.add_parser('replay'); q.add_argument('--dataset',required=True); q.add_argument('--old-policy',required=True); q.add_argument('--new-policy',required=True); q.set_defaults(func=cmd_replay)
     q=sp.add_parser('new-run'); q.add_argument('--family-id',required=True); q.add_argument('--holder-id',required=True); q.add_argument('--triple',required=True); q.add_argument('--gear',required=True); q.add_argument('--playbook',choices=['Change','Restructure','Investigate','Prototype','Visual'],required=True); q.add_argument('--base-sha',required=True); q.add_argument('--policy-hash',required=True); q.add_argument('--catalog-hash',required=True); q.add_argument('--adapter-hash',required=True); q.add_argument('--config-hash',required=True); q.add_argument('--out',required=True); q.set_defaults(func=cmd_new_run)
-    q=sp.add_parser('start'); q.add_argument('--goal',required=True); q.add_argument('--playbook',choices=['Change','Restructure','Investigate','Prototype','Visual'],required=True); q.add_argument('--gear',choices=['direct','direct+review','light','quick','express','full']); q.add_argument('--repo',default='.'); q.add_argument('--volume',action='store_true'); q.add_argument('--interview',action='store_true'); q.add_argument('--adversarial',action='store_true'); q.add_argument('--irreversible',action='store_true'); q.set_defaults(func=cmd_start)
+    q=sp.add_parser('start'); q.add_argument('--goal',required=True); q.add_argument('--playbook',choices=['Change','Restructure','Investigate','Prototype','Visual'],required=True); q.add_argument('--gear',choices=['direct','direct+review','light','quick','express','full']); q.add_argument('--repo',default='.'); q.add_argument('--volume',action='store_true'); q.add_argument('--interview',action='store_true'); q.add_argument('--adversarial',action='store_true'); q.add_argument('--irreversible',action='store_true'); q.add_argument('--blast-radius',dest='blast_radius',choices=['local','repo','production','production-data']); q.add_argument('--size-class',dest='size_class',choices=['S','M','L','XL']); q.set_defaults(func=cmd_start)
     q=sp.add_parser('lease-acquire'); q.add_argument('--db',required=True); q.add_argument('--run-id',required=True); q.add_argument('--role',required=True); q.add_argument('--scope',required=True); q.add_argument('--holder-id',required=True); q.add_argument('--ttl',type=int,default=3600); q.set_defaults(func=cmd_lease_acquire)
     q=sp.add_parser('lease-renew'); q.add_argument('--db',required=True); q.add_argument('--lease-id',required=True); q.add_argument('--holder-id',required=True); q.add_argument('--ttl',type=int,default=3600); q.set_defaults(func=cmd_lease_renew)
     q=sp.add_parser('lease-release'); q.add_argument('--db',required=True); q.add_argument('--lease-id',required=True); q.add_argument('--holder-id',required=True); q.set_defaults(func=cmd_lease_release)
     q=sp.add_parser('lease-check'); q.add_argument('--db',required=True); q.add_argument('--run-id',required=True); q.add_argument('--scope',required=True); q.set_defaults(func=cmd_lease_check)
     q=sp.add_parser('state-save'); q.add_argument('--state-dir',required=True); q.add_argument('--run-id',required=True); q.add_argument('--family-id',required=True); q.add_argument('--phase',required=True); q.add_argument('--plan-version',type=int); q.add_argument('--packet-version',type=int); q.add_argument('--dispatches'); q.add_argument('--findings'); q.add_argument('--lease'); q.set_defaults(func=cmd_state_save)
     q=sp.add_parser('state-load'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_state_load)
+    q=sp.add_parser('resolve-gates'); q.add_argument('--state-dir',required=True); q.add_argument('--blast-radius',dest='blast_radius',choices=['local','repo','production','production-data']); q.add_argument('--size-class',dest='size_class',choices=['S','M','L','XL']); q.add_argument('--irreversible',action='store_true'); q.set_defaults(func=cmd_resolve_gates)
     q=sp.add_parser('approve-plan'); q.add_argument('--state-dir',required=True); q.add_argument('--approved-by',choices=['user'],required=True); q.add_argument('--quote',required=True); q.add_argument('--plan-path'); q.set_defaults(func=cmd_approve_plan)
     q=sp.add_parser('state-reconcile'); q.add_argument('--state-dir',required=True); q.add_argument('--db'); q.set_defaults(func=cmd_state_reconcile)
     q=sp.add_parser('mark-spoke'); q.add_argument('--state-dir',required=True); q.add_argument('--spoke',required=True); q.add_argument('--digest'); q.add_argument('--unverified',action='store_true'); q.set_defaults(func=cmd_mark_spoke)

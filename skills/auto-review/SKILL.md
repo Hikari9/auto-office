@@ -29,11 +29,15 @@ Scope the contamination check to what changed between the review's start and end
 
 ## Review round caps
 
-`full`: 5 rounds. `express`: 2 rounds. Any gear whose preset does not fund `plan_review`
-(`direct`, `direct+review`, `light`, `quick`) has no plan-review round budget of its own — an
-ad-hoc plan review the user asks for on top of such a gear inherits `express`'s cap (2 rounds),
-not an unbounded one, unless the user names a higher cap explicitly. PLAN DEFECT and BRIEF DEFECT
-exit without consuming a round.
+Read caps from `config.default.yaml`'s `gear_presets.<gear>.plan_review_max_rounds` /
+`code_review_max_rounds` (`full`: 5/5, `express`: 2/2) via `office_runtime.py resolve-gates
+--state-dir <dir>` or `start`'s own `gates` output — never hardcode them here.
+`direct+review`/`light`/`quick` carry a literal `plan_review: false`: no plan-review budget
+of their own, by design. `direct` carries `plan_review: risk_forced`, resolving to a funded
+review (drawing `ad_hoc_review_max_rounds`, 2 by default) whenever `start` was given
+`--blast-radius production[-data]`, `--size-class L|XL`, or `--irreversible` — even with the
+named gear pinned to `direct`. Unset risk inputs are never read as low risk. PLAN DEFECT and
+BRIEF DEFECT exit without consuming a round.
 
 **A second CHANGES REQUIRED on the same task is a hard stop, not a checkpoint to notice and keep
 going past.** The moment a second consecutive CHANGES REQUIRED lands on the same artifact: stop.

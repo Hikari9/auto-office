@@ -284,7 +284,8 @@ def _init_git_repo(path):
 
 def _start_defaults(**overrides):
     d = dict(goal='do the thing', playbook='Change', gear=None, repo=None,
-              volume=False, interview=False, adversarial=False, irreversible=False)
+              volume=False, interview=False, adversarial=False, irreversible=False,
+              blast_radius=None, size_class=None)
     d.update(overrides)
     return d
 
@@ -475,6 +476,98 @@ class StartCommandTests(unittest.TestCase):
         code, out = self._start(gear='full', irreversible=False, volume=False, interview=False, adversarial=False)
         self.assertEqual(code, 0)
         self.assertEqual(out['gear'], 'full')
+
+    def test_fit_test_ignores_absence_of_blast_radius_and_size_class(self):
+        # issue-66 (runsheet.favor.church#66 self-improve): a size-M, multi-surface,
+        # production-facing change with none of the three legacy flags set used to land
+        # on `direct` -- the fit test never looked at blast radius or size class at all.
+        # Confirms the new inputs are additive: still unspecified, still `direct`, still
+        # no risk claimed. Absence must never read as risk.
+        code, out = self._start()
+        self.assertEqual(code, 0)
+        self.assertEqual(out['gear'], 'direct')
+        self.assertFalse(out['risk']['high'])
+        self.assertFalse(out['gates']['plan_review'])
+        self.assertIsNone(out['gates']['plan_review_max_rounds'])
+
+    def test_fit_test_production_blast_radius_escalates_direct_to_express(self):
+        code, out = self._start(blast_radius='production')
+        self.assertEqual(code, 0)
+        self.assertEqual(out['gear'], 'express')
+        self.assertTrue(out['risk']['high'])
+        self.assertEqual(out['gates']['plan_review_max_rounds'], 2)
+
+    def test_fit_test_large_size_class_escalates_direct_to_express(self):
+        code, out = self._start(size_class='L')
+        self.assertEqual(code, 0)
+        self.assertEqual(out['gear'], 'express')
+        self.assertTrue(out['risk']['high'])
+
+    def test_fit_test_small_size_class_is_not_risk(self):
+        code, out = self._start(size_class='S')
+        self.assertEqual(code, 0)
+        self.assertEqual(out['gear'], 'direct')
+        self.assertFalse(out['risk']['high'])
+
+    def test_explicit_direct_gear_under_high_risk_still_forces_plan_review_via_gates(self):
+        # Explicit --gear always wins on gear selection (never silently override the
+        # caller's named gear), but `direct`'s `risk_forced` plan_review/code_review
+        # gates still resolve True -- this is the gap the runsheet.favor.church#66 run
+        # exposed: `direct` was the actual gear picked, and nothing ever gave it a real
+        # lever to fund a plan reviewer under risk. Now it has one.
+        code, out = self._start(gear='direct', blast_radius='production')
+        self.assertEqual(code, 0)
+        self.assertEqual(out['gear'], 'direct')
+        self.assertTrue(out['gates']['plan_review'])
+        self.assertTrue(out['gates']['independent_code_review'])
+        # Not the gear's own funded budget (null) -- falls back to the ad-hoc cap.
+        self.assertEqual(out['gates']['plan_review_max_rounds'], 2)
+
+    def test_irreversible_is_high_risk_even_without_blast_radius_or_size_class(self):
+        code, out = self._start(gear='direct', irreversible=True)
+        self.assertEqual(code, 0)
+        self.assertTrue(out['risk']['high'])
+        self.assertTrue(out['gates']['plan_review'])
+
+
+class ResolveGatesTests(unittest.TestCase):
+    """Direct coverage of the token this run's question was actually about: `risk_forced`
+    had appeared exactly once in config.default.yaml with no definition anywhere in code,
+    protocol, or skills. These tests pin the definition down."""
+
+    def setUp(self):
+        code, out = _invoke(rt.cmd_effective_config, repo_root='.', overrides=None, set=None, user=None, hash_only=False)
+        self.assertEqual(code, 0)
+        self.config = out['config']
+
+    def test_risk_forced_resolves_false_when_risk_is_low(self):
+        gates = rt.resolve_gates('direct', False, self.config)
+        self.assertFalse(gates['plan_review'])
+        self.assertFalse(gates['independent_code_review'])
+
+    def test_risk_forced_resolves_true_when_risk_is_high(self):
+        gates = rt.resolve_gates('direct', True, self.config)
+        self.assertTrue(gates['plan_review'])
+        self.assertTrue(gates['independent_code_review'])
+
+    def test_light_and_quick_never_fund_plan_review_even_under_risk(self):
+        # skills/auto-review/SKILL.md documents these as deliberately not funding
+        # plan_review at all -- unlike `direct`, they carry a literal `False`, not
+        # `risk_forced`, so risk must not flip them.
+        for gear in ('direct+review', 'light', 'quick'):
+            gates = rt.resolve_gates(gear, True, self.config)
+            self.assertFalse(gates['plan_review'], f'{gear} must not fund plan_review under risk')
+
+    def test_full_gear_round_caps_come_from_config_not_prose(self):
+        gates = rt.resolve_gates('full', False, self.config)
+        self.assertEqual(gates['plan_review_max_rounds'], 5)
+        self.assertEqual(gates['code_review_max_rounds'], 5)
+
+    def test_express_gear_round_caps_come_from_config_not_prose(self):
+        gates = rt.resolve_gates('express', False, self.config)
+        self.assertEqual(gates['plan_review_max_rounds'], 2)
+        self.assertEqual(gates['code_review_max_rounds'], 2)
+
 
 
 def _write_state(d, phase='planned', **extra):

@@ -73,40 +73,68 @@ roles:
 gear_presets:
   direct:
     dedicated_planner: false
-    plan_review: false
+    plan_review: risk_forced
     independent_code_review: risk_forced
     funded_browser_verification: acceptance_forced
     allow_advisory_undercut: true
+    plan_review_max_rounds: null
+    code_review_max_rounds: 3
   direct+review:
     dedicated_planner: false
     plan_review: false
     independent_code_review: true
     funded_browser_verification: acceptance_forced
     allow_advisory_undercut: true
+    plan_review_max_rounds: null
+    code_review_max_rounds: 3
   light:
     dedicated_planner: false
     plan_review: false
     independent_code_review: shallow
     funded_browser_verification: acceptance_forced
     allow_advisory_undercut: true
+    plan_review_max_rounds: null
+    code_review_max_rounds: 2
   quick:
     dedicated_planner: optional
     plan_review: false
     independent_code_review: cost_bounded
     funded_browser_verification: acceptance_forced
     allow_advisory_undercut: true
+    plan_review_max_rounds: null
+    code_review_max_rounds: 2
   express:
     dedicated_planner: optional
     plan_review: policy_optional
     independent_code_review: true
     funded_browser_verification: acceptance_forced
     allow_advisory_undercut: true
+    plan_review_max_rounds: 2
+    code_review_max_rounds: 2
   full:
     dedicated_planner: true
     plan_review: true
     independent_code_review: true
     funded_browser_verification: true
     allow_advisory_undercut: false
+    plan_review_max_rounds: 5
+    code_review_max_rounds: 5
+# Round budget for a review that a gear's own preset doesn't fund (`plan_review: false`
+# or `risk_forced` resolving False) but that fires anyway — an ad-hoc user-requested plan
+# review, or a `risk_forced` gate that resolved True under a pinned low gear. Was
+# previously bare prose in skills/auto-review/SKILL.md with no config backing; a caller
+# had no field to read and no way to override it via repo/user config layering.
+ad_hoc_review_max_rounds: 2
+# Risk signals that escalate the default (unpinned) gear fit test past `direct`/`light`/
+# `quick`/`direct+review` into `express`, and that resolve any `risk_forced` gate to True
+# regardless of which gear ends up selected. `blast_radius` and `size_class` come from
+# `start --blast-radius/--size-class`; omitted values are treated as unknown, not low —
+# unknown never counts as risk on its own, only an explicit reversible/local/S-or-M
+# classification does.
+risk_signals:
+  high_blast_radius: [production, production-data]
+  high_size_class: [L, XL]
+
 maturity:
   difficulty_weights: {S: 0.5, M: 1.0, L: 2.0, XL: 3.0}
   event_weights:
