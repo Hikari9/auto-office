@@ -181,6 +181,12 @@ The lifecycle order is fixed. Gears fund or omit optional stages; they do not re
 
 The lifecycle itself is not user-configurable.
 
+Every lifecycle phase that is entered has a self-review checkpoint before advancement. The phase
+owner checks the objective, done criteria, current state, evidence, and residual risks or
+decisions, and records a disposition to proceed, amend, or stop. This includes phases that are
+inline or optional when they are entered; an omitted optional phase is covered by self-review of
+the omission decision. The receipt and evidence floor are defined in the lifecycle spec §8.0.
+
 ---
 
 ## 6. Role authority model

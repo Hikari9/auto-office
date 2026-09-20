@@ -16,6 +16,12 @@ Load only the protocol/reference needed for the current lifecycle step.
 - Every independent approval and review gate is held by an agent that did not produce the work,
   except the named section 5.1/5.2 inline waiver for small orchestrator edits (lifecycle spec §8).
   Self-verification is a pass, never an approval (lifecycle spec §8).
+- Every lifecycle phase that is entered has a recorded self-review checkpoint before it advances.
+  The phase owner re-reads the objective and done criteria, checks current state and evidence,
+  records residual risks or decisions, and either proceeds, amends, or stops. Optional phases
+  that are omitted are covered by self-review of the omission decision; self-review never
+  substitutes for an independent gate that the run's risk, gear, or policy requires
+  (lifecycle spec §8.0).
 - Pin `plugin_commit`, `policy_hash`, `catalog_snapshot_hash`, `adapter_snapshot_hash`, and `effective_config_hash` for each run.
 - Never let an active run begin using an unmerged self-improvement policy implicitly.
 - Keep raw run evidence private. Public proposals receive only deterministic sanitization, an evidence capsule, privacy lint, and opaque evidence hashes.
@@ -90,6 +96,8 @@ Before the first executor or reviewer dispatch, check `echo "$HERDR_ENV"` and `w
 
 - `auto-review` — plan/code gates and defect exits.
 - `auto-verification` — targeted tests, known-bad validation, browser/runtime acceptance flows, evidence quality.
+- Require a recorded self-review checkpoint for every entered lifecycle phase; a missing or
+  unverifiable checkpoint blocks advancement.
 - Require self-verification for every mutable run.
 - Require independent verification/review when risk, gear, playbook, repository policy, or user-facing acceptance requires it.
 

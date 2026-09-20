@@ -339,6 +339,28 @@ moment N parallel trees have ever existed together is after the merge.
 
 ## 8. Review with N producers
 
+### 8.0 Self-review in every phase
+
+Every lifecycle phase that is entered requires a self-review before the phase can advance.
+This includes `start`/intake, planning and requirements freeze, baseline and risk shaping,
+decisions and plan production, routing and packet preparation, execution, self-verification,
+independent review, browser/runtime verification, integration and reconciliation, tracking-issue
+updates, closeout, telemetry/state recording, lazy maintenance, and isolated improvement proposals.
+An optional phase that is not entered is covered by self-review of the decision to omit it.
+
+The phase owner re-reads the phase objective and done criteria against the current state, checks
+the phase's inputs and outputs, verifies the available evidence, records residual risks or
+user-owned decisions, and records one disposition: `proceed`, `amend`, or `stop`. The receipt
+must identify the phase and owner, the artifact or state version under review, the checks and
+evidence used, and any unresolved concern. A phase with no mutable artifact explicitly records
+`no artifact` and still reviews authority, inputs, outputs, and omission/transition state.
+
+A missing, empty, or unverifiable self-review receipt blocks advancement. Self-review is a
+quality pass, never an approval: it does not waive an independent gate that the run's risk, gear,
+or policy requires, the no-self-approval rule, or any required browser/runtime or known-bad
+verification. Independent review, when required, is additive, not a substitute for the phase
+owner's self-review.
+
 - Every **independent approval and review** gate is held by an agent that did
   not produce the work. A producer gating its own delegated output is a
   protocol violation, with one named exception: the section 5.1/5.2 inline

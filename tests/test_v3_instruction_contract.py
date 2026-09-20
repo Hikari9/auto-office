@@ -117,6 +117,26 @@ class TestTrackingIssuePrecedesPlanning(unittest.TestCase):
         self.assertRegex(section, r'Do not ask for a draft or routine approval')
 
 
+class TestPhaseSelfReviewFloor(unittest.TestCase):
+    """Every entered lifecycle phase must self-review before advancing."""
+
+    def test_lifecycle_spec_mandates_self_review_for_each_phase(self):
+        text = (REFERENCES_DIR / 'OFFICE-SKILLS-V3-LIFECYCLE-SPEC.md').read_text(encoding='utf-8')
+        start = text.index('### 8.0 Self-review in every phase')
+        end = text.index('### 8.1', start)
+        section = text[start:end]
+        self.assertRegex(section, r'Every lifecycle phase that is entered requires a self-review')
+        self.assertRegex(section, r'before the phase can advance')
+        self.assertRegex(section, r'receipt')
+        self.assertRegex(section, r'no artifact')
+        self.assertRegex(section, r'does not waive an independent gate that the run.s risk')
+
+    def test_control_plane_points_to_phase_self_review_floor(self):
+        text = (ROOT / 'SKILL.md').read_text(encoding='utf-8')
+        self.assertRegex(text, r'Every lifecycle phase that is entered has a recorded self-review checkpoint')
+        self.assertRegex(text, r'missing or\s+unverifiable checkpoint blocks advancement')
+
+
 class TestNoUnconditionalReviewEscalation(unittest.TestCase):
     """issue-35#decision-4 / issue-77 §4-5,7: a final/integration adversary is triggered by the
     integration boundary (dependent/merging multi-executor landings), never by executor count
