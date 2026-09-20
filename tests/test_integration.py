@@ -42,7 +42,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         subprocess.run(['git', 'commit', '--allow-empty', '-m', 'init'], cwd=self.repo, capture_output=True)
         self.state_dir = self.repo / '.office'
         self.state_dir.mkdir()
-        self.db = self.state_dir / 'telemetry.db'
+        self.db = self.state_dir / 'runs.db'
     
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -50,6 +50,7 @@ class TestLifecycleIntegration(unittest.TestCase):
     def _start_run(self, goal='exercise the lifecycle'):
         env = os.environ.copy()
         env['XDG_STATE_HOME'] = str(Path(self.tmpdir) / 'xdg-state')
+        env['AUTO_OFFICE_RUNS_DB'] = str(self.db)
         rc, out, err = run_cmd('start',
             '--goal', goal,
             '--playbook', 'Change',
@@ -434,6 +435,7 @@ class TestLifecycleIntegration(unittest.TestCase):
     def test_start_cli_can_select_full_fit_path(self):
         env = os.environ.copy()
         env['XDG_STATE_HOME'] = str(Path(self.tmpdir) / 'xdg-full')
+        env['AUTO_OFFICE_RUNS_DB'] = str(self.db)
         rc, out, err = run_cmd('start',
             '--goal', 'exercise full risk fit',
             '--playbook', 'Change',
@@ -448,6 +450,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         nested.mkdir(parents=True)
         env = os.environ.copy()
         env['XDG_STATE_HOME'] = str(Path(self.tmpdir) / 'xdg-nested')
+        env['AUTO_OFFICE_RUNS_DB'] = str(self.db)
         rc, out, err = run_cmd('start',
             '--goal', 'start from a nested directory',
             '--playbook', 'Change',

@@ -11,17 +11,9 @@ Load only the protocol/reference needed for the current lifecycle step.
 ## Permanent invariants
 
 - Keep the lifecycle order fixed. Gears may fund or omit optional stages; never reorder the lifecycle.
-- Keep merge-to-`main` a boundary no agent lifts on its own initiative; only an explicit
-  per-run user statement lifts it (spec 9.1).
-- Every independent approval and review gate is held by an agent that did not produce the work,
-  except the named section 5.1/5.2 inline waiver for small orchestrator edits (lifecycle spec §8).
-  Self-verification is a pass, never an approval (lifecycle spec §8).
-- Every lifecycle phase that is entered has a recorded self-review checkpoint before it advances.
-  The phase owner re-reads the objective and done criteria, checks current state and evidence,
-  records residual risks or decisions, and either proceeds, amends, or stops. Optional phases
-  that are omitted are covered by self-review of the omission decision; self-review never
-  substitutes for an independent gate that the run's risk, gear, or policy requires
-  (lifecycle spec §8.0).
+- Keep merge-to-`main` a boundary no agent lifts on its own initiative; only an explicit per-run user statement lifts it (spec 9.1).
+- Every independent approval and review gate is held by an agent that did not produce the work, except the named section 5.1/5.2 inline waiver for small orchestrator edits (lifecycle spec §8); self-verification is a pass, never an approval.
+- Every lifecycle phase that is entered has a recorded self-review checkpoint before it advances. The phase owner re-reads objective/done criteria, checks current state/evidence, records residual risks or decisions, and proceeds, amends, or stops. Omitted phases are covered by self-review of the omission; self-review never substitutes for a required independent gate (lifecycle spec §8.0).
 - Pin `plugin_commit`, `policy_hash`, `catalog_snapshot_hash`, `adapter_snapshot_hash`, and `effective_config_hash` for each run.
 - Never let an active run begin using an unmerged self-improvement policy implicitly.
 - Keep raw run evidence private. Public proposals receive only deterministic sanitization, an evidence capsule, privacy lint, and opaque evidence hashes.
@@ -41,9 +33,7 @@ Step zero, always, before any other action: run
 
 `python3 scripts/office_runtime.py start --goal <text> --playbook <Change|Restructure|Investigate|Prototype|Visual> [--gear <direct|direct+review|light|quick|express|full>] [--repo <path>] [--blast-radius <local|repo|production|production-data>] [--size-class <S|M|L|XL>]`
 
-Echo the returned `kickoff` block to the user, then use its `state_dir` for every later `check-spoke`/`mark-spoke --state-dir` call. Why: `references/why-start.md`.
-
-`start` resolves effective config (`prompt/CLI > repo > user > plugin default`, emitting `effective_config_hash`; check `~/.config/auto-office/config.yaml` directly), pins the catalog/adapter snapshot hashes, policy hash, and base SHA, runs the gear fit test when `--gear` is omitted, creates `state_dir` with a `tmp/` subfolder (avoiding `/tmp`), and creates durable run state with `phase = "intake"`. Why: `references/why-start.md`. Pass `--blast-radius`/`--size-class` from whatever provisional intent is in hand (a best guess, unset is never low risk); `production`/`production-data` or `L`/`XL` escalates the fit test into `express` and forces `direct`'s `risk_forced` review gates even under an explicit `--gear` pin — re-run `resolve-gates --state-dir <dir>` once the planner freezes the real `blast_radius` so a plan riskier than the kickoff guess gets its gates recomputed before packets ship.
+Echo the returned `kickoff` block to the user, then use its `state_dir` for every later `check-spoke`/`mark-spoke --state-dir` call. Why: `references/why-start.md`. `start` resolves effective config (`prompt/CLI > repo > user > plugin default`, emitting `effective_config_hash`; check `~/.config/auto-office/config.yaml` directly), pins catalog/adapter snapshot hashes, policy hash, and base SHA, runs the gear fit test when `--gear` is omitted, creates `state_dir` with a `tmp/` subfolder (avoiding `/tmp`), and creates durable run state with `phase = "intake"`. Pass `--blast-radius`/`--size-class` from provisional intent (a best guess, unset is never low risk); `production`/`production-data` or `L`/`XL` escalates the fit test into `express` and forces `direct`'s `risk_forced` review gates even under an explicit `--gear` pin — re-run `resolve-gates --state-dir <dir>` once the planner freezes the real `blast_radius` so a riskier plan gets its gates recomputed before packets ship.
 
 After `start` returns, capture only provisional intent from the user's request — do not interview or freeze anything yet. Before any repository reconnaissance, interview, or planning-spoke check, automatically load the `file-issue` skill and create or reuse exactly one tracking GitHub issue from that raw request. Do not ask for a draft or routine approval: run the skill's duplicate searches, file immediately when the repository and GitHub access are available, and stop before planning if an external blocker prevents safe filing. Record the issue number or URL on the family registry with `python3 scripts/office_runtime.py family-update --family-id <family_id> --state-dir <state_dir> --issue <number-or-url>`.
 
