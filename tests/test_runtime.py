@@ -1,4 +1,4 @@
-import contextlib, hashlib, importlib.util, io, json, os, subprocess, tempfile, unittest
+import contextlib, hashlib, importlib.util, io, json, os, sqlite3, subprocess, tempfile, unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -105,6 +105,35 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(d_prov['invocation_provenance'],'proven')
         self.assertNotIn('unproven',d_prov['reason'])
         self.assertNotIn('unverified',d_prov['reason'])
+
+
+class RoutePersistenceTests(unittest.TestCase):
+    def test_cli_route_persists_decision_to_request_recorder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / 'runs.db'
+            request = root / 'route.json'
+            rt.init_db(db).close()
+            request.write_text(json.dumps({
+                'run_id': 'run-route-1',
+                'runs_db': str(db),
+                'role': 'worker',
+                'playbook': 'Change',
+                'candidates': [cand('codex', model_id='luna')],
+            }), encoding='utf-8')
+
+            code, output = _invoke(rt.cmd_route, request=str(request))
+
+            self.assertEqual(code, 0)
+            self.assertTrue(output['routing_decision']['id'])
+            with sqlite3.connect(db) as con:
+                row = con.execute(
+                    'SELECT run_id, role, selected_triple, decision_hash FROM routing_decisions'
+                ).fetchone()
+            self.assertEqual(row[0], 'run-route-1')
+            self.assertEqual(row[1], 'worker')
+            self.assertEqual(row[2], output['selected'])
+            self.assertEqual(row[3], output['decision_hash'])
 
 class RouteDefectTests(unittest.TestCase):
     class Args:
@@ -299,11 +328,15 @@ class StartCommandTests(unittest.TestCase):
         self.state_home.mkdir(parents=True, exist_ok=True)
         self.state_home = self.state_home.resolve()
         self._old_xdg = os.environ.get('XDG_STATE_HOME')
+        self._old_runs_db = os.environ.get('AUTO_OFFICE_RUNS_DB')
         os.environ['XDG_STATE_HOME'] = str(self.state_home)
+        os.environ['AUTO_OFFICE_RUNS_DB'] = str(self.state_home / 'runs.db')
 
     def tearDown(self):
         if self._old_xdg is None: os.environ.pop('XDG_STATE_HOME', None)
         else: os.environ['XDG_STATE_HOME'] = self._old_xdg
+        if self._old_runs_db is None: os.environ.pop('AUTO_OFFICE_RUNS_DB', None)
+        else: os.environ['AUTO_OFFICE_RUNS_DB'] = self._old_runs_db
         self._tmp.cleanup()
 
     def _start(self, **overrides):
@@ -319,24 +352,19 @@ class StartCommandTests(unittest.TestCase):
         self.assertTrue((state_dir/'envelope.json').exists())
         self.assertNotIn(str(self.repo), str(state_dir))
 
-    def test_start_creates_the_recorder_every_later_command_defaults_to(self):
-        """`<state_dir>/runs.db` is the default `record-landing` resolves when no --db is given.
-
-        Nothing created it, so the contract-documented invocation resolved a path that had
-        never been written and rejected the landing outright once the recorder cross-check
-        became mandatory. The test that covers that rejection passes --db explicitly, so it
-        never exercised the default.
-        """
+    def test_start_creates_and_registers_the_configured_recorder(self):
         code, out = self._start(gear='direct')
         self.assertEqual(code, 0)
-        db = Path(out['state_dir']) / 'runs.db'
+        db = Path(out['runs_db'])
         self.assertTrue(db.exists(), f"start did not create {db}")
         import sqlite3
         with sqlite3.connect(db) as con:
             tables = {r[0] for r in con.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            run = con.execute('SELECT id, status FROM runs WHERE id=?', (out['run_id'],)).fetchone()
         self.assertIn('validations', tables)
         self.assertIn('outcome_labels', tables)
+        self.assertEqual(run, (out['run_id'], 'intake'))
 
     def test_writes_pointer_file_inside_target_repo(self):
         code, out = self._start(gear='direct')

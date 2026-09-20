@@ -275,7 +275,20 @@ def route(request: dict) -> dict:
 def cmd_route(args):
     """CLI handler for `office_runtime.py route <request_file>`."""
     req = load_data(args.request)
+    req.setdefault("runs_db", str(configured_runs_db(repo_root=Path.cwd())))
     result = route(req)
+    if req.get("run_id"):
+        try:
+            result["routing_decision"] = record_routing_decision(req["runs_db"], req, result)
+        except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+            dump_json({"error": "routing_decision_record_failed", "message": str(exc), "db": req["runs_db"]})
+            return 2
+    else:
+        result["routing_decision"] = {
+            "recorded": False,
+            "reason": "missing_run_id",
+            "db": req["runs_db"],
+        }
     dump_json(result)
     if result.get("status") in (
         "no_qualifying_candidate",
@@ -342,6 +355,8 @@ def init_db(path: Path):
     CREATE TABLE IF NOT EXISTS outcome_labels(id TEXT PRIMARY KEY, dispatch_id TEXT, label TEXT, primary_attribution TEXT, contributing_attributions TEXT, labeled_at TEXT, evidence_hash TEXT);
     CREATE TABLE IF NOT EXISTS lineage(id TEXT PRIMARY KEY, component_kind TEXT, component_id TEXT, parent_id TEXT, event TEXT, multiplier REAL, created_at TEXT);
     CREATE TABLE IF NOT EXISTS leases(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, role TEXT NOT NULL, scope TEXT NOT NULL, holder_id TEXT NOT NULL, acquired_at TEXT NOT NULL, expires_at TEXT NOT NULL, released_at TEXT, revoked_at TEXT, revoke_reason TEXT);
+    CREATE TABLE IF NOT EXISTS adapter_trust_acts(id TEXT PRIMARY KEY, triple TEXT NOT NULL, target_state TEXT NOT NULL, actor_id TEXT NOT NULL, reason TEXT NOT NULL, evidence_reference TEXT, recorded_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS recorded_overrides(override_id TEXT PRIMARY KEY, run_id TEXT, family_id TEXT, task_id TEXT, role TEXT, candidate_id TEXT, bypass_stage INTEGER, rationale TEXT, authorized_by TEXT, authorized_at TEXT, expires_at TEXT);
     """)
     dispatch_columns = {row[1] for row in con.execute("PRAGMA table_info(dispatches)")}
     if "invocation_model_id" not in dispatch_columns:
@@ -353,6 +368,50 @@ def init_db(path: Path):
 
 def cmd_init_db(args):
     con=init_db(Path(args.db)); mode=con.execute('PRAGMA journal_mode').fetchone()[0]; con.close(); dump_json({"db":str(Path(args.db)),"journal_mode":mode}); return 0
+
+
+def record_run(db_path: str | Path, envelope: dict, status: str = "intake") -> dict:
+    """Persist the run identity before any dispatch evidence can reference it."""
+    con = init_db(Path(db_path))
+    try:
+        con.execute(
+            "INSERT OR IGNORE INTO runs(id, family_id, created_at, plugin_commit, "
+            "policy_hash, catalog_hash, adapter_hash, config_hash, status) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                envelope["run_id"], envelope.get("family_id"), envelope.get("created_at"),
+                envelope.get("plugin_commit"), envelope.get("policy_hash"),
+                envelope.get("catalog_snapshot_hash"), envelope.get("adapter_snapshot_hash"),
+                envelope.get("effective_config_hash"), status,
+            ),
+        )
+        con.commit()
+    finally:
+        con.close()
+    return {"run_id": envelope["run_id"], "db": str(Path(db_path).resolve()), "status": status}
+
+
+def record_routing_decision(db_path: str | Path, request: dict, result: dict) -> dict:
+    """Append the CLI route decision without making pure route() stateful."""
+    run_id = request.get("run_id")
+    if not run_id:
+        raise ValueError("route request must include run_id to persist routing evidence")
+    decision_hash = result.get("decision_hash") or sha256_obj({"request": request, "result": result})
+    row_id = str(uuid.uuid4())
+    con = init_db(Path(db_path))
+    try:
+        con.execute(
+            "INSERT INTO routing_decisions(id, run_id, role, request_hash, selected_triple, decision_hash, created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (
+                row_id, run_id, request.get("role"), sha256_obj(request), result.get("selected"),
+                decision_hash, datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        con.commit()
+    finally:
+        con.close()
+    return {"id": row_id, "run_id": run_id, "decision_hash": decision_hash, "db": str(Path(db_path).resolve())}
 
 
 def cmd_record_dispatch(args):
@@ -393,6 +452,39 @@ CONFIG_TIERS = ("plugin_default", "user", "repo", "prompt_cli")
 
 def config_default_path() -> Path:
     return ROOT / "config" / "config.default.yaml"
+
+
+def configured_runs_db(config: dict | None = None, repo_root: Path | None = None) -> Path:
+    """Resolve the one durable recorder used by a real Auto Office run.
+
+    ``AUTO_OFFICE_RUNS_DB`` is an explicit test/embedding override.  Normal runs
+    follow the configured ``paths.runs_db`` value so dispatch, validation,
+    routing, and trust evidence do not silently split across per-run filenames.
+    """
+    override = os.environ.get("AUTO_OFFICE_RUNS_DB")
+    if override:
+        return Path(override).expanduser().resolve()
+    cfg = config if config is not None else (load_data(config_default_path()) or {})
+    raw = ((cfg.get("paths", {}) or {}).get("runs_db")
+           or "~/.local/share/auto-office/runs.db")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = (repo_root or Path.cwd()) / path
+    return path.resolve()
+
+
+def state_runs_db(state_dir: str | Path) -> Path:
+    """Resolve a run's recorder, preserving compatibility with legacy state dirs."""
+    state_path = Path(state_dir) / "state.json"
+    if state_path.is_file():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            configured = state.get("runs_db")
+            if isinstance(configured, str) and configured.strip():
+                return Path(configured).expanduser().resolve()
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+    return (Path(state_dir) / "runs.db").resolve()
 
 
 def deep_merge(base: Any, over: Any, tier: str, warnings: list, path: str = "") -> Any:
@@ -759,6 +851,7 @@ def cmd_start(args):
             dump_json({"valid": False, "errors": errors})
             return 2
         state_dir = _start_state_root() / run_id
+        runs_db = configured_runs_db(config, repo)
         state_dir.mkdir(parents=True, exist_ok=True)
         tmp_dir = state_dir / "tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -768,18 +861,16 @@ def cmd_start(args):
                  "playbook": args.playbook, "gear": gear, "holder_id": holder_id, "triple": triple,
                  "base_sha": base_sha, "plugin_commit": plugin_commit, "policy_hash": policy_hash,
                  "catalog_snapshot_hash": catalog_hash, "adapter_snapshot_hash": adapter_hash,
-                 "effective_config_hash": config_hash, "repo_root": str(repo),
+                 "effective_config_hash": config_hash, "runs_db": str(runs_db), "repo_root": str(repo),
                  "tmp_dir": str(tmp_dir.resolve()), "risk": risk, "gates": gates}
         _atomic_write_json(state_dir / "state.json", state)
         _atomic_write_json(state_dir / "envelope.json", envelope)
-        # Create the run's recorder here, so `<state_dir>/runs.db` -- the default every later
-        # command resolves -- actually exists. Nothing used to create it, so record-landing's
-        # mandatory cross-check resolved a path that was never written and rejected the
-        # contract-documented invocation outright.
+        # Create and register the configured recorder before returning a usable run.
         try:
-            init_db(state_dir / "runs.db")
-        except Exception:
-            pass
+            record_run(runs_db, envelope, status="intake")
+        except Exception as exc:
+            dump_json({"error": "recorder_init_failed", "message": str(exc), "db": str(runs_db)})
+            return 2
         # issue-77 kickoff registers family state before execution landings exist
         # (schema comment, family-registry.schema.json). Never fatal to `start`: family
         # registration is supplementary durable bookkeeping, not part of this command's
@@ -798,7 +889,7 @@ def cmd_start(args):
             gate_note = "\nPlan review: FUNDED (risk-forced)"
         kickoff = (f"Auto Office kickoff\nGoal: {args.goal}\nPlaybook: {args.playbook}\n"
                    f"Gear: {gear}\nRun: {run_id}\nBase SHA: {base_sha}{gate_note}")
-        dump_json({"state_dir": str(state_dir.resolve()), "run_id": run_id, "gear": gear,
+        dump_json({"state_dir": str(state_dir.resolve()), "runs_db": str(runs_db), "run_id": run_id, "gear": gear,
                    "pointer": str(pointer.resolve()), "kickoff": kickoff, "tmp_dir": str(tmp_dir.resolve()),
                    "risk": risk, "gates": gates})
         return 0
@@ -1622,9 +1713,9 @@ def cmd_record_landing(args):
     data = load_data(args.file)
     family_id = args.family_id or data.get("family_id")
     # Cross-check the cited evidence against the recorder when one is reachable: explicitly via
-    # --db, else the run state dir's own runs.db. A landing's `passed` boolean is the producer
+    # --db, else the run's resolved recorder. A landing's `passed` boolean is the producer
     # describing itself; the validations table is the record of a command having run.
-    db_path = Path(args.db) if getattr(args, "db", None) else Path(args.state_dir) / "runs.db"
+    db_path = Path(args.db) if getattr(args, "db", None) else state_runs_db(args.state_dir)
     if not db_path.exists():
         # Silently skipping the cross-check when no recorder is reachable would make the strongest
         # check on this path the easiest one to switch off -- point --state-dir somewhere without

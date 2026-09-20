@@ -195,6 +195,7 @@ class RuntimeDogfoodTests(unittest.TestCase):
 
             env = os.environ.copy()
             env["XDG_STATE_HOME"] = str(tmp_path / "state-home")
+            env["AUTO_OFFICE_RUNS_DB"] = str(tmp_path / "state-home" / "runs.db")
             start = self._ok(
                 env,
                 "start",
