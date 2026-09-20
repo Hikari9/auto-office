@@ -59,9 +59,7 @@ Before every routed role, take the `auto-routing` receipt. Route the exact ident
 
 The mandatory filter order lives in `protocol/routing.md`. Hold one invariant without loading it: adapter trust, the absolute floor, and tie-break evidence are derived from recorded evidence and never caller-supplied — trust only ever falls automatically, and only a recorded, attributed act raises it or overrides a derived gate.
 
-A harness rejecting the routed model/effort identity is a routing defect, not a retry: record it with `office_runtime.py route-defect`, re-dispatch corrected, and hand the amendment to an `auto-self-improve` subagent. `auto-closeout` gates on `check-route-defects`, so an unamended slug blocks completion.
-
-Never lower an absolute floor for cost or quota. Why: `references/why-routing.md`.
+A harness rejecting the routed model/effort identity is a routing defect, not a retry: record it with `office_runtime.py route-defect`, re-dispatch corrected, and hand the amendment to an `auto-self-improve` subagent. `auto-closeout` gates on `check-route-defects`, so an unamended slug blocks completion. Never lower an absolute floor for cost or quota. Why: `references/why-routing.md`.
 
 Every plan must contain a `model_assignments` block naming the orchestrator and planner identities: exact invocation model identifier (when exposed), canonical `model_id`, effort, harness/version, whether the planner is inline or separately routed, and a concise selection rationale. If the current entry model owns both roles, declare both explicitly.
 
