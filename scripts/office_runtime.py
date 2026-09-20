@@ -693,6 +693,27 @@ def resolve_gates(gear: str, risk_high: bool, config: dict) -> dict:
     }
 
 
+_PLAN_REVIEW_ROUND_VERDICTS = {"PLAN_DEFECT", "PLAN DEFECT"}
+
+
+def plan_review_round_authorized(last_verdict: str) -> bool:
+    """Does a prior plan-review verdict authorize spending another round?
+
+    Only `PLAN DEFECT` does. It contradicts an assumption the plan was built on, which
+    is what actually needs a fresh independent look once fixed -- not another pass over
+    the same, still-valid plan. `CHANGES REQUIRED` is the producer's to fix without
+    sending the plan back to the reviewer, and `ACCEPTED` ends review outright; treating
+    either as grounds for a second round is exactly the overengineering the round-cap
+    config exists to bound, not something the cap should spend budget accommodating.
+    `plan_review_max_rounds` counts PLAN-DEFECT-triggered re-reviews only -- the
+    practical default for a normal review, with no defect, stays one round regardless
+    of the configured ceiling. An unrecognized verdict string is never authorization;
+    only a named, accepted PLAN DEFECT is.
+    """
+    normalized = (last_verdict or "").strip().upper()
+    return normalized in _PLAN_REVIEW_ROUND_VERDICTS
+
+
 def _ensure_repo_gitignore(repo: Path) -> None:
     path = repo / ".gitignore"
     if path.exists():
@@ -790,6 +811,16 @@ def _plan_file_hash(path: str | None) -> str | None:
     if not path:
         return None
     return "sha256:" + hashlib.sha256(Path(path).expanduser().read_bytes()).hexdigest()
+
+
+def cmd_plan_review_round_authorized(args):
+    try:
+        authorized = plan_review_round_authorized(args.verdict)
+        dump_json({"verdict": args.verdict, "authorized": authorized})
+        return 0
+    except Exception as exc:
+        dump_json({"error": "plan_review_round_authorized_failed", "message": str(exc)})
+        return 2
 
 
 def cmd_resolve_gates(args):
@@ -1859,6 +1890,7 @@ def main():
     q=sp.add_parser('lease-check'); q.add_argument('--db',required=True); q.add_argument('--run-id',required=True); q.add_argument('--scope',required=True); q.set_defaults(func=cmd_lease_check)
     q=sp.add_parser('state-save'); q.add_argument('--state-dir',required=True); q.add_argument('--run-id',required=True); q.add_argument('--family-id',required=True); q.add_argument('--phase',required=True); q.add_argument('--plan-version',type=int); q.add_argument('--packet-version',type=int); q.add_argument('--dispatches'); q.add_argument('--findings'); q.add_argument('--lease'); q.set_defaults(func=cmd_state_save)
     q=sp.add_parser('state-load'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_state_load)
+    q=sp.add_parser('plan-review-round-authorized'); q.add_argument('--verdict',required=True); q.set_defaults(func=cmd_plan_review_round_authorized)
     q=sp.add_parser('resolve-gates'); q.add_argument('--state-dir',required=True); q.add_argument('--blast-radius',dest='blast_radius',choices=['local','repo','production','production-data']); q.add_argument('--size-class',dest='size_class',choices=['S','M','L','XL']); q.add_argument('--irreversible',action='store_true'); q.set_defaults(func=cmd_resolve_gates)
     q=sp.add_parser('approve-plan'); q.add_argument('--state-dir',required=True); q.add_argument('--approved-by',choices=['user'],required=True); q.add_argument('--quote',required=True); q.add_argument('--plan-path'); q.set_defaults(func=cmd_approve_plan)
     q=sp.add_parser('state-reconcile'); q.add_argument('--state-dir',required=True); q.add_argument('--db'); q.set_defaults(func=cmd_state_reconcile)

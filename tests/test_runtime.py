@@ -569,6 +569,39 @@ class ResolveGatesTests(unittest.TestCase):
         self.assertEqual(gates['code_review_max_rounds'], 2)
 
 
+class PlanReviewRoundAuthorizedTests(unittest.TestCase):
+    """Only PLAN DEFECT earns another plan-review round. CHANGES REQUIRED is the
+    producer's to fix without sending the plan back to the reviewer; ACCEPTED ends
+    review outright. `plan_review_max_rounds` is a ceiling on PLAN-DEFECT-triggered
+    re-reviews, not a target round count to spend -- a normal review with no defect
+    stays at one round regardless of the gear's configured cap."""
+
+    def test_plan_defect_authorizes_another_round(self):
+        self.assertTrue(rt.plan_review_round_authorized('PLAN DEFECT'))
+        self.assertTrue(rt.plan_review_round_authorized('PLAN_DEFECT'))
+        self.assertTrue(rt.plan_review_round_authorized('plan defect'))
+
+    def test_changes_required_does_not_authorize_another_round(self):
+        self.assertFalse(rt.plan_review_round_authorized('CHANGES REQUIRED'))
+        self.assertFalse(rt.plan_review_round_authorized('CHANGES_REQUIRED'))
+
+    def test_accepted_does_not_authorize_another_round(self):
+        self.assertFalse(rt.plan_review_round_authorized('ACCEPTED'))
+        self.assertFalse(rt.plan_review_round_authorized('PASS'))
+
+    def test_unrecognized_verdict_is_not_authorization(self):
+        self.assertFalse(rt.plan_review_round_authorized('garbage'))
+        self.assertFalse(rt.plan_review_round_authorized(''))
+        self.assertFalse(rt.plan_review_round_authorized(None))
+
+    def test_cli_surface_matches_the_function(self):
+        code, out = _invoke(rt.cmd_plan_review_round_authorized, verdict='PLAN DEFECT')
+        self.assertEqual(code, 0)
+        self.assertTrue(out['authorized'])
+        code, out = _invoke(rt.cmd_plan_review_round_authorized, verdict='CHANGES REQUIRED')
+        self.assertEqual(code, 0)
+        self.assertFalse(out['authorized'])
+
 
 def _write_state(d, phase='planned', **extra):
     obj = {'run_id': 'r1', 'phase': phase, 'plan_version': 1,

@@ -36,8 +36,16 @@ Read caps from `config.default.yaml`'s `gear_presets.<gear>.plan_review_max_roun
 of their own, by design. `direct` carries `plan_review: risk_forced`, resolving to a funded
 review (drawing `ad_hoc_review_max_rounds`, 2 by default) whenever `start` was given
 `--blast-radius production[-data]`, `--size-class L|XL`, or `--irreversible` — even with the
-named gear pinned to `direct`. Unset risk inputs are never read as low risk. PLAN DEFECT and
-BRIEF DEFECT exit without consuming a round.
+named gear pinned to `direct`. Unset risk inputs are never read as low risk.
+
+The cap counts PLAN-DEFECT-triggered re-reviews only — a normal review with no defect stays
+at one round regardless of the configured ceiling. `ACCEPTED` ends review immediately;
+`CHANGES REQUIRED` is the producer's to fix without sending the plan back to the reviewer;
+neither authorizes another round. Only an accepted `PLAN DEFECT` does — it contradicts an
+assumption the plan was built on, so the fix needs a fresh independent look, not "a round
+left in the budget." `BRIEF DEFECT` follows the same rule for the task brief. Check
+`office_runtime.py plan-review-round-authorized --verdict <verdict>` rather than reasoning
+about the verdict yourself.
 
 **A second CHANGES REQUIRED on the same task is a hard stop, not a checkpoint to notice and keep
 going past.** The moment a second consecutive CHANGES REQUIRED lands on the same artifact: stop.
