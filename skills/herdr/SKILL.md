@@ -235,3 +235,9 @@ survivor that flagged itself `reusable` or `compactable` instead of closing it.
 - Never run `herdr server stop` from an active session unless the user explicitly intends to stop the server and its pane processes.
 - Never kill the main Herdr process. Use named test sessions for experiments that need an isolated server.
 - CLI server errors are JSON on stderr with exit status 1. CLI syntax errors exit with status 2.
+
+## Observed 2026-09-20: two dispatch traps
+
+- `herdr agent prompt <agent> "$(cat long-brief.md)"` returned `{"err":null}` with the agent still `idle` and an empty composer: a multi-paragraph brief pasted as the prompt argument did not land at all. Send a one-line pointer instead ("Read and carry out the brief at <abs path> exactly ...") and keep the brief on disk in the run's `tmp/`. Confirm with `agent get` reporting `working` (codex) or pane output (agy) before counting the dispatch as in flight.
+- `scripts/office_spawn.sh --pane-id <id>` records the pane in the ledger but launches the process headless in the caller's shell, not inside that pane. For a pane-hosted agent the user can watch, start it with `herdr agent start <name> --kind <kind> --pane <id> -- <native args>` and then prompt it; add the ledger row yourself with `scripts/herdr-ledger.mjs add`.
+- `herdr agent prompt --timeout` is rejected without `--wait`.
