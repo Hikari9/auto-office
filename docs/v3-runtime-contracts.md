@@ -219,6 +219,37 @@ replacement (per the amendment that triggered it) without also passing `replaced
     "allowed_mutations": {
       "type": "array"
     },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "delivery"
+      ],
+      "properties": {
+        "delivery": {
+          "enum": [
+            "reply",
+            "file"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "if": {
+        "properties": {
+          "delivery": {
+            "const": "file"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "path"
+        ]
+      }
+    },
     "protected_paths": {
       "type": "array"
     },
