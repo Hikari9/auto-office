@@ -598,6 +598,28 @@ models:
     source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-luna', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-luna', fetched_at: '2026-09-13T05:35:00Z'}
     content_hash: 9830786db6fe24df6fad7a9742db0cc21f1a01b4faf752e0fcf99341845108d8
     supersession_metadata: null
+  - model_id: gpt-6-luna
+    invocation_model_id: gpt-6-luna
+    invocation_harness: codex
+    invocation_source: 'local-evidence:codex debug models --bundled'
+    # Added from run ce26b2fa (2026-09-23): codex 0.156.1 lists slug
+    # `gpt-6-luna` (efforts low..max) and a pane launch with
+    # `-m gpt-6-luna -c model_reasoning_effort=xhigh` bannered "GPT-6-Luna
+    # xhigh" and completed a verified executor task. No public benchmark row
+    # was fetched yet, so source fields are null rather than guessed.
+    dispatchable: true
+    source_identifier: null
+    source_name: local-evidence
+    effort: xhigh
+    source_effort: xhigh
+    effort_confidence: exact
+    benchmark_indexes: {}
+    price_fields: null
+    speed_fields: null
+    release_date: null
+    source_snapshot_metadata: null
+    content_hash: null
+    supersession_metadata: null
   - model_id: gpt-5.6-luna
     invocation_model_id: gpt-5.6-luna
     invocation_harness: codex
@@ -747,7 +769,16 @@ models:
     # was tested. Verify each independently before flipping; the mechanism
     # likely generalizes across Gemini-native slugs but that is a hypothesis,
     # not evidence, until each row has its own launch+banner confirmation.
-    dispatchable: true
+    #
+    # ROUTING DEFECT e0bc8b02 (run ce26b2fa, 2026-09-23) REGRESSES this on agy
+    # 1.2.8: the same `--model gemini-3.8-flash-medium` launch printed "model
+    # gemini-3.8-flash-medium is not recognized as a known model or custom
+    # model in settings. Ignoring the flag." The banner still read "Gemini 3.8
+    # Flash (Medium)" only because that is the account default, so the route
+    # was honoured by coincidence, not by the flag. Not dispatchable until a
+    # launch form that agy 1.2.8 actually applies is verified with a banner
+    # that differs from the account default.
+    dispatchable: false
     source_identifier: gemini-3-8-flash-medium
     source_name: artificial-analysis
     effort: medium

@@ -642,6 +642,62 @@ def _write_state(d, phase='planned', **extra):
     return obj
 
 
+class FreezeIntentCommandTests(unittest.TestCase):
+    INTENT = {"goal": "g", "done_criteria": ["d1"], "blast_radius": "repo",
+              "named_actions": [], "non_goals": ["n"]}
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _read_state(self):
+        return json.loads((Path(self.state_dir)/'state.json').read_text(encoding='utf-8'))
+
+    def _freeze(self, intent):
+        path = Path(self.state_dir)/'intent.json'
+        path.write_text(json.dumps(intent), encoding='utf-8')
+        return _invoke(rt.cmd_freeze_intent, state_dir=self.state_dir, intent=str(path))
+
+    def test_moves_intake_to_planned_and_records_fields(self):
+        _write_state(self.state_dir, phase='intake')
+        code, out = self._freeze(dict(self.INTENT, extra="dropped"))
+        self.assertEqual(code, 0)
+        state = self._read_state()
+        self.assertEqual(state['phase'], 'planned')
+        self.assertEqual(state['frozen_intent'], self.INTENT)
+
+    def test_rejects_missing_field_without_touching_state(self):
+        before = _write_state(self.state_dir, phase='intake')
+        intent = dict(self.INTENT); intent.pop('non_goals')
+        code, out = self._freeze(intent)
+        self.assertEqual(code, 2)
+        self.assertEqual(out['missing'], ['non_goals'])
+        self.assertEqual(self._read_state(), before)
+
+    def test_refuses_outside_intake(self):
+        before = _write_state(self.state_dir, phase='approved')
+        code, out = self._freeze(self.INTENT)
+        self.assertEqual(code, 2)
+        self.assertEqual(self._read_state(), before)
+
+    def test_refreeze_with_same_fields_is_idempotent(self):
+        _write_state(self.state_dir, phase='intake')
+        self._freeze(self.INTENT)
+        code, out = self._freeze(self.INTENT)
+        self.assertEqual(code, 0)
+        self.assertTrue(out['idempotent'])
+
+    def test_then_approve_plan_succeeds(self):
+        _write_state(self.state_dir, phase='intake')
+        self._freeze(self.INTENT)
+        code, _ = _invoke(rt.cmd_approve_plan, state_dir=self.state_dir, approved_by='user', quote='go', plan_path=None)
+        self.assertEqual(code, 0)
+        self.assertEqual(self._read_state()['phase'], 'approved')
+
+
 class ApprovePlanCommandTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

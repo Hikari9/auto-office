@@ -56,12 +56,13 @@ class TestSchemas(unittest.TestCase):
         )
 
     def test_catalog_effort_field_is_universally_populated(self):
-        # Deliverable F1 empirical audit: `effort` (not `min_effort`) is 44/44 on
-        # catalog/seed.yaml, and `min_effort` does not appear there at all (it is a
-        # config-only threshold under roles.<role>.floor.min_effort).
+        # Deliverable F1 empirical audit: every catalog/seed.yaml row carries `effort`
+        # (not `min_effort`), and `min_effort` does not appear there at all (it is a
+        # config-only threshold under roles.<role>.floor.min_effort). Asserted
+        # against the row count so adding a row does not need a test edit.
         catalog = yaml.safe_load((ROOT / 'catalog/seed.yaml').read_text())['models']
-        self.assertEqual(len(catalog), 44)
-        self.assertEqual(sum(1 for m in catalog if m.get('effort')), 44)
+        self.assertGreaterEqual(len(catalog), 44)
+        self.assertEqual(sum(1 for m in catalog if m.get('effort')), len(catalog))
         self.assertEqual(sum(1 for m in catalog if 'min_effort' in m), 0)
 
     def test_record_event_flag_form_produces_a_schema_valid_event(self):

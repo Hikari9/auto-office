@@ -942,6 +942,42 @@ def cmd_resolve_gates(args):
         return 2
 
 
+FROZEN_INTENT_FIELDS = ("goal", "done_criteria", "blast_radius", "named_actions", "non_goals")
+
+
+def cmd_freeze_intent(args):
+    """Planner freeze: record the five execution fields and move intake -> planned."""
+    try:
+        state_path = Path(args.state_dir).expanduser() / "state.json"
+        if not state_path.exists():
+            dump_json({"error": "no_state", "state_dir": str(Path(args.state_dir).expanduser())})
+            return 2
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        intent = json.loads(Path(args.intent).expanduser().read_text(encoding="utf-8"))
+        missing = [k for k in FROZEN_INTENT_FIELDS if k not in intent]
+        if missing:
+            dump_json({"error": "missing_fields", "missing": missing})
+            return 2
+        frozen = {k: intent[k] for k in FROZEN_INTENT_FIELDS}
+        phase = state.get("phase")
+        if phase == "planned" and state.get("frozen_intent") == frozen:
+            dump_json({"frozen": True, "idempotent": True, "phase": phase})
+            return 0
+        if phase != "intake":
+            dump_json({"error": "invalid_phase", "phase": phase, "expected": "intake"})
+            return 2
+        now = datetime.now(timezone.utc).isoformat()
+        state["frozen_intent"] = frozen
+        state["phase"] = "planned"
+        state["updated_at"] = now
+        _atomic_write_json(state_path, state)
+        dump_json({"frozen": True, "idempotent": False, "phase": "planned", "frozen_intent": frozen})
+        return 0
+    except Exception as exc:
+        dump_json({"error": "freeze_intent_failed", "message": str(exc)})
+        return 2
+
+
 def cmd_approve_plan(args):
     try:
         state_path = Path(args.state_dir).expanduser() / "state.json"
@@ -1983,6 +2019,7 @@ def main():
     q=sp.add_parser('state-load'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_state_load)
     q=sp.add_parser('plan-review-round-authorized'); q.add_argument('--verdict',required=True); q.set_defaults(func=cmd_plan_review_round_authorized)
     q=sp.add_parser('resolve-gates'); q.add_argument('--state-dir',required=True); q.add_argument('--blast-radius',dest='blast_radius',choices=['local','repo','production','production-data']); q.add_argument('--size-class',dest='size_class',choices=['S','M','L','XL']); q.add_argument('--irreversible',action='store_true'); q.set_defaults(func=cmd_resolve_gates)
+    q=sp.add_parser('freeze-intent'); q.add_argument('--state-dir',required=True); q.add_argument('--intent',required=True,help='JSON file with goal, done_criteria, blast_radius, named_actions, non_goals'); q.set_defaults(func=cmd_freeze_intent)
     q=sp.add_parser('approve-plan'); q.add_argument('--state-dir',required=True); q.add_argument('--approved-by',choices=['user'],required=True); q.add_argument('--quote',required=True); q.add_argument('--plan-path'); q.set_defaults(func=cmd_approve_plan)
     q=sp.add_parser('state-reconcile'); q.add_argument('--state-dir',required=True); q.add_argument('--db'); q.set_defaults(func=cmd_state_reconcile)
     q=sp.add_parser('mark-spoke'); q.add_argument('--state-dir',required=True); q.add_argument('--spoke',required=True); q.add_argument('--digest'); q.add_argument('--unverified',action='store_true'); q.set_defaults(func=cmd_mark_spoke)
