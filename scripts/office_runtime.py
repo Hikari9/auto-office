@@ -942,6 +942,99 @@ def cmd_resolve_gates(args):
         return 2
 
 
+FROZEN_INTENT_FIELDS = ("goal", "done_criteria", "blast_radius", "named_actions", "non_goals")
+BLAST_RADIUS_VALUES = ("local", "repo", "production", "production-data")
+
+
+def _frozen_intent_errors(intent):
+    """Type/value errors for the five frozen fields; empty list when valid."""
+    errors = []
+    if not isinstance(intent.get("goal"), str) or not intent["goal"].strip():
+        errors.append("goal must be a non-empty string")
+    done = intent.get("done_criteria")
+    if not isinstance(done, list) or not done or not all(isinstance(x, str) and x.strip() for x in done):
+        errors.append("done_criteria must be a non-empty list of non-empty strings")
+    if intent.get("blast_radius") not in BLAST_RADIUS_VALUES:
+        errors.append("blast_radius must be one of " + ", ".join(BLAST_RADIUS_VALUES))
+    non_goals = intent.get("non_goals")
+    if not isinstance(non_goals, list) or not all(isinstance(x, str) and x.strip() for x in non_goals):
+        errors.append("non_goals must be a list of non-empty strings")
+    actions = intent.get("named_actions")
+    if not isinstance(actions, list):
+        errors.append("named_actions must be a list")
+    else:
+        # An irreversible step is only a receipt when its preconditions are written
+        # out exactly (auto-intake), so an entry must name both the action and them.
+        for index, entry in enumerate(actions):
+            ok = (isinstance(entry, dict)
+                  and isinstance(entry.get("action"), str) and entry["action"].strip()
+                  and isinstance(entry.get("preconditions"), list) and entry["preconditions"]
+                  and all(isinstance(x, str) and x.strip() for x in entry["preconditions"]))
+            if not ok:
+                errors.append(f"named_actions[{index}] must be an object with a non-empty 'action' "
+                              "and a non-empty 'preconditions' list of non-empty strings")
+    return errors
+
+
+def cmd_freeze_intent(args):
+    """Planner freeze: validate the five execution fields, re-derive risk and gates
+    from the frozen blast_radius, and move intake -> planned in one write, so a
+    plan that widens risk can never reach approve-plan with start-time gates."""
+    try:
+        state_path = Path(args.state_dir).expanduser() / "state.json"
+        if not state_path.exists():
+            dump_json({"error": "no_state", "state_dir": str(Path(args.state_dir).expanduser())})
+            return 2
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        intent = json.loads(Path(args.intent).expanduser().read_text(encoding="utf-8"))
+        if not isinstance(intent, dict):
+            dump_json({"error": "invalid_intent", "errors": ["intent must be a JSON object"]})
+            return 2
+        missing = [k for k in FROZEN_INTENT_FIELDS if k not in intent]
+        if missing:
+            dump_json({"error": "missing_fields", "missing": missing})
+            return 2
+        errors = _frozen_intent_errors(intent)
+        if errors:
+            dump_json({"error": "invalid_intent", "errors": errors})
+            return 2
+        frozen = {k: intent[k] for k in FROZEN_INTENT_FIELDS}
+        phase = state.get("phase")
+        refreeze = phase == "planned" and state.get("frozen_intent") == frozen
+        if phase != "intake" and not refreeze:
+            dump_json({"error": "invalid_phase", "phase": phase, "expected": "intake"})
+            return 2
+        repo = Path(state.get("repo_root") or ".").expanduser().resolve()
+        config, _ = _start_effective_config(repo)
+        prior = state.get("risk") or {}
+        risk = _resolve_risk(argparse.Namespace(
+            blast_radius=frozen["blast_radius"],
+            size_class=prior.get("size_class"),
+            irreversible=bool(prior.get("irreversible")),
+        ), config)
+        gates = resolve_gates(state.get("gear"), risk["high"], config)
+        gates_changed = gates != state.get("gates")
+        # A same-intent refreeze is a no-op only when risk and gates already agree;
+        # otherwise it repairs them (e.g. state frozen by an older runtime).
+        if refreeze and not gates_changed and risk == state.get("risk"):
+            dump_json({"frozen": True, "idempotent": True, "phase": phase})
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        state["frozen_intent"] = frozen
+        state["risk"] = risk
+        state["gates"] = gates
+        state["phase"] = "planned"
+        state["updated_at"] = now
+        _atomic_write_json(state_path, state)
+        dump_json({"frozen": True, "idempotent": False, "repaired": refreeze, "phase": "planned",
+                   "frozen_intent": frozen, "risk": risk, "gates": gates,
+                   "gates_changed": gates_changed})
+        return 0
+    except Exception as exc:
+        dump_json({"error": "freeze_intent_failed", "message": str(exc)})
+        return 2
+
+
 def cmd_approve_plan(args):
     try:
         state_path = Path(args.state_dir).expanduser() / "state.json"
@@ -1983,6 +2076,7 @@ def main():
     q=sp.add_parser('state-load'); q.add_argument('--state-dir',required=True); q.set_defaults(func=cmd_state_load)
     q=sp.add_parser('plan-review-round-authorized'); q.add_argument('--verdict',required=True); q.set_defaults(func=cmd_plan_review_round_authorized)
     q=sp.add_parser('resolve-gates'); q.add_argument('--state-dir',required=True); q.add_argument('--blast-radius',dest='blast_radius',choices=['local','repo','production','production-data']); q.add_argument('--size-class',dest='size_class',choices=['S','M','L','XL']); q.add_argument('--irreversible',action='store_true'); q.set_defaults(func=cmd_resolve_gates)
+    q=sp.add_parser('freeze-intent'); q.add_argument('--state-dir',required=True); q.add_argument('--intent',required=True,help='JSON file with goal, done_criteria, blast_radius, named_actions, non_goals'); q.set_defaults(func=cmd_freeze_intent)
     q=sp.add_parser('approve-plan'); q.add_argument('--state-dir',required=True); q.add_argument('--approved-by',choices=['user'],required=True); q.add_argument('--quote',required=True); q.add_argument('--plan-path'); q.set_defaults(func=cmd_approve_plan)
     q=sp.add_parser('state-reconcile'); q.add_argument('--state-dir',required=True); q.add_argument('--db'); q.set_defaults(func=cmd_state_reconcile)
     q=sp.add_parser('mark-spoke'); q.add_argument('--state-dir',required=True); q.add_argument('--spoke',required=True); q.add_argument('--digest'); q.add_argument('--unverified',action='store_true'); q.set_defaults(func=cmd_mark_spoke)

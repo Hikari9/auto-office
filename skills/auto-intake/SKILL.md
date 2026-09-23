@@ -26,11 +26,11 @@ Cover all twelve on every run, delivered as one or two batched question rounds, 
 
 ## Freezing the five fields
 
-`goal`, `done_criteria`, `blast_radius`, `named_actions`, and `non_goals` are **derived** from the twelve answers, not asked directly. Every frozen value traces back to an answer above; one that doesn't is the defect this spoke exists to prevent.
+`goal`, `done_criteria`, `blast_radius`, `named_actions`, and `non_goals` are **derived** from the twelve answers, not asked directly. Every frozen value traces back to an answer above; one that doesn't is the defect this spoke exists to prevent. Record the freeze with `python3 scripts/office_runtime.py freeze-intent --state-dir <dir> --intent <json>`; it is the only intake → planned transition, and `approve-plan` refuses any other phase.
 
 ## Irreversible steps become named_actions
 
-Item 4 becomes a `named_actions:` entry with its preconditions written out exactly — that's the receipt that lets the loop perform it later without stopping. Preconditions you can't yet write exactly mean the interview isn't finished; keep asking.
+Item 4 becomes a `named_actions:` entry with its preconditions written out exactly (`{"action": ..., "preconditions": [...]}`; `freeze-intent` rejects anything less) — that's the receipt that lets the loop perform it later without stopping. Preconditions you can't yet write exactly mean the interview isn't finished; keep asking.
 
 External sends always stop the loop, regardless of preconditions — never a `named_actions` entry.
 

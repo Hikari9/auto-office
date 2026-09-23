@@ -642,6 +642,115 @@ def _write_state(d, phase='planned', **extra):
     return obj
 
 
+class FreezeIntentCommandTests(unittest.TestCase):
+    INTENT = {"goal": "g", "done_criteria": ["d1"], "blast_radius": "repo",
+              "named_actions": [], "non_goals": ["n"]}
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _read_state(self):
+        return json.loads((Path(self.state_dir)/'state.json').read_text(encoding='utf-8'))
+
+    def _freeze(self, intent):
+        path = Path(self.state_dir)/'intent.json'
+        path.write_text(json.dumps(intent), encoding='utf-8')
+        return _invoke(rt.cmd_freeze_intent, state_dir=self.state_dir, intent=str(path))
+
+    def test_moves_intake_to_planned_and_records_fields(self):
+        _write_state(self.state_dir, phase='intake')
+        code, out = self._freeze(dict(self.INTENT, extra="dropped"))
+        self.assertEqual(code, 0)
+        state = self._read_state()
+        self.assertEqual(state['phase'], 'planned')
+        self.assertEqual(state['frozen_intent'], self.INTENT)
+
+    def test_rejects_missing_field_without_touching_state(self):
+        before = _write_state(self.state_dir, phase='intake')
+        intent = dict(self.INTENT); intent.pop('non_goals')
+        code, out = self._freeze(intent)
+        self.assertEqual(code, 2)
+        self.assertEqual(out['missing'], ['non_goals'])
+        self.assertEqual(self._read_state(), before)
+
+    def test_refuses_outside_intake(self):
+        before = _write_state(self.state_dir, phase='approved')
+        code, out = self._freeze(self.INTENT)
+        self.assertEqual(code, 2)
+        self.assertEqual(self._read_state(), before)
+
+    def test_refreeze_with_same_fields_is_idempotent(self):
+        _write_state(self.state_dir, phase='intake')
+        self._freeze(self.INTENT)
+        code, out = self._freeze(self.INTENT)
+        self.assertEqual(code, 0)
+        self.assertTrue(out['idempotent'])
+
+    def test_widened_blast_radius_recomputes_gates_before_planned(self):
+        config, _ = rt._start_effective_config(Path('.').resolve())
+        low_gates = rt.resolve_gates('direct', False, config)
+        _write_state(self.state_dir, phase='intake', gear='direct',
+                     risk={'blast_radius': 'repo', 'size_class': 'S', 'irreversible': False, 'high': False},
+                     gates=low_gates)
+        code, out = self._freeze(dict(self.INTENT, blast_radius='production'))
+        self.assertEqual(code, 0)
+        state = self._read_state()
+        self.assertTrue(state['risk']['high'])
+        self.assertEqual(state['risk']['blast_radius'], 'production')
+        self.assertEqual(state['gates'], rt.resolve_gates('direct', True, config))
+        self.assertNotEqual(state['gates'], low_gates)
+        self.assertTrue(out['gates_changed'])
+
+    def test_rejects_malformed_values_without_touching_state(self):
+        before = _write_state(self.state_dir, phase='intake')
+        for bad in (dict(self.INTENT, goal=None), dict(self.INTENT, done_criteria='d1'),
+                    dict(self.INTENT, done_criteria=[]), dict(self.INTENT, blast_radius='everywhere'),
+                    dict(self.INTENT, named_actions='none'), dict(self.INTENT, non_goals=['']),):
+            code, out = self._freeze(bad)
+            self.assertEqual(code, 2, bad)
+            self.assertEqual(out['error'], 'invalid_intent')
+            self.assertEqual(self._read_state(), before)
+
+    def test_refreeze_repairs_stale_gates_on_planned_state(self):
+        config, _ = rt._start_effective_config(Path('.').resolve())
+        low_gates = rt.resolve_gates('direct', False, config)
+        _write_state(self.state_dir, phase='planned', gear='direct',
+                     frozen_intent=dict(self.INTENT, blast_radius='production'),
+                     risk={'blast_radius': 'repo', 'size_class': 'S', 'irreversible': False, 'high': False},
+                     gates=low_gates)
+        code, out = self._freeze(dict(self.INTENT, blast_radius='production'))
+        self.assertEqual(code, 0)
+        self.assertFalse(out['idempotent'])
+        self.assertTrue(out['repaired'])
+        state = self._read_state()
+        self.assertEqual(state['phase'], 'planned')
+        self.assertEqual(state['gates'], rt.resolve_gates('direct', True, config))
+
+    def test_named_actions_require_action_and_preconditions(self):
+        before = _write_state(self.state_dir, phase='intake')
+        for bad in ([""], [{}], ["deploy"], [{"action": "deploy"}],
+                    [{"action": "deploy", "preconditions": []}],
+                    [{"action": " ", "preconditions": ["x"]}],
+                    [{"action": "deploy", "preconditions": [""]}]):
+            code, out = self._freeze(dict(self.INTENT, named_actions=bad))
+            self.assertEqual(code, 2, bad)
+            self.assertEqual(self._read_state(), before)
+        good = [{"action": "apply migration", "preconditions": ["backup taken", "preview verified"]}]
+        code, _ = self._freeze(dict(self.INTENT, named_actions=good))
+        self.assertEqual(code, 0)
+
+    def test_then_approve_plan_succeeds(self):
+        _write_state(self.state_dir, phase='intake')
+        self._freeze(self.INTENT)
+        code, _ = _invoke(rt.cmd_approve_plan, state_dir=self.state_dir, approved_by='user', quote='go', plan_path=None)
+        self.assertEqual(code, 0)
+        self.assertEqual(self._read_state()['phase'], 'approved')
+
+
 class ApprovePlanCommandTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
