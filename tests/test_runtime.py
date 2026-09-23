@@ -709,11 +709,39 @@ class FreezeIntentCommandTests(unittest.TestCase):
         before = _write_state(self.state_dir, phase='intake')
         for bad in (dict(self.INTENT, goal=None), dict(self.INTENT, done_criteria='d1'),
                     dict(self.INTENT, done_criteria=[]), dict(self.INTENT, blast_radius='everywhere'),
-                    dict(self.INTENT, named_actions='none')):
+                    dict(self.INTENT, named_actions='none'), dict(self.INTENT, non_goals=['']),):
             code, out = self._freeze(bad)
             self.assertEqual(code, 2, bad)
             self.assertEqual(out['error'], 'invalid_intent')
             self.assertEqual(self._read_state(), before)
+
+    def test_refreeze_repairs_stale_gates_on_planned_state(self):
+        config, _ = rt._start_effective_config(Path('.').resolve())
+        low_gates = rt.resolve_gates('direct', False, config)
+        _write_state(self.state_dir, phase='planned', gear='direct',
+                     frozen_intent=dict(self.INTENT, blast_radius='production'),
+                     risk={'blast_radius': 'repo', 'size_class': 'S', 'irreversible': False, 'high': False},
+                     gates=low_gates)
+        code, out = self._freeze(dict(self.INTENT, blast_radius='production'))
+        self.assertEqual(code, 0)
+        self.assertFalse(out['idempotent'])
+        self.assertTrue(out['repaired'])
+        state = self._read_state()
+        self.assertEqual(state['phase'], 'planned')
+        self.assertEqual(state['gates'], rt.resolve_gates('direct', True, config))
+
+    def test_named_actions_require_action_and_preconditions(self):
+        before = _write_state(self.state_dir, phase='intake')
+        for bad in ([""], [{}], ["deploy"], [{"action": "deploy"}],
+                    [{"action": "deploy", "preconditions": []}],
+                    [{"action": " ", "preconditions": ["x"]}],
+                    [{"action": "deploy", "preconditions": [""]}]):
+            code, out = self._freeze(dict(self.INTENT, named_actions=bad))
+            self.assertEqual(code, 2, bad)
+            self.assertEqual(self._read_state(), before)
+        good = [{"action": "apply migration", "preconditions": ["backup taken", "preview verified"]}]
+        code, _ = self._freeze(dict(self.INTENT, named_actions=good))
+        self.assertEqual(code, 0)
 
     def test_then_approve_plan_succeeds(self):
         _write_state(self.state_dir, phase='intake')

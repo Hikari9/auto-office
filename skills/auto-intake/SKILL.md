@@ -30,7 +30,7 @@ Cover all twelve on every run, delivered as one or two batched question rounds, 
 
 ## Irreversible steps become named_actions
 
-Item 4 becomes a `named_actions:` entry with its preconditions written out exactly — that's the receipt that lets the loop perform it later without stopping. Preconditions you can't yet write exactly mean the interview isn't finished; keep asking.
+Item 4 becomes a `named_actions:` entry with its preconditions written out exactly (`{"action": ..., "preconditions": [...]}`; `freeze-intent` rejects anything less) — that's the receipt that lets the loop perform it later without stopping. Preconditions you can't yet write exactly mean the interview isn't finished; keep asking.
 
 External sends always stop the loop, regardless of preconditions — never a `named_actions` entry.
 

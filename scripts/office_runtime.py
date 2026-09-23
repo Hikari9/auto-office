@@ -956,10 +956,23 @@ def _frozen_intent_errors(intent):
         errors.append("done_criteria must be a non-empty list of non-empty strings")
     if intent.get("blast_radius") not in BLAST_RADIUS_VALUES:
         errors.append("blast_radius must be one of " + ", ".join(BLAST_RADIUS_VALUES))
-    for key in ("named_actions", "non_goals"):
-        value = intent.get(key)
-        if not isinstance(value, list) or not all(isinstance(x, (str, dict)) for x in value):
-            errors.append(f"{key} must be a list of strings or objects")
+    non_goals = intent.get("non_goals")
+    if not isinstance(non_goals, list) or not all(isinstance(x, str) and x.strip() for x in non_goals):
+        errors.append("non_goals must be a list of non-empty strings")
+    actions = intent.get("named_actions")
+    if not isinstance(actions, list):
+        errors.append("named_actions must be a list")
+    else:
+        # An irreversible step is only a receipt when its preconditions are written
+        # out exactly (auto-intake), so an entry must name both the action and them.
+        for index, entry in enumerate(actions):
+            ok = (isinstance(entry, dict)
+                  and isinstance(entry.get("action"), str) and entry["action"].strip()
+                  and isinstance(entry.get("preconditions"), list) and entry["preconditions"]
+                  and all(isinstance(x, str) and x.strip() for x in entry["preconditions"]))
+            if not ok:
+                errors.append(f"named_actions[{index}] must be an object with a non-empty 'action' "
+                              "and a non-empty 'preconditions' list of non-empty strings")
     return errors
 
 
@@ -987,10 +1000,8 @@ def cmd_freeze_intent(args):
             return 2
         frozen = {k: intent[k] for k in FROZEN_INTENT_FIELDS}
         phase = state.get("phase")
-        if phase == "planned" and state.get("frozen_intent") == frozen:
-            dump_json({"frozen": True, "idempotent": True, "phase": phase})
-            return 0
-        if phase != "intake":
+        refreeze = phase == "planned" and state.get("frozen_intent") == frozen
+        if phase != "intake" and not refreeze:
             dump_json({"error": "invalid_phase", "phase": phase, "expected": "intake"})
             return 2
         repo = Path(state.get("repo_root") or ".").expanduser().resolve()
@@ -1003,6 +1014,11 @@ def cmd_freeze_intent(args):
         ), config)
         gates = resolve_gates(state.get("gear"), risk["high"], config)
         gates_changed = gates != state.get("gates")
+        # A same-intent refreeze is a no-op only when risk and gates already agree;
+        # otherwise it repairs them (e.g. state frozen by an older runtime).
+        if refreeze and not gates_changed and risk == state.get("risk"):
+            dump_json({"frozen": True, "idempotent": True, "phase": phase})
+            return 0
         now = datetime.now(timezone.utc).isoformat()
         state["frozen_intent"] = frozen
         state["risk"] = risk
@@ -1010,7 +1026,7 @@ def cmd_freeze_intent(args):
         state["phase"] = "planned"
         state["updated_at"] = now
         _atomic_write_json(state_path, state)
-        dump_json({"frozen": True, "idempotent": False, "phase": "planned",
+        dump_json({"frozen": True, "idempotent": False, "repaired": refreeze, "phase": "planned",
                    "frozen_intent": frozen, "risk": risk, "gates": gates,
                    "gates_changed": gates_changed})
         return 0
