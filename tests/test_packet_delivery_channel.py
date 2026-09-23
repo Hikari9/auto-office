@@ -64,3 +64,38 @@ def test_file_delivery_inside_allowed_mutations_is_fine():
     rc, out = validate({"output": {"delivery": "file", "path": "/srv/repo/out.md"},
                         "allowed_mutations": ["/srv/repo/"]})
     assert not any("deliver" in e or "outside" in e for e in _errors(out))
+
+
+FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "fixtures", "execution-packet", "accept_complete.json")
+
+
+def _complete(**overrides):
+    with open(FIXTURE) as fh:
+        packet = json.load(fh)
+    packet.update(overrides)
+    return packet
+
+
+def test_schema_accepts_a_complete_packet_declaring_its_delivery_channel():
+    """The schema once rejected `output` outright (additionalProperties: false),
+    so no real packet could declare a channel and the check above never ran."""
+    rc, out = validate(_complete(output={"delivery": "file", "path": "/srv/repo/out.md"},
+                                 allowed_mutations=["/srv/repo/"]))
+    assert rc == 0, out
+
+
+def test_complete_read_only_packet_asking_for_a_file_is_rejected_end_to_end():
+    rc, out = validate(_complete(output={"delivery": "file", "path": "/tmp/x.md"},
+                                 allowed_mutations=[]))
+    assert rc == 2
+    errors = _errors(out)
+    assert any("cannot deliver its result as a file" in e for e in errors)
+    assert not any("Additional properties" in e for e in errors), errors
+
+
+def test_file_delivery_without_a_path_is_rejected_by_the_schema():
+    rc, out = validate(_complete(output={"delivery": "file"},
+                                 allowed_mutations=["/srv/repo/"]))
+    assert rc == 2
+    assert any(e.startswith("output") for e in _errors(out))
