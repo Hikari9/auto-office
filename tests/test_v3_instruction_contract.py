@@ -105,7 +105,7 @@ class TestTrackingIssuePrecedesPlanning(unittest.TestCase):
 
     def test_tracking_issue_is_required_before_planning_spoke(self):
         text = (ROOT / 'SKILL.md').read_text(encoding='utf-8')
-        issue_pos = text.index('file-issue')
+        issue_pos = text.index('file a github issue')
         planning_pos = text.index('take the `auto-planning` receipt')
         self.assertLess(issue_pos, planning_pos)
         self.assertRegex(text[issue_pos:planning_pos], r'create or reuse exactly one tracking GitHub issue')
@@ -113,7 +113,7 @@ class TestTrackingIssuePrecedesPlanning(unittest.TestCase):
 
     def test_tracking_issue_is_not_waiting_for_routine_approval(self):
         text = (ROOT / 'SKILL.md').read_text(encoding='utf-8')
-        section = text[text.index('file-issue'):text.index('## Fixed lifecycle')]
+        section = text[text.index('file a github issue'):text.index('## Fixed lifecycle')]
         self.assertRegex(section, r'Do not ask for a draft or routine approval')
 
 

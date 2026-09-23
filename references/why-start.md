@@ -32,7 +32,7 @@ authoritative over the normative spec if the two conflict — the spec still win
 The tracking issue is created or reused immediately after `start`, from the raw request before
 the planner's interview, so the run has a durable public record even if discovery stalls, quota
 is exhausted, or execution stops short. This preserves the useful v2 behavior without moving the
-v3 planner's interactive ownership or freezing intent early. The `file-issue` skill owns duplicate
+v3 planner's interactive ownership or freezing intent early. To file a github issue, first run duplicate
 searches and repository/access checks; a missing issue is a blocker, not a reason to invent a
 number. Once the issue exists, record its number or URL on the family registry, update its body
 after the plan is approved, and leave it open when the run is unresolved; completed work references
