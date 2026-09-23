@@ -36,9 +36,9 @@ pointer in the target repo; and prints the kickoff block.
 
 Done when: the returned `state_dir` exists for this run.
 
-Before entering planning, the orchestrator loads the `file-issue` skill and creates or reuses
-exactly one tracking GitHub issue from the raw request/provisional intent. The issue is filed
-without a draft or routine approval after the skill's duplicate and access checks. If safe filing
+Before entering planning, the orchestrator must file a github issue by creating or reusing
+exactly one tracking issue from the raw request/provisional intent. The issue is filed
+without a draft or routine approval after duplicate and access checks. If safe filing
 is blocked by missing repository or GitHub access, planning does not begin. Record the issue
 number or URL on the family registry with `family-update --issue <number-or-url>`.
 
