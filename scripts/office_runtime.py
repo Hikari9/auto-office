@@ -943,10 +943,30 @@ def cmd_resolve_gates(args):
 
 
 FROZEN_INTENT_FIELDS = ("goal", "done_criteria", "blast_radius", "named_actions", "non_goals")
+BLAST_RADIUS_VALUES = ("local", "repo", "production", "production-data")
+
+
+def _frozen_intent_errors(intent):
+    """Type/value errors for the five frozen fields; empty list when valid."""
+    errors = []
+    if not isinstance(intent.get("goal"), str) or not intent["goal"].strip():
+        errors.append("goal must be a non-empty string")
+    done = intent.get("done_criteria")
+    if not isinstance(done, list) or not done or not all(isinstance(x, str) and x.strip() for x in done):
+        errors.append("done_criteria must be a non-empty list of non-empty strings")
+    if intent.get("blast_radius") not in BLAST_RADIUS_VALUES:
+        errors.append("blast_radius must be one of " + ", ".join(BLAST_RADIUS_VALUES))
+    for key in ("named_actions", "non_goals"):
+        value = intent.get(key)
+        if not isinstance(value, list) or not all(isinstance(x, (str, dict)) for x in value):
+            errors.append(f"{key} must be a list of strings or objects")
+    return errors
 
 
 def cmd_freeze_intent(args):
-    """Planner freeze: record the five execution fields and move intake -> planned."""
+    """Planner freeze: validate the five execution fields, re-derive risk and gates
+    from the frozen blast_radius, and move intake -> planned in one write, so a
+    plan that widens risk can never reach approve-plan with start-time gates."""
     try:
         state_path = Path(args.state_dir).expanduser() / "state.json"
         if not state_path.exists():
@@ -954,9 +974,16 @@ def cmd_freeze_intent(args):
             return 2
         state = json.loads(state_path.read_text(encoding="utf-8"))
         intent = json.loads(Path(args.intent).expanduser().read_text(encoding="utf-8"))
+        if not isinstance(intent, dict):
+            dump_json({"error": "invalid_intent", "errors": ["intent must be a JSON object"]})
+            return 2
         missing = [k for k in FROZEN_INTENT_FIELDS if k not in intent]
         if missing:
             dump_json({"error": "missing_fields", "missing": missing})
+            return 2
+        errors = _frozen_intent_errors(intent)
+        if errors:
+            dump_json({"error": "invalid_intent", "errors": errors})
             return 2
         frozen = {k: intent[k] for k in FROZEN_INTENT_FIELDS}
         phase = state.get("phase")
@@ -966,12 +993,26 @@ def cmd_freeze_intent(args):
         if phase != "intake":
             dump_json({"error": "invalid_phase", "phase": phase, "expected": "intake"})
             return 2
+        repo = Path(state.get("repo_root") or ".").expanduser().resolve()
+        config, _ = _start_effective_config(repo)
+        prior = state.get("risk") or {}
+        risk = _resolve_risk(argparse.Namespace(
+            blast_radius=frozen["blast_radius"],
+            size_class=prior.get("size_class"),
+            irreversible=bool(prior.get("irreversible")),
+        ), config)
+        gates = resolve_gates(state.get("gear"), risk["high"], config)
+        gates_changed = gates != state.get("gates")
         now = datetime.now(timezone.utc).isoformat()
         state["frozen_intent"] = frozen
+        state["risk"] = risk
+        state["gates"] = gates
         state["phase"] = "planned"
         state["updated_at"] = now
         _atomic_write_json(state_path, state)
-        dump_json({"frozen": True, "idempotent": False, "phase": "planned", "frozen_intent": frozen})
+        dump_json({"frozen": True, "idempotent": False, "phase": "planned",
+                   "frozen_intent": frozen, "risk": risk, "gates": gates,
+                   "gates_changed": gates_changed})
         return 0
     except Exception as exc:
         dump_json({"error": "freeze_intent_failed", "message": str(exc)})

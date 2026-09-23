@@ -690,6 +690,31 @@ class FreezeIntentCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(out['idempotent'])
 
+    def test_widened_blast_radius_recomputes_gates_before_planned(self):
+        config, _ = rt._start_effective_config(Path('.').resolve())
+        low_gates = rt.resolve_gates('direct', False, config)
+        _write_state(self.state_dir, phase='intake', gear='direct',
+                     risk={'blast_radius': 'repo', 'size_class': 'S', 'irreversible': False, 'high': False},
+                     gates=low_gates)
+        code, out = self._freeze(dict(self.INTENT, blast_radius='production'))
+        self.assertEqual(code, 0)
+        state = self._read_state()
+        self.assertTrue(state['risk']['high'])
+        self.assertEqual(state['risk']['blast_radius'], 'production')
+        self.assertEqual(state['gates'], rt.resolve_gates('direct', True, config))
+        self.assertNotEqual(state['gates'], low_gates)
+        self.assertTrue(out['gates_changed'])
+
+    def test_rejects_malformed_values_without_touching_state(self):
+        before = _write_state(self.state_dir, phase='intake')
+        for bad in (dict(self.INTENT, goal=None), dict(self.INTENT, done_criteria='d1'),
+                    dict(self.INTENT, done_criteria=[]), dict(self.INTENT, blast_radius='everywhere'),
+                    dict(self.INTENT, named_actions='none')):
+            code, out = self._freeze(bad)
+            self.assertEqual(code, 2, bad)
+            self.assertEqual(out['error'], 'invalid_intent')
+            self.assertEqual(self._read_state(), before)
+
     def test_then_approve_plan_succeeds(self):
         _write_state(self.state_dir, phase='intake')
         self._freeze(self.INTENT)
