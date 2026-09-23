@@ -26,6 +26,8 @@ For a **native Gemini** model, the opposite convention verified correct: pass th
 
 Observed 2026-09-14: after a re-prompt, `herdr agent get wf` reported `idle` while the pane simultaneously showed `Searching...` and `esc to cancel` — the agent was demonstrably working. For agy, the harness status field is not a liveness signal. Reading `idle` proves nothing — not readiness, not completion, not death. The receipt is the pane content, never the status field. An orchestrator that polls agy status alone will both dispatch into a busy agent (believing it idle) and declare a working agent finished (believing it done). This is the agy analogue of `pgrep -f "codex exec"` matching the wrapper shell instead of the process — a green status reading is not proof of the state it claims.
 
+Recurred 2026-09-23 on 1.2.9 during `Running command...`, where a status-keyed monitor fired a false "finished without report." Monitor finish rule for agy: done = the brief's delivery artifact exists; stopped-without-delivering = status `idle`/`done`/`unknown` AND no `esc to cancel` in `herdr agent read <agent> --source visible --lines 6`, sustained for about 2 minutes of consecutive polls (the busy marker reappearing resets the count), then inspect the pane and `git status --porcelain` before re-prompting or closing; `blocked` exits immediately.
+
 ## Quota and recovery
 
 Probe before dispatch: `python3 ../../scripts/agy-usage.py --json` (bare for human-readable, `--percent` for routing math only). Live OAuth read against the CloudCode quota endpoint; exit `2` means unknown, not low. Full contract in `../../references/quota-probe.md`.
