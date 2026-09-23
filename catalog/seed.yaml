@@ -12,6 +12,20 @@ notes: >-
   unknown model, record it with `office_runtime.py route-defect` and amend the row here through
   `auto-self-improve`; never hand-patch the slug in a brief and move on.
 
+  Verified non-dispatchable on this account (2026-09-23, run 8cb62cce, defects
+  b13bc3e4 and c10c0577): `gpt-5.1-codex-max` via the codex harness. `codex` accepts
+  `-c model=gpt-5.1-codex-max` at startup, then the first turn fails with HTTP 400
+  `invalid_request_error: 'gpt-5.1-codex-max' model is not supported when using Codex with a
+  ChatGPT account`. There is deliberately no row for it below: it is not a slug to correct, it
+  is a model this account tier cannot reach. Do not add one without local-evidence proof from
+  `codex debug models --bundled` on an account that can.
+
+  Two failure shapes, one lesson. Passing no `-c model=` leaves the harness on its configured
+  default (here `gpt-5.6-luna`), so a route notice naming any other model is a false disclosure
+  that nothing will contradict — the dispatch simply succeeds on the wrong identity. Pinning a
+  model the account cannot reach fails loudly instead. Always pin `-c model=<invocation_model_id>`
+  when a route notice names one, and only ever name a model that has a row below.
+
   `invocation_source` records machine-readable slug provenance across three states:
   'local-evidence:*' (slug proven against a local harness command),
   'documented:*' (slug documented in authoritative sources but unproven against local harness),
