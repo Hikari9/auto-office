@@ -1,0 +1,15 @@
+# Learned patterns, sanitized. Evidence capsule is local; only its hash is public.
+# None of these touch capability floors, reward definitions, hard exclusions,
+# destructive permissions, maturity policy, or security boundaries.
+
+- name: verification-capture-vs-judgment
+  stream: learned-pattern
+  identity_hash: sha256:56d4c7fca2f16fe2ded75dbff795c3fa28c33b18185cf866e2d6eacd71f54162
+  evidence_hash: sha256:48979d7da4613fdcda0cb39ea4b0aa1ae7e9679c01bb89093d743f9abd261f24
+  source_count: 1
+  schema_version: 3
+  target_skill: auto-verification
+  changes_behavioral_policy: false
+  privacy_lint: passed
+  pattern: >-
+    A cheap browser worker captures and never verifies. Give it a pinned steps file (URL, viewport, actions, settle wait, DOM probe per state) run by a fixed script, and enforce safe mode and write refusal in the script. The orchestrator or a reviewer-grade route judges every frame and probe. Settle acceptance on probe values, with images as corroboration.
