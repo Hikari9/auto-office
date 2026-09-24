@@ -23,6 +23,10 @@ Cover the wiring separately from the behavior. Assert what arguments reach the r
 
 A clean rebase onto current mainline reconciles text, never semantics: a required-argument change in a merged dependency is invisible to the merge and fatal at runtime. Where the base has moved and a rebase is warranted, that's a writer-lease action, not something verification does unilaterally — it changes the reviewed tree and the pinned base SHA. Acquire the lease, update or invalidate the affected packets per protocol/state-and-takeover.md, then re-run the suite and re-verify against the new base.
 
+## A cheap browser worker captures; it does not verify
+
+See references/verification-failure-modes.md#free-form-capture. Route capture (drive the runtime, save frames) to the cheapest `browser` route, but keep judgment of every frame and probe with the orchestrator or a reviewer-grade route. Give the worker a pinned steps file (URL, viewport, actions, settle wait, DOM probe per state) for a fixed script, not a prose walkthrough. Enforce safe mode and write refusal in the script. Settle acceptance on probe values, with images as corroboration. Frames from a viewport the tool could not set are missing evidence, not a layout verdict.
+
 ## An artifact a worker could not have captured is fabricated
 
 When a worker is forbidden from calling the live system, it cannot produce any artifact that is defined as a capture of that system: snapshots, rollback targets, backups, recorded fixtures, golden files. Asked for one, it will hand-write something structurally valid and plausible.
