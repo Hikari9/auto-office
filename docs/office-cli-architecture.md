@@ -81,7 +81,7 @@ Semantic commands replace direct calls to `office_runtime.py` subcommands:
 | `office start [goal]` | `start` + issue record creation + kickoff | `<run-id> <phase> <worktree>` |
 | `office resume [<run-id>] [--harness <h> --session <id>]` | Run reactivation and session binding (R6) | R5 resume capsule (≤10 lines status + verbose pointer) |
 | `office status` | `status` | ≤10 lines: phase, next receipt, open gates, live dispatches |
-| `office events [--unread] [--ack]` | `list-events` + cursor lookup + `ack-event` (§4.5, R3) | one line per unread event: `<dispatch-id>#<seq> <observed-status> <summary>` |
+| `office events [--unread] [--ack]` | `list-events` + cursor lookup + `ack-event` (§4.5, R3) | one line per unread event: `<dispatch-id>#<seq> <observed_status> <terminal_classification> <source>`, taken verbatim from existing event fields; an absent field prints `-` (F12) |
 | `office spoke <name>`<br>`office spoke --mark <name>` | `spoke` check / mark / hash computation | `<name> ok <sha256:digest>` (computed by CLI; one spoke per call) |
 | `office route <role> --task <id>` | `route` candidate evaluation | `<role> -> <candidate> (<score>)` (catalog + config seed + quota probes) |
 | `office dispatch <role> --task <id>` | `dispatch` packet generation + pane spawn | `<dispatch-id> <pane-id> <worktree-path>` (validates packet, worktree, pane, ledger) |
@@ -123,7 +123,7 @@ Hook execution checks configuration in strict precedence order:
 3. User-global configuration (`~/.office/config.yaml`)
 4. Default: Enabled (`on`)
 
-If hooks are opted out at any level, the shim exits `0` immediately without executing further logic.
+If hooks are opted out at any level, the shim exits `0` immediately without executing further logic. The shim evaluates the two YAML levels through compiled sentinel files (§3.4), never by parsing YAML.
 
 ### 3.4 Fast Path Budget (D139-4, R8)
 For disabled hooks, absent runs, or unbound sessions, the hook shim executes with strict latency bounds:
@@ -131,10 +131,9 @@ For disabled hooks, absent runs, or unbound sessions, the hook shim executes wit
    1. Environment check: Inspect `OFFICE_HOOKS=off`. If off, exit `0` immediately.
    2. Runs stat: Stat `.office/runs/`. If absent or empty, exit `0` immediately.
    3. Binding stat (D139-4): Stat `.office/sessions/<harness>-<session-id>.json`. If absent, the session is unbound: exit `0` immediately for every event except `session.start`.
-   4. Configuration opt-outs: Only on paths that will act (a bound session, or the unbound `session.start` notice), parse repository (`.office/config.yaml`) and user-global (`~/.office/config.yaml`) YAML opt-outs. If disabled, exit `0`.
-2. **Budgets (R8, D139-4)**:
-   - The **50 ms** fast-path budget covers steps 1–3: env-off, no runs, and every unbound event other than `session.start`. It never imports YAML parsers or the full runtime.
-   - The YAML opt-out path (step 4) has a **150 ms** budget.
+   4. Opt-out sentinels (F9): stat compiled sentinel files instead of parsing YAML. If the repo has `.office/hooks.on`, hooks are enabled. Else, if it has `.office/hooks.off`, they are disabled. Else, if `~/.office/hooks.off` exists, they are disabled. Otherwise they are enabled (the D139-3 precedence, expressed as stats). If disabled, exit `0`.
+2. **Sentinel compilation (F9)**: `office install`, and every `office` command that loads configuration, rewrite the sentinels from the YAML `hooks:` values: at most one of `.office/hooks.on` / `.office/hooks.off` per repo (none when the repo YAML leaves `hooks:` unset), and `~/.office/hooks.off` present only when the user YAML sets `hooks: off|false`. Writes are atomic (temp file + rename). `office doctor` reports any sentinel that disagrees with its YAML source, such as after a hand edit, and `office doctor --fix` recompiles them.
+3. **Budget (R8, D139-4)**: The hook shim never parses YAML. Steps 1–4 are env reads and file stats only. The **50 ms** budget covers every unbound case, including the unbound `session.start` notice. The full runtime is imported only after step 4, on bound-session paths.
 
 ### 3.5 Doctor and Uninstallation (D139-5, R4)
 - `office doctor`:
@@ -180,7 +179,7 @@ Authority levels are defined as:
 |---|---|---|---|---|---|---|---|
 | `session.start` | `SessionStart` (`startup\|resume\|compact`) | `SessionStart` (`startup\|resume\|compact`) | `SessionStart` (`source: startup\|resume`) | ❌ none | `on_session_start` (resume does not fire) | Checkpoint + resume capsule (R5); unbound: 1-line notice (R7) | Fail-open, 5s timeout |
 | `prompt.submit` | `UserPromptSubmit` | `UserPromptSubmit` | `BeforeAgent` | `PreInvocation` (before model) | `pre_llm_call` | Inject unread inbox items only (R3) | Fail-open, 5s timeout |
-| `tool.pre` | `PreToolUse` | `PreToolUse` (warn-only, R1) | `BeforeTool` | `PreToolUse` | `pre_tool_call` | **Block only**: hard stops (protected path, lease escape, main checkout mutation) | **Fail-closed** on Claude, Gemini, agy, Hermes if bound + lease resolved; **Warn-only (fail-open)** on Codex (R1) |
+| `tool.pre` | `PreToolUse` | `PreToolUse` (warn-only, R1) | `BeforeTool` | `PreToolUse` | `pre_tool_call` | **Block only**: hard stops (protected path, lease escape, main checkout mutation) | **Fail-closed** on Claude, Gemini, agy, Hermes if bound + lease resolved; **Warn-only (fail-open)** on Codex until `office doctor` verifies a denial path on the installed Codex version; after verification, Codex is fail-closed under the same bound + lease-resolved rule, using the verified mechanism (R1, F1) |
 | `tool.post` | `PostToolUse` | `PostToolUse` | `AfterTool` | `PostToolUse` | `post_tool_call` | Observe + record touched files | Fail-open, 5s timeout |
 | `turn.stop` | `Stop` | `Stop` | `AfterAgent` | `Stop` | `post_llm_call` / `pre_verify` | Checkpoint + warn on missing receipt (never force continuation) | Fail-open, 5s timeout |
 | `compact.pre` | `PreCompact` | `PreCompact` | `PreCompress` (advisory only) | ❌ none | ⚠️ gateway-only `session:compress` | Checkpoint state | Fail-open, 5s timeout |
@@ -203,14 +202,14 @@ Hook shim execution uses a dedicated protocol distinct from the general CLI exit
 
 ### 4.4 Injection Budget and Resume Capsule (D141-4, R5)
 - **Injection Budget (D141-4)**: Maximum payload size is **≤12 lines** and **≤1 KB**, formatted as plain text (no ANSI codes, no markdown tables), ending with pointer line `office status --verbose`.
-- **Resume Capsule (R5)**: Emitted on `session.start` in a bound session for `source=resume` and `source=compact`, and for `source=startup` only when the session is already bound. The capsule consists of `office status` output (≤10 lines, D138-6) plus a final pointer line `office status --verbose`. It is injected into model context through the harness's session-start context channel (§4.3 "Inject Context" column; on a harness whose channel is UNKNOWN it is not injected) and obeys the D141-4 budget: plain text, ≤12 lines, ≤1 KB; if `office status` output would exceed 1 KB it is truncated to fit and the pointer line is kept.
+- **Resume Capsule (R5)**: Emitted on `session.start` in a bound session for `source=resume` and `source=compact`, and for `source=startup` only when the session is already bound. The capsule consists of `office status` output (≤10 lines, D138-6) plus a final pointer line `office status --verbose`. It is injected into model context only on harnesses whose session-start hook accepts context: Claude Code (`additionalContext`), Gemini CLI (`additionalContext`), and Codex only after `office doctor` verifies an injection channel. It is never injected on Hermes (`on_session_start` is observer-only, #137 §4), on agy (no session-start event), or on any harness whose channel is UNKNOWN. On those harnesses the auto-office skill runs `office status` explicitly at session start (D141-6) (F6). An injected capsule obeys the D141-4 budget: plain text, ≤12 lines, ≤1 KB; if `office status` output would exceed 1 KB it is truncated to fit and the pointer line is kept.
 
 ### 4.5 Run Event Inbox (R3)
 - The inbox **is the existing runtime event store** (`office_runtime.py record-event` / `list-events` / `ack-event`).
 - Events are keyed by `dispatch_id` + `sequence`, recording `observed_status`, `terminal_classification`, `source`, and `evidence` fields.
 - **Cursor scope**: acknowledgement cursors already exist per `(session_id, family_id, dispatch_id)` (`get_event_cursor` / `acknowledge_events` in `scripts/office_monitor.py`). The hook uses `session_id` = the binding record's `harness_session_id`, `family_id` = the bound run's family id from its `state.json`, and iterates the `dispatch_id`s present in the run's event store.
 - **Unread Events**: for each `dispatch_id`, events with `sequence` greater than that cursor's `last_acknowledged_sequence`, in ascending sequence order.
-- **`office events [--unread] [--ack]`**: a thin semantic wrapper (added to the §2.6 command registry) that performs the cursor lookup above. `list-events` alone does not filter by acknowledgement, so the hook and agents use this wrapper, not raw `list-events`. `--ack` calls `ack-event` with all required fields (`session_id`, `family_id`, `dispatch_id`, `sequence`, `event_id`) for the highest sequence delivered per dispatch.
+- **`office events [--unread] [--ack]`**: a thin semantic wrapper (added to the §2.6 command registry) that performs the cursor lookup above. `list-events` alone does not filter by acknowledgement, so the hook and agents use this wrapper, not raw `list-events`. `--ack` calls `ack-event` once per delivered event, in ascending `sequence` order per dispatch, with all required fields (`session_id`, `family_id`, `dispatch_id`, `sequence`, `event_id`). The runtime rejects a sequence greater than cursor + 1 (`sequence_gap`), so acks must never skip a sequence. If an ack fails, the remaining events for that dispatch stay unread (F3).
 - **Processing on `prompt.submit`**: The hook runs the `office events --unread --ack` logic, formats the result within the D141-4 injection budget (≤12 lines, ≤1 KB), and emits it to the prompt context through the harness's inject channel (§4.3). Items that did not fit the budget are not acked. If no unread events exist, or the harness inject channel is UNKNOWN, `prompt.submit` emits nothing and acks nothing.
 
 ### 4.6 Fallback Mechanisms per Harness (D141-6, R1)
@@ -405,4 +404,4 @@ Every decision code from `decisions-all.md` appears exactly once in this index:
 | **R5** | Resume capsule definition and emission lifecycle | [§3.2](#32-bound-vs-unbound-sessions-d139-2-d141-2-r2-r5-r7), [§4.4](#44-injection-budget-and-resume-capsule-d141-4-r5) |
 | **R6** | `office resume` semantic command contract and validation | [§2.6](#26-semantic-commands-d138-6-r6) |
 | **R7** | Multi-run unbound advisory notice format | [§3.2](#32-bound-vs-unbound-sessions-d139-2-d141-2-r2-r5-r7) |
-| **R8** | Fast-path evaluation order and 50 ms / 150 ms budgets | [§3.4](#34-fast-path-budget-d139-4-r8) |
+| **R8** | Fast-path evaluation order, compiled opt-out sentinels (F9), and 50 ms budget | [§3.4](#34-fast-path-budget-d139-4-r8) |
