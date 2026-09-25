@@ -40,3 +40,7 @@ Probe before dispatch: `python3 ../../scripts/claude-usage.py --json` (bare for 
 The authoritative read is the `claude agents --json` row for that id — its `status`/`state`. Corroborate only with signals that actually can see it: `ps -eo pid,command | grep claude` matching that row's `pid`, and artifact mtimes moving in its tree. `claude logs <id>` works only for background sessions, and failing with `connect ENOENT .../control.sock` means the log channel is unreachable, not that the agent is dead.
 
 Attribute invocation/stdio bugs (idle-prompt, missing MCP tools, fork-on-resume) to adapter, checkout/liveness-observability gaps to harness, and logical implementation defects to the producer model/role only when evidence supports it.
+
+## Pane-hosted Claude goes idle between its own background notifications
+
+A Claude executor that backgrounds its own long commands (build, test suites) reports `idle`/`done` between turns while those shells are still running, then wakes on their completion notifications. A monitor that treats "not `working` for two samples" as completion fires early on a Claude pane with no report written yet. For Claude executors, key completion on the report artifact (file exists / contains its final section) and on the agent disappearing, not on lifecycle state. Codex panes stay `working` through their turn, so state-based exits are safer there.
