@@ -6,7 +6,7 @@
 This document specifies the architecture for a single unified global CLI binary (`office`) and a portable agent-hook boundary across all supported AI agent harnesses (`claude`, `codex`, `gemini`, `agy`, `hermes`, and `herdr`). It defines run discovery, command semantics, hook lifecycle, packaging, and harness interoperability.
 
 ### 1.2 Settled Constraints (#140)
-- **Hybrid Hook Boundary**: Agent hooks perform mechanical, durability, and safety work (automatic state checkpoints, touched-file recording, missing-receipt warnings, and fail-closed safety blocking on hard stops). Lifecycle transitions (starting runs, routing, task dispatch, signoff approval, run close) remain explicit operations executed via `office` commands.
+- **Hybrid Hook Boundary**: Agent hooks perform mechanical, durability, and safety work (automatic state checkpoints, touched-file recording, missing-receipt warnings, and fail-closed safety blocking on hard stops in bound sessions on harnesses with a verified denial path; on Codex, `tool.pre` stays warn-only until `office doctor` verifies denial, per R1 and §4.3). Lifecycle transitions (starting runs, routing, task dispatch, signoff approval, run close) remain explicit operations executed via `office` commands.
 - **Resume-Never-Start Rule**: Hooks never automatically start an Office run. An unbound harness session in a repository with an active run reports an advisory notice; it never auto-binds or initializes state.
 - **No Mandatory Daemon**: All operations are process-based, direct-execution CLI invocations. State coordination relies on local atomic filesystem operations, lockfiles (`fcntl`), and structured storage. No persistent background daemon is required.
 - **MCP Deferred in v1**: MCP integration is deferred per decision D143-1. CLI commands are architected over an importable core registry (`office.api`) to allow MCP adapter generation in a subsequent issue without restructuring.
@@ -27,7 +27,7 @@ When an `office` command requires a run context, it resolves the target run usin
 1. **CLI Arguments**: Inspect `--run <id>` or `--state-dir <path>`. If either flag is provided, resolve directly to that run state directory.
 2. **State Directory Environment**: Inspect `OFFICE_STATE_DIR`. If set and non-empty, use this path as the run state directory.
 3. **Run ID Environment**: Inspect `OFFICE_RUN_ID`. If set and non-empty, resolve `<repo_runs_dir>/<OFFICE_RUN_ID>`.
-4. **Session Binding (R2)**: Query the current harness session ID and check `.office/sessions/<harness>-<session-id>.json` (written by `office start` or an explicit `office resume`). The file stores the JSON binding record `{schema: 1, harness, harness_session_id, run_id, state_dir, bound_at, bound_by}` where `bound_at` is an ISO-8601 UTC timestamp and `bound_by` is `"start"` or `"resume"`. If the binding file exists, read the bound run ID. Hooks extract the session ID from hook stdin (`session_id`; for agy, `conversationId`). `office start` and `office resume` accept `--session <id>`.
+4. **Session Binding (R2)**: Query the current harness session ID and check `.office/sessions/<harness>-<session-id>.json` (written by `office start` or an explicit `office resume`). The file stores the JSON binding record `{schema: 1, harness, harness_session_id, run_id, state_dir, bound_at, bound_by}` where `bound_at` is an ISO-8601 UTC timestamp and `bound_by` is `"start"` or `"resume"`. If the binding file exists, read the bound run ID. Hooks extract the session ID from hook stdin (`session_id`; for agy, `conversationId`). `office start` and `office resume` accept `--harness <h>` and `--session <id>`; they write a binding record only when both are given (the record's filename and `harness` field need both values). When either is missing, no binding is written and the command relies on the env precedence (`OFFICE_STATE_DIR` / `OFFICE_RUN_ID`, §2.2). Hook shims always know the harness from their own `--harness` argument (R4).
 5. **Git Common Directory Resolution**: Execute `git rev-parse --git-common-dir`. For git worktrees, resolve to the primary repository checkout root `.office/runs/`. Outside a git repository, run-scoped commands fail unless `--run` or `--state-dir` is explicitly provided. Global commands (`office list`, `office doctor`, `office install`) execute without a git or run context.
 6. **Sole Active Run Scan**: In `<repo_runs_dir>`, scan all run pointers. A run pointer is active unless its phase is `closed` or `abandoned`. If exactly one active run exists, select it as the target run.
 7. **Ambiguity or Absence**: If multiple active runs exist without an explicit binding or flag, or if zero active runs exist, fail immediately with exit code 3. Never select runs using latest modification time (`ls -t | head -1`).
@@ -79,15 +79,16 @@ Semantic commands replace direct calls to `office_runtime.py` subcommands:
 | Command | Replaced `office_runtime.py` Subcommands | Terse Output Shape |
 |---|---|---|
 | `office start [goal]` | `start` + issue record creation + kickoff | `<run-id> <phase> <worktree>` |
-| `office resume [<run-id>] [--session <id>]` | Run reactivation and session binding (R6) | R5 resume capsule (≤10 lines status + verbose pointer) |
+| `office resume [<run-id>] [--harness <h> --session <id>]` | Run reactivation and session binding (R6) | R5 resume capsule (≤10 lines status + verbose pointer) |
 | `office status` | `status` | ≤10 lines: phase, next receipt, open gates, live dispatches |
+| `office events [--unread] [--ack]` | `list-events` + cursor lookup + `ack-event` (§4.5, R3) | one line per unread event: `<dispatch-id>#<seq> <observed-status> <summary>` |
 | `office spoke <name>`<br>`office spoke --mark <name>` | `spoke` check / mark / hash computation | `<name> ok <sha256:digest>` (computed by CLI; one spoke per call) |
 | `office route <role> --task <id>` | `route` candidate evaluation | `<role> -> <candidate> (<score>)` (catalog + config seed + quota probes) |
 | `office dispatch <role> --task <id>` | `dispatch` packet generation + pane spawn | `<dispatch-id> <pane-id> <worktree-path>` (validates packet, worktree, pane, ledger) |
 | `office approve <gate-id>` | `approve` gate signoff | `<gate-id> approved <receipt-id>` |
 | `office close` | `close` run finalization and archival | `<run-id> closed <archive-receipt>` |
 
-**Resume Command Semantics (R6)**: `office resume [<run-id>] [--session <id>]` validates that the run pointer is active (D138-4). If `<run-id>` is omitted, it resolves via discovery precedence (§2.1–§2.2) and exits 3 on ambiguity or absence (D138-3). Once resolved, it writes the session binding record `.office/sessions/<harness>-<session-id>.json` (R2) with `bound_by: "resume"`, and prints the resume capsule (R5).
+**Resume Command Semantics (R6)**: `office resume [<run-id>] [--harness <h> --session <id>]` validates that the run pointer is active (D138-4). If `<run-id>` is omitted, it resolves via discovery precedence (§2.1–§2.2) and exits 3 on ambiguity or absence (D138-3). Once resolved, when both `--harness` and `--session` are given it writes the session binding record `.office/sessions/<harness>-<session-id>.json` (R2) with `bound_by: "resume"`, and in all cases prints the resume capsule (R5).
 
 **Accepted Spoke Weakening**: `office spoke --mark <name>` accepts a single spoke name per call and computes the file digest internally. It weakens the check by no longer proving the agent located the file manually, but strictly blocks batch-marking across multiple spokes.
 
@@ -128,11 +129,12 @@ If hooks are opted out at any level, the shim exits `0` immediately without exec
 For disabled hooks, absent runs, or unbound sessions, the hook shim executes with strict latency bounds:
 1. **Fast Path Evaluation Order (R8)**:
    1. Environment check: Inspect `OFFICE_HOOKS=off`. If off, exit `0` immediately.
-   2. Filesystem stat check: Stat `.office/runs/`. If absent or empty, exit `0` immediately.
-   3. Configuration opt-outs: Parse repository (`.office/config.yaml`) and user-global (`~/.office/config.yaml`) YAML opt-outs. If disabled, exit `0`.
-2. **Budgets (R8)**:
-   - The **50 ms** fast-path budget strictly covers the `OFFICE_HOOKS=off` env check and no-runs (`.office/runs/` absent) cases without importing Python YAML parsers or the full runtime.
-   - The YAML opt-out path has a **150 ms** budget allowing lightweight YAML configuration evaluation.
+   2. Runs stat: Stat `.office/runs/`. If absent or empty, exit `0` immediately.
+   3. Binding stat (D139-4): Stat `.office/sessions/<harness>-<session-id>.json`. If absent, the session is unbound: exit `0` immediately for every event except `session.start`.
+   4. Configuration opt-outs: Only on paths that will act (a bound session, or the unbound `session.start` notice), parse repository (`.office/config.yaml`) and user-global (`~/.office/config.yaml`) YAML opt-outs. If disabled, exit `0`.
+2. **Budgets (R8, D139-4)**:
+   - The **50 ms** fast-path budget covers steps 1–3: env-off, no runs, and every unbound event other than `session.start`. It never imports YAML parsers or the full runtime.
+   - The YAML opt-out path (step 4) has a **150 ms** budget.
 
 ### 3.5 Doctor and Uninstallation (D139-5, R4)
 - `office doctor`:
@@ -194,20 +196,22 @@ Hook shim execution uses a dedicated protocol distinct from the general CLI exit
 | Harness | Allow | Inject Context | Warn | Deny / Block |
 |---|---|---|---|---|
 | **Claude Code** | Exit `0` (empty stdout) | Stdout JSON `{additionalContext: "..."}` | Stdout JSON `{systemMessage: "..."}` | Exit `2` **or** JSON `{permissionDecision: "deny"}` |
-| **Codex CLI** | Exit `0` (empty stdout) | Stdout plain text / JSON | Stderr message (non-zero exit not verified to block) | **Warn-only (fail-open)** until `office doctor` verifies denial path. Hard stops enforced via explicit gates (packet `protected_paths` + diff check at integration). |
+| **Codex CLI** | Exit `0` (empty stdout) | UNKNOWN (#137 §2; unverified until `office doctor` confirms an injection channel; until then Codex hooks inject nothing) | Stderr message (non-zero exit not verified to block) | **Warn-only (fail-open)** until `office doctor` verifies denial path. Hard stops enforced via explicit gates (packet `protected_paths` + diff check at integration). |
 | **Gemini CLI** | Exit `0` (empty stdout) | Stdout JSON `{additionalContext: "..."}` | Stderr message | JSON `{decision: "deny"}` **or** exit `2` (System Block) |
 | **agy** | Exit `0` (empty stdout) | Stdout JSON `{injectSteps: [...]}` | Stderr message | Stdout JSON `{decision: "deny"}` |
-| **Hermes** | Exit `0` (empty stdout) | Stdout plain text / JSON `{context: "..."}` | Stderr message | Exit `2` **or** JSON `{action: "block"}` |
+| **Hermes** | Exit `0` (empty stdout) | Stdout plain text / JSON `{context: "..."}` | Stderr message | Exit `2` (block; other response shapes not established by #137) |
 
 ### 4.4 Injection Budget and Resume Capsule (D141-4, R5)
 - **Injection Budget (D141-4)**: Maximum payload size is **≤12 lines** and **≤1 KB**, formatted as plain text (no ANSI codes, no markdown tables), ending with pointer line `office status --verbose`.
-- **Resume Capsule (R5)**: Emitted on `session.start` in a bound session for `source=resume` and `source=compact`, and for `source=startup` only when the session is already bound. The capsule consists of `office status` output (≤10 lines, D138-6) plus a final pointer line `office status --verbose`.
+- **Resume Capsule (R5)**: Emitted on `session.start` in a bound session for `source=resume` and `source=compact`, and for `source=startup` only when the session is already bound. The capsule consists of `office status` output (≤10 lines, D138-6) plus a final pointer line `office status --verbose`. It is injected into model context through the harness's session-start context channel (§4.3 "Inject Context" column; on a harness whose channel is UNKNOWN it is not injected) and obeys the D141-4 budget: plain text, ≤12 lines, ≤1 KB; if `office status` output would exceed 1 KB it is truncated to fit and the pointer line is kept.
 
 ### 4.5 Run Event Inbox (R3)
 - The inbox **is the existing runtime event store** (`office_runtime.py record-event` / `list-events` / `ack-event`).
 - Events are keyed by `dispatch_id` + `sequence`, recording `observed_status`, `terminal_classification`, `source`, and `evidence` fields.
-- **Unread Events**: Defined as events recorded in the event store that have not yet been acknowledged (`acked`).
-- **Processing on `prompt.submit`**: The hook queries unread events via `list-events`, formats them within the D141-4 injection budget (≤12 lines, ≤1 KB), emits them to the prompt context, and immediately marks them acknowledged via `ack-event`. If no unread events exist, `prompt.submit` emits nothing.
+- **Cursor scope**: acknowledgement cursors already exist per `(session_id, family_id, dispatch_id)` (`get_event_cursor` / `acknowledge_events` in `scripts/office_monitor.py`). The hook uses `session_id` = the binding record's `harness_session_id`, `family_id` = the bound run's family id from its `state.json`, and iterates the `dispatch_id`s present in the run's event store.
+- **Unread Events**: for each `dispatch_id`, events with `sequence` greater than that cursor's `last_acknowledged_sequence`, in ascending sequence order.
+- **`office events [--unread] [--ack]`**: a thin semantic wrapper (added to the §2.6 command registry) that performs the cursor lookup above. `list-events` alone does not filter by acknowledgement, so the hook and agents use this wrapper, not raw `list-events`. `--ack` calls `ack-event` with all required fields (`session_id`, `family_id`, `dispatch_id`, `sequence`, `event_id`) for the highest sequence delivered per dispatch.
+- **Processing on `prompt.submit`**: The hook runs the `office events --unread --ack` logic, formats the result within the D141-4 injection budget (≤12 lines, ≤1 KB), and emits it to the prompt context through the harness's inject channel (§4.3). Items that did not fit the budget are not acked. If no unread events exist, or the harness inject channel is UNKNOWN, `prompt.submit` emits nothing and acks nothing.
 
 ### 4.6 Fallback Mechanisms per Harness (D141-6, R1)
 Explicit `office` commands are the binding contract; hooks only accelerate durability:
