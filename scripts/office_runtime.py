@@ -20,6 +20,8 @@ MUTABLE_TRUST_ROLES = {"executor", "code_reviewer", "browser_verifier", "closeou
 ATTRIBUTIONS = {"model","harness","adapter","quota/account","environment/network","planner","brief","repository","verification","unknown"}
 OUTCOMES = {"pending","verified_no_observed_failure","recurrence_failure","revert_failure","material_post_merge_defect","abandoned","environment_failure"}
 PHASE_ORDER = ("intake", "planned", "approved", "executing", "reviewed", "closed")
+REUSE_COMPACT_THRESHOLD = 272_000
+REUSE_COMPACT_ROLES = ("executor", "plan_reviewer")
 START_PINNED_FIELDS = (
     "run_id",
     "family_id",
@@ -2046,6 +2048,62 @@ def cmd_cleanup_worktrees(args):
         return 2
 
 
+def reuse_dispatch_plan(role: str, context_tokens: int | None, herdr_available: bool,
+                         compact_supported: bool, target: str, brief_path: str) -> dict:
+    """Pure decision: reuse a worker as-is, or compact it then queue the next brief.
+
+    Never emits a spawn/start command and never waits on compaction; the brief command is
+    queued immediately after the compact command (Herdr queues the prompt for the worker).
+    """
+    brief_command = ["herdr", "agent", "prompt", target,
+                      f"Read and carry out the brief at {brief_path} exactly."]
+
+    if role not in REUSE_COMPACT_ROLES:
+        reason = "role_not_eligible"
+    elif context_tokens is None:
+        reason = "context_unknown"
+    elif not (context_tokens > REUSE_COMPACT_THRESHOLD):
+        reason = "at_or_below_threshold"
+    elif not herdr_available:
+        reason = "herdr_unavailable"
+    elif not compact_supported:
+        reason = "compact_unsupported"
+    else:
+        reason = None
+
+    if reason is None:
+        return {
+            "mode": "compact_then_queue",
+            "reason": "eligible_over_threshold",
+            "commands": [["herdr", "agent", "prompt", target, "/compact"], brief_command],
+            "await_compaction": False,
+            "threshold": REUSE_COMPACT_THRESHOLD,
+            "context_tokens": context_tokens,
+        }
+
+    return {
+        "mode": "normal_reuse",
+        "reason": reason,
+        "commands": [brief_command],
+        "await_compaction": False,
+        "threshold": REUSE_COMPACT_THRESHOLD,
+        "context_tokens": context_tokens,
+    }
+
+
+def cmd_reuse_plan(args):
+    result = reuse_dispatch_plan(
+        role=args.role,
+        context_tokens=args.context_tokens,
+        herdr_available=args.herdr_available,
+        compact_supported=args.compact_supported,
+        target=args.target,
+        brief_path=args.brief_path,
+    )
+    dump_json(result)
+    return 0
+
+
 def main():
     p=argparse.ArgumentParser(description='Auto Office v3 deterministic runtime helpers')
     sp=p.add_subparsers(dest='cmd',required=True)
@@ -2107,6 +2165,7 @@ def main():
     q=sp.add_parser('validate-review'); q.add_argument('file'); q.set_defaults(func=cmd_validate_review)
     q=sp.add_parser('tmp-dir'); q.add_argument('--state-dir'); q.set_defaults(func=cmd_tmp_dir)
     q=sp.add_parser('cleanup-worktrees'); q.add_argument('--state-dir',required=True); q.add_argument('--repo'); q.add_argument('--force',action='store_true'); q.set_defaults(func=cmd_cleanup_worktrees)
+    q=sp.add_parser('reuse-plan'); q.add_argument('--role',required=True); q.add_argument('--context-tokens',dest='context_tokens',type=int); q.add_argument('--herdr-available',dest='herdr_available',action='store_true'); q.add_argument('--no-herdr-available',dest='herdr_available',action='store_false'); q.add_argument('--compact-supported',dest='compact_supported',action='store_true'); q.add_argument('--no-compact-supported',dest='compact_supported',action='store_false'); q.add_argument('--target',required=True); q.add_argument('--brief-path',dest='brief_path',required=True); q.set_defaults(herdr_available=os.environ.get('HERDR_ENV')=='1', compact_supported=False, func=cmd_reuse_plan)
 
     args=p.parse_args(); sys.exit(args.func(args))
 
