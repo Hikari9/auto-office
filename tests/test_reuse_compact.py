@@ -50,10 +50,14 @@ class TestReuseDispatchPlan(unittest.TestCase):
     def test_executor_role_qualifies(self):
         plan = self._plan(role="executor")
         self.assertEqual(plan["mode"], "compact_then_queue")
+        self.assertEqual(plan["reason"], "eligible_over_threshold")
+        self.assertEqual(plan["commands"][1][-1], "Read and carry out the brief at /tmp/brief-T1.md exactly.")
 
     def test_plan_reviewer_role_qualifies(self):
         plan = self._plan(role="plan_reviewer")
         self.assertEqual(plan["mode"], "compact_then_queue")
+        self.assertEqual(plan["reason"], "eligible_over_threshold")
+        self.assertEqual(plan["commands"][1][-1], "Read and carry out the brief at /tmp/brief-T1.md exactly.")
 
     def test_reviewer_role_is_not_eligible(self):
         plan = self._plan(role="reviewer")
