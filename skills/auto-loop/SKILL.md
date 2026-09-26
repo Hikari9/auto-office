@@ -22,3 +22,5 @@ After approval the run proceeds end to end with no further go-aheads: bootstrap 
 Report blockers, then carry out the authorized action — a defect exit pauses and reports, it doesn't decline an authority decision. A defect must concern the artifact it names; a scope objection raised to dodge an authority call is really that disagreement in disguise. If the harness itself blocks an action, ask the user instead of rephrasing past the guard (spec §9.1, §9.2).
 
 It stops for exactly two things: an external send, and a user-owned decision the plan didn't anticipate. Everything the plan named — production applies included — it executes without asking again.
+
+Reusing an executor or plan_reviewer whose context exceeds 272,000 tokens: send `/compact` and queue the next brief pointer back to back, then move on — no wait, no poll, no replacement worker. `scripts/office_runtime.py reuse-plan` is the pinned, pure decision (`compact_then_queue` vs `normal_reuse`); call it before reusing, don't hand-roll the threshold check.
