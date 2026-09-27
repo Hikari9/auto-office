@@ -8,7 +8,7 @@ description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use t
 > **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
 > role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
 
-Route `harness@version × model_id × effort`, not model brand alone.
+Route `harness@major × model_id × effort`, not model brand alone.
 
 Read `../../protocol/routing.md`, `../../config/config.default.yaml`, the pinned catalog snapshot, pinned adapter snapshot, effective config, and comparable local evidence.
 

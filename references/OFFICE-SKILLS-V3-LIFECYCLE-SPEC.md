@@ -131,7 +131,7 @@ the single gate, because routing and funding are only overrulable while they are
 still free to change.
 
 The schedule names, per task: write scope, routed identity
-(`harness@version × model_id × effort`), the dependency that places it in its
+(`harness@major × model_id × effort`), the dependency that places it in its
 wave, and its size class. Bars show size classes (#42); the router produces
 classes rather than honest minute estimates.
 

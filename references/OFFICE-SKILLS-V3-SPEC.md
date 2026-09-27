@@ -60,7 +60,7 @@ Public benchmark data is cold-start evidence.
 
 Local evidence for the exact routable triple:
 
-`harness@version × model × effort`
+`harness@major × model × effort`
 
 outranks generic leaderboard evidence when enough comparable local evidence exists.
 
@@ -116,7 +116,7 @@ Runtime evidence remains harness-specific.
 Therefore:
 
 - **benchmark identity:** `model_id × effort`
-- **routable identity:** `harness@version × model_id × effort`
+- **routable identity:** `harness@major × model_id × effort`
 
 Two harnesses exposing the same model share public priors where appropriate, but never share runtime reliability, quota, dispatch-form, or adapter-trust evidence automatically.
 
@@ -283,7 +283,7 @@ family_id: <stable-id>
 dispatch_id: <uuid>
 role: <role>
 holder_id: <session-or-agent-id>
-triple: <harness@version/model@effort>
+triple: <harness@major/model@effort>
 mode: <gear>
 playbook: <playbook>
 base_sha: <git-sha>
@@ -1708,7 +1708,7 @@ v3 is implementation-complete only when all of the following are demonstrated en
 
 ### Routing
 
-- route unit is `harness@version × model × effort`;
+- route unit is `harness@major × model × effort`;
 - same underlying model across harnesses is represented correctly;
 - hard floors filter before cost;
 - local evidence can change a route;
