@@ -16,7 +16,14 @@ export PIP_USER=0
 if [ ! -x .venv/bin/python3 ]; then
   echo "== Creating .venv"
   python3 -m venv .venv
+fi
+# Reinstall only when the dependency declaration changed, so an existing .venv picks up new
+# test deps (e.g. pytest-xdist) without being rebuilt on every run.
+stamp="$(shasum pyproject.toml | cut -d' ' -f1)"
+if [ "$(cat .venv/.validate-stamp 2>/dev/null)" != "$stamp" ]; then
+  echo "== Installing package and test deps"
   .venv/bin/python3 -m pip install -q -e '.[test]' build
+  echo "$stamp" > .venv/.validate-stamp
 fi
 export PATH="$PWD/.venv/bin:$PATH"
 
@@ -27,18 +34,13 @@ echo "== Ecosystem check"
 python3 scripts/check_ecosystem.py
 
 echo "== Unit tests (3.0 helpers + 3.1 runtime; visual tests skip without Playwright)"
-python3 -m pytest tests/ -q
+# Two workers: the local resource budget caps test parallelism at 2 on this class of machine.
+python3 -m pytest tests/ -q -n "${VALIDATE_WORKERS:-2}"
 
 echo "== Adapter validation"
 for f in adapters/seed/*.yaml; do
   python3 scripts/office_runtime.py validate-adapter "$f"
 done
-
-echo "== Schema validation"
-python3 tests/test_schemas.py
-
-echo "== Integration test"
-python3 tests/test_integration.py
 
 if [ "${VALIDATE_BUILD:-0}" = "1" ]; then
   echo "== Build the distribution"
