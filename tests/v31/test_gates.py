@@ -1,0 +1,265 @@
+"""Submission, gates, convergence bounds, amendments, and terminal classification."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from conftest import BAD_ADD, GOOD_ADD, PLAN_ONE, PLAN_TWO, start_inline
+
+
+EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
+
+
+def _go(env, plan=PLAN_ONE, gear="direct+review", **script):
+    env.trust()
+    env.script(**script)
+    start_inline(env, plan=plan, gear=gear)
+    env.office("approve", "plan", "--quote", "approved", check=0)
+
+
+def _task(env, tid="T1"):
+    con = env.con()
+    return dict(con.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
+
+
+def _worker(env, tid="T1"):
+    con = env.con()
+    t = _task(env, tid)
+    d = dict(con.execute("SELECT * FROM dispatches WHERE id=?", (t["current_dispatch_id"],)).fetchone())
+    return {"OFFICE_RUN_ID": d["run_id"], "OFFICE_DISPATCH_ID": d["id"], "OFFICE_TASK_ID": tid, "OFFICE_ROLE": "executor"}, Path(d["worktree"])
+
+
+def test_duplicate_submit_reuses_the_operation(env):
+    # The executor submits, then its response is "lost" and it submits again.
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+        code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    con = env.con()
+    before = (con.execute("SELECT COUNT(*) FROM revisions").fetchone()[0], con.execute("SELECT COUNT(*) FROM gates").fetchone()[0],
+              con.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], con.execute("SELECT plan_version FROM runs").fetchone()[0])
+    wenv, wt = _worker(env)
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert "already submitted" in out, out
+    after = (con.execute("SELECT COUNT(*) FROM revisions").fetchone()[0], con.execute("SELECT COUNT(*) FROM gates").fetchone()[0],
+             con.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], con.execute("SELECT plan_version FROM runs").fetchone()[0])
+    assert before == after
+    assert [c["role"] for c in env.calls()].count("code_reviewer") == 1
+
+
+def test_dirty_edit_with_unchanged_head_invalidates_prior_pass(env):
+    _go(env, executor=[{}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    wenv, wt = _worker(env)
+    (wt / "calc.py").write_text(GOOD_ADD)
+    head = env.git("rev-parse", "HEAD", cwd=wt).strip()
+    code, out = env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"})
+    assert "rev R1 captured" in out, out
+    (wt / "calc.py").write_text(GOOD_ADD + "\n# changed without a commit\n")
+    assert env.git("rev-parse", "HEAD", cwd=wt).strip() == head
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert "rev R2 captured" in out and "supersedes R1" in out, out
+    con = env.con()
+    r1 = {r["kind"]: r["status"] for r in con.execute("SELECT kind, status FROM gates WHERE revision_id='R1'")}
+    assert r1 == {"checks": "cancelled", "code_review": "cancelled"}, r1
+    assert con.execute("SELECT verdict FROM gates WHERE revision_id='R2' AND kind='code_review'").fetchone()[0] == "PASS"
+    assert _task(env)["accepted_revision_id"] == "R2"
+    # Accepted work is closed to further edits from that session.
+    (wt / "calc.py").write_text(GOOD_ADD + "\n# after acceptance\n")
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert code == 4 and "lease" in out
+
+
+def test_stale_pass_is_audit_only(env):
+    from office import db, gates, review_parse, state
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}],
+        code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    con = env.con()
+    wenv, wt = _worker(env)
+    env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"}, check=0)
+    (wt / "calc.py").write_text(GOOD_ADD + "\n# v2\n")
+    env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"}, check=0)
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    stale_gate = con.execute("SELECT id FROM gates WHERE revision_id='R1' AND kind='checks'").fetchone()[0]
+    con.execute("UPDATE gates SET status='running' WHERE id=?", (stale_gate,))
+    with db.transaction(con):
+        gates.ingest_task_gate(con, run, stale_gate, {"verdict": "PASS", "parsed": review_parse.Parsed(verdict="PASS"),
+                                                      "route": "late"})
+    row = con.execute("SELECT status, verdict FROM gates WHERE id=?", (stale_gate,)).fetchone()
+    assert row["status"] == "stale" and row["verdict"] == "PASS"
+    assert _task(env)["status"] != "accepted"
+
+
+def test_amendment_delivered_but_not_applied_cannot_satisfy(env, monkeypatch):
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}],
+        code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    wenv, wt = _worker(env)
+    (wt / "calc.py").write_text(GOOD_ADD)
+    code, out = env.office("amend", "T1", "--", "also handle negative numbers the same way")
+    assert code == 0 and "A1" in out and "delivering to T1" in out, out
+    # The worker's next command carries the delivery; it has not applied it.
+    code, out = env.office("status", cwd=wt, env=wenv)
+    assert "AMENDMENT A1 delivered" in out and "office ack A1" in out, out
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert "amendment pending" in out, out
+    assert _task(env)["status"] != "accepted"
+    con = env.con()
+    assert con.execute("SELECT status FROM deliveries").fetchone()[0] == "delivered"
+    code, out = env.office("ack", "A1", cwd=wt, env=wenv)
+    assert code == 0 and "applied" in out, out
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert "captured" in out
+    assert _task(env)["status"] == "accepted"
+
+
+def test_superseded_amendment_ack_is_rejected(env):
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}],
+        code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    wenv, wt = _worker(env)
+    env.office("amend", "T1", "--", "first delta", check=0)
+    env.office("amend", "T1", "--", "second delta", check=0)
+    code, out = env.office("ack", "A1", cwd=wt, env=wenv)
+    assert code == 4 and "superseded" in out and "A2" in out and "first delta" in out, out
+    code, out = env.office("ack", "A2", cwd=wt, env=wenv)
+    assert code == 0, out
+    con = env.con()
+    assert con.execute("SELECT applied_plan_version FROM dispatches WHERE id=?", (wenv["OFFICE_DISPATCH_ID"],)).fetchone()[0] == 3
+
+
+def test_crash_after_amendment_commit_redelivers_without_rebump(env):
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}],
+        code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    wenv, wt = _worker(env)
+    env.office("amend", "T1", "--", "rename nothing, just a delta", check=0)
+    con = env.con()
+    v = con.execute("SELECT plan_version FROM runs").fetchone()[0]
+    # Lost response: the worker saw nothing. Resume/next command redelivers.
+    for _ in range(2):
+        code, out = env.office("status", cwd=wt, env=wenv)
+        assert "AMENDMENT A1 delivered" in out
+    assert con.execute("SELECT plan_version FROM runs").fetchone()[0] == v
+    assert con.execute("SELECT delivered_count FROM deliveries").fetchone()[0] == 2
+
+
+def test_repeated_finding_stops_after_one_escalation(env):
+    finding = "VERDICT: CHANGES_REQUIRED\nFINDING F1 | material | calc.py:2 | add ignores overflow | clamp the result"
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True},
+                       {"write": {"calc.py": GOOD_ADD + "# try 2\n"}, "submit": True},
+                       {"write": {"calc.py": GOOD_ADD + "# try 3\n"}, "submit": True}],
+        code_reviewer=[{"reply": finding}])
+    env.office("dispatch", "T1", check=0)
+    t = _task(env)
+    assert t["status"] == "paused", t
+    assert "escalation" in t["pause_reason"] or "exhausted" in t["pause_reason"], t["pause_reason"]
+    con = env.con()
+    assert con.execute("SELECT COUNT(*) FROM gates WHERE escalated=1").fetchone()[0] == 1
+    reviews = [c for c in env.calls() if c["role"] == "code_reviewer"]
+    assert len(reviews) <= 4, len(reviews)
+    code, data = env.ojson("status")
+    assert "resolve T1" in data["next"]
+
+
+def test_invalid_reviewer_reply_falls_back_then_blocks(env):
+    # Every installed route returns an unparseable reply.
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+        code_reviewer=[{"reply": "Looks great to me!"}])
+    env.office("dispatch", "T1", check=0)
+    t = _task(env)
+    assert t["status"] == "blocked" and "unavailable" in t["pause_reason"], t
+    con = env.con()
+    g = con.execute("SELECT verdict, env_failures FROM gates WHERE kind='code_review'").fetchone()
+    assert g["verdict"] == "UNAVAILABLE" and g["env_failures"] >= 2
+    models = {r[0] for r in con.execute("SELECT model FROM dispatches WHERE role='code_reviewer'")}
+    assert len(models) >= 2, models  # substituted a different model each time before giving up
+
+
+def test_quota_failure_substitutes_route(env):
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+        **{"codex:code_reviewer": [{"stderr": "Error: usage limit reached (429)", "exit": 1}],
+           "claude:code_reviewer": [{"reply": "VERDICT: PASS"}], "gemini:code_reviewer": [{"reply": "VERDICT: PASS"}]})
+    env.office("dispatch", "T1", check=0)
+    assert _task(env)["status"] == "accepted"
+    con = env.con()
+    assert con.execute("SELECT COUNT(*) FROM dispatches WHERE role='code_reviewer' AND outcome='environment_failure'").fetchone()[0] == 1
+
+
+def test_missing_check_command_is_never_pass(env):
+    plan = PLAN_ONE.replace('checks: python3 -c "import calc; assert calc.add(2, 3) == 5"', "checks: definitely-not-a-command --x")
+    _go(env, plan=plan, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+        code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    t = _task(env)
+    assert t["status"] == "blocked", t
+    con = env.con()
+    assert con.execute("SELECT verdict FROM gates WHERE kind='checks'").fetchone()[0] == "UNAVAILABLE"
+    assert [c["role"] for c in env.calls()].count("code_reviewer") == 0
+
+
+def test_process_endings_always_classified(env):
+    from office import db
+    _go(env, executor=[{"exit": 0}, {"exit": 3}, {"signal": "TERM"}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    con = env.con()
+    rows = con.execute("SELECT terminal_classification, exit_code, signal FROM dispatches WHERE role='executor' "
+                       "ORDER BY started_at").fetchall()
+    kinds = [r["terminal_classification"] for r in rows]
+    assert kinds[:3] == ["success", "nonzero", "signal"], kinds
+    assert rows[1]["exit_code"] == 3 and rows[2]["signal"] == 15
+    t = _task(env)
+    assert t["status"] == "blocked" and "without submitting" in t["pause_reason"]
+
+
+def test_parallel_independent_tasks_accept_and_integrate(env):
+    _go(env, plan=PLAN_TWO,
+        executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": "def mul(a, b):\n    return a * b\n"}},
+                   "submit": True}],
+        code_reviewer=[{"reply": "VERDICT: PASS"}])
+    code, out = env.office("dispatch", "T1", "T2", "--parallel")
+    assert code == 0 and "T1 ->" in out and "T2 ->" in out, out
+    code, data = env.ojson("status")
+    assert data["data"]["tasks"] == {"T1": "accepted", "T2": "accepted"}, data
+    con = env.con()
+    integ = con.execute("SELECT landing_json FROM runs").fetchone()[0]
+    assert '"status": "accepted"' in integ
+
+
+def test_shared_scope_cannot_be_double_held(env):
+    plan = PLAN_TWO.replace("scope: mul.py", "scope: calc.py")
+    _go(env, plan=plan, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}],
+        code_reviewer=[{"reply": "VERDICT: PASS"}])
+    code, out = env.office("dispatch", "T1", "T2", "--parallel")
+    assert code == 4 and "scope-held" in out, out
+
+
+def test_stacked_dispatch_launches_the_next_task_after_acceptance(env):
+    _go(env, plan=PLAN_TWO,
+        executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": "def mul(a, b):\n    return a * b\n"}},
+                   "submit": True}],
+        code_reviewer=[{"reply": "VERDICT: PASS"}])
+    code, out = env.office("dispatch", "T1", "T2")
+    assert code == 0 and "T2 stacked after T1" in out, out
+    code, data = env.ojson("status")
+    assert data["data"]["tasks"] == {"T1": "accepted", "T2": "accepted"}, data
+    con = env.con()
+    base_t2 = con.execute("SELECT base_commit FROM dispatches WHERE task_id='T2' AND role='executor'").fetchone()[0]
+    t1_commit = con.execute("SELECT r.commit_sha FROM tasks t JOIN revisions r ON r.id=t.accepted_revision_id "
+                            "WHERE t.id='T1'").fetchone()[0]
+    assert base_t2 == t1_commit  # T2 built on T1's accepted revision
+
+
+def test_integration_conflict_is_surfaced_not_landed(env):
+    plan = PLAN_TWO.replace("scope: mul.py", "scope: mul.py, README.md").replace("scope: calc.py\n", "scope: calc.py, README.md\n")
+    _go(env, plan=plan,
+        executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD, "README.md": "one\n"},
+                                     "T2": {"mul.py": "def mul(a, b):\n    return a * b\n", "README.md": "two\n"}},
+                   "submit": True}],
+        code_reviewer=[{"reply": "VERDICT: PASS"}], integration_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    env.office("dispatch", "T2", check=0)  # not stacked: T2 starts from the run base too
+    code, data = env.ojson("status")
+    assert data["data"]["tasks"] == {"T1": "accepted", "T2": "accepted"}, data
+    assert "integration conflict" in data["next"], data["next"]
+    code, out = env.office("close", "--handoff", "x")
+    assert code == 4 and "integration conflict" in out, out

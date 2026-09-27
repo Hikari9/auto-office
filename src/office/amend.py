@@ -1,0 +1,352 @@
+"""Amendments: versioned deltas, durable delivery, and applied acknowledgement.
+
+Delivered and applied are different states. The runtime delivers a combined
+delta on the worker's next `office` command (and nudges a live Herdr worker).
+Only `office ack <id>` records that the worker applied it at a safe boundary.
+A newer amendment supersedes an older unapplied one.
+"""
+from __future__ import annotations
+
+import os
+import re
+import uuid
+from pathlib import Path
+
+from office import db, jobs, paths, planfile, plans, state
+from office.result import Result
+from office.state import Refused, Usage
+from office.util import dumps, now_iso, sha256_bytes
+
+# Words that signal an authority-envelope change (external, irreversible, or
+# destructive action). An "ordinary" amendment carrying one is refused.
+AUTHORITY_TERMS = re.compile(
+    r"\b(deploy|production|prod\b|publish|release|send|email|notify users|delete|drop table|truncate|force.?push|"
+    r"merge (to|into) main|migrat(e|ion) (prod|production)|payment|charge|rotate (key|secret)|credentials?)\b", re.I)
+
+
+def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, requirements: bool = False,
+          quote: str | None = None, cwd: Path | None = None) -> Result:
+    if os.environ.get("OFFICE_DISPATCH_ID"):
+        raise Refused("worker-cannot-amend", "workers do not amend the plan; report the problem in your submission",
+                      next_step="office submit")
+    if not delta or not delta.strip():
+        raise Usage("missing-delta", "an amendment needs a delta", next_step='office amend <scope> -- "<delta>"')
+    if state.is_terminal(run):
+        raise Refused("run-terminal", f"run is {run['phase']}")
+    if requirements or scope == "requirements":
+        return _requirements_change(con, run, delta, quote)
+    scope_ids = _scope_ids(con, run, scope)
+    plan_text = _orchestrator_plan_text(run, cwd)
+    if contract:
+        return _contract(con, run, scope, scope_ids, delta, plan_text)
+    return _ordinary(con, run, scope, scope_ids, delta, plan_text)
+
+
+def _scope_ids(con, run: dict, scope: str) -> list[str]:
+    if scope in ("plan", "all", "run"):
+        return []
+    ids = [s.strip() for s in re.split(r"[,\s]+", scope) if s.strip()]
+    known = {t["id"] for t in state.tasks(con, run["id"])}
+    unknown = [i for i in ids if i not in known]
+    if unknown:
+        raise Usage("unknown-task", f"unknown task(s) {', '.join(unknown)}", next_step="scope is plan, or task ids like T2,T3")
+    return ids
+
+
+def _orchestrator_plan_text(run: dict, cwd: Path | None) -> str | None:
+    ident = paths.repo_identity(cwd)
+    candidates = [ident[0] / ".office" / "PLAN.md"] if ident else []
+    for c in candidates:
+        if c.is_file():
+            return c.read_text(encoding="utf-8")
+    return None
+
+
+def _requirements_change(con, run: dict, delta: str, quote: str | None) -> Result:
+    if not quote or not quote.strip():
+        raise Refused("user-quote-required", "only the user can change requirements; record their words",
+                      next_step='office amend requirements --quote "<user\'s exact words>" -- "<change>"')
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        cur = state.current_requirements(con, run["id"])
+        frozen = dict(cur["frozen"])
+        frozen.setdefault("user_changes", []).append(delta.strip())
+        version = cur["version"] + 1
+        con.execute("INSERT INTO requirements(run_id, version, frozen_json, source, quote, created_at) VALUES(?,?,?,?,?,?)",
+                    (run["id"], version, dumps(frozen), "user", quote.strip(), now_iso()))
+        state.update_run(con, run["id"], requirements_version=version)
+        amendment_id = _record(con, run, "requirements", [], delta, run["plan_version"], run["plan_version"])
+        live = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] not in ("accepted", "cancelled", "planned")]
+        _deliver(con, state.get_run(con, run["id"]), amendment_id, live, f"requirements r{version}: {delta.strip()}",
+                 run["plan_version"])
+        state.emit(con, run, "requirements.changed", f"REQUIREMENTS r{version}: {delta.strip()[:100]}; authorization required")
+    jobs.kick(con, run["id"])
+    return Result(lines=[f"requirements r{version} recorded | authorization for r{version} required"],
+                  next='obtain user authorization, then office approve plan --quote "<user\'s words>"')
+
+
+def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan_text: str | None) -> Result:
+    current = state.current_plan(con, run["id"])
+    if current is None:
+        raise Refused("no-plan", "there is no plan to amend", next_step="office submit the plan first")
+    if AUTHORITY_TERMS.search(delta):
+        raise Refused("contract-level-change", "this delta touches the authority envelope (external, irreversible, or "
+                      "destructive action); it is not an ordinary amendment", scope=scope,
+                      next_step=f'office amend {scope} --contract -- "<request>" (and user authorization for the new action)')
+    new_text, parsed = _next_plan_text(current, plan_text, scope_ids, delta)
+    changes = _diff(con, run, parsed.tasks)
+    contract_hits = changes["contract"] + [f"{t} (new, overlapping scope)" for t in changes["overlap_new"]]
+    if parsed.requirements.get("named_actions") and parsed.requirements["named_actions"] != (current["requirements"] or {}).get("named_actions"):
+        contract_hits.append("named actions")
+    if contract_hits:
+        raise Refused("contract-level-change", f"ordinary amendments cannot change scope ownership, interfaces, or "
+                      f"authority ({', '.join(contract_hits)})", scope=scope, preserved="plan unchanged",
+                      next_step=f'office amend {scope} --contract -- "<request>"')
+    res = Result()
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        version = run["plan_version"] + 1
+        amendment_id = _record(con, run, "ordinary", scope_ids, delta, run["plan_version"], version)
+        con.execute("INSERT INTO plans(run_id, version, kind, body, tasks_json, requirements_json, created_by, created_at, "
+                    "content_hash, parent_version, amendment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (run["id"], version, "ordinary", new_text, dumps(parsed.tasks), dumps(parsed.requirements),
+                     "orchestrator", now_iso(), sha256_bytes(new_text.encode()), run["plan_version"], amendment_id))
+        sync = plans.sync_tasks(con, run, parsed.tasks, version)
+        affected = sorted(set(scope_ids) | set(sync["acceptance"]) | set(sync["contract"]))
+        if not scope_ids and not affected:
+            affected = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] not in ("accepted", "cancelled")]
+        for tid in scope_ids:
+            if tid not in sync["acceptance"]:
+                state.update_task(con, run["id"], tid, contract_version=version, acceptance_version=version)
+        state.update_run(con, run["id"], plan_version=version)
+        run = state.get_run(con, run["id"])
+        delivered = _deliver(con, run, amendment_id, affected, delta.strip(), version)
+        rereview = None
+        if plans.review_required(run) and not plans.plan_review_ended(con, run):
+            rereview = plans.queue_plan_review(con, run, version)
+        state.emit(con, run, "plan.amended", f"plan p{version} ({amendment_id}, ordinary)"
+                   + (f" | affected {', '.join(affected)}" if affected else ""), audience="runtime")
+    jobs.kick(con, run["id"])
+    parts = [f"plan p{version}", amendment_id]
+    if rereview:
+        parts.append("rereview queued")
+    if affected:
+        parts.append(f"affected {','.join(affected)}")
+    if delivered:
+        parts.append(f"delivering to {','.join(delivered)}")
+    res.add(" | ".join(parts))
+    from office import guide
+    res.next = guide.next_action(con, state.get_run(con, run["id"]))
+    return res
+
+
+def _contract(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan_text: str | None) -> Result:
+    """Contract amendments belong to the planner. In a run whose orchestrator is
+    the planner (inline mode), its edited PLAN.md is the contract amendment."""
+    if run.get("planner_mode") == "inline":
+        if plan_text is None:
+            raise Usage("no-plan-file", "edit .office/PLAN.md with the contract change first",
+                        next_step=f'edit .office/PLAN.md, then office amend {scope} --contract -- "<summary>"')
+        return _apply_contract_text(con, run, scope_ids, delta, plan_text, author="orchestrator-as-planner")
+    from office import dispatch
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        amendment_id = _record(con, run, "contract", scope_ids, delta, run["plan_version"], None)
+        graph = {t["id"]: t["depends"] for t in state.tasks(con, run["id"])}
+        targets = set(scope_ids)
+        for tid in scope_ids:
+            targets |= planfile.dependants(graph, tid)
+        if not scope_ids:
+            targets = {t["id"] for t in state.tasks(con, run["id"])}
+        paused = []
+        for t in state.tasks(con, run["id"]):
+            if t["id"] in targets and t["status"] not in ("accepted", "cancelled", "planned", "paused"):
+                state.update_task(con, run["id"], t["id"], status="paused", pause_reason=f"contract amendment {amendment_id}")
+                paused.append(t["id"])
+        dispatch.create_planner_task(con, run, contract_request=f"{amendment_id}: {delta.strip()}")
+        state.emit(con, run, "plan.contract_requested", f"contract amendment {amendment_id} requested; planner queued",
+                   audience="runtime")
+    jobs.kick(con, run["id"])
+    return Result(lines=[f"contract amendment {amendment_id} | planner P1 queued"
+                         + (f" | paused {','.join(paused)}" if paused else "")],
+                  next="no action; the revised plan returns here (unaffected work continues)")
+
+
+def _apply_contract_text(con, run, scope_ids, delta, text, author) -> Result:
+    parsed = planfile.parse(text)
+    if parsed.errors:
+        raise Refused("plan-invalid", "plan has problems: " + "; ".join(parsed.errors[:5]),
+                      next_step="fix .office/PLAN.md, then retry the amendment")
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        version = run["plan_version"] + 1
+        amendment_id = _record(con, run, "contract", scope_ids, delta, run["plan_version"], version)
+        con.execute("INSERT INTO plans(run_id, version, kind, body, tasks_json, requirements_json, created_by, created_at, "
+                    "content_hash, parent_version, amendment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (run["id"], version, "contract", text, dumps(parsed.tasks), dumps(parsed.requirements), author,
+                     now_iso(), sha256_bytes(text.encode()), run["plan_version"], amendment_id))
+        sync = plans.sync_tasks(con, run, parsed.tasks, version)
+        state.update_run(con, run["id"], plan_version=version)
+        run = state.get_run(con, run["id"])
+        affected = sorted(set(scope_ids) | set(sync["contract"]) | set(sync["acceptance"]))
+        _deliver(con, run, amendment_id, affected, delta.strip(), version)
+        flagged = _envelope_changes(con, run, parsed)
+        if plans.review_required(run):
+            plans.queue_plan_review(con, run, version, escalated=plans.plan_review_ended(con, run))
+        state.emit(con, run, "plan.amended", f"plan p{version} ({amendment_id}, contract)", audience="runtime")
+    jobs.kick(con, run["id"])
+    lines = [f"plan p{version} | {amendment_id} contract | affected {','.join(affected) or 'none'}"]
+    if flagged:
+        lines.append(f"new authority entries need user authorization: {', '.join(flagged)}")
+    return Result(lines=lines, next=('obtain user authorization, then office approve ' + flagged[0] + ' --quote "<words>"')
+                  if flagged else "exceptions only; office status")
+
+
+def contract_from_planner(con, run: dict, amendment_id: str | None, changes: dict, version: int) -> None:
+    """Deliver a planner-submitted contract revision. Caller holds tx."""
+    affected = sorted(set(changes.get("contract", [])) | set(changes.get("acceptance", [])))
+    _deliver(con, run, amendment_id or "P" + str(version), affected, f"plan p{version} contract revision", version)
+    for t in state.tasks(con, run["id"]):
+        if t["status"] == "paused" and (t.get("pause_reason") or "").startswith("contract amendment"):
+            from office import gates
+            state.update_task(con, run["id"], t["id"], status=gates.derive_status(con, run, t), pause_reason=None)
+
+
+def _envelope_changes(con, run: dict, parsed) -> list[str]:
+    old = {(e.get("action"), tuple(e.get("preconditions") or [])) for e in (run.get("envelope") or [])}
+    flagged = []
+    envelope = list(run.get("envelope") or [])
+    for a in parsed.requirements.get("named_actions") or []:
+        key = (a["action"], tuple(a.get("preconditions") or []))
+        if key not in old:
+            entry = {"id": f"X{len(envelope) + 1}", **a, "needs_authorization": True}
+            envelope.append(entry)
+            flagged.append(entry["id"])
+    if flagged:
+        state.update_run(con, run["id"], envelope=envelope)
+    return flagged
+
+
+def _next_plan_text(current: dict, plan_text: str | None, scope_ids: list[str], delta: str):
+    if plan_text and sha256_bytes(plan_text.encode()) != current["content_hash"]:
+        parsed = planfile.parse(plan_text)
+        if parsed.errors:
+            raise Refused("plan-invalid", "the edited .office/PLAN.md has problems: " + "; ".join(parsed.errors[:5]),
+                          next_step="fix .office/PLAN.md, then retry the amendment")
+        return plan_text, parsed
+    note = f"\n\n<!-- amendment -->\nAmendment ({', '.join(scope_ids) or 'plan'}): {delta.strip()}\n"
+    text = current["body"].rstrip() + note
+    return text, planfile.parse(current["body"])
+
+
+def _diff(con, run, planned: list[dict]) -> dict:
+    existing = {t["id"]: t for t in state.tasks(con, run["id"])}
+    out = {"contract": [], "overlap_new": []}
+    for p in planned:
+        cur = existing.get(p["id"])
+        if cur is None:
+            others = [t for t in existing.values() if t["status"] not in ("cancelled", "accepted")]
+            if any(planfile.scopes_overlap(p["scope"], o["scope"]) for o in others):
+                out["overlap_new"].append(p["id"])
+            continue
+        if cur["scope"] != p["scope"] or (cur["interfaces"] or []) != p["interfaces"]:
+            out["contract"].append(p["id"])
+    return out
+
+
+def _record(con, run, klass, scope_ids, delta, from_v, to_v) -> str:
+    seq = con.execute("SELECT COUNT(*) FROM amendments WHERE run_id=?", (run["id"],)).fetchone()[0] + 1
+    amendment_id = f"A{seq}"
+    con.execute("INSERT INTO amendments(id, run_id, seq, class, scope_json, delta, from_plan_version, to_plan_version, "
+                "requested_by, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (f"{run['id'][:8]}:{amendment_id}", run["id"], seq, klass, dumps(scope_ids), delta.strip(), from_v, to_v,
+                 "orchestrator", "committed", now_iso()))
+    return amendment_id
+
+
+def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, target_version: int) -> list[str]:
+    """Queue one combined delta per affected dispatched task and supersede older
+    unapplied ones. Caller holds tx."""
+    from office import dispatch, gates
+    targets = []
+    for tid in task_ids:
+        task = state.get_task(con, run["id"], tid)
+        if task is None or not task.get("current_dispatch_id") or task["status"] == "cancelled":
+            continue
+        d = state.get_dispatch(con, task["current_dispatch_id"])
+        applied = d.get("applied_plan_version") or 0
+        older = con.execute("SELECT id, content FROM deliveries WHERE run_id=? AND task_id=? AND status IN ('queued','delivered') "
+                            "ORDER BY target_version", (run["id"], tid)).fetchall()
+        combined = [r["content"] for r in older] + [f"{amendment_id} (p{target_version}): {text}"]
+        did = f"{run['id'][:8]}:{amendment_id}:{tid}"
+        for r in older:
+            con.execute("UPDATE deliveries SET status='superseded', superseded_by=? WHERE id=?", (did, r["id"]))
+        con.execute("INSERT OR REPLACE INTO deliveries(id, run_id, amendment_id, task_id, dispatch_id, target_version, status, "
+                    "content, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (did, run["id"], amendment_id, tid, d["id"], target_version, "queued",
+                     "\n".join(combined) + f"\n(from p{applied} to p{target_version})", now_iso()))
+        if task["status"] == "accepted":
+            state.update_task(con, run["id"], tid, status="changes_required", pause_reason=f"amended by {amendment_id}")
+        if gates.worker_live(con, d["id"]):
+            state.enqueue(con, run, "notify_worker", {"dispatch_id": d["id"], "task_id": tid,
+                          "text": f"AMENDMENT {amendment_id}: run office status, apply it, then office ack {amendment_id}."},
+                          dedup_key=f"notify:{did}", max_attempts=1)
+        else:
+            # The worker is gone: a fresh session starts from the current
+            # contract, so the delta is carried in its brief, not acked.
+            con.execute("UPDATE deliveries SET status='superseded', superseded_by='relaunch' WHERE id=?", (did,))
+            if task["status"] not in ("planned",):
+                dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"))
+        targets.append(tid)
+    return targets
+
+
+def pending_block(con, run: dict, dispatch_id: str) -> list[str]:
+    """Delivery rides on the worker's command responses. Marks delivered."""
+    d = state.get_dispatch(con, dispatch_id)
+    if d is None or not d.get("task_id"):
+        return []
+    rows = con.execute("SELECT * FROM deliveries WHERE run_id=? AND task_id=? AND dispatch_id=? AND status IN ('queued','delivered') "
+                       "ORDER BY target_version DESC LIMIT 1", (run["id"], d["task_id"], dispatch_id)).fetchall()
+    if not rows:
+        return []
+    r = rows[0]
+    with db.transaction(con):
+        con.execute("UPDATE deliveries SET status='delivered', delivered_at=COALESCE(delivered_at, ?), "
+                    "delivered_count=delivered_count+1 WHERE id=?", (now_iso(), r["id"]))
+    return [f"AMENDMENT {r['amendment_id']} delivered | task {r['task_id']} | plan -> p{r['target_version']}",
+            *[f"  {line}" for line in r["content"].splitlines()[:8]],
+            f"apply it at a safe boundary, then: office ack {r['amendment_id']}"]
+
+
+def ack(con, run: dict, amendment_id: str) -> Result:
+    dispatch_id = os.environ.get("OFFICE_DISPATCH_ID")
+    if not dispatch_id:
+        raise Refused("not-a-worker", "office ack is run by the worker that applied the amendment",
+                      next_step="the worker runs office ack <id> after applying it")
+    d = state.get_dispatch(con, dispatch_id)
+    amendment_id = amendment_id.upper()
+    with db.transaction(con):
+        row = con.execute("SELECT * FROM deliveries WHERE run_id=? AND task_id=? AND amendment_id=? ORDER BY created_at DESC LIMIT 1",
+                          (run["id"], d["task_id"], amendment_id)).fetchone()
+        if row is None:
+            raise Refused("unknown-amendment", f"no amendment {amendment_id} was delivered to {d['task_id']}",
+                          next_step="office status shows pending amendments")
+        if row["status"] == "applied":
+            return Result(lines=[f"{amendment_id} already applied"], next="continue; office submit when ready")
+        if row["status"] == "superseded":
+            current = con.execute("SELECT * FROM deliveries WHERE run_id=? AND task_id=? AND status IN ('queued','delivered') "
+                                  "ORDER BY target_version DESC LIMIT 1", (run["id"], d["task_id"])).fetchone()
+            nxt = f"apply {current['amendment_id']} instead, then office ack {current['amendment_id']}" if current else "office status"
+            raise Refused("amendment-superseded", f"{amendment_id} was superseded"
+                          + (f" by {current['amendment_id']}:\n{current['content']}" if current else ""),
+                          scope=d["task_id"], next_step=nxt)
+        if row["dispatch_id"] != dispatch_id:
+            raise Refused("wrong-holder", f"{amendment_id} was delivered to another session of {d['task_id']}")
+        con.execute("UPDATE deliveries SET status='applied', applied_at=?, delivered_at=COALESCE(delivered_at, ?) WHERE id=?",
+                    (now_iso(), now_iso(), row["id"]))
+        con.execute("UPDATE dispatches SET applied_plan_version=? WHERE id=?", (row["target_version"], dispatch_id))
+        state.emit(con, run, "amendment.applied", f"{d['task_id']} applied {amendment_id}", audience="runtime",
+                   task_id=d["task_id"])
+    return Result(lines=[f"{amendment_id} applied | task contract now p{row['target_version']}"],
+                  next="continue work; office submit when ready")
