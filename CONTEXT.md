@@ -83,3 +83,28 @@ _Avoid_: pass, green, done
 
 **Integration review**:
 A review of composed output, required only where one checkpoint consumes another's unmerged output or a landing combines scopes that share an interface or file.
+
+## Runtime (3.1)
+
+**Office version**:
+The exact PEP 440 identity of the runtime that owns a run (`3.1.0`, or `3.1.0+g<sha>` from a source checkout). Pinned on the run and every packet; a mismatch is rejected.
+_Avoid_: plugin version, release (unqualified)
+
+**Front door**:
+The `office` command on PATH. It resolves the target run and runs that run's pinned runtime.
+
+**Outbox job**:
+A durable unit of external work (a review, a capture, a delivery) committed in the same transaction as the state change that needs it, then run by a short-lived `office _job` process.
+_Avoid_: background task, daemon
+
+**Evidence status**:
+Whether a visual capture can be judged: `COMPARABLE`, `INVALID_COMPARISON`, `NOT_APPLICABLE` or `CAPTURE_BLOCKED`. Separate from the verdict.
+
+**Vision proof**:
+A cached result of the image-capability probe for one exact harness/model/effort/adapter route. Only a passing proof qualifies a route for visual judgment.
+
+**Model family floor**:
+The minimum model version per family for default routing (`model_family_floors`, Gemini 3.7 by default). An explicit `--route` is exempt.
+
+**Tombstone**:
+The row `office prune -f` leaves for a removed run: identity, terminal reason, archive digest.

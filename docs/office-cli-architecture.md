@@ -1,5 +1,21 @@
 # Office CLI Architecture & Agent Hook Specification
 
+> **Superseded in part by Auto Office 3.1.0** ([#157](https://github.com/Hikari9/auto-office/issues/157) ratification;
+> implementation notes in [`v31-implementation.md`](v31-implementation.md)). Where this document disagrees, 3.1 wins:
+>
+> - **Distribution**: the package is `auto-office` (import `office`, command `office`), installed with
+>   `uv tool install auto-office`, not `office-skills`.
+> - **State authority**: `runs.db` is the only authority for 3.1 runs. Session bindings, events, cursors,
+>   amendments and deliveries are tables in it; `.office/sessions/*.json`, `state.json` and `events.jsonl` are not
+>   written for 3.1 runs.
+> - **Command surface (§2.6)**: the canonical CLI is `start`, `resume`, `status`, `dispatch <task>... [--parallel]`,
+>   `submit`, `amend`, `ack`, `close`, plus `list`, `inspect`, `doctor`, `prune [-f]`. `office events`, `office spoke`
+>   and `office route` are not user commands (routing, spokes and events are runtime-internal; `office inspect`
+>   shows them). `dispatch` takes task ids, not a role. There is no `office next`; every command ends with `next:`.
+> - **`office approve` and `office raw` (§2.7)** are compatibility surfaces through 3.1.x and are removed in 3.2.0.
+> - **Version pinning**: every run and packet carries `office_version`; the front door runs the pinned runtime and
+>   fails with an actionable blocker when it is not installed.
+
 ## 1. Purpose and Scope
 
 ### 1.1 Goal
