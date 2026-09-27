@@ -90,5 +90,12 @@ uv venv && uv pip install -e '.[visual,test]'
 python3 scripts/check_ecosystem.py
 ```
 
+There is no remote CI. Validation runs locally as a pre-push hook; enable it once per clone:
+
+```bash
+git config core.hooksPath .githooks   # pre-push: PR guard + scripts/validate.sh
+scripts/validate.sh                   # run by hand; VALIDATE_BUILD=1 also builds the wheel
+```
+
 Tests run every agent through scripted fake harness binaries in isolated data and state homes;
 they never touch `~/.local` or a real model.

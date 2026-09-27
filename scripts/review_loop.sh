@@ -238,7 +238,7 @@ while [[ $iter -lt $MAX_ITERATIONS ]]; do
   verify_args=(--worktree "$WORKTREE" --dispatch-id "$DISPATCH_ID" --state-dir "$STATE_DIR" --db "$DB")
   if [[ -n "$PACKET" ]]; then verify_args+=(--packet "$PACKET"); fi
   verify_out=$("$VERIFY_SCRIPT" "${verify_args[@]}")
-  # Parsed with python3, not jq. jq is not a declared dependency -- validate.yml installs only
+  # Parsed with python3, not jq. jq is not a declared dependency -- the test extras install only
   # pyyaml, jsonschema and pytest -- and a jq-less host silently produced an empty reason, which
   # put the loop straight back on the path that labels an unverifiable run as abandoned. The
   # line below it already carried a grep fallback for exactly that case; this one did not.

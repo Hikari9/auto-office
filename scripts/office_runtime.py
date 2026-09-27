@@ -234,7 +234,7 @@ def route(request: dict) -> dict:
         try:
             # Both parents, because neither is guaranteed to be on sys.path: pytest puts
             # the repo root there, but `python3 tests/test_schemas.py` -- which is exactly
-            # how .github/workflows/validate.yml invokes it -- puts only tests/ there, and
+            # how scripts/validate.sh invokes it -- puts only tests/ there, and
             # the shim then degraded to routing_module_unavailable in CI while passing
             # locally under pytest.
             _here = os.path.dirname(os.path.abspath(__file__))
