@@ -25,6 +25,20 @@ ends with a `next:` line naming the next legal action.
 - A run stays on the Office version that created it. If a command says a run is pinned to another
   runtime (including a 3.0 run), follow the instruction it prints.
 
+## Asking the user
+
+Take every decision to the user through the harness's native question tool when it has one, not
+free text in chat: intake questions, plan `## Questions`, plan/merge/trust/waive authorization,
+escalations, and route notices. Show the plan or notice first; the tool carries the decision.
+- Claude Code: `AskUserQuestion` (1-4 questions, 2-4 options each; list your recommendation first
+  with "(Recommended)" in its label; "Other" is added automatically).
+- Codex: `request_user_input`, when the session exposes it.
+- Antigravity (`agy`): `ask_question`.
+- Hermes: `clarify` (up to 4 choices; "Other" is added automatically).
+- Any other harness, or when the tool is unavailable: concise numbered plain-text questions in one batch.
+
+`--quote` records the user's selected answer or typed words verbatim, whichever tool carried them.
+
 ## Install check (every session, before anything else)
 
 Run `office --version`. This skill's directory is the `auto-office` package, so it is the install source.
@@ -45,8 +59,8 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 3. If the output says a planner was queued, wait (`office status`). Otherwise you plan inline:
    interview the user directly for anything you would otherwise guess, write `.office/PLAN.md`
    (format: `office submit --help`), then `office submit`.
-4. When `next:` asks for authorization, show the user the plan and requirements, get their
-   answer, and record it: `office approve plan --quote "<their words>"`.
+4. When `next:` asks for authorization, show the user the plan and requirements, ask for their
+   decision (see Asking the user), and record it: `office approve plan --quote "<their words>"`.
 
 ## Execute
 

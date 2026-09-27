@@ -329,3 +329,17 @@ class TestReviewTierVocabularyMatchesT0Schema(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestNativeQuestionTool(unittest.TestCase):
+    """User decisions go through the harness's native question tool, with a plain-text fallback,
+    and the recorded --quote stays the user's own words or selected answer."""
+
+    def test_skill_maps_native_question_tool_per_harness(self):
+        text = (ROOT / 'SKILL.md').read_text(encoding='utf-8')
+        section = text[text.index('## Asking the user'):text.index('## Install check')]
+        self.assertRegex(section, r'native question tool')
+        self.assertRegex(section, r'Claude Code: `AskUserQuestion`')
+        self.assertRegex(section, r'"\(Recommended\)"')
+        self.assertRegex(section, r'plain-text questions')
+        self.assertRegex(section, r'`--quote` records the user.s selected answer or typed words verbatim')

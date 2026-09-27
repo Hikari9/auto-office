@@ -108,3 +108,12 @@ def test_dispatch_returns_while_the_worker_is_still_running(env):
             break
         time.sleep(1)
     assert data["data"]["tasks"]["T1"] == "accepted", data
+
+
+def test_user_authorization_next_names_native_question_tool(env):
+    start_inline(env)
+    code, data = env.ojson("status")
+    assert "ask the user (native question tool)" in data["next"], data["next"]
+    assert "office approve plan --quote" in data["next"], data["next"]
+    code, out = env.office("dispatch", "T1")
+    assert code == 4 and "native question tool" in out, out

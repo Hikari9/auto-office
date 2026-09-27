@@ -49,7 +49,7 @@ def next_action(con, run: dict) -> str:
     plan = state.current_plan(con, run["id"])
     from office import planfile
     if planfile.parse(plan["body"]).questions and not plans._answered(con, run):
-        return 'relay the plan questions to the user, then office amend plan --contract -- "<answers>"'
+        return 'ask the user the plan questions (native question tool), then office amend plan --contract -- "<answers>"'
     rs = plans.review_state(con, run)
     if rs["required"] and not rs["ended"] and rs["first_verdict"] is None:
         return "no action; plan review is running"
@@ -60,10 +60,10 @@ def next_action(con, run: dict) -> str:
             'request the fix: office amend plan --contract -- "<fix>"' if run.get("planner_mode") == "dedicated"
             else "fix .office/PLAN.md, then office amend plan --contract -- \"<fix>\"")
     if not state.active_authorization(con, run, "plan"):
-        return f'obtain user authorization for r{run["requirements_version"]}, then office approve plan --quote "<user\'s words>"'
+        return f'ask the user (native question tool) for authorization of r{run["requirements_version"]}, then office approve plan --quote "<user\'s words>"'
     for e in run.get("envelope") or []:
         if e.get("needs_authorization"):
-            return f'new authority entry {e["id"]} ({e["action"]}) needs the user: office approve {e["id"]} --quote "<words>"'
+            return f'new authority entry {e["id"]} ({e["action"]}) needs authorization: ask the user (native question tool), then office approve {e["id"]} --quote "<words>"'
     tasks = state.tasks(con, run["id"])
     c = _counts(tasks)
     for status in ("blocked", "paused"):

@@ -231,7 +231,7 @@ def require_dispatchable(con, run: dict) -> None:
     if not state.active_authorization(con, run, "plan"):
         raise Refused("authorization-required",
                       f"requirements r{run['requirements_version']} are not authorized by the user", scope="run",
-                      preserved="the plan", next_step='obtain user authorization, then office approve plan --quote "<user\'s words>"')
+                      preserved="the plan", next_step='ask the user (native question tool) for authorization, then office approve plan --quote "<user\'s words>"')
     rs = review_state(con, run)
     if rs["required"] and not rs["ended"]:
         if rs["first_verdict"] is None:
