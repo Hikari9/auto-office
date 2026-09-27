@@ -29,7 +29,9 @@ _REQUIRED_OVERRIDE_FIELDS = (
 
 
 def candidate_id(c):
-    return f"{c.get('harness')}@{c.get('harness_version')}/{c.get('model_id')}@{c.get('effort')}"
+    """Route identity `harness@major/model_id@effort`. Trust keys on the harness major,
+    so a point release never resets it; the full `harness_version` stays in disclosure."""
+    return f"{c.get('harness')}@{scoring.harness_major(c.get('harness_version'))}/{c.get('model_id')}@{c.get('effort')}"
 
 
 def preferred_rank(c, preferred_seed):

@@ -30,6 +30,27 @@ EFFORT_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3, "xhigh": 4, "max": 5
 
 _EVIDENCE_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
+_MAJOR_RE = re.compile(r"^v?(\d+)(?:[.\-+].*)?$")
+_TRIPLE_RE = re.compile(r"^(?P<harness>[^@/]+)@(?P<version>[^/]*)/(?P<rest>.+)$")
+
+
+def harness_major(version: Any) -> str:
+    """The harness version that identity and trust key on: the major number only.
+    `agy 1.2.11` and `agy 1.2.12` are one route; so are `codex 0.155` and `0.157`.
+    Non-numeric labels (`local`, `cli`, `unknown`) pass through unchanged, so they never
+    silently inherit trust recorded under a real major."""
+    text = "" if version is None else str(version).strip()
+    m = _MAJOR_RE.match(text)
+    return m.group(1) if m else (text or "unknown")
+
+
+def normalize_triple(triple: str) -> str:
+    """Rewrites `harness@version/model@effort` so its version is the major number."""
+    m = _TRIPLE_RE.match(triple or "")
+    if not m:
+        return triple
+    return f"{m.group('harness')}@{harness_major(m.group('version'))}/{m.group('rest')}"
+
 _FAILURE_LABELS = ("recurrence_failure", "material_post_merge_defect")
 
 # §7.3.1's mapping table: (stored label, narrative:* tag or None for "no tag / default").
@@ -91,11 +112,15 @@ def evaluate_trust_state(con: sqlite3.Connection, target_triple: str) -> tuple[i
     `adapter_trust_acts` row for this exact triple, and only when no qualifying failure
     currently stands -- a standing quarantine is never cleared by any act.
     """
+    # Rows recorded under any release of the same harness major count as this route,
+    # including rows stored with a full version before identity keyed on the major.
+    target_triple = normalize_triple(target_triple)
     cur = con.cursor()
-    dispatch_rows = cur.execute(
-        "SELECT id, attribution FROM dispatches WHERE triple = ?", (target_triple,)
-    ).fetchall()
-    attribution_by_dispatch = {row[0]: row[1] for row in dispatch_rows}
+    attribution_by_dispatch = {
+        row[0]: row[1]
+        for row in cur.execute("SELECT id, attribution, triple FROM dispatches").fetchall()
+        if normalize_triple(row[2] or "") == target_triple
+    }
 
     qualifying: set[str] = set()
     if attribution_by_dispatch:
@@ -146,16 +171,48 @@ def evaluate_trust_state(con: sqlite3.Connection, target_triple: str) -> tuple[i
         # standing failure always wins over any trust act, however recent.
         return (critical_failures, "quarantined")
 
-    act_row = cur.execute(
-        "SELECT target_state FROM adapter_trust_acts WHERE triple = ? "
-        "ORDER BY recorded_at DESC, rowid DESC LIMIT 1",
-        (target_triple,),
-    ).fetchone()
+    act_row = next(
+        (
+            row[0]
+            for row in cur.execute(
+                "SELECT target_state, triple FROM adapter_trust_acts "
+                "ORDER BY recorded_at DESC, rowid DESC"
+            ).fetchall()
+            if normalize_triple(row[1] or "") == target_triple
+        ),
+        None,
+    )
     if act_row:
-        return (0, act_row[0])
+        return (0, act_row)
+    # A local act always wins; absent one, the shipped baseline is itself a recorded
+    # act (a reviewed, committed grant), so it may supply `proven` for a fresh install.
+    baseline = trust_baseline().get(target_triple)
+    if baseline:
+        return (0, baseline)
     # The floor, absent any explicit trust act and any qualifying failure, is
     # valid-unverified -- never proven, no matter how many successes accumulated.
     return (0, "valid-unverified")
+
+
+def trust_baseline() -> dict[str, str]:
+    """`catalog/trust-baseline.yaml`: triple -> target_state for routes the maintainers
+    verified across real runs. Shipped with the plugin so a new install starts from
+    verified agents instead of an empty `adapter_trust_acts` log."""
+    import yaml
+
+    from office import paths
+
+    path = paths.resources_root() / "catalog" / "trust-baseline.yaml"
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except OSError:
+        return {}
+    out = {}
+    for entry in data.get("routes") or []:
+        state = entry.get("target_state")
+        if state in ("valid-unverified", "proven") and entry.get("triple"):
+            out[normalize_triple(entry["triple"])] = state
+    return out
 
 
 def ensure_trust_schema(con: sqlite3.Connection) -> None:
@@ -206,6 +263,7 @@ def record_trust_act(
             "(>=10 non-whitespace characters)"
         )
 
+    triple = normalize_triple(triple.strip())
     con = sqlite3.connect(str(db_path))
     try:
         ensure_trust_schema(con)
@@ -304,11 +362,15 @@ def compute_local_reward(con: sqlite3.Connection, target_triple: str) -> float |
     result is their mean; this aggregation rule is not pinned by the contract text
     (which speaks of a single R per triple) and is called out in the T2B landing.
     """
+    target_triple = normalize_triple(target_triple)
     cur = con.cursor()
-    dispatch_rows = cur.execute(
-        "SELECT id, money_estimate, money_actual FROM dispatches WHERE triple = ?",
-        (target_triple,),
-    ).fetchall()
+    dispatch_rows = [
+        row[:3]
+        for row in cur.execute(
+            "SELECT id, money_estimate, money_actual, triple FROM dispatches"
+        ).fetchall()
+        if normalize_triple(row[3] or "") == target_triple
+    ]
     if not dispatch_rows:
         return None
     budget_by_dispatch = {row[0]: (row[1], row[2]) for row in dispatch_rows}
