@@ -98,9 +98,11 @@ catalog, installed adapters, capability proofs, and a live quota probe, then cal
 unchanged), takes one fenced lease per task scope (overlapping live scopes are refused), creates
 the worktree, writes the packet and brief, and queues the launch. Workers launch through
 `office _supervise`, which records every ending: `success`, `nonzero`, `signal`,
-`launch_failed`, `supervisor_error`. Inside Herdr (`HERDR_ENV=1`) the supervisor runs in the run's
-own Herdr tab so delegations stay visible; a launch that does not start within 45 s falls back to
-a plain process.
+`launch_failed`, `supervisor_error`. Inside Herdr (`HERDR_ENV=1`) the supervisor runs in a pane
+split to the right of the caller's pane (`HERDR_PANE_ID`) in the tab the user is watching, with
+further dispatches reusing an idle Office pane or stacking down in that column. Closing the run
+closes only those panes. Without a caller pane, the run gets its own tab. A launch that does not
+start within 45 s falls back to a plain process.
 
 A worker that exits without submitting is relaunched up to `verification.environment_retry_max`
 times, then its task is blocked with its worktree preserved. Findings reach a live worker on its

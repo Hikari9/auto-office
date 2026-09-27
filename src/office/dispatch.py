@@ -386,7 +386,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         return _wait_terminal(dispatch["id"], timeout=5) if wait else {"launcher": "sync"}
     use_herdr = (launcher in ("auto", "herdr") and os.environ.get("HERDR_ENV") == "1" and shutil.which("herdr"))
     if use_herdr:
-        pane = _herdr_pane(run, cwd)
+        pane = _herdr_pane(run, cwd, label=f"office {dispatch.get('role') or kind} {dispatch['id']}")
         if pane:
             # The pane's shell does not inherit this process's environment, and
             # a long command line is truncated by the terminal: write a short
@@ -428,19 +428,65 @@ def _herdr_json(args: list[str]) -> dict:
         return {}
 
 
-def _herdr_pane(run: dict, cwd: Path) -> str | None:
-    """A pane in this run's own Herdr tab: reuse a pane whose last dispatch
-    ended, else split inside the tab. The user's own panes are never split."""
-    anchor = os.environ.get("OFFICE_HERDR_ANCHOR")
-    if anchor:
-        res = _herdr_json(["pane", "split", "--pane", anchor, "--direction", "right", "--cwd", str(cwd), "--no-focus"])
-        return (res.get("pane") or {}).get("pane_id")
+def _herdr_pane(run: dict, cwd: Path, label: str | None = None) -> str | None:
+    """A visible Herdr pane for a dispatch, split beside the caller's own pane.
+
+    The first dispatch splits the orchestrator's pane (`HERDR_PANE_ID`, or
+    `OFFICE_HERDR_ANCHOR` when set) to the right, so the agent appears in the
+    tab the user is watching. Later dispatches reuse a pane whose dispatch has
+    ended, else stack down in that column. The caller's pane is only ever split,
+    never run in or closed. Without a caller pane, the run gets its own tab."""
     tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
-    tab = json.loads(tab_file.read_text()) if tab_file.is_file() else None
+    layout = json.loads(tab_file.read_text()) if tab_file.is_file() else None
+    anchor = os.environ.get("OFFICE_HERDR_ANCHOR") or os.environ.get("HERDR_PANE_ID")
+    if layout and layout.get("mode") != "split" or (layout is None and not anchor):
+        pane = _herdr_own_tab_pane(run, cwd, tab_file, layout)
+    else:
+        pane = _herdr_split_pane(run, cwd, tab_file, layout, anchor)
+    if pane and label:
+        subprocess.run(["herdr", "pane", "rename", pane, label], capture_output=True, timeout=30)
+    return pane
+
+
+def _busy_panes(run: dict) -> set:
+    con = db.connect()
+    try:
+        return {r["pane_id"] for r in con.execute("SELECT pane_id FROM dispatches WHERE run_id=? AND launcher='herdr' "
+                                                  "AND status IN ('launching','running')", (run["id"],)).fetchall()}
+    finally:
+        con.close()
+
+
+def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None, anchor: str | None) -> str | None:
+    layout = layout or {"mode": "split", "anchor": anchor, "panes": []}
+    anchor = layout.get("anchor") or anchor
+    live = [p for p in layout["panes"] if _herdr_json(["pane", "get", p])]  # the user may close panes
+    busy = _busy_panes(run)
+    for pane in live:
+        if pane not in busy:
+            subprocess.run(["herdr", "pane", "run", pane, f"cd {shlex.quote(str(cwd))}"], capture_output=True, timeout=30)
+            layout["panes"] = live
+            atomic_write_json(tab_file, layout)
+            return pane
+    # Split the caller's pane vertically (side by side); stack further agents in that column.
+    target, direction = (live[-1], "down") if live else (anchor, "right")
+    res = _herdr_json(["pane", "split", "--pane", target, "--direction", direction, "--cwd", str(cwd), "--no-focus"])
+    info = res.get("pane") or {}
+    pane = info.get("pane_id")
+    if not pane:
+        return None
+    layout["panes"] = live + [pane]
+    layout.setdefault("tab_id", info.get("tab_id"))
+    atomic_write_json(tab_file, layout)
+    return pane
+
+
+def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None) -> str | None:
+    """No caller pane to split (or a run begun before split mode): a tab owned by the run."""
     if tab and not _herdr_json(["tab", "get", tab["tab_id"]]):
         tab = None  # the user closed it
     if tab is None:
-        workspace = (os.environ.get("HERDR_PANE_ID") or "").split(":")[0]
+        workspace = (os.environ.get("HERDR_WORKSPACE_ID") or os.environ.get("HERDR_PANE_ID") or "").split(":")[0]
         args = ["tab", "create", "--label", f"office-{run['id'][:8]}", "--cwd", str(cwd), "--no-focus"]
         if workspace:
             args[2:2] = ["--workspace", workspace]
@@ -448,15 +494,10 @@ def _herdr_pane(run: dict, cwd: Path) -> str | None:
         root = (res.get("root_pane") or {}).get("pane_id")
         if not root:
             return None
-        tab = {"tab_id": (res.get("tab") or {}).get("tab_id"), "panes": [root]}
+        tab = {"mode": "tab", "tab_id": (res.get("tab") or {}).get("tab_id"), "panes": [root]}
         atomic_write_json(tab_file, tab)
         return root
-    con = db.connect()
-    try:
-        busy = {r["pane_id"] for r in con.execute("SELECT pane_id FROM dispatches WHERE run_id=? AND launcher='herdr' "
-                                                  "AND status IN ('launching','running')", (run["id"],)).fetchall()}
-    finally:
-        con.close()
+    busy = _busy_panes(run)
     for pane in tab["panes"]:
         if pane not in busy:
             subprocess.run(["herdr", "pane", "run", pane, f"cd {shlex.quote(str(cwd))}"], capture_output=True, timeout=30)
@@ -471,11 +512,16 @@ def _herdr_pane(run: dict, cwd: Path) -> str | None:
 
 
 def close_herdr_tab(run: dict) -> None:
+    """Close what the run created: its panes in the caller's tab, or its own tab."""
     tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
     if tab_file.is_file() and shutil.which("herdr"):
         try:
             tab = json.loads(tab_file.read_text())
-            subprocess.run(["herdr", "tab", "close", tab["tab_id"]], capture_output=True, timeout=30)
+            if tab.get("mode") == "split":
+                for pane in tab.get("panes") or []:
+                    subprocess.run(["herdr", "pane", "close", pane], capture_output=True, timeout=30)
+            else:
+                subprocess.run(["herdr", "tab", "close", tab["tab_id"]], capture_output=True, timeout=30)
         except (OSError, ValueError, subprocess.SubprocessError, KeyError):
             pass
 
