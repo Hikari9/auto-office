@@ -10,7 +10,7 @@ import signal
 from pathlib import Path
 
 from office import config as cfg
-from office import db, discovery, jobs, legacy, paths, state, version
+from office import db, discovery, jobs, legacy, paths, scoring, state, version
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, new_run_id, now_iso, pid_alive, sha256_obj, short
@@ -175,6 +175,7 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
         if state.is_terminal(current):
             return Result(lines=[f"{short(run['id'])} already {current['phase']}"], next=None)
         receipt = _archive_receipt(con, current, landing, handoff)
+        scoring.label_run_outcomes(con, run["id"], "closed")
         state.update_run(con, run["id"], phase="closed", terminal_at=now_iso(), terminal_reason="closed",
                          archive_digest=receipt["digest"], landing={**landing, "handoff": handoff})
         state.emit(con, current, "run.closed", f"run closed, archive {receipt['digest'][7:19]}")
@@ -201,6 +202,7 @@ def abandon(con, run: dict, reason: str) -> Result:
         for row in live:
             con.execute("UPDATE dispatches SET status='cancelled', ended_at=? WHERE id=?", (now_iso(), row["id"]))
         receipt = _archive_receipt(con, current, {"status": "abandoned"}, None)
+        scoring.label_run_outcomes(con, run["id"], "abandoned")
         state.update_run(con, run["id"], phase="abandoned", terminal_at=now_iso(),
                          terminal_reason=reason.strip()[:500], archive_digest=receipt["digest"])
         state.emit(con, current, "run.abandoned", f"run abandoned: {reason.strip()[:80]}")
