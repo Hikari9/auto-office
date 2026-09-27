@@ -1,9 +1,12 @@
 ---
 name: auto-execution
-description: Internal Auto Office v3 execution spoke. Use after an accepted plan to validate execution packets, acquire mutable role/write-scope ownership, dispatch executors or workers through the selected harness adapter, enforce protected paths and blast-radius limits, handle takeover/version checks, self-review mutations, and return durable evidence without widening scope.
+description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use the office CLI). Internal Auto Office v3 execution spoke. Use after an accepted plan to validate execution packets, acquire mutable role/write-scope ownership, dispatch executors or workers through the selected harness adapter, enforce protected paths and blast-radius limits, handle takeover/version checks, self-review mutations, and return durable evidence without widening scope.
 ---
 
 # Auto Execution
+
+> **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
+> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
 
 Before dispatch, validate both the run envelope and execution packet. Reject missing/contradictory mandatory fields. Require the router's `selection_disclosure`, publish it to the user before launching the executor/worker, and preserve it in the dispatch record and readback.
 

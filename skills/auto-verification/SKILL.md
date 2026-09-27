@@ -1,9 +1,12 @@
 ---
 name: auto-verification
-description: Internal Auto Office v3 verification spoke. Use to build or execute the verification floor for mutable work, choose targeted/regression/static/build/runtime checks, prove known-bad inputs fail critical gates, run browser acceptance flows for user-facing work, and package validation evidence for independent review and closeout.
+description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use the office CLI). Internal Auto Office v3 verification spoke. Use to build or execute the verification floor for mutable work, choose targeted/regression/static/build/runtime checks, prove known-bad inputs fail critical gates, run browser acceptance flows for user-facing work, and package validation evidence for independent review and closeout.
 ---
 
 # Auto Verification
+
+> **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
+> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
 
 Every mutable run self-verifies. Add independent verification when risk, gear, playbook, repository policy, or acceptance path requires it.
 

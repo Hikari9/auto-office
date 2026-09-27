@@ -1,9 +1,12 @@
 ---
 name: auto-self-improve
-description: Internal Auto Office v3 self-improvement primitive. Use only to create isolated learned-pattern or catalog/policy proposal work from historical evidence after deterministic sanitization, replay/evals where required, privacy lint, deterministic proposal identity, independent review, and lineage metadata.
+description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use the office CLI). Internal Auto Office v3 self-improvement primitive. Use only to create isolated learned-pattern or catalog/policy proposal work from historical evidence after deterministic sanitization, replay/evals where required, privacy lint, deterministic proposal identity, independent review, and lineage metadata.
 ---
 
 # Auto Self Improve
+
+> **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
+> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
 
 Work in a separate worktree/branch from the family whose policy is pinned.
 
