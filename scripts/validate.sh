@@ -5,6 +5,10 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
+# A git hook exports GIT_DIR, GIT_INDEX_FILE and friends. Tests that run git inside their
+# own temp fixture repos would inherit them and commit onto the branch being pushed.
+unset $(git rev-parse --local-env-vars)
+
 # Same install as the old CI job: an editable package plus test deps, in a repo-local venv.
 # A user-site install is not enough: some tests point HOME at a temp dir, which hides it.
 # pip is configured for --user installs on some hosts, which a venv (and build's isolated env) rejects.
