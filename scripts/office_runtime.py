@@ -2104,7 +2104,101 @@ def cmd_reuse_plan(args):
     return 0
 
 
+# --------------------------------------------------------------------------
+# Auto Office 3.1 compatibility guard (3.1.x only; removed in 3.2.0).
+#
+# This file is the retained 3.0 helper surface. A run created by Auto Office
+# 3.1 is owned by runs.db, so a helper here must never write it. A 3.0 run is
+# pinned to the plugin commit that started it and is served by exactly that
+# commit, materialized from git history, never by newer code.
+# --------------------------------------------------------------------------
+_V31_READ_ONLY = {"state-load", "family-show", "family-list", "list-events", "completion-status",
+                  "check-spoke", "check-route-defects", "lease-check", "validate-packet", "validate-adapter",
+                  "validate-checkpoint", "validate-landing", "validate-review", "hash", "maturity", "privacy-lint"}
+
+
+def _pin_guard(argv):
+    if os.environ.get("OFFICE_PINNED_LEGACY") or os.environ.get("OFFICE_RAW_PASSTHROUGH") == "1" and "--state-dir" not in argv:
+        return None
+    cmd = argv[0] if argv else ""
+    state_dir = None
+    for i, a in enumerate(argv):
+        if a == "--state-dir" and i + 1 < len(argv):
+            state_dir = argv[i + 1]
+    if cmd in ("start", "new-run") and not os.environ.get("OFFICE_PINNED_LEGACY"):
+        _compat_record(cmd, argv, None, "refused-new-run")
+        dump_json({"error": "new_runs_use_office", "message": "Auto Office 3.1 creates new runs: office start \"<goal>\". "
+                   "This helper serves only runs that 3.0 already started."})
+        return 5
+    if not state_dir:
+        return None
+    try:
+        state = json.loads((Path(state_dir).expanduser() / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = None
+    if isinstance(state, dict) and (state.get("_authority") == "runs.db" or state.get("office_version")):
+        if cmd in _V31_READ_ONLY:
+            return None
+        _compat_record(cmd, argv, state.get("run_id"), "refused-3.1-run")
+        dump_json({"error": "owned_by_office_3_1", "run_id": state.get("run_id"),
+                   "message": "this run is owned by runs.db under Auto Office 3.1; legacy helpers cannot write it",
+                   "use": "office status / office submit / office amend / office close"})
+        return 5
+    if isinstance(state, dict) and state.get("plugin_commit"):
+        pinned = str(state["plugin_commit"])
+        here = os.environ.get("AUTO_OFFICE_PLUGIN_COMMIT") or _start_plugin_commit()
+        if pinned != here and len(pinned) >= 7 and all(c in "0123456789abcdef" for c in pinned):
+            retained = _retained_legacy_runtime(pinned)
+            if retained is None:
+                dump_json({"error": "pinned_runtime_unavailable", "plugin_commit": pinned,
+                           "message": "this 3.0 run is pinned to a plugin commit that is not available here",
+                           "next": f"git -C <auto-office checkout> archive {pinned[:12]} | tar -x -C <dir>, then retry"})
+                return 5
+            env = dict(os.environ, OFFICE_PINNED_LEGACY="1", AUTO_OFFICE_PLUGIN_COMMIT=pinned)
+            os.execve(sys.executable, [sys.executable, str(retained / "scripts" / "office_runtime.py"), *argv], env)
+    return None
+
+
+def _retained_legacy_runtime(commit):
+    base = Path(os.environ.get("OFFICE_DATA_HOME") or Path.home() / ".local" / "share" / "auto-office") / "runtimes"
+    target = base / f"legacy-{commit[:12]}"
+    if (target / "scripts" / "office_runtime.py").is_file():
+        return target
+    try:
+        proc = subprocess.run(["git", "-C", str(ROOT), "archive", "--format=tar", commit], capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    import tarfile
+    staging = target.with_name(target.name + ".partial")
+    staging.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tar:
+        tar.extractall(staging, filter="data")
+    staging.rename(target)
+    return target
+
+
+def _compat_record(cmd, argv, run_id, outcome):
+    try:
+        base = Path(os.environ.get("OFFICE_DATA_HOME") or Path.home() / ".local" / "share" / "auto-office")
+        db = Path(os.environ.get("AUTO_OFFICE_RUNS_DB") or base / "runs.db")
+        con = sqlite3.connect(str(db), timeout=10)
+        con.execute("CREATE TABLE IF NOT EXISTS compat_calls(id TEXT PRIMARY KEY, at TEXT NOT NULL, office_version TEXT NOT NULL, "
+                    "run_id TEXT, command TEXT NOT NULL, argv_json TEXT NOT NULL, caller TEXT, outcome TEXT NOT NULL)")
+        con.execute("INSERT INTO compat_calls VALUES(?,?,?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), datetime.now(timezone.utc).isoformat(), "3.0-helper", run_id, cmd,
+                     json.dumps(argv), os.environ.get("AI_AGENT"), outcome))
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+
 def main():
+    guard = _pin_guard(sys.argv[1:])
+    if guard is not None:
+        sys.exit(guard)
     p=argparse.ArgumentParser(description='Auto Office v3 deterministic runtime helpers')
     sp=p.add_subparsers(dest='cmd',required=True)
     q=sp.add_parser('validate-packet'); q.add_argument('--kind',choices=['execution','envelope'],required=True); q.add_argument('file'); q.set_defaults(func=cmd_validate_packet)

@@ -1,0 +1,132 @@
+"""Harness adapters: how to launch a routed role on an installed harness.
+
+A seed adapter's `office_profiles` describe three launch forms:
+
+- `worker`: planner/executor. May edit its own worktree and run commands.
+- `reviewer`: read-only review whose final message is the verdict.
+- `vision`: read-only review with image evidence attached.
+
+A profile existing is not proof the route works. Visual capability counts only
+after an image-sensitive conformance probe of the exact harness/model/effort
+path passes (office.conformance).
+"""
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+import time
+from pathlib import Path
+
+import yaml
+
+from office import paths
+from office.util import atomic_write_json, sha256_obj
+
+PROFILE_KINDS = ("worker", "reviewer", "vision")
+_VERSION_TTL_SECONDS = 6 * 3600
+
+
+class AdapterError(RuntimeError):
+    pass
+
+
+def adapter_dir() -> Path:
+    return paths.resources_root() / "adapters" / "seed"
+
+
+def load_all() -> dict[str, dict]:
+    out = {}
+    for p in sorted(adapter_dir().glob("*.yaml")):
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        out[data.get("id", p.stem)] = data
+    return out
+
+
+def adapter_hash(adapter: dict) -> str:
+    return sha256_obj(adapter)
+
+
+def profile(adapter: dict, kind: str) -> dict | None:
+    return (adapter.get("office_profiles") or {}).get(kind)
+
+
+def executable(adapter: dict) -> str | None:
+    return (adapter.get("invocation") or {}).get("executable")
+
+
+def installed(adapter: dict) -> bool:
+    exe = executable(adapter)
+    return bool(exe and shutil.which(exe))
+
+
+def harness_version(adapter: dict) -> str | None:
+    """`<harness> --version`, cached briefly so routing does not fork per call."""
+    exe = executable(adapter)
+    if not exe or not shutil.which(exe):
+        return None
+    cache_path = paths.data_home() / "harness-versions.json"
+    try:
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    entry = cache.get(exe)
+    now = time.time()
+    if entry and now - entry.get("at", 0) < _VERSION_TTL_SECONDS:
+        return entry.get("version")
+    cmd = (adapter.get("version_fingerprint") or {}).get("command") or [exe, "--version"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        text = (proc.stdout or proc.stderr).strip().splitlines()
+        raw = text[0] if text else ""
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"\d+\.\d+(\.\d+)?", raw)
+    version = match.group(0) if match else (raw or None)
+    cache[exe] = {"version": version, "at": now}
+    try:
+        atomic_write_json(cache_path, cache)
+    except OSError:
+        pass
+    return version
+
+
+def effort_value(adapter: dict, effort: str) -> str | None:
+    mapping = adapter.get("effort_mapping") or {}
+    return mapping.get(effort, effort)
+
+
+def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
+               output: Path | None = None, images: list[Path] | None = None,
+               include_dirs: list[Path] | None = None) -> tuple[list[str], dict]:
+    """Return (argv, profile). Placeholders are substituted element-wise; the
+    prompt never passes through a shell."""
+    prof = profile(adapter, kind)
+    if not prof:
+        raise AdapterError(f"adapter {adapter.get('id')} has no {kind} profile")
+    exe = executable(adapter)
+    mapped_effort = effort_value(adapter, effort)
+    argv = [exe]
+    for raw in prof.get("argv") or []:
+        arg = str(raw)
+        if arg == "{images}":
+            for image in images or []:
+                for piece in prof.get("image_arg") or []:
+                    argv.append(str(piece).replace("{image}", str(image)))
+            continue
+        if arg == "{include_dirs}":
+            for d in include_dirs or []:
+                for piece in prof.get("include_arg") or []:
+                    argv.append(str(piece).replace("{dir}", str(d)))
+            continue
+        if "{effort}" in arg and mapped_effort is None:
+            # This harness has no knob for this effort: drop the flag and the
+            # value that follows it, rather than passing a literal 'None'.
+            if argv and argv[-1].startswith("-"):
+                argv.pop()
+            continue
+        arg = (arg.replace("{model}", model).replace("{effort}", mapped_effort or "")
+               .replace("{cwd}", str(cwd)).replace("{output}", str(output or "")))
+        argv.append(arg)
+    return argv, prof
