@@ -1,0 +1,209 @@
+"""Herdr dispatch starts the real agent: `herdr agent start` + `agent prompt`, never `sh launch.sh`."""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+from conftest import start_inline
+
+FAKE_HERDR = r'''#!{python}
+import json, os, sys
+state = os.environ["FAKE_HERDR_STATE"]
+data = json.load(open(state)) if os.path.exists(state) else {{"calls": [], "n": 0, "get": []}}
+args = sys.argv[1:]
+data["calls"].append(args)
+result = {{}}
+code = 0
+if args[:2] == ["pane", "split"]:
+    data["n"] += 1
+    result = {{"pane": {{"pane_id": "w1:p%d" % (100 + data["n"]), "tab_id": "w1:t1"}}}}
+elif args[:2] == ["pane", "get"]:
+    result = {{"pane": {{"pane_id": args[2]}}}}
+elif args[:2] == ["agent", "get"]:
+    seq = data["get"]
+    status = seq.pop(0) if len(seq) > 1 else (seq[0] if seq else "gone")
+    if status == "gone":
+        code = 1
+    else:
+        result = {{"agent": {{"name": args[2], "status": status}}}}
+elif args[:2] == ["agent", "read"]:
+    print(data.get("content", ""))
+    json.dump(data, open(state, "w"))
+    sys.exit(0)
+json.dump(data, open(state, "w"))
+print(json.dumps({{"result": result}}))
+sys.exit(code)
+'''
+
+
+def _fake(env, monkeypatch, gets=()) -> Path:
+    herdr = env.bin / "herdr"
+    herdr.write_text(FAKE_HERDR.format(python=sys.executable))
+    herdr.chmod(0o755)
+    state = env.tmp / "herdr-state.json"
+    state.write_text(json.dumps({"calls": [], "n": 0, "get": list(gets)}))
+    monkeypatch.setenv("FAKE_HERDR_STATE", str(state))
+    return state
+
+
+def _calls(state: Path) -> list:
+    return json.loads(state.read_text())["calls"]
+
+
+def _live_dispatch(env, monkeypatch):
+    env.trust()
+    start_inline(env)
+    code, out = env.office("approve", "plan", "--quote", "yes, go ahead")
+    assert code == 0, out
+    code, out = env.office("dispatch", "T1", env={"OFFICE_WORKER_LAUNCHER": "external"})
+    assert code == 0, out
+    from office import state
+    con = env.con()
+    try:
+        run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+        d = state.get_dispatch(con, con.execute("SELECT id FROM dispatches WHERE task_id='T1'").fetchone()[0])
+    finally:
+        con.close()
+    return run, d
+
+
+def test_herdr_path_starts_the_agent_and_prompts_it(env, monkeypatch):
+    state_file = _fake(env, monkeypatch)
+    run, d = _live_dispatch(env, monkeypatch)
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
+    monkeypatch.setenv("OFFICE_LAUNCHER", "herdr")
+    from office import dispatch, paths
+    monkeypatch.setattr(dispatch.frontdoor, "current_argv", lambda: (["true"], {}))
+    d = {**d, "adapter_id": "claude", "model": "fake-model", "effort": "high"}
+    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    ddir.mkdir(parents=True, exist_ok=True)
+    (ddir / "brief.md").write_text("ROLE executor\n")
+    res = dispatch.launch(run, d, "worker", ddir, cwd=env.repo)
+    assert res["launcher"] == "herdr" and res["agent"] == f"office-{d['id']}"
+    calls = _calls(state_file)
+    start = next(c for c in calls if c[:2] == ["agent", "start"])
+    assert start[start.index("--kind") + 1] == "claude"
+    assert start[start.index("--pane") + 1] == res["pane"]
+    agent_args = start[start.index("--") + 1:]
+    assert agent_args[agent_args.index("--model") + 1] == "fake-model"
+    assert agent_args[agent_args.index("--effort") + 1] == "high"
+    prompt = next(c for c in calls if c[:2] == ["agent", "prompt"])
+    assert prompt[2] == res["agent"] and str(ddir / "brief.md") in prompt[3]
+    assert calls.index(start) < calls.index(prompt)
+    assert not any("launch.sh" in " ".join(c) or c[-1].startswith("sh ") for c in calls)
+    assert not (ddir / "launch.sh").exists()
+    spec = json.loads((ddir / "launch.json").read_text())
+    assert spec["herdr_agent"] == res["agent"]
+
+
+def test_model_and_effort_in_interactive_argv_for_each_harness():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    from office import adapters
+    seeds = adapters.load_all()
+    for harness in ("claude", "codex", "agy"):
+        got = adapters.interactive_argv(seeds[harness], "worker", model="m-x", effort="medium", cwd=Path("/w"))
+        assert got, harness
+        args, kind = got
+        assert kind == harness
+        joined = " ".join(args)
+        assert "m-x" in args and "medium" in joined, (harness, args)
+        assert args[0] != harness  # the executable comes from --kind, not the args
+
+
+def _spec(tmp: Path, output: Path | None = None) -> dict:
+    return {"herdr_agent": "office-D", "output": str(output) if output else None}
+
+
+def test_single_done_sample_does_not_end_but_repeated_done_does(env, monkeypatch):
+    state_file = _fake(env, monkeypatch, gets=["done", "working", "done", "done", "done"])
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    code, cls = dispatch.watch_herdr_agent(d["id"], _spec(env.tmp), poll=0)
+    assert (code, cls) == (0, "success")
+    gets = [c for c in _calls(state_file) if c[:2] == ["agent", "get"]]
+    assert len(gets) == 5  # the lone first `done` was not trusted
+
+
+def test_repeated_idle_ends_and_process_exit_ends(env, monkeypatch):
+    _fake(env, monkeypatch, gets=["idle", "idle", "idle"])
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp), poll=0) == (0, "success")
+    _fake(env, monkeypatch, gets=["working", "gone"])
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp), poll=0) == (None, "nonzero")
+
+
+def test_output_file_or_submit_ends_the_dispatch(env, monkeypatch):
+    state_file = _fake(env, monkeypatch, gets=["working"])
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: PASS")
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
+    # Complete means written and stable across two polls: one sample in between, no done/idle needed.
+    assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 1
+    monkeypatch.setattr(dispatch, "_submitted", lambda con, disp: True)
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp), poll=0) == (0, "success")
+
+
+def test_no_interactive_profile_stays_headless(env, monkeypatch):
+    state_file = _fake(env, monkeypatch)
+    run, d = _live_dispatch(env, monkeypatch)
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("OFFICE_LAUNCHER", "herdr")
+    from office import dispatch, paths
+    monkeypatch.setattr(dispatch.frontdoor, "current_argv", lambda: (["true"], {}))
+    d = {**d, "adapter_id": "gemini", "model": "fake-model", "effort": "high"}
+    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    ddir.mkdir(parents=True, exist_ok=True)
+    res = dispatch.launch(run, d, "worker", ddir, cwd=env.repo)
+    assert res["launcher"] == "process"
+    assert not any(c[:1] == ["agent"] for c in _calls(state_file))
+
+
+def test_reviewer_dispatch_launches_read_only_in_herdr(env, monkeypatch):
+    state_file = _fake(env, monkeypatch)
+    run, d = _live_dispatch(env, monkeypatch)
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
+    monkeypatch.setenv("OFFICE_LAUNCHER", "herdr")
+    from office import dispatch, paths
+    monkeypatch.setattr(dispatch.frontdoor, "current_argv", lambda: (["true"], {}))
+    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    ddir.mkdir(parents=True, exist_ok=True)
+    (ddir / "brief.md").write_text("You are a code reviewer\n")
+    out = ddir / "reply.txt"
+    for adapter_id, kind in (("claude", "claude"), ("codex", "codex")):
+        rd = {**d, "adapter_id": adapter_id, "model": "fake-model", "effort": "high"}
+        res = dispatch.launch(run, rd, "reviewer", ddir, cwd=env.repo, output=out, include_dirs=[env.tmp])
+        assert res["launcher"] == "herdr", res
+        calls = _calls(state_file)
+        start = [c for c in calls if c[:2] == ["agent", "start"]][-1]
+        assert start[start.index("--kind") + 1] == kind
+        args = start[start.index("--") + 1:]
+        assert "fake-model" in args and "high" in " ".join(args)
+        if kind == "claude":
+            assert args[args.index("--disallowedTools") + 1] == "Edit,Write,Bash,NotebookEdit"
+            assert args[args.index("--allowedTools") + 1] == "Read,Grep,Glob"
+            assert str(env.tmp) in args
+        else:
+            assert args[args.index("--sandbox") + 1] == "read-only"
+        prompt = [c for c in calls if c[:2] == ["agent", "prompt"]][-1]
+        assert str(out) in prompt[3] and "office submit" not in prompt[3]
+        assert not any(c[-1].startswith("sh ") for c in calls)
+    env_text = (ddir / "agent.env").read_text()
+    assert "OFFICE_ROLE=reviewer" in env_text and "OFFICE_DISPATCH_ID" not in env_text
+
+
+def test_reviewer_pane_reply_is_kept_when_no_file_was_written(env, monkeypatch):
+    state_file = _fake(env, monkeypatch, gets=["done", "done", "done"])
+    data = json.loads(state_file.read_text())
+    data["content"] = "VERDICT: PASS"
+    state_file.write_text(json.dumps(data))
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    out = env.tmp / "reply.txt"
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
+    assert "VERDICT: PASS" in out.read_text()

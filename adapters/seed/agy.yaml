@@ -53,6 +53,14 @@ source_notes: Current office-skills Agy mechanics seeded for migration; exact mo
 # visual judgment runs in the run's private evidence directory.
 capabilities: [review]
 office_profiles:
+  worker:
+    argv: [--dangerously-skip-permissions, --print-timeout, 45m, --model, "{model}", --add-dir, "{cwd}"]
+    prompt: argv-bound
+    prompt_flag: "--print="
+    output: stdout
+    herdr_kind: agy
+    interactive:
+      argv: [--dangerously-skip-permissions, --model, "{model}", --effort, "{effort}", --add-dir, "{cwd}"]
   vision:
     argv: [--dangerously-skip-permissions, --print-timeout, 30m, --model, "{model}", "{include_dirs}"]
     include_arg: [--add-dir, "{dir}"]
@@ -60,3 +68,6 @@ office_profiles:
     prompt_flag: "--prompt="
     image_transport: prompt-path
     output: stdout
+    herdr_kind: agy
+    interactive:
+      argv: [--dangerously-skip-permissions, --model, "{model}", --effort, "{effort}", "{include_dirs}"]
