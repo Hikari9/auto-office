@@ -73,6 +73,64 @@
     },
     "source_notes": {
       "type": "string"
+    },
+    "office_profiles": {
+      "type": "object",
+      "description": "v3.1 launch forms: worker, reviewer, vision. A profile is not proof the route works; visual capability needs a passing conformance probe.",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "argv",
+          "prompt"
+        ],
+        "properties": {
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "prompt": {
+            "enum": [
+              "stdin",
+              "argv",
+              "argv-bound"
+            ]
+          },
+          "output": {
+            "enum": [
+              "stdout",
+              "file"
+            ]
+          },
+          "image_arg": {
+            "type": "array"
+          },
+          "image_transport": {
+            "enum": [
+              "argv",
+              "prompt-path",
+              "prompt-at"
+            ]
+          },
+          "include_arg": {
+            "type": "array"
+          },
+          "herdr_kind": {
+            "type": "string"
+          },
+          "prompt_flag": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Capabilities the adapter asserts for routing. 'vision' is never asserted here; it is granted only by a passing conformance probe."
     }
   }
 }

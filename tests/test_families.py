@@ -221,7 +221,7 @@ class FamilyConfigTierPrecedenceTests(TempStateDirMixin, unittest.TestCase):
         self.assertEqual(
             fam.resolve_family_config_tiers(repo_root, self.state_dir, family_id)[0]
             ["quota"]["reserve_percent"],
-            20,
+            5,  # v3.1 charter 12A: the plugin-default quota reserve is 5%
         )
 
         user_path = self.state_dir / "user.yaml"
