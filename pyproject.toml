@@ -19,7 +19,7 @@ dependencies = [
 # Deterministic browser capture for visual gates. Without it the visual gate
 # reports CAPTURE_BLOCKED instead of passing.
 visual = ["playwright>=1.40"]
-test = ["pytest>=8"]
+test = ["pytest>=8", "pytest-xdist>=3"]
 
 [project.scripts]
 office = "office.cli:main"

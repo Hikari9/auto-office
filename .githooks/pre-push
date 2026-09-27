@@ -1,11 +1,16 @@
 #!/bin/bash
 # Pre-push hook. Enable once per clone: git config core.hooksPath .githooks
 # 1. PR guard: direct pushes to main are rejected (owner bypass: BYPASS_PR=1).
-# 2. Validation gate: scripts/validate.sh (CI stays empty, #120). Skip with SKIP_VALIDATE=1.
+# 2. Validation gate: scripts/validate.sh (CI stays empty, #120). Skipped for delete-only
+#    pushes; skip explicitly with SKIP_VALIDATE=1.
 protected_branch="main"
+zero="0000000000000000000000000000000000000000"
+updates=0
 
 while read local_ref local_sha remote_ref remote_sha
 do
+  # A branch deletion ships no code, so it needs no validation.
+  [ "$local_sha" = "$zero" ] || updates=$((updates + 1))
   if [ "$remote_ref" = "refs/heads/$protected_branch" ]; then
     if [ "$BYPASS_PR" = "1" ]; then
       echo "⚠️ [PR GUARD] Direct push to main BYPASSED by repo owner."
@@ -17,6 +22,11 @@ do
     fi
   fi
 done
+
+if [ "$updates" = "0" ]; then
+  echo "[VALIDATE] Only branch deletions in this push; nothing to validate."
+  exit 0
+fi
 
 if [ "$SKIP_VALIDATE" = "1" ]; then
   echo "⚠️ [VALIDATE] Skipped by SKIP_VALIDATE=1."
