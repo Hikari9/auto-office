@@ -43,7 +43,7 @@ models:
     effort: high
     source_effort: High Effort
     effort_confidence: mapped
-    benchmark_indexes: {}
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 32}
     price_fields:
     speed_fields:
     release_date:
@@ -51,7 +51,7 @@ models:
     content_hash:
     supersession_metadata:
   - model_id: opus
-    invocation_model_id: claude-opus-5
+    invocation_model_id: claude-opus-5-5
     invocation_harness: claude
     invocation_source: 'documented: the claude CLI cannot enumerate models, so this slug is documented rather than CLI-proven; record a route-defect if a dispatch rejects it'
     source_identifier: spec:planner-seed-opus
@@ -59,7 +59,7 @@ models:
     effort: medium
     source_effort: Medium
     effort_confidence: mapped
-    benchmark_indexes: {}
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 51}
     price_fields:
     speed_fields:
     release_date:
@@ -75,7 +75,7 @@ models:
     effort: low
     source_effort: Low
     effort_confidence: mapped
-    benchmark_indexes: {}
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 46}
     price_fields:
     speed_fields:
     release_date:
@@ -83,15 +83,15 @@ models:
     content_hash:
     supersession_metadata:
   - model_id: luna
-    invocation_model_id: gpt-5.6-luna
+    invocation_model_id: gpt-6-luna
     invocation_harness: codex
-    invocation_source: local-evidence:dispatch-failure-amendment
+    invocation_source: local-evidence:codex debug models lists gpt-6-luna
     source_identifier: spec:reviewer-seed-luna
     source_name: office-skills-v3-spec
     effort: xhigh
     source_effort: XHigh
     effort_confidence: mapped
-    benchmark_indexes: {}
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 34}
     price_fields:
     speed_fields:
     release_date:

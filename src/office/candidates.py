@@ -206,6 +206,14 @@ def parse_route_override(text: str) -> dict:
     return {"harness": harness or None, "model_id": model, "effort": effort or None}
 
 
+def _preferred_seed(policy_cfg: dict, run: dict):
+    """roles.<role>.preferred_seed_by_size.<size_class> replaces preferred_seed when the
+    run's size class (start --size-class) has an entry there."""
+    size = (run.get("risk") or {}).get("size_class")
+    by_size = policy_cfg.get("preferred_seed_by_size") or {}
+    return by_size.get(size) or policy_cfg.get("preferred_seed")
+
+
 def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                task_id: str | None = None, override: str | None = None,
                exclude: set[str] | None = None, probe: bool = True) -> dict:
@@ -241,7 +249,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "role": role,
         "playbook": run.get("playbook"),
         "policy": policy,
-        "preferred_seed": None if override else policy_cfg.get("preferred_seed"),
+        "preferred_seed": None if override else _preferred_seed(policy_cfg, run),
         "cost_policy": cost_policy,
         "allow_advisory_undercut": bool(gear.get("allow_advisory_undercut", True)),
         "runs_db": str(paths.runs_db()),
