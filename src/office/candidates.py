@@ -254,3 +254,24 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     result["skipped"] = skipped
     result["request"] = request
     return result
+
+
+def trust_report(con: sqlite3.Connection) -> list[str]:
+    """One line per candidate route of each trust-gated role, with its derived trust
+    state; non-proven routes carry the exact command a user runs to promote them."""
+    from office import routing, scoring
+    scoring.ensure_trust_schema(con)
+    lines = []
+    for role in sorted(routing.MUTABLE_TRUST_ROLES):
+        cands, _ = build_candidates(con, role, probe=False)
+        if not cands:
+            lines.append(f"trust {role}: no candidate routes")
+            continue
+        for c in cands:
+            triple = routing.candidate_id(c)
+            _, state = scoring.evaluate_trust_state(con, triple)
+            line = f"trust {role} {triple}: {state}"
+            if state != "proven":
+                line += f" | office approve trust {triple} --quote \"<user's words>\""
+            lines.append(line)
+    return lines
