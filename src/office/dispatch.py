@@ -254,8 +254,62 @@ def revoke(con, run: dict, task_id: str, reason: str) -> Result:
                     "AND revoked_at IS NULL", (now_iso(), reason, run["id"], task_id))
         state.update_task(con, run["id"], task_id, status="paused", pause_reason=f"lease revoked: {reason}")
         state.emit(con, run, "lease.revoked", f"{task_id} lease revoked", task_id=task_id)
-    return Result(lines=[f"{task_id} lease revoked | later submits from its holder are rejected"],
-                  next=f"office dispatch {task_id} to relaunch")
+    live = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE run_id=? AND task_id=? AND ended_at IS NULL "
+                                         "AND status IN ('launching', 'running')", (run["id"], task_id)).fetchall()]
+    stopped = [d["id"] for d in live if stop_dispatch(run, d)]
+    lines = [f"{task_id} lease revoked | later submits from its holder are rejected"]
+    if stopped:
+        lines.append(f"stopped {', '.join(stopped)} (SIGTERM)")
+    return Result(lines=lines, next=f"office dispatch {task_id} to relaunch")
+
+
+def _agent_pgid_file(run: dict, dispatch_id: str) -> Path:
+    return paths.run_dir(run["id"]) / "dispatches" / dispatch_id / "agent.pgid"
+
+
+def _killpg(pid, sig=signal.SIGTERM) -> bool:
+    if not pid or pid <= 0 or pid == os.getpid() or pid == os.getpgrp():
+        return False
+    try:
+        os.killpg(pid, sig)
+    except OSError:
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            return False
+    return True
+
+
+def stop_dispatch(run: dict, d: dict, *, wait: float = 5.0) -> bool:
+    """SIGTERM a live dispatch's supervisor and agent process groups, close its
+    herdr pane, and make sure the end is recorded as `signal`."""
+    if d.get("launcher") in (None, "external", "sync"):
+        return False  # not under Office's process control
+    sup = d.get("pid") if pid_alive(d.get("pid")) else None
+    pgid_file = _agent_pgid_file(run, d["id"])
+    agent = None
+    if pgid_file.is_file():
+        try:
+            agent = int(pgid_file.read_text().strip())
+        except ValueError:
+            agent = None
+    signalled = _killpg(sup)
+    signalled = _killpg(agent) or signalled
+    deadline = time.time() + wait
+    while sup and pid_alive(sup) and time.time() < deadline:
+        time.sleep(0.05)  # let the supervisor record its own `signal` end
+    if d.get("launcher") == "herdr" and d.get("pane_id") and shutil.which("herdr"):
+        subprocess.run(["herdr", "pane", "close", d["pane_id"]], capture_output=True, timeout=30)
+        signalled = True
+    con = db.connect()
+    try:
+        ended = state.get_dispatch(con, d["id"]).get("ended_at")
+    finally:
+        con.close()
+    if not ended:
+        # The supervisor was already gone or did not get to record the end.
+        _finish(d["id"], None, int(signal.SIGTERM), "signal", 0.0)
+    return signalled or not ended
 
 
 # ------------------------------------------------------------------ launch job
@@ -386,26 +440,15 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         return _wait_terminal(dispatch["id"], timeout=5) if wait else {"launcher": "sync"}
     use_herdr = (launcher in ("auto", "herdr") and os.environ.get("HERDR_ENV") == "1" and shutil.which("herdr"))
     if use_herdr:
-        pane = _herdr_pane(run, cwd, label=f"office {dispatch.get('role') or kind} {dispatch['id']}")
+        inter = _interactive(dispatch, kind, cwd, include_dirs)
+        pane = _herdr_pane(run, cwd, label=f"office {dispatch.get('role') or kind} {dispatch['id']}") if inter else None
         if pane:
-            # The pane's shell does not inherit this process's environment, and
-            # a long command line is truncated by the terminal: write a short
-            # launcher that carries Office's configuration and runs the supervisor.
-            carry = {k: v for k, v in env.items()
-                     if k.startswith(("OFFICE_", "AUTO_OFFICE_", "XDG_")) or k in ("PYTHONPATH", "PATH")}
-            script = paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.sh"
-            carry["OFFICE_SUPERVISOR_VIA"] = "herdr"
-            script.write_text("#!/bin/sh\n" + "".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(carry.items()))
-                              + f"cd {shlex.quote(str(cwd))}\nexec " + " ".join(shlex.quote(a) for a in sup) + "\n")
-            script.chmod(0o700)
-            subprocess.run(["herdr", "pane", "run", pane, f"sh {shlex.quote(str(script))}"], capture_output=True, timeout=30)
-            _record_launch(run, dispatch["id"], launcher="herdr", pane_id=pane)
-            _pane_ledger(run, dispatch, pane)
-            if _started(dispatch["id"], timeout=45):
+            started = _herdr_agent_start(run, dispatch, spec, env, inter, pane, cwd, ddir)
+            if started:
                 if wait:
                     return _wait_terminal(dispatch["id"])
-                return {"launcher": "herdr", "pane": pane}
-            # The pane never ran the supervisor: fall back to a plain process.
+                return started
+            # The agent never came up in the pane: fall back to a plain process.
             _record_launch(run, dispatch["id"], launcher="process-fallback", pane_id=None)
     log = open(ddir / "supervisor.log", "ab")
     try:
@@ -418,6 +461,135 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         proc.wait()
         return _wait_terminal(dispatch["id"])
     return {"launcher": "process", "pid": proc.pid}
+
+
+def _interactive(dispatch: dict, kind: str, cwd: Path, include_dirs: list[Path] | None = None) -> tuple[list[str], str] | None:
+    """The pane-hosted form of this dispatch's harness, or None (headless)."""
+    adapter = adapters.load_all().get(dispatch.get("adapter_id") or "")
+    if not adapter or not dispatch.get("model"):
+        return None
+    return adapters.interactive_argv(adapter, kind, model=dispatch["model"], effort=dispatch.get("effort") or "none",
+                                     cwd=cwd, include_dirs=include_dirs)
+
+
+def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
+                       cwd: Path, ddir: Path) -> dict | None:
+    """Start the real harness in the pane with `herdr agent start`, hand it a
+    one-line brief pointer, and leave a detached watcher to record the end.
+    The pane runs the agent itself, never a shell wrapper around it."""
+    args, herdr_kind = inter
+    name = f"office-{dispatch['id']}"
+    worker = spec["kind"] == "worker"
+    # The pane's shell does not inherit this process's environment: source the
+    # dispatch identity into it first, so the agent's own `office submit` works.
+    wenv = worker_env(run, dispatch, dispatch.get("role") if worker else "reviewer")
+    if not worker:
+        # Reviewers get no Office authority: they cannot submit or ack.
+        for k in ("OFFICE_TASK_ID", "OFFICE_DISPATCH_ID"):
+            wenv.pop(k, None)
+    carry = {k: v for k, v in wenv.items() if k.startswith(("OFFICE_", "AUTO_OFFICE_", "XDG_")) or k in ("PYTHONPATH", "PATH")}
+    env_file = ddir / "agent.env"
+    env_file.write_text("".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(carry.items())))
+    env_file.chmod(0o600)
+    subprocess.run(["herdr", "pane", "run", pane, f". {shlex.quote(str(env_file))} && cd {shlex.quote(str(cwd))}"],
+                   capture_output=True, timeout=30)
+    try:
+        proc = subprocess.run(["herdr", "agent", "start", name, "--kind", herdr_kind, "--pane", pane, "--", *args],
+                              capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    spec.update({"herdr_agent": name, "pane": pane})
+    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    _record_launch(run, dispatch["id"], launcher="herdr", pane_id=pane)
+    _pane_ledger(run, dispatch, pane)
+    # A long brief pasted as the prompt does not land; a one-line pointer does.
+    if worker:
+        pointer = (f"Read and carry out the brief at {spec['prompt_file']} exactly. "
+                   "When the work and its checks are complete, run: office submit")
+    else:
+        images = f" Inspect each evidence image: {' '.join(spec['images'])}." if spec.get("images") else ""
+        pointer = (f"Read and carry out the review brief at {spec['prompt_file']} exactly.{images} "
+                   f"Write your complete review to {spec['output']}. If your tools cannot write files, "
+                   "end your reply with the complete review instead. Do not edit anything else.")
+    subprocess.run(["herdr", "agent", "prompt", name, pointer], capture_output=True, timeout=30)
+    log = open(ddir / "supervisor.log", "ab")
+    try:
+        watcher = subprocess.Popen(frontdoor.current_argv()[0] + ["_supervise", dispatch["id"]], cwd=str(cwd),
+                                   stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
+                                   start_new_session=True, close_fds=True)
+    finally:
+        log.close()
+    return {"launcher": "herdr", "pane": pane, "agent": name, "watcher_pid": watcher.pid}
+
+
+def _herdr_agent_sample(name: str) -> dict | None:
+    """One `herdr agent get` sample: {"status", "content_hash"}, or None when
+    the agent is gone (its process exited)."""
+    try:
+        proc = subprocess.run(["herdr", "agent", "get", name], capture_output=True, text=True, timeout=30)
+        res = json.loads(proc.stdout or "{}").get("result") or {}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {"status": "unknown", "content_hash": None}
+    agent = res.get("agent") or res
+    if proc.returncode != 0 or not agent:
+        return None
+    read = _herdr_agent_text(name)
+    return {"status": agent.get("status") or agent.get("agent_status"), "content_hash": sha256_obj(read)}
+
+
+def _herdr_agent_text(name: str) -> str:
+    try:
+        return subprocess.run(["herdr", "agent", "read", name], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _submitted(con, dispatch: dict) -> bool:
+    return bool(con.execute("SELECT 1 FROM revisions WHERE dispatch_id=?", (dispatch["id"],)).fetchone()
+                or con.execute("SELECT 1 FROM plans WHERE run_id=? AND created_by=?",
+                               (dispatch["run_id"], dispatch["id"])).fetchone())
+
+
+def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None, stable_samples: int = 3) -> tuple:
+    """(exit_code, classification) for a pane-hosted agent. A submit or the
+    output file ends the dispatch. A single `done`/`idle` sample is never
+    trusted: only `stable_samples` consecutive settled samples with unchanged
+    pane content end it. The agent disappearing (process exit) ends it."""
+    poll = float(os.environ.get("OFFICE_HERDR_POLL", "5")) if poll is None else poll
+    output = Path(spec["output"]) if spec.get("output") else None
+    history: list[dict] = []
+    last_size = None
+    while True:
+        con = db.connect()
+        try:
+            d = state.get_dispatch(con, dispatch_id)
+            if d["status"] in ("exited", "failed", "cancelled"):
+                # Already recorded (cancelled, or ended by another path): not ours to finish.
+                return None, "cancelled" if d["status"] == "cancelled" else "duplicate_ignored"
+            if _submitted(con, d):
+                return 0, "success"
+        finally:
+            con.close()
+        size = output.stat().st_size if output and output.is_file() else 0
+        if size and size == last_size:
+            # Complete: written and no longer growing between two polls.
+            return 0, "success"
+        last_size = size or None
+        sample = _herdr_agent_sample(spec["herdr_agent"])
+        if sample is None:
+            return None, "nonzero"
+        history.append(sample)
+        window = history[-stable_samples:]
+        if (len(window) == stable_samples and all(w["status"] in ("done", "idle") for w in window)
+                and len({w["content_hash"] for w in window}) == 1):
+            if output and not (output.is_file() and output.stat().st_size):
+                # A read-only reviewer that could not write the file left its
+                # review in the pane: keep that as the reply.
+                output.write_text(_herdr_agent_text(spec["herdr_agent"]), encoding="utf-8")
+            return 0, "success"
+        time.sleep(poll)
 
 
 def _herdr_json(args: list[str]) -> dict:
@@ -589,10 +761,12 @@ def supervise(dispatch_id: str) -> int:
     started = time.time()
     code, sig, classification = None, None, None
     child = None
-    state_box = {"signal": None}
+    state_box = {"signal": None, "watching": False}
 
     def forward(signum, _frame):
         state_box["signal"] = signum
+        if state_box["watching"]:
+            raise _Stopped(signum)
         if child and child.poll() is None:
             try:
                 os.killpg(child.pid, signum)
@@ -615,6 +789,13 @@ def supervise(dispatch_id: str) -> int:
             classification = "duplicate_ignored"
             return 0
         spec = json.loads((paths.run_dir(run["id"]) / "dispatches" / dispatch_id / "launch.json").read_text())
+        if spec.get("herdr_agent"):
+            # The agent runs in its herdr pane; this process only watches for the end.
+            _mark(dispatch_id, pid_child=os.getpid())
+            state_box["watching"] = True
+            code, classification = watch_herdr_agent(dispatch_id, spec)
+            state_box["watching"] = False
+            return 0 if classification == "success" else 1
         log_path = Path(d.get("log_path") or spec.get("log_path"))
         log_path.parent.mkdir(parents=True, exist_ok=True)
         adapter = adapters.load_all()[d["adapter_id"]]
@@ -643,6 +824,7 @@ def supervise(dispatch_id: str) -> int:
             child = subprocess.Popen(argv, cwd=spec["cwd"], stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      env=env, start_new_session=True)
             _mark(dispatch_id, pid_child=child.pid)
+            _agent_pgid_file(run, dispatch_id).write_text(str(child.pid))
             if stdin == subprocess.PIPE:
                 try:
                     child.stdin.write(prompt.encode())
@@ -663,6 +845,8 @@ def supervise(dispatch_id: str) -> int:
             sig, classification = state_box["signal"], "signal"
         else:
             classification = "success" if code == 0 else "nonzero"
+    except _Stopped as stop:
+        sig, classification = stop.signum, "signal"
     except FileNotFoundError as exc:
         code, classification = 127, "launch_failed"
         _note(log_path, f"launch failed: {exc}")
@@ -673,6 +857,12 @@ def supervise(dispatch_id: str) -> int:
         if classification != "duplicate_ignored":
             _finish(dispatch_id, code, sig, classification or "unknown", time.time() - started)
     return 0 if classification == "success" else 1
+
+
+class _Stopped(BaseException):
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = int(signum)
 
 
 def _note(log_path, text: str) -> None:
