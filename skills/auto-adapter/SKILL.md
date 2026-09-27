@@ -5,6 +5,9 @@ description: Auto Office v3 harness-adapter engineering primitive. Use to add, v
 
 # Auto Adapter
 
+> **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
+> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
+
 Adapters are data/mechanics, never separate office lifecycles.
 
 Start with `python3 ../../scripts/office_runtime.py scaffold-adapter <id> --out <path>`, then fill every mandatory semantic field and run `validate-adapter`.

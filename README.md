@@ -1,35 +1,94 @@
-# Auto Office v3 ecosystem preview
+# Auto Office
 
-This bundle is a reference implementation of the supplied **office-skills v3 — Adaptive Office Runtime Specification**. It is intentionally structured as one canonical `auto-office` lifecycle with internal protocol/spoke skills and harness primitives, rather than branded lifecycle copies.
+One adaptive engineering lifecycle, driven through a single `office` CLI. An orchestrator agent
+decides strategy; routed specialist agents plan, implement, and independently review; the runtime
+owns every mechanical step behind one transactional state store (`runs.db`).
 
-## What is included
+- **Distribution:** `auto-office` · **Python package:** `office` · **Executable:** `office`
+- **Version:** 3.1.0 (`office --version` prints the exact identity; source checkouts report a
+  PEP 440 local version such as `3.1.0+g1a2b3c4d5e6f`)
 
-- `SKILL.md` — canonical Auto Office control plane.
-- `skills/auto-*` — narrow lifecycle spokes for planning, routing, execution, review, verification, closeout, maintenance, adapters, and self-improvement.
-- `skills/codex-cli`, `skills/claude-cli`, `skills/agy-cli` — directly invocable harness primitives. They are mechanics, not separate offices.
-- `schemas/` — machine-checkable run envelope, execution packet, adapter, quota, finding, outcome, and routing-candidate contracts.
-- `config/config.default.yaml` — v3 policy defaults grounded in the spec.
-- `catalog/seed.yaml` — cold-start identity rows for the planner/reviewer names explicitly present in the spec. Benchmark/price fields remain unknown rather than invented.
-- `adapters/seed/` — conservative Codex/Claude/Agy seed adapters marked `valid-unverified`; none is falsely shipped as `proven`.
-- `scripts/office_runtime.py` — deterministic helper CLI for validation, routing, snapshots, SQLite recording, maturity, replay, privacy lint, catalog snapshots, adapter scaffolding, and proposal identity.
-- `evals/` and `tests/` — acceptance scenarios and executable unit tests.
-- `references/OFFICE-SKILLS-V3-SPEC.md` — exact uploaded normative spec.
-
-## Preview caveats
-
-The v3 spec deliberately leaves several provider-specific facts to refreshed catalog/adapter data. This bundle does the same. Real benchmark indexes, prices, current model slugs, provider quota APIs, and live harness conformance are **not fabricated**. Seed harness adapters are therefore `valid-unverified` and must pass deterministic + live conformance and the configured runtime evidence bar before normal mutable routing.
-
-The uploaded spec references “the five frozen execution fields” without naming them. To preserve continuity with the current `office-skills` implementation, this preview seeds `goal`, `done_criteria`, `blast_radius`, `named_actions`, and `non_goals`. That mapping is called out as compatibility data and should be replaced if the ratified v3 packet contract defines different names.
-
-## Quick smoke test
+## Install
 
 ```bash
-python3 scripts/check_ecosystem.py
-python3 -m unittest discover -s tests -v
-python3 scripts/office_runtime.py init-db --db ~/.local/state/auto-office/runs/runs.db
-python3 scripts/office_runtime.py maturity --points 60
+uv tool install auto-office            # or: uv tool install 'auto-office[visual]' for browser capture
+office install                         # idempotent harness hooks (Claude Code, Gemini CLI), runtime registration
+office doctor                          # verify the install, hooks, pinned runtimes, known harness defects
 ```
 
-## Installation shape
+From a checkout: `uv tool install --editable .` (or `uv venv && uv pip install -e '.[visual,test]'`).
 
-The ZIP root is `auto-office/`, matching the existing plugin convention. It contains ChatGPT `agents/openai.yaml` metadata as well as `.claude-plugin/plugin.json` for the current Claude plugin layout.
+`uv tool install` provides the `office` command; `office install` then adds the managed hooks and registers
+the runtime. If the skill runs before either step, it stops at its install check and asks you to approve the
+install, and it offers an upgrade when the installed `office` release differs from the skill's `VERSION`.
+The visual extra installs Playwright and uses the local Chrome; without it, visual gates report
+`CAPTURE_BLOCKED` rather than passing.
+
+## Use
+
+```text
+office start "<goal>"                 create a run; queues the planner when policy requires one
+office resume [run]                   bind this session to a run and show where it stands
+office status                         what matters now, ending with the next legal action
+office dispatch <task>... [--parallel]
+office submit                         planner/executor: submit a plan or work
+office amend <scope> -- "<delta>"     ordinary, --contract, or --requirements --quote "<user words>"
+office ack <amendment-id>             worker: the delivered amendment is applied
+office close                          after acceptance and landing (--handoff <pr>, --abandon "<why>")
+
+office list | inspect [run|task|gate|evidence|events|route] [id] | doctor | prune [-f]
+office approve <plan|merge|X1|trust <route>|waive <T2:gate>> --quote "<user words>"
+```
+
+Every result is a few lines ending in `next:`. `--verbose`, `--json`, and `office inspect` show the
+detail default output hides. `SKILL.md` is the orchestrator brief; executors, planners, and
+reviewers receive runtime-generated briefs and never write JSON or receipts.
+
+## How it works
+
+- **State:** SQLite `runs.db` (WAL) is the only lifecycle authority. One semantic transition is one
+  transaction; outside work (agent launches, checks, reviews, captures) is queued in an outbox in
+  the same transaction and run by short-lived `office _job` processes, so a crash delays work but
+  never loses it. JSON files under a run directory are generated read-only views.
+- **Version pinning:** every run and every packet carries the `office_version` that created it. The
+  front door re-executes a command under the registered runtime for that version, or stops with an
+  actionable error; a run never migrates in place.
+- **Submission:** `office submit` captures the worktree exactly as it is (dirty edits included) as an
+  immutable revision, deduplicates replays, runs deterministic checks, then dispatches independent
+  code and (when acceptance involves the UI) visual review on that same revision.
+- **Convergence:** verdicts are `PASS | CHANGES_REQUIRED | PLAN_DEFECT | BRIEF_DEFECT | UNAVAILABLE`.
+  Findings go straight to the owning worker. Round budgets, a no-progress stop, and one escalation
+  bound every loop; nothing unavailable, stale, skipped, or malformed ever counts as PASS.
+- **Rolling plan review:** after a first `CHANGES_REQUIRED`, the amended plan launches safe work at
+  once while the re-review runs concurrently; a `PLAN_DEFECT` blocks its scope until an independent
+  reviewer clears it.
+- **Visual evidence:** deterministic Playwright capture (viewports and states from acceptance),
+  direct DOM measurements against an approved reference, evidence status
+  `COMPARABLE | INVALID_COMPARISON | NOT_APPLICABLE | CAPTURE_BLOCKED`, and judgment only by a
+  route whose exact harness/model/effort passed an image-sensitive conformance probe.
+
+Design and contracts: [`docs/v31-implementation.md`](docs/v31-implementation.md),
+[`docs/v31-rolling-review-gates.md`](docs/v31-rolling-review-gates.md), [`CONTEXT.md`](CONTEXT.md).
+
+## Migrating from 3.0
+
+- Runs started by 3.0 stay on 3.0. `office list` shows them as `3.0 legacy`; `office resume <id>`
+  points at the exact retained runtime (materialized from git history for the run's pinned
+  commit). `scripts/office_runtime.py` forwards a 3.0 state directory there automatically.
+- `scripts/` is the retained 3.0 helper surface, available through the 3.1.x line and removed in
+  3.2.0. `office raw <subcommand>` reaches it with a deprecation warning; every call is recorded
+  (`office doctor` lists remaining consumers). Legacy helpers can never write a 3.1 run.
+- New runs use 3.1 by default. Roll new runs back without touching existing ones by setting
+  `runtime: {new_runs: "3.0"}` in `~/.config/auto-office/config.yaml`.
+- The default quota reserve is now 5% (the balanced-routing money band stays 20%).
+
+## Development
+
+```bash
+uv venv && uv pip install -e '.[visual,test]'
+.venv/bin/python -m pytest tests            # 3.0 helper suite + tests/v31
+python3 scripts/check_ecosystem.py
+```
+
+Tests run every agent through scripted fake harness binaries in isolated data and state homes;
+they never touch `~/.local` or a real model.

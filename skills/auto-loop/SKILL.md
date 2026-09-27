@@ -1,9 +1,12 @@
 ---
 name: auto-loop
-description: Internal Auto Office v3 loop-driver spoke. Use after plan approval to dispatch waves without blocking, integrate dispatch branches through a validated merge, adjudicate contract disagreements, and hold the autonomy ceiling — proceeding end to end while never merging to main without an explicit user statement.
+description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use the office CLI). Internal Auto Office v3 loop-driver spoke. Use after plan approval to dispatch waves without blocking, integrate dispatch branches through a validated merge, adjudicate contract disagreements, and hold the autonomy ceiling — proceeding end to end while never merging to main without an explicit user statement.
 ---
 
 # Auto Loop
+
+> **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
+> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
 
 Dispatch every task in the wave before waiting on any of them. One worktree per dispatch, cut from the run's pinned base SHA — regardless of executor count or gear. A single-dispatch run is not exempt: it is the case most tempting to skip the worktree for ("just one quick executor," work directly in the main checkout), and exactly the case where that shortcut is wrong. The orchestrator can never assume exclusive ownership of the repo's main working tree; another human or another agent/session may be concurrently editing it, independent of how many dispatches this orchestrator itself is running. Each executor commits its own work locally to its own dispatch branch — never pushes, never touches any other branch — as a checkpoint immediately before reporting done, so a finished dispatch survives an orchestrator mistake made later during post-dispatch verification or integration. The orchestrator still owns final integration and merge, and may amend, squash, or rewrite that commit while landing it. Two tasks in one wave never share a write scope — a wave is only real if it draws as disjoint. Every brief's completion criterion is a command whose output settles it, not a target — "under 120 lines" is a wish, "`wc -l` reports under 120" is a receipt (spec §4).
 

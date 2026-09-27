@@ -1,9 +1,12 @@
 ---
 name: auto-planning
-description: Internal Auto Office v3 planning spoke. Use when the auto-office orchestrator needs to run interactive requirements discovery directly with the user, freeze the five execution fields, resolve product decisions, classify playbook/blast radius/size, produce or refresh a serialized implementation plan, or revise a plan after an accepted PLAN DEFECT. Do not use as a separate lifecycle or to change frozen requirements silently after freeze.
+description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use the office CLI). Internal Auto Office v3 planning spoke. Use when the auto-office orchestrator needs to run interactive requirements discovery directly with the user, freeze the five execution fields, resolve product decisions, classify playbook/blast radius/size, produce or refresh a serialized implementation plan, or revise a plan after an accepted PLAN DEFECT. Do not use as a separate lifecycle or to change frozen requirements silently after freeze.
 ---
 
 # Auto Planning
+
+> **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
+> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
 
 Receive the pinned run envelope and the orchestrator's provisional intent. Own **what** up to freeze, then **how**: run `skills/auto-intake/SKILL.md`'s interview directly with the user, reshape goal/scope/done-criteria/blast-radius/named-actions/non-goals when repository evidence contradicts the provisional framing, then freeze the five fields.
 
