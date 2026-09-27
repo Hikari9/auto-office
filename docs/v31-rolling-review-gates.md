@@ -1,6 +1,6 @@
 # v3.1 rolling plan review and checkpoint gate semantics
 
-Status: **decided design, not implemented.** Resolves [Decide rolling plan review and parallel checkpoint gate semantics](https://github.com/Hikari9/auto-office/issues/160) on the [v3.1 map](https://github.com/Hikari9/auto-office/issues/152). Product policy comes from the [ratified charter](https://github.com/Hikari9/auto-office/issues/153#issuecomment-5832359821); mechanism evidence from [the gates research](https://github.com/Hikari9/auto-office/issues/155#issuecomment-5832808796). Code pointers are against `main` at `3bce9b1`.
+Status: **decided design, implemented in Auto Office 3.1.0** (`src/office/gates.py`, `src/office/amend.py`, `src/office/integration.py`; see [`v31-implementation.md`](v31-implementation.md)). Resolves [Decide rolling plan review and parallel checkpoint gate semantics](https://github.com/Hikari9/auto-office/issues/160) on the [v3.1 map](https://github.com/Hikari9/auto-office/issues/152). Product policy comes from the [ratified charter](https://github.com/Hikari9/auto-office/issues/153#issuecomment-5832359821); mechanism evidence from [the gates research](https://github.com/Hikari9/auto-office/issues/155#issuecomment-5832808796). Code pointers are against `main` at `3bce9b1`.
 
 Terms are defined in [`CONTEXT.md`](../CONTEXT.md). The storage choice is recorded in [ADR 0001](adr/0001-sqlite-single-state-authority.md).
 
