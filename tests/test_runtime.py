@@ -835,3 +835,35 @@ class ApprovePlanCommandTests(unittest.TestCase):
         self.assertEqual(state['adapter_snapshot_hash'], before['adapter_snapshot_hash'])
         self.assertEqual(state['policy_hash'], before['policy_hash'])
         self.assertEqual(state['effective_config_hash'], before['effective_config_hash'])
+
+
+class HarnessVersionLineTests(unittest.TestCase):
+    def setUp(self):
+        s = importlib.util.spec_from_file_location('office_scoring', ROOT/'scripts/office_scoring.py')
+        self.scoring = importlib.util.module_from_spec(s); s.loader.exec_module(self.scoring)
+
+    def test_version_line(self):
+        vl = self.scoring.harness_version_line
+        self.assertEqual(vl('1.2.11'), '1')
+        self.assertEqual(vl('v2.1.283'), '2')
+        self.assertEqual(vl('0.157.1'), '0.157')
+        self.assertEqual(vl('local'), 'local')
+
+    def test_candidate_id_groups_patch_releases(self):
+        a = rt.candidate_id({'harness': 'agy', 'harness_version': '1.2.11', 'model_id': 'gemini-3.8-flash', 'effort': 'low'})
+        b = rt.candidate_id({'harness': 'agy', 'harness_version': '1.2.12', 'model_id': 'gemini-3.8-flash', 'effort': 'low'})
+        c = rt.candidate_id({'harness': 'agy', 'harness_version': '2.0.0', 'model_id': 'gemini-3.8-flash', 'effort': 'low'})
+        self.assertEqual(a, 'agy@1/gemini-3.8-flash@low')
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, c)
+
+    def test_trust_act_carries_across_patch_not_major(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = Path(d)/'runs.db'
+            con = sqlite3.connect(db)
+            con.execute('CREATE TABLE dispatches(id TEXT PRIMARY KEY, triple TEXT, attribution TEXT)')
+            con.commit(); con.close()
+            self.scoring.record_trust_act(db, 'agy@1.2.11/gemini-3.8-flash@low', 'proven', 'maintainer', 'observed clean dispatches')
+            self.assertEqual(self.scoring.get_current_trust_state(db, 'agy@1.2.12/gemini-3.8-flash@low'), 'proven')
+            self.assertEqual(self.scoring.get_current_trust_state(db, 'agy@1/gemini-3.8-flash@low'), 'proven')
+            self.assertEqual(self.scoring.get_current_trust_state(db, 'agy@2.0.0/gemini-3.8-flash@low'), 'valid-unverified')

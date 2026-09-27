@@ -5,7 +5,7 @@ description: Internal Auto Office v3 router. Use when selecting or explaining a 
 
 # Auto Routing
 
-Route `harness@version × model_id × effort`, not model brand alone.
+Route `harness@version-line × model_id × effort`, not model brand alone.
 
 Read `../../protocol/routing.md`, `../../config/config.default.yaml`, the pinned catalog snapshot, pinned adapter snapshot, effective config, and comparable local evidence.
 

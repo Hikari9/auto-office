@@ -135,7 +135,13 @@ def cmd_validate_adapter(args):
 
 
 def candidate_id(c):
-    return f"{c.get('harness')}@{c.get('harness_version')}/{c.get('model_id')}@{c.get('effort')}"
+    """Route identity `harness@version-line/model_id@effort`. The version line is the
+    major version (major.minor for 0.x); the full `harness_version` stays in telemetry."""
+    try:
+        from scripts.office_scoring import harness_version_line
+    except ImportError:
+        from office_scoring import harness_version_line
+    return f"{c.get('harness')}@{harness_version_line(c.get('harness_version'))}/{c.get('model_id')}@{c.get('effort')}"
 
 
 def _num(v, default=float("inf")):

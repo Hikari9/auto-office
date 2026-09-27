@@ -47,6 +47,36 @@ _NARRATIVE_BASE = {
 }
 
 
+_SEMVER_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:[.\-+].*)?$")
+_TRIPLE_RE = re.compile(r"^(?P<harness>[^@/]+)@(?P<version>[^/]*)/(?P<rest>.+)$")
+
+
+def harness_version_line(version: Any) -> str:
+    """Collapses a harness version to the line that identity and trust key on: the
+    major version, or major.minor for 0.x (semver's breaking-change boundary). Patch
+    releases ship the same model, so `agy@1.2.11` and `agy@1.2.12` share one identity
+    while `agy@2.0.0` does not. Non-semver values (`local`, None) pass through unchanged.
+    The full version is still recorded separately as `harness_version` for telemetry."""
+    if version is None:
+        return "None"
+    text = str(version).strip()
+    m = _SEMVER_RE.match(text)
+    if not m:
+        return text
+    major, minor = m.group(1), m.group(2)
+    if major == "0" and minor is not None:
+        return f"0.{minor}"
+    return major
+
+
+def normalize_triple(triple: str) -> str:
+    """Rewrites `harness@version/model@effort` so its version is the version line."""
+    m = _TRIPLE_RE.match(triple or "")
+    if not m:
+        return triple
+    return f"{m.group('harness')}@{harness_version_line(m.group('version'))}/{m.group('rest')}"
+
+
 def _valid_evidence_hash(value: Any) -> bool:
     """Evidence-validity checklist properties 1-4 (§7.1.2 / Finding F21): present,
     correctly prefixed, correct length, hex-only lowercase body."""
@@ -89,10 +119,15 @@ def evaluate_trust_state(con: sqlite3.Connection, target_triple: str) -> tuple[i
     `adapter_trust_acts` row for this exact triple, and only when no qualifying failure
     currently stands -- a standing quarantine is never cleared by any act.
     """
+    # Identity keys on the harness version line, so rows recorded under any patch
+    # release of the same line (including pre-normalization full versions) count.
+    target_triple = normalize_triple(target_triple)
     cur = con.cursor()
-    dispatch_rows = cur.execute(
-        "SELECT id, attribution FROM dispatches WHERE triple = ?", (target_triple,)
-    ).fetchall()
+    dispatch_rows = [
+        (row[0], row[1])
+        for row in cur.execute("SELECT id, attribution, triple FROM dispatches").fetchall()
+        if normalize_triple(row[2] or "") == target_triple
+    ]
     attribution_by_dispatch = {row[0]: row[1] for row in dispatch_rows}
 
     qualifying: set[str] = set()
@@ -144,11 +179,17 @@ def evaluate_trust_state(con: sqlite3.Connection, target_triple: str) -> tuple[i
         # standing failure always wins over any trust act, however recent.
         return (critical_failures, "quarantined")
 
-    act_row = cur.execute(
-        "SELECT target_state FROM adapter_trust_acts WHERE triple = ? "
-        "ORDER BY recorded_at DESC, rowid DESC LIMIT 1",
-        (target_triple,),
-    ).fetchone()
+    act_row = next(
+        (
+            (row[0],)
+            for row in cur.execute(
+                "SELECT target_state, triple FROM adapter_trust_acts "
+                "ORDER BY recorded_at DESC, rowid DESC"
+            ).fetchall()
+            if normalize_triple(row[1]) == target_triple
+        ),
+        None,
+    )
     if act_row:
         return (0, act_row[0])
     # The floor, absent any explicit trust act and any qualifying failure, is
@@ -204,6 +245,7 @@ def record_trust_act(
             "(>=10 non-whitespace characters)"
         )
 
+    triple = normalize_triple(triple.strip())
     con = sqlite3.connect(str(db_path))
     try:
         ensure_trust_schema(con)

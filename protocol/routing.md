@@ -1,6 +1,6 @@
 # Routing
 
-Route identity is `harness@version × model_id × effort`. Public benchmark identity is only `model_id × effort`; never share runtime reliability, quota, dispatch-form, or adapter-trust evidence automatically across harnesses.
+Route identity is `harness@version-line × model_id × effort`. The version line is the harness major version (major.minor for 0.x, e.g. `codex@0.157`, `agy@1`); patch releases ship the same model, so trust and evidence carry across them. The full `harness_version` is still recorded in dispatch telemetry. Normalization lives in `office_scoring.harness_version_line`/`normalize_triple`. Public benchmark identity is only `model_id × effort`; never share runtime reliability, quota, dispatch-form, or adapter-trust evidence automatically across harnesses.
 
 Filter in this exact order: hard exclusions → adapter validity/trust → required capabilities → absolute role floor → task shape → quota safety → advisory quality anchor → cost → local tie-break evidence.
 

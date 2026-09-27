@@ -51,7 +51,7 @@ The order is fixed and lives in one place: `protocol/lifecycle.md`. Gears may fu
 
 Before every routed role, take the `auto-routing` receipt. Route the exact identity:
 
-`harness@version × model_id × effort`
+`harness@version-line × model_id × effort`
 
 The mandatory filter order lives in `protocol/routing.md`. Hold one invariant without loading it: adapter trust, the absolute floor, and tie-break evidence are derived from recorded evidence and never caller-supplied — trust only ever falls automatically, and only a recorded, attributed act raises it or overrides a derived gate.
 
