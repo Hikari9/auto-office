@@ -11,8 +11,8 @@ effort_mapping:
   low: low
   medium: medium
   high: high
-  xhigh: null
-  max: null
+  xhigh: xhigh
+  max: max
 benchmark_slug_mapping: {}
 invocation:
   executable: claude
@@ -52,3 +52,21 @@ conformance:
   deterministic: pending
   live: pending
 source_notes: Current office-skills Claude mechanics seeded for migration; tool allowlists remain dispatch-specific and must be generated from the packet/environment.
+capabilities: [planning, builder, review]
+office_profiles:
+  worker:
+    argv: [-p, --model, "{model}", --effort, "{effort}", --permission-mode, bypassPermissions, --output-format, text]
+    prompt: stdin
+    output: stdout
+    herdr_kind: claude
+  reviewer:
+    argv: [-p, --model, "{model}", --effort, "{effort}", --allowedTools, "Read,Grep,Glob", --disallowedTools, "Edit,Write,Bash,NotebookEdit", --output-format, text, "{include_dirs}"]
+    include_arg: [--add-dir, "{dir}"]
+    prompt: stdin
+    output: stdout
+  vision:
+    argv: [-p, --model, "{model}", --effort, "{effort}", --allowedTools, "Read,Grep,Glob", --disallowedTools, "Edit,Write,Bash,NotebookEdit", --output-format, text, "{include_dirs}"]
+    include_arg: [--add-dir, "{dir}"]
+    image_transport: prompt-path
+    prompt: stdin
+    output: stdout

@@ -37,6 +37,22 @@ benchmark_index_notes: >-
   v4.2 added AA-Briefcase and GDP.pdf and removed GPQA Diamond. Never compare raw scores
   across index versions.
 models:
+  - model_id: sonnet
+    invocation_model_id: claude-sonnet-5
+    invocation_harness: claude
+    invocation_source: 'documented: claude --model accepts full model ids; unproven until conformance'
+    source_identifier: claude-sonnet-5-high
+    source_name: shipped-seed
+    effort: high
+    source_effort: High Effort
+    effort_confidence: mapped
+    benchmark_indexes: {}
+    price_fields: null
+    speed_fields: null
+    release_date: null
+    source_snapshot_metadata: {kind: normative-seed-preference, notes: v3.1 visual-review preference 2}
+    content_hash: null
+    supersession_metadata: null
   - model_id: opus
     invocation_model_id: claude-opus-5
     invocation_harness: claude
@@ -792,7 +808,12 @@ models:
     # was honoured by coincidence, not by the flag. Not dispatchable until a
     # launch form that agy 1.2.8 actually applies is verified with a banner
     # that differs from the account default.
-    dispatchable: false
+    # RESOLVED on agy 1.2.12 (local-evidence, 2026-09-27): an unknown slug now
+    # fails at launch (exit 1, "invalid model selection ... is not recognized")
+    # instead of being ignored as on 1.2.8, and `--model gemini-3.8-flash-medium`
+    # with `--prompt=` launched and answered with exit 0. The 3.1 vision profile
+    # (adapters/seed/agy.yaml) is the only default consumer of this row.
+    dispatchable: true
     source_identifier: gemini-3-8-flash-medium
     source_name: artificial-analysis
     effort: medium
@@ -833,7 +854,12 @@ models:
     # user as under-reporting; the probe was directionally correct. Treat a
     # single-digit agy reading as real and do not override it without evidence
     # stronger than recollection.
-    dispatchable: false
+    # RESOLVED on agy 1.2.12 (local-evidence, 2026-09-27): an unknown slug now
+    # fails at launch (exit 1, "invalid model selection ... is not recognized")
+    # instead of being ignored as on 1.2.8, and `--model gemini-3.8-flash-low`
+    # with `--prompt=` launched and answered with exit 0. The 3.1 vision profile
+    # (adapters/seed/agy.yaml) is the only default consumer of this row.
+    dispatchable: true
     source_identifier: gemini-3-8-flash-low
     source_name: artificial-analysis
     effort: low

@@ -266,7 +266,7 @@ class EffectiveConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             u = self.write(d, 'user.yaml', 'quota: {reserve_percent: "lots"}\n')
             cfg, _, warns = self.resolve(d, user=u)
-            self.assertEqual(cfg['quota']['reserve_percent'], 20)
+            self.assertEqual(cfg['quota']['reserve_percent'], 5)  # plugin default (charter 12A)
             self.assertEqual(warns[0]['reason'], 'type-mismatch-ignored')
 
     def test_matching_schema_version_is_not_a_warning(self):
@@ -289,7 +289,9 @@ class EffectiveConfigTests(unittest.TestCase):
             cfg, tiers, warns = self.resolve(d, user=str(Path(d)/'nope.yaml'))
             self.assertFalse(next(t for t in tiers if t['tier'] == 'user')['present'])
             self.assertEqual(warns, [])
-            self.assertEqual(cfg['quota']['reserve_percent'], 20)
+            self.assertEqual(cfg['quota']['reserve_percent'], 5)  # plugin default (charter 12A)
+            # The balanced money band is a different 20% and does not move.
+            self.assertEqual(cfg['cost_policy']['balanced_money_band_percent'], 20)
 
 
 def _invoke(func, **kwargs):

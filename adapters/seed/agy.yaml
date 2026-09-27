@@ -47,3 +47,16 @@ conformance:
   deterministic: pending
   live: pending
 source_notes: Current office-skills Agy mechanics seeded for migration; exact model display names are dynamic and must come from local discovery.
+# 3.1: agy is the Gemini route on accounts where the Gemini CLI reports
+# IneligibleTierError. Only a vision profile: agy has no verified read-only
+# isolation, so it is not used as a code reviewer or worker by default; the
+# visual judgment runs in the run's private evidence directory.
+capabilities: [review]
+office_profiles:
+  vision:
+    argv: [--dangerously-skip-permissions, --print-timeout, 30m, --model, "{model}", "{include_dirs}"]
+    include_arg: [--add-dir, "{dir}"]
+    prompt: argv-bound
+    prompt_flag: "--prompt="
+    image_transport: prompt-path
+    output: stdout
