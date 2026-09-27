@@ -17,6 +17,10 @@ office doctor                          # verify the install, hooks, pinned runti
 ```
 
 From a checkout: `uv tool install --editable .` (or `uv venv && uv pip install -e '.[visual,test]'`).
+
+`uv tool install` provides the `office` command; `office install` then adds the managed hooks and registers
+the runtime. If the skill runs before either step, it stops at its install check and asks you to approve the
+install, and it offers an upgrade when the installed `office` release differs from the skill's `VERSION`.
 The visual extra installs Playwright and uses the local Chrome; without it, visual gates report
 `CAPTURE_BLOCKED` rather than passing.
 

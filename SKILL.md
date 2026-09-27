@@ -25,6 +25,17 @@ ends with a `next:` line naming the next legal action.
 - A run stays on the Office version that created it. If a command says a run is pinned to another
   runtime (including a 3.0 run), follow the instruction it prints.
 
+## Install check (every session, before anything else)
+
+Run `office --version`. This skill's directory is the `auto-office` package, so it is the install source.
+- **Not found:** the CLI is not installed. Stop and ask the user to approve installing it; never install
+  silently. On approval: `uv tool install "<this skill's directory>"` (`pipx install` if `uv` is missing),
+  then `office install` (managed harness hooks and runtime registration; it backs up each config) and
+  `office doctor`.
+- **Found, but its release (the part before any `+`) differs from this directory's `VERSION`:** tell the
+  user and offer `uv tool install --force "<this skill's directory>"`, then `office install`. Runs already
+  started keep their pinned runtime either way.
+
 ## Start
 
 1. Create or reuse exactly one tracking GitHub issue for the request (search for duplicates first;

@@ -78,6 +78,22 @@ def check_skill_budgets(root=ROOT):
             errors.append(f'{relative}: {count} lines exceeds line budget of {budget}')
     return errors
 
+def check_versions(root=ROOT):
+    """One release identity: VERSION, the plugin manifest and the package agree.
+    Claude Code keys plugin updates on the manifest version, and every run pins
+    the package version, so a mismatch ships one identity under two numbers."""
+    import tomllib
+    want = (root / 'VERSION').read_text().strip()
+    found = {'VERSION': want}
+    manifest = root / '.claude-plugin' / 'plugin.json'
+    if manifest.exists():
+        found['.claude-plugin/plugin.json'] = json.loads(manifest.read_text()).get('version')
+    project = root / 'pyproject.toml'
+    if project.exists():
+        found['pyproject.toml'] = tomllib.loads(project.read_text()).get('project', {}).get('version')
+    return [f'{where}: version {got!r} does not match VERSION {want!r}' for where, got in found.items() if got != want]
+
+
 def main():
     errors=[]
     skills = discovered_skills(ROOT)
@@ -131,6 +147,7 @@ def main():
 
     budget_errors = check_skill_budgets()
     errors.extend(budget_errors)
+    errors.extend(check_versions())
         
     if errors:
         print('FAIL')
