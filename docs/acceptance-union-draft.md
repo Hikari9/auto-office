@@ -19,6 +19,12 @@ Conventions:
   the residue says is missing). `none`: no command, or the implementation is missing.
 - **Dispositions.** `KEEP`, `SUPERSEDED-BY <target>`, `MERGE-WITH <ID>`, `RETIRE`. `UNDECIDED
   (#n)` marks a row whose disposition depends on an open maintainer decision.
+- **Instruction-layer proof (#117).** A text or regex search over instruction docs does not prove
+  an instruction-layer row. Only a recorded live or fixture run counts (for example `v31` §16).
+  Rows without one are `weak-proof` and say "needs recorded run".
+- **Past-merge proof (#118).** Verify in order: (a) `git merge-base --is-ancestor <sha> origin/main`
+  when the commit was not squashed; (b) otherwise the carrying PR is merged into main
+  (`gh pr view N --json state,mergeCommit`); (c) otherwise status `attested` with the SHA.
 - Maintainer decisions already applied: #127 and #129 are in scope for v3.x (KEEP, implementation
   missing); #128 fit_gear must select all six modes (KEEP); #120 CI stays empty and `validate.yml`
   will be removed, so the CI rows are superseded by that decision.
@@ -35,13 +41,13 @@ Short form: `v31` = `docs/v31-implementation.md`.
 | ID | Source row ID | Source | Requirement | Current proof | Proof status | Proposed disposition | Related issue | Rationale |
 |---|---|---|---|---|---|---|---|---|
 | **A. Lifecycle roles and intake** | | | | | | | | |
-| U001 | issue-35#decision-1 | 3.0 | Orchestrator captures provisional intent while the planner investigates and interviews | `pytest tests/test_v3_instruction_contract.py` | weak-proof | UNDECIDED (#117) | #117 | Proof is a whole-file instruction-doc assertion |
-| U002 | issue-77#provisional-kickoff | 3.0 | Kickoff gathers only initial intent and launches planner with a provisional packet | `-k test_provisional_kickoff` | broken-cite | UNDECIDED (#117) | #117 | Test name absent |
-| U003 | issue-77#interactive-planner | 3.0 | Dedicated planner does recon, interviews the user, reshapes the problem | `-k test_interactive_planner` | broken-cite | UNDECIDED (#117) | #117 | Test name absent |
-| U004 | issue-35#child-47 | 3.0 | Orchestrator fully grills requirements; planner never talks to user | `git grep` of lifecycle spec | weak-proof | RETIRE | — | Already superseded by decision-1 / #77 |
-| U005 | issue-35#decision-3 | 3.0 | Executor owns code-review dispositions and evidence-backed refutations | `pytest tests/test_v3_instruction_contract.py` | weak-proof | UNDECIDED (#117) | #117 | Instruction-doc assertion only |
+| U001 | issue-35#decision-1 | 3.0 | Orchestrator captures provisional intent while the planner investigates and interviews | `pytest tests/test_v3_instruction_contract.py` (doc text assertion) | weak-proof | KEEP | #117 | needs recorded run: no §16 or fixture run exercises this; §16.9 (F01) planned without a user interview |
+| U002 | issue-77#provisional-kickoff | 3.0 | Kickoff gathers only initial intent and launches planner with a provisional packet | `-k test_provisional_kickoff` (absent) | weak-proof | KEEP | #117 | needs recorded run: no §16 or fixture run exercises this |
+| U003 | issue-77#interactive-planner | 3.0 | Dedicated planner does recon, interviews the user, reshapes the problem | `-k test_interactive_planner` (absent) | weak-proof | KEEP | #117 | needs recorded run: no §16 or fixture run exercises this; §16.9 exercised planning but not the interview |
+| U004 | issue-35#child-47 | 3.0 | Orchestrator fully grills requirements; planner never talks to user | `git grep` of lifecycle spec | weak-proof | RETIRE | — | Already superseded by decision-1 / #77; doc-text-search-only proof, needs recorded run if reopened |
+| U005 | issue-35#decision-3 | 3.0 | Executor owns code-review dispositions and evidence-backed refutations | `pytest tests/test_v3_instruction_contract.py` (doc text assertion) | weak-proof | KEEP | #117 | needs recorded run: no §16 or fixture run exercises this; §16.9 reviewed but recorded no refutation |
 | U006 | issue-77#orchestrator-distribution | 3.0 | Orchestrator distributes executor packets by the planner's dependency graph | `-k test_orchestrator_distribution` | broken-cite | SUPERSEDED-BY U036 | #117 | 3.1 dispatch owns parallel/stacked distribution (v31:92 §5) |
-| U007 | issue-93#structured-intake-fallback | 3.0 | Intake falls back to batched plain-text questions without ask_question | `-k test_intake_fallback` | broken-cite | UNDECIDED (#117) | #117 | Test name absent |
+| U007 | issue-93#structured-intake-fallback | 3.0 | Intake falls back to batched plain-text questions without ask_question | `-k test_intake_fallback` (absent) | weak-proof | KEEP | #117 | needs recorded run: no §16 or fixture run exercises this |
 | U008 | issue-93#spoke-loading | 3.0 | Spoke loading is portable across Claude, Codex, agy with mark-spoke receipts | `-k test_spoke_loading` | broken-cite | SUPERSEDED-BY v31:234 (§14) | #117 | 3.1 retires `office spoke` and the spoke digest ritual |
 | U009 | issue-35#child-81 | 3.0 | Five task-shape playbooks specialize procedure and evidence | `-k test_start_cli_can_select_full_fit_path` | weak-proof | KEEP | #122 | Test exists but does not assert the playbooks |
 | **B. Amendments and versioning** | | | | | | | | |
@@ -62,9 +68,9 @@ Short form: `v31` = `docs/v31-implementation.md`.
 | U023 | issue-35#child-85 | 3.0 | Run takeover does a durable-state handshake and revokes the stale lease | `-k test_stale_lease_takeover` | weak-proof | MERGE-WITH U024 | #122 | Both claim crash/lease recovery |
 | U024 | §15.2 | 3.1 | Crash between transition and outside work recovers once | `test_state_core.py::test_crash_after_commit_before_external_work_recovers_once` | passes | KEEP | — | |
 | U025 | issue-35#decision-6 | 3.0 | One orchestrator supervises concurrent families with one focus family | re-point `test_families.py::StickyFocusMatrixTests` | broken-cite | MERGE-WITH U026 | #121 | Duplicate of sticky-focus |
-| U026 | issue-77#sticky-focus | 3.0 | Family focus is sticky and inferred | re-point `test_families.py::StickyFocusMatrixTests + FocusAmbiguityTests` | broken-cite | KEEP | #121 | No 3.1 counterpart; families absent from v31 doc |
-| U027 | issue-77#concurrent-families | 3.0 | Multiple families run concurrently with durable isolated state | re-point `test_families.py::RestartReconstructionTests` | broken-cite | KEEP | #121 | No 3.1 counterpart |
-| U028 | issue-77#soft-scheduling | 3.0 | Cross-family quota collisions produce advisory warnings | re-point `test_families.py::test_projected_collision_warns_for_one_family_while_the_other_stays_runnable` | broken-cite | KEEP | #121 | No 3.1 counterpart |
+| U026 | issue-77#sticky-focus | 3.0 | Family focus is sticky and inferred | `tests/v31/test_discovery_pinning.py::test_ambiguous_runs_never_select_latest_mtime` + `::test_unbound_session_never_starts_or_binds` | passes | SUPERSEDED-BY src/office/discovery.py:88,120 | #121 | Session binding is the sticky focus; inference is limited to the sole active run and ambiguity is refused (discovery.py:1-5) |
+| U027 | issue-77#concurrent-families | 3.0 | Multiple families run concurrently with durable isolated state | `tests/v31/test_discovery_pinning.py::test_ambiguous_runs_never_select_latest_mtime` | passes | SUPERSEDED-BY src/office/db.py:25, src/office/discovery.py:111 | #121 | Each run is its own family (`family_id = run_id`, lifecycle.py:67); state is per run in runs.db and is re-read on resume |
+| U028 | issue-77#soft-scheduling | 3.0 | Cross-family quota collisions produce advisory warnings | re-point `test_families.py::test_projected_collision_warns_for_one_family_while_the_other_stays_runnable` (3.0 only) | broken-cite | KEEP | #121 | 3.1 gap: no cross-run quota projection or collision warning in src/office |
 | **D. Version identity, pinning, discovery** | | | | | | | | |
 | U029 | issue-35#child-53 | 3.0 | Spokes collapse into single auto-office, keeping primitive CLI skills | `python3 scripts/check_ecosystem.py` | weak-proof | SUPERSEDED-BY v31:234 (§14) | #122 | `office-skills` → `auto-office` done in 3.1 |
 | U030 | §15.14 | 3.1 | Unbound session never starts or binds | `test_discovery_pinning.py::test_unbound_session_never_starts_or_binds` | passes | KEEP | — | |
@@ -159,10 +165,24 @@ Short form: `v31` = `docs/v31-implementation.md`.
 | U111 | issue-93#portability-demonstration | 3.0 | Portability demonstration in a scratch repo | evidence doc + privacy-lint | passes | KEEP | — | Re-run for 3.1 is not recorded |
 | U112 | §16.9 | 3.1 | Live run through codex orchestrator lands with hidden tests passing | live observation (eval pilot F01) | weak-proof | MERGE-WITH U111 | — | Only codex exercised for 3.1 |
 | U113 | §17 | 3.1 | Prospective matched-fixture evaluation (spec §24, ≥60 jobs) | `eval/v31/` | none | KEEP | #171 | Not completed; quota-bound |
-| U114 | issue-35#decision-2 | 3.0 | Implementation resolves conflicts, reuses components, lands | `git diff --stat 5d7a450` | weak-proof | UNDECIDED (#118) | #118 | Historical-process row |
-| U115 | plan-v2#finding-F10 | 3.0 | Final merge asserts reviewed head SHA, tree hash, diff equality | `git log -1 --stat` | weak-proof | UNDECIDED (#118) | #118 | Historical-process row |
+| U114 | issue-35#decision-2 | 3.0 | Implementation resolves conflicts, reuses components, lands | `git merge-base --is-ancestor 5d7a450 origin/main` (rule a; exits 0 on 2026-09-27) | passes | KEEP | #118 | Not squashed; ancestor of main. Landing via PR #99 also confirmed by rule b |
+| U115 | plan-v2#finding-F10 | 3.0 | Final merge asserts reviewed head SHA, tree hash, diff equality | `git merge-base --is-ancestor 854b04a origin/main` (rule a) + `gh pr view 99 --json state,mergeCommit,headRefOid` (MERGED, merge ff303e7, head 854b04a = `ff303e7^2`) | attested | KEEP | #118 | Reviewed head SHA is proven; integration tree hash and diff equality attested at ff303e7 |
 | U116 | plan-v2#ci-billing-lock | 3.0 | Remote CI `validate.yml` runs on GitHub | `gh run list --workflow=validate.yml` | none | SUPERSEDED-BY #120 decision | #120 | CI stays empty; validate.yml to be removed |
 | U117 | issue-40#validate-yml-runs-clean-locally | 3.0 | Every `validate.yml` command passes locally | check_ecosystem + full pytest | passes | SUPERSEDED-BY #120 decision | #120 | Workflow file will be removed; keep an equivalent local gate if wanted |
+
+## Families in 3.1
+
+- **Grouping (covered).** Every 3.1 run is its own family: `family_id = run_id`
+  (`src/office/lifecycle.py:67`, `src/office/db.py:25`). Multiple runs coexist in `runs.db` and are
+  listed by `office list` (`src/office/cli.py:249`).
+- **Sticky focus (covered, narrower).** Focus is a session binding set by `office resume <run>`
+  (`src/office/discovery.py:88`). Resolution order is flag, env, binding, sole active run
+  (`discovery.py:120`). 3.0 inferred focus from context; 3.1 refuses ambiguity instead.
+- **Restart reconstruction (covered).** State is re-read from `runs.db` on each call; there is no
+  separate family file to rebuild.
+- **Legacy code.** 3.1 calls `scripts/office_runtime.py` only to serve pinned 3.0 runs
+  (`src/office/compat.py:136`); `family-*` commands map to `office list`/`resume` (`compat.py:35`).
+- **Gap.** No cross-run quota collision warning (U028).
 
 ## Counts
 
@@ -170,8 +190,8 @@ Rows: 117 (84 from 3.0, 33 from 3.1). §16 rows 1–5 are one row (U053).
 
 | Disposition | Count |
 |---|---|
-| KEEP | 79 |
-| SUPERSEDED-BY | 13 |
+| KEEP | 84 |
+| SUPERSEDED-BY | 15 |
 | MERGE-WITH | 15 |
 | RETIRE | 3 |
-| UNDECIDED | 7 |
+| UNDECIDED | 0 |
