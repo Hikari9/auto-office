@@ -100,6 +100,13 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
             jobs.kick(con, run_id)
         res = Result()
         res.add(f"{short(run_id)} planning | gear {gear} | {planner_note}")
+        from office import candidates
+        report_con = db.connect()
+        try:
+            for line in candidates.trust_report(report_con):
+                res.add(line)
+        finally:
+            report_con.close()
         if planner_problem:
             res.notices.append(planner_problem)
         if planner_mode == "dedicated":
