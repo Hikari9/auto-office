@@ -82,7 +82,7 @@ def _requirements_change(con, run: dict, delta: str, quote: str | None) -> Resul
         state.emit(con, run, "requirements.changed", f"REQUIREMENTS r{version}: {delta.strip()[:100]}; authorization required")
     jobs.kick(con, run["id"])
     return Result(lines=[f"requirements r{version} recorded | authorization for r{version} required"],
-                  next='obtain user authorization, then office approve plan --quote "<user\'s words>"')
+                  next='ask the user (native question tool) for authorization, then office approve plan --quote "<user\'s words>"')
 
 
 def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan_text: str | None) -> Result:
@@ -198,7 +198,7 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author) -> Result:
     lines = [f"plan p{version} | {amendment_id} contract | affected {','.join(affected) or 'none'}"]
     if flagged:
         lines.append(f"new authority entries need user authorization: {', '.join(flagged)}")
-    return Result(lines=lines, next=('obtain user authorization, then office approve ' + flagged[0] + ' --quote "<words>"')
+    return Result(lines=lines, next=('ask the user (native question tool) for authorization, then office approve ' + flagged[0] + ' --quote "<words>"')
                   if flagged else "exceptions only; office status")
 
 

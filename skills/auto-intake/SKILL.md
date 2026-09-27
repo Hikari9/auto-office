@@ -8,7 +8,7 @@ description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use t
 > **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
 > role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
 
-The planner conducts this interview directly with the user, after repository reconnaissance and using the orchestrator's provisional intent only as a starting hypothesis it may revise. Use a structured question tool when the harness has one; batched plain text otherwise — either form satisfies intent coverage as long as all twelve items are covered before freezing.
+The planner conducts this interview directly with the user, after repository reconnaissance and using the orchestrator's provisional intent only as a starting hypothesis it may revise. Use the harness's native question tool when it has one (the per-harness list is under "Asking the user" in the root `SKILL.md`; Claude Code: `AskUserQuestion`); batched plain text otherwise — either form satisfies intent coverage as long as all twelve items are covered before freezing.
 
 ## The twelve-item floor
 
