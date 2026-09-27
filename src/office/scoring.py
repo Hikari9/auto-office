@@ -427,3 +427,66 @@ def reward_sort_key(reward: float | None) -> tuple[int, float]:
     if r == 0:
         return (2, 0.0)
     return (3, -r)
+
+
+# ---------------------------------------------------------------------------
+# Outcome labels at closeout (F4). Labels come only from evidence already recorded
+# for a dispatch; nothing here attributes a failure to the adapter.
+# ---------------------------------------------------------------------------
+
+def _dispatch_evidence_hash(con: sqlite3.Connection, dispatch_id: str) -> str | None:
+    """Returns the earliest valid sha256 evidence hash recorded for `dispatch_id` across
+    validations, findings and gate evidence on its revisions, or None."""
+    queries = (
+        "SELECT evidence_hash, created_at FROM validations WHERE dispatch_id = ?",
+        "SELECT evidence_hash, created_at FROM findings WHERE dispatch_id = ?",
+        "SELECT e.sha256, e.created_at FROM evidence e JOIN revisions r ON r.id = e.revision_id "
+        "WHERE r.dispatch_id = ?",
+    )
+    candidates = []
+    for sql in queries:
+        for value, created_at in con.execute(sql, (dispatch_id,)).fetchall():
+            if _valid_evidence_hash(value):
+                candidates.append((created_at or "", value))
+    return min(candidates)[1] if candidates else None
+
+
+def label_run_outcomes(con: sqlite3.Connection, run_id: str, terminal: str) -> list[dict]:
+    """Writes one outcome label per evidenced dispatch of `run_id`. `terminal` is
+    `closed` or `abandoned`. On close only dispatches that produced an accepted revision
+    are labeled (verified_no_observed_failure); on abandon every evidenced dispatch is
+    labeled `abandoned`. Dispatches without evidence, or already labeled, are skipped,
+    so a repeated close writes nothing new. primary_attribution stays NULL."""
+    if terminal == "closed":
+        rows = con.execute(
+            "SELECT DISTINCT r.dispatch_id FROM tasks t JOIN revisions r ON r.id = t.accepted_revision_id "
+            "WHERE t.run_id = ? AND r.dispatch_id IS NOT NULL ORDER BY r.dispatch_id", (run_id,)
+        ).fetchall()
+        label = "verified_no_observed_failure"
+    elif terminal == "abandoned":
+        rows = con.execute(
+            "SELECT id FROM dispatches WHERE run_id = ? ORDER BY id", (run_id,)
+        ).fetchall()
+        label = "abandoned"
+    else:
+        raise ValueError(f"unrecognised terminal state {terminal!r}")
+    written = []
+    for (dispatch_id,) in rows:
+        if con.execute("SELECT 1 FROM outcome_labels WHERE dispatch_id = ?", (dispatch_id,)).fetchone():
+            continue
+        evidence_hash = _dispatch_evidence_hash(con, dispatch_id)
+        if evidence_hash is None:
+            continue
+        row = {
+            "id": "OL" + uuid.uuid5(uuid.NAMESPACE_URL, f"office-outcome:{dispatch_id}").hex[:16],
+            "dispatch_id": dispatch_id, "label": label, "primary_attribution": None,
+            "contributing_attributions": None,
+            "labeled_at": datetime.now(timezone.utc).isoformat(), "evidence_hash": evidence_hash,
+        }
+        con.execute(
+            "INSERT OR IGNORE INTO outcome_labels(id, dispatch_id, label, primary_attribution, "
+            "contributing_attributions, labeled_at, evidence_hash) VALUES(?,?,?,?,?,?,?)",
+            tuple(row.values()),
+        )
+        written.append(row)
+    return written
