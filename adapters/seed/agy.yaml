@@ -48,10 +48,12 @@ conformance:
   live: pending
 source_notes: Current office-skills Agy mechanics seeded for migration; exact model display names are dynamic and must come from local discovery.
 # 3.1: agy is the Gemini route on accounts where the Gemini CLI reports
-# IneligibleTierError. Only a vision profile: agy has no verified read-only
-# isolation, so it is not used as a code reviewer or worker by default; the
-# visual judgment runs in the run's private evidence directory.
-capabilities: [review]
+# IneligibleTierError. agy has no verified read-only isolation, so it has no
+# code-reviewer profile; the visual judgment runs in the run's private evidence
+# directory. It builds in its own task worktree through the worker profile
+# (the preferred executor seed), so it declares `builder` like the other
+# worker-capable adapters. Trust is still derived per route (stage 2).
+capabilities: [builder, review]
 office_profiles:
   worker:
     argv: [--dangerously-skip-permissions, --print-timeout, 45m, --model, "{model}", --add-dir, "{cwd}"]
