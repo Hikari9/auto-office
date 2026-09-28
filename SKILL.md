@@ -49,6 +49,9 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 - **Found, but its release (the part before any `+`) differs from this directory's `VERSION`:** tell the
   user and offer `uv tool install --force "<this skill's directory>"`, then `office install`. Runs already
   started keep their pinned runtime either way.
+- **Found, same release:** a wheel reports only its release, so fixes merged after the install are
+  invisible to `--version`. Run `office doctor`; if it prints `install: STALE`, tell the user and offer
+  the same reinstall. Runs pinned to this release pick up the reinstalled code.
 
 ## Start
 
