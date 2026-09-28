@@ -43,3 +43,27 @@ def test_seed_by_size_overrides_default_seed():
     assert candidates._preferred_seed(policy, {"risk": {"size_class": "L"}}) == base
     assert candidates._preferred_seed(policy, {"risk": {}}) == base
     assert candidates._preferred_seed({"preferred_seed": base}, {"risk": {"size_class": "XL"}}) == base
+
+
+def test_agy_is_a_builder_and_gemini_low_is_trusted():
+    agy = config.load_yaml(paths.resources_root() / "adapters" / "seed" / "agy.yaml")
+    assert "builder" in agy["capabilities"]
+    assert scoring.trust_baseline()["agy@1/gemini-3.8-flash@low"] == "proven"
+
+
+def test_alias_follows_newest_family_member():
+    alias = {"model_id": "opus", "alias_family": r"^claude-opus-(?P<version>\d+(?:-\d+)*)$",
+             "invocation_harness": "claude", "invocation_model_id": "claude-opus-5-5",
+             "invocation_source": "documented: alias", "effort": "low", "benchmark_indexes": {}}
+    rows = [alias,
+            {"model_id": "claude-opus-5-5", "invocation_harness": "claude", "effort": "low",
+             "invocation_source": "documented: x", "benchmark_indexes": {INDEX: 42}},
+            {"model_id": "claude-opus-6", "invocation_harness": "claude", "effort": "low", "dispatchable": False,
+             "invocation_source": "unverified: new", "benchmark_indexes": {INDEX: 60}},
+            {"model_id": "claude-opus-6", "invocation_harness": "claude", "effort": "high",
+             "invocation_source": "documented: x", "benchmark_indexes": {INDEX: 70}}]
+    resolved = candidates.resolve_aliases(rows)[0]
+    assert resolved["invocation_model_id"] == "claude-opus-6"
+    assert resolved["benchmark_indexes"] == {INDEX: 60}
+    assert resolved["invocation_source"] == "documented: alias"
+    assert candidates.resolve_aliases([alias])[0]["invocation_model_id"] == "claude-opus-5-5"

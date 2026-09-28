@@ -6,7 +6,7 @@ notes: >-
   adapter-attributed failure quarantines the route regardless. Add a route only with a
   maintainer grant on record; run history alone does not qualify (outcome labels were not
   recorded before 3.1, so no route had labelled evidence at the 5-success threshold).
-recorded_at: '2026-09-27'
+recorded_at: '2026-09-28'
 granted_by: Rico Tiongson (techteam@favor.church)
 routes:
   - triple: claude@2/claude-sonnet-5@high
@@ -24,3 +24,6 @@ routes:
   - triple: agy@1/gemini-3.8-flash@medium
     target_state: proven
     evidence: grants at agy 1.2.11 and cli (runs 53f86d74, ce26b2fa); preferred executor seed
+  - triple: agy@1/gemini-3.8-flash@low
+    target_state: proven
+    evidence: maintainer grant 2026-09-28 (#183) as the default visual reviewer; vision proof and visual_reviewer success at agy 1.2.12

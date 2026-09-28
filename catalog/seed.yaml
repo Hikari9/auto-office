@@ -35,6 +35,7 @@ benchmark_index_notes: >-
   Scores from index version v4.3.2 (September 2026, current as of 2026-09-27) are NOT comparable to v4.3, v4.3.1, v4.2 or v4.1.1 scores. v4.3.1 refreshed the AA-Briefcase and GDPval-AA v2 pairwise judge panels to Claude Opus 5, GPT-5.6 Sol and Gemini 3.8 Flash. v4.3.2 moved GDPval-AA to v2.1 (Elo re-anchored to DeepSeek V4.1 Flash (max) at 1600, Crowd-BT fit) and AA-Briefcase to v1.1 (anchor unchanged at GPT-5.5 (medium) = 1000, Crowd-BT fit per pairwise scope). v4.3 replaced tau3-Banking with AutomationBench-AA and Terminal-Bench 2.1 with 4.0. Never compare raw scores across index versions.
 models:
   - model_id: sonnet
+    alias_family: '^claude-sonnet-(?P<version>\d+(?:-\d+)*)$'
     invocation_model_id: claude-sonnet-5
     invocation_harness: claude
     invocation_source: 'documented: claude --model accepts full model ids; unproven until conformance'
@@ -51,6 +52,7 @@ models:
     content_hash:
     supersession_metadata:
   - model_id: opus
+    alias_family: '^claude-opus-(?P<version>\d+(?:-\d+)*)$'
     invocation_model_id: claude-opus-5-5
     invocation_harness: claude
     invocation_source: 'documented: the claude CLI cannot enumerate models, so this slug is documented rather than CLI-proven; record a route-defect if a dispatch rejects it'
@@ -67,6 +69,7 @@ models:
     content_hash:
     supersession_metadata:
   - model_id: astra
+    alias_family: '^gpt-(?P<version>\d+(?:\.\d+)*)-astra$'
     invocation_model_id: gpt-6-astra
     invocation_harness: codex
     invocation_source: local-evidence:codex-debug-models-bundled
@@ -83,6 +86,7 @@ models:
     content_hash:
     supersession_metadata:
   - model_id: luna
+    alias_family: '^gpt-(?P<version>\d+(?:\.\d+)*)-luna$'
     invocation_model_id: gpt-6-luna
     invocation_harness: codex
     invocation_source: local-evidence:codex debug models lists gpt-6-luna
