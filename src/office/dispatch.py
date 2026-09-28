@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -431,6 +432,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
     if kind == "worker" and os.environ.get("OFFICE_WORKER_LAUNCHER") == "external":
         # A worker hosted outside Office's process control (an interactive
         # session the user or a test drives). It is live until it says otherwise.
+        write_agent_env(run, dispatch, ddir)
         _record_launch(run, dispatch["id"], launcher="external")
         return {"launcher": "external"}
     if launcher == "sync":
@@ -438,29 +440,33 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         _record_launch(run, dispatch["id"], launcher="sync", pid=os.getpid())
         subprocess.run(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, env=env)
         return _wait_terminal(dispatch["id"], timeout=5) if wait else {"launcher": "sync"}
+    headless = "process"
     use_herdr = (launcher in ("auto", "herdr") and os.environ.get("HERDR_ENV") == "1" and shutil.which("herdr"))
     if use_herdr:
         inter = _interactive(dispatch, kind, cwd, include_dirs)
         pane = _herdr_pane(run, cwd, label=f"office {dispatch.get('role') or kind} {dispatch['id']}") if inter else None
+        if inter and not pane:
+            _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
         if pane:
             started = _herdr_agent_start(run, dispatch, spec, env, inter, pane, cwd, ddir)
             if started:
                 if wait:
                     return _wait_terminal(dispatch["id"])
                 return started
-            # The agent never came up in the pane: fall back to a plain process.
-            _record_launch(run, dispatch["id"], launcher="process-fallback", pane_id=None)
+            # The agent never came up in the pane: fall back to a plain process,
+            # and keep that visible on the dispatch (its notice says why).
+            headless = "process-fallback"
     log = open(ddir / "supervisor.log", "ab")
     try:
         proc = subprocess.Popen(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
                                 start_new_session=True, close_fds=True)
     finally:
         log.close()
-    _record_launch(run, dispatch["id"], launcher="process", pid=proc.pid)
+    _record_launch(run, dispatch["id"], launcher=headless, pid=proc.pid)
     if wait:
         proc.wait()
         return _wait_terminal(dispatch["id"])
-    return {"launcher": "process", "pid": proc.pid}
+    return {"launcher": headless, "pid": proc.pid}
 
 
 def _interactive(dispatch: dict, kind: str, cwd: Path, include_dirs: list[Path] | None = None) -> tuple[list[str], str] | None:
@@ -472,16 +478,9 @@ def _interactive(dispatch: dict, kind: str, cwd: Path, include_dirs: list[Path] 
                                      cwd=cwd, include_dirs=include_dirs)
 
 
-def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
-                       cwd: Path, ddir: Path) -> dict | None:
-    """Start the real harness in the pane with `herdr agent start`, hand it a
-    one-line brief pointer, and leave a detached watcher to record the end.
-    The pane runs the agent itself, never a shell wrapper around it."""
-    args, herdr_kind = inter
-    name = f"office-{dispatch['id']}"
-    worker = spec["kind"] == "worker"
-    # The pane's shell does not inherit this process's environment: source the
-    # dispatch identity into it first, so the agent's own `office submit` works.
+def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = True) -> Path:
+    """agent.env: the dispatch identity a pane-hosted agent sources before it
+    starts, whether Office or the user launches it."""
     wenv = worker_env(run, dispatch, dispatch.get("role") if worker else "reviewer")
     if not worker:
         # Reviewers get no Office authority: they cannot submit or ack.
@@ -491,14 +490,31 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     env_file = ddir / "agent.env"
     env_file.write_text("".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(carry.items())))
     env_file.chmod(0o600)
+    return env_file
+
+
+def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
+                       cwd: Path, ddir: Path) -> dict | None:
+    """Start the real harness in the pane with `herdr agent start`, hand it a
+    one-line brief pointer, and leave a detached watcher to record the end.
+    The pane runs the agent itself, never a shell wrapper around it."""
+    args, herdr_kind = inter
+    name = herdr_agent_name(dispatch["id"])
+    worker = spec["kind"] == "worker"
+    # The pane's shell does not inherit this process's environment: source the
+    # dispatch identity into it first, so the agent's own `office submit` works.
+    env_file = write_agent_env(run, dispatch, ddir, worker=worker)
     subprocess.run(["herdr", "pane", "run", pane, f". {shlex.quote(str(env_file))} && cd {shlex.quote(str(cwd))}"],
                    capture_output=True, timeout=30)
     try:
         proc = subprocess.run(["herdr", "agent", "start", name, "--kind", herdr_kind, "--pane", pane, "--", *args],
                               capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        _launch_notice(run, dispatch, f"herdr agent start failed ({exc}); running headless instead")
         return None
     if proc.returncode != 0:
+        why = (proc.stdout or proc.stderr or "").strip()[:200]
+        _launch_notice(run, dispatch, f"herdr agent start failed ({why}); running headless instead")
         return None
     spec.update({"herdr_agent": name, "pane": pane})
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
@@ -513,7 +529,14 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         pointer = (f"Read and carry out the review brief at {spec['prompt_file']} exactly.{images} "
                    f"Write your complete review to {spec['output']}. If your tools cannot write files, "
                    "end your reply with the complete review instead. Do not edit anything else.")
-    subprocess.run(["herdr", "agent", "prompt", name, pointer], capture_output=True, timeout=30)
+    landed = _deliver_prompt(name, pane, pointer)
+    if not landed:
+        # The agent is up in a pane the user can see; a second headless copy
+        # would race it. Say so and leave the pane for a manual re-prompt.
+        _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane}); "
+                                      f"re-prompt it: herdr agent prompt {name} {shlex.quote(pointer)}")
+    spec["prompt_landed"] = landed
+    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
     log = open(ddir / "supervisor.log", "ab")
     try:
         watcher = subprocess.Popen(frontdoor.current_argv()[0] + ["_supervise", dispatch["id"]], cwd=str(cwd),
@@ -521,7 +544,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
                                    start_new_session=True, close_fds=True)
     finally:
         log.close()
-    return {"launcher": "herdr", "pane": pane, "agent": name, "watcher_pid": watcher.pid}
+    return {"launcher": "herdr", "pane": pane, "agent": name, "watcher_pid": watcher.pid, "prompt_landed": landed}
 
 
 def _herdr_agent_sample(name: str) -> dict | None:
@@ -536,14 +559,72 @@ def _herdr_agent_sample(name: str) -> dict | None:
     if proc.returncode != 0 or not agent:
         return None
     read = _herdr_agent_text(name)
-    return {"status": agent.get("status") or agent.get("agent_status"), "content_hash": sha256_obj(read)}
+    return {"status": agent.get("status") or agent.get("agent_status"), "content_hash": sha256_obj(read),
+            "busy": _pane_busy(read)}
 
 
-def _herdr_agent_text(name: str) -> str:
+def _herdr_agent_text(name: str, *extra: str) -> str:
     try:
-        return subprocess.run(["herdr", "agent", "read", name], capture_output=True, text=True, timeout=30).stdout
+        return subprocess.run(["herdr", "agent", "read", name, *extra], capture_output=True, text=True,
+                              timeout=30).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
+
+
+# Footer text a harness shows only while a turn is running. agy's reported
+# status is not a liveness signal (it reads idle mid-turn); its pane is.
+BUSY_MARKERS = ("esc to cancel", "esc to interrupt")
+
+
+def _pane_busy(text: str) -> bool:
+    low = (text or "").lower()
+    return any(m in low for m in BUSY_MARKERS)
+
+
+def herdr_agent_name(dispatch_id: str) -> str:
+    """Herdr agent names must match [a-z][a-z0-9_-]{0,31}; dispatch ids start
+    with an uppercase D, which herdr rejects."""
+    return re.sub(r"[^a-z0-9_-]", "-", f"office-{dispatch_id}".lower())[:32]
+
+
+def _prompt_landed(name: str, timeout: float) -> bool:
+    """A prompt has landed once the agent reports `working` or its pane shows a
+    busy marker. `agent prompt` returning without error proves neither."""
+    deadline = time.time() + timeout
+    while True:
+        res = _herdr_json(["agent", "get", name])
+        agent = res.get("agent") or res
+        if (agent.get("status") or agent.get("agent_status")) == "working":
+            return True
+        if _pane_busy(_herdr_agent_text(name, "--source", "visible", "--lines", "6")):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(1)
+
+
+def _deliver_prompt(name: str, pane: str, pointer: str) -> bool:
+    """Send the one-line pointer and confirm it landed; retry once by typing it
+    into the pane and pressing Enter (agy can drop a prompt sent right after
+    `agent start` returns)."""
+    timeout = float(os.environ.get("OFFICE_HERDR_LAND_TIMEOUT", "30"))
+    subprocess.run(["herdr", "agent", "prompt", name, pointer], capture_output=True, timeout=30)
+    if _prompt_landed(name, timeout):
+        return True
+    subprocess.run(["herdr", "pane", "send-text", pane, pointer], capture_output=True, timeout=30)
+    subprocess.run(["herdr", "pane", "send-keys", pane, "Enter"], capture_output=True, timeout=30)
+    return _prompt_landed(name, timeout)
+
+
+def _launch_notice(run: dict, dispatch: dict, text: str) -> None:
+    """Record a launch problem where `office status` shows it."""
+    con = db.connect()
+    try:
+        with db.transaction(con):
+            state.emit(con, run, "launch", f"{dispatch.get('task_id') or dispatch['id']}: {text}",
+                       task_id=dispatch.get("task_id"), dispatch_id=dispatch["id"])
+    finally:
+        con.close()
 
 
 def _submitted(con, dispatch: dict) -> bool:
@@ -583,6 +664,7 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
         history.append(sample)
         window = history[-stable_samples:]
         if (len(window) == stable_samples and all(w["status"] in ("done", "idle") for w in window)
+                and not any(w.get("busy") for w in window)
                 and len({w["content_hash"] for w in window}) == 1):
             if output and not (output.is_file() and output.stat().st_size):
                 # A read-only reviewer that could not write the file left its
@@ -746,7 +828,7 @@ def _wait_terminal(dispatch_id: str, timeout: float | None = None) -> dict:
             con.close()
         if d["status"] in ("exited", "failed", "cancelled"):
             return {"exit_code": d["exit_code"], "terminal": d["terminal_classification"], "signal": d["signal"]}
-        if d.get("pid") and d.get("launcher") == "process" and not pid_alive(d["pid"]) and d["status"] == "running":
+        if d.get("pid") and d.get("launcher") in ("process", "process-fallback") and not pid_alive(d["pid"]) and d["status"] == "running":
             time.sleep(1)
             continue
         time.sleep(2)

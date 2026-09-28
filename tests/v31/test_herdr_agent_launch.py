@@ -18,6 +18,9 @@ code = 0
 if args[:2] == ["pane", "split"]:
     data["n"] += 1
     result = {{"pane": {{"pane_id": "w1:p%d" % (100 + data["n"]), "tab_id": "w1:t1"}}}}
+elif args[:2] == ["agent", "start"] and os.environ.get("FAKE_HERDR_START_FAIL"):
+    code = 1
+    result = {{"error": {{"code": "invalid_agent_name"}}}}
 elif args[:2] == ["pane", "get"]:
     result = {{"pane": {{"pane_id": args[2]}}}}
 elif args[:2] == ["agent", "get"]:
@@ -69,7 +72,7 @@ def _live_dispatch(env, monkeypatch):
 
 
 def test_herdr_path_starts_the_agent_and_prompts_it(env, monkeypatch):
-    state_file = _fake(env, monkeypatch)
+    state_file = _fake(env, monkeypatch, gets=["working"])
     run, d = _live_dispatch(env, monkeypatch)
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
@@ -81,7 +84,8 @@ def test_herdr_path_starts_the_agent_and_prompts_it(env, monkeypatch):
     ddir.mkdir(parents=True, exist_ok=True)
     (ddir / "brief.md").write_text("ROLE executor\n")
     res = dispatch.launch(run, d, "worker", ddir, cwd=env.repo)
-    assert res["launcher"] == "herdr" and res["agent"] == f"office-{d['id']}"
+    assert res["launcher"] == "herdr" and res["agent"] == f"office-{d['id'].lower()}"
+    assert res["prompt_landed"] is True
     calls = _calls(state_file)
     start = next(c for c in calls if c[:2] == ["agent", "start"])
     assert start[start.index("--kind") + 1] == "claude"
@@ -108,7 +112,11 @@ def test_model_and_effort_in_interactive_argv_for_each_harness():
         args, kind = got
         assert kind == harness
         joined = " ".join(args)
-        assert "m-x" in args and "medium" in joined, (harness, args)
+        if harness == "agy":
+            # Native Gemini takes the combined slug (gemini-3.8-flash-medium); no --effort.
+            assert "m-x" in args and "--effort" not in args, args
+        else:
+            assert "m-x" in args and "medium" in joined, (harness, args)
         assert args[0] != harness  # the executable comes from --kind, not the args
 
 
@@ -164,7 +172,7 @@ def test_no_interactive_profile_stays_headless(env, monkeypatch):
 
 
 def test_reviewer_dispatch_launches_read_only_in_herdr(env, monkeypatch):
-    state_file = _fake(env, monkeypatch)
+    state_file = _fake(env, monkeypatch, gets=["working"])
     run, d = _live_dispatch(env, monkeypatch)
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
@@ -207,3 +215,85 @@ def test_reviewer_pane_reply_is_kept_when_no_file_was_written(env, monkeypatch):
     out = env.tmp / "reply.txt"
     assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
     assert "VERDICT: PASS" in out.read_text()
+
+
+def test_agent_names_are_valid_for_herdr():
+    import re
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    from office import dispatch
+    for did in ("Dbd54d9db", "D880825EE", "DXYZ_" + "A" * 40):
+        name = dispatch.herdr_agent_name(did)
+        assert re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name), name
+
+
+def _herdr_launch(env, monkeypatch, gets, adapter="agy"):
+    state_file = _fake(env, monkeypatch, gets=gets)
+    run, d = _live_dispatch(env, monkeypatch)
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
+    monkeypatch.setenv("OFFICE_LAUNCHER", "herdr")
+    monkeypatch.setenv("OFFICE_HERDR_LAND_TIMEOUT", "0")
+    from office import dispatch, paths
+    monkeypatch.setattr(dispatch.frontdoor, "current_argv", lambda: (["true"], {}))
+    d = {**d, "adapter_id": adapter, "model": "gemini-3.8-flash-medium", "effort": "medium"}
+    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    ddir.mkdir(parents=True, exist_ok=True)
+    (ddir / "brief.md").write_text("ROLE executor\n")
+    res = dispatch.launch(run, d, "worker", ddir, cwd=env.repo)
+    return state_file, run, d, res
+
+
+def _launch_events(env, run):
+    con = env.con()
+    try:
+        return [r[0] for r in con.execute("SELECT summary FROM events WHERE run_id=? AND kind='launch'", (run["id"],))]
+    finally:
+        con.close()
+
+
+def test_unlanded_prompt_is_retried_by_typing_it(env, monkeypatch):
+    state_file, run, d, res = _herdr_launch(env, monkeypatch, gets=["idle", "working"])
+    assert res["launcher"] == "herdr" and res["prompt_landed"] is True
+    calls = _calls(state_file)
+    assert any(c[:2] == ["pane", "send-text"] and "brief.md" in c[3] for c in calls)
+    assert any(c[:2] == ["pane", "send-keys"] and c[-1] == "Enter" for c in calls)
+    assert _launch_events(env, run) == []
+
+
+def test_prompt_that_never_lands_is_reported_not_relaunched(env, monkeypatch):
+    state_file, run, d, res = _herdr_launch(env, monkeypatch, gets=["idle"])
+    assert res["launcher"] == "herdr" and res["prompt_landed"] is False
+    events = _launch_events(env, run)
+    assert len(events) == 1 and "did not land" in events[0] and res["agent"] in events[0]
+
+
+def test_failed_agent_start_is_disclosed_before_headless_fallback(env, monkeypatch):
+    monkeypatch.setenv("FAKE_HERDR_START_FAIL", "1")
+    state_file, run, d, res = _herdr_launch(env, monkeypatch, gets=["working"])
+    assert res["launcher"] == "process-fallback"
+    con = env.con()
+    try:
+        assert con.execute("SELECT launcher FROM dispatches WHERE id=?", (d["id"],)).fetchone()[0] == "process-fallback"
+    finally:
+        con.close()
+    events = _launch_events(env, run)
+    assert len(events) == 1 and "herdr agent start failed" in events[0] and "invalid_agent_name" in events[0]
+
+
+def test_busy_pane_never_settles_as_done(env, monkeypatch):
+    state_file = _fake(env, monkeypatch, gets=["idle", "idle", "idle", "idle", "gone"])
+    data = json.loads(state_file.read_text())
+    data["content"] = "Running command...\nesc to cancel    Gemini 3.8 Flash"
+    state_file.write_text(json.dumps(data))
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    # agy reads idle mid-turn; the busy footer keeps it live until the agent is gone.
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp), poll=0) == (None, "nonzero")
+
+
+def test_external_dispatch_writes_agent_env_for_a_manual_launch(env, monkeypatch):
+    _fake(env, monkeypatch)
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import paths
+    env_text = (paths.run_dir(run["id"]) / "dispatches" / d["id"] / "agent.env").read_text()
+    assert f"OFFICE_DISPATCH_ID={d['id']}" in env_text and "OFFICE_ROLE=executor" in env_text

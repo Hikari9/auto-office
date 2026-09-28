@@ -82,6 +82,22 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 - If a command reports a missing route or trust, show the user the route notice; only they can
   promote trust (`office approve trust <route> --quote "<words>"`).
 
+## Herdr agents
+
+Inside Herdr, Office starts each dispatch as a real interactive agent in a pane beside yours and
+confirms the brief pointer landed. A `launch` notice in `office status` means it could not: the
+pane agent never started (the dispatch ran headless) or the prompt never landed (re-prompt it).
+To relaunch a dispatch by hand, `office revoke T1`, then `OFFICE_WORKER_LAUNCHER=external office
+dispatch T1` and, from the dispatch directory it names:
+1. `herdr pane split --current --direction right`, then `herdr pane run <pane> ". agent.env && cd <worktree>"`.
+2. `herdr agent start office-<dispatch id, lowercased> --kind <harness> --pane <pane> -- <native args>`
+   (names must match `[a-z][a-z0-9_-]{0,31}`; agy takes the combined Gemini slug, no `--effort`).
+3. `herdr agent prompt <name> "Read and carry out the brief at <brief.md> exactly. When the work
+   and its checks are complete, run: office submit"`. It has landed only when the pane shows
+   `esc to cancel`/`esc to interrupt` or the agent reports `working`. If neither, type it with
+   `herdr pane send-text <pane> "<pointer>"` plus `herdr pane send-keys <pane> Enter`.
+agy's status field reads `idle` mid-turn. Judge an agy pane by its footer and `git status`, never the status.
+
 ## Land and close
 
 When every task is accepted the runtime composes and verifies the integrated result. Then push

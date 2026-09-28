@@ -61,7 +61,9 @@ office_profiles:
     output: stdout
     herdr_kind: agy
     interactive:
-      argv: [--dangerously-skip-permissions, --model, "{model}", --effort, "{effort}", --add-dir, "{cwd}"]
+      # The model is the combined native-Gemini slug (gemini-3.8-flash-medium); a
+      # separate --effort is the claude/codex convention and must not be added.
+      argv: [--dangerously-skip-permissions, --model, "{model}", --add-dir, "{cwd}"]
   vision:
     argv: [--dangerously-skip-permissions, --print-timeout, 30m, --model, "{model}", "{include_dirs}"]
     include_arg: [--add-dir, "{dir}"]
@@ -71,4 +73,4 @@ office_profiles:
     output: stdout
     herdr_kind: agy
     interactive:
-      argv: [--dangerously-skip-permissions, --model, "{model}", --effort, "{effort}", "{include_dirs}"]
+      argv: [--dangerously-skip-permissions, --model, "{model}", "{include_dirs}"]
