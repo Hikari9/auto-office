@@ -52,16 +52,19 @@ def test_dirty_edit_with_unchanged_head_invalidates_prior_pass(env):
     (wt / "calc.py").write_text(GOOD_ADD)
     head = env.git("rev-parse", "HEAD", cwd=wt).strip()
     code, out = env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"})
-    assert "rev R1 captured" in out, out
+    con = env.con()
+    rid = con.execute("SELECT id FROM runs").fetchone()[0][:8]
+    R1, R2 = f"R1-{rid}", f"R2-{rid}"
+    assert f"rev {R1} captured" in out, out
     (wt / "calc.py").write_text(GOOD_ADD + "\n# changed without a commit\n")
     assert env.git("rev-parse", "HEAD", cwd=wt).strip() == head
     code, out = env.office("submit", cwd=wt, env=wenv)
-    assert "rev R2 captured" in out and "supersedes R1" in out, out
+    assert f"rev {R2} captured" in out and f"supersedes {R1}" in out, out
     con = env.con()
-    r1 = {r["kind"]: r["status"] for r in con.execute("SELECT kind, status FROM gates WHERE revision_id='R1'")}
+    r1 = {r["kind"]: r["status"] for r in con.execute("SELECT kind, status FROM gates WHERE revision_id=?", (R1,))}
     assert r1 == {"checks": "cancelled", "code_review": "cancelled"}, r1
-    assert con.execute("SELECT verdict FROM gates WHERE revision_id='R2' AND kind='code_review'").fetchone()[0] == "PASS"
-    assert _task(env)["accepted_revision_id"] == "R2"
+    assert con.execute("SELECT verdict FROM gates WHERE revision_id=? AND kind='code_review'", (R2,)).fetchone()[0] == "PASS"
+    assert _task(env)["accepted_revision_id"] == R2
     # Accepted work is closed to further edits from that session.
     (wt / "calc.py").write_text(GOOD_ADD + "\n# after acceptance\n")
     code, out = env.office("submit", cwd=wt, env=wenv)
@@ -79,7 +82,7 @@ def test_stale_pass_is_audit_only(env):
     (wt / "calc.py").write_text(GOOD_ADD + "\n# v2\n")
     env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"}, check=0)
     run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
-    stale_gate = con.execute("SELECT id FROM gates WHERE revision_id='R1' AND kind='checks'").fetchone()[0]
+    stale_gate = con.execute("SELECT id FROM gates WHERE revision_id=? AND kind='checks'", (f"R1-{run['id'][:8]}",)).fetchone()[0]
     con.execute("UPDATE gates SET status='running' WHERE id=?", (stale_gate,))
     with db.transaction(con):
         gates.ingest_task_gate(con, run, stale_gate, {"verdict": "PASS", "parsed": review_parse.Parsed(verdict="PASS"),
@@ -263,3 +266,19 @@ def test_integration_conflict_is_surfaced_not_landed(env):
     assert "integration conflict" in data["next"], data["next"]
     code, out = env.office("close", "--handoff", "x")
     assert code == 4 and "integration conflict" in out, out
+
+
+def test_revision_ids_are_unique_across_runs(env):
+    """revisions.id is a global primary key: a second run's first revision must not collide
+    with any earlier run's R1 (regression: every run after the first failed office submit)."""
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    # A foreign run already holding the bare legacy id and this run's would-be id prefix pattern.
+    con.execute("INSERT INTO revisions(id, run_id, task_id, seq, commit_sha, tree_sha, requirements_version, plan_version, "
+                "applied_version, env_fingerprint, operation_id, status, created_at) VALUES('R1','other-run','T1',1,'x','x',1,1,1,'x','op-foreign','current','t')")
+    con.commit()
+    wenv, wt = _worker(env)
+    code, out = env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"}, check=0)
+    assert f"rev R1-{run_id[:8]} captured" in out, out
