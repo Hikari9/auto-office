@@ -37,7 +37,54 @@ _QUOTA_TTL = 60.0
 
 def catalog_rows() -> list[dict]:
     data = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8")) or {}
-    return list(data.get("models") or [])
+    return resolve_aliases(list(data.get("models") or []))
+
+
+_ALIAS_FIELDS = ("benchmark_indexes", "price_fields", "speed_fields", "release_date")
+
+
+def _version_key(version: str) -> tuple[int, ...]:
+    return tuple(int(p) for p in re.findall(r"\d+", version))
+
+
+def resolve_aliases(rows: list[dict]) -> list[dict]:
+    """A row with `alias_family` (a regex with a `version` group over model_id) takes
+    the invocation and scores of the highest-version matching row at the same harness
+    and effort, so `opus` follows each new Opus as the catalog adds it. With no
+    match, the alias keeps its own static fields. A target without a proven
+    invocation_source inherits the alias's."""
+    # Non-dispatchable rows count: they are usually just unlistable by their CLI, and the
+    # alias's own invocation_source stands behind the full model id as the slug.
+    concrete = [r for r in rows if not r.get("alias_family")]
+    out = []
+    for row in rows:
+        pattern = row.get("alias_family")
+        if not pattern:
+            out.append(row)
+            continue
+        best = None
+        for r in concrete:
+            m = re.match(pattern, r.get("model_id") or "")
+            if not m or r.get("invocation_harness") != row.get("invocation_harness") or r.get("effort") != row.get("effort"):
+                continue
+            key = _version_key(m.group("version"))
+            if best is None or key > best[0]:
+                best = (key, r)
+        if best is None:
+            out.append(row)
+            continue
+        target = best[1]
+        resolved = dict(row)
+        resolved["invocation_model_id"] = target.get("invocation_model_id") or target["model_id"]
+        source = str(target.get("invocation_source") or "")
+        if source.startswith(("local-evidence:", "documented:")):
+            resolved["invocation_source"] = source
+        for field in _ALIAS_FIELDS:
+            if target.get(field):
+                resolved[field] = target[field]
+        resolved["alias_resolved_to"] = target["model_id"]
+        out.append(resolved)
+    return out
 
 
 def role_policy(config: dict, role: str) -> dict:
@@ -206,6 +253,14 @@ def parse_route_override(text: str) -> dict:
     return {"harness": harness or None, "model_id": model, "effort": effort or None}
 
 
+def _preferred_seed(policy_cfg: dict, run: dict):
+    """roles.<role>.preferred_seed_by_size.<size_class> replaces preferred_seed when the
+    run's size class (start --size-class) has an entry there."""
+    size = (run.get("risk") or {}).get("size_class")
+    by_size = policy_cfg.get("preferred_seed_by_size") or {}
+    return by_size.get(size) or policy_cfg.get("preferred_seed")
+
+
 def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                task_id: str | None = None, override: str | None = None,
                exclude: set[str] | None = None, probe: bool = True) -> dict:
@@ -241,7 +296,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "role": role,
         "playbook": run.get("playbook"),
         "policy": policy,
-        "preferred_seed": None if override else policy_cfg.get("preferred_seed"),
+        "preferred_seed": None if override else _preferred_seed(policy_cfg, run),
         "cost_policy": cost_policy,
         "allow_advisory_undercut": bool(gear.get("allow_advisory_undercut", True)),
         "runs_db": str(paths.runs_db()),
