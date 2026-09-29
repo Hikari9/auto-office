@@ -320,3 +320,15 @@ def test_revision_with_checks_is_not_accepted_without_them(env):
     env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"}, check=0)
     env.office("status", check=0)
     assert _task(env)["status"] != "accepted"
+
+
+def test_not_logged_in_reviewer_skips_the_whole_harness(env):
+    # Every route on a harness that is not signed in fails the same way; the
+    # retry must not spend the bound on the same harness's other models.
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+        **{"codex:code_reviewer": [{"stderr": "Not logged in · Please run /login", "exit": 1}],
+           "claude:code_reviewer": [{"reply": "VERDICT: PASS"}], "gemini:code_reviewer": [{"reply": "VERDICT: PASS"}]})
+    env.office("dispatch", "T1", check=0)
+    assert _task(env)["status"] == "accepted"
+    reviewers = [c["harness"] for c in env.calls() if c.get("role") == "code_reviewer"]
+    assert reviewers.count("codex") == 1 and reviewers[-1] != "codex", reviewers

@@ -266,13 +266,14 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                     "summary": f"{parsed.verdict} by {triple}", "producer_route": producer}
         reason = (f"{triple}: exit {d.get('exit_code')} ({d.get('terminal_classification')})"
                   if d.get("terminal_classification") != "success" else f"{triple}: invalid reply ({'; '.join(parsed.errors[:2])})")
-        if _quota_signature(text):
-            reason += " [quota]"
+        wall = "quota" if _quota_signature(text) else "auth" if _auth_signature(text) else None
+        if wall:
+            reason += f" [{wall}]"
         failures.append(reason)
         if pinned:
             break  # the user named this reviewer; never substitute another
         excluded.add(triple)
-        if _quota_signature(text):
+        if wall:
             excluded.add(f"harness:{cand['harness']}")
         elif d.get("terminal_classification") == "success":
             excluded.add(f"model:{cand['harness']}/{cand.get('invocation_model_id')}")
@@ -339,6 +340,12 @@ def _last_block(text: str) -> str:
 
 def _quota_signature(text: str) -> bool:
     return bool(re.search(r"rate.?limit|quota|usage limit|429|too many requests|exhausted", text[-2000:], re.I))
+
+
+def _auth_signature(text: str) -> bool:
+    """The harness is not signed in: every route on it will fail the same way."""
+    return bool(re.search(r"not logged in|please run /login|authentication (failed|required)|unauthorized|\b401\b",
+                          text[-2000:], re.I))
 
 
 def job_review(con, run: dict, job: dict) -> dict:
