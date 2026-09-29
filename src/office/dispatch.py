@@ -676,16 +676,20 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
             con.close()
         size = output.stat().st_size if output and output.is_file() else 0
         sample = _herdr_agent_sample(spec["herdr_agent"])
-        if size and size == last_size and (sample is None or sample.get("busy") is False):
+        blind = unknown >= unknown_limit
+        if size and size == last_size and (sample is None or sample.get("busy") is False or blind):
             # Complete: written, no longer growing between two polls, and the
-            # agent is not still mid-turn (it may rewrite the file).
+            # agent is not still mid-turn (it may rewrite the file). After the
+            # pane has been unreadable past the limit, a file that stopped
+            # growing is the only evidence left, so it bounds the wait.
             return 0, "success"
         last_size = size or None
         if sample is None:
             return None, "nonzero"
         unknown = unknown + 1 if sample.get("busy") is None else 0
         if unknown == unknown_limit:
-            # Said once: submit, the output file, the agent exiting, or a revoke still end it.
+            # Said once. A reviewer's stable output now ends it (above); a worker,
+            # like a headless process, ends on submit, exit, or revoke.
             _watch_notice(dispatch_id, f"herdr agent {spec['herdr_agent']} has been unreadable for "
                                        f"{unknown_limit} polls; check its pane, or office revoke")
         history.append(sample)

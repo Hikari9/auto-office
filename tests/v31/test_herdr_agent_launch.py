@@ -372,3 +372,16 @@ def test_persistently_unreadable_pane_is_reported_once(env, monkeypatch):
     assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp), poll=0) == (None, "nonzero")
     events = _launch_events(env, run)
     assert len(events) == 1 and "unreadable for 2 polls" in events[0]
+
+
+def test_unreadable_pane_past_the_limit_accepts_stable_output(env, monkeypatch):
+    monkeypatch.setenv("FAKE_HERDR_READ_FAIL", "1")
+    monkeypatch.setenv("OFFICE_HERDR_UNKNOWN_LIMIT", "3")
+    state_file = _fake(env, monkeypatch, gets=["idle"])  # never gone
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: PASS")
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
+    # The limit is reached on poll 3; the next poll accepts the stable file.
+    assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 4
