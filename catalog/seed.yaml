@@ -275,7 +275,7 @@ models:
   - model_id: claude-sonnet-5-5
     invocation_model_id: claude-sonnet-5-5
     invocation_harness: claude
-    invocation_source: 'documented: claude --model accepts full model ids and claude-sonnet-5-5 is in local Claude Code usage records; unproven against a local dispatch until conformance'
+    invocation_source: 'local-evidence: pane launch `claude --model claude-sonnet-5-5 --effort high` bannered "Sonnet 5.5 with high effort" at claude 2.1.284 (2026-09-29)'
     source_identifier: claude-sonnet-5-5-high
     source_name: artificial-analysis
     effort: high

@@ -9,6 +9,9 @@ notes: >-
 recorded_at: '2026-09-28'
 granted_by: Rico Tiongson (techteam@favor.church)
 routes:
+  - triple: claude@2/claude-sonnet-5-5@high
+    target_state: proven
+    evidence: maintainer grant 2026-09-29 as the default executor; pane launch `claude --model claude-sonnet-5-5 --effort high` bannered "Sonnet 5.5 with high effort" at claude 2.1.284
   - triple: claude@2/claude-sonnet-5@high
     target_state: proven
     evidence: grants at claude 2.1.282, 2.1.283, cli, local (runs c024d10e, d42517a3, 11328d8d, 129139c5); 1 labelled executor success
