@@ -31,7 +31,8 @@ elif args[:2] == ["agent", "get"]:
     else:
         result = {{"agent": {{"name": args[2], "status": status}}}}
 elif args[:2] == ["agent", "read"]:
-    print(data.get("content", ""))
+    reads = data.setdefault("reads", [])
+    print(reads.pop(0) if len(reads) > 1 else (reads[0] if reads else data.get("content", "")))
     json.dump(data, open(state, "w"))
     sys.exit(0)
 json.dump(data, open(state, "w"))
@@ -40,12 +41,15 @@ sys.exit(code)
 '''
 
 
-def _fake(env, monkeypatch, gets=()) -> Path:
+BUSY = "Working (1s \u2022 esc to interrupt)"
+
+
+def _fake(env, monkeypatch, gets=(), reads=()) -> Path:
     herdr = env.bin / "herdr"
     herdr.write_text(FAKE_HERDR.format(python=sys.executable))
     herdr.chmod(0o755)
     state = env.tmp / "herdr-state.json"
-    state.write_text(json.dumps({"calls": [], "n": 0, "get": list(gets)}))
+    state.write_text(json.dumps({"calls": [], "n": 0, "get": list(gets), "reads": list(reads)}))
     monkeypatch.setenv("FAKE_HERDR_STATE", str(state))
     return state
 
@@ -72,7 +76,7 @@ def _live_dispatch(env, monkeypatch):
 
 
 def test_herdr_path_starts_the_agent_and_prompts_it(env, monkeypatch):
-    state_file = _fake(env, monkeypatch, gets=["working"])
+    state_file = _fake(env, monkeypatch, reads=[BUSY])
     run, d = _live_dispatch(env, monkeypatch)
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
@@ -172,7 +176,7 @@ def test_no_interactive_profile_stays_headless(env, monkeypatch):
 
 
 def test_reviewer_dispatch_launches_read_only_in_herdr(env, monkeypatch):
-    state_file = _fake(env, monkeypatch, gets=["working"])
+    state_file = _fake(env, monkeypatch, reads=[BUSY])
     run, d = _live_dispatch(env, monkeypatch)
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
@@ -226,8 +230,8 @@ def test_agent_names_are_valid_for_herdr():
         assert re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name), name
 
 
-def _herdr_launch(env, monkeypatch, gets, adapter="agy"):
-    state_file = _fake(env, monkeypatch, gets=gets)
+def _herdr_launch(env, monkeypatch, gets=(), reads=(), adapter="agy"):
+    state_file = _fake(env, monkeypatch, gets=gets, reads=reads)
     run, d = _live_dispatch(env, monkeypatch)
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
@@ -252,7 +256,7 @@ def _launch_events(env, run):
 
 
 def test_unlanded_prompt_is_retried_by_typing_it(env, monkeypatch):
-    state_file, run, d, res = _herdr_launch(env, monkeypatch, gets=["idle", "working"])
+    state_file, run, d, res = _herdr_launch(env, monkeypatch, reads=["> composer empty", BUSY])
     assert res["launcher"] == "herdr" and res["prompt_landed"] is True
     calls = _calls(state_file)
     assert any(c[:2] == ["pane", "send-text"] and "brief.md" in c[3] for c in calls)
@@ -261,7 +265,8 @@ def test_unlanded_prompt_is_retried_by_typing_it(env, monkeypatch):
 
 
 def test_prompt_that_never_lands_is_reported_not_relaunched(env, monkeypatch):
-    state_file, run, d, res = _herdr_launch(env, monkeypatch, gets=["idle"])
+    # `working` alone is not proof: codex reports it while a trust dialog holds the composer.
+    state_file, run, d, res = _herdr_launch(env, monkeypatch, gets=["working"], reads=["> composer empty"])
     assert res["launcher"] == "herdr" and res["prompt_landed"] is False
     events = _launch_events(env, run)
     assert len(events) == 1 and "did not land" in events[0] and res["agent"] in events[0]
@@ -269,7 +274,7 @@ def test_prompt_that_never_lands_is_reported_not_relaunched(env, monkeypatch):
 
 def test_failed_agent_start_is_disclosed_before_headless_fallback(env, monkeypatch):
     monkeypatch.setenv("FAKE_HERDR_START_FAIL", "1")
-    state_file, run, d, res = _herdr_launch(env, monkeypatch, gets=["working"])
+    state_file, run, d, res = _herdr_launch(env, monkeypatch, reads=[BUSY])
     assert res["launcher"] == "process-fallback"
     con = env.con()
     try:

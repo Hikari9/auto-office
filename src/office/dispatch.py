@@ -588,14 +588,12 @@ def herdr_agent_name(dispatch_id: str) -> str:
 
 
 def _prompt_landed(name: str, timeout: float) -> bool:
-    """A prompt has landed once the agent reports `working` or its pane shows a
-    busy marker. `agent prompt` returning without error proves neither."""
+    """A prompt has landed once the pane shows a busy footer. `agent prompt`
+    returning without error proves nothing, and neither does a `working`
+    status: codex reports it while a startup trust dialog holds the composer
+    empty, and agy reads `idle` mid-turn."""
     deadline = time.time() + timeout
     while True:
-        res = _herdr_json(["agent", "get", name])
-        agent = res.get("agent") or res
-        if (agent.get("status") or agent.get("agent_status")) == "working":
-            return True
         if _pane_busy(_herdr_agent_text(name, "--source", "visible", "--lines", "6")):
             return True
         if time.time() >= deadline:
