@@ -14,6 +14,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import threading
 import sys
 import time
 import uuid
@@ -613,6 +614,17 @@ def watch_external_output(dispatch_id: str, spec: dict, *, poll: float | None = 
         time.sleep(poll)
 
 
+def _wall_cap_seconds(prof: dict) -> float | None:
+    """The hard wall-clock limit for a headless agent: OFFICE_WORKER_MAX_MINUTES,
+    else the profile's max_minutes, else none (headless agents are often silent
+    until they finish, so there is no idle rule)."""
+    raw = os.environ.get("OFFICE_WORKER_MAX_MINUTES") or prof.get("max_minutes")
+    try:
+        return float(raw) * 60 if raw else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _interactive(dispatch: dict, kind: str, cwd: Path, include_dirs: list[Path] | None = None) -> tuple[list[str], str] | None:
     """The pane-hosted form of this dispatch's harness, or None (headless)."""
     adapter = adapters.load_all().get(dispatch.get("adapter_id") or "")
@@ -1107,6 +1119,19 @@ def supervise(dispatch_id: str) -> int:
                                      env=env, start_new_session=True)
             _mark(dispatch_id, pid_child=child.pid)
             _agent_pgid_file(run, dispatch_id).write_text(str(child.pid))
+            cap = _wall_cap_seconds(prof)
+            if cap:
+                # A harness whose own timeout can fail to fire (agy stalled 3.5h
+                # past --print-timeout 45m) is stopped here instead of hanging the task.
+                def expire(pid=child.pid):
+                    state_box["timed_out"] = True
+                    _note(log_path, f"office: wall-clock cap of {cap / 60:g} min reached; stopping the agent")
+                    _killpg(pid, signal.SIGTERM)
+                    time.sleep(10)
+                    _killpg(pid, signal.SIGKILL)
+                timer = threading.Timer(cap, expire)
+                timer.daemon = True
+                timer.start()
             if stdin == subprocess.PIPE:
                 try:
                     child.stdin.write(prompt.encode())
@@ -1121,7 +1146,9 @@ def supervise(dispatch_id: str) -> int:
                     sys.stdout.flush()
             child.wait()
         code = child.returncode
-        if code is not None and code < 0:
+        if state_box.get("timed_out"):
+            classification = "timeout"
+        elif code is not None and code < 0:
             sig, classification = -code, "signal"
         elif state_box["signal"]:
             sig, classification = state_box["signal"], "signal"

@@ -351,3 +351,23 @@ def test_amendment_for_an_earlier_session_does_not_hold_a_relaunch(env):
     code, out = env.office("submit", cwd=wt, env=wenv)
     assert "captured" in out and "amendment pending" not in out, out
     assert _task(env)["status"] == "accepted"
+
+
+def test_headless_worker_past_its_wall_cap_is_stopped_and_surfaces(env):
+    # agy once idled 3.5h past its own --print-timeout; the supervisor's cap
+    # stops it, relaunches within the bound, then blocks with a named reason.
+    _go(env, executor=[{"sleep": 60}, {"sleep": 60}, {"sleep": 60}])
+    code, out = env.office("dispatch", "T1", env={"OFFICE_WORKER_MAX_MINUTES": "0.02"}, check=0)
+    t = _task(env)
+    assert t["status"] == "blocked" and "timeout" in (t["pause_reason"] or ""), t
+    con = env.con()
+    assert {r[0] for r in con.execute("SELECT terminal_classification FROM dispatches WHERE role='executor'")} == {"timeout"}
+
+
+def test_agy_profiles_carry_a_wall_cap():
+    import sys as _s
+    _s.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    from office import adapters, dispatch
+    agy = adapters.load_all()["agy"]
+    assert dispatch._wall_cap_seconds(adapters.profile(agy, "worker")) == 50 * 60
+    assert dispatch._wall_cap_seconds(adapters.profile(adapters.load_all()["claude"], "worker")) is None

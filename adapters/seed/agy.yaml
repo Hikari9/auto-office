@@ -56,6 +56,8 @@ capabilities: [builder, review]
 office_profiles:
   worker:
     argv: [--dangerously-skip-permissions, --print-timeout, 45m, --model, "{model}", --add-dir, "{cwd}"]
+    # Supervisor hard cap: --print-timeout has failed to fire (idle 3.5h waiting on a background task).
+    max_minutes: 50
     prompt: argv-bound
     prompt_flag: "--print="
     output: stdout
@@ -66,6 +68,7 @@ office_profiles:
       argv: [--dangerously-skip-permissions, --model, "{model}", --add-dir, "{cwd}"]
   vision:
     argv: [--dangerously-skip-permissions, --print-timeout, 30m, --model, "{model}", "{include_dirs}"]
+    max_minutes: 35
     include_arg: [--add-dir, "{dir}"]
     prompt: argv-bound
     prompt_flag: "--prompt="
