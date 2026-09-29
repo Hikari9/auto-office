@@ -383,5 +383,21 @@ def test_unreadable_pane_past_the_limit_accepts_stable_output(env, monkeypatch):
     out = env.tmp / "reply.txt"
     out.write_text("VERDICT: PASS")
     assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
-    # The limit is reached on poll 3; the next poll accepts the stable file.
+    # The limit is reached on poll 3, which accepts the stable file.
+    assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 3
+
+
+def test_recovered_busy_pane_is_not_settled_by_the_blind_limit(env, monkeypatch):
+    monkeypatch.setenv("OFFICE_HERDR_UNKNOWN_LIMIT", "3")
+    # Two unreadable samples, then the pane reads busy (resetting the count), then the agent exits.
+    state_file = _fake(env, monkeypatch, gets=["working", "working", "working", "gone"], reads=[BUSY])
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    samples = iter([{"status": "unknown", "content_hash": None, "busy": None}] * 2)
+    real = dispatch._herdr_agent_sample
+    monkeypatch.setattr(dispatch, "_herdr_agent_sample", lambda name: next(samples, None) or real(name))
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: PASS (draft)")
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
+    # It did not settle on the recovered busy samples; it ended only when the agent was gone.
     assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 4
