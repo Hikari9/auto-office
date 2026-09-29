@@ -554,21 +554,23 @@ def _herdr_agent_sample(name: str) -> dict | None:
         proc = subprocess.run(["herdr", "agent", "get", name], capture_output=True, text=True, timeout=30)
         res = json.loads(proc.stdout or "{}").get("result") or {}
     except (OSError, subprocess.SubprocessError, ValueError):
-        return {"status": "unknown", "content_hash": None}
+        # Unreadable is not idle: busy stays unknown (None), which never settles.
+        return {"status": "unknown", "content_hash": None, "busy": None}
     agent = res.get("agent") or res
     if proc.returncode != 0 or not agent:
         return None
     read = _herdr_agent_text(name)
     return {"status": agent.get("status") or agent.get("agent_status"), "content_hash": sha256_obj(read),
-            "busy": _pane_busy(read)}
+            "busy": None if read is None else _pane_busy(read)}
 
 
-def _herdr_agent_text(name: str, *extra: str) -> str:
+def _herdr_agent_text(name: str, *extra: str) -> str | None:
+    """Pane text, or None when it could not be read."""
     try:
-        return subprocess.run(["herdr", "agent", "read", name, *extra], capture_output=True, text=True,
-                              timeout=30).stdout
+        proc = subprocess.run(["herdr", "agent", "read", name, *extra], capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
-        return ""
+        return None
+    return proc.stdout if proc.returncode == 0 else None
 
 
 # Footer text a harness shows only while a turn is running. agy's reported
@@ -662,7 +664,7 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
             con.close()
         size = output.stat().st_size if output and output.is_file() else 0
         sample = _herdr_agent_sample(spec["herdr_agent"])
-        if size and size == last_size and not (sample and sample.get("busy")):
+        if size and size == last_size and (sample is None or sample.get("busy") is False):
             # Complete: written, no longer growing between two polls, and the
             # agent is not still mid-turn (it may rewrite the file).
             return 0, "success"
@@ -672,12 +674,12 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
         history.append(sample)
         window = history[-stable_samples:]
         if (len(window) == stable_samples and all(w["status"] in ("done", "idle") for w in window)
-                and not any(w.get("busy") for w in window)
+                and all(w.get("busy") is False for w in window)
                 and len({w["content_hash"] for w in window}) == 1):
             if output and not (output.is_file() and output.stat().st_size):
                 # A read-only reviewer that could not write the file left its
                 # review in the pane: keep that as the reply.
-                output.write_text(_herdr_agent_text(spec["herdr_agent"]), encoding="utf-8")
+                output.write_text(_herdr_agent_text(spec["herdr_agent"]) or "", encoding="utf-8")
             return 0, "success"
         time.sleep(poll)
 

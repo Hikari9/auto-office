@@ -30,6 +30,9 @@ elif args[:2] == ["agent", "get"]:
         code = 1
     else:
         result = {{"agent": {{"name": args[2], "status": status}}}}
+elif args[:2] == ["agent", "read"] and os.environ.get("FAKE_HERDR_READ_FAIL"):
+    json.dump(data, open(state, "w"))
+    sys.exit(1)
 elif args[:2] == ["agent", "read"]:
     reads = data.setdefault("reads", [])
     print(reads.pop(0) if len(reads) > 1 else (reads[0] if reads else data.get("content", "")))
@@ -328,3 +331,15 @@ def test_hung_prompt_call_does_not_escape_the_launch(env, monkeypatch):
     monkeypatch.setattr(dispatch.subprocess, "run", run)
     state_file, run_, d, res = _herdr_launch(env, monkeypatch, reads=["> composer empty", BUSY])
     assert res["launcher"] == "herdr" and res["prompt_landed"] is True and res["watcher_pid"]
+
+
+def test_unreadable_pane_never_settles_stable_output_or_idle(env, monkeypatch):
+    monkeypatch.setenv("FAKE_HERDR_READ_FAIL", "1")
+    state_file = _fake(env, monkeypatch, gets=["idle", "idle", "idle", "idle", "gone"])
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: PASS (draft)")
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
+    # Unknown busy state held it open until the agent was gone.
+    assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 5
