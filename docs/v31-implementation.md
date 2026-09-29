@@ -141,6 +141,27 @@ file, or a declared shared interface). Conflicts and failures are surfaced; `off
 until integration is accepted and a landing is recorded (`--handoff <pr>` or the commit reachable
 from the default branch).
 
+### 6.1 User model overrides (#185)
+
+`office dispatch T1 --as <harness>/<model>[@effort]` runs the executor on a model the user names. It
+skips the candidate registry, trust, and floors, because the user's choice is the authority. It still
+resolves through a matching catalog row, so `agy/gemini-3.8-flash@medium` invokes `gemini-3.8-flash-medium`.
+The dispatch records `override_json` (`by: user`, `declared`, the triple, and any launch form), and
+`office inspect task` shows "user override". Stacked starts and relaunches keep the override and launch
+form, because both travel in the stored route.
+
+- `--cli "<argv>"` (needs `--as`): starts exactly that argv in a herdr pane (`--kind` comes from the
+  executable) through the normal landed-prompt path. Outside herdr, or if the agent does not start, the
+  dispatch is left external with a notice. It never runs the adapter's own argv instead.
+- `--external`: prepares the worktree, lease, brief and `agent.env`, launches nothing, and emits a
+  `launch` notice with the herdr commands. Every dispatch prints brief, env, worktree and those commands.
+- `--review-as <harness>/<model>[@effort]` (plus `--review-cli` / `--review-external`): pins the task's
+  code reviewer. It is refused at dispatch when it shares the executor's model family (claude, gpt,
+  gemini, ...). At review time the gate checks again against the dispatch that actually produced the
+  revision, and a pinned reviewer is never substituted by another route. An external reviewer is ended
+  by a watcher once its review file is written and stops growing (no timeout; revoke ends it).
+- A routed reviewer excludes a declared executor's family (`family:<name>` route exclusion).
+
 ## 7. Rolling plan review, amendments, authority
 
 Implemented as specified in [v31-rolling-review-gates.md](v31-rolling-review-gates.md): the first

@@ -19,7 +19,7 @@ from typing import Iterator
 
 from office import paths
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -54,8 +54,10 @@ SHARED_COLUMNS = {
         "branch TEXT", "base_commit TEXT", "lease_id TEXT", "packet_hash TEXT", "packet_path TEXT",
         "harness TEXT", "model TEXT", "effort TEXT", "adapter_id TEXT", "applied_plan_version INTEGER",
         "log_path TEXT", "launcher TEXT", "pane_id TEXT", "launched_at TEXT", "last_seen_at TEXT",
-        "route_json TEXT", "gate_id TEXT",
+        "route_json TEXT", "gate_id TEXT", "override_json TEXT",
     ],
+    # v2 (#185): user-declared model overrides.
+    "tasks": ["review_override_json TEXT"],
     "findings": [
         "run_id TEXT", "task_id TEXT", "gate_id TEXT", "revision_id TEXT", "gate_kind TEXT",
         "code TEXT", "fingerprint TEXT", "location TEXT", "category TEXT", "action TEXT",
@@ -72,7 +74,7 @@ CREATE TABLE IF NOT EXISTS schema_meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS requirements(run_id TEXT NOT NULL, version INTEGER NOT NULL, frozen_json TEXT NOT NULL, source TEXT NOT NULL, quote TEXT, created_at TEXT NOT NULL, PRIMARY KEY(run_id, version));
 CREATE TABLE IF NOT EXISTS authorizations(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, kind TEXT NOT NULL, target TEXT, requirements_version INTEGER, envelope_json TEXT, authorized_by TEXT NOT NULL, quote TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT, revoke_reason TEXT);
 CREATE TABLE IF NOT EXISTS plans(run_id TEXT NOT NULL, version INTEGER NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, tasks_json TEXT NOT NULL, requirements_json TEXT, created_by TEXT NOT NULL, created_at TEXT NOT NULL, content_hash TEXT NOT NULL, parent_version INTEGER, amendment_id TEXT, PRIMARY KEY(run_id, version));
-CREATE TABLE IF NOT EXISTS tasks(run_id TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL, role TEXT NOT NULL, scope_json TEXT NOT NULL, depends_json TEXT NOT NULL, interfaces_json TEXT, accept_json TEXT NOT NULL, checks_json TEXT NOT NULL, visual_json TEXT, status TEXT NOT NULL, pause_reason TEXT, introduced_plan_version INTEGER NOT NULL, contract_version INTEGER NOT NULL, acceptance_version INTEGER NOT NULL, current_dispatch_id TEXT, current_revision_id TEXT, accepted_revision_id TEXT, escalations_used INTEGER NOT NULL DEFAULT 0, stack_after TEXT, route_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(run_id, id));
+CREATE TABLE IF NOT EXISTS tasks(run_id TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL, role TEXT NOT NULL, scope_json TEXT NOT NULL, depends_json TEXT NOT NULL, interfaces_json TEXT, accept_json TEXT NOT NULL, checks_json TEXT NOT NULL, visual_json TEXT, status TEXT NOT NULL, pause_reason TEXT, introduced_plan_version INTEGER NOT NULL, contract_version INTEGER NOT NULL, acceptance_version INTEGER NOT NULL, current_dispatch_id TEXT, current_revision_id TEXT, accepted_revision_id TEXT, escalations_used INTEGER NOT NULL DEFAULT 0, stack_after TEXT, route_json TEXT, review_override_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(run_id, id));
 CREATE TABLE IF NOT EXISTS revisions(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT NOT NULL, seq INTEGER NOT NULL, dispatch_id TEXT, lease_id TEXT, fencing INTEGER, commit_sha TEXT NOT NULL, tree_sha TEXT NOT NULL, base_commit TEXT, requirements_version INTEGER NOT NULL, plan_version INTEGER NOT NULL, applied_version INTEGER NOT NULL, env_fingerprint TEXT NOT NULL, refs_json TEXT, operation_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, supersedes TEXT, changed_json TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS gates(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, subject TEXT NOT NULL, task_id TEXT, revision_id TEXT, plan_version INTEGER, kind TEXT NOT NULL, input_key TEXT NOT NULL, status TEXT NOT NULL, verdict TEXT, evidence_status TEXT, route TEXT, route_json TEXT, job_id TEXT, round INTEGER NOT NULL DEFAULT 1, attempt INTEGER NOT NULL DEFAULT 1, env_failures INTEGER NOT NULL DEFAULT 0, recaptures INTEGER NOT NULL DEFAULT 0, escalated INTEGER NOT NULL DEFAULT 0, summary TEXT, stale_reason TEXT, fallback TEXT, reused_from TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT);
 CREATE INDEX IF NOT EXISTS gates_subject ON gates(run_id, subject, kind);

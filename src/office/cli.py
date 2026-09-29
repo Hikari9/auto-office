@@ -85,6 +85,16 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("tasks", nargs="*")
     s.add_argument("--parallel", action="store_true")
     s.add_argument("--route", help="advanced: override the route (harness/model@effort)")
+    s.add_argument("--as", dest="as_model", metavar="HARNESS/MODEL[@EFFORT]",
+                   help="run the executor on this model, bypassing registry, trust and floors (a user override)")
+    s.add_argument("--cli", metavar="ARGV", help="with --as: start exactly this agent argv in a herdr pane")
+    s.add_argument("--external", action="store_true",
+                   help="prepare the dispatch and print how to start it; launch nothing")
+    s.add_argument("--review-as", metavar="HARNESS/MODEL[@EFFORT]",
+                   help="pin the code reviewer (must be a different model family than the executor)")
+    s.add_argument("--review-cli", metavar="ARGV", help="with --review-as: start exactly this reviewer argv in herdr")
+    s.add_argument("--review-external", action="store_true",
+                   help="with --review-as: you start the reviewer; Office reads its review file")
     s = sp.add_parser("submit", parents=[common], add_help=False)
     s.add_argument("-h", "--help", action="store_true")
     s.add_argument("--plan", help=argparse.SUPPRESS)
@@ -302,7 +312,10 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return guide.status(con, run, verbose=args.verbose)
     if cmd == "dispatch":
         from office import dispatch
-        return dispatch.dispatch(con, run, args.tasks, parallel=args.parallel, route=args.route)
+        return dispatch.dispatch(con, run, args.tasks, parallel=args.parallel, route=args.route,
+                                 as_model=args.as_model, cli=args.cli, external=args.external,
+                                 review_as=args.review_as, review_cli=args.review_cli,
+                                 review_external=args.review_external)
     if cmd == "submit":
         from office import submit
         return submit.submit(con, run, cwd=cwd, plan_path=args.plan)

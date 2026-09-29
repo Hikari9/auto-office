@@ -81,14 +81,17 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
   `office approve waive T2:<gate> --quote "<words>"`.
 - If a command reports a missing route or trust, show the user the route notice; only they can
   promote trust (`office approve trust <route> --quote "<words>"`).
+- When the user names a model, dispatch with `--as <harness>/<model>[@effort]` (add `--cli "<argv>"` for an
+  exact agent command, or `--external` to only print how to start it) and `--review-as` to pin the code
+  reviewer, which must be a different model family. Every dispatch prints its brief, env, and herdr commands.
 
 ## Herdr agents
 
 Inside Herdr, Office starts each dispatch as a real interactive agent in a pane beside yours and
 confirms the brief pointer landed. A `launch` notice in `office status` means it could not: the
 pane agent never started (the dispatch ran headless) or the prompt never landed (re-prompt it).
-To relaunch a dispatch by hand, `office revoke T1`, then `OFFICE_WORKER_LAUNCHER=external office
-dispatch T1` and, from the dispatch directory it names:
+To relaunch a dispatch by hand, `office revoke T1`, then `office dispatch T1 --external` (plus `--as`
+for another model), which prints these paths and commands:
 1. `herdr pane split --current --direction right`, then `herdr pane run <pane> ". agent.env && cd <worktree>"`.
 2. `herdr agent start office-<dispatch id, lowercased> --kind <harness> --pane <pane> -- <native args>`
    (names must match `[a-z][a-z0-9_-]{0,31}`; agy takes the combined Gemini slug, no `--effort`).
