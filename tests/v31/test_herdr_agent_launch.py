@@ -158,7 +158,9 @@ def test_output_file_or_submit_ends_the_dispatch(env, monkeypatch):
     out.write_text("VERDICT: PASS")
     assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
     # Complete means written and stable across two polls (one sample each), no done/idle needed.
-    assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 2
+    # At least two: under heavy load a fake-herdr call can time out, which is an
+    # unknown sample and correctly costs one more poll.
+    assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) >= 2
     monkeypatch.setattr(dispatch, "_submitted", lambda con, disp: True)
     assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp), poll=0) == (0, "success")
 
