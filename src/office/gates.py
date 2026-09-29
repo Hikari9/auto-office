@@ -59,6 +59,10 @@ def plan_for_revision(con, run: dict, task: dict, rev_id: str, changed: list[str
         start_waiting(con, run, task["id"], rev_id)
     if not rows:
         summary.append("no gates configured")
+        # No gate will ever finish to trigger acceptance, so evaluate it now;
+        # the evaluator accepts only when policy explicitly requires no gate.
+        if evaluate_acceptance(con, run, task["id"]):
+            summary.append("accepted (no gate required by policy)")
     return {"gates": rows, "summary": summary}
 
 
