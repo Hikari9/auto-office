@@ -273,6 +273,13 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
         con.execute("UPDATE dispatches SET override_json=? WHERE id=?",
                     (dumps({"by": "user", "declared": bool(decision.get("override")), "triple": routing.candidate_id(cand),
                             **(decision.get("launch") or {})}), dispatch_id))
+    # This session starts from the current contract, so an amendment still
+    # waiting on an earlier session of the task is already in its brief; left
+    # queued, it would hold the new revision at amendment_pending (and its ack
+    # would be refused as the wrong holder).
+    con.execute("UPDATE deliveries SET status='superseded', superseded_by='relaunch' WHERE run_id=? AND task_id=? "
+                "AND status IN ('queued','delivered') AND dispatch_id IS NOT ? AND target_version<=?",
+                (run["id"], task_id, dispatch_id, applied))
     state.update_task(con, run["id"], task_id, status="launching", current_dispatch_id=dispatch_id,
                       pause_reason=None, stack_after=None)
     payload = {"dispatch_id": dispatch_id, "task_id": task_id, "role": role, "fix_of": fix_of,
