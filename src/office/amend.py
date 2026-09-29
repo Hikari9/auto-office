@@ -120,6 +120,8 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
                 state.update_task(con, run["id"], tid, contract_version=version, acceptance_version=version)
         state.update_run(con, run["id"], plan_version=version)
         run = state.get_run(con, run["id"])
+        plans.apply_run_checks(con, run, parsed.run_checks)
+        run = state.get_run(con, run["id"])
         delivered = _deliver(con, run, amendment_id, affected, delta.strip(), version)
         rereview = None
         if plans.review_required(run) and not plans.plan_review_ended(con, run):
@@ -187,6 +189,8 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author) -> Result:
                      now_iso(), sha256_bytes(text.encode()), run["plan_version"], amendment_id))
         sync = plans.sync_tasks(con, run, parsed.tasks, version)
         state.update_run(con, run["id"], plan_version=version)
+        run = state.get_run(con, run["id"])
+        plans.apply_run_checks(con, run, parsed.run_checks)
         run = state.get_run(con, run["id"])
         affected = sorted(set(scope_ids) | set(sync["contract"]) | set(sync["acceptance"]))
         _deliver(con, run, amendment_id, affected, delta.strip(), version)
