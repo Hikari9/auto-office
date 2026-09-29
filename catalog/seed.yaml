@@ -272,6 +272,22 @@ models:
     source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-opus-5-low', release_url: 'https://artificialanalysis.ai/models/releases/claude-opus-5', fetched_at: '2026-09-27T14:55:41Z', page_title: 'Claude Opus 5 (Adaptive Reasoning, Low Effort)'}
     content_hash: 9b5ee7efad3ed104070eb0995299a9af1a32005df8ab5eaedf050d6d301868d7
     supersession_metadata: {supersedes: null, superseded_by: claude-opus-5-5, reason: deprecated-by-vendor-per-artificial-analysis-model-page}
+  - model_id: claude-sonnet-5-5
+    invocation_model_id: claude-sonnet-5-5
+    invocation_harness: claude
+    invocation_source: 'local-evidence: pane launch `claude --model claude-sonnet-5-5 --effort high` bannered "Sonnet 5.5 with high effort" at claude 2.1.284 (2026-09-29)'
+    source_identifier: claude-sonnet-5-5-high
+    source_name: artificial-analysis
+    effort: high
+    source_effort: High Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 47}
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 10.0, currency: USD, as_of: '2026-09-29'}
+    speed_fields:
+    release_date: '2026-09'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-sonnet-5-5-high', release_url: 'https://artificialanalysis.ai/models/releases/claude-sonnet-5-5', fetched_at: '2026-09-29T04:10:00Z', page_title: 'Claude Sonnet 5.5 (Adaptive Reasoning, High Effort, Default Fallback)'}
+    content_hash:
+    supersession_metadata:
   - model_id: claude-sonnet-5
     invocation_model_id:
     invocation_harness: claude
