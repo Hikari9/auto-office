@@ -594,7 +594,7 @@ def _prompt_landed(name: str, timeout: float) -> bool:
     empty, and agy reads `idle` mid-turn."""
     deadline = time.time() + timeout
     while True:
-        if _pane_busy(_herdr_agent_text(name, "--source", "visible", "--lines", "6")):
+        if _pane_busy(_herdr_agent_text(name, "--source", "visible", "--lines", "15")):
             return True
         if time.time() >= deadline:
             return False
