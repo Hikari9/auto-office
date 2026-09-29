@@ -385,6 +385,7 @@ def test_unreadable_pane_past_the_limit_accepts_stable_output(env, monkeypatch):
     assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
     # The limit is reached on poll 3, which accepts the stable file.
     assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 3
+    assert any("unreadable for 3 polls" in e for e in _launch_events(env, run))
 
 
 def test_recovered_busy_pane_is_not_settled_by_the_blind_limit(env, monkeypatch):

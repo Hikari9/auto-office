@@ -680,6 +680,12 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
             unknown = unknown + 1 if sample.get("busy") is None else 0
         # Blind only while this very sample is still unreadable.
         blind = sample is not None and sample.get("busy") is None and unknown >= unknown_limit
+        if blind and unknown == unknown_limit:
+            # Said once, before anything below can end the watch. A reviewer's
+            # stable output now ends it; a worker, like a headless process,
+            # ends on submit, exit, or revoke.
+            _watch_notice(dispatch_id, f"herdr agent {spec['herdr_agent']} has been unreadable for "
+                                       f"{unknown_limit} polls; check its pane, or office revoke")
         if size and size == last_size and (sample is None or sample.get("busy") is False or blind):
             # Complete: written, no longer growing between two polls, and the
             # agent is not still mid-turn (it may rewrite the file). After the
@@ -689,11 +695,6 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
         last_size = size or None
         if sample is None:
             return None, "nonzero"
-        if unknown == unknown_limit:
-            # Said once. A reviewer's stable output now ends it (above); a worker,
-            # like a headless process, ends on submit, exit, or revoke.
-            _watch_notice(dispatch_id, f"herdr agent {spec['herdr_agent']} has been unreadable for "
-                                       f"{unknown_limit} polls; check its pane, or office revoke")
         history.append(sample)
         window = history[-stable_samples:]
         if (len(window) == stable_samples and all(w["status"] in ("done", "idle") for w in window)
