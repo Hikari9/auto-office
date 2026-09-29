@@ -154,8 +154,8 @@ def test_output_file_or_submit_ends_the_dispatch(env, monkeypatch):
     out = env.tmp / "reply.txt"
     out.write_text("VERDICT: PASS")
     assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
-    # Complete means written and stable across two polls: one sample in between, no done/idle needed.
-    assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 1
+    # Complete means written and stable across two polls (one sample each), no done/idle needed.
+    assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 2
     monkeypatch.setattr(dispatch, "_submitted", lambda con, disp: True)
     assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp), poll=0) == (0, "success")
 
@@ -302,3 +302,29 @@ def test_external_dispatch_writes_agent_env_for_a_manual_launch(env, monkeypatch
     from office import paths
     env_text = (paths.run_dir(run["id"]) / "dispatches" / d["id"] / "agent.env").read_text()
     assert f"OFFICE_DISPATCH_ID={d['id']}" in env_text and "OFFICE_ROLE=executor" in env_text
+
+
+def test_stable_output_does_not_settle_while_the_pane_is_busy(env, monkeypatch):
+    state_file = _fake(env, monkeypatch, gets=["working", "working", "working", "gone"], reads=[BUSY])
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: PASS (draft)")
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
+    # It waited through every busy sample and ended only once the agent was gone.
+    assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 4
+
+
+def test_hung_prompt_call_does_not_escape_the_launch(env, monkeypatch):
+    import subprocess as sp
+    from office import dispatch
+    real = sp.run
+
+    def run(args, *a, **k):
+        if list(args[:3]) == ["herdr", "agent", "prompt"]:
+            raise sp.TimeoutExpired(args, 30)
+        return real(args, *a, **k)
+
+    monkeypatch.setattr(dispatch.subprocess, "run", run)
+    state_file, run_, d, res = _herdr_launch(env, monkeypatch, reads=["> composer empty", BUSY])
+    assert res["launcher"] == "herdr" and res["prompt_landed"] is True and res["watcher_pid"]

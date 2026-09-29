@@ -606,11 +606,20 @@ def _deliver_prompt(name: str, pane: str, pointer: str) -> bool:
     into the pane and pressing Enter (agy can drop a prompt sent right after
     `agent start` returns)."""
     timeout = float(os.environ.get("OFFICE_HERDR_LAND_TIMEOUT", "30"))
-    subprocess.run(["herdr", "agent", "prompt", name, pointer], capture_output=True, timeout=30)
+
+    def herdr(*args: str) -> None:
+        # The agent is already recorded as launched: a hung or missing herdr
+        # here must not escape before the watcher starts.
+        try:
+            subprocess.run(["herdr", *args], capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    herdr("agent", "prompt", name, pointer)
     if _prompt_landed(name, timeout):
         return True
-    subprocess.run(["herdr", "pane", "send-text", pane, pointer], capture_output=True, timeout=30)
-    subprocess.run(["herdr", "pane", "send-keys", pane, "Enter"], capture_output=True, timeout=30)
+    herdr("pane", "send-text", pane, pointer)
+    herdr("pane", "send-keys", pane, "Enter")
     return _prompt_landed(name, timeout)
 
 
@@ -652,11 +661,12 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
         finally:
             con.close()
         size = output.stat().st_size if output and output.is_file() else 0
-        if size and size == last_size:
-            # Complete: written and no longer growing between two polls.
+        sample = _herdr_agent_sample(spec["herdr_agent"])
+        if size and size == last_size and not (sample and sample.get("busy")):
+            # Complete: written, no longer growing between two polls, and the
+            # agent is not still mid-turn (it may rewrite the file).
             return 0, "success"
         last_size = size or None
-        sample = _herdr_agent_sample(spec["herdr_agent"])
         if sample is None:
             return None, "nonzero"
         history.append(sample)
