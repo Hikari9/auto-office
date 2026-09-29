@@ -188,7 +188,9 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
         if dispatch_mod.live_lease(con, run["id"], d["lease_id"]) is None:
             raise Refused("lease-lost", f"{task['id']} lease was revoked during submit", scope=task["id"])
         seq = con.execute("SELECT COUNT(*) FROM revisions WHERE run_id=?", (run["id"],)).fetchone()[0] + 1
-        rev_id = f"R{seq}"
+        # revisions.id is a GLOBAL primary key shared by every run in runs.db; a bare
+        # per-run "R{seq}" collides with the first revision of any earlier run.
+        rev_id = f"R{seq}-{run['id'][:8]}"
         prev = task.get("current_revision_id")
         prev_row = con.execute("SELECT * FROM revisions WHERE id=?", (prev,)).fetchone() if prev else None
         changed = paths.git(wt, "diff", "--name-only", prev_row["commit_sha"] if prev_row else d["base_commit"], commit).split()
