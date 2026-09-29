@@ -758,8 +758,16 @@ def _deliver_prompt(name: str, pane: str, pointer: str) -> bool:
     if _prompt_landed(name, timeout):
         return True
     herdr("pane", "send-text", pane, pointer)
-    herdr("pane", "send-keys", pane, "Enter")
-    return _prompt_landed(name, timeout)
+    # A TUI can take an Enter that follows typed text too closely as part of
+    # the paste and leave it in the composer: pause, submit, and submit once
+    # more if it still has not landed.
+    delay = float(os.environ.get("OFFICE_HERDR_KEY_DELAY", "1"))
+    for _ in range(2):
+        time.sleep(delay)
+        herdr("pane", "send-keys", pane, "Enter")
+        if _prompt_landed(name, timeout / 2):
+            return True
+    return False
 
 
 def _watch_notice(dispatch_id: str, text: str) -> None:

@@ -404,3 +404,12 @@ def test_recovered_busy_pane_is_not_settled_by_the_blind_limit(env, monkeypatch)
     assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
     # It did not settle on the recovered busy samples; it ended only when the agent was gone.
     assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 4
+
+
+def test_typed_pointer_left_in_the_composer_gets_a_second_enter(env, monkeypatch):
+    monkeypatch.setenv("OFFICE_HERDR_KEY_DELAY", "0")
+    state_file, run, d, res = _herdr_launch(env, monkeypatch, reads=["> composer empty", "> pointer typed, not sent",
+                                                                     BUSY])
+    assert res["prompt_landed"] is True
+    enters = [c for c in _calls(state_file) if c[:2] == ["pane", "send-keys"] and c[-1] == "Enter"]
+    assert len(enters) == 2
