@@ -106,7 +106,9 @@ def test_concurrent_event_writers_neither_lose_nor_duplicate(env):
     before = con.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     ctx = multiprocessing.get_context("spawn")
     with ctx.Pool(4) as pool:
-        pool.map(_emit_many, [(str(paths.runs_db()), run_id, 40, f"w{i}") for i in range(4)])
+        # Bounded: a pool child that dies (seen under heavy load) otherwise hangs
+        # pool.map, and with it the whole suite, instead of failing this test.
+        pool.map_async(_emit_many, [(str(paths.runs_db()), run_id, 40, f"w{i}") for i in range(4)]).get(timeout=300)
     rows = con.execute("SELECT seq, summary FROM events WHERE kind='t'").fetchall()
     assert len(rows) == 160 == con.execute("SELECT COUNT(*) FROM events").fetchone()[0] - before
     assert len({r["seq"] for r in rows}) == 160
