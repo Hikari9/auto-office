@@ -150,3 +150,19 @@ def test_later_defect_pauses_affected_scope_only(env):
     code, data = env.ojson("status", env=EXTERNAL)  # the concurrent re-review now returns a defect on T2
     assert data["data"]["tasks"]["T2"] == "paused", data
     assert data["data"]["tasks"]["T1"] in ("running", "launching"), data
+
+
+def test_defect_in_the_briefs_own_format_is_valid():
+    # The plan-review brief asks for <class> | <task> | <what is wrong> | <evidence: ...>;
+    # the parser used to read evidence from a fifth field and rejected it (run 1fd7e457).
+    from office import review_parse
+    brief_form = ("VERDICT: PLAN_DEFECT\n"
+                  "DEFECT P1 | requirement-contradiction | T49 | Remove the p36 path | evidence: T48: \"p36 = 0\"\n")
+    parsed = review_parse.parse(brief_form, plan_review=True)
+    assert parsed.valid, parsed.errors
+    assert parsed.defects[0]["evidence"] == 'T48: "p36 = 0"' and parsed.defects[0]["action"] == ""
+    legacy = review_parse.parse(DEFECT, plan_review=True)
+    assert legacy.valid and legacy.defects[0]["action"] == "use mul.py"
+    bare = review_parse.parse("VERDICT: PLAN_DEFECT\nDEFECT P3 | requirement-contradiction | T1 | wrong\n",
+                              plan_review=True)
+    assert not bare.valid and "must cite evidence" in bare.errors[0]
