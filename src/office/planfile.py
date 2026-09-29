@@ -46,6 +46,10 @@ class ParsedPlan:
     warnings: list[str] = field(default_factory=list)
 
 
+def _is_no_check(value: str) -> bool:
+    return value.strip().lower() in ("none", "n/a")
+
+
 def _split_list(value: str) -> list[str]:
     value = value.strip()
     if not value or value.lower() in ("none", "-", "n/a"):
@@ -108,7 +112,7 @@ def parse(text: str) -> ParsedPlan:
                 task["interfaces"] = _split_list(value)
                 list_key = "interfaces" if not value else None
             elif key == "checks":
-                if value.lower() in ("none", "n/a"):
+                if _is_no_check(value):
                     task["checks"] = []
                 elif value:
                     task["checks"] = [value]
@@ -133,7 +137,8 @@ def parse(text: str) -> ParsedPlan:
             list_key = key if not value else None
             if value:
                 if key == "checks":
-                    plan.run_checks.append(value)
+                    if not _is_no_check(value):
+                        plan.run_checks.append(value)
                 else:
                     req[key] = value
             continue
@@ -166,7 +171,7 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
         pre = pre.split(":", 1)[1] if ":" in pre else pre
         actions.append({"action": action.strip(), "preconditions": [p.strip() for p in pre.split(";") if p.strip()]})
     checks = req.get("checks") if isinstance(req.get("checks"), list) else []
-    plan.run_checks.extend(checks)
+    plan.run_checks.extend(c for c in checks if not _is_no_check(c))
     return {
         "goal": req.get("goal"),
         "done_criteria": req.get("done") if isinstance(req.get("done"), list) else [],

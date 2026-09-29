@@ -73,6 +73,19 @@ def maybe_queue(con, run: dict) -> None:
     state.enqueue(con, run, "integrate", {"key": key}, dedup_key=f"integrate:{run['id']}:{key}", max_attempts=2)
 
 
+def retrigger(con, run: dict) -> bool:
+    """Force a fresh integration pass on the current accepted set, bypassing the
+    per-set dedup key (used when run-level checks changed but the accepted
+    revisions did not). Caller holds the tx."""
+    tasks = accepted_set(con, run)
+    if tasks is None:
+        return False
+    key = _set_key(con, tasks)
+    state.enqueue(con, run, "integrate", {"key": key},
+                  dedup_key=f"integrate:{run['id']}:{key}:recheck:{uuid.uuid4().hex[:8]}", max_attempts=2)
+    return True
+
+
 def _set_integration(con, run: dict, **fields) -> None:
     run = state.get_run(con, run["id"])
     landing = dict(run.get("landing") or {})
