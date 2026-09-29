@@ -253,6 +253,65 @@ def parse_route_override(text: str) -> dict:
     return {"harness": harness or None, "model_id": model, "effort": effort or None}
 
 
+# Aliases that name a family without its vendor prefix.
+_FAMILY_ALIASES = {"opus": "claude", "sonnet": "claude", "haiku": "claude", "fable": "claude",
+                   "luna": "gpt", "astra": "gpt", "sol": "gpt", "terra": "gpt"}
+
+
+def model_family(model_id: str | None) -> str | None:
+    """The vendor family a model belongs to (claude, gpt, gemini, ...): the
+    independence unit for review. `claude-sonnet-5-5` and `sonnet` are both claude."""
+    head = (model_id or "").lower().split("-", 1)[0]
+    return _FAMILY_ALIASES.get(head, head) or None
+
+
+def declared_candidate(harness: str, model: str, effort: str | None = None) -> dict:
+    """A candidate the user named with --as/--review-as. It bypasses the
+    registry, trust, and floors, but still resolves through the catalog when a
+    row matches, so `agy/gemini-3.8-flash@medium` invokes the combined slug
+    `gemini-3.8-flash-medium` the harness actually accepts."""
+    from office.state import Usage
+    adapter = adapters.load_all().get(harness)
+    if adapter is None:
+        raise Usage("unknown-harness", f"--as names harness {harness!r}, which has no adapter",
+                    next_step="use one of: " + ", ".join(sorted(adapters.load_all())))
+    rows = [r for r in catalog_rows() if r.get("invocation_harness") == harness
+            and model in (r.get("model_id"), r.get("invocation_model_id"))]
+    if effort:
+        rows = [r for r in rows if r.get("effort") == effort] or rows
+    # A row named exactly what the user typed beats an alias that invokes it.
+    rows.sort(key=lambda r: r.get("model_id") != model)
+    row = rows[0] if len(rows) == 1 or (rows and effort) else None
+    return {
+        "harness": harness,
+        "harness_version": adapters.harness_version(adapter) or "unknown",
+        "model_id": (row or {}).get("model_id") or model,
+        "invocation_model_id": (row or {}).get("invocation_model_id") or model,
+        "invocation_source": "user-override",
+        "effort": effort or (row or {}).get("effort") or "none",
+        "benchmark_indexes": (row or {}).get("benchmark_indexes") or {},
+        "capabilities": sorted(set(adapter.get("capabilities") or [])),
+        "adapter_id": adapter.get("id"),
+        "adapter_hash": adapters.adapter_hash(adapter),
+        "cost": _cost(row or {}),
+        "quota": {"status": "unknown", "tightest_remaining_percent": None},
+        "override": True,
+    }
+
+
+def declared_decision(text: str, *, flag: str = "--as") -> dict:
+    """A routing decision for a user-declared `harness/model[@effort]`."""
+    from office.state import Usage
+    want = parse_route_override(text)
+    if not want["harness"] or not want["model_id"]:
+        raise Usage("invalid-override", f"{flag} {text!r}: expected <harness>/<model>[@effort]")
+    cand = declared_candidate(want["harness"], want["model_id"], want["effort"])
+    triple = routing.candidate_id(cand)
+    return {"status": "selected", "selected": triple, "candidate": cand, "override": True,
+            "selection_disclosure": {"triple": triple, "reason": f"user override ({flag} {text})", "override": True},
+            "skipped": []}
+
+
 def _preferred_seed(policy_cfg: dict, run: dict):
     """roles.<role>.preferred_seed_by_size.<size_class> replaces preferred_seed when the
     run's size class (start --size-class) has an entry there."""
@@ -271,10 +330,12 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors)
     if exclude:
         # Entries: an exact triple, "model:<harness>/<model>" (every effort of a
-        # model that misbehaved), or "harness:<name>" (a shared quota/auth wall).
+        # model that misbehaved), "harness:<name>" (a shared quota/auth wall), or
+        # "family:<name>" (a declared producer's family, for independent review).
         def excluded(c):
             return (routing.candidate_id(c) in exclude or f"harness:{c['harness']}" in exclude
-                    or f"model:{c['harness']}/{c['invocation_model_id']}" in exclude)
+                    or f"model:{c['harness']}/{c['invocation_model_id']}" in exclude
+                    or f"family:{model_family(c['model_id'])}" in exclude)
         candidates = [c for c in candidates if not excluded(c)]
     if override:
         want = parse_route_override(override)

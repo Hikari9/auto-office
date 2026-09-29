@@ -211,9 +211,25 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     excluded = set(exclude or [])
     producer = _producer_route(con, gate)
     failures = []
+    task = state.get_task(con, run["id"], gate["task_id"]) if gate.get("task_id") else None
+    # A user-pinned code reviewer (dispatch --review-as) replaces routing; a
+    # declared executor's family is excluded from routed review.
+    pinned = (task or {}).get("review_override") if role == "code_reviewer" else None
+    producer_model, producer_declared = _producer_model(con, gate)
+    producer_family = candidates.model_family(producer_model)
+    if producer_declared and producer_family and not pinned:
+        excluded.add(f"family:{producer_family}")
     for attempt in range(limit + 1):
-        decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
-                                         exclude=excluded)
+        if pinned:
+            decision = candidates.declared_decision(pinned["as"], flag="--review-as")
+            decision["launch"] = {k: pinned[k] for k in ("cli", "external") if pinned.get(k)}
+            if producer_family and candidates.model_family(decision["candidate"]["model_id"]) == producer_family:
+                failures.append(f"--review-as {pinned['as']} is the same model family ({producer_family}) as the "
+                                f"producer {producer_model}; not independent")
+                break
+        else:
+            decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
+                                             exclude=excluded)
         if decision.get("status") != "selected":
             failures.append(f"no qualifying {role} route ({decision.get('status')})")
             break
@@ -230,8 +246,10 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         from office import dispatch as dispatch_mod
         d = state.get_dispatch(con, dispatch_id)
         profile_kind = kind or ("vision" if visual else "reviewer")
+        launch_form = decision.get("launch") or {}
         dispatch_mod.launch(run, d, profile_kind, ddir, cwd=cwd, wait=True, output=output, images=images,
-                            include_dirs=include_dirs)
+                            include_dirs=include_dirs, cli=launch_form.get("cli"),
+                            external=bool(launch_form.get("external")))
         d = state.get_dispatch(con, dispatch_id)
         text = output.read_text(encoding="utf-8", errors="replace") if output.is_file() and output.stat().st_size else ""
         if not text:
@@ -251,6 +269,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         if _quota_signature(text):
             reason += " [quota]"
         failures.append(reason)
+        if pinned:
+            break  # the user named this reviewer; never substitute another
         excluded.add(triple)
         if _quota_signature(text):
             excluded.add(f"harness:{cand['harness']}")
@@ -262,6 +282,19 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     return {"verdict": "UNAVAILABLE", "parsed": None, "route": None, "summary": "; ".join(failures)[:600]}
 
 
+def _producer_model(con, gate: dict) -> tuple[str | None, bool]:
+    """(model_id, declared) of the dispatch that produced the gate's revision."""
+    if not gate.get("revision_id"):
+        return None, False
+    row = con.execute("SELECT d.route_json, d.override_json FROM revisions r JOIN dispatches d ON d.id=r.dispatch_id "
+                      "WHERE r.id=?", (gate["revision_id"],)).fetchone()
+    if not row:
+        return None, False
+    cand = (json.loads(row["route_json"] or "{}").get("candidate") or {})
+    declared = bool(json.loads(row["override_json"] or "{}").get("declared"))
+    return cand.get("model_id"), declared
+
+
 def _producer_route(con, gate: dict) -> str | None:
     if not gate.get("revision_id"):
         return None
@@ -271,6 +304,7 @@ def _producer_route(con, gate: dict) -> str | None:
 
 
 def _reviewer_dispatch(con, run: dict, gate: dict, role: str, decision: dict) -> str:
+    from office import dispatch as dispatch_mod
     cand = decision["candidate"]
     dispatch_id = "D" + uuid.uuid4().hex[:8]
     con.execute("INSERT INTO dispatches(id, run_id, role, holder_id, triple, invocation_model_id, selection_reason, started_at, "
@@ -279,8 +313,11 @@ def _reviewer_dispatch(con, run: dict, gate: dict, role: str, decision: dict) ->
                 (dispatch_id, run["id"], role, dispatch_id, routing.candidate_id(cand), cand.get("invocation_model_id"),
                  (decision.get("selection_disclosure") or {}).get("reason"), now_iso(), gate.get("task_id"), "reviewer",
                  run["office_version"], "launching", cand["harness"], cand.get("invocation_model_id"), cand.get("effort"),
-                 cand.get("adapter_id"), dumps({"candidate": cand, "selection_disclosure": decision.get("selection_disclosure")}),
-                 gate["id"]))
+                 cand.get("adapter_id"), dumps(dispatch_mod._route_payload(decision)), gate["id"]))
+    if decision.get("override"):
+        con.execute("UPDATE dispatches SET override_json=? WHERE id=?",
+                    (dumps({"by": "user", "declared": True, "triple": routing.candidate_id(cand),
+                            **(decision.get("launch") or {})}), dispatch_id))
     con.execute("INSERT INTO routing_decisions(id, run_id, role, request_hash, selected_triple, decision_hash, created_at) "
                 "VALUES(?,?,?,?,?,?,?)", (uuid.uuid4().hex, run["id"], role, sha256_obj(role + gate["id"]),
                                           decision.get("selected"), decision.get("decision_hash"), now_iso()))

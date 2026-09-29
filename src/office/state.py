@@ -97,7 +97,8 @@ def pinned_config(run: dict) -> dict:
 
 # ---------------------------------------------------------------- tasks
 
-TASK_JSON = ("scope_json", "depends_json", "interfaces_json", "accept_json", "checks_json", "visual_json")
+TASK_JSON = ("scope_json", "depends_json", "interfaces_json", "accept_json", "checks_json", "visual_json",
+             "review_override_json")
 
 
 def _task(row) -> dict | None:
@@ -105,7 +106,7 @@ def _task(row) -> dict | None:
         return None
     d = dict(row)
     for key in TASK_JSON:
-        d[key[:-5]] = loads(d.get(key), [] if key != "visual_json" else None)
+        d[key[:-5]] = loads(d.get(key), None if key in ("visual_json", "review_override_json") else [])
     return d
 
 
@@ -123,7 +124,7 @@ def tasks(con: sqlite3.Connection, run_id: str, *, include_planner: bool = False
 
 def update_task(con: sqlite3.Connection, run_id: str, task_id: str, **fields) -> None:
     fields["updated_at"] = now_iso()
-    for key in ("scope", "depends", "interfaces", "accept", "checks", "visual"):
+    for key in ("scope", "depends", "interfaces", "accept", "checks", "visual", "review_override"):
         if key in fields:
             fields[key + "_json"] = dumps(fields.pop(key))
     cols = ", ".join(f"{k}=?" for k in fields)
