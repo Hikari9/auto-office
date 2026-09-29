@@ -282,3 +282,41 @@ def test_revision_ids_are_unique_across_runs(env):
     wenv, wt = _worker(env)
     code, out = env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"}, check=0)
     assert f"rev R1-{run_id[:8]} captured" in out, out
+
+
+PLAN_NO_GATES = PLAN_ONE.replace('checks: python3 -c "import calc; assert calc.add(2, 3) == 5"', "checks: none")
+
+
+def test_no_gate_revision_is_accepted_on_submit(env):
+    # Direct gear funds no review and the task declares checks: none, so no gate
+    # exists to finish; acceptance must be evaluated on submit (it hung "submitted").
+    _go(env, plan=PLAN_NO_GATES, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    wenv, wt = _worker(env)
+    code, out = env.office("submit", cwd=wt, env=wenv, check=0)
+    assert code == 0 and "accepted (no gate required by policy)" in out, out
+    assert _task(env)["status"] == "accepted"
+
+
+def test_stuck_no_gate_revision_is_accepted_by_reconcile(env):
+    _go(env, plan=PLAN_NO_GATES, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    wenv, wt = _worker(env)
+    env.office("submit", cwd=wt, env=wenv, check=0)
+    # Put it back the way an older runtime left it: submitted, no gates, never evaluated.
+    con = env.con()
+    con.execute("UPDATE tasks SET status='submitted', accepted_revision_id=NULL WHERE id='T1'")
+    con.commit()
+    assert _task(env)["status"] == "submitted"
+    env.office("status", check=0)
+    assert _task(env)["status"] == "accepted"
+
+
+def test_revision_with_checks_is_not_accepted_without_them(env):
+    # The no-gate path must not accept a task whose checks never ran.
+    _go(env, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    wenv, wt = _worker(env)
+    env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"}, check=0)
+    env.office("status", check=0)
+    assert _task(env)["status"] != "accepted"
