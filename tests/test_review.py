@@ -419,7 +419,9 @@ class TestReview(unittest.TestCase):
     def test_office_spawn_with_full_disclosure_records_start_receipt(self):
         adapter = self.repo / 'adapter.yaml'
         adapter.write_text(
-            "invocation:\n  executable: /bin/sleep\n  argv:\n    - \"2\"\n  prompt_transport: argv\n",
+            # Long enough to outlive the receipt write and the 1s liveness check
+            # on a loaded machine; `sleep 2` exited first and read as "died".
+            "invocation:\n  executable: /bin/sleep\n  argv:\n    - \"20\"\n  prompt_transport: argv\n",
             encoding='utf-8',
         )
         disclosure = json.dumps({
