@@ -22,7 +22,7 @@ elif args[:2] == ["agent", "start"] and os.environ.get("FAKE_HERDR_START_FAIL"):
     code = 1
     result = {{"error": {{"code": "invalid_agent_name"}}}}
 elif args[:2] == ["pane", "get"]:
-    result = {{"pane": {{"pane_id": args[2]}}}}
+    result = {{"pane": {{"pane_id": args[2], "agent": data.get("pane_agents", {{}}).get(args[2])}}}}
 elif args[:2] == ["agent", "get"]:
     seq = data["get"]
     status = seq.pop(0) if len(seq) > 1 else (seq[0] if seq else "gone")
@@ -343,3 +343,32 @@ def test_unreadable_pane_never_settles_stable_output_or_idle(env, monkeypatch):
     assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
     # Unknown busy state held it open until the agent was gone.
     assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 5
+
+
+def test_pane_still_holding_a_finished_agent_is_not_reused(env, monkeypatch):
+    state_file = _fake(env, monkeypatch)
+    data = json.loads(state_file.read_text())
+    data["pane_agents"] = {"w1:p50": "codex"}  # ended dispatch, session still in the pane
+    state_file.write_text(json.dumps(data))
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    tab_file = env.tmp / "herdr-tab.json"
+    pane = dispatch._herdr_split_pane(run, env.repo, tab_file, {"mode": "split", "anchor": "w1:pQ", "panes": ["w1:p50"]},
+                                      "w1:pQ")
+    assert pane != "w1:p50" and pane.startswith("w1:p1")
+    assert any(c[:2] == ["pane", "split"] for c in _calls(state_file))
+    # A plain shell pane is still reused.
+    data = json.loads(state_file.read_text()); data["pane_agents"] = {}; state_file.write_text(json.dumps(data))
+    assert dispatch._herdr_split_pane(run, env.repo, tab_file, {"mode": "split", "anchor": "w1:pQ",
+                                                                "panes": ["w1:p50"]}, "w1:pQ") == "w1:p50"
+
+
+def test_persistently_unreadable_pane_is_reported_once(env, monkeypatch):
+    monkeypatch.setenv("FAKE_HERDR_READ_FAIL", "1")
+    monkeypatch.setenv("OFFICE_HERDR_UNKNOWN_LIMIT", "2")
+    _fake(env, monkeypatch, gets=["idle", "idle", "idle", "idle", "gone"])
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp), poll=0) == (None, "nonzero")
+    events = _launch_events(env, run)
+    assert len(events) == 1 and "unreadable for 2 polls" in events[0]

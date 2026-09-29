@@ -625,6 +625,16 @@ def _deliver_prompt(name: str, pane: str, pointer: str) -> bool:
     return _prompt_landed(name, timeout)
 
 
+def _watch_notice(dispatch_id: str, text: str) -> None:
+    con = db.connect()
+    try:
+        d = state.get_dispatch(con, dispatch_id)
+        run = state.get_run(con, d["run_id"])
+    finally:
+        con.close()
+    _launch_notice(run, d, text)
+
+
 def _launch_notice(run: dict, dispatch: dict, text: str) -> None:
     """Record a launch problem where `office status` shows it."""
     con = db.connect()
@@ -651,6 +661,8 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
     output = Path(spec["output"]) if spec.get("output") else None
     history: list[dict] = []
     last_size = None
+    unknown = 0
+    unknown_limit = int(os.environ.get("OFFICE_HERDR_UNKNOWN_LIMIT", "60"))
     while True:
         con = db.connect()
         try:
@@ -671,6 +683,11 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
         last_size = size or None
         if sample is None:
             return None, "nonzero"
+        unknown = unknown + 1 if sample.get("busy") is None else 0
+        if unknown == unknown_limit:
+            # Said once: submit, the output file, the agent exiting, or a revoke still end it.
+            _watch_notice(dispatch_id, f"herdr agent {spec['herdr_agent']} has been unreadable for "
+                                       f"{unknown_limit} polls; check its pane, or office revoke")
         history.append(sample)
         window = history[-stable_samples:]
         if (len(window) == stable_samples and all(w["status"] in ("done", "idle") for w in window)
@@ -721,13 +738,21 @@ def _busy_panes(run: dict) -> set:
         con.close()
 
 
+def _pane_is_shell(pane: str) -> bool:
+    """A pane Office may start an agent in: live, with no agent in it. An ended
+    dispatch's pane can still hold its finished session, which herdr rejects
+    (`agent_pane_busy`), so the dispatch row alone does not make it reusable."""
+    info = _herdr_json(["pane", "get", pane]).get("pane") or {}
+    return bool(info) and not info.get("agent")
+
+
 def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None, anchor: str | None) -> str | None:
     layout = layout or {"mode": "split", "anchor": anchor, "panes": []}
     anchor = layout.get("anchor") or anchor
     live = [p for p in layout["panes"] if _herdr_json(["pane", "get", p])]  # the user may close panes
     busy = _busy_panes(run)
     for pane in live:
-        if pane not in busy:
+        if pane not in busy and _pane_is_shell(pane):
             subprocess.run(["herdr", "pane", "run", pane, f"cd {shlex.quote(str(cwd))}"], capture_output=True, timeout=30)
             layout["panes"] = live
             atomic_write_json(tab_file, layout)
@@ -763,7 +788,7 @@ def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None) 
         return root
     busy = _busy_panes(run)
     for pane in tab["panes"]:
-        if pane not in busy:
+        if pane not in busy and _pane_is_shell(pane):
             subprocess.run(["herdr", "pane", "run", pane, f"cd {shlex.quote(str(cwd))}"], capture_output=True, timeout=30)
             return pane
     direction = "right" if len(tab["panes"]) % 2 else "down"
