@@ -332,3 +332,22 @@ def test_not_logged_in_reviewer_skips_the_whole_harness(env):
     assert _task(env)["status"] == "accepted"
     reviewers = [c["harness"] for c in env.calls() if c.get("role") == "code_reviewer"]
     assert reviewers.count("codex") == 1 and reviewers[-1] != "codex", reviewers
+
+
+def test_amendment_for_an_earlier_session_does_not_hold_a_relaunch(env):
+    # An amendment delivered to D1, then the task relaunched as D2 (e.g. an
+    # external relaunch): D2 starts from the amended contract, so its submit must
+    # not sit at amendment_pending waiting on an ack only D1 could give.
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    env.office("amend", "T1", "--", "also handle negative numbers the same way", check=0)
+    env.office("revoke", "T1", check=0)
+    code, out = env.office("dispatch", "T1", env=EXTERNAL)
+    assert code == 0, out
+    con = env.con()
+    assert [r[0] for r in con.execute("SELECT status FROM deliveries")] == ["superseded"]
+    wenv, wt = _worker(env)
+    (wt / "calc.py").write_text(GOOD_ADD)
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert "captured" in out and "amendment pending" not in out, out
+    assert _task(env)["status"] == "accepted"
