@@ -404,7 +404,9 @@ class TestReview(unittest.TestCase):
         tests/test_dogfood.py, never pass them)."""
         adapter = self.repo / 'adapter.yaml'
         adapter.write_text(
-            "invocation:\n  executable: /bin/sleep\n  argv:\n    - \"2\"\n  prompt_transport: argv\n",
+            # Outlives the 1s liveness check on a loaded machine; exits on its own
+            # (office_spawn.sh parses --timeout but does not enforce it).
+            "invocation:\n  executable: /bin/sleep\n  argv:\n    - \"8\"\n  prompt_transport: argv\n",
             encoding='utf-8',
         )
         r = subprocess.run([
@@ -419,9 +421,9 @@ class TestReview(unittest.TestCase):
     def test_office_spawn_with_full_disclosure_records_start_receipt(self):
         adapter = self.repo / 'adapter.yaml'
         adapter.write_text(
-            # Long enough to outlive the receipt write and the 1s liveness check
-            # on a loaded machine; `sleep 2` exited first and read as "died".
-            "invocation:\n  executable: /bin/sleep\n  argv:\n    - \"20\"\n  prompt_transport: argv\n",
+            # Outlives the receipt write and the 1s liveness check on a loaded
+            # machine (`sleep 2` exited first and read as "died"); exits on its own.
+            "invocation:\n  executable: /bin/sleep\n  argv:\n    - \"8\"\n  prompt_transport: argv\n",
             encoding='utf-8',
         )
         disclosure = json.dumps({
