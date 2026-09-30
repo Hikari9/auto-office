@@ -777,6 +777,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
                    "When the work and its checks are complete, run: office submit")
     else:
         images = f" Inspect each evidence image: {' '.join(spec['images'])}." if spec.get("images") else ""
+        pointer = (f"Read and carry out the review brief at {spec['prompt_file']} exactly.{images} "
                    f"Write your complete review to {spec['output']}; Office reads only that file, never "
                    "your terminal. Do not edit anything else.")
     from office import transcripts

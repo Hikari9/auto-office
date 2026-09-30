@@ -433,7 +433,7 @@ def test_dispatch_of_a_task_blocked_on_an_unavailable_review_reruns_only_the_rev
     # rock-mcp run 2fc0f696 C5: `dispatch T2 --review-as ...` on a submitted
     # revision blocked by an UNAVAILABLE code review launched a fresh executor.
     _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
-        code_reviewer=[{"reply": "Looks great to me!"}])
+        code_reviewer=[{"reply": "", "exit": 1}])
     env.office("dispatch", "T1", check=0)
     blocked = _task(env)
     assert blocked["status"] == "blocked", blocked

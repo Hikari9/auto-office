@@ -55,6 +55,7 @@ office_profiles:
     prompt: stdin
     output: stdout
     herdr_kind: codex
+    interactive:
       argv: [-c, "projects={{cwd_toml}={trust_level=\"trusted\"}}", --yolo, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}"]
       resume_argv: [resume, "{session_id}"]
   reviewer:
