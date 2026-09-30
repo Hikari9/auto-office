@@ -285,33 +285,48 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                             include_dirs=include_dirs, cli=launch_form.get("cli"),
                             external=bool(launch_form.get("external")))
         d = state.get_dispatch(con, dispatch_id)
-        text = output.read_text(encoding="utf-8", errors="replace") if output.is_file() and output.stat().st_size else ""
-        if not text:
-            log = Path(d.get("log_path") or ddir / "output.log")
-            text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+        text = _reply_text(d, ddir, output)
         parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual)
-        if not parsed.valid and d.get("launcher") == "herdr":
-            # A pane scrape (TUI chrome, a scrolled-off or wrapped reply) is not
-            # the reviewer's answer; its harness transcript keeps the full reply.
-            spec_file = ddir / "launch.json"
-            spec = json.loads(spec_file.read_text()) if spec_file.is_file() else {}
-            reply = dispatch_mod.transcript_reply(d, spec)
-            if reply:
-                alt = review_parse.parse(_last_block(reply), plan_review=plan_review, visual=visual)
-                if alt.valid:
-                    text, parsed = reply, alt
-                    output.write_text(reply, encoding="utf-8")
+        wrote_file = output.is_file() and output.stat().st_size > 0
+        # Wall signatures come from the harness log, never from the review
+        # itself (a review of quota code must not read as a quota wall).
+        log_text = "" if wrote_file else _log_text(d, ddir)
+        launch_failed = (d.get("terminal_classification") != "success" and not wrote_file) \
+            or _quota_signature(log_text) or _auth_signature(log_text)
+        if not parsed.valid and not launch_failed:
+            # The reviewer answered (or ended cleanly) but its reply file is
+            # missing or unparseable. Its work is not discarded and no other
+            # reviewer is substituted: the same session is asked to rewrite the
+            # file with the exact errors (R11). Results come only from the file
+            # (R13), never from pane or transcript text.
+            text, parsed, attention = _reprompt_until_valid(con, run, d, ddir, output, parsed,
+                                                            plan_review=plan_review, visual=visual)
+            if attention:
+                with db.transaction(con):
+                    state.record_evidence(con, run["id"], "review_output", output if output.is_file() else None,
+                                          task_id=gate.get("task_id"), revision_id=gate.get("revision_id"),
+                                          gate_id=gate["id"], meta={"route": triple, "exit": d.get("exit_code")},
+                                          digest=sha256_bytes(text.encode()))
+                return {"verdict": "ATTENTION", "parsed": None, "route": triple, "dispatch_id": dispatch_id,
+                        "summary": attention, "producer_route": producer}
+            d = state.get_dispatch(con, dispatch_id)
         with db.transaction(con):
             state.record_evidence(con, run["id"], "review_output", output if output.is_file() else None,
                                   task_id=gate.get("task_id"), revision_id=gate.get("revision_id"), gate_id=gate["id"],
                                   meta={"route": triple, "exit": d.get("exit_code")},
                                   digest=sha256_bytes(text.encode()))
-        if d.get("terminal_classification") == "success" and parsed.valid:
+        if parsed.valid:
+            # A valid reply file is the result, whatever the exit classification.
+            # The reviewer is done: snapshot and close its pane (R1).
+            dispatch_mod.reclaim_pane(run, dispatch_id)
             return {"verdict": parsed.verdict, "parsed": parsed, "route": triple, "dispatch_id": dispatch_id,
                     "summary": f"{parsed.verdict} by {triple}", "producer_route": producer}
-        reason = (f"{triple}: exit {d.get('exit_code')} ({d.get('terminal_classification')})"
-                  if d.get("terminal_classification") != "success" else f"{triple}: invalid reply ({'; '.join(parsed.errors[:2])})")
-        wall = "quota" if _quota_signature(text) else "auth" if _auth_signature(text) else None
+        # Only a launch failure reaches here: the agent never produced a reply
+        # (never started, died first, or hit an auth or quota wall). That is the
+        # one case where another route is substituted.
+        log_text = _log_text(d, ddir)
+        reason = f"{triple}: exit {d.get('exit_code')} ({d.get('terminal_classification')}) with no reply"
+        wall = "quota" if _quota_signature(log_text) else "auth" if _auth_signature(log_text) else None
         if wall:
             reason += f" [{wall}]"
         failures.append(reason)
@@ -320,12 +335,86 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         excluded.add(triple)
         if wall:
             excluded.add(f"harness:{cand['harness']}")
-        elif d.get("terminal_classification") == "success":
-            excluded.add(f"model:{cand['harness']}/{cand.get('invocation_model_id')}")
         with db.transaction(con):
             con.execute("UPDATE gates SET env_failures=env_failures+1 WHERE id=?", (gate["id"],))
             con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?", (dispatch_id,))
     return {"verdict": "UNAVAILABLE", "parsed": None, "route": None, "summary": "; ".join(failures)[:600]}
+
+
+REPLY_FILE_RULE = ("Office reads your review only from that file; text you print in the terminal is not read.")
+
+
+def _reply_text(d: dict, ddir: Path, output: Path) -> str:
+    """The reviewer's reply: its reply file, or (headless only) the captured
+    stdout log, which is also a file the harness wrote. Never pane text."""
+    if output.is_file() and output.stat().st_size:
+        return output.read_text(encoding="utf-8", errors="replace")
+    if d.get("launcher") in ("herdr", "external"):
+        return ""
+    return _log_text(d, ddir)
+
+
+def _log_text(d: dict, ddir: Path) -> str:
+    log = Path(d.get("log_path") or ddir / "output.log")
+    return log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+
+
+def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, parsed, *, plan_review: bool,
+                          visual: bool) -> tuple[str, "review_parse.Parsed", str | None]:
+    """Ask the same reviewer to rewrite its reply file until it parses, up to
+    gates.review_reprompt_max. Returns (text, parsed, attention reason or None)."""
+    from office import dispatch as dispatch_mod
+    gates_cfg = run.get("gates") or {}
+    limit = int(gates_cfg.get("review_reprompt_max", 3))
+    wait_s = float(os.environ.get("OFFICE_REVIEW_REPROMPT_WAIT") or gates_cfg.get("review_reprompt_wait_seconds", 900))
+    poll = float(os.environ.get("OFFICE_REVIEW_REPROMPT_POLL", "5"))
+    name = dispatch_mod.herdr_agent_name(d["id"])
+    errors = parsed.errors or ["no reply file"]
+    text = ""
+    for n in range(1, limit + 1):
+        if d.get("launcher") != "herdr" or not _agent_alive(name):
+            break  # no live session to ask: the orchestrator decides (never a substitute)
+        if output.is_file():
+            output.replace(output.with_name(f"reply.invalid-{n}.txt"))
+        prompt = (f"Office could not read your review ({'; '.join(errors[:4])}). Write your complete review again, "
+                  f"in the format the brief requires (a VERDICT line first), to {output}. {REPLY_FILE_RULE}")
+        try:
+            subprocess.run(["herdr", "agent", "prompt", name, prompt], capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            break
+        with db.transaction(con):
+            state.emit(con, run, "review.reprompt", f"{d.get('task_id') or 'plan'} {d['role']} {d['id']}: re-prompted "
+                       f"{n}/{limit} ({'; '.join(errors[:2])})", audience="runtime", task_id=d.get("task_id"),
+                       dispatch_id=d["id"])
+        text = _await_file(output, wait_s, poll)
+        parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual)
+        if parsed.valid:
+            return text, parsed, None
+        errors = parsed.errors or ["no reply file"]
+    reason = (f"reviewer {d['id']} ({d.get('triple')}) left no valid reply file after re-prompting: "
+              f"{'; '.join(errors[:3])}; its pane is kept. Re-prompt it (herdr agent prompt {name} ...) "
+              "or waive the gate")
+    return text, parsed, reason
+
+
+def _agent_alive(name: str) -> bool:
+    try:
+        return subprocess.run(["herdr", "agent", "get", name], capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _await_file(output: Path, wait_s: float, poll: float) -> str:
+    """Wait for the reviewer to write the reply file and stop growing."""
+    deadline = time.time() + wait_s
+    last = None
+    while time.time() < deadline:
+        size = output.stat().st_size if output.is_file() else 0
+        if size and size == last:
+            return output.read_text(encoding="utf-8", errors="replace")
+        last = size or None
+        time.sleep(poll)
+    return output.read_text(encoding="utf-8", errors="replace") if output.is_file() else ""
 
 
 def _producer_model(con, gate: dict) -> tuple[str | None, bool]:
@@ -489,6 +578,14 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
                    task_id=task["id"])
         if gate["kind"] == "checks":
             start_waiting(con, run, task["id"], gate["revision_id"])
+    elif verdict == "ATTENTION":
+        # The reviewer answered but never left a readable reply file. Its work
+        # and pane are kept; the orchestrator decides (R11). Never UNAVAILABLE.
+        state.emit(con, run, "gate.attention", f"{task['id']} {kind_label} needs attention: "
+                   f"{outcome.get('summary', '')[:220]}", task_id=task["id"])
+        state.update_task(con, run["id"], task["id"], status="blocked",
+                          pause_reason=f"{kind_label} review needs attention: {outcome.get('summary', '')[:200]}")
+        return
     elif verdict == "UNAVAILABLE":
         state.emit(con, run, "gate.unavailable", f"{task['id']} {kind_label} UNAVAILABLE: {outcome.get('summary', '')[:160]}; "
                    "valid unrelated results are preserved", task_id=task["id"])
@@ -610,9 +707,8 @@ def worker_live(con, dispatch_id: str | None) -> bool:
 
 
 def deliver_findings(con, run: dict, task: dict, gate: dict) -> None:
-    """Route actionable findings to the owning worker without the orchestrator.
-    A live worker gets them on its next command; otherwise a fix round starts
-    on the same worktree and lease lineage."""
+    """Route actionable findings: a live worker gets them on its next command;
+    otherwise they wait for the orchestrator to run office rerun (R8)."""
     rows = con.execute("SELECT code, severity, location, summary FROM findings WHERE run_id=? AND task_id=? AND state='open' "
                        "ORDER BY created_at", (run["id"], task["id"])).fetchall()
     text = "; ".join(f"{r['code']} {r['location'] or ''} {r['summary'][:100]}" for r in rows[:6])
@@ -624,8 +720,10 @@ def deliver_findings(con, run: dict, task: dict, gate: dict) -> None:
                                                   "text": f"Findings on {gate['revision_id']}: run office status, fix, then office submit."},
                       dedup_key=f"notify:{gate['id']}", max_attempts=1)
         return
-    from office import dispatch as dispatch_mod
-    dispatch_mod.request_launch(con, run, task["id"], role="executor", fix_of=gate["revision_id"])
+    # No live worker: the findings wait for the orchestrator, who chooses to
+    # resume the earlier session or start a fresh one (R8). Nothing launches here.
+    state.emit(con, run, "task.findings_queued", f"{task['id']} findings on {gate['revision_id']} are waiting for you: "
+               f"office rerun {task['id']} --resume | --fresh", task_id=task["id"])
 
 
 # ------------------------------------------------------------------ acceptance

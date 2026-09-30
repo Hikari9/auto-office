@@ -10,6 +10,12 @@ from office.state import Usage
 from office.util import loads, short
 
 
+def _optional_cols(con) -> str:
+    """session_id / resumed_from, or NULL stand-ins on a schema that predates them."""
+    have = {r[1] for r in con.execute("PRAGMA table_info(dispatches)")}
+    return ", ".join(c if c in have else f"NULL AS {c}" for c in ("session_id", "resumed_from"))
+
+
 def inspect(con, run: dict, what: str | None, ident: str | None) -> Result:
     what = (what or "run").lower()
     if what == "run":
@@ -65,12 +71,16 @@ def _task(con, run, tid) -> Result:
         lines.append(f"review pinned by user: {t['review_override']['as']}"
                      + (" (external)" if t["review_override"].get("external") else ""))
     for d in con.execute("SELECT id, role, triple, status, terminal_classification, exit_code, applied_plan_version, worktree, "
-                         "launcher, override_json FROM dispatches WHERE run_id=? AND task_id=? ORDER BY started_at",
+                         "launcher, override_json, " + _optional_cols(con) + " FROM dispatches WHERE run_id=? AND task_id=? "
+                         "ORDER BY started_at",
                          (run["id"], tid)).fetchall():
         ov = json.loads(d["override_json"] or "{}")
         lines.append(f"dispatch {d['id']} {d['role']} {d['triple']} {d['status']} {d['terminal_classification'] or ''} "
                      f"applied p{d['applied_plan_version'] or '-'} via {d['launcher'] or '-'}"
-                     + (" | user override" + (f" --cli {ov['cli']}" if ov.get("cli") else "") if ov.get("by") else ""))
+                     + (" | user override" + (f" --cli {ov['cli']}" if ov.get("cli") else "") if ov.get("by") else "")
+                     + (f" | resumed from {d['resumed_from'] or ov.get('resumed_from')}"
+                        if (d["resumed_from"] or ov.get("resumed_from")) else "")
+                     + (f" | session {d['session_id']}" if d["session_id"] else ""))
     for r in con.execute("SELECT id, commit_sha, status, applied_version, created_at FROM revisions WHERE run_id=? AND task_id=? "
                          "ORDER BY seq", (run["id"], tid)).fetchall():
         lines.append(f"revision {r['id']} {r['commit_sha'][:12]} {r['status']} applied p{r['applied_version']}")

@@ -5,9 +5,11 @@ agent never needs an `office next` command or the Office source to proceed.
 """
 from __future__ import annotations
 
+import re
+
 import os
 
-from office import amend, plans, state
+from office import amend, planpath, plans, state
 from office.result import Result
 from office.util import short
 
@@ -45,7 +47,7 @@ def next_action(con, run: dict) -> str:
     if not run["plan_version"]:
         if run.get("planner_mode") == "dedicated":
             return "no action; the planner is working (office status)"
-        return "write .office/PLAN.md (office submit --help shows the format), then office submit"
+        return f"write {planpath.rel(run)} (office submit --help shows the format), then office submit"
     plan = state.current_plan(con, run["id"])
     from office import planfile
     if planfile.parse(plan["body"]).questions and not plans._answered(con, run):
@@ -54,11 +56,15 @@ def next_action(con, run: dict) -> str:
     if rs["required"] and not rs["ended"] and rs["first_verdict"] is None:
         return "no action; plan review is running"
     if rs["first_verdict"] == "CHANGES_REQUIRED" and run["plan_version"] <= (rs["first_version"] or 0) and not rs["ended"]:
-        return 'amend the plan: office amend plan -- "<changes>" (edit .office/PLAN.md for task changes); safe work may launch right after'
+        return f'amend the plan: office amend plan -- "<changes>" (edit {planpath.rel(run)} for task changes); safe work may launch right after'
+    live_ids = {t["id"] for t in state.tasks(con, run["id"]) if t["status"] != "cancelled"}
     for d in rs["open_defects"]:
+        named = set(re.findall(r"\bT\d+\b", d.get("location") or ""))
+        if named and not (named & live_ids):
+            continue  # every task it names was cancelled
         return f"plan defect {d['code']} blocks {d.get('location') or 'the plan'}; " + (
             'request the fix: office amend plan --contract -- "<fix>"' if run.get("planner_mode") == "dedicated"
-            else "fix .office/PLAN.md, then office amend plan --contract -- \"<fix>\"")
+            else f"fix {planpath.rel(run)}, then office amend plan --contract -- \"<fix>\"")
     if not state.active_authorization(con, run, "plan"):
         return f'ask the user (native question tool) for authorization of r{run["requirements_version"]}, then office approve plan --quote "<user\'s words>"'
     for e in run.get("envelope") or []:
@@ -71,6 +77,11 @@ def next_action(con, run: dict) -> str:
             tid = c[status][0]
             t = next(x for x in tasks if x["id"] == tid)
             return f"resolve {tid} ({t.get('pause_reason') or status}); office inspect task {tid}"
+    from office import gates as gates_mod
+    for t in tasks:
+        if t["status"] == "changes_required" and not gates_mod.worker_live(con, t.get("current_dispatch_id")):
+            # Findings wait for the orchestrator's choice (R8); nothing relaunches on its own.
+            return f"findings on {t['id']} wait for you: office rerun {t['id']} --resume | --fresh"
     ready = ready_tasks(con, run)
     if ready:
         return "choose execution strategy; office dispatch " + " ".join(ready) + (" --parallel" if len(ready) > 1 else "")
@@ -117,6 +128,10 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     for t in tasks:
         if t["status"] in ("paused", "blocked"):
             res.add(f"blocker: {t['id']} {t.get('pause_reason') or t['status']}")
+        elif t["status"] in ("running", "launching", "submitted", "changes_required"):
+            waiting = _waiting_on(con, run, t)
+            if waiting:
+                res.add(f"{t['id']} waiting: {waiting}")
     events = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=6)
     for e in events:
         res.add(f"· {e['summary']}")
@@ -132,6 +147,96 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     if resumed:
         res.verbose.append("resumed: pending jobs and deliveries reconstructed from runs.db")
     return res
+
+
+def _snapshot(con, run: dict) -> tuple:
+    run = state.get_run(con, run["id"])
+    tasks = tuple((t["id"], t["status"], t.get("current_revision_id")) for t in state.tasks(con, run["id"]))
+    return run["phase"], run["requirements_version"], run["plan_version"], tasks
+
+
+def stalls(con, run: dict, since: str = "") -> list[str]:
+    """Work Office believes is in progress with nothing left to advance it."""
+    out = []
+    live_jobs = con.execute("SELECT COUNT(*) FROM outbox WHERE run_id=? AND status IN ('queued','claimed')",
+                            (run["id"],)).fetchone()[0]
+    for g in con.execute("SELECT id, task_id, kind, status FROM gates WHERE run_id=? AND status IN ('queued','running')",
+                         (run["id"],)).fetchall():
+        if not live_jobs:
+            out.append(f"{g['task_id'] or 'plan'} {g['kind']} gate {g['id']} is {g['status']} but no job is queued or running")
+    for j in con.execute("SELECT kind, error FROM outbox WHERE run_id=? AND status='failed' AND finished_at > ?",
+                         (run["id"], since)).fetchall():
+        out.append(f"job {j['kind']} failed: {(j['error'] or '')[:120]}")
+    return out
+
+
+def _needs_orchestrator(con, run: dict) -> bool:
+    if any(t["status"] in ("paused", "blocked", "changes_required") for t in state.tasks(con, run["id"])):
+        return True
+    return not next_action(con, state.get_run(con, run["id"])).startswith(("exceptions only", "no action"))
+
+
+def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
+    """Block until something needs the orchestrator, then print status.
+    Exit 0: a task, phase, plan or requirements change, or a new orchestrator
+    event. Exit 3: a stall (work marked in progress that nothing can advance).
+    Exit 124: timeout with nothing new. A watcher keys on the exit code, never
+    on matching status text."""
+    import time
+    from office import db, jobs, lifecycle
+    from office.util import now_iso
+    start = _snapshot(con, run)
+    started_at = now_iso()  # only a job that fails while waiting is news
+    deadline = time.time() + timeout
+    first = True
+    while True:
+        with db.transaction(con):
+            lifecycle.reconcile(con, run)
+            jobs.reclaim(con, run["id"])
+        jobs.kick(con, run["id"])
+        stuck = stalls(con, run, since=started_at)
+        changed = _snapshot(con, run) != start
+        news = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=1)
+        # Something already waiting on the orchestrator ends the wait at once;
+        # otherwise a blocker present at the start would sit until the timeout.
+        pending = first and _needs_orchestrator(con, run)
+        first = False
+        if stuck or changed or news or pending or state.is_terminal(state.get_run(con, run["id"])) \
+                or time.time() >= deadline:
+            res = status(con, run)
+            if stuck:
+                res.lines[1:1] = [f"stall: {s}" for s in stuck]
+                res.exit_code = 3
+            elif not (changed or news or pending):
+                res.lines.insert(1, f"wait: nothing new in {int(timeout)}s")
+                res.exit_code = 124
+            return res
+        time.sleep(poll)
+
+
+def _waiting_on(con, run: dict, task: dict) -> str:
+    """What a live task is actually waiting on, so `live` never hides a stall:
+    an amendment its session must ack, a submission held for one, or gates."""
+    rid = run["id"]
+    # Only a held revision newer than the current one is still waiting; an older
+    # one was replaced by a later submission.
+    held = con.execute("SELECT id FROM revisions WHERE run_id=? AND task_id=? AND status='amendment_pending' "
+                       "AND seq > COALESCE((SELECT seq FROM revisions WHERE id=?), 0) ORDER BY seq DESC LIMIT 1",
+                       (rid, task["id"], task.get("current_revision_id"))).fetchone()
+    parts = []
+    for dl in con.execute("SELECT amendment_id, dispatch_id FROM deliveries WHERE run_id=? AND task_id=? "
+                          "AND status IN ('queued','delivered') ORDER BY created_at", (rid, task["id"])).fetchall():
+        holder = dl["dispatch_id"]
+        stale = holder and holder != task["current_dispatch_id"]
+        parts.append(f"{dl['amendment_id']} ack by {holder or 'next session'}"
+                     + (" (not the current session; it can ack it)" if stale else ""))
+    if held:
+        parts.insert(0, f"{held['id']} held for amendment")
+    if task.get("current_revision_id"):
+        for g in con.execute("SELECT kind, status FROM gates WHERE revision_id=? AND status IN ('queued','running','waiting')",
+                             (task["current_revision_id"],)).fetchall():
+            parts.append(f"{g['kind']} {g['status']}")
+    return "; ".join(parts)
 
 
 def worker_status(con, run: dict, dispatch_id: str) -> Result:

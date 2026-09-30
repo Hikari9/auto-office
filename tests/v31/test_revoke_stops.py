@@ -91,6 +91,6 @@ def test_revoke_stops_a_herdr_agent_dispatch(env, monkeypatch):
     assert code == 0, out
     d = _until(lambda: (lambda d: d if d["ended_at"] else None)(_dispatch(env)))
     assert d["terminal_classification"] == "signal" and d["signal"] == signal.SIGTERM
-    assert ["pane", "close", res["pane"]] in _calls(state_file)
+    assert ["pane", "close", res["pane"]] in _calls(state_file), [c for c in _calls(state_file) if c[0] == "pane"]
     _until(lambda: _dead(res["watcher_pid"]) or os.waitpid(res["watcher_pid"], os.WNOHANG)[0])
     assert _lease_revoked(env)

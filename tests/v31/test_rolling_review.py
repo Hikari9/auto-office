@@ -129,13 +129,33 @@ def test_requirements_change_needs_the_user_and_invalidates_authorization(env):
     assert code == 4 and "authorization-required" in out
 
 
-def test_unavailable_plan_reviewer_blocks_dispatch(env):
+def test_unreadable_plan_review_needs_attention_and_blocks_dispatch(env):
     _start(env, plan_reviewer=[{"reply": "no idea", "exit": 0}])
     env.office("approve", "plan", "--quote", "go", check=0)
     code, out = env.office("dispatch", "T1", env=EXTERNAL)
-    assert code == 4 and "plan-review-unavailable" in out, out
+    assert code == 4 and "plan-review-attention" in out, out
     code, out = env.office("approve", "waive", "plan-review", "--quote", "skip the plan review this time")
     assert code == 0
+    code, out = env.office("dispatch", "T1", env=EXTERNAL)
+    assert code == 0, out
+
+
+def test_waiving_plan_review_releases_defects_and_stops_further_rounds(env):
+    # Run b90bbb5b: after the waiver a stale plan defect kept a task paused, since
+    # only a reviewer could clear it and none would run again. A contract
+    # amendment after the waiver still launched a plan reviewer.
+    _start(env, plan_reviewer=[{"reply": DEFECT.replace("| T2 |", "| R2/R3 |")}])
+    env.office("approve", "plan", "--quote", "go", check=0)
+    code, data = env.ojson("status")
+    assert data["data"]["open_defects"], data
+    env.office("approve", "waive", "plan-review", "--quote", "skip the plan review this time", check=0)
+    code, data = env.ojson("status")
+    assert data["data"]["open_defects"] == [] and "paused" not in data["data"]["tasks"].values(), data
+    before = len([c for c in env.calls() if c.get("role") == "plan_reviewer"])
+    env.write_plan(PLAN_ONE + "\n")
+    env.office("amend", "plan", "--contract", "--", "reword T1", check=0)
+    after = len([c for c in env.calls() if c.get("role") == "plan_reviewer"])
+    assert after == before, (before, after)
     code, out = env.office("dispatch", "T1", env=EXTERNAL)
     assert code == 0, out
 

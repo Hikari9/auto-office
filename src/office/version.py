@@ -139,6 +139,80 @@ def current() -> str:
     return identity
 
 
+# A wheel carries these source paths under office/_resources (pyproject force-include).
+_RESOURCE_PATHS = ("config", "schemas", "catalog", "adapters", "skills", "SKILL.md", "VERSION")
+
+
+def install_source() -> Path | None:
+    """The local directory this wheel was installed from, when there is one.
+
+    `uv tool install <dir>` and `pipx install <dir>` record it in the wheel's
+    direct_url.json. Editable installs and index installs return None."""
+    try:
+        from importlib.metadata import PackageNotFoundError, distribution
+        try:
+            raw = distribution("auto-office").read_text("direct_url.json")
+        except PackageNotFoundError:
+            return None
+    except ImportError:  # pragma: no cover - stdlib on 3.11+
+        return None
+    try:
+        import json
+        from urllib.parse import unquote, urlparse
+        data = json.loads(raw or "")
+    except ValueError:
+        return None
+    url = urlparse(data.get("url") or "")
+    if url.scheme != "file" or (data.get("dir_info") or {}).get("editable"):
+        return None
+    src = Path(unquote(url.path))
+    return src if (src / "src" / "office").is_dir() else None
+
+
+def _tree_digests(root: Path, rel_to: Path) -> dict[str, str]:
+    if root.is_file():
+        files = [root]
+    elif root.is_dir():
+        files = sorted(p for p in root.rglob("*") if p.is_file())
+    else:
+        files = []
+    # Files a wheel never ships (OS metadata, bytecode) are not drift.
+    skip = {".DS_Store", "Thumbs.db"}
+    return {str(f.relative_to(rel_to)): hashlib.sha256(f.read_bytes()).hexdigest()
+            for f in files if "__pycache__" not in f.parts and f.suffix != ".pyc" and f.name not in skip}
+
+
+def install_drift(package_root: Path = PACKAGE_ROOT, source: Path | None = None) -> dict | None:
+    """Compare an installed wheel's runtime files with its install source.
+
+    A wheel reports its bare distribution version, so a wheel built before a
+    fix landed and one built after it both say "3.1.0". Content is the only
+    honest comparison. Returns None when there is nothing to compare (source
+    checkout, or no local install source), else {"source", "head", "differ"}
+    where "differ" lists runtime paths that are changed, missing, or extra."""
+    if source is None:
+        if _is_source_checkout():
+            return None
+        source = install_source()
+    if source is None or not (source / "src" / "office").is_dir():
+        return None
+    res_root = package_root / "_resources"
+    installed = {"src/office/" + k: v for k, v in _tree_digests(package_root, package_root).items()
+                 if not k.startswith("_resources/")}
+    wanted = {"src/office/" + k: v for k, v in _tree_digests(source / "src" / "office", source / "src" / "office").items()}
+    for rel in _RESOURCE_PATHS:
+        installed.update(_tree_digests(res_root / rel, res_root))
+        wanted.update(_tree_digests(source / rel, source))
+    differ = sorted(k for k in installed.keys() | wanted.keys() if installed.get(k) != wanted.get(k))
+    try:
+        proc = subprocess.run(["git", "-C", str(source), "rev-parse", "--short=12", "HEAD"],
+                              capture_output=True, text=True, timeout=10)
+        head = proc.stdout.strip() if proc.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        head = None
+    return {"source": str(source), "head": head, "differ": differ}
+
+
 def release_line(version: str) -> str:
     """'3.1.0+g…' -> '3.1'. Used for compatibility-window checks."""
     parts = re.split(r"[.+]", version)

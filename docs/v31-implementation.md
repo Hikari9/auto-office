@@ -186,11 +186,11 @@ while the re-review runs; a PLAN_DEFECT (closed class list, cited evidence) bloc
 dependants until an independent review names it `CLEARED` on a later plan version; UNAVAILABLE
 blocks until a substitute answers or the user waives.
 
-`office amend` re-reads `.office/PLAN.md`: ordinary amendments may change decomposition, ordering,
+`office amend` re-reads the run's draft `.office/plans/<run>/PLAN.md`: ordinary amendments may change decomposition, ordering,
 acceptance and tests; a change to a task's scope or interfaces, a new overlapping task, a new named
 action, or authority words in the delta is refused as contract-level. Contract amendments go to the
 dedicated planner (affected scopes and dependants pause) or, in inline mode, apply from the edited
-plan. An inline contract amendment whose `.office/PLAN.md` is identical to the current plan, or does
+plan. An inline contract amendment whose draft is identical to the current plan, or does
 not change the entry of a named task, is refused (`plan-not-edited` / `contract-not-edited`) with a
 `next:` to edit the plan first; otherwise the version would bump while the task kept its old
 contract. Deliveries are combined per task, supersede older unapplied ones, and are `queued →

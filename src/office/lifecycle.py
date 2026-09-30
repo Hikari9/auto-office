@@ -10,7 +10,7 @@ import signal
 from pathlib import Path
 
 from office import config as cfg
-from office import db, discovery, jobs, legacy, paths, scoring, state, version
+from office import db, discovery, jobs, legacy, paths, planpath, scoring, state, version
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, new_run_id, now_iso, pid_alive, sha256_obj, short
@@ -109,10 +109,13 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
             report_con.close()
         if planner_problem:
             res.notices.append(planner_problem)
+        moved = planpath.relocate_legacy(con, top)
+        if moved:
+            res.notices.append(moved)
         if planner_mode == "dedicated":
             res.next = "no action; the plan will return here (office status)"
         else:
-            res.next = "write the plan to .office/PLAN.md (office submit --help shows the format), then office submit"
+            res.next = f"write the plan to {planpath.rel(run)} (office submit --help shows the format), then office submit"
         res.data = {"run_id": run_id, "office_version": ver, "gear": gear, "risk": risk, "gates": gates,
                     "planner_mode": planner_mode, "bound": [f"{h}:{s}" for h, s in bound], "warnings": warnings}
         res.verbose = [f"office_version {ver}", f"state {sdir}", f"base {base_sha[:12]}",
@@ -195,8 +198,10 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
         _release_all(con, run["id"], "closed")
         _end_bindings(con, run["id"])
     state.write_projection(con, run["id"])
-    from office import dispatch
+    from office import dispatch, rerun
+    rerun.reclaim_all(run)  # snapshot, then close each dispatch pane
     dispatch.close_herdr_tab(run)
+    planpath.remove(Path(run["repo_root"]), run)
     return Result(lines=[f"{short(run['id'])} closed | archive receipt {receipt['digest'][7:15]}"],
                   data={"archive_digest": receipt["digest"]})
 
@@ -228,8 +233,10 @@ def abandon(con, run: dict, reason: str) -> Result:
             except OSError:
                 pass
     state.write_projection(con, run["id"])
-    from office import dispatch
+    from office import dispatch, rerun
+    rerun.reclaim_all(run)  # snapshot, then close each dispatch pane
     dispatch.close_herdr_tab(run)
+    planpath.remove(Path(run["repo_root"]), run)
     return Result(lines=[f"{short(run['id'])} abandoned | work preserved in its worktrees until office prune -f"])
 
 

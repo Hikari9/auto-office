@@ -55,6 +55,8 @@ SHARED_COLUMNS = {
         "harness TEXT", "model TEXT", "effort TEXT", "adapter_id TEXT", "applied_plan_version INTEGER",
         "log_path TEXT", "launcher TEXT", "pane_id TEXT", "launched_at TEXT", "last_seen_at TEXT",
         "route_json TEXT", "gate_id TEXT", "override_json TEXT",
+        # #200: pane lifecycle (session capture for resume, reclaim on accept).
+        "session_id TEXT", "resumed_from TEXT", "keep_pane INTEGER", "pane_closed_at TEXT",
     ],
     # v2 (#185): user-declared model overrides.
     "tasks": ["review_override_json TEXT"],

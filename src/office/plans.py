@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from office import briefs, candidates, db, jobs, planfile, review_parse, routing, state
+from office import briefs, candidates, db, jobs, planfile, planpath, review_parse, routing, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_bytes, short
@@ -27,13 +27,13 @@ PLAN_SUBJECT = "plan"
 
 def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id: str | None = None) -> Result:
     if not plan_path.is_file():
-        raise Usage("no-plan-file", f"no plan at {plan_path}", next_step="write .office/PLAN.md, then office submit")
+        raise Usage("no-plan-file", f"no plan at {plan_path}", next_step=f"write {plan_path}, then office submit")
     text = plan_path.read_text(encoding="utf-8")
     parsed = planfile.parse(text)
     if parsed.errors:
         raise Refused("plan-invalid", "plan has problems: " + "; ".join(parsed.errors[:6]),
-                      scope="plan", preserved=".office/PLAN.md is unchanged",
-                      next_step="fix .office/PLAN.md, then office submit (office submit --help shows the format)",
+                      scope="plan", preserved=f"{plan_path} is unchanged",
+                      next_step=f"fix {plan_path}, then office submit (office submit --help shows the format)",
                       data={"errors": parsed.errors})
     digest = sha256_bytes(text.encode())
     current = state.current_plan(con, run["id"])
@@ -219,6 +219,8 @@ def review_state(con, run: dict) -> dict:
 
 def queue_plan_review(con, run: dict, plan_version: int, *, escalated: bool = False, exclude: list[str] | None = None) -> str | None:
     """Queue one plan-review round. Caller holds the tx."""
+    if (state.get_run(con, run["id"]).get("plan_review") or {}).get("ended_reason") == "waived by the user":
+        return None  # the user waived plan review; no further round runs
     gates = plan_gates(con, run["id"])
     rounds = len([g for g in gates if not g["escalated"]])
     maximum = int((run.get("gates") or {}).get("plan_review_max_rounds") or 1)
@@ -243,7 +245,7 @@ def require_dispatchable(con, run: dict) -> None:
     run = state.get_run(con, run["id"])
     if not run["plan_version"]:
         raise Refused("no-plan", "there is no plan to dispatch from",
-                      next_step="write .office/PLAN.md then office submit" if run.get("planner_mode") != "dedicated"
+                      next_step=f"write {planpath.rel(run)} then office submit" if run.get("planner_mode") != "dedicated"
                       else "wait for the planner; office status")
     plan = state.current_plan(con, run["id"])
     if planfile.parse(plan["body"]).questions and not _answered(con, run):
@@ -258,12 +260,16 @@ def require_dispatchable(con, run: dict) -> None:
         if rs["first_verdict"] is None:
             raise Refused("plan-review-pending", "the first plan review has not returned", scope="plan",
                           next_step="no action; the verdict will return here (office status)")
+        if rs["last_verdict"] == "ATTENTION":
+            raise Refused("plan-review-attention", "the plan reviewer answered but left no readable reply file",
+                          scope="plan", next_step='re-prompt the reviewer in its pane to write the file, or the user may '
+                                                'waive: office approve waive plan-review --quote "<words>"')
         if rs["first_verdict"] == "UNAVAILABLE" and rs["last_verdict"] in (None, "UNAVAILABLE"):
             raise Refused("plan-review-unavailable", "no plan reviewer could review the plan", scope="plan",
                           next_step='resolve the reviewer route, or the user may waive: office approve waive plan-review --quote "<words>"')
         if rs["first_verdict"] == "CHANGES_REQUIRED" and run["plan_version"] <= rs["first_version"]:
             raise Refused("plan-amendment-required", "the first plan review asked for changes that are not yet in the plan",
-                          scope="plan", next_step='office amend plan -- "<what changed>" (edit .office/PLAN.md first for task changes)')
+                          scope="plan", next_step=f'office amend plan -- "<what changed>" (edit {planpath.rel(run)} first for task changes)')
     for d in rs["open_defects"]:
         if not _task_ids_in(d.get("location") or ""):
             raise Refused("plan-defect", f"open plan defect {d['code']}: {d['summary'][:120]}", scope="whole plan",
@@ -342,6 +348,13 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
         paused = pause_for_defects(con, run)
         state.emit(con, run, "plan.defect", f"PLAN {verdict} p{gate['plan_version']}"
                    + (f"; paused {', '.join(paused)}" if paused else ""))
+    elif verdict == "ATTENTION":
+        # The plan reviewer answered but left no readable reply file after
+        # re-prompting; its pane is kept and the orchestrator decides (R11).
+        state.emit(con, run, "plan.attention", f"PLAN REVIEW p{gate['plan_version']} needs attention: "
+                   f"{outcome.get('summary', '')[:240]}")
+        state.update_run(con, run["id"], plan_review=pr)
+        return
     else:
         state.emit(con, run, "plan.unavailable", f"PLAN REVIEW UNAVAILABLE p{gate['plan_version']}: "
                    f"{outcome.get('summary') or 'no qualifying reviewer answered'}")
@@ -416,4 +429,6 @@ def unpause_cleared(con, run: dict) -> None:
         return
     for t in state.tasks(con, run["id"]):
         if t["status"] == "paused" and t.get("pause_reason") == "plan defect":
-            state.update_task(con, run["id"], t["id"], status="running", pause_reason=None)
+            # Back to where it was: a submitted revision still has gates to finish.
+            from office import gates
+            state.update_task(con, run["id"], t["id"], status=gates.derive_status(con, run, t), pause_reason=None)

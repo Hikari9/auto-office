@@ -1,6 +1,6 @@
 """One role-aware `office submit`.
 
-Planner: the plan in .office/PLAN.md becomes the next plan version.
+Planner: the run's plan draft (.office/plans/<run>/PLAN.md) becomes the next plan version.
 Executor: the worktree as it is right now (commits plus uncommitted edits)
 becomes an immutable revision, and every applicable gate is queued. The same
 tree under the same lease and applied version is the same submission, so a
@@ -13,10 +13,14 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from office import db, dispatch as dispatch_mod, gates, jobs, paths, plans, state, version
+from office import db, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, state, version
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_obj, short
+def _draft(con, root: Path, run: dict) -> Path:
+    planpath.relocate_legacy(con, root)
+    return planpath.draft(root, run)
+
 
 def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None) -> Result:
     dispatch_id = os.environ.get("OFFICE_DISPATCH_ID")
@@ -29,7 +33,7 @@ def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None) -> Result
         if d["role"] == "planner":
             top = paths.repo_identity(cwd)
             base = top[0] if top else Path(d["worktree"])
-            return plans.submit_plan(con, run, Path(plan_path) if plan_path else base / ".office" / "PLAN.md",
+            return plans.submit_plan(con, run, Path(plan_path) if plan_path else _draft(con, base, run),
                                      submitter=dispatch_id, dispatch_id=dispatch_id)
         return submit_revision(con, run, d, cwd)
     if run.get("planner_mode") == "dedicated" and not plan_path:
@@ -38,7 +42,7 @@ def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None) -> Result
     ident = paths.repo_identity(cwd)
     if ident is None and not plan_path:
         raise Usage("no-repository", "run office submit from the repository", next_step="cd into the repository")
-    path = Path(plan_path) if plan_path else ident[0] / ".office" / "PLAN.md"
+    path = Path(plan_path) if plan_path else _draft(con, ident[0], run)
     return plans.submit_plan(con, run, path, submitter="orchestrator")
 
 
