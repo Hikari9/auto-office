@@ -95,7 +95,7 @@ Design and contracts: [`docs/v31-implementation.md`](docs/v31-implementation.md)
 - `scripts/` is the retained 3.0 helper surface. It was slated for removal in 3.2.0 and stays through
   3.2.x; its removal is a separate change. `office raw <subcommand>` reaches it with a deprecation warning; every call is recorded
   (`office doctor` lists remaining consumers). Legacy helpers can never write a 3.1 run.
-- New runs use 3.1 by default. Roll new runs back without touching existing ones by setting
+- New runs use the installed runtime (3.2) by default. Roll new runs back without touching existing ones by setting
   `runtime: {new_runs: "3.0"}` in `~/.config/auto-office/config.yaml`.
 - The default quota reserve is now 5% (the balanced-routing money band stays 20%).
 
