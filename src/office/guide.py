@@ -9,11 +9,21 @@ import re
 
 import os
 
-from office import amend, planpath, plans, state
+from office import amend, paths, planpath, plans, state
 from office.result import Result
-from office.util import short
+from office.util import atomic_write_text, short
 
 ORCH_EVENT_KINDS = None  # every orchestrator-audience event
+
+IDLE_STALL_DEFAULT_S = 60.0
+
+
+def idle_stall_s() -> float:
+    """Seconds an executor's agent may sit idle before it is a stall; env override in seconds."""
+    try:
+        return float(os.environ.get("OFFICE_EXECUTOR_IDLE_STALL_S", IDLE_STALL_DEFAULT_S))
+    except ValueError:
+        return IDLE_STALL_DEFAULT_S
 
 
 def _counts(tasks: list[dict]) -> dict:
@@ -187,6 +197,59 @@ def stalls(con, run: dict, since: str = "") -> list[str]:
     for j in con.execute("SELECT kind, error FROM outbox WHERE run_id=? AND status='failed' AND finished_at > ?",
                          (run["id"], since)).fetchall():
         out.append(f"job {j['kind']} failed: {(j['error'] or '')[:120]}")
+    out.extend(_idle_executors(con, run))
+    return out
+
+
+def _idle_executors(con, run: dict) -> list[str]:
+    """Executors whose agent stopped without submitting. Nothing else ends that
+    wait: the session is alive, so no exit is recorded and no job is pending.
+    Liveness unknown (herdr unreachable) is never a stall."""
+    from office import db, dispatch, rerun
+    from office.util import now_iso, parse_iso
+    threshold = idle_stall_s()
+    out = []
+    for row in con.execute("SELECT d.* FROM dispatches d JOIN tasks t ON t.run_id=d.run_id AND t.id=d.task_id "
+                           "AND t.current_dispatch_id=d.id WHERE d.run_id=? AND d.role='executor' "
+                           "AND d.status IN ('launching','running') AND d.ended_at IS NULL "
+                           "AND d.launcher IN ('herdr','process','process-fallback') "
+                           "AND t.status IN ('launching','running','changes_required')", (run["id"],)).fetchall():
+        d = dict(row)
+        act = rerun.agent_activity(d)
+        if act is None:
+            continue
+        who = f"{d['task_id']} executor {d['id']}"
+        tid = d["task_id"]
+        actions = f"office rerun {tid} --resume|--fresh or office revoke {tid}"
+        refused = con.execute("SELECT summary FROM events WHERE run_id=? AND dispatch_id=? "
+                              "AND kind IN ('submit.refused','submit.rejected') ORDER BY seq DESC LIMIT 1",
+                              (run["id"], d["id"])).fetchone()
+        why = f"; its last submit was refused: {refused[0][:160]}" if refused else ""
+        if not act["alive"]:
+            what = f"process {d['pid']}" if d["launcher"] != "herdr" else f"herdr agent {d['pane_id'] or ''}".strip()
+            out.append(f"{who}: {what} is gone but the dispatch is still running{why}; next: {actions}")
+            continue
+        changed = act["hash"] is not None and d.get("idle_hash") not in (None, act["hash"])
+        if act["busy"] or changed:
+            idle_since = None
+        else:
+            idle_since = d.get("idle_since") or now_iso()
+        if (idle_since, act["hash"] or d.get("idle_hash")) != (d.get("idle_since"), d.get("idle_hash")):
+            with db.transaction(con):
+                con.execute("UPDATE dispatches SET idle_since=?, idle_hash=? WHERE id=?",
+                            (idle_since, act["hash"] or d.get("idle_hash"), d["id"]))
+        if idle_since is None:
+            continue
+        idle = (parse_iso(now_iso()) - parse_iso(idle_since)).total_seconds()
+        if idle < threshold:
+            continue
+        tail = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "pane-tail.txt"
+        if act["text"] is not None:
+            atomic_write_text(tail, "\n".join(act["text"].splitlines()[-40:]) + "\n")
+        name = dispatch.herdr_agent_name(d["id"])
+        prompt = f"herdr agent prompt {name}, " if d["launcher"] == "herdr" else ""
+        out.append(f"{who}: idle {int(idle)}s without submitting{why}; pane tail in {tail}; "
+                   f"next: {prompt}{actions}")
     return out
 
 

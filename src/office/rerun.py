@@ -15,7 +15,7 @@ from pathlib import Path
 from office import adapters, db, dispatch, gates, jobs, state
 from office.result import Result
 from office.state import Refused, Usage
-from office.util import pid_alive
+from office.util import pid_alive, sha256_obj
 
 
 def _fresh_cmd(tid: str) -> str:
@@ -46,6 +46,32 @@ def agent_alive(d: dict) -> bool | None:
         return bool(agent)
     body = (proc.stdout or "") + (proc.stderr or "")
     return False if "not_found" in body else None
+
+
+def agent_activity(d: dict) -> dict | None:
+    """What a running agent is doing now, or None when that cannot be known
+    (herdr unreachable or its pane unreadable): {"alive", "busy", "hash", "text"}.
+    A headless process has no idle state: it is busy while its pid lives.
+    A pane-hosted agent is busy when herdr reports `working` or the pane shows a
+    turn in progress (agy reports idle mid-turn, so its pane decides); `hash`
+    is the pane content, which changes while the agent is doing anything."""
+    alive = agent_alive(d)
+    if alive is None:
+        return None
+    if not alive or d.get("launcher") != "herdr":
+        return {"alive": alive, "busy": alive, "hash": None, "text": None}
+    name = dispatch.herdr_agent_name(d["id"])
+    text = dispatch._herdr_agent_text(name)
+    if text is None:
+        return None
+    try:
+        proc = subprocess.run(["herdr", "agent", "get", name], capture_output=True, text=True, timeout=30)
+        agent = (json.loads(proc.stdout or "{}").get("result") or {}).get("agent") or {}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    status = agent.get("status") or agent.get("agent_status")
+    return {"alive": True, "busy": status == "working" or dispatch._pane_busy(text), "hash": sha256_obj(text),
+            "text": text}
 
 
 def _set_resumed_from(con, dispatch_id: str, parent: str) -> None:

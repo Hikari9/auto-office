@@ -23,6 +23,23 @@ def _draft(con, root: Path, run: dict) -> Path:
 
 
 def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect: dict | None = None) -> Result:
+    """A refusal inside a dispatch is recorded on it, so a worker that stopped
+    after one can be told from one that is still working."""
+    try:
+        return _submit(con, run, cwd=cwd, plan_path=plan_path, redirect=redirect)
+    except Refused as exc:
+        dispatch_id = os.environ.get("OFFICE_DISPATCH_ID")
+        # outside-scope records its own event, which also blocks the task on exit.
+        if dispatch_id and exc.category != "outside-scope":
+            d = state.get_dispatch(con, dispatch_id)
+            if d is not None and d["run_id"] == run["id"]:
+                with db.transaction(con):
+                    state.emit(con, run, "submit.rejected", f"{exc.category}: {exc.message}", audience="runtime",
+                               task_id=d.get("task_id"), dispatch_id=dispatch_id, payload={"code": exc.category})
+        raise
+
+
+def _submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect: dict | None = None) -> Result:
     """`redirect` ({defect, quote, root_cause, requirement, reviewer}) submits a plan
     revision that follows the user's redirect of a plan defect (office.redirect)."""
     dispatch_id = os.environ.get("OFFICE_DISPATCH_ID")
