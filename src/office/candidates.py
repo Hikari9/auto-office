@@ -37,7 +37,54 @@ _QUOTA_TTL = 60.0
 
 def catalog_rows() -> list[dict]:
     data = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8")) or {}
-    return list(data.get("models") or [])
+    return resolve_aliases(list(data.get("models") or []))
+
+
+_ALIAS_FIELDS = ("benchmark_indexes", "price_fields", "speed_fields", "release_date")
+
+
+def _version_key(version: str) -> tuple[int, ...]:
+    return tuple(int(p) for p in re.findall(r"\d+", version))
+
+
+def resolve_aliases(rows: list[dict]) -> list[dict]:
+    """A row with `alias_family` (a regex with a `version` group over model_id) takes
+    the invocation and scores of the highest-version matching row at the same harness
+    and effort, so `opus` follows each new Opus as the catalog adds it. With no
+    match, the alias keeps its own static fields. A target without a proven
+    invocation_source inherits the alias's."""
+    # Non-dispatchable rows count: they are usually just unlistable by their CLI, and the
+    # alias's own invocation_source stands behind the full model id as the slug.
+    concrete = [r for r in rows if not r.get("alias_family")]
+    out = []
+    for row in rows:
+        pattern = row.get("alias_family")
+        if not pattern:
+            out.append(row)
+            continue
+        best = None
+        for r in concrete:
+            m = re.match(pattern, r.get("model_id") or "")
+            if not m or r.get("invocation_harness") != row.get("invocation_harness") or r.get("effort") != row.get("effort"):
+                continue
+            key = _version_key(m.group("version"))
+            if best is None or key > best[0]:
+                best = (key, r)
+        if best is None:
+            out.append(row)
+            continue
+        target = best[1]
+        resolved = dict(row)
+        resolved["invocation_model_id"] = target.get("invocation_model_id") or target["model_id"]
+        source = str(target.get("invocation_source") or "")
+        if source.startswith(("local-evidence:", "documented:")):
+            resolved["invocation_source"] = source
+        for field in _ALIAS_FIELDS:
+            if target.get(field):
+                resolved[field] = target[field]
+        resolved["alias_resolved_to"] = target["model_id"]
+        out.append(resolved)
+    return out
 
 
 def role_policy(config: dict, role: str) -> dict:
@@ -206,6 +253,73 @@ def parse_route_override(text: str) -> dict:
     return {"harness": harness or None, "model_id": model, "effort": effort or None}
 
 
+# Aliases that name a family without its vendor prefix.
+_FAMILY_ALIASES = {"opus": "claude", "sonnet": "claude", "haiku": "claude", "fable": "claude",
+                   "luna": "gpt", "astra": "gpt", "sol": "gpt", "terra": "gpt"}
+
+
+def model_family(model_id: str | None) -> str | None:
+    """The vendor family a model belongs to (claude, gpt, gemini, ...): the
+    independence unit for review. `claude-sonnet-5-5` and `sonnet` are both claude."""
+    head = (model_id or "").lower().split("-", 1)[0]
+    return _FAMILY_ALIASES.get(head, head) or None
+
+
+def declared_candidate(harness: str, model: str, effort: str | None = None) -> dict:
+    """A candidate the user named with --as/--review-as. It bypasses the
+    registry, trust, and floors, but still resolves through the catalog when a
+    row matches, so `agy/gemini-3.8-flash@medium` invokes the combined slug
+    `gemini-3.8-flash-medium` the harness actually accepts."""
+    from office.state import Usage
+    adapter = adapters.load_all().get(harness)
+    if adapter is None:
+        raise Usage("unknown-harness", f"--as names harness {harness!r}, which has no adapter",
+                    next_step="use one of: " + ", ".join(sorted(adapters.load_all())))
+    rows = [r for r in catalog_rows() if r.get("invocation_harness") == harness
+            and model in (r.get("model_id"), r.get("invocation_model_id"))]
+    if effort:
+        rows = [r for r in rows if r.get("effort") == effort] or rows
+    # A row named exactly what the user typed beats an alias that invokes it.
+    rows.sort(key=lambda r: r.get("model_id") != model)
+    row = rows[0] if len(rows) == 1 or (rows and effort) else None
+    return {
+        "harness": harness,
+        "harness_version": adapters.harness_version(adapter) or "unknown",
+        "model_id": (row or {}).get("model_id") or model,
+        "invocation_model_id": (row or {}).get("invocation_model_id") or model,
+        "invocation_source": "user-override",
+        "effort": effort or (row or {}).get("effort") or "none",
+        "benchmark_indexes": (row or {}).get("benchmark_indexes") or {},
+        "capabilities": sorted(set(adapter.get("capabilities") or [])),
+        "adapter_id": adapter.get("id"),
+        "adapter_hash": adapters.adapter_hash(adapter),
+        "cost": _cost(row or {}),
+        "quota": {"status": "unknown", "tightest_remaining_percent": None},
+        "override": True,
+    }
+
+
+def declared_decision(text: str, *, flag: str = "--as") -> dict:
+    """A routing decision for a user-declared `harness/model[@effort]`."""
+    from office.state import Usage
+    want = parse_route_override(text)
+    if not want["harness"] or not want["model_id"]:
+        raise Usage("invalid-override", f"{flag} {text!r}: expected <harness>/<model>[@effort]")
+    cand = declared_candidate(want["harness"], want["model_id"], want["effort"])
+    triple = routing.candidate_id(cand)
+    return {"status": "selected", "selected": triple, "candidate": cand, "override": True,
+            "selection_disclosure": {"triple": triple, "reason": f"user override ({flag} {text})", "override": True},
+            "skipped": []}
+
+
+def _preferred_seed(policy_cfg: dict, run: dict):
+    """roles.<role>.preferred_seed_by_size.<size_class> replaces preferred_seed when the
+    run's size class (start --size-class) has an entry there."""
+    size = (run.get("risk") or {}).get("size_class")
+    by_size = policy_cfg.get("preferred_seed_by_size") or {}
+    return by_size.get(size) or policy_cfg.get("preferred_seed")
+
+
 def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                task_id: str | None = None, override: str | None = None,
                exclude: set[str] | None = None, probe: bool = True) -> dict:
@@ -216,10 +330,12 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors)
     if exclude:
         # Entries: an exact triple, "model:<harness>/<model>" (every effort of a
-        # model that misbehaved), or "harness:<name>" (a shared quota/auth wall).
+        # model that misbehaved), "harness:<name>" (a shared quota/auth wall), or
+        # "family:<name>" (a declared producer's family, for independent review).
         def excluded(c):
             return (routing.candidate_id(c) in exclude or f"harness:{c['harness']}" in exclude
-                    or f"model:{c['harness']}/{c['invocation_model_id']}" in exclude)
+                    or f"model:{c['harness']}/{c['invocation_model_id']}" in exclude
+                    or f"family:{model_family(c['model_id'])}" in exclude)
         candidates = [c for c in candidates if not excluded(c)]
     if override:
         want = parse_route_override(override)
@@ -241,7 +357,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "role": role,
         "playbook": run.get("playbook"),
         "policy": policy,
-        "preferred_seed": None if override else policy_cfg.get("preferred_seed"),
+        "preferred_seed": None if override else _preferred_seed(policy_cfg, run),
         "cost_policy": cost_policy,
         "allow_advisory_undercut": bool(gear.get("allow_advisory_undercut", True)),
         "runs_db": str(paths.runs_db()),

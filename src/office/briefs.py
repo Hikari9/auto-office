@@ -13,7 +13,7 @@ non_goals:
 - <explicitly out of scope>
 actions:
 - <irreversible or external action> | preconditions: <a>; <b>
-checks: <command run on the composed result>   (optional)
+checks: <command run on the composed result: a fresh checkout, so install deps in it>   (optional)
 
 ## Questions            (only if a product decision is needed from the user)
 - <question>
@@ -23,7 +23,7 @@ checks: <command run on the composed result>   (optional)
 scope: <paths/globs this task may write>, <more>
 depends: none | T<n>, T<m>
 interfaces: <what it provides or consumes>   (optional)
-checks: <deterministic command> | none
+checks: <deterministic, non-mutating command> | none
 accept:
 - <criterion a reviewer can verify>
 visual: none

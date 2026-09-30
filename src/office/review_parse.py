@@ -33,9 +33,17 @@ class Parsed:
         return not self.errors
 
 
+# What a TUI puts around a reply line when it is read off a pane: message
+# bullets (`• `, `⏺ `), tree and box-drawing gutters, and check marks.
+_LEAD_GLYPHS = "•●⏺◦▪▸►‣∙·○◆⎿└├│┃║▌▎▏╭╰✓✔"
+_LEAD = re.compile(r"^(?:[-*>]\s+|[" + _LEAD_GLYPHS + r"]\s*)+")
+_TRAIL = re.compile(r"\s*[│┃║▌▐╮╯]+\s*$")
+
+
 def _clean(line: str) -> str:
     line = line.strip().strip("`").strip()
-    line = re.sub(r"^[-*>]\s+", "", line)
+    line = _LEAD.sub("", line)
+    line = _TRAIL.sub("", line).strip().strip("`").strip()
     return line.replace("**", "")
 
 
@@ -94,7 +102,12 @@ def parse(text: str, *, plan_review: bool = False, visual: bool = False) -> Pars
         if m:
             parts = [p.strip() for p in m.group(2).split("|")]
             cls = parts[0].lower() if parts else ""
-            evidence = parts[4] if len(parts) > 4 else ""
+            # The brief's form is <class> | <task> | <what is wrong> | <evidence: ...>; an older
+            # form put an action before the evidence. Evidence is the labelled field, else the last.
+            ev_at = next((i for i, p in enumerate(parts) if i >= 3 and re.match(r"evidence\b", p, re.I)), None)
+            if ev_at is None and len(parts) >= 4:
+                ev_at = len(parts) - 1
+            evidence = re.sub(r"^evidence\s*:\s*", "", parts[ev_at], flags=re.I) if ev_at is not None else ""
             if cls not in DEFECT_CLASSES:
                 out.errors.append(f"{m.group(1)}: defect class {cls!r} is not in the closed list")
             if not evidence:
@@ -102,8 +115,8 @@ def parse(text: str, *, plan_review: bool = False, visual: bool = False) -> Pars
             out.defects.append({"code": m.group(1).upper(), "category": cls,
                                 "location": parts[1] if len(parts) > 1 else "",
                                 "summary": parts[2] if len(parts) > 2 else "",
-                                "action": parts[3] if len(parts) > 3 else "", "evidence": evidence,
-                                "severity": "material"})
+                                "action": " | ".join(parts[3:ev_at]) if ev_at is not None else "",
+                                "evidence": evidence, "severity": "material"})
             continue
         m = re.match(r"^(RESOLVED|CLEARED)\s+([A-Za-z]+\d+)", line, re.I)
         if m:

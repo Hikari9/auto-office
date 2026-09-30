@@ -140,6 +140,26 @@ def test_unavailable_plan_reviewer_blocks_dispatch(env):
     assert code == 0, out
 
 
+def test_waiving_plan_review_releases_defects_and_stops_further_rounds(env):
+    # Run b90bbb5b: after the waiver a stale plan defect kept a task paused, since
+    # only a reviewer could clear it and none would run again. A contract
+    # amendment after the waiver still launched a plan reviewer.
+    _start(env, plan_reviewer=[{"reply": DEFECT.replace("| T2 |", "| R2/R3 |")}])
+    env.office("approve", "plan", "--quote", "go", check=0)
+    code, data = env.ojson("status")
+    assert data["data"]["open_defects"], data
+    env.office("approve", "waive", "plan-review", "--quote", "skip the plan review this time", check=0)
+    code, data = env.ojson("status")
+    assert data["data"]["open_defects"] == [] and "paused" not in data["data"]["tasks"].values(), data
+    before = len([c for c in env.calls() if c.get("role") == "plan_reviewer"])
+    env.write_plan(PLAN_ONE + "\n")
+    env.office("amend", "plan", "--contract", "--", "reword T1", check=0)
+    after = len([c for c in env.calls() if c.get("role") == "plan_reviewer"])
+    assert after == before, (before, after)
+    code, out = env.office("dispatch", "T1", env=EXTERNAL)
+    assert code == 0, out
+
+
 def test_later_defect_pauses_affected_scope_only(env):
     plan = PLAN_TWO.replace("### T2: Implement mul\nscope: mul.py\ndepends: none", "### T2: Implement mul\nscope: mul.py\ndepends: none")
     _start(env, plan=plan, plan_reviewer=[{"reply": CR}, {"reply": DEFECT}])
@@ -150,3 +170,19 @@ def test_later_defect_pauses_affected_scope_only(env):
     code, data = env.ojson("status", env=EXTERNAL)  # the concurrent re-review now returns a defect on T2
     assert data["data"]["tasks"]["T2"] == "paused", data
     assert data["data"]["tasks"]["T1"] in ("running", "launching"), data
+
+
+def test_defect_in_the_briefs_own_format_is_valid():
+    # The plan-review brief asks for <class> | <task> | <what is wrong> | <evidence: ...>;
+    # the parser used to read evidence from a fifth field and rejected it (run 1fd7e457).
+    from office import review_parse
+    brief_form = ("VERDICT: PLAN_DEFECT\n"
+                  "DEFECT P1 | requirement-contradiction | T49 | Remove the p36 path | evidence: T48: \"p36 = 0\"\n")
+    parsed = review_parse.parse(brief_form, plan_review=True)
+    assert parsed.valid, parsed.errors
+    assert parsed.defects[0]["evidence"] == 'T48: "p36 = 0"' and parsed.defects[0]["action"] == ""
+    legacy = review_parse.parse(DEFECT, plan_review=True)
+    assert legacy.valid and legacy.defects[0]["action"] == "use mul.py"
+    bare = review_parse.parse("VERDICT: PLAN_DEFECT\nDEFECT P3 | requirement-contradiction | T1 | wrong\n",
+                              plan_review=True)
+    assert not bare.valid and "must cite evidence" in bare.errors[0]

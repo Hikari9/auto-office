@@ -45,14 +45,21 @@ roles:
   plan_reviewer:
     preferred_seed:
       - {model_id: luna, effort: xhigh}
+      - {model_id: opus, harness: claude, effort: low}
     required_capabilities: [review]
     floor:
-      min_effort: high
+      # Intelligence, not effort, is the floor (#183). Scores are version-pinned;
+      # a candidate without a score for this exact index version fails closed.
+      min_effort: none
+      min_benchmark_index: {index_name: Artificial Analysis Intelligence Index v4.3.2, min_score: 31}
       allowed_sources: ["local-evidence:", "documented:"]
   executor:
     required_capabilities: [builder]
     floor:
-      min_effort: medium
+      # Intelligence, not effort, is the floor (#183). Scores are version-pinned;
+      # a candidate without a score for this exact index version fails closed.
+      min_effort: none
+      min_benchmark_index: {index_name: Artificial Analysis Intelligence Index v4.3.2, min_score: 31}
       allowed_sources: ["local-evidence:", "documented:"]
   worker:
     required_capabilities: []
@@ -62,9 +69,13 @@ roles:
   code_reviewer:
     preferred_seed:
       - {model_id: luna, effort: xhigh}
+      - {model_id: opus, harness: claude, effort: low}
     required_capabilities: [review]
     floor:
-      min_effort: high
+      # Intelligence, not effort, is the floor (#183). Scores are version-pinned;
+      # a candidate without a score for this exact index version fails closed.
+      min_effort: none
+      min_benchmark_index: {index_name: Artificial Analysis Intelligence Index v4.3.2, min_score: 31}
       allowed_sources: ["local-evidence:", "documented:"]
   browser_verifier:
     required_capabilities: [browser]
@@ -76,9 +87,9 @@ roles:
   # image-sensitive conformance probe of its exact harness/model/effort path.
   visual_reviewer:
     preferred_seed:
-      # Latest Gemini Flash through agy (Gemini slugs embed effort).
-      - {model_id: gemini-3.8-flash, harness: agy, effort: medium}
+      # Latest Gemini Flash through agy (Gemini slugs embed effort); low is the default.
       - {model_id: gemini-3.8-flash, harness: agy, effort: low}
+      - {model_id: gemini-3.8-flash, harness: agy, effort: medium}
       - {model_id: sonnet, harness: claude}
       - {model_id: luna}
     required_capabilities: [review, vision]

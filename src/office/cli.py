@@ -22,6 +22,7 @@ Auto Office {ver}
   office start "<goal>"             create a run; queues the planner when policy requires one
   office resume [run]               bind this session to a run and show where it stands
   office status                     what matters now, ending with the next legal action
+  office wait [--timeout S]         block until something needs you (exit 0), a stall (3), or timeout (124)
   office dispatch <task>... [--parallel]
                                     launch tasks (routing, worktrees, leases are automatic)
   office submit                     planner/executor: submit your plan or your work
@@ -32,7 +33,7 @@ Auto Office {ver}
   office list                       runs in this repository (--all for every run)
   office inspect [run|task|gate|evidence|events|route] [id]
   office doctor                     check the installation, hooks, and runtimes
-  office prune                      show finished runs that office prune -f would remove
+  office prune [--run <id>]         show finished runs that office prune -f would remove
 
 Global flags: --run <id>, --json, --verbose. Every command ends with `next:`.
 """
@@ -46,7 +47,18 @@ Submitting the same tree again is safe; it reports the existing submission.
 
 Planner / orchestrator planning inline: submits .office/PLAN.md. Format:
 
-{fmt}"""
+{fmt}
+Checks (task `checks:` and the run-level `checks:` under Requirements):
+- Every check must be non-mutating. A check that edits the tree (a formatter
+  or `lint --fix`) makes the task's checks STALE; use the check-only form.
+- Run-level checks run on a freshly composed integration worktree that holds
+  only what is in git, recreated on every compose. Installed dependencies
+  (node_modules, a virtualenv) are absent, so a check needing them must install
+  them itself, e.g. `pnpm install --frozen-lockfile && pnpm lint`. Otherwise
+  it reports "command not found" and integration stops UNAVAILABLE.
+- Inline planning: to change a task's contract, edit its entry in
+  .office/PLAN.md first, then office amend <T> --contract; an amendment whose
+  PLAN.md does not change the named task is refused."""
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -81,10 +93,23 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("resume", parents=[common])
     s.add_argument("target", nargs="?")
     sp.add_parser("status", parents=[common])
+    s = sp.add_parser("wait", parents=[common])
+    s.add_argument("--timeout", type=float, default=1500.0, help="seconds before exit 124 (default 1500)")
+    s.add_argument("--poll", type=float, default=10.0, help=argparse.SUPPRESS)
     s = sp.add_parser("dispatch", parents=[common])
     s.add_argument("tasks", nargs="*")
     s.add_argument("--parallel", action="store_true")
     s.add_argument("--route", help="advanced: override the route (harness/model@effort)")
+    s.add_argument("--as", dest="as_model", metavar="HARNESS/MODEL[@EFFORT]",
+                   help="run the executor on this model, bypassing registry, trust and floors (a user override)")
+    s.add_argument("--cli", metavar="ARGV", help="with --as: start exactly this agent argv in a herdr pane")
+    s.add_argument("--external", action="store_true",
+                   help="prepare the dispatch and print how to start it; launch nothing")
+    s.add_argument("--review-as", metavar="HARNESS/MODEL[@EFFORT]",
+                   help="pin the code reviewer (must be a different model family than the executor)")
+    s.add_argument("--review-cli", metavar="ARGV", help="with --review-as: start exactly this reviewer argv in herdr")
+    s.add_argument("--review-external", action="store_true",
+                   help="with --review-as: you start the reviewer; Office reads its review file")
     s = sp.add_parser("submit", parents=[common], add_help=False)
     s.add_argument("-h", "--help", action="store_true")
     s.add_argument("--plan", help=argparse.SUPPRESS)
@@ -257,7 +282,8 @@ def _run(args, unknown) -> int:
         from office import prune
         con = _con()
         try:
-            return emit(prune.force(con) if args.force else prune.dry_run(con), args)
+            only = prune.select_run(con, args.run_arg) if args.run_arg else None
+            return emit(prune.force(con, only) if args.force else prune.dry_run(con, only), args)
         finally:
             con.close()
     if cmd == "doctor":
@@ -300,9 +326,15 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                 lifecycle.reconcile(con, run)
             jobs.kick(con, run["id"])
         return guide.status(con, run, verbose=args.verbose)
+    if cmd == "wait":
+        from office import guide
+        return guide.wait(con, run, timeout=args.timeout, poll=args.poll)
     if cmd == "dispatch":
         from office import dispatch
-        return dispatch.dispatch(con, run, args.tasks, parallel=args.parallel, route=args.route)
+        return dispatch.dispatch(con, run, args.tasks, parallel=args.parallel, route=args.route,
+                                 as_model=args.as_model, cli=args.cli, external=args.external,
+                                 review_as=args.review_as, review_cli=args.review_cli,
+                                 review_external=args.review_external)
     if cmd == "submit":
         from office import submit
         return submit.submit(con, run, cwd=cwd, plan_path=args.plan)

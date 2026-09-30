@@ -1,7 +1,8 @@
 """office prune: remove finished runs' local data, keep a tombstone.
 
 `office prune` never mutates anything; it reports what `office prune -f`
-would remove. With --force, each candidate is re-checked inside a runs.db
+would remove. `--run <id>` restricts both to that one run, and refuses when it
+is unknown, not finished, or already pruned. With --force, each candidate is re-checked inside a runs.db
 write transaction immediately before its data is deleted, so a run resumed or
 reopened after the dry run is never touched. Unsafe or locked candidates are
 skipped and reported. Running it twice is harmless.
@@ -23,6 +24,7 @@ from pathlib import Path
 
 from office import db, paths, state
 from office.result import Result
+from office.state import Refused, Usage
 from office.util import now_iso, pid_alive, sha256_bytes, short
 
 DETAIL_TABLES = ("tasks", "revisions", "gates", "amendments", "deliveries", "events", "cursors", "outbox", "evidence",
@@ -89,8 +91,26 @@ def _recorded(con, run: dict, wt: Path) -> bool:
         return False
 
 
-def plan(con, *, cwd: Path | None = None) -> list[dict]:
-    rows = con.execute("SELECT id FROM runs WHERE office_version IS NOT NULL ORDER BY created_at").fetchall()
+def select_run(con, prefix: str) -> str:
+    """`--run <id>`: the one finished, prunable run it names, else refuse.
+    Naming a run must never widen to every finished run."""
+    run = state.find_run(con, prefix)
+    if run is None or not run.get("office_version"):
+        raise Usage("unknown-run", f"no run {prefix!r}", next_step="office list --all shows run ids")
+    reason = _eligibility(con, run)
+    if reason == "already pruned":
+        raise Refused("already-pruned", f"run {short(run['id'])} is already pruned", next_step="nothing to do")
+    if run["phase"] not in state.TERMINAL_PHASES:
+        raise Refused("run-not-finished", f"run {short(run['id'])} is {run['phase']}; only a closed or abandoned run "
+                      "can be pruned", next_step=f"office close --run {short(run['id'])} first, or leave it")
+    return run["id"]
+
+
+def plan(con, *, cwd: Path | None = None, run_id: str | None = None) -> list[dict]:
+    if run_id:
+        rows = con.execute("SELECT id FROM runs WHERE id=?", (run_id,)).fetchall()
+    else:
+        rows = con.execute("SELECT id FROM runs WHERE office_version IS NOT NULL ORDER BY created_at").fetchall()
     out = []
     for r in rows:
         run = state.get_run(con, r["id"])
@@ -119,8 +139,8 @@ def _size(p: Path) -> int:
     return total
 
 
-def dry_run(con) -> Result:
-    candidates = plan(con)
+def dry_run(con, run_id: str | None = None) -> Result:
+    candidates = plan(con, run_id=run_id) if run_id else plan(con)
     eligible = [c for c in candidates if c["eligible"]]
     skipped = [c for c in candidates if not c["eligible"]]
     res = Result()
@@ -133,13 +153,14 @@ def dry_run(con) -> Result:
         if skipped:
             res.add(f"would skip {len(skipped)}: " + "; ".join(f"{short(c['run_id'])} {c['reason']}" for c in skipped[:4]))
         res.add("active, paused, blocked, and resumable runs are never selected")
-    res.next = "office prune -f to remove them (tombstones stay in runs.db)" if eligible else None
+    only = f" --run {short(run_id)}" if run_id else ""
+    res.next = f"office prune -f{only} to remove {'it' if run_id else 'them'} (tombstones stay in runs.db)" if eligible else None
     res.data = {"dry_run": True, "candidates": candidates}
     return res
 
 
-def force(con) -> Result:
-    candidates = plan(con)
+def force(con, run_id: str | None = None) -> Result:
+    candidates = plan(con, run_id=run_id) if run_id else plan(con)
     removed, skipped = [], []
     for c in candidates:
         if not c["eligible"]:

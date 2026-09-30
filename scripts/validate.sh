@@ -22,7 +22,12 @@ fi
 stamp="$(shasum pyproject.toml | cut -d' ' -f1)"
 if [ "$(cat .venv/.validate-stamp 2>/dev/null)" != "$stamp" ]; then
   echo "== Installing package and test deps"
-  .venv/bin/python3 -m pip install -q -e '.[test]' build
+  # A .venv made by `uv run`/`uv venv` has no pip; install through uv when that is the case.
+  if .venv/bin/python3 -m pip --version >/dev/null 2>&1; then
+    .venv/bin/python3 -m pip install -q -e '.[test]' build
+  else
+    uv pip install -q --python .venv/bin/python3 -e '.[test]' build
+  fi
   echo "$stamp" > .venv/.validate-stamp
 fi
 export PATH="$PWD/.venv/bin:$PATH"
@@ -50,3 +55,11 @@ if [ "${VALIDATE_BUILD:-0}" = "1" ]; then
 fi
 
 echo "== Validation passed"
+# Record the pass against the committed tree, so the pre-push hook can skip a
+# rerun: a 12-minute gate inside `git push` holds the SSH connection idle and
+# GitHub drops it (the push dies with SIGPIPE). Only a clean tree is stamped,
+# since otherwise the tree that passed is not the one being pushed.
+if [ -z "$(git status --porcelain --untracked-files=no)" ]; then
+  stamps="$(git rev-parse --git-common-dir)/office-validated"
+  mkdir -p "$stamps" && touch "$stamps/$(git rev-parse 'HEAD^{tree}')"
+fi

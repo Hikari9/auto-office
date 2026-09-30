@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
 import subprocess
+import threading
 import sys
 import time
 import uuid
@@ -51,9 +53,21 @@ def create_planner_task(con, run: dict, *, contract_request: str | None = None, 
 
 # ------------------------------------------------------------------ dispatch command
 
-def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, route: str | None = None) -> Result:
+def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, route: str | None = None,
+             as_model: str | None = None, cli: str | None = None, external: bool = False,
+             review_as: str | None = None, review_cli: str | None = None, review_external: bool = False) -> Result:
     if not task_ids:
         raise Usage("no-task", "name at least one task", next_step="office dispatch T1 [T2 ...] [--parallel]")
+    if as_model and route:
+        raise Usage("invalid-override", "use --as or --route, not both")
+    if cli and external or review_cli and review_external:
+        raise Usage("invalid-override", "a CLI launch and an external launch are mutually exclusive")
+    if cli and not as_model:
+        raise Usage("invalid-override", "--cli needs --as <harness>/<model>[@effort] so the dispatch records what runs")
+    if (review_cli or review_external) and not review_as:
+        raise Usage("invalid-override", "--review-cli/--review-external need --review-as <harness>/<model>[@effort]")
+    launch_prefs = {k: v for k, v in (("cli", cli), ("external", external)) if v}
+    review_decision = candidates.declared_decision(review_as, flag="--review-as") if review_as else None
     if state.is_terminal(run):
         raise Refused("run-terminal", f"run is {run['phase']}")
     from office import guide, plans
@@ -65,8 +79,15 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
         if task is None or task["role"] == "planner":
             raise Usage("unknown-task", f"{tid} is not a task in plan p{run['plan_version']}",
                         next_step="office status lists the ready tasks")
-        routes[tid] = candidates.route_role(con, state.pinned_config(run), run, "executor",
-                                            task_id=tid, override=route)
+        if as_model:
+            routes[tid] = candidates.declared_decision(as_model)
+        else:
+            routes[tid] = candidates.route_role(con, state.pinned_config(run), run, "executor",
+                                                task_id=tid, override=route)
+        if launch_prefs and routes[tid].get("status") == "selected":
+            routes[tid]["launch"] = launch_prefs
+        if review_decision and routes[tid].get("status") == "selected":
+            _require_independent(tid, routes[tid]["candidate"], review_decision["candidate"])
     res = Result()
     with db.transaction(con):
         run = state.get_run(con, run["id"])
@@ -90,6 +111,9 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 raise Refused("no-route", _route_failure(tid, decision), scope=tid,
                               preserved="plan and other dispatches", next_step=_route_next(decision, tid))
             _record_routing(con, run, decision)
+            if review_as:
+                state.update_task(con, run["id"], tid, review_override={
+                    "as": review_as, "cli": review_cli, "external": bool(review_external), "by": "user"})
             if stack_after:
                 state.update_task(con, run["id"], tid, status="queued", stack_after=stack_after,
                                   pause_reason=f"stacked after {stack_after}")
@@ -100,7 +124,9 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 res.add(f"{tid} stacked after {stack_after}")
             else:
                 did = request_launch(con, run, tid, role="executor", decision=decision, base=base)
-                res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} launching")
+                res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} launching"
+                        + (" (user override)" if decision.get("override") else ""))
+                res.lines.extend(f"  {line}" for line in launch_instructions(run, state.get_dispatch(con, did)))
             previous = tid
         if run["phase"] == "planning":
             state.update_run(con, run["id"], phase="executing")
@@ -138,8 +164,57 @@ def _record_routing(con, run: dict, decision: dict) -> None:
 
 
 def _stash_route(con, run, tid, decision):
-    state.update_task(con, run["id"], tid, route_json=dumps({"candidate": decision.get("candidate"),
-                                                          "selection_disclosure": decision.get("selection_disclosure")}))
+    state.update_task(con, run["id"], tid, route_json=dumps(_route_payload(decision)))
+
+
+def _route_payload(decision: dict) -> dict:
+    """What a dispatch keeps of its decision, so a stacked start or a relaunch
+    reproduces the same route, override, and launch form."""
+    out = {"candidate": decision.get("candidate"), "selection_disclosure": decision.get("selection_disclosure")}
+    for key in ("override", "launch"):
+        if decision.get(key):
+            out[key] = decision[key]
+    return out
+
+
+def _require_independent(tid: str, executor: dict, reviewer: dict) -> None:
+    """No self-approval by family: a user-pinned reviewer must come from a
+    different model family than the executor it reviews."""
+    ef, rf = candidates.model_family(executor.get("model_id")), candidates.model_family(reviewer.get("model_id"))
+    if ef and ef == rf:
+        raise Refused("review-not-independent",
+                      f"{tid}: --review-as {reviewer['harness']}/{reviewer['model_id']} is the same model family "
+                      f"({rf}) as the executor {executor['harness']}/{executor['model_id']}", scope=tid,
+                      next_step="pin a reviewer from a different family, or drop --review-as to route one")
+
+
+def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> list[str]:
+    """Where a dispatch's brief and identity live, and the herdr commands that
+    start any agent on it by hand (SKILL.md "Herdr agents"). `output` makes it
+    a reviewer's: it writes its review there instead of submitting."""
+    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    wt = d.get("worktree") or str(ddir)
+    name = herdr_agent_name(d["id"])
+    cli = ((d.get("route") or {}).get("launch") or {}).get("cli")
+    if cli:
+        argv = shlex.split(cli)
+        kind, args = Path(argv[0]).name, argv[1:]
+    else:
+        adapter = adapters.load_all().get(d.get("adapter_id") or "")
+        inter = adapters.interactive_argv(adapter, "worker" if output is None else "reviewer", model=d.get("model") or "",
+                                          effort=d.get("effort") or "none", cwd=Path(wt)) if adapter and d.get("model") else None
+        kind, args = (inter[1], inter[0]) if inter else (d.get("harness") or "<kind>", [])
+    if output is None:
+        pointer = (f"Read and carry out the brief at {ddir / 'brief.md'} exactly. "
+                   "When the work and its checks are complete, run: office submit")
+    else:
+        pointer = (f"Read and carry out the review brief at {ddir / 'brief.md'} exactly. Write your complete review to "
+                   f"{output}. Do not edit anything else.")
+    return [f"brief: {ddir / 'brief.md'}", f"env: {ddir / 'agent.env'}", f"worktree: {wt}",
+            *([f"output: {output}"] if output else []),
+            f"herdr: herdr pane run <pane> {shlex.quote('. ' + str(ddir / 'agent.env') + ' && cd ' + wt)}",
+            f"       herdr agent start {name} --kind {kind} --pane <pane> -- {shlex.join(args)}".rstrip(),
+            f"       herdr agent prompt {name} {shlex.quote(pointer)}"]
 
 
 def _base_for(con, run: dict, task: dict, graph: dict, stack_after: str | None) -> str:
@@ -174,13 +249,10 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
         prior = state.get_dispatch(con, task["current_dispatch_id"])
     if decision is None:
         if prior and prior.get("route"):
-            decision = {"status": "selected", "candidate": prior["route"].get("candidate"),
-                        "selection_disclosure": prior["route"].get("selection_disclosure"),
-                        "selected": prior.get("triple")}
+            decision = {**prior["route"], "status": "selected", "selected": prior.get("triple")}
         elif task.get("route_json"):
             s = json.loads(task["route_json"])
-            decision = {"status": "selected", "candidate": s["candidate"], "selection_disclosure": s["selection_disclosure"],
-                        "selected": routing.candidate_id(s["candidate"])}
+            decision = {**s, "status": "selected", "selected": routing.candidate_id(s["candidate"])}
     if decision is None:
         raise Refused("no-route", f"{task_id}: no route recorded for relaunch", scope=task_id)
     cand = decision["candidate"]
@@ -197,10 +269,28 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
          (decision.get("selection_disclosure") or {}).get("reason"), run.get("playbook"), now_iso(), task_id, role,
          run["office_version"], "launching", worktree, branch, base or (prior or {}).get("base_commit") or run["base_sha"],
          lease["id"], cand["harness"], cand.get("invocation_model_id"), cand.get("effort"), cand.get("adapter_id"),
-         applied, dumps({"candidate": cand, "selection_disclosure": decision.get("selection_disclosure")})))
+         applied, dumps(_route_payload(decision))))
+    if decision.get("override") or decision.get("launch"):
+        con.execute("UPDATE dispatches SET override_json=? WHERE id=?",
+                    (dumps({"by": "user", "declared": bool(decision.get("override")), "triple": routing.candidate_id(cand),
+                            **(decision.get("launch") or {})}), dispatch_id))
+    # This session starts from the current contract, so an amendment still
+    # waiting on an earlier session of the task is already in its brief; left
+    # queued, it would hold the new revision at amendment_pending (and its ack
+    # would be refused as the wrong holder).
+    con.execute("UPDATE deliveries SET status='superseded', superseded_by='relaunch' WHERE run_id=? AND task_id=? "
+                "AND status IN ('queued','delivered') AND dispatch_id IS NOT ? AND target_version<=?",
+                (run["id"], task_id, dispatch_id, applied))
+    # A newer amendment (a requirements change can target a plan version past
+    # the task contract) is not in this brief: hand it to this session, or no
+    # session could ever ack it and every submit would stay amendment_pending.
+    con.execute("UPDATE deliveries SET dispatch_id=?, status='queued' WHERE run_id=? AND task_id=? "
+                "AND status IN ('queued','delivered') AND dispatch_id IS NOT ?",
+                (dispatch_id, run["id"], task_id, dispatch_id))
     state.update_task(con, run["id"], task_id, status="launching", current_dispatch_id=dispatch_id,
                       pause_reason=None, stack_after=None)
-    payload = {"dispatch_id": dispatch_id, "task_id": task_id, "role": role, "fix_of": fix_of, **(extra or {})}
+    payload = {"dispatch_id": dispatch_id, "task_id": task_id, "role": role, "fix_of": fix_of,
+               **(decision.get("launch") or {}), **(extra or {})}
     state.enqueue(con, run, "launch_agent", payload, dedup_key=f"launch:{dispatch_id}", max_attempts=2)
     return dispatch_id
 
@@ -381,7 +471,8 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     with db.transaction(con):
         con.execute("UPDATE dispatches SET packet_hash=?, packet_path=?, log_path=? WHERE id=?",
                     (packet["packet_hash"], str(ddir / "packet.json"), str(ddir / "output.log"), dispatch["id"]))
-    launcher = launch(run, dispatch, "worker", ddir, cwd=wt)
+    launcher = launch(run, dispatch, "worker", ddir, cwd=wt, cli=payload.get("cli"),
+                      external=bool(payload.get("external")))
     return {"dispatch_id": dispatch["id"], **launcher}
 
 
@@ -408,7 +499,7 @@ def worker_env(run: dict, dispatch: dict, role: str) -> dict:
 
 def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait: bool = False,
            output: Path | None = None, images: list[Path] | None = None, include_dirs: list[Path] | None = None,
-           prompt_file: Path | None = None) -> dict:
+           prompt_file: Path | None = None, cli: str | None = None, external: bool = False) -> dict:
     """Start `office _supervise` for a dispatch, in a Herdr pane when running
     inside Herdr (visible delegation), else as a detached process."""
     spec = {"dispatch_id": dispatch["id"], "kind": kind, "cwd": str(cwd), "output": str(output) if output else None,
@@ -428,39 +519,116 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
     env.update(extra)
     env.pop(frontdoor.HOP_ENV, None)
     launcher = os.environ.get("OFFICE_LAUNCHER", "auto")
-    if kind == "worker" and os.environ.get("OFFICE_WORKER_LAUNCHER") == "external":
-        # A worker hosted outside Office's process control (an interactive
-        # session the user or a test drives). It is live until it says otherwise.
-        _record_launch(run, dispatch["id"], launcher="external")
-        return {"launcher": "external"}
+    use_herdr = (launcher in ("auto", "herdr") and os.environ.get("HERDR_ENV") == "1" and shutil.which("herdr"))
+    if cli and not use_herdr:
+        _launch_notice(run, dispatch, f"--cli needs a herdr session; left external instead. Start it by hand: {cli}")
+        external = True
+    if external or (kind == "worker" and os.environ.get("OFFICE_WORKER_LAUNCHER") == "external"):
+        # Hosted outside Office's process control (an interactive session the
+        # user or a test drives). A worker is live until it submits; a reviewer
+        # ends when its output file is written.
+        return _launch_external(run, dispatch, kind, spec, ddir, sup, env, cwd, wait=wait, announce=external)
     if launcher == "sync":
         # Deterministic mode for tests and fixtures: supervise in the foreground.
         _record_launch(run, dispatch["id"], launcher="sync", pid=os.getpid())
         subprocess.run(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, env=env)
         return _wait_terminal(dispatch["id"], timeout=5) if wait else {"launcher": "sync"}
-    use_herdr = (launcher in ("auto", "herdr") and os.environ.get("HERDR_ENV") == "1" and shutil.which("herdr"))
+    headless = "process"
     if use_herdr:
-        inter = _interactive(dispatch, kind, cwd, include_dirs)
+        if cli:
+            # The user's exact argv; herdr supplies the executable from --kind.
+            argv_cli = shlex.split(cli)
+            inter = (argv_cli[1:], Path(argv_cli[0]).name)
+        else:
+            inter = _interactive(dispatch, kind, cwd, include_dirs)
         pane = _herdr_pane(run, cwd, label=f"office {dispatch.get('role') or kind} {dispatch['id']}") if inter else None
+        if inter and not pane:
+            _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
         if pane:
             started = _herdr_agent_start(run, dispatch, spec, env, inter, pane, cwd, ddir)
             if started:
                 if wait:
                     return _wait_terminal(dispatch["id"])
                 return started
-            # The agent never came up in the pane: fall back to a plain process.
-            _record_launch(run, dispatch["id"], launcher="process-fallback", pane_id=None)
+            if cli:
+                # Running the adapter's own argv headless would not be what the user asked for.
+                _launch_notice(run, dispatch, f"--cli agent did not start in herdr; left external. Start it by hand: {cli}")
+                return _launch_external(run, dispatch, kind, spec, ddir, sup, env, cwd, wait=wait, announce=False)
+            # The agent never came up in the pane: fall back to a plain process,
+            # and keep that visible on the dispatch (its notice says why).
+            headless = "process-fallback"
     log = open(ddir / "supervisor.log", "ab")
     try:
         proc = subprocess.Popen(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
                                 start_new_session=True, close_fds=True)
     finally:
         log.close()
-    _record_launch(run, dispatch["id"], launcher="process", pid=proc.pid)
+    _record_launch(run, dispatch["id"], launcher=headless, pid=proc.pid)
     if wait:
         proc.wait()
         return _wait_terminal(dispatch["id"])
-    return {"launcher": "process", "pid": proc.pid}
+    return {"launcher": headless, "pid": proc.pid}
+
+
+def _launch_external(run: dict, dispatch: dict, kind: str, spec: dict, ddir: Path, sup: list[str], env: dict,
+                     cwd: Path, *, wait: bool, announce: bool) -> dict:
+    worker = kind == "worker"
+    write_agent_env(run, dispatch, ddir, worker=worker)
+    _record_launch(run, dispatch["id"], launcher="external")
+    if announce:
+        lines = launch_instructions(run, state_dispatch(dispatch["id"]), output=None if worker else spec.get("output"))
+        _launch_notice(run, dispatch, "external " + ("executor" if worker else "reviewer") + ": " + " | ".join(lines))
+    if worker:
+        return {"launcher": "external"}
+    # A reviewer: a detached watcher ends the dispatch once the output file is written.
+    spec["external"] = True
+    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    log = open(ddir / "supervisor.log", "ab")
+    try:
+        watcher = subprocess.Popen(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
+                                   start_new_session=True, close_fds=True)
+    finally:
+        log.close()
+    if wait:
+        return _wait_terminal(dispatch["id"])
+    return {"launcher": "external", "watcher_pid": watcher.pid}
+
+
+def state_dispatch(dispatch_id: str) -> dict:
+    con = db.connect()
+    try:
+        return state.get_dispatch(con, dispatch_id)
+    finally:
+        con.close()
+
+
+def watch_external_output(dispatch_id: str, spec: dict, *, poll: float | None = None) -> tuple:
+    """(exit_code, classification) for an externally hosted reviewer: done once
+    its output file is written and stops growing, or when the dispatch is
+    cancelled (revoke). It waits on a person, so it has no timeout."""
+    poll = float(os.environ.get("OFFICE_HERDR_POLL", "5")) if poll is None else poll
+    output = Path(spec["output"])
+    last = None
+    while True:
+        d = state_dispatch(dispatch_id)
+        if d["status"] in ("exited", "failed", "cancelled"):
+            return None, "cancelled" if d["status"] == "cancelled" else "duplicate_ignored"
+        size = output.stat().st_size if output.is_file() else 0
+        if size and size == last:
+            return 0, "success"
+        last = size or None
+        time.sleep(poll)
+
+
+def _wall_cap_seconds(prof: dict) -> float | None:
+    """The hard wall-clock limit for a headless agent: OFFICE_WORKER_MAX_MINUTES,
+    else the profile's max_minutes, else none (headless agents are often silent
+    until they finish, so there is no idle rule)."""
+    raw = os.environ.get("OFFICE_WORKER_MAX_MINUTES") or prof.get("max_minutes")
+    try:
+        return float(raw) * 60 if raw else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _interactive(dispatch: dict, kind: str, cwd: Path, include_dirs: list[Path] | None = None) -> tuple[list[str], str] | None:
@@ -472,16 +640,9 @@ def _interactive(dispatch: dict, kind: str, cwd: Path, include_dirs: list[Path] 
                                      cwd=cwd, include_dirs=include_dirs)
 
 
-def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
-                       cwd: Path, ddir: Path) -> dict | None:
-    """Start the real harness in the pane with `herdr agent start`, hand it a
-    one-line brief pointer, and leave a detached watcher to record the end.
-    The pane runs the agent itself, never a shell wrapper around it."""
-    args, herdr_kind = inter
-    name = f"office-{dispatch['id']}"
-    worker = spec["kind"] == "worker"
-    # The pane's shell does not inherit this process's environment: source the
-    # dispatch identity into it first, so the agent's own `office submit` works.
+def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = True) -> Path:
+    """agent.env: the dispatch identity a pane-hosted agent sources before it
+    starts, whether Office or the user launches it."""
     wenv = worker_env(run, dispatch, dispatch.get("role") if worker else "reviewer")
     if not worker:
         # Reviewers get no Office authority: they cannot submit or ack.
@@ -491,19 +652,36 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     env_file = ddir / "agent.env"
     env_file.write_text("".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(carry.items())))
     env_file.chmod(0o600)
+    return env_file
+
+
+def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
+                       cwd: Path, ddir: Path) -> dict | None:
+    """Start the real harness in the pane with `herdr agent start`, hand it a
+    one-line brief pointer, and leave a detached watcher to record the end.
+    The pane runs the agent itself, never a shell wrapper around it."""
+    args, herdr_kind = inter
+    name = herdr_agent_name(dispatch["id"])
+    worker = spec["kind"] == "worker"
+    # The pane's shell does not inherit this process's environment: source the
+    # dispatch identity into it first, so the agent's own `office submit` works.
+    env_file = write_agent_env(run, dispatch, ddir, worker=worker)
     subprocess.run(["herdr", "pane", "run", pane, f". {shlex.quote(str(env_file))} && cd {shlex.quote(str(cwd))}"],
                    capture_output=True, timeout=30)
     try:
         proc = subprocess.run(["herdr", "agent", "start", name, "--kind", herdr_kind, "--pane", pane, "--", *args],
                               capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        _launch_notice(run, dispatch, f"herdr agent start failed ({exc}); running headless instead")
         return None
     if proc.returncode != 0:
+        why = (proc.stdout or proc.stderr or "").strip()[:200]
+        _launch_notice(run, dispatch, f"herdr agent start failed ({why}); running headless instead")
         return None
     spec.update({"herdr_agent": name, "pane": pane})
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
     _record_launch(run, dispatch["id"], launcher="herdr", pane_id=pane)
-    _pane_ledger(run, dispatch, pane)
+    _pane_ledger(run, dispatch, pane, agent=name, kind=herdr_kind, worktree=cwd, session_id=_started_session(proc.stdout))
     # A long brief pasted as the prompt does not land; a one-line pointer does.
     if worker:
         pointer = (f"Read and carry out the brief at {spec['prompt_file']} exactly. "
@@ -513,7 +691,14 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         pointer = (f"Read and carry out the review brief at {spec['prompt_file']} exactly.{images} "
                    f"Write your complete review to {spec['output']}. If your tools cannot write files, "
                    "end your reply with the complete review instead. Do not edit anything else.")
-    subprocess.run(["herdr", "agent", "prompt", name, pointer], capture_output=True, timeout=30)
+    landed = _deliver_prompt(name, pane, pointer)
+    if not landed:
+        # The agent is up in a pane the user can see; a second headless copy
+        # would race it. Say so and leave the pane for a manual re-prompt.
+        _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane}); "
+                                      f"re-prompt it: herdr agent prompt {name} {shlex.quote(pointer)}")
+    spec["prompt_landed"] = landed
+    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
     log = open(ddir / "supervisor.log", "ab")
     try:
         watcher = subprocess.Popen(frontdoor.current_argv()[0] + ["_supervise", dispatch["id"]], cwd=str(cwd),
@@ -521,7 +706,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
                                    start_new_session=True, close_fds=True)
     finally:
         log.close()
-    return {"launcher": "herdr", "pane": pane, "agent": name, "watcher_pid": watcher.pid}
+    return {"launcher": "herdr", "pane": pane, "agent": name, "watcher_pid": watcher.pid, "prompt_landed": landed}
 
 
 def _herdr_agent_sample(name: str) -> dict | None:
@@ -531,19 +716,104 @@ def _herdr_agent_sample(name: str) -> dict | None:
         proc = subprocess.run(["herdr", "agent", "get", name], capture_output=True, text=True, timeout=30)
         res = json.loads(proc.stdout or "{}").get("result") or {}
     except (OSError, subprocess.SubprocessError, ValueError):
-        return {"status": "unknown", "content_hash": None}
+        # Unreadable is not idle: busy stays unknown (None), which never settles.
+        return {"status": "unknown", "content_hash": None, "busy": None}
     agent = res.get("agent") or res
     if proc.returncode != 0 or not agent:
         return None
     read = _herdr_agent_text(name)
-    return {"status": agent.get("status") or agent.get("agent_status"), "content_hash": sha256_obj(read)}
+    return {"status": agent.get("status") or agent.get("agent_status"), "content_hash": sha256_obj(read),
+            "busy": None if read is None else _pane_busy(read)}
 
 
-def _herdr_agent_text(name: str) -> str:
+def _herdr_agent_text(name: str, *extra: str) -> str | None:
+    """Pane text, or None when it could not be read."""
     try:
-        return subprocess.run(["herdr", "agent", "read", name], capture_output=True, text=True, timeout=30).stdout
+        proc = subprocess.run(["herdr", "agent", "read", name, *extra], capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
-        return ""
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+# Footer text a harness shows only while a turn is running. agy's reported
+# status is not a liveness signal (it reads idle mid-turn); its pane is.
+BUSY_MARKERS = ("esc to cancel", "esc to interrupt")
+
+
+def _pane_busy(text: str) -> bool:
+    low = (text or "").lower()
+    return any(m in low for m in BUSY_MARKERS)
+
+
+def herdr_agent_name(dispatch_id: str) -> str:
+    """Herdr agent names must match [a-z][a-z0-9_-]{0,31}; dispatch ids start
+    with an uppercase D, which herdr rejects."""
+    return re.sub(r"[^a-z0-9_-]", "-", f"office-{dispatch_id}".lower())[:32]
+
+
+def _prompt_landed(name: str, timeout: float) -> bool:
+    """A prompt has landed once the pane shows a busy footer. `agent prompt`
+    returning without error proves nothing, and neither does a `working`
+    status: codex reports it while a startup trust dialog holds the composer
+    empty, and agy reads `idle` mid-turn."""
+    deadline = time.time() + timeout
+    while True:
+        if _pane_busy(_herdr_agent_text(name, "--source", "visible", "--lines", "15")):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(1)
+
+
+def _deliver_prompt(name: str, pane: str, pointer: str) -> bool:
+    """Send the one-line pointer and confirm it landed; retry once by typing it
+    into the pane and pressing Enter (agy can drop a prompt sent right after
+    `agent start` returns)."""
+    timeout = float(os.environ.get("OFFICE_HERDR_LAND_TIMEOUT", "30"))
+
+    def herdr(*args: str) -> None:
+        # The agent is already recorded as launched: a hung or missing herdr
+        # here must not escape before the watcher starts.
+        try:
+            subprocess.run(["herdr", *args], capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    herdr("agent", "prompt", name, pointer)
+    if _prompt_landed(name, timeout):
+        return True
+    herdr("pane", "send-text", pane, pointer)
+    # A TUI can take an Enter that follows typed text too closely as part of
+    # the paste and leave it in the composer: pause, submit, and submit once
+    # more if it still has not landed.
+    delay = float(os.environ.get("OFFICE_HERDR_KEY_DELAY", "1"))
+    for _ in range(2):
+        time.sleep(delay)
+        herdr("pane", "send-keys", pane, "Enter")
+        if _prompt_landed(name, timeout / 2):
+            return True
+    return False
+
+
+def _watch_notice(dispatch_id: str, text: str) -> None:
+    con = db.connect()
+    try:
+        d = state.get_dispatch(con, dispatch_id)
+        run = state.get_run(con, d["run_id"])
+    finally:
+        con.close()
+    _launch_notice(run, d, text)
+
+
+def _launch_notice(run: dict, dispatch: dict, text: str) -> None:
+    """Record a launch problem where `office status` shows it."""
+    con = db.connect()
+    try:
+        with db.transaction(con):
+            state.emit(con, run, "launch", f"{dispatch.get('task_id') or dispatch['id']}: {text}",
+                       task_id=dispatch.get("task_id"), dispatch_id=dispatch["id"])
+    finally:
+        con.close()
 
 
 def _submitted(con, dispatch: dict) -> bool:
@@ -561,6 +831,8 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
     output = Path(spec["output"]) if spec.get("output") else None
     history: list[dict] = []
     last_size = None
+    unknown = 0
+    unknown_limit = int(os.environ.get("OFFICE_HERDR_UNKNOWN_LIMIT", "60"))
     while True:
         con = db.connect()
         try:
@@ -573,23 +845,54 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
         finally:
             con.close()
         size = output.stat().st_size if output and output.is_file() else 0
-        if size and size == last_size:
-            # Complete: written and no longer growing between two polls.
+        sample = _herdr_agent_sample(spec["herdr_agent"])
+        if sample is not None:
+            unknown = unknown + 1 if sample.get("busy") is None else 0
+        # Blind only while this very sample is still unreadable.
+        blind = sample is not None and sample.get("busy") is None and unknown >= unknown_limit
+        if blind and unknown == unknown_limit:
+            # Said once, before anything below can end the watch. A reviewer's
+            # stable output now ends it; a worker, like a headless process,
+            # ends on submit, exit, or revoke.
+            _watch_notice(dispatch_id, f"herdr agent {spec['herdr_agent']} has been unreadable for "
+                                       f"{unknown_limit} polls; check its pane, or office revoke")
+        if size and size == last_size and (sample is None or sample.get("busy") is False or blind):
+            # Complete: written, no longer growing between two polls, and the
+            # agent is not still mid-turn (it may rewrite the file). After the
+            # pane has been unreadable past the limit, a file that stopped
+            # growing is the only evidence left, so it bounds the wait.
             return 0, "success"
         last_size = size or None
-        sample = _herdr_agent_sample(spec["herdr_agent"])
         if sample is None:
             return None, "nonzero"
         history.append(sample)
         window = history[-stable_samples:]
         if (len(window) == stable_samples and all(w["status"] in ("done", "idle") for w in window)
+                and all(w.get("busy") is False for w in window)
                 and len({w["content_hash"] for w in window}) == 1):
             if output and not (output.is_file() and output.stat().st_size):
                 # A read-only reviewer that could not write the file left its
-                # review in the pane: keep that as the reply.
-                output.write_text(_herdr_agent_text(spec["herdr_agent"]), encoding="utf-8")
+                # review in its session: its harness transcript holds the full
+                # reply; the pane screen (chrome, wrapping, scrollback) is the
+                # last resort.
+                reply = transcript_reply(d, spec)
+                output.write_text(reply or _herdr_agent_text(spec["herdr_agent"]) or "", encoding="utf-8")
             return 0, "success"
         time.sleep(poll)
+
+
+def transcript_reply(d: dict, spec: dict) -> str | None:
+    """The pane-hosted agent's final reply from its harness session log, found
+    by the brief path its prompt named and the cwd it ran in."""
+    from office import transcripts
+    marker = spec.get("prompt_file")
+    if not marker or not d:
+        return None
+    try:
+        return transcripts.final_reply(d.get("harness"), marker=marker, cwd=spec.get("cwd"),
+                                       since=d.get("launched_at") or d.get("started_at"))
+    except Exception:  # a fallback reader must never end the watch abnormally
+        return None
 
 
 def _herdr_json(args: list[str]) -> dict:
@@ -629,13 +932,21 @@ def _busy_panes(run: dict) -> set:
         con.close()
 
 
+def _pane_is_shell(pane: str) -> bool:
+    """A pane Office may start an agent in: live, with no agent in it. An ended
+    dispatch's pane can still hold its finished session, which herdr rejects
+    (`agent_pane_busy`), so the dispatch row alone does not make it reusable."""
+    info = _herdr_json(["pane", "get", pane]).get("pane") or {}
+    return bool(info) and not info.get("agent")
+
+
 def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None, anchor: str | None) -> str | None:
     layout = layout or {"mode": "split", "anchor": anchor, "panes": []}
     anchor = layout.get("anchor") or anchor
     live = [p for p in layout["panes"] if _herdr_json(["pane", "get", p])]  # the user may close panes
     busy = _busy_panes(run)
     for pane in live:
-        if pane not in busy:
+        if pane not in busy and _pane_is_shell(pane):
             subprocess.run(["herdr", "pane", "run", pane, f"cd {shlex.quote(str(cwd))}"], capture_output=True, timeout=30)
             layout["panes"] = live
             atomic_write_json(tab_file, layout)
@@ -671,7 +982,7 @@ def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None) 
         return root
     busy = _busy_panes(run)
     for pane in tab["panes"]:
-        if pane not in busy:
+        if pane not in busy and _pane_is_shell(pane):
             subprocess.run(["herdr", "pane", "run", pane, f"cd {shlex.quote(str(cwd))}"], capture_output=True, timeout=30)
             return pane
     direction = "right" if len(tab["panes"]) % 2 else "down"
@@ -698,11 +1009,46 @@ def close_herdr_tab(run: dict) -> None:
             pass
 
 
-def _pane_ledger(run: dict, dispatch: dict, pane: str) -> None:
+def _orchestrator_pane(run: dict) -> str | None:
+    """The pane of the orchestrator that owns this dispatch: its HERDR_PANE_ID,
+    else the anchor the run's split layout recorded (a relaunch from a detached
+    job has no pane of its own)."""
+    pane = os.environ.get("HERDR_PANE_ID")
+    if pane:
+        return pane
+    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
+    try:
+        layout = json.loads(tab_file.read_text()) if tab_file.is_file() else {}
+    except (OSError, ValueError):
+        layout = {}
+    return layout.get("anchor") or os.environ.get("OFFICE_HERDR_ANCHOR") or None
+
+
+def _started_session(stdout: str | None) -> str | None:
+    """The agent session id `herdr agent start` reports, when it reports one."""
+    try:
+        res = json.loads(stdout or "{}").get("result") or {}
+    except ValueError:
+        return None
+    agent = res.get("agent") or res
+    return agent.get("session_id") or agent.get("agent_session_id") if isinstance(agent, dict) else None
+
+
+def _pane_ledger(run: dict, dispatch: dict, pane: str, *, agent: str | None = None, kind: str | None = None,
+                 worktree: Path | str | None = None, session_id: str | None = None) -> None:
+    """One row per spawned pane, in the herdr-ledger schema, so `herdr-ledger
+    sweep` (which only touches rows whose orchestrator_pane_id is the caller's
+    pane) can close it once the agent has finished."""
     ledger = paths.run_dir(run["id"]) / "panes.jsonl"
+    now = now_iso()
+    row = {"pane_id": pane, "agent": agent, "kind": kind, "session_id": session_id,
+           "worktree": str(worktree) if worktree else None, "spawned_at": now, "recorded_at": now,
+           "orchestrator_pane_id": _orchestrator_pane(run),
+           "orchestrator_session_id": os.environ.get("HERDR_SESSION_ID") or None,
+           "run_id": run["id"], "dispatch_id": dispatch["id"], "role": dispatch.get("role"),
+           "status": "working", "suggestion": None, "note": None, "closed": False, "updated_at": now}
     with ledger.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"pane_id": pane, "agent": None, "dispatch_id": dispatch["id"], "run_id": run["id"],
-                             "role": dispatch.get("role"), "recorded_at": now_iso()}) + "\n")
+        fh.write(json.dumps(row) + "\n")
 
 
 def _record_launch(run: dict, dispatch_id: str, *, launcher: str, pid: int | None = None, pane_id: str | None = None) -> None:
@@ -746,7 +1092,7 @@ def _wait_terminal(dispatch_id: str, timeout: float | None = None) -> dict:
             con.close()
         if d["status"] in ("exited", "failed", "cancelled"):
             return {"exit_code": d["exit_code"], "terminal": d["terminal_classification"], "signal": d["signal"]}
-        if d.get("pid") and d.get("launcher") == "process" and not pid_alive(d["pid"]) and d["status"] == "running":
+        if d.get("pid") and d.get("launcher") in ("process", "process-fallback") and not pid_alive(d["pid"]) and d["status"] == "running":
             time.sleep(1)
             continue
         time.sleep(2)
@@ -789,6 +1135,12 @@ def supervise(dispatch_id: str) -> int:
             classification = "duplicate_ignored"
             return 0
         spec = json.loads((paths.run_dir(run["id"]) / "dispatches" / dispatch_id / "launch.json").read_text())
+        if spec.get("external") and spec.get("output"):
+            _mark(dispatch_id, pid_child=os.getpid())
+            state_box["watching"] = True
+            code, classification = watch_external_output(dispatch_id, spec)
+            state_box["watching"] = False
+            return 0 if classification == "success" else 1
         if spec.get("herdr_agent"):
             # The agent runs in its herdr pane; this process only watches for the end.
             _mark(dispatch_id, pid_child=os.getpid())
@@ -825,6 +1177,19 @@ def supervise(dispatch_id: str) -> int:
                                      env=env, start_new_session=True)
             _mark(dispatch_id, pid_child=child.pid)
             _agent_pgid_file(run, dispatch_id).write_text(str(child.pid))
+            cap = _wall_cap_seconds(prof)
+            if cap:
+                # A harness whose own timeout can fail to fire (agy stalled 3.5h
+                # past --print-timeout 45m) is stopped here instead of hanging the task.
+                def expire(pid=child.pid):
+                    state_box["timed_out"] = True
+                    _note(log_path, f"office: wall-clock cap of {cap / 60:g} min reached; stopping the agent")
+                    _killpg(pid, signal.SIGTERM)
+                    time.sleep(10)
+                    _killpg(pid, signal.SIGKILL)
+                timer = threading.Timer(cap, expire)
+                timer.daemon = True
+                timer.start()
             if stdin == subprocess.PIPE:
                 try:
                     child.stdin.write(prompt.encode())
@@ -839,7 +1204,9 @@ def supervise(dispatch_id: str) -> int:
                     sys.stdout.flush()
             child.wait()
         code = child.returncode
-        if code is not None and code < 0:
+        if state_box.get("timed_out"):
+            classification = "timeout"
+        elif code is not None and code < 0:
             sig, classification = -code, "signal"
         elif state_box["signal"]:
             sig, classification = state_box["signal"], "signal"

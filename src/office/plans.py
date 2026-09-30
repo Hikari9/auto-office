@@ -51,8 +51,9 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
                     (run["id"], new_version, kind, text, dumps(parsed.tasks), dumps(parsed.requirements),
                      dispatch_id or submitter, now_iso(), digest, run["plan_version"] or None))
         changes = sync_tasks(con, run, parsed.tasks, new_version)
-        state.update_run(con, run["id"], plan_version=new_version,
-                         landing={"run_checks": parsed.run_checks, **(run.get("landing") or {})})
+        state.update_run(con, run["id"], plan_version=new_version)
+        run = state.get_run(con, run["id"])
+        apply_run_checks(con, run, parsed.run_checks)
         run = state.get_run(con, run["id"])
         if dispatch_id:
             planner = state.get_task(con, run["id"], "P1")
@@ -87,6 +88,26 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
         res.notices.append(w)
     res.next = ("no action; findings will be delivered" if dispatch_id else _after_plan_next(con, state.get_run(con, run["id"])))
     return res
+
+
+def apply_run_checks(con, run: dict, run_checks: list[str]) -> None:
+    """Store the latest plan's run-level checks (the newest plan always wins)
+    and, if they changed while every task is accepted, retrigger integration
+    so the composed result is re-checked against the new checks. Caller holds
+    the tx."""
+    from office import integration
+    landing = dict(run.get("landing") or {})
+    old = list(landing.get("run_checks") or [])
+    new = list(run_checks)
+    landing["run_checks"] = new
+    state.update_run(con, run["id"], landing=landing)
+    if old == new:
+        return
+    run = state.get_run(con, run["id"])
+    if integration.accepted_set(con, run) is None:
+        return
+    state.emit(con, run, "integration.recheck", "run checks changed; integration re-check queued")
+    integration.retrigger(con, run)
 
 
 def _apply_requirements(con, run: dict, proposed: dict, submitter: str) -> None:
@@ -198,6 +219,8 @@ def review_state(con, run: dict) -> dict:
 
 def queue_plan_review(con, run: dict, plan_version: int, *, escalated: bool = False, exclude: list[str] | None = None) -> str | None:
     """Queue one plan-review round. Caller holds the tx."""
+    if (state.get_run(con, run["id"]).get("plan_review") or {}).get("ended_reason") == "waived by the user":
+        return None  # the user waived plan review; no further round runs
     gates = plan_gates(con, run["id"])
     rounds = len([g for g in gates if not g["escalated"]])
     maximum = int((run.get("gates") or {}).get("plan_review_max_rounds") or 1)
@@ -395,4 +418,6 @@ def unpause_cleared(con, run: dict) -> None:
         return
     for t in state.tasks(con, run["id"]):
         if t["status"] == "paused" and t.get("pause_reason") == "plan defect":
-            state.update_task(con, run["id"], t["id"], status="running", pause_reason=None)
+            # Back to where it was: a submitted revision still has gates to finish.
+            from office import gates
+            state.update_task(con, run["id"], t["id"], status=gates.derive_status(con, run, t), pause_reason=None)

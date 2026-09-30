@@ -59,6 +59,10 @@ def plan_for_revision(con, run: dict, task: dict, rev_id: str, changed: list[str
         start_waiting(con, run, task["id"], rev_id)
     if not rows:
         summary.append("no gates configured")
+        # No gate will ever finish to trigger acceptance, so evaluate it now;
+        # the evaluator accepts only when policy explicitly requires no gate.
+        if evaluate_acceptance(con, run, task["id"]):
+            summary.append("accepted (no gate required by policy)")
     return {"gates": rows, "summary": summary}
 
 
@@ -207,9 +211,25 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     excluded = set(exclude or [])
     producer = _producer_route(con, gate)
     failures = []
+    task = state.get_task(con, run["id"], gate["task_id"]) if gate.get("task_id") else None
+    # A user-pinned code reviewer (dispatch --review-as) replaces routing; a
+    # declared executor's family is excluded from routed review.
+    pinned = (task or {}).get("review_override") if role == "code_reviewer" else None
+    producer_model, producer_declared = _producer_model(con, gate)
+    producer_family = candidates.model_family(producer_model)
+    if producer_declared and producer_family and not pinned:
+        excluded.add(f"family:{producer_family}")
     for attempt in range(limit + 1):
-        decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
-                                         exclude=excluded)
+        if pinned:
+            decision = candidates.declared_decision(pinned["as"], flag="--review-as")
+            decision["launch"] = {k: pinned[k] for k in ("cli", "external") if pinned.get(k)}
+            if producer_family and candidates.model_family(decision["candidate"]["model_id"]) == producer_family:
+                failures.append(f"--review-as {pinned['as']} is the same model family ({producer_family}) as the "
+                                f"producer {producer_model}; not independent")
+                break
+        else:
+            decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
+                                             exclude=excluded)
         if decision.get("status") != "selected":
             failures.append(f"no qualifying {role} route ({decision.get('status')})")
             break
@@ -226,14 +246,27 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         from office import dispatch as dispatch_mod
         d = state.get_dispatch(con, dispatch_id)
         profile_kind = kind or ("vision" if visual else "reviewer")
+        launch_form = decision.get("launch") or {}
         dispatch_mod.launch(run, d, profile_kind, ddir, cwd=cwd, wait=True, output=output, images=images,
-                            include_dirs=include_dirs)
+                            include_dirs=include_dirs, cli=launch_form.get("cli"),
+                            external=bool(launch_form.get("external")))
         d = state.get_dispatch(con, dispatch_id)
         text = output.read_text(encoding="utf-8", errors="replace") if output.is_file() and output.stat().st_size else ""
         if not text:
             log = Path(d.get("log_path") or ddir / "output.log")
             text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
         parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual)
+        if not parsed.valid and d.get("launcher") == "herdr":
+            # A pane scrape (TUI chrome, a scrolled-off or wrapped reply) is not
+            # the reviewer's answer; its harness transcript keeps the full reply.
+            spec_file = ddir / "launch.json"
+            spec = json.loads(spec_file.read_text()) if spec_file.is_file() else {}
+            reply = dispatch_mod.transcript_reply(d, spec)
+            if reply:
+                alt = review_parse.parse(_last_block(reply), plan_review=plan_review, visual=visual)
+                if alt.valid:
+                    text, parsed = reply, alt
+                    output.write_text(reply, encoding="utf-8")
         with db.transaction(con):
             state.record_evidence(con, run["id"], "review_output", output if output.is_file() else None,
                                   task_id=gate.get("task_id"), revision_id=gate.get("revision_id"), gate_id=gate["id"],
@@ -244,11 +277,14 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                     "summary": f"{parsed.verdict} by {triple}", "producer_route": producer}
         reason = (f"{triple}: exit {d.get('exit_code')} ({d.get('terminal_classification')})"
                   if d.get("terminal_classification") != "success" else f"{triple}: invalid reply ({'; '.join(parsed.errors[:2])})")
-        if _quota_signature(text):
-            reason += " [quota]"
+        wall = "quota" if _quota_signature(text) else "auth" if _auth_signature(text) else None
+        if wall:
+            reason += f" [{wall}]"
         failures.append(reason)
+        if pinned:
+            break  # the user named this reviewer; never substitute another
         excluded.add(triple)
-        if _quota_signature(text):
+        if wall:
             excluded.add(f"harness:{cand['harness']}")
         elif d.get("terminal_classification") == "success":
             excluded.add(f"model:{cand['harness']}/{cand.get('invocation_model_id')}")
@@ -256,6 +292,19 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             con.execute("UPDATE gates SET env_failures=env_failures+1 WHERE id=?", (gate["id"],))
             con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?", (dispatch_id,))
     return {"verdict": "UNAVAILABLE", "parsed": None, "route": None, "summary": "; ".join(failures)[:600]}
+
+
+def _producer_model(con, gate: dict) -> tuple[str | None, bool]:
+    """(model_id, declared) of the dispatch that produced the gate's revision."""
+    if not gate.get("revision_id"):
+        return None, False
+    row = con.execute("SELECT d.route_json, d.override_json FROM revisions r JOIN dispatches d ON d.id=r.dispatch_id "
+                      "WHERE r.id=?", (gate["revision_id"],)).fetchone()
+    if not row:
+        return None, False
+    cand = (json.loads(row["route_json"] or "{}").get("candidate") or {})
+    declared = bool(json.loads(row["override_json"] or "{}").get("declared"))
+    return cand.get("model_id"), declared
 
 
 def _producer_route(con, gate: dict) -> str | None:
@@ -267,6 +316,7 @@ def _producer_route(con, gate: dict) -> str | None:
 
 
 def _reviewer_dispatch(con, run: dict, gate: dict, role: str, decision: dict) -> str:
+    from office import dispatch as dispatch_mod
     cand = decision["candidate"]
     dispatch_id = "D" + uuid.uuid4().hex[:8]
     con.execute("INSERT INTO dispatches(id, run_id, role, holder_id, triple, invocation_model_id, selection_reason, started_at, "
@@ -275,8 +325,11 @@ def _reviewer_dispatch(con, run: dict, gate: dict, role: str, decision: dict) ->
                 (dispatch_id, run["id"], role, dispatch_id, routing.candidate_id(cand), cand.get("invocation_model_id"),
                  (decision.get("selection_disclosure") or {}).get("reason"), now_iso(), gate.get("task_id"), "reviewer",
                  run["office_version"], "launching", cand["harness"], cand.get("invocation_model_id"), cand.get("effort"),
-                 cand.get("adapter_id"), dumps({"candidate": cand, "selection_disclosure": decision.get("selection_disclosure")}),
-                 gate["id"]))
+                 cand.get("adapter_id"), dumps(dispatch_mod._route_payload(decision)), gate["id"]))
+    if decision.get("override"):
+        con.execute("UPDATE dispatches SET override_json=? WHERE id=?",
+                    (dumps({"by": "user", "declared": True, "triple": routing.candidate_id(cand),
+                            **(decision.get("launch") or {})}), dispatch_id))
     con.execute("INSERT INTO routing_decisions(id, run_id, role, request_hash, selected_triple, decision_hash, created_at) "
                 "VALUES(?,?,?,?,?,?,?)", (uuid.uuid4().hex, run["id"], role, sha256_obj(role + gate["id"]),
                                           decision.get("selected"), decision.get("decision_hash"), now_iso()))
@@ -291,13 +344,20 @@ def _last_block(text: str) -> str:
     if not idx:
         return text
     start = idx[-1]
-    while start > 0 and re.match(r"^\s*(EVIDENCE_STATUS|FINDING|DEFECT|RESOLVED|CLEARED|RETRACT)", lines[start - 1], re.I):
+    while start > 0 and re.match(r"^(EVIDENCE_STATUS|FINDING|DEFECT|RESOLVED|CLEARED|RETRACT)",
+                                 review_parse._clean(lines[start - 1]), re.I):
         start -= 1
     return "\n".join(lines[start:])
 
 
 def _quota_signature(text: str) -> bool:
     return bool(re.search(r"rate.?limit|quota|usage limit|429|too many requests|exhausted", text[-2000:], re.I))
+
+
+def _auth_signature(text: str) -> bool:
+    """The harness is not signed in: every route on it will fail the same way."""
+    return bool(re.search(r"not logged in|please run /login|authentication (failed|required)|unauthorized|\b401\b",
+                          text[-2000:], re.I))
 
 
 def job_review(con, run: dict, job: dict) -> dict:

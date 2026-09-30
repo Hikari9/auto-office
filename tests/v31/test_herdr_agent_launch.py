@@ -18,8 +18,11 @@ code = 0
 if args[:2] == ["pane", "split"]:
     data["n"] += 1
     result = {{"pane": {{"pane_id": "w1:p%d" % (100 + data["n"]), "tab_id": "w1:t1"}}}}
+elif args[:2] == ["agent", "start"] and os.environ.get("FAKE_HERDR_START_FAIL"):
+    code = 1
+    result = {{"error": {{"code": "invalid_agent_name"}}}}
 elif args[:2] == ["pane", "get"]:
-    result = {{"pane": {{"pane_id": args[2]}}}}
+    result = {{"pane": {{"pane_id": args[2], "agent": data.get("pane_agents", {{}}).get(args[2])}}}}
 elif args[:2] == ["agent", "get"]:
     seq = data["get"]
     status = seq.pop(0) if len(seq) > 1 else (seq[0] if seq else "gone")
@@ -27,8 +30,12 @@ elif args[:2] == ["agent", "get"]:
         code = 1
     else:
         result = {{"agent": {{"name": args[2], "status": status}}}}
+elif args[:2] == ["agent", "read"] and os.environ.get("FAKE_HERDR_READ_FAIL"):
+    json.dump(data, open(state, "w"))
+    sys.exit(1)
 elif args[:2] == ["agent", "read"]:
-    print(data.get("content", ""))
+    reads = data.setdefault("reads", [])
+    print(reads.pop(0) if len(reads) > 1 else (reads[0] if reads else data.get("content", "")))
     json.dump(data, open(state, "w"))
     sys.exit(0)
 json.dump(data, open(state, "w"))
@@ -37,12 +44,15 @@ sys.exit(code)
 '''
 
 
-def _fake(env, monkeypatch, gets=()) -> Path:
+BUSY = "Working (1s \u2022 esc to interrupt)"
+
+
+def _fake(env, monkeypatch, gets=(), reads=()) -> Path:
     herdr = env.bin / "herdr"
     herdr.write_text(FAKE_HERDR.format(python=sys.executable))
     herdr.chmod(0o755)
     state = env.tmp / "herdr-state.json"
-    state.write_text(json.dumps({"calls": [], "n": 0, "get": list(gets)}))
+    state.write_text(json.dumps({"calls": [], "n": 0, "get": list(gets), "reads": list(reads)}))
     monkeypatch.setenv("FAKE_HERDR_STATE", str(state))
     return state
 
@@ -69,7 +79,7 @@ def _live_dispatch(env, monkeypatch):
 
 
 def test_herdr_path_starts_the_agent_and_prompts_it(env, monkeypatch):
-    state_file = _fake(env, monkeypatch)
+    state_file = _fake(env, monkeypatch, reads=[BUSY])
     run, d = _live_dispatch(env, monkeypatch)
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
@@ -81,7 +91,8 @@ def test_herdr_path_starts_the_agent_and_prompts_it(env, monkeypatch):
     ddir.mkdir(parents=True, exist_ok=True)
     (ddir / "brief.md").write_text("ROLE executor\n")
     res = dispatch.launch(run, d, "worker", ddir, cwd=env.repo)
-    assert res["launcher"] == "herdr" and res["agent"] == f"office-{d['id']}"
+    assert res["launcher"] == "herdr" and res["agent"] == f"office-{d['id'].lower()}"
+    assert res["prompt_landed"] is True
     calls = _calls(state_file)
     start = next(c for c in calls if c[:2] == ["agent", "start"])
     assert start[start.index("--kind") + 1] == "claude"
@@ -108,7 +119,11 @@ def test_model_and_effort_in_interactive_argv_for_each_harness():
         args, kind = got
         assert kind == harness
         joined = " ".join(args)
-        assert "m-x" in args and "medium" in joined, (harness, args)
+        if harness == "agy":
+            # Native Gemini takes the combined slug (gemini-3.8-flash-medium); no --effort.
+            assert "m-x" in args and "--effort" not in args, args
+        else:
+            assert "m-x" in args and "medium" in joined, (harness, args)
         assert args[0] != harness  # the executable comes from --kind, not the args
 
 
@@ -142,8 +157,10 @@ def test_output_file_or_submit_ends_the_dispatch(env, monkeypatch):
     out = env.tmp / "reply.txt"
     out.write_text("VERDICT: PASS")
     assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
-    # Complete means written and stable across two polls: one sample in between, no done/idle needed.
-    assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 1
+    # Complete means written and stable across two polls (one sample each), no done/idle needed.
+    # At least two: under heavy load a fake-herdr call can time out, which is an
+    # unknown sample and correctly costs one more poll.
+    assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) >= 2
     monkeypatch.setattr(dispatch, "_submitted", lambda con, disp: True)
     assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp), poll=0) == (0, "success")
 
@@ -164,7 +181,7 @@ def test_no_interactive_profile_stays_headless(env, monkeypatch):
 
 
 def test_reviewer_dispatch_launches_read_only_in_herdr(env, monkeypatch):
-    state_file = _fake(env, monkeypatch)
+    state_file = _fake(env, monkeypatch, reads=[BUSY])
     run, d = _live_dispatch(env, monkeypatch)
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
@@ -207,3 +224,192 @@ def test_reviewer_pane_reply_is_kept_when_no_file_was_written(env, monkeypatch):
     out = env.tmp / "reply.txt"
     assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
     assert "VERDICT: PASS" in out.read_text()
+
+
+def test_agent_names_are_valid_for_herdr():
+    import re
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    from office import dispatch
+    for did in ("Dbd54d9db", "D880825EE", "DXYZ_" + "A" * 40):
+        name = dispatch.herdr_agent_name(did)
+        assert re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name), name
+
+
+def _herdr_launch(env, monkeypatch, gets=(), reads=(), adapter="agy"):
+    state_file = _fake(env, monkeypatch, gets=gets, reads=reads)
+    run, d = _live_dispatch(env, monkeypatch)
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
+    monkeypatch.setenv("OFFICE_LAUNCHER", "herdr")
+    monkeypatch.setenv("OFFICE_HERDR_LAND_TIMEOUT", "0")
+    from office import dispatch, paths
+    monkeypatch.setattr(dispatch.frontdoor, "current_argv", lambda: (["true"], {}))
+    d = {**d, "adapter_id": adapter, "model": "gemini-3.8-flash-medium", "effort": "medium"}
+    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    ddir.mkdir(parents=True, exist_ok=True)
+    (ddir / "brief.md").write_text("ROLE executor\n")
+    res = dispatch.launch(run, d, "worker", ddir, cwd=env.repo)
+    return state_file, run, d, res
+
+
+def _launch_events(env, run):
+    con = env.con()
+    try:
+        return [r[0] for r in con.execute("SELECT summary FROM events WHERE run_id=? AND kind='launch'", (run["id"],))]
+    finally:
+        con.close()
+
+
+def test_unlanded_prompt_is_retried_by_typing_it(env, monkeypatch):
+    state_file, run, d, res = _herdr_launch(env, monkeypatch, reads=["> composer empty", BUSY])
+    assert res["launcher"] == "herdr" and res["prompt_landed"] is True
+    calls = _calls(state_file)
+    assert any(c[:2] == ["pane", "send-text"] and "brief.md" in c[3] for c in calls)
+    assert any(c[:2] == ["pane", "send-keys"] and c[-1] == "Enter" for c in calls)
+    assert _launch_events(env, run) == []
+
+
+def test_prompt_that_never_lands_is_reported_not_relaunched(env, monkeypatch):
+    # `working` alone is not proof: codex reports it while a trust dialog holds the composer.
+    state_file, run, d, res = _herdr_launch(env, monkeypatch, gets=["working"], reads=["> composer empty"])
+    assert res["launcher"] == "herdr" and res["prompt_landed"] is False
+    events = _launch_events(env, run)
+    assert len(events) == 1 and "did not land" in events[0] and res["agent"] in events[0]
+
+
+def test_failed_agent_start_is_disclosed_before_headless_fallback(env, monkeypatch):
+    monkeypatch.setenv("FAKE_HERDR_START_FAIL", "1")
+    state_file, run, d, res = _herdr_launch(env, monkeypatch, reads=[BUSY])
+    assert res["launcher"] == "process-fallback"
+    con = env.con()
+    try:
+        assert con.execute("SELECT launcher FROM dispatches WHERE id=?", (d["id"],)).fetchone()[0] == "process-fallback"
+    finally:
+        con.close()
+    events = _launch_events(env, run)
+    assert len(events) == 1 and "herdr agent start failed" in events[0] and "invalid_agent_name" in events[0]
+
+
+def test_busy_pane_never_settles_as_done(env, monkeypatch):
+    state_file = _fake(env, monkeypatch, gets=["idle", "idle", "idle", "idle", "gone"])
+    data = json.loads(state_file.read_text())
+    data["content"] = "Running command...\nesc to cancel    Gemini 3.8 Flash"
+    state_file.write_text(json.dumps(data))
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    # agy reads idle mid-turn; the busy footer keeps it live until the agent is gone.
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp), poll=0) == (None, "nonzero")
+
+
+def test_external_dispatch_writes_agent_env_for_a_manual_launch(env, monkeypatch):
+    _fake(env, monkeypatch)
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import paths
+    env_text = (paths.run_dir(run["id"]) / "dispatches" / d["id"] / "agent.env").read_text()
+    assert f"OFFICE_DISPATCH_ID={d['id']}" in env_text and "OFFICE_ROLE=executor" in env_text
+
+
+def test_stable_output_does_not_settle_while_the_pane_is_busy(env, monkeypatch):
+    state_file = _fake(env, monkeypatch, gets=["working", "working", "working", "gone"], reads=[BUSY])
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: PASS (draft)")
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
+    # It waited through every busy sample and ended only once the agent was gone.
+    assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 4
+
+
+def test_hung_prompt_call_does_not_escape_the_launch(env, monkeypatch):
+    import subprocess as sp
+    from office import dispatch
+    real = sp.run
+
+    def run(args, *a, **k):
+        if list(args[:3]) == ["herdr", "agent", "prompt"]:
+            raise sp.TimeoutExpired(args, 30)
+        return real(args, *a, **k)
+
+    monkeypatch.setattr(dispatch.subprocess, "run", run)
+    state_file, run_, d, res = _herdr_launch(env, monkeypatch, reads=["> composer empty", BUSY])
+    assert res["launcher"] == "herdr" and res["prompt_landed"] is True and res["watcher_pid"]
+
+
+def test_unreadable_pane_never_settles_stable_output_or_idle(env, monkeypatch):
+    monkeypatch.setenv("FAKE_HERDR_READ_FAIL", "1")
+    state_file = _fake(env, monkeypatch, gets=["idle", "idle", "idle", "idle", "gone"])
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: PASS (draft)")
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
+    # Unknown busy state held it open until the agent was gone.
+    assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 5
+
+
+def test_pane_still_holding_a_finished_agent_is_not_reused(env, monkeypatch):
+    state_file = _fake(env, monkeypatch)
+    data = json.loads(state_file.read_text())
+    data["pane_agents"] = {"w1:p50": "codex"}  # ended dispatch, session still in the pane
+    state_file.write_text(json.dumps(data))
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    tab_file = env.tmp / "herdr-tab.json"
+    pane = dispatch._herdr_split_pane(run, env.repo, tab_file, {"mode": "split", "anchor": "w1:pQ", "panes": ["w1:p50"]},
+                                      "w1:pQ")
+    assert pane != "w1:p50" and pane.startswith("w1:p1")
+    assert any(c[:2] == ["pane", "split"] for c in _calls(state_file))
+    # A plain shell pane is still reused.
+    data = json.loads(state_file.read_text()); data["pane_agents"] = {}; state_file.write_text(json.dumps(data))
+    assert dispatch._herdr_split_pane(run, env.repo, tab_file, {"mode": "split", "anchor": "w1:pQ",
+                                                                "panes": ["w1:p50"]}, "w1:pQ") == "w1:p50"
+
+
+def test_persistently_unreadable_pane_is_reported_once(env, monkeypatch):
+    monkeypatch.setenv("FAKE_HERDR_READ_FAIL", "1")
+    monkeypatch.setenv("OFFICE_HERDR_UNKNOWN_LIMIT", "2")
+    _fake(env, monkeypatch, gets=["idle", "idle", "idle", "idle", "gone"])
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp), poll=0) == (None, "nonzero")
+    events = _launch_events(env, run)
+    assert len(events) == 1 and "unreadable for 2 polls" in events[0]
+
+
+def test_unreadable_pane_past_the_limit_accepts_stable_output(env, monkeypatch):
+    monkeypatch.setenv("FAKE_HERDR_READ_FAIL", "1")
+    monkeypatch.setenv("OFFICE_HERDR_UNKNOWN_LIMIT", "3")
+    state_file = _fake(env, monkeypatch, gets=["idle"])  # never gone
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: PASS")
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
+    # The limit is reached on poll 3, which accepts the stable file.
+    assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 3
+    assert any("unreadable for 3 polls" in e for e in _launch_events(env, run))
+
+
+def test_recovered_busy_pane_is_not_settled_by_the_blind_limit(env, monkeypatch):
+    monkeypatch.setenv("OFFICE_HERDR_UNKNOWN_LIMIT", "3")
+    # Two unreadable samples, then the pane reads busy (resetting the count), then the agent exits.
+    state_file = _fake(env, monkeypatch, gets=["working", "working", "working", "gone"], reads=[BUSY])
+    run, d = _live_dispatch(env, monkeypatch)
+    from office import dispatch
+    samples = iter([{"status": "unknown", "content_hash": None, "busy": None}] * 2)
+    real = dispatch._herdr_agent_sample
+    monkeypatch.setattr(dispatch, "_herdr_agent_sample", lambda name: next(samples, None) or real(name))
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: PASS (draft)")
+    assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
+    # It did not settle on the recovered busy samples; it ended only when the agent was gone.
+    assert len([c for c in _calls(state_file) if c[:2] == ["agent", "get"]]) == 4
+
+
+def test_typed_pointer_left_in_the_composer_gets_a_second_enter(env, monkeypatch):
+    monkeypatch.setenv("OFFICE_HERDR_KEY_DELAY", "0")
+    state_file, run, d, res = _herdr_launch(env, monkeypatch, reads=["> composer empty", "> pointer typed, not sent",
+                                                                     BUSY])
+    assert res["prompt_landed"] is True
+    enters = [c for c in _calls(state_file) if c[:2] == ["pane", "send-keys"] and c[-1] == "Enter"]
+    assert len(enters) == 2

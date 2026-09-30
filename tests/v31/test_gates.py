@@ -52,16 +52,19 @@ def test_dirty_edit_with_unchanged_head_invalidates_prior_pass(env):
     (wt / "calc.py").write_text(GOOD_ADD)
     head = env.git("rev-parse", "HEAD", cwd=wt).strip()
     code, out = env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"})
-    assert "rev R1 captured" in out, out
+    con = env.con()
+    rid = con.execute("SELECT id FROM runs").fetchone()[0][:8]
+    R1, R2 = f"R1-{rid}", f"R2-{rid}"
+    assert f"rev {R1} captured" in out, out
     (wt / "calc.py").write_text(GOOD_ADD + "\n# changed without a commit\n")
     assert env.git("rev-parse", "HEAD", cwd=wt).strip() == head
     code, out = env.office("submit", cwd=wt, env=wenv)
-    assert "rev R2 captured" in out and "supersedes R1" in out, out
+    assert f"rev {R2} captured" in out and f"supersedes {R1}" in out, out
     con = env.con()
-    r1 = {r["kind"]: r["status"] for r in con.execute("SELECT kind, status FROM gates WHERE revision_id='R1'")}
+    r1 = {r["kind"]: r["status"] for r in con.execute("SELECT kind, status FROM gates WHERE revision_id=?", (R1,))}
     assert r1 == {"checks": "cancelled", "code_review": "cancelled"}, r1
-    assert con.execute("SELECT verdict FROM gates WHERE revision_id='R2' AND kind='code_review'").fetchone()[0] == "PASS"
-    assert _task(env)["accepted_revision_id"] == "R2"
+    assert con.execute("SELECT verdict FROM gates WHERE revision_id=? AND kind='code_review'", (R2,)).fetchone()[0] == "PASS"
+    assert _task(env)["accepted_revision_id"] == R2
     # Accepted work is closed to further edits from that session.
     (wt / "calc.py").write_text(GOOD_ADD + "\n# after acceptance\n")
     code, out = env.office("submit", cwd=wt, env=wenv)
@@ -79,7 +82,7 @@ def test_stale_pass_is_audit_only(env):
     (wt / "calc.py").write_text(GOOD_ADD + "\n# v2\n")
     env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"}, check=0)
     run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
-    stale_gate = con.execute("SELECT id FROM gates WHERE revision_id='R1' AND kind='checks'").fetchone()[0]
+    stale_gate = con.execute("SELECT id FROM gates WHERE revision_id=? AND kind='checks'", (f"R1-{run['id'][:8]}",)).fetchone()[0]
     con.execute("UPDATE gates SET status='running' WHERE id=?", (stale_gate,))
     with db.transaction(con):
         gates.ingest_task_gate(con, run, stale_gate, {"verdict": "PASS", "parsed": review_parse.Parsed(verdict="PASS"),
@@ -263,3 +266,157 @@ def test_integration_conflict_is_surfaced_not_landed(env):
     assert "integration conflict" in data["next"], data["next"]
     code, out = env.office("close", "--handoff", "x")
     assert code == 4 and "integration conflict" in out, out
+
+
+def test_revision_ids_are_unique_across_runs(env):
+    """revisions.id is a global primary key: a second run's first revision must not collide
+    with any earlier run's R1 (regression: every run after the first failed office submit)."""
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    # A foreign run already holding the bare legacy id and this run's would-be id prefix pattern.
+    con.execute("INSERT INTO revisions(id, run_id, task_id, seq, commit_sha, tree_sha, requirements_version, plan_version, "
+                "applied_version, env_fingerprint, operation_id, status, created_at) VALUES('R1','other-run','T1',1,'x','x',1,1,1,'x','op-foreign','current','t')")
+    con.commit()
+    wenv, wt = _worker(env)
+    code, out = env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"}, check=0)
+    assert f"rev R1-{run_id[:8]} captured" in out, out
+
+
+PLAN_NO_GATES = PLAN_ONE.replace('checks: python3 -c "import calc; assert calc.add(2, 3) == 5"', "checks: none")
+
+
+def test_no_gate_revision_is_accepted_on_submit(env):
+    # Direct gear funds no review and the task declares checks: none, so no gate
+    # exists to finish; acceptance must be evaluated on submit (it hung "submitted").
+    _go(env, plan=PLAN_NO_GATES, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    wenv, wt = _worker(env)
+    code, out = env.office("submit", cwd=wt, env=wenv, check=0)
+    assert code == 0 and "accepted (no gate required by policy)" in out, out
+    assert _task(env)["status"] == "accepted"
+
+
+def test_stuck_no_gate_revision_is_accepted_by_reconcile(env):
+    _go(env, plan=PLAN_NO_GATES, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    wenv, wt = _worker(env)
+    env.office("submit", cwd=wt, env=wenv, check=0)
+    # Put it back the way an older runtime left it: submitted, no gates, never evaluated.
+    con = env.con()
+    con.execute("UPDATE tasks SET status='submitted', accepted_revision_id=NULL WHERE id='T1'")
+    con.commit()
+    assert _task(env)["status"] == "submitted"
+    env.office("status", check=0)
+    assert _task(env)["status"] == "accepted"
+
+
+def test_revision_with_checks_is_not_accepted_without_them(env):
+    # The no-gate path must not accept a task whose checks never ran.
+    _go(env, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    wenv, wt = _worker(env)
+    env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"}, check=0)
+    env.office("status", check=0)
+    assert _task(env)["status"] != "accepted"
+
+
+def test_not_logged_in_reviewer_skips_the_whole_harness(env):
+    # Every route on a harness that is not signed in fails the same way; the
+    # retry must not spend the bound on the same harness's other models.
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+        **{"codex:code_reviewer": [{"stderr": "Not logged in · Please run /login", "exit": 1}],
+           "claude:code_reviewer": [{"reply": "VERDICT: PASS"}], "gemini:code_reviewer": [{"reply": "VERDICT: PASS"}]})
+    env.office("dispatch", "T1", check=0)
+    assert _task(env)["status"] == "accepted"
+    reviewers = [c["harness"] for c in env.calls() if c.get("role") == "code_reviewer"]
+    assert reviewers.count("codex") == 1 and reviewers[-1] != "codex", reviewers
+
+
+def test_amendment_for_an_earlier_session_does_not_hold_a_relaunch(env):
+    # An amendment delivered to D1, then the task relaunched as D2 (e.g. an
+    # external relaunch): D2 starts from the amended contract, so its submit must
+    # not sit at amendment_pending waiting on an ack only D1 could give.
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    env.office("amend", "T1", "--", "also handle negative numbers the same way", check=0)
+    env.office("revoke", "T1", check=0)
+    code, out = env.office("dispatch", "T1", env=EXTERNAL)
+    assert code == 0, out
+    con = env.con()
+    assert [r[0] for r in con.execute("SELECT status FROM deliveries")] == ["superseded"]
+    wenv, wt = _worker(env)
+    (wt / "calc.py").write_text(GOOD_ADD)
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert "captured" in out and "amendment pending" not in out, out
+    assert _task(env)["status"] == "accepted"
+
+
+def test_requirements_amendment_follows_a_relaunch_to_the_new_session(env):
+    # A requirements change targets a plan version past the task contract, so the
+    # relaunch rule above does not supersede it. It must move to the new session
+    # (the only one that can ack it) instead of holding every submit forever.
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    env.office("amend", "requirements", "--quote", "also log each call", "--", "R9: log each call", check=0)
+    env.office("approve", "plan", "--quote", "approve", check=0)
+    con = env.con()
+    # Other tasks' amendments had moved the plan past this task's contract (the
+    # live run: A7 at p6 against a p2 contract).
+    con.execute("UPDATE deliveries SET target_version=target_version+4 WHERE status IN ('queued','delivered')")
+    con.commit()
+    env.office("revoke", "T1", check=0)
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    con = env.con()
+    current = _task(env)["current_dispatch_id"]
+    pending = con.execute("SELECT amendment_id, dispatch_id FROM deliveries WHERE status IN ('queued','delivered')").fetchall()
+    assert pending and all(r["dispatch_id"] == current for r in pending), [dict(r) for r in con.execute("SELECT amendment_id, status, dispatch_id, target_version FROM deliveries")]
+    _, out = env.office("status", check=0)
+    assert "T1 waiting:" in out and pending[0]["amendment_id"] in out, out
+    wenv, wt = _worker(env)
+    for r in pending:
+        env.office("ack", r["amendment_id"], cwd=wt, env=wenv, check=0)
+    (wt / "calc.py").write_text(GOOD_ADD)
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert "amendment pending" not in out, out
+    assert _task(env)["status"] == "accepted"
+
+
+def test_current_session_can_ack_an_amendment_left_on_an_ended_session(env):
+    # State an older runtime left behind: the delivery still names an ended
+    # session. The task's current session acks it instead of being refused.
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    first = _task(env)["current_dispatch_id"]
+    env.office("revoke", "T1", check=0)
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    env.office("amend", "T1", "--", "also handle negative numbers the same way", check=0)
+    con = env.con()
+    con.execute("UPDATE dispatches SET ended_at=COALESCE(ended_at, started_at), status='cancelled' WHERE id=?", (first,))
+    con.execute("UPDATE deliveries SET dispatch_id=? WHERE status IN ('queued','delivered')", (first,))
+    con.commit()
+    aid = con.execute("SELECT amendment_id FROM deliveries WHERE status IN ('queued','delivered')").fetchone()[0]
+    wenv, wt = _worker(env)
+    code, out = env.office("ack", aid, cwd=wt, env=wenv)
+    assert code == 0 and "applied" in out, out
+
+
+def test_headless_worker_past_its_wall_cap_is_stopped_and_surfaces(env):
+    # agy once idled 3.5h past its own --print-timeout; the supervisor's cap
+    # stops it, relaunches within the bound, then blocks with a named reason.
+    _go(env, executor=[{"sleep": 60}, {"sleep": 60}, {"sleep": 60}])
+    code, out = env.office("dispatch", "T1", env={"OFFICE_WORKER_MAX_MINUTES": "0.02"}, check=0)
+    t = _task(env)
+    assert t["status"] == "blocked" and "timeout" in (t["pause_reason"] or ""), t
+    con = env.con()
+    assert {r[0] for r in con.execute("SELECT terminal_classification FROM dispatches WHERE role='executor'")} == {"timeout"}
+
+
+def test_agy_profiles_carry_a_wall_cap():
+    import sys as _s
+    _s.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    from office import adapters, dispatch
+    agy = adapters.load_all()["agy"]
+    assert dispatch._wall_cap_seconds(adapters.profile(agy, "worker")) == 50 * 60
+    assert dispatch._wall_cap_seconds(adapters.profile(adapters.load_all()["claude"], "worker")) is None
