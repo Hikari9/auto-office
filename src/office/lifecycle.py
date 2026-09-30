@@ -190,7 +190,8 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
         _release_all(con, run["id"], "closed")
         _end_bindings(con, run["id"])
     state.write_projection(con, run["id"])
-    from office import dispatch
+    from office import dispatch, rerun
+    rerun.reclaim_all(run)  # snapshot, then close each dispatch pane
     dispatch.close_herdr_tab(run)
     return Result(lines=[f"{short(run['id'])} closed | archive receipt {receipt['digest'][7:15]}"],
                   data={"archive_digest": receipt["digest"]})
@@ -223,7 +224,8 @@ def abandon(con, run: dict, reason: str) -> Result:
             except OSError:
                 pass
     state.write_projection(con, run["id"])
-    from office import dispatch
+    from office import dispatch, rerun
+    rerun.reclaim_all(run)  # snapshot, then close each dispatch pane
     dispatch.close_herdr_tab(run)
     return Result(lines=[f"{short(run['id'])} abandoned | work preserved in its worktrees until office prune -f"])
 

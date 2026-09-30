@@ -132,6 +132,22 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
     return argv, prof
 
 
+def resume_argv(adapter: dict, kind: str, *, session_id: str, model: str, effort: str, cwd: Path,
+                include_dirs: list[Path] | None = None) -> tuple[list[str], str] | None:
+    """(agent args, herdr kind) that reopen `session_id` in a pane, or None when
+    the profile declares no `interactive.resume_argv` (the harness cannot resume).
+    The resume args follow the profile's interactive args, `{session_id}` filled in."""
+    prof = profile(adapter, kind) or {}
+    form = (prof.get("interactive") or {}).get("resume_argv")
+    if not form or not session_id:
+        return None
+    base = interactive_argv(adapter, kind, model=model, effort=effort, cwd=cwd, include_dirs=include_dirs)
+    if base is None:
+        return None
+    args, herdr_kind = base
+    return args + [str(a).replace("{session_id}", session_id) for a in form], herdr_kind
+
+
 def interactive_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
                      include_dirs: list[Path] | None = None) -> tuple[list[str], str] | None:
     """(agent args, herdr kind) for a pane-hosted interactive session, or None
