@@ -44,6 +44,14 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
                       scope="plan", next_step=f"revise {plan_path} to follow the redirect, then submit again")
     if current and current["content_hash"] == digest:
         return Result(lines=[f"plan p{current['version']} already submitted"], next=_after_plan_next(con, run))
+    from office import visual
+    visual_errors, visual_warnings = visual.preflight(parsed.tasks)
+    if visual_errors:
+        raise Refused("plan-visual-uncapturable", "the visual gate could never capture: " + "; ".join(visual_errors[:4]),
+                      scope="plan", preserved=f"{plan_path} is unchanged",
+                      next_step=f"fix the visual block in {plan_path}, then office submit",
+                      data={"errors": visual_errors})
+    parsed.warnings[:0] = visual_warnings
     res = Result()
     with db.transaction(con):
         run = state.get_run(con, run["id"])

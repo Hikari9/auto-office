@@ -34,3 +34,23 @@ def test_proven_route_has_no_approve_command(env):
     assert code == 0, out
     executor = [l for l in _trust_lines(out) if l.startswith("trust executor ")]
     assert executor and all(l.endswith(": proven") for l in executor), out
+
+
+def test_visual_route_without_a_current_vision_proof_says_so(env):
+    """#211: trust `proven` is not vision. A proof on an older harness version
+    no longer counts, and the trust line must say why the route is rejected."""
+    from office import candidates
+    env.trust()
+    con = env.con()
+    cands, _ = candidates.build_candidates(con, "visual_reviewer", probe=False)
+    assert cands
+    c = cands[0]
+    con.execute("INSERT INTO capability_proofs(key, harness, harness_version, model, effort, adapter_hash, capability, "
+                "result, details, proved_at) VALUES('stale', ?, '0.0.1', ?, ?, 'sha256:old', 'vision', 'pass', '', "
+                "'2026-09-27T00:00:00+00:00')", (c["harness"], c["invocation_model_id"], c["effort"]))
+    code, out = env.office("start", "fixture goal", "--planner", "inline")
+    assert code == 0, out
+    visual = [l for l in _trust_lines(out) if l.startswith("trust visual_reviewer ")]
+    assert visual and all("vision" in l and "office doctor --probe-vision" in l for l in visual), out
+    assert any("last pass on 0.0.1, 2026-09-27" in l for l in visual), out
+    assert any("never probed" in l for l in visual) == (len(visual) > 1), out

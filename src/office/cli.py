@@ -178,6 +178,8 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("extra", nargs="*")
     s.add_argument("--quote")
     s.add_argument("--root-cause", help="with waive P<n>: why the user judged the defect wrong")
+    s.add_argument("--by", help="approve visual: the reviewer route that wrote --report (harness/model[@effort])")
+    s.add_argument("--report", help="approve visual: the review file to record as the visual gate result")
     s = sp.add_parser("revoke", parents=[common])
     s.add_argument("task")
     s.add_argument("--reason", default="orchestrator revoke")
@@ -396,7 +398,8 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return inspect_cmd.inspect(con, run, args.what, args.ident)
     if cmd == "approve":
         from office import authority
-        return authority.approve(con, run, args.target, args.quote, args.extra, root_cause=args.root_cause)
+        return authority.approve(con, run, args.target, args.quote, args.extra, root_cause=args.root_cause,
+                                 by=args.by, report=args.report)
     if cmd == "revoke":
         from office import dispatch
         return dispatch.revoke(con, run, args.task.upper(), args.reason)

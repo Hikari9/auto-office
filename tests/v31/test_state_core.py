@@ -146,3 +146,19 @@ def test_projection_edits_have_no_effect(env):
     open(f"{run['state_dir']}/view.json", "w").write(json.dumps(view))
     code, data = env.ojson("status")
     assert data["data"]["phase"] == "planning"
+
+
+def test_migration_adds_columns_to_a_db_already_at_the_current_version(env):
+    """#211: #200 added pane columns without a version bump, so a runs.db
+    already stamped current never got them. Drift, not the stamp, decides."""
+    from office import db, paths
+    env.con().close()
+    raw = sqlite3.connect(str(paths.runs_db()))
+    raw.execute("ALTER TABLE dispatches DROP COLUMN pane_closed_at")
+    raw.execute("DROP TABLE deviations")
+    raw.commit()
+    raw.close()
+    con = db.connect()
+    assert "pane_closed_at" in {r[1] for r in con.execute("PRAGMA table_info(dispatches)")}
+    assert con.execute("SELECT 1 FROM sqlite_master WHERE name='deviations'").fetchone()
+    assert not db._drifted(con)

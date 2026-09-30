@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from pathlib import Path
 
 from office import db, jobs, routing, scoring, state
 from office.result import Result
@@ -15,7 +16,7 @@ from office.util import dumps, now_iso, short
 
 
 def approve(con, run: dict, target: str, quote: str | None, extra: list[str] | None = None,
-            root_cause: str | None = None) -> Result:
+            root_cause: str | None = None, *, by: str | None = None, report: str | None = None) -> Result:
     import os
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-approve", "a worker cannot approve anything")
@@ -39,6 +40,10 @@ def approve(con, run: dict, target: str, quote: str | None, extra: list[str] | N
         if not extra:
             raise Usage("missing-gate", "name what to waive", next_step="office approve waive <T2:visual|plan-review|P3> --quote ...")
         return _waive(con, run, extra[0], quote, root_cause)
+    if t == "visual":
+        if not extra or not by or not report:
+            raise Usage("missing-visual-verdict", "name the task, the reviewer, and its report", next_step=VISUAL_USAGE)
+        return _visual_verdict(con, run, extra[0].upper(), by, Path(report).expanduser(), quote)
     raise Usage("unknown-authority", f"nothing named {target!r} needs approval",
                 next_step="office status shows any authority the run needs")
 
@@ -138,6 +143,69 @@ def _waive(con, run, spec: str, quote: str, root_cause: str | None = None) -> Re
             line = f"{tid} {kind} gate waived by the user; the gap is recorded on the task"
     jobs.kick(con, run["id"])
     return Result(lines=[line], next="exceptions only; office status")
+
+
+VISUAL_USAGE = ('office approve visual T2 --by <harness>/<model>[@effort] --report <review file> '
+                '--quote "<user\'s words>"')
+
+
+def _visual_verdict(con, run, tid: str, by: str, report: Path, quote: str) -> Result:
+    """#211: record a visual review the user had run outside Office as the
+    task's visual gate result. The report must parse in the visual format and
+    the reviewer must not share the producer's model family; acceptance is
+    still evaluated by the runtime against every other gate."""
+    from office import candidates, gates, review_parse
+    if not report.is_file():
+        raise Usage("no-report", f"no review file at {report}", next_step=VISUAL_USAGE)
+    reviewer = candidates.parse_route_override(by)
+    if not reviewer.get("harness") or not reviewer.get("model_id"):
+        raise Usage("invalid-reviewer", f"--by {by!r}: expected <harness>/<model>[@effort]", next_step=VISUAL_USAGE)
+    parsed = review_parse.parse(gates._last_block(report.read_text(encoding="utf-8", errors="replace")), visual=True)
+    if not parsed.valid:
+        raise Refused("report-invalid", "the report is not a valid visual review: " + "; ".join(parsed.errors[:3]),
+                      next_step="have the reviewer rewrite it in the visual review format, then retry")
+    if parsed.verdict not in ("PASS", "CHANGES_REQUIRED"):
+        raise Refused("report-not-a-verdict", f"the report's verdict is {parsed.verdict}; only PASS or "
+                      "CHANGES_REQUIRED can stand in for the gate", next_step=f"office approve waive {tid}:visual")
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        task = state.get_task(con, run["id"], tid)
+        if task is None or not task.get("current_revision_id"):
+            raise Usage("unknown-task", f"{tid} has no submitted revision to review")
+        rev_id = task["current_revision_id"]
+        latest = [g for g in gates.required_gates(con, run, task, rev_id) if g["kind"] == "visual"]
+        if not latest:
+            raise Refused("no-visual-gate", f"{tid} revision {rev_id} has no visual gate", next_step="office status")
+        prior = latest[0]
+        if prior["status"] in ("queued", "running", "waiting"):
+            raise Refused("visual-gate-busy", f"{tid} visual gate {prior['id']} is {prior['status']}; Office is still "
+                          "running it", next_step="office wait, then retry if it ends UNAVAILABLE")
+        if prior["verdict"] == "PASS":
+            return Result(lines=[f"{tid} visual gate already PASS on {rev_id}"], next="office status")
+        producer_model, _ = gates._producer_model(con, prior)
+        family = candidates.model_family(producer_model)
+        if family and candidates.model_family(reviewer["model_id"]) == family:
+            raise Refused("not-independent", f"{by} is the same model family ({family}) as the producer "
+                          f"{producer_model}; a producer cannot approve its own work",
+                          next_step="use a reviewer from a different model family")
+        gid = gates._new_gate(con, run, task, rev_id, "visual", prior["input_key"] + ":external", "running",
+                              round_no=prior["round"])
+        con.execute("INSERT INTO authorizations(id, run_id, kind, target, requirements_version, authorized_by, quote, created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?)", ("Z" + uuid.uuid4().hex[:8], run["id"], "external-visual", f"{tid}:{gid}",
+                                                run["requirements_version"], "user", quote.strip(), now_iso()))
+        state.record_evidence(con, run["id"], "review_output", report, task_id=tid, revision_id=rev_id, gate_id=gid,
+                              meta={"route": by, "external": True, "replaces_gate": prior["id"]})
+        if task["status"] in ("paused", "blocked"):
+            state.update_task(con, run["id"], tid, status="submitted", pause_reason=None)
+        state.emit(con, run, "authority.external_visual", f"user recorded an external visual review of {tid} by {by}",
+                   task_id=tid)
+        gates.ingest_task_gate(con, run, gid, {"verdict": parsed.verdict, "parsed": parsed, "route": by,
+                                               "evidence_status": parsed.evidence_status,
+                                               "summary": f"{parsed.verdict} by {by} (external, recorded by the user)"})
+        status = state.get_task(con, run["id"], tid)["status"]
+    jobs.kick(con, run["id"])
+    return Result(lines=[f"{tid} visual {parsed.verdict} by {by} recorded on {rev_id} | {tid} {status}"],
+                  next="exceptions only; office status")
 
 
 def waived(con, run_id: str, task_id: str) -> set[str]:
