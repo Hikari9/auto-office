@@ -22,7 +22,12 @@ fi
 stamp="$(shasum pyproject.toml | cut -d' ' -f1)"
 if [ "$(cat .venv/.validate-stamp 2>/dev/null)" != "$stamp" ]; then
   echo "== Installing package and test deps"
-  .venv/bin/python3 -m pip install -q -e '.[test]' build
+  # A .venv made by `uv run`/`uv venv` has no pip; install through uv when that is the case.
+  if .venv/bin/python3 -m pip --version >/dev/null 2>&1; then
+    .venv/bin/python3 -m pip install -q -e '.[test]' build
+  else
+    uv pip install -q --python .venv/bin/python3 -e '.[test]' build
+  fi
   echo "$stamp" > .venv/.validate-stamp
 fi
 export PATH="$PWD/.venv/bin:$PATH"
