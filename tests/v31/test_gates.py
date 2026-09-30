@@ -153,6 +153,12 @@ def test_repeated_finding_stops_after_one_escalation(env):
                        {"write": {"calc.py": GOOD_ADD + "# try 3\n"}, "submit": True}],
         code_reviewer=[{"reply": finding}])
     env.office("dispatch", "T1", check=0)
+    # Each fix round is the orchestrator's choice now (R8): rerun fresh until
+    # convergence gives up.
+    for _ in range(3):
+        if _task(env)["status"] != "changes_required":
+            break
+        env.office("rerun", "T1", "--fresh", check=0)
     t = _task(env)
     assert t["status"] == "paused", t
     assert "escalation" in t["pause_reason"] or "exhausted" in t["pause_reason"], t["pause_reason"]
@@ -164,18 +170,18 @@ def test_repeated_finding_stops_after_one_escalation(env):
     assert "resolve T1" in data["next"]
 
 
-def test_invalid_reviewer_reply_falls_back_then_blocks(env):
-    # Every installed route returns an unparseable reply.
+def test_invalid_reviewer_reply_is_kept_not_substituted(env):
+    # R11: an unparseable reply is the reviewer's work, not a route failure. No
+    # other reviewer is tried and the gate is never UNAVAILABLE for this reason.
     _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
         code_reviewer=[{"reply": "Looks great to me!"}])
     env.office("dispatch", "T1", check=0)
     t = _task(env)
-    assert t["status"] == "blocked" and "unavailable" in t["pause_reason"], t
+    assert t["status"] == "blocked" and "needs attention" in t["pause_reason"], t
     con = env.con()
     g = con.execute("SELECT verdict, env_failures FROM gates WHERE kind='code_review'").fetchone()
-    assert g["verdict"] == "UNAVAILABLE" and g["env_failures"] >= 2
-    models = {r[0] for r in con.execute("SELECT model FROM dispatches WHERE role='code_reviewer'")}
-    assert len(models) >= 2, models  # substituted a different model each time before giving up
+    assert g["verdict"] == "ATTENTION" and g["env_failures"] == 0
+    assert con.execute("SELECT COUNT(*) FROM dispatches WHERE role='code_reviewer'").fetchone()[0] == 1
 
 
 def test_quota_failure_substitutes_route(env):

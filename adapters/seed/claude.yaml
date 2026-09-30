@@ -61,20 +61,21 @@ office_profiles:
     herdr_kind: claude
     interactive:
       argv: [--model, "{model}", --effort, "{effort}", --permission-mode, bypassPermissions, --add-dir, "{cwd}"]
+      resume_argv: [--resume, "{session_id}"]
   reviewer:
-    argv: [-p, --model, "{model}", --effort, "{effort}", --allowedTools, "Read,Grep,Glob", --disallowedTools, "Edit,Write,Bash,NotebookEdit", --output-format, text, "{include_dirs}"]
+    argv: [-p, --model, "{model}", --effort, "{effort}", --allowedTools, "Read,Grep,Glob,Write", --disallowedTools, "Edit,Bash,NotebookEdit", --add-dir, "{output_dir}", --output-format, text, "{include_dirs}"]
     include_arg: [--add-dir, "{dir}"]
     prompt: stdin
     output: stdout
     herdr_kind: claude
     interactive:
-      argv: [--model, "{model}", --effort, "{effort}", --allowedTools, "Read,Grep,Glob", --disallowedTools, "Edit,Write,Bash,NotebookEdit", "{include_dirs}"]
+      argv: [--model, "{model}", --effort, "{effort}", --allowedTools, "Read,Grep,Glob,Write", --disallowedTools, "Edit,Bash,NotebookEdit", --add-dir, "{output_dir}", "{include_dirs}"]
   vision:
-    argv: [-p, --model, "{model}", --effort, "{effort}", --allowedTools, "Read,Grep,Glob", --disallowedTools, "Edit,Write,Bash,NotebookEdit", --output-format, text, "{include_dirs}"]
+    argv: [-p, --model, "{model}", --effort, "{effort}", --allowedTools, "Read,Grep,Glob,Write", --disallowedTools, "Edit,Bash,NotebookEdit", --add-dir, "{output_dir}", --output-format, text, "{include_dirs}"]
     include_arg: [--add-dir, "{dir}"]
     image_transport: prompt-path
     prompt: stdin
     output: stdout
     herdr_kind: claude
     interactive:
-      argv: [--model, "{model}", --effort, "{effort}", --allowedTools, "Read,Grep,Glob", --disallowedTools, "Edit,Write,Bash,NotebookEdit", "{include_dirs}"]
+      argv: [--model, "{model}", --effort, "{effort}", --allowedTools, "Read,Grep,Glob,Write", --disallowedTools, "Edit,Bash,NotebookEdit", --add-dir, "{output_dir}", "{include_dirs}"]

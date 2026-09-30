@@ -126,8 +126,14 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
             if argv and argv[-1].startswith("-"):
                 argv.pop()
             continue
+        if "{output_dir}" in arg and not output:
+            # No reply file (a worker): drop the flag that grants its directory.
+            if argv and argv[-1].startswith("-"):
+                argv.pop()
+            continue
         arg = (arg.replace("{model}", model).replace("{effort}", mapped_effort or "")
-               .replace("{cwd}", str(cwd)).replace("{output}", str(output or "")))
+               .replace("{cwd}", str(cwd)).replace("{output_dir}", str(Path(output).parent) if output else "")
+               .replace("{output}", str(output or "")))
         argv.append(arg)
     return argv, prof
 
@@ -149,7 +155,7 @@ def resume_argv(adapter: dict, kind: str, *, session_id: str, model: str, effort
 
 
 def interactive_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
-                     include_dirs: list[Path] | None = None) -> tuple[list[str], str] | None:
+                     include_dirs: list[Path] | None = None, output: Path | None = None) -> tuple[list[str], str] | None:
     """(agent args, herdr kind) for a pane-hosted interactive session, or None
     when the profile has no interactive form. The args follow `herdr agent
     start ... --`, so the executable itself is not included."""
@@ -159,5 +165,5 @@ def interactive_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: 
         return None
     form = {"argv": inter["argv"], "include_arg": prof.get("include_arg")}
     argv, _ = build_argv({**adapter, "office_profiles": {kind: form}}, kind,
-                         model=model, effort=effort, cwd=cwd, include_dirs=include_dirs)
+                         model=model, effort=effort, cwd=cwd, include_dirs=include_dirs, output=output)
     return argv[1:], prof["herdr_kind"]

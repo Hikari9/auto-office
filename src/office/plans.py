@@ -260,6 +260,10 @@ def require_dispatchable(con, run: dict) -> None:
         if rs["first_verdict"] is None:
             raise Refused("plan-review-pending", "the first plan review has not returned", scope="plan",
                           next_step="no action; the verdict will return here (office status)")
+        if rs["last_verdict"] == "ATTENTION":
+            raise Refused("plan-review-attention", "the plan reviewer answered but left no readable reply file",
+                          scope="plan", next_step='re-prompt the reviewer in its pane to write the file, or the user may '
+                                                'waive: office approve waive plan-review --quote "<words>"')
         if rs["first_verdict"] == "UNAVAILABLE" and rs["last_verdict"] in (None, "UNAVAILABLE"):
             raise Refused("plan-review-unavailable", "no plan reviewer could review the plan", scope="plan",
                           next_step='resolve the reviewer route, or the user may waive: office approve waive plan-review --quote "<words>"')
@@ -344,6 +348,13 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
         paused = pause_for_defects(con, run)
         state.emit(con, run, "plan.defect", f"PLAN {verdict} p{gate['plan_version']}"
                    + (f"; paused {', '.join(paused)}" if paused else ""))
+    elif verdict == "ATTENTION":
+        # The plan reviewer answered but left no readable reply file after
+        # re-prompting; its pane is kept and the orchestrator decides (R11).
+        state.emit(con, run, "plan.attention", f"PLAN REVIEW p{gate['plan_version']} needs attention: "
+                   f"{outcome.get('summary', '')[:240]}")
+        state.update_run(con, run["id"], plan_review=pr)
+        return
     else:
         state.emit(con, run, "plan.unavailable", f"PLAN REVIEW UNAVAILABLE p{gate['plan_version']}: "
                    f"{outcome.get('summary') or 'no qualifying reviewer answered'}")

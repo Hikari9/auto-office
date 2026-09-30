@@ -540,7 +540,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
             argv_cli = shlex.split(cli)
             inter = (argv_cli[1:], Path(argv_cli[0]).name)
         else:
-            inter = _interactive(dispatch, kind, cwd, include_dirs)
+            inter = _interactive(dispatch, kind, cwd, include_dirs, output=output)
         pane = _herdr_pane(run, cwd, label=f"office {dispatch.get('role') or kind} {dispatch['id']}") if inter else None
         if inter and not pane:
             _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
@@ -631,13 +631,14 @@ def _wall_cap_seconds(prof: dict) -> float | None:
         return None
 
 
-def _interactive(dispatch: dict, kind: str, cwd: Path, include_dirs: list[Path] | None = None) -> tuple[list[str], str] | None:
+def _interactive(dispatch: dict, kind: str, cwd: Path, include_dirs: list[Path] | None = None,
+                 output: Path | None = None) -> tuple[list[str], str] | None:
     """The pane-hosted form of this dispatch's harness, or None (headless)."""
     adapter = adapters.load_all().get(dispatch.get("adapter_id") or "")
     if not adapter or not dispatch.get("model"):
         return None
     return adapters.interactive_argv(adapter, kind, model=dispatch["model"], effort=dispatch.get("effort") or "none",
-                                     cwd=cwd, include_dirs=include_dirs)
+                                     cwd=cwd, include_dirs=include_dirs, output=output)
 
 
 def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = True) -> Path:
@@ -689,8 +690,8 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     else:
         images = f" Inspect each evidence image: {' '.join(spec['images'])}." if spec.get("images") else ""
         pointer = (f"Read and carry out the review brief at {spec['prompt_file']} exactly.{images} "
-                   f"Write your complete review to {spec['output']}. If your tools cannot write files, "
-                   "end your reply with the complete review instead. Do not edit anything else.")
+                   f"Write your complete review to {spec['output']}; Office reads only that file, never "
+                   "your terminal. Do not edit anything else.")
     landed = _deliver_prompt(name, pane, pointer)
     if not landed:
         # The agent is up in a pane the user can see; a second headless copy
@@ -870,13 +871,9 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
         if (len(window) == stable_samples and all(w["status"] in ("done", "idle") for w in window)
                 and all(w.get("busy") is False for w in window)
                 and len({w["content_hash"] for w in window}) == 1):
-            if output and not (output.is_file() and output.stat().st_size):
-                # A read-only reviewer that could not write the file left its
-                # review in its session: its harness transcript holds the full
-                # reply; the pane screen (chrome, wrapping, scrollback) is the
-                # last resort.
-                reply = transcript_reply(d, spec)
-                output.write_text(reply or _herdr_agent_text(spec["herdr_agent"]) or "", encoding="utf-8")
+            # A reviewer's result is only its reply file (R13). A missing file is
+            # left missing: run_reviewer re-prompts the same session to write it
+            # (R11); pane or transcript text is never taken as the review.
             return 0, "success"
         time.sleep(poll)
 
@@ -1283,9 +1280,10 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
     if task is None or task["current_dispatch_id"] != dispatch_id:
         return
     if task["status"] == "changes_required":
-        # Findings arrived while this session was still alive; it ended without
-        # acting on them, so the next fix round starts in a fresh session.
-        request_launch(con, run, task["id"], role=d["role"], fix_of=task.get("current_revision_id"))
+        # Findings arrived while this session was alive and it ended without
+        # acting on them: they wait for the orchestrator (office rerun), R8.
+        state.emit(con, run, "task.findings_queued", f"{task['id']} worker ended with findings open: "
+                   f"office rerun {task['id']} --resume | --fresh", task_id=task["id"])
         return
     if task["status"] in ("running", "launching"):
         submitted = con.execute("SELECT 1 FROM revisions WHERE dispatch_id=?", (dispatch_id,)).fetchone()
