@@ -26,7 +26,8 @@ def test_submit_shows_parallel_lanes_routes_and_checkpoints(env):
     assert out.count("off base") == 2, out
     assert "why: " in out and "review: " in out, out
     assert ("checkpoints: T1 accepted [checks, code review] -> T2 accepted [checks, code review] "
-            "-> integration review -> closeout") in out, out
+            "-> integration review -> handoff PR (task PRs off: no origin remote)") in out, out
+    assert "end state: ask" in out, out
     body = (env.repo / ".office" / "PLAN.md").read_text()
     assert planfile.DIAGRAM_BEGIN in body and planfile.DIAGRAM_END in body
     # The generated block is output, not plan content: resubmitting is a no-op.

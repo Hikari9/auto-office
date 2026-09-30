@@ -152,7 +152,7 @@ def _apply_requirements(con, run: dict, proposed: dict, submitter: str) -> None:
     cur = state.current_requirements(con, run["id"])
     frozen = dict(cur["frozen"])
     merged = dict(frozen)
-    for key in ("done_criteria", "blast_radius", "non_goals", "named_actions"):
+    for key in ("done_criteria", "blast_radius", "non_goals", "named_actions", "end_state", "deploy"):
         if proposed.get(key):
             merged[key] = proposed[key]
     if proposed.get("goal"):

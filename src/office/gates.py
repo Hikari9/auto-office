@@ -902,6 +902,12 @@ def landing_state(con, run: dict, handoff: str | None) -> dict:
     commit = integration.final_commit(con, run)
     if not commit:
         return {"status": "none", "detail": "no accepted work"}
+    recorded = state.get_run(con, run["id"]).get("landing") or {}
+    if recorded.get("merged"):
+        return {"status": "landed", "detail": f"task PRs merged at {recorded['merged']['commit'][:12]}",
+                "commit": recorded["merged"]["commit"]}
+    if recorded.get("delivered"):
+        return {"status": "landed", "detail": recorded["delivered"], "commit": commit}
     repo = Path(run["repo_root"])
     for target in ("origin/main", "main", "origin/master", "master"):
         proc = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", target], capture_output=True, text=True)

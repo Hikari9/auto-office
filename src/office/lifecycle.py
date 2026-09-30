@@ -35,7 +35,8 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
           blast_radius: str | None = None, size_class: str | None = None, irreversible: bool = False,
           volume: bool = False, interview: bool = False, adversarial: bool = False,
           sets: list[str] | None = None, harness: str | None = None, session: str | None = None,
-          base: str | None = None, planner: str | None = None, issue: str | None = None) -> Result:
+          base: str | None = None, planner: str | None = None, issue: str | None = None,
+          no_prs: bool = False) -> Result:
     if not goal or not goal.strip():
         raise Usage("missing-goal", "office start needs a goal", next_step='office start "<goal>"')
     ident = paths.repo_identity(cwd)
@@ -82,8 +83,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                  sha256_obj(config), "planning", ver, str(top), str(common), goal.strip(), "planning", gear,
                  playbook, base_sha, str(sdir), 1, 0, 1, dumps(config), dumps(risk), dumps(gates), dumps([]),
                  dumps(plan_review), planner_mode, now))
-            if issue:
-                con.execute("UPDATE runs SET landing_json=? WHERE id=?", (dumps({"issue": issue}), run_id))
+            landing = {**({"issue": issue} if issue else {}),
+                       **({"prs": {"enabled": False, "reason": "--no-prs"}} if no_prs else {})}
+            if landing:
+                con.execute("UPDATE runs SET landing_json=? WHERE id=?", (dumps(landing), run_id))
             con.execute("INSERT INTO requirements(run_id, version, frozen_json, source, quote, created_at) "
                         "VALUES(?,?,?,?,?,?)", (run_id, 1, dumps(frozen), "start", None, now))
             run = state.get_run(con, run_id)
