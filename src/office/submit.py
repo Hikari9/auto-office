@@ -177,7 +177,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                       scope=task["id"], preserved="your worktree", next_step="stop and wait; the orchestrator is resolving it")
     commit = make_commit(wt, tree, head, f"office: {task['id']} submission\n\nrun {run['id'][:8]} task {task['id']}\n\n"
                          f"{paths.office_trailer(run['id'])}")
-    from office import planfile
+    from office import planfile, prs
     touched = paths.git(wt, "diff", "--name-only", d["base_commit"], commit).split()
     outside = [f for f in touched if not planfile.path_in_scope(f, task["scope"])]
     if outside:
@@ -214,6 +214,9 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                      d["base_commit"], run["requirements_version"], run["plan_version"], applied, env_fp, op_id, status,
                      prev, dumps(changed), now_iso()))
         paths.git(wt, "update-ref", f"refs/office/{run['id'][:8]}/{task['id']}/{rev_id}", commit)
+        if prs.enabled(run):
+            prs.advance_branch(run, d, commit)
+            prs.queue(con, run, task["id"], "revision", rev_id)
         dispatch_mod.renew_lease(con, d["lease_id"])
         if status == "amendment_pending":
             state.emit(con, run, "submit.amendment_pending", f"{task['id']} {rev_id} submitted under p{applied}; "

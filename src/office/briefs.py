@@ -134,10 +134,22 @@ def executor_brief(con, run: dict, packet: dict) -> str:
         for f in findings:
             out.append(f"- {f['code']} [{f['severity']}] {f['location'] or ''} {f['summary']}"
                        + (f" -> {f['action']}" if f["action"] else ""))
-    out += ["",
-            "RULES do not merge, push, deploy, publish, or send anything external. Committed and uncommitted",
-            "edits are both captured at submit. Do not write JSON or receipts for Office.",
-            "If an office command prints AMENDMENT <id>: apply it at a safe boundary, then run office ack <id>.",
+    pr = packet.get("pr")
+    if pr:
+        out += ["", f"GIT commit and push your work to this branch as you go: {pr['push']}",
+                "    (this branch only; never force-push, never push another branch)."]
+        if pr.get("open"):
+            out.append(f"    After your first push, open its draft PR: {pr['open']}")
+        else:
+            out.append(f"    Its draft PR is #{pr['number']}.")
+        out += ["",
+                "RULES do not merge, deploy, publish, or send anything else external. Office commits any",
+                "leftover edits at submit and pushes them. Do not write JSON or receipts for Office."]
+    else:
+        out += ["",
+                "RULES do not merge, push, deploy, publish, or send anything external. Committed and uncommitted",
+                "edits are both captured at submit. Do not write JSON or receipts for Office."]
+    out += ["If an office command prints AMENDMENT <id>: apply it at a safe boundary, then run office ack <id>.",
             "WHEN DONE run: office submit   (from this worktree). Then stop; results are delivered."]
     return "\n".join(out) + "\n"
 
