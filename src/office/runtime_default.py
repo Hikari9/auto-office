@@ -5,15 +5,17 @@ created it until it is terminal; nothing here touches an existing run.
 
   ~/.config/auto-office/config.yaml:
     runtime:
-      new_runs: "3.1"   # or "3.0" to roll new runs back to the retained v3 runtime
+      new_runs: "3.0"   # roll new runs back to the retained v3 runtime; unset (or any
+                        # 3.1+ value) means this installed runtime
 """
 from __future__ import annotations
 
 import os
+import re
 
 import yaml
 
-from office import legacy, paths
+from office import legacy, paths, version
 from office.state import OfficeError
 
 # The last Auto Office 3.0 commit on main before the 3.1 implementation.
@@ -33,17 +35,16 @@ def new_runs_setting() -> str:
                 return str(value)
         except (OSError, yaml.YAMLError):
             pass
-    return "3.1"
+    return version.release_line(version.current())
 
 
 def require_new_run_runtime() -> None:
     setting = new_runs_setting()
-    if setting.startswith("3.1"):
-        return
     if setting.startswith("3.0"):
         retained = legacy.retained_runtime(LEGACY_V3_FINAL)
         where = f"python3 {retained}/scripts/office_runtime.py start ..." if retained else "the retained v3 runtime (office doctor)"
         raise OfficeError("new-runs-on-3.0",
-                          "new runs are configured to use Auto Office 3.0 (rollback); 3.1 does not create them",
-                          next_step=f"start with {where}, or set runtime.new_runs: \"3.1\"", exit_code=4)
-    raise OfficeError("bad-runtime-setting", f"runtime.new_runs={setting!r} is not 3.0 or 3.1", exit_code=2)
+                          f"new runs are configured to use Auto Office 3.0 (rollback); {version.current()} does not create them",
+                          next_step=f"start with {where}, or remove runtime.new_runs", exit_code=4)
+    if not re.fullmatch(r"3\.[1-9]\d*(\..*)?", setting):
+        raise OfficeError("bad-runtime-setting", f"runtime.new_runs={setting!r} is not 3.0 or 3.1+", exit_code=2)
