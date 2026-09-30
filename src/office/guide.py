@@ -135,6 +135,69 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     return res
 
 
+def _snapshot(con, run: dict) -> tuple:
+    run = state.get_run(con, run["id"])
+    tasks = tuple((t["id"], t["status"], t.get("current_revision_id")) for t in state.tasks(con, run["id"]))
+    return run["phase"], run["requirements_version"], run["plan_version"], tasks
+
+
+def stalls(con, run: dict) -> list[str]:
+    """Work Office believes is in progress with nothing left to advance it."""
+    out = []
+    live_jobs = con.execute("SELECT COUNT(*) FROM outbox WHERE run_id=? AND status IN ('queued','claimed')",
+                            (run["id"],)).fetchone()[0]
+    for g in con.execute("SELECT id, task_id, kind, status FROM gates WHERE run_id=? AND status IN ('queued','running')",
+                         (run["id"],)).fetchall():
+        if not live_jobs:
+            out.append(f"{g['task_id'] or 'plan'} {g['kind']} gate {g['id']} is {g['status']} but no job is queued or running")
+    for j in con.execute("SELECT kind, error FROM outbox WHERE run_id=? AND status='failed' AND finished_at > ?",
+                         (run["id"], run.get("updated_at") or "")).fetchall():
+        out.append(f"job {j['kind']} failed: {(j['error'] or '')[:120]}")
+    return out
+
+
+def _needs_orchestrator(con, run: dict) -> bool:
+    if any(t["status"] in ("paused", "blocked", "changes_required") for t in state.tasks(con, run["id"])):
+        return True
+    return not next_action(con, state.get_run(con, run["id"])).startswith(("exceptions only", "no action"))
+
+
+def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
+    """Block until something needs the orchestrator, then print status.
+    Exit 0: a task, phase, plan or requirements change, or a new orchestrator
+    event. Exit 3: a stall (work marked in progress that nothing can advance).
+    Exit 124: timeout with nothing new. A watcher keys on the exit code, never
+    on matching status text."""
+    import time
+    from office import db, jobs, lifecycle
+    start = _snapshot(con, run)
+    deadline = time.time() + timeout
+    first = True
+    while True:
+        with db.transaction(con):
+            lifecycle.reconcile(con, run)
+            jobs.reclaim(con, run["id"])
+        jobs.kick(con, run["id"])
+        stuck = stalls(con, run)
+        changed = _snapshot(con, run) != start
+        news = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=1)
+        # Something already waiting on the orchestrator ends the wait at once;
+        # otherwise a blocker present at the start would sit until the timeout.
+        pending = first and _needs_orchestrator(con, run)
+        first = False
+        if stuck or changed or news or pending or state.is_terminal(state.get_run(con, run["id"])) \
+                or time.time() >= deadline:
+            res = status(con, run)
+            if stuck:
+                res.lines[1:1] = [f"stall: {s}" for s in stuck]
+                res.exit_code = 3
+            elif not (changed or news or pending):
+                res.lines.insert(1, f"wait: nothing new in {int(timeout)}s")
+                res.exit_code = 124
+            return res
+        time.sleep(poll)
+
+
 def _waiting_on(con, run: dict, task: dict) -> str:
     """What a live task is actually waiting on, so `live` never hides a stall:
     an amendment its session must ack, a submission held for one, or gates."""
