@@ -210,7 +210,7 @@ def test_reviewer_dispatch_launches_in_herdr_able_to_write_its_reply(env, monkey
         # R12: a reviewer may write its reply file, and gets that file's directory.
         assert str(out.parent) in args, args
         if kind == "claude":
-            assert args[args.index("--disallowedTools") + 1] == "Edit,Bash,NotebookEdit"
+            assert args[args.index("--disallowedTools") + 1].startswith("Edit,Bash,NotebookEdit,Edit(/")
             assert args[args.index("--allowedTools") + 1] == "Read,Grep,Glob,Write"
             assert str(env.tmp) in args
         else:

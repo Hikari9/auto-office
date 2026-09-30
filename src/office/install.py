@@ -12,7 +12,7 @@ import shutil
 import time
 from pathlib import Path
 
-from office import frontdoor, legacy, paths, runtime_default
+from office import frontdoor, legacy, paths, read_scope, runtime_default
 from office.result import Result
 
 MARKER = "--office-managed"
@@ -120,12 +120,24 @@ def install(only: list[str] | None = None, dry_run: bool = False, migrate_legacy
                 continue
             entries[:] = [e for e in entries if not _is_managed(e)] + [want]
             changed = True
+        rules_added = rules_removed = 0
+        owned: list[str] = []
+        if harness == "claude":
+            added, removed, owned = read_scope.sync(data, read_scope.load_ledger())
+            rules_added, rules_removed = len(added), len(removed)
+            changed = changed or bool(added or removed)
         if changed and not dry_run:
             backup = _backup(path)
             path.write_text(json.dumps(data, indent=2) + "\n")
+            if harness == "claude":
+                read_scope.save_ledger(owned)
             res.add(f"{harness}: hooks installed ({', '.join(events.values())})" + (f"; backup {backup.name}" if backup else ""))
         else:
             res.add(f"{harness}: " + ("would install hooks" if changed else "hooks already current"))
+        if harness == "claude":
+            res.add(f"{harness}: reviewer read rules "
+                    + (f"{'would add' if dry_run else 'added'} {rules_added}, removed {rules_removed}"
+                       if rules_added or rules_removed else "already current"))
         if legacy_found and not migrate_legacy:
             res.add(f"{harness}: {legacy_found} legacy install_hooks.sh entr{'y' if legacy_found == 1 else 'ies'} left in place "
                     "(office install --migrate-legacy-hooks removes them)")
@@ -148,13 +160,17 @@ def uninstall(purge: bool = False) -> Result:
             continue
         hooks = data.get("hooks") or {}
         removed = 0
+        rules = read_scope.strip(data, read_scope.load_ledger()) if harness == "claude" else 0
         for native, entries in list(hooks.items()):
             kept = [e for e in entries if not _is_managed(e)]
             removed += len(entries) - len(kept)
             hooks[native] = kept
-        if removed:
+        if removed or rules:
             _backup(path)
             path.write_text(json.dumps(data, indent=2) + "\n")
-            res.add(f"{harness}: removed {removed} Office-managed hook entr{'y' if removed == 1 else 'ies'}")
+            if harness == "claude":
+                read_scope.save_ledger([])
+            res.add(f"{harness}: removed {removed} Office-managed hook entr{'y' if removed == 1 else 'ies'}"
+                    + (f" and {rules} reviewer read rule{'s' if rules != 1 else ''}" if rules else ""))
     res.add("run state and runs.db kept" if not purge else "purge is not automatic: remove the data directory yourself")
     return res

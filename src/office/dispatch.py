@@ -21,7 +21,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, routing, state, version
+from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, state, version
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import atomic_write_json, dumps, now_iso, pid_alive, sha256_obj, short
@@ -236,7 +236,8 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
     else:
         adapter = adapters.load_all().get(d.get("adapter_id") or "")
         inter = adapters.interactive_argv(adapter, "worker" if output is None else "reviewer", model=d.get("model") or "",
-                                          effort=d.get("effort") or "none", cwd=Path(wt)) if adapter and d.get("model") else None
+                                          effort=d.get("effort") or "none", cwd=Path(wt),
+                                          output=Path(output) if output else None) if adapter and d.get("model") else None
         kind, args = (inter[1], inter[0]) if inter else (d.get("harness") or "<kind>", [])
     if output is None:
         pointer = (f"Read and carry out the brief at {ddir / 'brief.md'} exactly. "
@@ -812,7 +813,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     def seen() -> bool:
         try:
             return transcripts.prompt_seen(dispatch.get("harness") or herdr_kind, marker=spec["prompt_file"],
-                                           cwd=cwd, since=sent_at)
+                                           cwd=_session_cwd(spec, dispatch.get("harness") or herdr_kind, cwd), since=sent_at)
         except Exception:  # a landing probe must never abort the launch
             return False
 
@@ -1146,6 +1147,14 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
             # (R11); pane or transcript text is never taken as the review.
             return 0, "success"
         time.sleep(poll)
+
+
+def _session_cwd(spec: dict, harness: str | None, cwd: Path) -> Path:
+    """The directory the harness records as its session cwd. A codex reviewer
+    runs in its dispatch dir, its only writable root, not in the checkout."""
+    if harness == "codex" and spec.get("kind") in read_scope.READER_KINDS and spec.get("output"):
+        return Path(spec["output"]).parent
+    return cwd
 
 
 def transcript_reply(d: dict, spec: dict) -> str | None:
