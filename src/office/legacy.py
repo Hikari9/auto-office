@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from office import paths
-from office.version import SOURCE_ROOT
+from office.version import SOURCE_ROOT, install_source
 
 LEGACY_TERMINAL = ("closed", "abandoned")
 
@@ -84,10 +84,11 @@ def retained_runtime(plugin_commit: str, *, materialize: bool = True) -> Path | 
         return target
     if not materialize or not _is_sha(plugin_commit):
         return None
-    if not (SOURCE_ROOT / ".git").exists():
+    source = SOURCE_ROOT if (SOURCE_ROOT / ".git").exists() else install_source()
+    if source is None or not (source / ".git").exists():
         return None
     try:
-        proc = subprocess.run(["git", "-C", str(SOURCE_ROOT), "archive", "--format=tar", plugin_commit],
+        proc = subprocess.run(["git", "-C", str(source), "archive", "--format=tar", plugin_commit],
                               capture_output=True, timeout=120)
     except (OSError, subprocess.SubprocessError):
         return None

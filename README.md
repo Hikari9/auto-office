@@ -24,6 +24,12 @@ install, and it offers an upgrade when the installed `office` release differs fr
 The visual extra installs Playwright and uses the local Chrome; without it, visual gates report
 `CAPTURE_BLOCKED` rather than passing.
 
+`office doctor --fix` refreshes managed hooks, restores exact legacy runtimes from the local
+installation source's git history, retires obsolete Office entries from Gemini's unused legacy
+hook file, and converts Hermes scalar hook commands to lists of command mappings. Config edits
+are backed up first and preserve unrelated settings; Hermes still requires its own hook approval.
+For visual capture after a checkout reinstall, use `uv tool install --force --reinstall '.[visual]'`.
+
 ## Use
 
 ```text
