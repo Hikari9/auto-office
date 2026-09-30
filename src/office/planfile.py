@@ -231,14 +231,21 @@ def _validate(plan: ParsedPlan) -> None:
     end = r.get("end_state")
     if end and end not in END_STATES:
         plan.errors.append(f"requirements end_state must be one of {', '.join(END_STATES)}")
-    if end == "preview" and not r["deploy"].get("preview"):
-        plan.errors.append("end_state preview needs `deploy_preview: <command>`")
-    if end == "e2e" and not r["deploy"].get("prod"):
-        plan.errors.append("end_state e2e needs `deploy_prod: <command>`")
-    if end in ("preview", "e2e") and not r["deploy"].get("verify"):
-        plan.warnings.append("no `deploy_verify:` command; the deploy is recorded without verification")
     for a, b in _parallel_overlaps(plan.tasks):
         plan.warnings.append(f"{a} and {b} may run in parallel but their scopes overlap; leases will serialize them")
+
+
+def end_state_problems(end: str | None, deploy: dict) -> tuple[list[str], list[str]]:
+    """(errors, warnings) for an end state and its deploy commands, checked on
+    the merged requirements (start flags plus the plan)."""
+    errors, warnings = [], []
+    if end == "preview" and not deploy.get("preview"):
+        errors.append("end_state preview needs `deploy_preview: <command>`")
+    if end == "e2e" and not deploy.get("prod"):
+        errors.append("end_state e2e needs `deploy_prod: <command>`")
+    if end in ("preview", "e2e") and not deploy.get("verify"):
+        warnings.append("no `deploy_verify:` command; the deploy is recorded without verification")
+    return errors, warnings
 
 
 def _has_cycle(graph: dict[str, list[str]]) -> bool:

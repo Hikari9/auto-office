@@ -1,9 +1,9 @@
 ---
 name: auto-office
-description: Adaptive office engineering runtime for the complete lifecycle from intent through planning, routed execution, independent review, verification, and closeout, driven through one `office` CLI. Use when explicitly invoked as /auto-office or when the user directly asks to run an Auto Office lifecycle. Routes each role by harness, model, and effort under pinned policy, trust and capability floors, and live quota; the runtime owns state, receipts, evidence, and review mechanics. Preserves human merge-to-main, no-self-approval, private evidence, and version-pinned runs.
+description: Adaptive office engineering runtime for the complete lifecycle from intent through planning, routed execution, independent review, verification, and closeout, driven through one `office` CLI. Use when explicitly invoked as /auto-office or when the user directly asks to run an Auto Office lifecycle. Routes each role by harness, model, and effort under pinned policy, trust and capability floors, and live quota; the runtime owns state, receipts, evidence, and review mechanics. Preserves human merge-to-main unless the user chose merge or end-to-end at intake, no-self-approval, private evidence, and version-pinned runs.
 ---
 
-# Auto Office 3.1
+# Auto Office 3.2
 
 You are the orchestrator. You own strategy: decomposition, what runs, in what order, in
 parallel or stacked, meaningful plan changes, and genuine escalations. The `office` runtime owns
@@ -57,28 +57,30 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 
 1. Create or reuse exactly one tracking GitHub issue for the request (search for duplicates first;
    do not ask for a draft or routine approval). Stop if you cannot file it safely.
-2. `office start "<goal>" --issue <n>` (add `--blast-radius`, `--size-class`, `--irreversible`
-   from your provisional read; unset is unknown, never low risk).
-3. If the output says a planner was queued, wait (`office wait`). Otherwise you plan inline:
+2. Ask how far to go after the task PRs: stop and ask after (`ask`), preview deploy only (`preview`),
+   merge only (`merge`), or merge + prod deploy (`e2e`, which is merge and deploy authority). For a
+   deploy, show `office land --detect`'s proposed commands and have the user confirm them.
+3. `office start "<goal>" --issue <n> --end-state <answer>` (`--deploy-preview|prod|verify "<cmd>"`
+   as confirmed; `--blast-radius`, `--size-class`, `--irreversible` from your provisional read;
+   unset is unknown, never low risk).
+4. If the output says a planner was queued, wait (`office wait`). Otherwise you plan inline:
    interview the user directly for anything you would otherwise guess, write `.office/plans/<run>/PLAN.md` (the path `office start` prints)
    (format: `office submit --help`), then `office submit`.
-4. `office submit` prints the plan diagram (also written into PLAN.md, and reprinted by
-   `office inspect plan`): waves of parallel tasks, what each task stacks on, its route preview
-   and why, and the checkpoint chain. When `next:` asks for authorization, show the user the
-   requirements and that diagram verbatim, ask for their decision (see Asking the user), and
-   record it: `office approve plan --quote "<their words>"`. After an amendment, show only the
-   printed delta against the previous plan version.
+5. `office submit` prints the plan diagram (waves, stacking, route preview and why, checkpoints;
+   `office inspect plan` reprints it). When `next:` asks for authorization, show the requirements
+   and the diagram verbatim, ask (see Asking the user), then `office approve plan --quote "<words>"`.
+   After an amendment show only the printed delta.
 
 ## Execute
 
 - Dispatch as the approved diagram shows: a wave's roots with `office dispatch T1 T2 --parallel`,
-  and dependents stacked on what they depend on (`office dispatch T1 T3` stacks T3 on T1). The
-  runtime enforces scope ownership but does not maximize concurrency for you. Routes re-resolve
-  at dispatch; a line `route differs from the plan preview` names the change and why.
+  dependents stacked (`office dispatch T1 T3`). A `route differs from the plan preview` line names why.
 - To wait on the run, use `office wait`: exit 0 means act, 3 means a stall to resolve, 124 means nothing
   new. Key on the exit code, never on matching status text.
-- Executors submit their own work; reviewers are dispatched and read by the runtime, only from their
-  reply files, never pane text. A bad reply re-prompts the same reviewer; after three it needs you.
+- Executors push their task branch as they work and submit; the runtime pushes the reviewed revision
+  to the task's draft PR (stacked on its parent's), posts verdicts, and marks it ready on acceptance.
+- Reviewers are dispatched and read by the runtime, only from their reply files, never pane text.
+  A bad reply re-prompts the same reviewer; after three it needs you.
 - Findings never relaunch anything on their own. When `next:` says a task's findings wait for you, run
   `office rerun T2 --resume` (the same harness session, in a fresh pane) or `office rerun T2 --fresh`;
   resume refuses with the reason and the `--fresh` command when the session cannot be reopened.
@@ -127,11 +129,15 @@ reads `idle` mid-turn, so judge an agy pane by its footer and `git status`, neve
 
 ## Land and close
 
-When every task is accepted the runtime composes and verifies the integrated result. Then push
-the integration branch it names and open a PR that includes `Closes #<issue>` when the work is
-complete (merging stays with the user unless they explicitly authorized it:
-`office approve merge --quote "<words>"`). Finish with `office close --handoff <pr-url>`. Stop
-early with `office close --abandon "<reason>"`; nothing is deleted until `office prune -f`.
+When every task is accepted the runtime composes and verifies the integrated result. `office land`
+then follows the end state. `ask` lists the task PRs: ask the user and record the choice with
+`office land --merge|--preview|--e2e --quote "<words>"`, or stop with `office close --handoff <pr-url>`.
+`preview` deploys and verifies the integrated result. `merge`/`e2e` merge the PRs bottom-up after
+required checks, confirm the default branch matches the reviewed tree, close the issue, and (e2e)
+deploy prod and verify; a failure names what merged and the rollback target. Then `office close`.
+With task PRs off (local, no GitHub, `--no-prs`), push the integration branch it names, open a PR
+with `Closes #<issue>`, and `office close --handoff <pr-url>`. Stop early with
+`office close --abandon "<reason>"`; nothing is deleted until `office prune -f`.
 
 ## Resume
 
@@ -140,7 +146,7 @@ It reconstructs pending work from runs.db; never start a new run to continue an 
 
 ## Diagnostics
 
-`office inspect run|task|gate|evidence|events|route [id]` and `--verbose`/`--json` show the
+`office inspect run|plan|task|gate|evidence|events|route [id]` and `--verbose`/`--json` show the
 detail default output hides. `office doctor` checks the install, hooks, pinned runtimes, and
 known harness defects. `office list` and `office prune` (dry run; `-f` to delete) maintain runs.
 

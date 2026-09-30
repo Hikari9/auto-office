@@ -37,6 +37,14 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
                       scope="plan", preserved=f"{plan_path} is unchanged",
                       next_step=f"fix {plan_path}, then office submit (office submit --help shows the format)",
                       data={"errors": parsed.errors})
+    frozen = state.current_requirements(con, run["id"])["frozen"]
+    end_errors, end_warnings = planfile.end_state_problems(
+        parsed.requirements.get("end_state") or frozen.get("end_state"),
+        {**(frozen.get("deploy") or {}), **(parsed.requirements.get("deploy") or {})})
+    if end_errors:
+        raise Refused("plan-invalid", "plan has problems: " + "; ".join(end_errors), scope="plan",
+                      preserved=".office/PLAN.md is unchanged", next_step="add the confirmed deploy command, then office submit")
+    parsed.warnings.extend(end_warnings)
     digest = sha256_bytes(text.encode())
     current = state.current_plan(con, run["id"])
     if current and current["content_hash"] == digest and redirect:
@@ -152,9 +160,11 @@ def _apply_requirements(con, run: dict, proposed: dict, submitter: str) -> None:
     cur = state.current_requirements(con, run["id"])
     frozen = dict(cur["frozen"])
     merged = dict(frozen)
-    for key in ("done_criteria", "blast_radius", "non_goals", "named_actions", "end_state", "deploy"):
+    for key in ("done_criteria", "blast_radius", "non_goals", "named_actions", "end_state"):
         if proposed.get(key):
             merged[key] = proposed[key]
+    if proposed.get("deploy"):
+        merged["deploy"] = {**(frozen.get("deploy") or {}), **proposed["deploy"]}
     if proposed.get("goal"):
         merged["goal"] = proposed["goal"]
     if merged == frozen:

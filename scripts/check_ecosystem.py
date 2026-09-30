@@ -13,7 +13,9 @@ INIT_MARKERS=('TODO:', 'example_asset.txt', 'scripts/example.py', 'references/ap
 # Constraint 11 was previously report-only; the maintainer explicitly reopened it
 # for this change so context-load size is now a gate. These budgets are the current
 # `wc -l` counts rounded up with roughly 10% headroom; adjust this table deliberately.
-HUB_LINE_BUDGET = 128
+# 3.1 plan-defect redirects took the hub to 142 lines and 3.2 (plan diagram, task PRs,
+# end state, office land) to 153; the budget is re-set here to that count plus ~10%.
+HUB_LINE_BUDGET = 168
 # 3.1: each 3.0 spoke carries a three-line banner pointing 3.1 runs at the office CLI;
 # the per-spoke budgets below grew by exactly those lines.
 SKILL_LINE_BUDGETS = {

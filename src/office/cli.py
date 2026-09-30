@@ -119,6 +119,10 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--planner", choices=["dedicated", "inline"], help="override who writes the plan")
     s.add_argument("--issue", help="the tracking GitHub issue (number or URL)")
     s.add_argument("--no-prs", action="store_true", help="keep task work local: no pushes or per-task PRs")
+    s.add_argument("--end-state", choices=["ask", "preview", "merge", "e2e"],
+                   help="the user's intake answer: how far to go after the task PRs")
+    for step in ("preview", "prod", "verify"):
+        s.add_argument(f"--deploy-{step}", metavar="CMD", help=f"the user-confirmed {step} command")
 
     s = sp.add_parser("resume", parents=[common])
     s.add_argument("target", nargs="?")
@@ -318,7 +322,9 @@ def _run(args, unknown) -> int:
                               size_class=args.size_class, irreversible=args.irreversible, volume=args.volume,
                               interview=args.interview, adversarial=args.adversarial, sets=args.set,
                               harness=args.harness, session=args.session, base=args.base, planner=args.planner,
-                              issue=args.issue, no_prs=args.no_prs)
+                              issue=args.issue, no_prs=args.no_prs, end_state=args.end_state,
+                              deploy={k: v for k in ("preview", "prod", "verify")
+                                      if (v := getattr(args, f"deploy_{k}"))})
         return emit(res, args)
     if cmd == "list":
         from office import lifecycle
@@ -344,6 +350,10 @@ def _run(args, unknown) -> int:
     if cmd == "uninstall":
         from office import install
         return emit(install.uninstall(purge=args.purge), args)
+    if cmd == "land" and args.detect:
+        from office import land, paths
+        ident = paths.repo_identity(cwd)
+        return emit(land.detect_deploy(ident[0] if ident else Path(cwd or ".")), args)
     if cmd == "submit" and args.help:
         from office import briefs
         print(SUBMIT_HELP.format(fmt=briefs.PLAN_FORMAT))
@@ -397,7 +407,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return amend.ack(con, run, args.amendment)
     if cmd == "land":
         from office import land
-        return land.land(con, run, mode=args.land_mode, quote=args.quote, detect=args.detect)
+        return land.land(con, run, mode=args.land_mode, quote=args.quote)
     if cmd == "close":
         from office import lifecycle
         if args.abandon:

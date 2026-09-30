@@ -103,9 +103,8 @@ def test_preview_deploys_the_integration_and_leaves_prs_open(env, monkeypatch):
     env.office("close", check=0)
 
 
-def test_detect_proposes_vercel_commands(env):
+def test_detect_proposes_vercel_commands_before_any_run(env):
     (env.repo / "vercel.json").write_text("{}")
-    start_inline(env)
     code, out = env.office("land", "--detect")
     assert code == 0 and "deploy_prod: vercel deploy --prod" in out and "deploy_preview: vercel deploy" in out, out
 
@@ -115,3 +114,15 @@ def test_e2e_without_a_prod_command_is_a_plan_error(env):
     env.write_plan(_plan("e2e"))
     code, out = env.office("submit")
     assert code == 4 and "end_state e2e needs `deploy_prod: <command>`" in out, out
+
+
+def test_intake_flags_reach_the_diagram_when_the_plan_omits_them(env, monkeypatch):
+    github(env, monkeypatch)
+    env.trust()
+    code, out = env.office("start", "g", "--gear", "direct+review", "--planner", "inline", "--end-state", "e2e",
+                           "--deploy-prod", "make ship", "--deploy-verify", "make smoke")
+    assert code == 0, out
+    env.write_plan(PLAN_STACKED)
+    code, out = env.office("submit")
+    assert code == 0, out
+    assert "deploy prod `make ship` -> verify `make smoke` -> closeout" in out and "end state: e2e" in out, out
