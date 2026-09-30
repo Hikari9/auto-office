@@ -32,7 +32,7 @@ Auto Office {ver}
   office list                       runs in this repository (--all for every run)
   office inspect [run|task|gate|evidence|events|route] [id]
   office doctor                     check the installation, hooks, and runtimes
-  office prune                      show finished runs that office prune -f would remove
+  office prune [--run <id>]         show finished runs that office prune -f would remove
 
 Global flags: --run <id>, --json, --verbose. Every command ends with `next:`.
 """
@@ -46,7 +46,18 @@ Submitting the same tree again is safe; it reports the existing submission.
 
 Planner / orchestrator planning inline: submits .office/PLAN.md. Format:
 
-{fmt}"""
+{fmt}
+Checks (task `checks:` and the run-level `checks:` under Requirements):
+- Every check must be non-mutating. A check that edits the tree (a formatter
+  or `lint --fix`) makes the task's checks STALE; use the check-only form.
+- Run-level checks run on a freshly composed integration worktree that holds
+  only what is in git, recreated on every compose. Installed dependencies
+  (node_modules, a virtualenv) are absent, so a check needing them must install
+  them itself, e.g. `pnpm install --frozen-lockfile && pnpm lint`. Otherwise
+  it reports "command not found" and integration stops UNAVAILABLE.
+- Inline planning: to change a task's contract, edit its entry in
+  .office/PLAN.md first, then office amend <T> --contract; an amendment whose
+  PLAN.md does not change the named task is refused."""
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -267,7 +278,8 @@ def _run(args, unknown) -> int:
         from office import prune
         con = _con()
         try:
-            return emit(prune.force(con) if args.force else prune.dry_run(con), args)
+            only = prune.select_run(con, args.run_arg) if args.run_arg else None
+            return emit(prune.force(con, only) if args.force else prune.dry_run(con, only), args)
         finally:
             con.close()
     if cmd == "doctor":

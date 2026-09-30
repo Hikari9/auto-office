@@ -102,7 +102,19 @@ the worktree, writes the packet and brief, and queues the launch. Workers launch
 split to the right of the caller's pane (`HERDR_PANE_ID`) in the tab the user is watching, with
 further dispatches reusing an idle Office pane or stacking down in that column. Closing the run
 closes only those panes. Without a caller pane, the run gets its own tab. A launch that does not
-start within 45 s falls back to a plain process.
+start within 45 s falls back to a plain process. Each spawned pane is appended to the run's
+`panes.jsonl` in the `herdr-ledger` schema (`pane_id`, `agent`, `kind`, `session_id` when herdr
+reports one, `spawned_at`, `status`, and `orchestrator_pane_id` from the orchestrator's
+`HERDR_PANE_ID`, else the run's split anchor), so `herdr-ledger sweep` from the orchestrator's pane
+can close finished dispatch panes.
+
+A pane-hosted reviewer is read-only and usually cannot write its `reply.txt`. When the file is
+absent or empty once the agent settles, the reply is taken from the harness's own session
+transcript (Claude `projects/<cwd slug>/*.jsonl`, last assistant text; Codex
+`sessions/YYYY/MM/DD/rollout-*.jsonl`, last assistant message), found by the brief path in a
+user-role prompt and the dispatch cwd; the pane screen is the last resort. A pane-scraped reply that
+does not parse is re-read from the transcript before the route counts as failed. The reply parser
+ignores TUI bullets and box-drawing gutters (`• VERDICT: PASS`, `│ FINDING ... │`).
 
 A worker that exits without submitting is relaunched up to `verification.environment_retry_max`
 times, then its task is blocked with its worktree preserved. Findings reach a live worker on its
@@ -139,7 +151,11 @@ run base in dependency order on `office/<run>/integration`, runs the plan's run-
 runs an integration review only at a real boundary (a dependency on unmerged output, a shared
 file, or a declared shared interface). Conflicts and failures are surfaced; `office close` refuses
 until integration is accepted and a landing is recorded (`--handoff <pr>` or the commit reachable
-from the default branch).
+from the default branch). The integration worktree is recreated from git on every compose, so it
+holds no installed dependencies; run-level checks that need them install them in the command
+(`pnpm install --frozen-lockfile && pnpm lint`). A check that is not found reports UNAVAILABLE with
+that instruction; Office never runs a package manager itself. Checks must not mutate the tree: a
+task check that does (`lint --fix`) makes the gate STALE.
 
 ### 6.1 User model overrides (#185)
 
@@ -174,7 +190,10 @@ blocks until a substitute answers or the user waives.
 acceptance and tests; a change to a task's scope or interfaces, a new overlapping task, a new named
 action, or authority words in the delta is refused as contract-level. Contract amendments go to the
 dedicated planner (affected scopes and dependants pause) or, in inline mode, apply from the edited
-plan. Deliveries are combined per task, supersede older unapplied ones, and are `queued →
+plan. An inline contract amendment whose `.office/PLAN.md` is identical to the current plan, or does
+not change the entry of a named task, is refused (`plan-not-edited` / `contract-not-edited`) with a
+`next:` to edit the plan first; otherwise the version would bump while the task kept its old
+contract. Deliveries are combined per task, supersede older unapplied ones, and are `queued →
 delivered → applied` (`office ack`); a submission under an older applied version is "amendment
 pending" (no round, no acceptance). Authorization binds requirements version + authority envelope,
 survives plan bumps, and is invalidated by a requirements change or needed afresh for a new
@@ -207,7 +226,7 @@ visual decision is never needed by this runtime.
 
 ## 9. Prune
 
-`office prune` reports and never writes (not even git objects). `office prune -f` re-checks each
+`office prune` reports and never writes (not even git objects). `--run <id>` restricts the dry run and `-f` to that one run and refuses one that is unknown, not finished, or already pruned. `office prune -f` re-checks each
 candidate under the write lock and removes only `closed`/`abandoned` runs with no live agent, no
 executing job, and no worktree content beyond its last recorded revision. Kept: the `runs` row as a
 tombstone (terminal state, `office_version`, requirements/plan/policy identity and hashes, terminal
@@ -287,6 +306,7 @@ adoption. Session binding keys add the Herdr pane and harness ancestor process t
 | Force prune never removes resumable runs | `prune._eligibility` | `test_prune::test_force_prunes_terminal_only_and_keeps_tombstone` |
 | Force prune re-checks at deletion | `prune._prune_one` | `test_prune::test_force_rechecks_eligibility_at_deletion` |
 | Tombstone kept, artifacts removed | `prune._prune_one` | `test_prune::test_force_prunes_terminal_only_and_keeps_tombstone` |
+| `prune --run` selects only that run | `prune.select_run` | `test_prune::test_run_flag_restricts_prune_to_that_run` |
 | Rollback affects future runs only | `runtime_default` | `test_discovery_pinning::test_rollback_changes_future_runs_only` |
 | Legacy/raw never a second authority | `compat`, `scripts/office_runtime.py` guard | `test_compat_hooks_install::test_raw_…`, `…legacy_helper_cannot_write_a_31_run` |
 | No gate green from skipped/unavailable/stale | `gates` | `test_gates::test_missing_check_command_is_never_pass`, `test_rolling_review::test_unavailable_plan_reviewer_blocks_dispatch` |

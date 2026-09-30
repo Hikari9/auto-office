@@ -92,6 +92,10 @@ class Env:
         monkeypatch.setenv("OFFICE_LAUNCHER", "sync")
         monkeypatch.setenv("OFFICE_QUOTA_PROBE", "off")
         monkeypatch.setenv("FAKE_SCENARIO", str(self.scenario))
+        # Harness session transcripts (the reviewer-reply fallback) are read from
+        # these homes; never from the real ones.
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(self.home / ".claude"))
+        monkeypatch.setenv("CODEX_HOME", str(self.home / ".codex"))
         # Only fake harnesses and system tools: a real harness on PATH must never run in tests.
         system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
         monkeypatch.setenv("PATH", os.pathsep.join([str(self.bin)] + system))

@@ -675,7 +675,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     spec.update({"herdr_agent": name, "pane": pane})
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
     _record_launch(run, dispatch["id"], launcher="herdr", pane_id=pane)
-    _pane_ledger(run, dispatch, pane)
+    _pane_ledger(run, dispatch, pane, agent=name, kind=herdr_kind, worktree=cwd, session_id=_started_session(proc.stdout))
     # A long brief pasted as the prompt does not land; a one-line pointer does.
     if worker:
         pointer = (f"Read and carry out the brief at {spec['prompt_file']} exactly. "
@@ -866,10 +866,27 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
                 and len({w["content_hash"] for w in window}) == 1):
             if output and not (output.is_file() and output.stat().st_size):
                 # A read-only reviewer that could not write the file left its
-                # review in the pane: keep that as the reply.
-                output.write_text(_herdr_agent_text(spec["herdr_agent"]) or "", encoding="utf-8")
+                # review in its session: its harness transcript holds the full
+                # reply; the pane screen (chrome, wrapping, scrollback) is the
+                # last resort.
+                reply = transcript_reply(d, spec)
+                output.write_text(reply or _herdr_agent_text(spec["herdr_agent"]) or "", encoding="utf-8")
             return 0, "success"
         time.sleep(poll)
+
+
+def transcript_reply(d: dict, spec: dict) -> str | None:
+    """The pane-hosted agent's final reply from its harness session log, found
+    by the brief path its prompt named and the cwd it ran in."""
+    from office import transcripts
+    marker = spec.get("prompt_file")
+    if not marker or not d:
+        return None
+    try:
+        return transcripts.final_reply(d.get("harness"), marker=marker, cwd=spec.get("cwd"),
+                                       since=d.get("launched_at") or d.get("started_at"))
+    except Exception:  # a fallback reader must never end the watch abnormally
+        return None
 
 
 def _herdr_json(args: list[str]) -> dict:
@@ -986,11 +1003,46 @@ def close_herdr_tab(run: dict) -> None:
             pass
 
 
-def _pane_ledger(run: dict, dispatch: dict, pane: str) -> None:
+def _orchestrator_pane(run: dict) -> str | None:
+    """The pane of the orchestrator that owns this dispatch: its HERDR_PANE_ID,
+    else the anchor the run's split layout recorded (a relaunch from a detached
+    job has no pane of its own)."""
+    pane = os.environ.get("HERDR_PANE_ID")
+    if pane:
+        return pane
+    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
+    try:
+        layout = json.loads(tab_file.read_text()) if tab_file.is_file() else {}
+    except (OSError, ValueError):
+        layout = {}
+    return layout.get("anchor") or os.environ.get("OFFICE_HERDR_ANCHOR") or None
+
+
+def _started_session(stdout: str | None) -> str | None:
+    """The agent session id `herdr agent start` reports, when it reports one."""
+    try:
+        res = json.loads(stdout or "{}").get("result") or {}
+    except ValueError:
+        return None
+    agent = res.get("agent") or res
+    return agent.get("session_id") or agent.get("agent_session_id") if isinstance(agent, dict) else None
+
+
+def _pane_ledger(run: dict, dispatch: dict, pane: str, *, agent: str | None = None, kind: str | None = None,
+                 worktree: Path | str | None = None, session_id: str | None = None) -> None:
+    """One row per spawned pane, in the herdr-ledger schema, so `herdr-ledger
+    sweep` (which only touches rows whose orchestrator_pane_id is the caller's
+    pane) can close it once the agent has finished."""
     ledger = paths.run_dir(run["id"]) / "panes.jsonl"
+    now = now_iso()
+    row = {"pane_id": pane, "agent": agent, "kind": kind, "session_id": session_id,
+           "worktree": str(worktree) if worktree else None, "spawned_at": now, "recorded_at": now,
+           "orchestrator_pane_id": _orchestrator_pane(run),
+           "orchestrator_session_id": os.environ.get("HERDR_SESSION_ID") or None,
+           "run_id": run["id"], "dispatch_id": dispatch["id"], "role": dispatch.get("role"),
+           "status": "working", "suggestion": None, "note": None, "closed": False, "updated_at": now}
     with ledger.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"pane_id": pane, "agent": None, "dispatch_id": dispatch["id"], "run_id": run["id"],
-                             "role": dispatch.get("role"), "recorded_at": now_iso()}) + "\n")
+        fh.write(json.dumps(row) + "\n")
 
 
 def _record_launch(run: dict, dispatch_id: str, *, launcher: str, pid: int | None = None, pane_id: str | None = None) -> None:

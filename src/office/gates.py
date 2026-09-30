@@ -256,6 +256,17 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             log = Path(d.get("log_path") or ddir / "output.log")
             text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
         parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual)
+        if not parsed.valid and d.get("launcher") == "herdr":
+            # A pane scrape (TUI chrome, a scrolled-off or wrapped reply) is not
+            # the reviewer's answer; its harness transcript keeps the full reply.
+            spec_file = ddir / "launch.json"
+            spec = json.loads(spec_file.read_text()) if spec_file.is_file() else {}
+            reply = dispatch_mod.transcript_reply(d, spec)
+            if reply:
+                alt = review_parse.parse(_last_block(reply), plan_review=plan_review, visual=visual)
+                if alt.valid:
+                    text, parsed = reply, alt
+                    output.write_text(reply, encoding="utf-8")
         with db.transaction(con):
             state.record_evidence(con, run["id"], "review_output", output if output.is_file() else None,
                                   task_id=gate.get("task_id"), revision_id=gate.get("revision_id"), gate_id=gate["id"],
@@ -333,7 +344,8 @@ def _last_block(text: str) -> str:
     if not idx:
         return text
     start = idx[-1]
-    while start > 0 and re.match(r"^\s*(EVIDENCE_STATUS|FINDING|DEFECT|RESOLVED|CLEARED|RETRACT)", lines[start - 1], re.I):
+    while start > 0 and re.match(r"^(EVIDENCE_STATUS|FINDING|DEFECT|RESOLVED|CLEARED|RETRACT)",
+                                 review_parse._clean(lines[start - 1]), re.I):
         start -= 1
     return "\n".join(lines[start:])
 
