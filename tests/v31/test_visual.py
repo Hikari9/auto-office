@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import socket
+from importlib.util import find_spec
 
 import pytest
 
-pytest.importorskip("playwright")
+requires_playwright = pytest.mark.skipif(
+    find_spec("playwright") is None,
+    reason="install the visual extra to run browser capture integration tests",
+)
 
 from conftest import start_inline  # noqa: E402
 
@@ -94,6 +98,102 @@ def _task(con):
     return dict(con.execute("SELECT * FROM tasks WHERE id='T1'").fetchone())
 
 
+def _capture_inputs(monkeypatch, tmp_path, *, port: int, start: str):
+    import os
+    import subprocess
+    from contextlib import nullcontext
+    from pathlib import Path
+
+    from office import visual
+
+    worktree = tmp_path / "repo"
+    (worktree / "site").mkdir(parents=True)
+    (worktree / ".gitignore").write_text("ignored.out\n")
+    original = "<!doctype html><title>submitted</title>\n"
+    (worktree / "site" / "index.html").write_text(original)
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(worktree), *args], check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    git("init")
+    git("config", "user.name", "Visual Test")
+    git("config", "user.email", "visual-test@example.test")
+    git("add", "-A")
+    git("commit", "-m", "submitted revision")
+    commit = git("rev-parse", "HEAD")
+
+    run_dir = tmp_path / "office-run"
+    monkeypatch.setattr(visual.paths, "run_dir", lambda _run_id: run_dir)
+    monkeypatch.setattr(visual.gates, "_check_env", lambda _run: dict(os.environ))
+    monkeypatch.setattr(visual, "capture_backend_missing", lambda: None)
+    monkeypatch.setattr(visual, "reference_path", lambda _run, _task, _worktree: None)
+    monkeypatch.setattr(visual, "_playwright_capture",
+                        lambda _url, _spec, _evdir, _ref: {"environment": {"engine": "test"}, "frames": []})
+    monkeypatch.setattr(visual.db, "transaction", lambda _con: nullcontext())
+    monkeypatch.setattr(visual.state, "record_evidence", lambda *_args, **_kwargs: None)
+
+    run = {"id": "run-1", "office_version": "test"}
+    task = {"id": "T1", "title": "visual capture", "visual": {
+        "url": f"http://127.0.0.1:{port}/site/index.html", "start": start}}
+    rev = {"id": "R1", "commit_sha": commit}
+    gate = {"id": "G1", "recaptures": 0}
+    return visual, worktree, original, run, task, rev, gate
+
+
+def test_start_rewrite_is_restored_and_recorded_without_invalidating_capture(monkeypatch, tmp_path):
+    import json
+    import shlex
+    import sys
+    from pathlib import Path
+
+    port = _port()
+    script = tmp_path / "rewrite_and_serve.py"
+    script.write_text(f"""from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+path = Path('site/index.html')
+path.write_text(path.read_text() + '<!-- serve rewrite -->\\n')
+Path('generated.out').write_text('untracked output')
+Path('ignored.out').write_text('ignored output')
+ThreadingHTTPServer(('127.0.0.1', {port}), SimpleHTTPRequestHandler).serve_forever()
+""")
+    start = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"
+    visual, worktree, original, run, task, rev, gate = _capture_inputs(
+        monkeypatch, tmp_path, port=port, start=start)
+
+    result = visual.capture_all(object(), run, task, rev, gate, worktree)
+
+    assert result["evidence_status"] == "COMPARABLE", result
+    assert (worktree / "site" / "index.html").read_text() == original
+    assert (worktree / "generated.out").read_text() == "untracked output"
+    assert (worktree / "ignored.out").read_text() == "ignored output"
+    receipt = json.loads(Path(result["receipt_path"]).read_text())
+    assert receipt["restored_paths"] == ["site/index.html"]
+
+
+def test_worktree_edit_before_capture_stays_invalid_and_is_not_restored(monkeypatch, tmp_path):
+    import shlex
+    import sys
+
+    port = _port()
+    marker = tmp_path / "server-started"
+    script = tmp_path / "start_marker.py"
+    script.write_text(f"from pathlib import Path; Path({str(marker)!r}).write_text('started')\n")
+    start = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"
+    visual, worktree, _original, run, task, rev, gate = _capture_inputs(
+        monkeypatch, tmp_path, port=port, start=start)
+    changed = "edited after submit, before capture\n"
+    (worktree / "site" / "index.html").write_text(changed)
+
+    result = visual.capture_all(object(), run, task, rev, gate, worktree)
+
+    assert result["evidence_status"] == "INVALID_COMPARISON", result
+    assert result["cause"] == "worktree changed after submit (stale capture)"
+    assert (worktree / "site" / "index.html").read_text() == changed
+    assert not marker.exists()
+
+
+@requires_playwright
 def test_matching_capture_passes_with_measured_dom(env):
     con, out, wt, wenv = _setup(env, PAGE, port=_port())
     g = _gate(con)
@@ -115,6 +215,7 @@ def test_matching_capture_passes_with_measured_dom(env):
     assert any(m.get("property") == "width" for f in data["frames"] for m in f["measurements"])
 
 
+@requires_playwright
 def test_broken_interaction_is_a_product_failure_not_invalid(env):
     con, out, wt, wenv = _setup(env, BROKEN, port=_port())
     g = _gate(con)
@@ -124,6 +225,7 @@ def test_broken_interaction_is_a_product_failure_not_invalid(env):
     assert not [c for c in env.calls() if c["role"] == "visual_reviewer"]  # no judgment spent
 
 
+@requires_playwright
 def test_clipped_element_is_measured_material_drift(env):
     con, out, wt, wenv = _setup(env, CLIPPED, port=_port())
     g = _gate(con)
@@ -132,6 +234,7 @@ def test_clipped_element_is_measured_material_drift(env):
     assert any("viewport clearance" in (r or "") or "scrollWidth" in (r or "") for r in rows), rows
 
 
+@requires_playwright
 def test_wrong_state_is_invalid_comparison_then_blocks_after_one_recapture(env):
     con, out, wt, wenv = _setup(env, PAGE, port=_port(), extra="  auth: [data-test=signed-in]\n")
     g = _gate(con)
@@ -140,12 +243,14 @@ def test_wrong_state_is_invalid_comparison_then_blocks_after_one_recapture(env):
     assert _task(con)["status"] == "blocked"
 
 
+@requires_playwright
 def test_no_reference_passes_with_fidelity_unmeasured(env):
     con, out, wt, wenv = _setup(env, PAGE, port=_port(), reference=None)
     g = _gate(con)
     assert g["verdict"] == "PASS" and "fidelity unmeasured" in (g["summary"] or ""), g
 
 
+@requires_playwright
 def test_route_without_image_capability_never_passes(env):
     con, out, wt, wenv = _setup(env, PAGE, port=_port(), probe="PROBE NO_IMAGE")
     g = _gate(con)
@@ -154,6 +259,7 @@ def test_route_without_image_capability_never_passes(env):
     assert con.execute("SELECT COUNT(*) FROM capability_proofs WHERE result='pass'").fetchone()[0] == 0
 
 
+@requires_playwright
 def test_unrelated_edit_reuses_visual_evidence_but_reference_change_invalidates(env):
     port = _port()
     con, out, wt, wenv = _setup(env, BROKEN, port=port)

@@ -246,7 +246,7 @@ def _wait_url(url: str, timeout: float) -> str | None:
 
 
 def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Path) -> dict:
-    from office.submit import matches_revision
+    from office.submit import matches_revision, restore_tracked_paths
     spec = task["visual"]
     evdir = paths.run_dir(run["id"]) / "evidence" / task["id"] / rev["id"] / f"visual-{gate['id']}-{gate['recaptures']}"
     evdir.mkdir(parents=True, exist_ok=True)
@@ -260,32 +260,73 @@ def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Pat
                 "cause": f"{url} is not a local/test origin; capture is limited to authorized local and preview environments",
                 "product_failures": []}
     server = None
+    server_log = None
+    server_started = False
+    restored_paths = []
+    restore_error = None
+    capture_block = None
+    capture_invalid = None
+    result = None
+    ref = None
+    ref_row = None
     try:
         if spec.get("start"):
-            log = open(evdir / "server.log", "ab")
-            server = subprocess.Popen(spec["start"], shell=True, cwd=str(worktree), stdout=log, stderr=log,
+            server_log = open(evdir / "server.log", "ab")
+            server = subprocess.Popen(spec["start"], shell=True, cwd=str(worktree), stdout=server_log, stderr=server_log,
                                       start_new_session=True, env=gates._check_env(run))
+            server_started = True
         problem = _wait_url(url, 90 if spec.get("start") else 10)
         if problem and problem.startswith("not reachable"):
-            return {"evidence_status": "CAPTURE_BLOCKED", "cause": f"{url} {problem}", "product_failures": []}
-        missing = capture_backend_missing()
-        if missing:
-            return {"evidence_status": "CAPTURE_BLOCKED", "cause": missing, "product_failures": []}
-        ref = reference_path(run, task, worktree)
-        with db.transaction(con):
-            ref_row = register_reference(con, run, task, ref) if ref else None
-        result = _playwright_capture(url, spec, evdir, ref)
-        if not matches_revision(worktree, rev["commit_sha"], paths.run_dir(run["id"]) / "tmp"):
-            return {"evidence_status": "INVALID_COMPARISON", "cause": "worktree changed during capture", "product_failures": []}
-        if ref is not None and sha256_file(ref) != (ref_row or {}).get("sha256"):
-            return {"evidence_status": "INVALID_COMPARISON", "cause": "reference changed during capture (stale reference)",
-                    "product_failures": []}
+            capture_block = f"{url} {problem}"
+        else:
+            missing = capture_backend_missing()
+            if missing:
+                capture_block = missing
+            else:
+                ref = reference_path(run, task, worktree)
+                with db.transaction(con):
+                    ref_row = register_reference(con, run, task, ref) if ref else None
+                result = _playwright_capture(url, spec, evdir, ref)
+                if ref is not None and sha256_file(ref) != (ref_row or {}).get("sha256"):
+                    capture_invalid = "reference changed during capture (stale reference)"
     finally:
-        if server and server.poll() is None:
+        if server is not None:
             try:
                 os.killpg(server.pid, signal.SIGTERM)
             except OSError:
                 pass
+            try:
+                server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(server.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                server.wait()
+        if server_log is not None:
+            server_log.close()
+        if server_started:
+            try:
+                restored_paths = restore_tracked_paths(
+                    worktree, rev["commit_sha"], paths.run_dir(run["id"]) / "tmp")
+            except Exception as exc:
+                restore_error = exc
+
+    if restore_error is not None:
+        return {"evidence_status": "INVALID_COMPARISON",
+                "cause": f"could not restore tracked worktree changes after visual capture: {restore_error}",
+                "product_failures": []}
+    if server_started and not matches_revision(worktree, rev["commit_sha"], paths.run_dir(run["id"]) / "tmp"):
+        return {"evidence_status": "INVALID_COMPARISON", "cause": "tracked worktree changes could not be restored",
+                "product_failures": []}
+    if capture_block:
+        return {"evidence_status": "CAPTURE_BLOCKED", "cause": capture_block, "product_failures": []}
+    if capture_invalid:
+        return {"evidence_status": "INVALID_COMPARISON", "cause": capture_invalid, "product_failures": []}
+    if not server_started and not matches_revision(worktree, rev["commit_sha"], paths.run_dir(run["id"]) / "tmp"):
+        return {"evidence_status": "INVALID_COMPARISON", "cause": "worktree changed during capture", "product_failures": []}
+    if result is None:
+        return {"evidence_status": "CAPTURE_BLOCKED", "cause": "capture did not produce a result", "product_failures": []}
     receipt = {
         "office_version": run["office_version"], "run_id": run["id"], "task_id": task["id"], "revision": rev["id"],
         "commit": rev["commit_sha"], "gate_id": gate["id"], "checkpoint": task["title"],
@@ -294,6 +335,7 @@ def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Pat
         "fidelity": "measured" if ref_row else "unmeasured (no approved reference)",
         "environment": result.get("environment"), "frames": result["frames"],
         "measurement_method": "dom" if ref_row and ref_row["kind"] == "html" else ("image_estimate" if ref_row else "none"),
+        "restored_paths": restored_paths,
     }
     receipt_path = evdir / "receipt.json"
     receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True))
