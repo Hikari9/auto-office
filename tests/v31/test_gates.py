@@ -353,6 +353,55 @@ def test_amendment_for_an_earlier_session_does_not_hold_a_relaunch(env):
     assert _task(env)["status"] == "accepted"
 
 
+def test_requirements_amendment_follows_a_relaunch_to_the_new_session(env):
+    # A requirements change targets a plan version past the task contract, so the
+    # relaunch rule above does not supersede it. It must move to the new session
+    # (the only one that can ack it) instead of holding every submit forever.
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    env.office("amend", "requirements", "--quote", "also log each call", "--", "R9: log each call", check=0)
+    env.office("approve", "plan", "--quote", "approve", check=0)
+    con = env.con()
+    # Other tasks' amendments had moved the plan past this task's contract (the
+    # live run: A7 at p6 against a p2 contract).
+    con.execute("UPDATE deliveries SET target_version=target_version+4 WHERE status IN ('queued','delivered')")
+    con.commit()
+    env.office("revoke", "T1", check=0)
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    con = env.con()
+    current = _task(env)["current_dispatch_id"]
+    pending = con.execute("SELECT amendment_id, dispatch_id FROM deliveries WHERE status IN ('queued','delivered')").fetchall()
+    assert pending and all(r["dispatch_id"] == current for r in pending), [dict(r) for r in con.execute("SELECT amendment_id, status, dispatch_id, target_version FROM deliveries")]
+    _, out = env.office("status", check=0)
+    assert "T1 waiting:" in out and pending[0]["amendment_id"] in out, out
+    wenv, wt = _worker(env)
+    for r in pending:
+        env.office("ack", r["amendment_id"], cwd=wt, env=wenv, check=0)
+    (wt / "calc.py").write_text(GOOD_ADD)
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert "amendment pending" not in out, out
+    assert _task(env)["status"] == "accepted"
+
+
+def test_current_session_can_ack_an_amendment_left_on_an_ended_session(env):
+    # State an older runtime left behind: the delivery still names an ended
+    # session. The task's current session acks it instead of being refused.
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    first = _task(env)["current_dispatch_id"]
+    env.office("revoke", "T1", check=0)
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    env.office("amend", "T1", "--", "also handle negative numbers the same way", check=0)
+    con = env.con()
+    con.execute("UPDATE dispatches SET ended_at=COALESCE(ended_at, started_at), status='cancelled' WHERE id=?", (first,))
+    con.execute("UPDATE deliveries SET dispatch_id=? WHERE status IN ('queued','delivered')", (first,))
+    con.commit()
+    aid = con.execute("SELECT amendment_id FROM deliveries WHERE status IN ('queued','delivered')").fetchone()[0]
+    wenv, wt = _worker(env)
+    code, out = env.office("ack", aid, cwd=wt, env=wenv)
+    assert code == 0 and "applied" in out, out
+
+
 def test_headless_worker_past_its_wall_cap_is_stopped_and_surfaces(env):
     # agy once idled 3.5h past its own --print-timeout; the supervisor's cap
     # stops it, relaunches within the bound, then blocks with a named reason.

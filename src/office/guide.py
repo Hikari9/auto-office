@@ -114,6 +114,10 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     for t in tasks:
         if t["status"] in ("paused", "blocked"):
             res.add(f"blocker: {t['id']} {t.get('pause_reason') or t['status']}")
+        elif t["status"] in ("running", "launching", "submitted", "changes_required"):
+            waiting = _waiting_on(con, run, t)
+            if waiting:
+                res.add(f"{t['id']} waiting: {waiting}")
     events = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=6)
     for e in events:
         res.add(f"· {e['summary']}")
@@ -129,6 +133,28 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     if resumed:
         res.verbose.append("resumed: pending jobs and deliveries reconstructed from runs.db")
     return res
+
+
+def _waiting_on(con, run: dict, task: dict) -> str:
+    """What a live task is actually waiting on, so `live` never hides a stall:
+    an amendment its session must ack, a submission held for one, or gates."""
+    rid = run["id"]
+    held = con.execute("SELECT id FROM revisions WHERE run_id=? AND task_id=? AND status='amendment_pending' "
+                       "ORDER BY seq DESC LIMIT 1", (rid, task["id"])).fetchone()
+    parts = []
+    for dl in con.execute("SELECT amendment_id, dispatch_id FROM deliveries WHERE run_id=? AND task_id=? "
+                          "AND status IN ('queued','delivered') ORDER BY created_at", (rid, task["id"])).fetchall():
+        holder = dl["dispatch_id"]
+        stale = holder and holder != task["current_dispatch_id"]
+        parts.append(f"{dl['amendment_id']} ack by {holder or 'next session'}"
+                     + (" (not the current session; it can ack it)" if stale else ""))
+    if held:
+        parts.insert(0, f"{held['id']} held for amendment")
+    if task.get("current_revision_id"):
+        for g in con.execute("SELECT kind, status FROM gates WHERE revision_id=? AND status IN ('queued','running','waiting')",
+                             (task["current_revision_id"],)).fetchall():
+            parts.append(f"{g['kind']} {g['status']}")
+    return "; ".join(parts)
 
 
 def worker_status(con, run: dict, dispatch_id: str) -> Result:
