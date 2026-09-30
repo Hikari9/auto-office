@@ -137,6 +137,11 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
         if not worker:
             discovery.bind(con, run, keys, "resume")
         reconcile(con, run)
+        if not worker:
+            # An explicit resume is the retry for an integration that failed on
+            # something fixed outside Office (a stray worktree, missing deps).
+            from office import integration
+            integration.retry_failed(con, state.get_run(con, run["id"]))
     jobs.kick(con, run["id"])
     from office import guide
     return guide.status(con, state.get_run(con, run["id"]), resumed=True)

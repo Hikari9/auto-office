@@ -204,3 +204,21 @@ def final_reply(harness: str | None, *, marker: str, cwd: str | Path | None = No
                 if text and text.strip():
                     return text
     return None
+
+
+def prompt_seen(harness: str | None, *, marker: str, cwd: str | Path | None = None, since=None) -> bool:
+    """True once the session that was sent `marker` (the brief path) has logged
+    it as a user prompt. That is the harness's own record that the prompt
+    reached the model, which no pane footer proves: a narrow Claude pane never
+    shows `esc to interrupt`, and codex reports `working` while a startup
+    dialog holds the composer empty."""
+    if not marker:
+        return False
+    t = _epoch(since)
+    h = (harness or "").lower()
+    files: list[Path] = []
+    if h in ("claude", ""):
+        files += _claude_candidates(cwd, t)
+    if h in ("codex", ""):
+        files += _codex_candidates(t)
+    return any(_mentions(f, marker) and _prompted(f, marker, cwd) for f in files)

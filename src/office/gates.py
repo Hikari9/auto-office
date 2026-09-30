@@ -108,6 +108,40 @@ def start_waiting(con, run: dict, task_id: str, rev_id: str) -> list[str]:
     return started
 
 
+def unavailable_review_block(con, run: dict, task: dict) -> dict | None:
+    """The UNAVAILABLE code-review gate that alone blocks the task's current
+    (submitted) revision, or None when the task is blocked for another reason."""
+    rev_id = task.get("current_revision_id")
+    if task["status"] != "blocked" or not rev_id:
+        return None
+    latest = {g["kind"]: g for g in required_gates(con, run, task, rev_id)}
+    code = latest.get("code_review")
+    if not code or code["status"] != "done" or code["verdict"] != "UNAVAILABLE":
+        return None
+    if any(g["status"] == "done" and g["verdict"] != "PASS" for k, g in latest.items() if k != "code_review"):
+        return None  # another gate failed too; a re-review alone would not unblock it
+    return code
+
+
+def rerun_unavailable_review(con, run: dict, task: dict) -> str | None:
+    """Queue a fresh code review of the task's current revision when that
+    revision is blocked only because its code review was UNAVAILABLE (no
+    reviewer could answer). The submission is kept and no executor is
+    launched. Returns the new gate id, or None when that is not the block.
+    Caller holds the tx."""
+    code = unavailable_review_block(con, run, task)
+    if code is None:
+        return None
+    rev_id = code["revision_id"]
+    gid = _new_gate(con, run, task, rev_id, "code_review", f"{code['input_key']}:rerun:{uuid.uuid4().hex[:6]}",
+                    "queued", round_no=code["round"], escalated=code["escalated"])
+    state.enqueue(con, run, "review", {"gate_id": gid, "task_id": task["id"]}, dedup_key=f"review:{gid}", max_attempts=2)
+    state.update_task(con, run["id"], task["id"], status="submitted", pause_reason=None)
+    state.emit(con, run, "gate.rerun", f"{task['id']} code review re-run on {rev_id} (was UNAVAILABLE)",
+               task_id=task["id"])
+    return gid
+
+
 def stale_open_gates(con, run: dict, task_id: str, new_rev: str) -> None:
     """A new revision supersedes the old one: unfinished gates on it never run
     or, if already running, are ingested as stale audit evidence."""

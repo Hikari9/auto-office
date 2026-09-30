@@ -85,6 +85,8 @@ def planner_brief(con, run: dict, packet: dict) -> str:
         out += ["", f"CURRENT PLAN p{plan['version']} (revise it; do not start over):", plan["body"]]
     out += ["", "FORMAT for .office/PLAN.md:", PLAN_FORMAT,
             "Keep tasks small, independently checkable, with disjoint scopes unless ordered by depends.",
+            "Write each check for the tool versions the repo pins. Vitest 1.x rejects `--maxWorkers=N` on its "
+            "own (\"minThreads and maxThreads must not conflict\"): cap workers with `--maxWorkers=N --minWorkers=1`.",
             "WHEN DONE run: office submit", "Then stop. Review findings, if any, come back through the orchestrator."]
     return "\n".join(out) + "\n"
 

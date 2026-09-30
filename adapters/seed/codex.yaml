@@ -56,14 +56,14 @@ office_profiles:
     output: stdout
     herdr_kind: codex
     interactive:
-      argv: [--yolo, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}"]
+      argv: [-c, "projects={{cwd_toml}={trust_level=\"trusted\"}}", --yolo, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}"]
   reviewer:
     argv: [exec, --sandbox, read-only, --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}", -o, "{output}", "-"]
     prompt: stdin
     output: file
     herdr_kind: codex
     interactive:
-      argv: [--sandbox, read-only, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}"]
+      argv: [-c, "projects={{cwd_toml}={trust_level=\"trusted\"}}", --sandbox, read-only, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}"]
   vision:
     argv: [exec, --sandbox, read-only, --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}", -o, "{output}", "{images}", "-"]
     image_arg: [--image, "{image}"]
@@ -72,4 +72,4 @@ office_profiles:
     output: file
     herdr_kind: codex
     interactive:
-      argv: [--sandbox, read-only, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}"]
+      argv: [-c, "projects={{cwd_toml}={trust_level=\"trusted\"}}", --sandbox, read-only, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}"]

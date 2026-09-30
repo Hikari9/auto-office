@@ -18,10 +18,6 @@ from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_obj, short
 
-REVISION_AUTHOR = {"GIT_AUTHOR_NAME": "Auto Office", "GIT_AUTHOR_EMAIL": "office@localhost",
-                   "GIT_COMMITTER_NAME": "Auto Office", "GIT_COMMITTER_EMAIL": "office@localhost"}
-
-
 def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None) -> Result:
     dispatch_id = os.environ.get("OFFICE_DISPATCH_ID")
     if os.environ.get("OFFICE_ROLE") == "reviewer":
@@ -137,7 +133,7 @@ def make_commit(worktree: Path, tree: str, head: str, message: str) -> str:
     existing = paths.git(worktree, "rev-parse", "HEAD^{tree}")
     if existing == tree:
         return head
-    env = dict(os.environ, **REVISION_AUTHOR)
+    env = dict(os.environ, **paths.commit_identity_env(worktree))
     return paths.git(worktree, "commit-tree", tree, "-p", head, "-m", message, env=env)
 
 
@@ -166,7 +162,8 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     if task["status"] in ("paused", "blocked", "cancelled"):
         raise Refused("task-paused", f"{task['id']} is {task['status']}: {task.get('pause_reason') or ''}",
                       scope=task["id"], preserved="your worktree", next_step="stop and wait; the orchestrator is resolving it")
-    commit = make_commit(wt, tree, head, f"office: {task['id']} submission\n\nrun {run['id'][:8]} task {task['id']}")
+    commit = make_commit(wt, tree, head, f"office: {task['id']} submission\n\nrun {run['id'][:8]} task {task['id']}\n\n"
+                         f"{paths.office_trailer(run['id'])}")
     from office import planfile
     touched = paths.git(wt, "diff", "--name-only", d["base_commit"], commit).split()
     outside = [f for f in touched if not planfile.path_in_scope(f, task["scope"])]

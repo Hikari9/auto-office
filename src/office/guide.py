@@ -80,8 +80,11 @@ def next_action(con, run: dict) -> str:
     from office import integration
     integ = integration.status(con, run)
     if integ["required"] and integ["status"] not in ("accepted",):
-        if integ["status"] in ("blocked", "conflict", "unavailable"):
-            return f"integration {integ['status']}: {integ.get('detail', '')}; office inspect run"
+        if integ["status"] == "conflict":
+            return f"integration conflict: {integ.get('detail', '')}; office inspect run"
+        if integ["status"] in ("blocked", "unavailable"):
+            return (f"integration {integ['status']}: {integ.get('detail', '')}; fix the cause, then office resume "
+                    "to retry integration")
         return "no action; integration verification is running"
     branch = integ.get("branch")
     return (f"land it: push {branch} and open a PR (merge to main stays with the user), then office close --handoff <pr-url>"

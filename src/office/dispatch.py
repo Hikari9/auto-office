@@ -79,6 +79,19 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
         if task is None or task["role"] == "planner":
             raise Usage("unknown-task", f"{tid} is not a task in plan p{run['plan_version']}",
                         next_step="office status lists the ready tasks")
+        if not (as_model or route or cli or external):
+            from office import gates
+            block = gates.unavailable_review_block(con, run, task)
+            if block:
+                # Only its review re-runs (below), so a pinned reviewer is
+                # checked against the revision's real producer.
+                if review_decision:
+                    producer, _declared = gates._producer_model(con, block)
+                    row = con.execute("SELECT d.harness FROM revisions r JOIN dispatches d ON d.id=r.dispatch_id "
+                                      "WHERE r.id=?", (block["revision_id"],)).fetchone()
+                    _require_independent(tid, {"harness": row["harness"] if row else "?", "model_id": producer},
+                                         review_decision["candidate"])
+                continue
         if as_model:
             routes[tid] = candidates.declared_decision(as_model)
         else:
@@ -95,6 +108,22 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
         previous = None
         for tid in task_ids:
             task = state.get_task(con, run["id"], tid)
+            if tid not in routes:
+                # A submitted revision blocked only by an UNAVAILABLE code
+                # review needs its review re-run, not a fresh executor.
+                from office import gates
+                if review_as:
+                    state.update_task(con, run["id"], tid, review_override={
+                        "as": review_as, "cli": review_cli, "external": bool(review_external), "by": "user"})
+                gid = gates.rerun_unavailable_review(con, run, state.get_task(con, run["id"], tid))
+                if gid is None:
+                    raise Refused("state-changed", f"{tid} is no longer blocked on its code review; re-run dispatch",
+                                  scope=tid, next_step=f"office dispatch {tid}")
+                res.add(f"{tid} code review re-run on {task['current_revision_id']} (gate {gid}"
+                        + (f", reviewer {review_as}" if review_as else "") + "); the submission is kept, "
+                        "no executor launched")
+                previous = tid
+                continue
             if task["status"] in ("running", "launching", "submitted", "changes_required", "queued"):
                 res.add(f"{tid} already {task['status']}")
                 previous = tid
@@ -124,7 +153,8 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 res.add(f"{tid} stacked after {stack_after}")
             else:
                 did = request_launch(con, run, tid, role="executor", decision=decision, base=base)
-                res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} launching"
+                verb = "prepared for you to start (external; nothing launched)" if external else "launching"
+                res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} {verb}"
                         + (" (user override)" if decision.get("override") else ""))
                 res.lines.extend(f"  {line}" for line in launch_instructions(run, state.get_dispatch(con, did)))
             previous = tid
@@ -209,11 +239,14 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
                    "When the work and its checks are complete, run: office submit")
     else:
         pointer = (f"Read and carry out the review brief at {ddir / 'brief.md'} exactly. Write your complete review to "
-                   f"{output}. Do not edit anything else.")
+                   f"{output}. If your tools cannot write files, end your reply with the complete review instead. "
+                   "Do not edit anything else.")
     return [f"brief: {ddir / 'brief.md'}", f"env: {ddir / 'agent.env'}", f"worktree: {wt}",
             *([f"output: {output}"] if output else []),
             f"herdr: herdr pane run <pane> {shlex.quote('. ' + str(ddir / 'agent.env') + ' && cd ' + wt)}",
             f"       herdr agent start {name} --kind {kind} --pane <pane> -- {shlex.join(args)}".rstrip(),
+            "       (wait until `herdr pane get <pane>` shows the agent and its UI is up; answer a codex "
+            "'Trust this folder?' with Enter; send the pointer with `agent prompt`, never `pane run`)",
             f"       herdr agent prompt {name} {shlex.quote(pointer)}"]
 
 
@@ -610,8 +643,28 @@ def watch_external_output(dispatch_id: str, spec: dict, *, poll: float | None = 
         size = output.stat().st_size if output.is_file() else 0
         if size and size == last:
             return 0, "success"
+        if not size:
+            # A read-only reviewer (codex --sandbox read-only, claude without
+            # Write) cannot create the file its brief names; the pointer tells
+            # it to end its reply with the review, and its session transcript
+            # keeps that reply. The person may start it in any directory, so
+            # the brief path alone identifies the session.
+            reply = _external_transcript_reply(d, spec)
+            if reply:
+                output.write_text(reply, encoding="utf-8")
+                return 0, "success"
         last = size or None
         time.sleep(poll)
+
+
+_VERDICT_LINE = re.compile(r"^\W*VERDICT\s*:", re.M)
+
+
+def _external_transcript_reply(d: dict, spec: dict) -> str | None:
+    """An external reviewer's final reply from its transcript, once it holds a
+    VERDICT line (an earlier progress message is not the review)."""
+    reply = transcript_reply(d, {**spec, "cwd": None})
+    return reply if reply and _VERDICT_LINE.search(reply) else None
 
 
 def _wall_cap_seconds(prof: dict) -> float | None:
@@ -685,11 +738,24 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         pointer = (f"Read and carry out the review brief at {spec['prompt_file']} exactly.{images} "
                    f"Write your complete review to {spec['output']}. If your tools cannot write files, "
                    "end your reply with the complete review instead. Do not edit anything else.")
-    landed = _deliver_prompt(name, pane, pointer)
+    from office import transcripts
+    sent_at = time.time()
+
+    def seen() -> bool:
+        try:
+            return transcripts.prompt_seen(dispatch.get("harness") or herdr_kind, marker=spec["prompt_file"],
+                                           cwd=cwd, since=sent_at)
+        except Exception:  # a landing probe must never abort the launch
+            return False
+
+    landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen)
     if not landed:
         # The agent is up in a pane the user can see; a second headless copy
         # would race it. Say so and leave the pane for a manual re-prompt.
-        _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane}); "
+        trust = _trust_dialog(_pane_view(name))
+        why = (" a folder-trust dialog holds the composer; answer it in the pane (1. Trust and continue) and"
+               if trust else "")
+        _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
                                       f"re-prompt it: herdr agent prompt {name} {shlex.quote(pointer)}")
     spec["prompt_landed"] = landed
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
@@ -745,24 +811,115 @@ def herdr_agent_name(dispatch_id: str) -> str:
     return re.sub(r"[^a-z0-9_-]", "-", f"office-{dispatch_id}".lower())[:32]
 
 
-def _prompt_landed(name: str, timeout: float) -> bool:
-    """A prompt has landed once the pane shows a busy footer. `agent prompt`
-    returning without error proves nothing, and neither does a `working`
-    status: codex reports it while a startup trust dialog holds the composer
-    empty, and agy reads `idle` mid-turn."""
+# Codex opens a folder it has not been told to trust on a "Trust this folder?"
+# dialog. Until it is answered the composer is empty, so a prompt sent then is
+# lost while `agent prompt` succeeds and `agent get` can read `working`.
+TRUST_DIALOG_MARKERS = ("trust this folder",)
+# The ctx figure in a Claude status line ("ctx: 12k · $0.03"): it rises from
+# 0k once a prompt reaches the model, which is a landed signal in a pane too
+# narrow to show the busy footer.
+_CTX_RE = re.compile(r"\bctx:\s*(\d+(?:\.\d+)?)\s*k\b", re.I)
+
+
+def _trust_dialog(text: str | None) -> bool:
+    low = (text or "").lower()
+    return any(m in low for m in TRUST_DIALOG_MARKERS)
+
+
+def _ctx_k(text: str | None) -> float | None:
+    found = _CTX_RE.findall(text or "")
+    return float(found[-1]) if found else None
+
+
+def _pane_view(name: str) -> str | None:
+    return _herdr_agent_text(name, "--source", "visible", "--lines", "40")
+
+
+def _agent_up(pane: str, name: str | None = None) -> bool:
+    """Herdr detects an agent in the pane, or reports the named agent in a
+    known state: its UI is up, so typed text goes to the agent's composer and
+    not to the pane's shell."""
+    if (_herdr_json(["pane", "get", pane]).get("pane") or {}).get("agent"):
+        return True
+    if not name:
+        return False
+    res = _herdr_json(["agent", "get", name])
+    agent = res.get("agent") or res
+    status = (agent.get("status") or agent.get("agent_status")) if isinstance(agent, dict) else None
+    return status in ("idle", "working", "blocked", "done")
+
+
+def _landed_in(text: str | None, baseline_ctx: float | None) -> bool:
+    if text is None or _trust_dialog(text):
+        return False
+    if _pane_busy(text):
+        return True
+    ctx = _ctx_k(text)
+    return ctx is not None and ctx > (baseline_ctx or 0)
+
+
+def _prompt_landed(name: str, timeout: float, *, baseline_ctx: float | None = None, seen=None) -> str:
+    """'landed' once the pane shows a busy footer, the Claude status line's ctx
+    rises above its pre-prompt value, or the harness transcript logs the
+    prompt (`seen`); 'trust' when a folder-trust dialog holds the composer;
+    else '' at the deadline. `agent prompt` returning without error proves
+    nothing, and neither does a `working` status: codex reports it while the
+    trust dialog holds the composer empty, and agy reads `idle` mid-turn."""
     deadline = time.time() + timeout
     while True:
-        if _pane_busy(_herdr_agent_text(name, "--source", "visible", "--lines", "15")):
-            return True
+        text = _pane_view(name)
+        if _trust_dialog(text):
+            return "trust"
+        if _landed_in(text, baseline_ctx):
+            return "landed"
+        if seen is not None and seen():
+            return "landed"
         if time.time() >= deadline:
-            return False
+            return ""
         time.sleep(1)
 
 
-def _deliver_prompt(name: str, pane: str, pointer: str) -> bool:
-    """Send the one-line pointer and confirm it landed; retry once by typing it
-    into the pane and pressing Enter (agy can drop a prompt sent right after
-    `agent start` returns)."""
+def _await_agent_ui(name: str, pane: str, timeout: float, *, answer_trust: bool, herdr) -> str:
+    """Wait for the agent's UI before anything is sent. 'ready' once herdr sees
+    the agent in the pane; 'trust' when a folder-trust dialog is up that Office
+    may not answer; 'down' when no agent appeared by the deadline. A dialog on
+    an Office-owned directory is answered with option 1 (Trust and continue)."""
+    deadline = time.time() + timeout
+    answered = False
+    while True:
+        text = _pane_view(name)
+        if _trust_dialog(text):
+            if not answer_trust or answered:
+                if time.time() >= deadline:
+                    return "trust"
+            else:
+                herdr("pane", "send-keys", pane, "Enter")
+                answered = True
+        elif _agent_up(pane, name):
+            return "ready"
+        if time.time() >= deadline:
+            return "down"
+        time.sleep(1)
+
+
+def _office_owned(run: dict, cwd: Path | str | None) -> bool:
+    """A directory Office created for this run (dispatch dirs, review checkouts,
+    task worktrees): Office may answer a harness's trust prompt for it."""
+    if not cwd:
+        return False
+    try:
+        where = Path(cwd).resolve()
+        roots = [paths.run_dir(run["id"]).resolve(), (paths.worktrees_dir() / run["id"][:8]).resolve()]
+    except OSError:
+        return False
+    return any(where == r or r in where.parents for r in roots)
+
+
+def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = False, seen=None) -> bool:
+    """Wait for the agent UI, send the one-line pointer and confirm it landed;
+    retry once by typing it into the pane and pressing Enter (agy can drop a
+    prompt sent right after `agent start` returns). Nothing is typed into a
+    pane where herdr sees no agent: that text would go to the shell."""
     timeout = float(os.environ.get("OFFICE_HERDR_LAND_TIMEOUT", "30"))
 
     def herdr(*args: str) -> None:
@@ -773,10 +930,32 @@ def _deliver_prompt(name: str, pane: str, pointer: str) -> bool:
         except (OSError, subprocess.SubprocessError):
             pass
 
+    ui = _await_agent_ui(name, pane, timeout, answer_trust=answer_trust, herdr=herdr)
+    if ui == "trust":
+        return False
+    baseline = _ctx_k(_pane_view(name))
     herdr("agent", "prompt", name, pointer)
-    if _prompt_landed(name, timeout):
+    got = _prompt_landed(name, timeout, baseline_ctx=baseline, seen=seen)
+    if got == "landed":
         return True
-    herdr("pane", "send-text", pane, pointer)
+    if got == "trust":
+        # The dialog came up after the prompt was sent (a slow start): answer
+        # it if Office may, then send the pointer again.
+        if not answer_trust:
+            return False
+        herdr("pane", "send-keys", pane, "Enter")
+        if _await_agent_ui(name, pane, timeout, answer_trust=False, herdr=herdr) != "ready":
+            return False
+        herdr("agent", "prompt", name, pointer)
+        if _prompt_landed(name, timeout, baseline_ctx=baseline, seen=seen) == "landed":
+            return True
+    if not _agent_up(pane, name):
+        return False
+    # A pointer already sitting in the composer only needs submitting; typing
+    # it again would send it twice.
+    view = _pane_view(name) or ""
+    if pointer[:48] not in view:
+        herdr("pane", "send-text", pane, pointer)
     # A TUI can take an Enter that follows typed text too closely as part of
     # the paste and leave it in the composer: pause, submit, and submit once
     # more if it still has not landed.
@@ -784,7 +963,7 @@ def _deliver_prompt(name: str, pane: str, pointer: str) -> bool:
     for _ in range(2):
         time.sleep(delay)
         herdr("pane", "send-keys", pane, "Enter")
-        if _prompt_landed(name, timeout / 2):
+        if _prompt_landed(name, timeout / 2, baseline_ctx=baseline, seen=seen) == "landed":
             return True
     return False
 

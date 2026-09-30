@@ -89,6 +89,29 @@ def git(cwd: Path | str, *args: str, check: bool = True, env: dict | None = None
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
+FALLBACK_IDENTITY = ("Auto Office", "office@localhost")
+
+
+def commit_identity_env(repo: Path | str) -> dict:
+    """GIT_AUTHOR_*/GIT_COMMITTER_* for commits Office makes on the operator's
+    behalf. The identity is OFFICE_GIT_NAME/OFFICE_GIT_EMAIL when set, else the
+    repo's own `git config user.name/user.email`, so a host that verifies the
+    commit author (Vercel blocks a deployment when GitHub cannot match the
+    email to an account) sees the operator. The placeholder identity is used
+    only when neither is configured. Provenance travels in an `Office-Run:`
+    trailer on the message instead."""
+    name = os.environ.get("OFFICE_GIT_NAME") or git(repo, "config", "user.name", check=False)
+    email = os.environ.get("OFFICE_GIT_EMAIL") or git(repo, "config", "user.email", check=False)
+    if not (name and email):
+        name, email = FALLBACK_IDENTITY
+    return {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
+            "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email}
+
+
+def office_trailer(run_id: str) -> str:
+    return f"Office-Run: {run_id}"
+
+
 class GitError(RuntimeError):
     def __init__(self, args, code, stderr):
         super().__init__(f"git {' '.join(args)} failed ({code}): {stderr}")

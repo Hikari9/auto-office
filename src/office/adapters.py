@@ -97,6 +97,17 @@ def effort_value(adapter: dict, effort: str) -> str | None:
     return mapping.get(effort, effort)
 
 
+def toml_path(path: Path) -> str:
+    """`path`, resolved, as a TOML basic string. Codex keys `projects` trust on
+    the canonical path (macOS `/tmp` is `/private/tmp`), and a JSON string is a
+    valid TOML basic string."""
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        resolved = Path(path)
+    return json.dumps(str(resolved))
+
+
 def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
                output: Path | None = None, images: list[Path] | None = None,
                include_dirs: list[Path] | None = None) -> tuple[list[str], dict]:
@@ -127,6 +138,7 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
                 argv.pop()
             continue
         arg = (arg.replace("{model}", model).replace("{effort}", mapped_effort or "")
+               .replace("{cwd_toml}", toml_path(cwd))
                .replace("{cwd}", str(cwd)).replace("{output}", str(output or "")))
         argv.append(arg)
     return argv, prof

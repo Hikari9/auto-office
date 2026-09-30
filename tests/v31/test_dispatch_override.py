@@ -220,3 +220,9 @@ def test_model_family():
     assert model_family("gpt-6-luna") == model_family("luna") == "gpt"
     assert model_family("gemini-3.8-flash") == "gemini"
     assert model_family(None) is None
+
+
+def test_external_dispatch_says_nothing_was_launched(env):
+    _go(env)
+    code, out = env.office("dispatch", "T1", "--as", "claude/claude-sonnet-5-5@high", "--external")
+    assert code == 0 and "nothing launched" in out and " launching" not in out, out
