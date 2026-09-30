@@ -1,0 +1,61 @@
+id: gemini
+verified_state: valid-unverified
+version_fingerprint:
+  command: [gemini, --version]
+  parser: first-line
+model_source:
+  type: catalog-plus-probe
+  command: null
+# Gemini CLI exposes no reasoning-effort flag; every effort runs the model default.
+effort_mapping:
+  none: null
+  low: null
+  medium: null
+  high: null
+  xhigh: null
+  max: null
+benchmark_slug_mapping: {}
+invocation:
+  executable: gemini
+  argv: [-m, "{model}", -p, "{prompt}"]
+  prompt_transport: stdin
+  cwd_transport: process-cwd
+safe_prompt_passing:
+  shell: false
+  supports_prompt_file: false
+  notes: Prompt bytes go on stdin; -p carries a fixed pointer sentence and is appended to stdin.
+dispatch_forms: [cli]
+trusted_for: [discovery, read-only-investigation, conformance]
+quota_probe:
+  type: external-primitive
+  command: null
+  unknown_is_unlimited: false
+shallow_review:
+  supported: true
+  minimum_effort: none
+agentic_capability:
+  default: unknown
+failure_signatures:
+  - {id: workspace-file-scope, attribution: adapter, pattern: "path not in workspace: @-referenced files outside cwd need --include-directories"}
+  - {id: approval-mode-plan-read-only, attribution: adapter, pattern: "plan approval mode refuses edits; use it only for review"}
+conformance:
+  deterministic: pending
+  live: pending
+source_notes: Added in 3.1 as a Gemini route. The shipped catalog has no Gemini CLI row (the 3.1 visual preference routes Gemini Flash through agy); a Gemini CLI row added by the user stays valid-unverified until the office conformance probe passes on the installed version.
+capabilities: [planning, builder, review]
+office_profiles:
+  worker:
+    argv: [-m, "{model}", --approval-mode, yolo, -o, text, -p, "Follow the instructions provided on stdin exactly."]
+    prompt: stdin
+    output: stdout
+  reviewer:
+    argv: [-m, "{model}", --approval-mode, plan, -o, text, "{include_dirs}", -p, "Follow the review instructions provided on stdin exactly."]
+    include_arg: [--include-directories, "{dir}"]
+    prompt: stdin
+    output: stdout
+  vision:
+    argv: [-m, "{model}", --approval-mode, plan, -o, text, "{include_dirs}", -p, "Follow the review instructions provided on stdin exactly."]
+    include_arg: [--include-directories, "{dir}"]
+    image_transport: prompt-at
+    prompt: stdin
+    output: stdout

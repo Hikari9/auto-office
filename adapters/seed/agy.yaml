@@ -47,3 +47,33 @@ conformance:
   deterministic: pending
   live: pending
 source_notes: Current office-skills Agy mechanics seeded for migration; exact model display names are dynamic and must come from local discovery.
+# 3.1: agy is the Gemini route on accounts where the Gemini CLI reports
+# IneligibleTierError. agy has no verified read-only isolation, so it is not a
+# code reviewer; visual judgment runs in the run's private evidence directory.
+# Executor (builder) since 2026-09-28 (#183): the worker profile runs in the
+# dispatch worktree, where write access is the point.
+capabilities: [builder, review]
+office_profiles:
+  worker:
+    argv: [--dangerously-skip-permissions, --print-timeout, 45m, --model, "{model}", --add-dir, "{cwd}"]
+    # Supervisor hard cap: --print-timeout has failed to fire (idle 3.5h waiting on a background task).
+    max_minutes: 50
+    prompt: argv-bound
+    prompt_flag: "--print="
+    output: stdout
+    herdr_kind: agy
+    interactive:
+      # The model is the combined native-Gemini slug (gemini-3.8-flash-medium); a
+      # separate --effort is the claude/codex convention and must not be added.
+      argv: [--dangerously-skip-permissions, --model, "{model}", --add-dir, "{cwd}"]
+  vision:
+    argv: [--dangerously-skip-permissions, --print-timeout, 30m, --model, "{model}", "{include_dirs}"]
+    max_minutes: 35
+    include_arg: [--add-dir, "{dir}"]
+    prompt: argv-bound
+    prompt_flag: "--prompt="
+    image_transport: prompt-path
+    output: stdout
+    herdr_kind: agy
+    interactive:
+      argv: [--dangerously-skip-permissions, --model, "{model}", "{include_dirs}"]

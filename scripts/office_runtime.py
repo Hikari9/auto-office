@@ -20,6 +20,8 @@ MUTABLE_TRUST_ROLES = {"executor", "code_reviewer", "browser_verifier", "closeou
 ATTRIBUTIONS = {"model","harness","adapter","quota/account","environment/network","planner","brief","repository","verification","unknown"}
 OUTCOMES = {"pending","verified_no_observed_failure","recurrence_failure","revert_failure","material_post_merge_defect","abandoned","environment_failure"}
 PHASE_ORDER = ("intake", "planned", "approved", "executing", "reviewed", "closed")
+REUSE_COMPACT_THRESHOLD = 272_000
+REUSE_COMPACT_ROLES = ("executor", "plan_reviewer")
 START_PINNED_FIELDS = (
     "run_id",
     "family_id",
@@ -232,7 +234,7 @@ def route(request: dict) -> dict:
         try:
             # Both parents, because neither is guaranteed to be on sys.path: pytest puts
             # the repo root there, but `python3 tests/test_schemas.py` -- which is exactly
-            # how .github/workflows/validate.yml invokes it -- puts only tests/ there, and
+            # how scripts/validate.sh invokes it -- puts only tests/ there, and
             # the shim then degraded to routing_module_unavailable in CI while passing
             # locally under pytest.
             _here = os.path.dirname(os.path.abspath(__file__))
@@ -2046,7 +2048,157 @@ def cmd_cleanup_worktrees(args):
         return 2
 
 
+def reuse_dispatch_plan(role: str, context_tokens: int | None, herdr_available: bool,
+                         compact_supported: bool, target: str, brief_path: str) -> dict:
+    """Pure decision: reuse a worker as-is, or compact it then queue the next brief.
+
+    Never emits a spawn/start command and never waits on compaction; the brief command is
+    queued immediately after the compact command (Herdr queues the prompt for the worker).
+    """
+    brief_command = ["herdr", "agent", "prompt", target,
+                      f"Read and carry out the brief at {brief_path} exactly."]
+
+    if role not in REUSE_COMPACT_ROLES:
+        reason = "role_not_eligible"
+    elif context_tokens is None:
+        reason = "context_unknown"
+    elif not (context_tokens > REUSE_COMPACT_THRESHOLD):
+        reason = "at_or_below_threshold"
+    elif not herdr_available:
+        reason = "herdr_unavailable"
+    elif not compact_supported:
+        reason = "compact_unsupported"
+    else:
+        reason = None
+
+    if reason is None:
+        return {
+            "mode": "compact_then_queue",
+            "reason": "eligible_over_threshold",
+            "commands": [["herdr", "agent", "prompt", target, "/compact"], brief_command],
+            "await_compaction": False,
+            "threshold": REUSE_COMPACT_THRESHOLD,
+            "context_tokens": context_tokens,
+        }
+
+    return {
+        "mode": "normal_reuse",
+        "reason": reason,
+        "commands": [brief_command],
+        "await_compaction": False,
+        "threshold": REUSE_COMPACT_THRESHOLD,
+        "context_tokens": context_tokens,
+    }
+
+
+def cmd_reuse_plan(args):
+    result = reuse_dispatch_plan(
+        role=args.role,
+        context_tokens=args.context_tokens,
+        herdr_available=args.herdr_available,
+        compact_supported=args.compact_supported,
+        target=args.target,
+        brief_path=args.brief_path,
+    )
+    dump_json(result)
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Auto Office 3.1 compatibility guard (3.1.x only; removed in 3.2.0).
+#
+# This file is the retained 3.0 helper surface. A run created by Auto Office
+# 3.1 is owned by runs.db, so a helper here must never write it. A 3.0 run is
+# pinned to the plugin commit that started it and is served by exactly that
+# commit, materialized from git history, never by newer code.
+# --------------------------------------------------------------------------
+_V31_READ_ONLY = {"state-load", "family-show", "family-list", "list-events", "completion-status",
+                  "check-spoke", "check-route-defects", "lease-check", "validate-packet", "validate-adapter",
+                  "validate-checkpoint", "validate-landing", "validate-review", "hash", "maturity", "privacy-lint"}
+
+
+def _pin_guard(argv):
+    if os.environ.get("OFFICE_PINNED_LEGACY") or os.environ.get("OFFICE_RAW_PASSTHROUGH") == "1" and "--state-dir" not in argv:
+        return None
+    cmd = argv[0] if argv else ""
+    state_dir = None
+    for i, a in enumerate(argv):
+        if a == "--state-dir" and i + 1 < len(argv):
+            state_dir = argv[i + 1]
+    if cmd in ("start", "new-run") and not os.environ.get("OFFICE_PINNED_LEGACY"):
+        _compat_record(cmd, argv, None, "refused-new-run")
+        dump_json({"error": "new_runs_use_office", "message": "Auto Office 3.1 creates new runs: office start \"<goal>\". "
+                   "This helper serves only runs that 3.0 already started."})
+        return 5
+    if not state_dir:
+        return None
+    try:
+        state = json.loads((Path(state_dir).expanduser() / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = None
+    if isinstance(state, dict) and (state.get("_authority") == "runs.db" or state.get("office_version")):
+        if cmd in _V31_READ_ONLY:
+            return None
+        _compat_record(cmd, argv, state.get("run_id"), "refused-3.1-run")
+        dump_json({"error": "owned_by_office_3_1", "run_id": state.get("run_id"),
+                   "message": "this run is owned by runs.db under Auto Office 3.1; legacy helpers cannot write it",
+                   "use": "office status / office submit / office amend / office close"})
+        return 5
+    if isinstance(state, dict) and state.get("plugin_commit"):
+        pinned = str(state["plugin_commit"])
+        here = os.environ.get("AUTO_OFFICE_PLUGIN_COMMIT") or _start_plugin_commit()
+        if pinned != here and len(pinned) >= 7 and all(c in "0123456789abcdef" for c in pinned):
+            retained = _retained_legacy_runtime(pinned)
+            if retained is None:
+                dump_json({"error": "pinned_runtime_unavailable", "plugin_commit": pinned,
+                           "message": "this 3.0 run is pinned to a plugin commit that is not available here",
+                           "next": f"git -C <auto-office checkout> archive {pinned[:12]} | tar -x -C <dir>, then retry"})
+                return 5
+            env = dict(os.environ, OFFICE_PINNED_LEGACY="1", AUTO_OFFICE_PLUGIN_COMMIT=pinned)
+            os.execve(sys.executable, [sys.executable, str(retained / "scripts" / "office_runtime.py"), *argv], env)
+    return None
+
+
+def _retained_legacy_runtime(commit):
+    base = Path(os.environ.get("OFFICE_DATA_HOME") or Path.home() / ".local" / "share" / "auto-office") / "runtimes"
+    target = base / f"legacy-{commit[:12]}"
+    if (target / "scripts" / "office_runtime.py").is_file():
+        return target
+    try:
+        proc = subprocess.run(["git", "-C", str(ROOT), "archive", "--format=tar", commit], capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    import tarfile
+    staging = target.with_name(target.name + ".partial")
+    staging.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tar:
+        tar.extractall(staging, filter="data")
+    staging.rename(target)
+    return target
+
+
+def _compat_record(cmd, argv, run_id, outcome):
+    try:
+        base = Path(os.environ.get("OFFICE_DATA_HOME") or Path.home() / ".local" / "share" / "auto-office")
+        db = Path(os.environ.get("AUTO_OFFICE_RUNS_DB") or base / "runs.db")
+        con = sqlite3.connect(str(db), timeout=10)
+        con.execute("CREATE TABLE IF NOT EXISTS compat_calls(id TEXT PRIMARY KEY, at TEXT NOT NULL, office_version TEXT NOT NULL, "
+                    "run_id TEXT, command TEXT NOT NULL, argv_json TEXT NOT NULL, caller TEXT, outcome TEXT NOT NULL)")
+        con.execute("INSERT INTO compat_calls VALUES(?,?,?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), datetime.now(timezone.utc).isoformat(), "3.0-helper", run_id, cmd,
+                     json.dumps(argv), os.environ.get("AI_AGENT"), outcome))
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+
 def main():
+    guard = _pin_guard(sys.argv[1:])
+    if guard is not None:
+        sys.exit(guard)
     p=argparse.ArgumentParser(description='Auto Office v3 deterministic runtime helpers')
     sp=p.add_subparsers(dest='cmd',required=True)
     q=sp.add_parser('validate-packet'); q.add_argument('--kind',choices=['execution','envelope'],required=True); q.add_argument('file'); q.set_defaults(func=cmd_validate_packet)
@@ -2107,6 +2259,7 @@ def main():
     q=sp.add_parser('validate-review'); q.add_argument('file'); q.set_defaults(func=cmd_validate_review)
     q=sp.add_parser('tmp-dir'); q.add_argument('--state-dir'); q.set_defaults(func=cmd_tmp_dir)
     q=sp.add_parser('cleanup-worktrees'); q.add_argument('--state-dir',required=True); q.add_argument('--repo'); q.add_argument('--force',action='store_true'); q.set_defaults(func=cmd_cleanup_worktrees)
+    q=sp.add_parser('reuse-plan'); q.add_argument('--role',required=True); q.add_argument('--context-tokens',dest='context_tokens',type=int); q.add_argument('--herdr-available',dest='herdr_available',action='store_true'); q.add_argument('--no-herdr-available',dest='herdr_available',action='store_false'); q.add_argument('--compact-supported',dest='compact_supported',action='store_true'); q.add_argument('--no-compact-supported',dest='compact_supported',action='store_false'); q.add_argument('--target',required=True); q.add_argument('--brief-path',dest='brief_path',required=True); q.set_defaults(herdr_available=os.environ.get('HERDR_ENV')=='1', compact_supported=False, func=cmd_reuse_plan)
 
     args=p.parse_args(); sys.exit(args.func(args))
 

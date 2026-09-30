@@ -13,3 +13,17 @@ report signals the gap.
 
 See auto-verification/SKILL.md, "A green suite that injects a double at every seam proves the
 double," for the remedy this failure mode motivates.
+
+## free-form-capture
+
+A low-cost model drives a browser from a prose brief and picks its own clicks and timing. Across
+several rounds of one run, it captured frames before rendering settled, followed a different click
+path than the step named, and once left the safe simulation mode that the brief listed as a hard
+rule, so the frames had to be deleted and recaptured. Separately, the browser tool could not resize
+its viewport, so the phone-width steps came back as desktop frames. Every round still reported
+success. After the orchestrator switched to a pinned steps file run by a fixed script, with a DOM
+probe per state, none of these recurred. The worker's job shrank to starting the server, running the
+script and stopping the server, and acceptance was settled on the probe values.
+
+See auto-verification/SKILL.md, "A cheap browser worker captures; it does not verify," for the
+remedy.

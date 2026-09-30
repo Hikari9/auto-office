@@ -1,0 +1,32 @@
+schema_version: 1
+notes: >-
+  Shipped adapter trust. Each route is `harness@major/model_id@effort`; trust keys on the
+  harness major, so point releases inherit it. A route here reads as `proven` on a fresh
+  install. Any local act in runs.db for the same route wins over this file, and a standing
+  adapter-attributed failure quarantines the route regardless. Add a route only with a
+  maintainer grant on record; run history alone does not qualify (outcome labels were not
+  recorded before 3.1, so no route had labelled evidence at the 5-success threshold).
+recorded_at: '2026-09-28'
+granted_by: Rico Tiongson (techteam@favor.church)
+routes:
+  - triple: claude@2/claude-sonnet-5-5@high
+    target_state: proven
+    evidence: maintainer grant 2026-09-29 as the default executor; pane launch `claude --model claude-sonnet-5-5 --effort high` bannered "Sonnet 5.5 with high effort" at claude 2.1.284
+  - triple: claude@2/claude-sonnet-5@high
+    target_state: proven
+    evidence: grants at claude 2.1.282, 2.1.283, cli, local (runs c024d10e, d42517a3, 11328d8d, 129139c5); 1 labelled executor success
+  - triple: claude@2/claude-sonnet-5@medium
+    target_state: proven
+    evidence: grant at claude 2.1.282 (run c024d10e); 2 labelled successes across executor and code_reviewer
+  - triple: codex@0/gpt-6-luna@xhigh
+    target_state: proven
+    evidence: grants at codex 0.157.1 and cli (runs d42517a3, ce26b2fa); pinned plan and code reviewer
+  - triple: codex@0/gpt-6-luna@high
+    target_state: proven
+    evidence: grants at codex 0.156.1, 0.157.1, cli (runs c024d10e, ca430652, 213b7ae7)
+  - triple: agy@1/gemini-3.8-flash@medium
+    target_state: proven
+    evidence: grants at agy 1.2.11 and cli (runs 53f86d74, ce26b2fa); preferred executor seed
+  - triple: agy@1/gemini-3.8-flash@low
+    target_state: proven
+    evidence: maintainer grant 2026-09-28 (#183) as the default visual reviewer; vision proof and visual_reviewer success at agy 1.2.12

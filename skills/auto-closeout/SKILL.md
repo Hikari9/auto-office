@@ -1,9 +1,12 @@
 ---
 name: auto-closeout
-description: Internal Auto Office v3 closeout spoke. Use after implementation/review to reconcile findings, validate completion evidence, report branch/PR state and real blockers, record pinned runtime hashes and telemetry, enforce the human merge-to-main boundary, and finish family state without claiming success from model confidence alone.
+description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use the office CLI). Internal Auto Office v3 closeout spoke. Use after implementation/review to reconcile findings, validate completion evidence, report branch/PR state and real blockers, record pinned runtime hashes and telemetry, enforce the human merge-to-main boundary, and finish family state without claiming success from model confidence alone.
 ---
 
 # Auto Closeout
+
+> **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
+> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
 
 A family may report implementation complete only with evidence for: Outcome; Key implementation; Validation; browser/runtime evidence when applicable; Review result; PR/branch state; Remaining real blockers; Pinned runtime hashes.
 

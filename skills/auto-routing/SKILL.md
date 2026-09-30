@@ -1,11 +1,14 @@
 ---
 name: auto-routing
-description: Internal Auto Office v3 router. Use when selecting or explaining a role route across harness, model, and effort; evaluating adapter trust/capabilities/absolute floors/task shape/quota/advisory quality/cost/local evidence; deciding exploration eligibility; or recording a routing decision. Route-time must remain offline and reproducible from pinned snapshots.
+description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use the office CLI). Internal Auto Office v3 router. Use when selecting or explaining a role route across harness, model, and effort; evaluating adapter trust/capabilities/absolute floors/task shape/quota/advisory quality/cost/local evidence; deciding exploration eligibility; or recording a routing decision. Route-time must remain offline and reproducible from pinned snapshots.
 ---
 
 # Auto Routing
 
-Route `harness@version × model_id × effort`, not model brand alone.
+> **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
+> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
+
+Route `harness@major × model_id × effort`, not model brand alone.
 
 Read `../../protocol/routing.md`, `../../config/config.default.yaml`, the pinned catalog snapshot, pinned adapter snapshot, effective config, and comparable local evidence.
 

@@ -1,9 +1,12 @@
 ---
 name: auto-review
-description: Internal Auto Office v3 independent review spoke. Use for plan review, code review, accepted-material/minor/rejected/pending finding disposition, pointed blast-radius and bypass analysis, repeated review rounds, or validating PLAN DEFECT and BRIEF DEFECT exits.
+description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use the office CLI). Internal Auto Office v3 independent review spoke. Use for plan review, code review, accepted-material/minor/rejected/pending finding disposition, pointed blast-radius and bypass analysis, repeated review rounds, or validating PLAN DEFECT and BRIEF DEFECT exits.
 ---
 
 # Auto Review
+
+> **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
+> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
 
 Every gate is held by an agent that did not produce the work — never self-approve. Use a fresh/different reviewer session from the producer whenever the harness permits it. When `HERDR_ENV=1` and `herdr` is reachable, that fresh session is a Herdr pane, not an in-process subagent tool (see the top-level `SKILL.md`'s Dispatch and mutation section) — check this before dispatching, not after defaulting to whatever tool is already loaded. Before invoking a plan reviewer or code reviewer, publish the router's `selection_disclosure` to the user and preserve it in the dispatch record/readback: exact invocation model identifier when available, canonical model ID, effort, harness/version, and the evidence-backed reason this reviewer route won.
 

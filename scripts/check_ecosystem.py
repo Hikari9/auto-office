@@ -14,19 +14,21 @@ INIT_MARKERS=('TODO:', 'example_asset.txt', 'scripts/example.py', 'references/ap
 # for this change so context-load size is now a gate. These budgets are the current
 # `wc -l` counts rounded up with roughly 10% headroom; adjust this table deliberately.
 HUB_LINE_BUDGET = 128
+# 3.1: each 3.0 spoke carries a three-line banner pointing 3.1 runs at the office CLI;
+# the per-spoke budgets below grew by exactly those lines.
 SKILL_LINE_BUDGETS = {
     'skills/agy-cli/SKILL.md': 46,
-    'skills/auto-adapter/SKILL.md': 18,
-    'skills/auto-closeout/SKILL.md': 64,
-    'skills/auto-execution/SKILL.md': 20,
-    'skills/auto-intake/SKILL.md': 48,
-    'skills/auto-loop/SKILL.md': 27,
-    'skills/auto-maintenance/SKILL.md': 18,
-    'skills/auto-planning/SKILL.md': 21,
-    'skills/auto-review/SKILL.md': 33,
-    'skills/auto-routing/SKILL.md': 51,
-    'skills/auto-self-improve/SKILL.md': 26,
-    'skills/auto-verification/SKILL.md': 50,
+    'skills/auto-adapter/SKILL.md': 21,
+    'skills/auto-closeout/SKILL.md': 67,
+    'skills/auto-execution/SKILL.md': 23,
+    'skills/auto-intake/SKILL.md': 51,
+    'skills/auto-loop/SKILL.md': 30,
+    'skills/auto-maintenance/SKILL.md': 21,
+    'skills/auto-planning/SKILL.md': 24,
+    'skills/auto-review/SKILL.md': 36,
+    'skills/auto-routing/SKILL.md': 54,
+    'skills/auto-self-improve/SKILL.md': 29,
+    'skills/auto-verification/SKILL.md': 53,
     'skills/claude-cli/SKILL.md': 43,
     # Raised from 61 for the env -i / HERDR_ENV invisibility section: a recorded
     # failure mode with a reproduction, compressed to 28 lines before raising.
@@ -75,6 +77,22 @@ def check_skill_budgets(root=ROOT):
         if count > budget:
             errors.append(f'{relative}: {count} lines exceeds line budget of {budget}')
     return errors
+
+def check_versions(root=ROOT):
+    """One release identity: VERSION, the plugin manifest and the package agree.
+    Claude Code keys plugin updates on the manifest version, and every run pins
+    the package version, so a mismatch ships one identity under two numbers."""
+    import tomllib
+    want = (root / 'VERSION').read_text().strip()
+    found = {'VERSION': want}
+    manifest = root / '.claude-plugin' / 'plugin.json'
+    if manifest.exists():
+        found['.claude-plugin/plugin.json'] = json.loads(manifest.read_text()).get('version')
+    project = root / 'pyproject.toml'
+    if project.exists():
+        found['pyproject.toml'] = tomllib.loads(project.read_text()).get('project', {}).get('version')
+    return [f'{where}: version {got!r} does not match VERSION {want!r}' for where, got in found.items() if got != want]
+
 
 def main():
     errors=[]
@@ -129,6 +147,7 @@ def main():
 
     budget_errors = check_skill_budgets()
     errors.extend(budget_errors)
+    errors.extend(check_versions())
         
     if errors:
         print('FAIL')

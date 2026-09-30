@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "auto-office"
+version = "3.1.0"
+description = "Auto Office: adaptive, independently reviewed agent engineering runtime behind one `office` CLI."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Auto Office maintainers" }]
+dependencies = [
+  "PyYAML>=6",
+  "jsonschema>=4.18",
+]
+
+[project.optional-dependencies]
+# Deterministic browser capture for visual gates. Without it the visual gate
+# reports CAPTURE_BLOCKED instead of passing.
+visual = ["playwright>=1.40"]
+test = ["pytest>=8", "pytest-xdist>=3"]
+
+[project.scripts]
+office = "office.cli:main"
+
+[project.urls]
+Repository = "https://github.com/Hikari9/auto-office"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/office"]
+
+# Runtime resources live at the repository root so the legacy v3 helpers and the
+# packaged runtime read the same files. A wheel carries them under office/_resources.
+[tool.hatch.build.targets.wheel.force-include]
+"config" = "office/_resources/config"
+"schemas" = "office/_resources/schemas"
+"catalog" = "office/_resources/catalog"
+"adapters" = "office/_resources/adapters"
+"skills" = "office/_resources/skills"
+"SKILL.md" = "office/_resources/SKILL.md"
+"VERSION" = "office/_resources/VERSION"
+"scripts/codex-usage.py" = "office/_resources/scripts/codex-usage.py"
+"scripts/claude-usage.py" = "office/_resources/scripts/claude-usage.py"
+"scripts/agy-usage.py" = "office/_resources/scripts/agy-usage.py"
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "config", "schemas", "catalog", "adapters", "skills", "scripts", "SKILL.md", "VERSION", "README.md", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]

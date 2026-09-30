@@ -1,6 +1,6 @@
 # Routing
 
-Route identity is `harness@version × model_id × effort`. Public benchmark identity is only `model_id × effort`; never share runtime reliability, quota, dispatch-form, or adapter-trust evidence automatically across harnesses.
+Route identity is `harness@major × model_id × effort`. Public benchmark identity is only `model_id × effort`; never share runtime reliability, quota, dispatch-form, or adapter-trust evidence automatically across harnesses. The harness version counts by major only (`agy@1`, `codex@0`): point releases share trust and history, and the full version stays in the selection disclosure. `catalog/trust-baseline.yaml` ships maintainer-granted routes that read as proven on a fresh install; a local trust act overrides it.
 
 Filter in this exact order: hard exclusions → adapter validity/trust → required capabilities → absolute role floor → task shape → quota safety → advisory quality anchor → cost → local tie-break evidence.
 

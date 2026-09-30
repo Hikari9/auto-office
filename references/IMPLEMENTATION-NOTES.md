@@ -26,7 +26,7 @@ This preview keeps those names to make migration concrete. Treat them as compati
 
 ## Route helper contract
 
-`office_runtime.py route` accepts a JSON/YAML request containing `role`, `gear`, `playbook`, `policy`, and `candidates`. Candidates already represent locally discovered/bound `harness@version × model × effort` triples. The helper performs deterministic filtering and selection; it does not use the network.
+`office_runtime.py route` accepts a JSON/YAML request containing `role`, `gear`, `playbook`, `policy`, and `candidates`. Candidates already represent locally discovered/bound `harness@major × model × effort` triples. The helper performs deterministic filtering and selection; it does not use the network.
 
 Successful route results include a `selection_disclosure` with the canonical model identity, the exact harness invocation identifier when available, and an evidence-based reason. Dispatch telemetry persists the invocation identifier and reason so the user-visible notice and durable record agree.
 

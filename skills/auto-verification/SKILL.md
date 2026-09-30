@@ -1,9 +1,12 @@
 ---
 name: auto-verification
-description: Internal Auto Office v3 verification spoke. Use to build or execute the verification floor for mutable work, choose targeted/regression/static/build/runtime checks, prove known-bad inputs fail critical gates, run browser acceptance flows for user-facing work, and package validation evidence for independent review and closeout.
+description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use the office CLI). Internal Auto Office v3 verification spoke. Use to build or execute the verification floor for mutable work, choose targeted/regression/static/build/runtime checks, prove known-bad inputs fail critical gates, run browser acceptance flows for user-facing work, and package validation evidence for independent review and closeout.
 ---
 
 # Auto Verification
+
+> **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
+> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
 
 Every mutable run self-verifies. Add independent verification when risk, gear, playbook, repository policy, or acceptance path requires it.
 
@@ -22,6 +25,10 @@ See references/verification-failure-modes.md#green-suite-double for the failure 
 Cover the wiring separately from the behavior. Assert what arguments reach the real factory, without opening a connection. When a suite is green but the code has never run against the real dependency, say so in the evidence rather than reporting the pass rate alone.
 
 A clean rebase onto current mainline reconciles text, never semantics: a required-argument change in a merged dependency is invisible to the merge and fatal at runtime. Where the base has moved and a rebase is warranted, that's a writer-lease action, not something verification does unilaterally — it changes the reviewed tree and the pinned base SHA. Acquire the lease, update or invalidate the affected packets per protocol/state-and-takeover.md, then re-run the suite and re-verify against the new base.
+
+## A cheap browser worker captures; it does not verify
+
+See references/verification-failure-modes.md#free-form-capture. Route capture (drive the runtime, save frames) to the cheapest `browser` route, but keep judgment of every frame and probe with the orchestrator or a reviewer-grade route. Give the worker a pinned steps file (URL, viewport, actions, settle wait, DOM probe per state) for a fixed script, not a prose walkthrough. Enforce safe mode and write refusal in the script. Settle acceptance on probe values, with images as corroboration. Frames from a viewport the tool could not set are missing evidence, not a layout verdict.
 
 ## An artifact a worker could not have captured is fabricated
 

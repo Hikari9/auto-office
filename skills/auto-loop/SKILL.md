@@ -1,9 +1,12 @@
 ---
 name: auto-loop
-description: Internal Auto Office v3 loop-driver spoke. Use after plan approval to dispatch waves without blocking, integrate dispatch branches through a validated merge, adjudicate contract disagreements, and hold the autonomy ceiling — proceeding end to end while never merging to main without an explicit user statement.
+description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use the office CLI). Internal Auto Office v3 loop-driver spoke. Use after plan approval to dispatch waves without blocking, integrate dispatch branches through a validated merge, adjudicate contract disagreements, and hold the autonomy ceiling — proceeding end to end while never merging to main without an explicit user statement.
 ---
 
 # Auto Loop
+
+> **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
+> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
 
 Dispatch every task in the wave before waiting on any of them. One worktree per dispatch, cut from the run's pinned base SHA — regardless of executor count or gear. A single-dispatch run is not exempt: it is the case most tempting to skip the worktree for ("just one quick executor," work directly in the main checkout), and exactly the case where that shortcut is wrong. The orchestrator can never assume exclusive ownership of the repo's main working tree; another human or another agent/session may be concurrently editing it, independent of how many dispatches this orchestrator itself is running. Each executor commits its own work locally to its own dispatch branch — never pushes, never touches any other branch — as a checkpoint immediately before reporting done, so a finished dispatch survives an orchestrator mistake made later during post-dispatch verification or integration. The orchestrator still owns final integration and merge, and may amend, squash, or rewrite that commit while landing it. Two tasks in one wave never share a write scope — a wave is only real if it draws as disjoint. Every brief's completion criterion is a command whose output settles it, not a target — "under 120 lines" is a wish, "`wc -l` reports under 120" is a receipt (spec §4).
 
@@ -21,8 +24,6 @@ After approval the run proceeds end to end with no further go-aheads: bootstrap 
 
 Report blockers, then carry out the authorized action — a defect exit pauses and reports, it doesn't decline an authority decision. A defect must concern the artifact it names; a scope objection raised to dodge an authority call is really that disagreement in disguise. If the harness itself blocks an action, ask the user instead of rephrasing past the guard (spec §9.1, §9.2).
 
-It stops for exactly two things: an external send, and a user-owned decision the plan didn't anticipate. Everything the plan named — production applies included — it executes without asking again.
+It stops for exactly two things: an external send, and a user-owned decision the plan didn't anticipate. Everything the plan named — production applies included — it executes without asking again. Send a mid-run contract amendment only to dispatches whose base contains its producer (`references/contract-amendments.md`).
 
-## Contract amendments follow the dependency graph
-
-A mid-run amendment to a pinned shared contract (a new field, a narrowed union) goes only to dispatches whose base already contains the code that produces or consumes it. A task cut before the producing side merged cannot satisfy it inside its write scope and will correctly stop with a BRIEF DEFECT. Observed three times in one run: a UI task asked to render a field its base's server actions did not yet return; a server task asked to add gate entries whose count-asserting tests were outside its scope; a UI task told to stop if an e2e mock layer was missing, when the repo's e2e harness could only mock auth. For each amendment, check every in-flight dispatch's base: send it only where the producer exists, and otherwise defer it to a follow-up round after the orchestrator rebases that dispatch onto the producer. When a brief adds registry/manifest entries, include the tests that count those entries in its write scope. Make "optional" acceptance steps (e2e specs) drop-if-unavailable, not stop-the-task.
+Reusing an executor or plan_reviewer whose context exceeds 272,000 tokens: send `/compact` and queue the next brief pointer back to back, then move on — no wait, no poll, no replacement worker. `scripts/office_runtime.py reuse-plan` is the pinned, pure decision (`compact_then_queue` vs `normal_reuse`); call it before reusing, don't hand-roll the threshold check.

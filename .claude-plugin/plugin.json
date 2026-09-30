@@ -1,7 +1,17 @@
 {
   "name": "auto-office",
-  "version": "18.0.0-beta.1",
-  "description": "Auto Office v3 adaptive orchestration runtime: durable role packets, harness/model/effort routing, adapter trust, quota-aware cost policy, verification, private telemetry, replay, maturity, and isolated self-improvement. Human merge-to-main remains mandatory.",
-  "author": {"name": "office-skills"},
-  "keywords": ["office", "orchestration", "routing", "adapters", "verification", "telemetry", "self-improvement"]
+  "version": "3.1.0",
+  "description": "Auto Office 3.1: one `office` CLI over a single transactional runs.db authority. Adaptive harness/model/effort routing, one-submit verification with independent code and visual review, rolling plan review, durable amendments, version-pinned runs, and human merge-to-main.",
+  "author": {
+    "name": "auto-office"
+  },
+  "keywords": [
+    "office",
+    "orchestration",
+    "routing",
+    "adapters",
+    "verification",
+    "telemetry",
+    "self-improvement"
+  ]
 }

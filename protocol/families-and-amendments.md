@@ -38,6 +38,14 @@ applies; immediate replacement requires an explicit user request (`protocol/stat
 § replacement authority; `docs/v3-runtime-contracts.md` §3.1). Bumping every version on every delta
 is itself a defect — a routing-only change must never invalidate requirements or plan approval.
 
+Editing `plan.md` in place does not bump the runtime `plan_version`: a run revised to v24 through
+file edits still reported `plan_version 1` at `approve-plan`. Record each plan revision with
+`office_runtime.py amend --kind plan_contract`, so the runtime version matches the plan file. The
+delta must carry every field `schemas/amendment.schema.json` requires: `amendment_id`,
+`family_id`, `kind`, `affected_scopes`, `expected_prior_versions`, `resulting_versions`, `reason`,
+`evidence`, and `evidence_hash`. `freeze-intent` only works in `intake`; after that, requirement
+changes go through `amend --kind requirements`.
+
 ## Conditional compaction
 
 Long-lived roles may compact at semantic phase boundaries, after first serializing the state the

@@ -10,3 +10,4 @@ graft/
 
 # Herdr spawn ledger: worktree-local run state, never committed
 .herdr/
+.venv/

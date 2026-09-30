@@ -11,7 +11,9 @@ paths:
   runs_db: ~/.local/share/auto-office/runs.db
   catalog_dir: ~/.local/share/auto-office/catalog
 quota:
-  reserve_percent: 20
+  # Ratified v3.1 charter (12A): protect 5% of provider quota. The balanced
+  # money band below is a different 20% and stays 20.
+  reserve_percent: 5
 cost_policy:
   default: balanced
   balanced_money_band_percent: 20
@@ -22,6 +24,10 @@ exploration:
   max_cost_vs_cheapest_percent: 125
   allowed_roles: [worker]
   allowed_playbooks: [Investigate, Prototype]
+# Minimum model version per family for default routing. A catalog row below its
+# family floor is skipped unless the route is named explicitly with --route.
+model_family_floors:
+  gemini: "3.7"
 adapter_trust:
   proven_min_successful_dispatches: 5
   proven_min_task_shapes: 2
@@ -39,14 +45,21 @@ roles:
   plan_reviewer:
     preferred_seed:
       - {model_id: luna, effort: xhigh}
+      - {model_id: opus, harness: claude, effort: low}
     required_capabilities: [review]
     floor:
-      min_effort: high
+      # Intelligence, not effort, is the floor (#183). Scores are version-pinned;
+      # a candidate without a score for this exact index version fails closed.
+      min_effort: none
+      min_benchmark_index: {index_name: Artificial Analysis Intelligence Index v4.3.2, min_score: 31}
       allowed_sources: ["local-evidence:", "documented:"]
   executor:
     required_capabilities: [builder]
     floor:
-      min_effort: medium
+      # Intelligence, not effort, is the floor (#183). Scores are version-pinned;
+      # a candidate without a score for this exact index version fails closed.
+      min_effort: none
+      min_benchmark_index: {index_name: Artificial Analysis Intelligence Index v4.3.2, min_score: 31}
       allowed_sources: ["local-evidence:", "documented:"]
   worker:
     required_capabilities: []
@@ -56,15 +69,33 @@ roles:
   code_reviewer:
     preferred_seed:
       - {model_id: luna, effort: xhigh}
+      - {model_id: opus, harness: claude, effort: low}
     required_capabilities: [review]
     floor:
-      min_effort: high
+      # Intelligence, not effort, is the floor (#183). Scores are version-pinned;
+      # a candidate without a score for this exact index version fails closed.
+      min_effort: none
+      min_benchmark_index: {index_name: Artificial Analysis Intelligence Index v4.3.2, min_score: 31}
       allowed_sources: ["local-evidence:", "documented:"]
   browser_verifier:
     required_capabilities: [browser]
     floor:
       min_effort: low
       allowed_sources: ["local-evidence:"]
+  # Visual judgment is a separate specialist from code review (charter 8B).
+  # Preference order Gemini -> Sonnet -> Luna; a route qualifies only after an
+  # image-sensitive conformance probe of its exact harness/model/effort path.
+  visual_reviewer:
+    preferred_seed:
+      # Latest Gemini Flash through agy (Gemini slugs embed effort); low is the default.
+      - {model_id: gemini-3.8-flash, harness: agy, effort: low}
+      - {model_id: gemini-3.8-flash, harness: agy, effort: medium}
+      - {model_id: sonnet, harness: claude}
+      - {model_id: luna}
+    required_capabilities: [review, vision]
+    floor:
+      min_effort: low
+      allowed_sources: ["local-evidence:", "documented:"]
   closeout_verifier:
     required_capabilities: [verification]
     floor:
@@ -125,6 +156,17 @@ gear_presets:
 # previously bare prose in skills/auto-review/SKILL.md with no config backing; a caller
 # had no field to read and no way to override it via repo/user config layering.
 ad_hoc_review_max_rounds: 2
+# v3.1 convergence bounds (docs/v31-rolling-review-gates.md Q8). Invalid captures
+# and environment/adapter failures never spend implementation rounds; they have
+# their own small bound. environment_retry_max is provisional until the
+# matched-fixture evaluation measures it.
+verification:
+  environment_retry_max: 2
+  recapture_max: 1
+  visual_review_max_rounds: 2
+  no_progress_repeats: 2
+  job_timeout_seconds: 3600
+  check_timeout_seconds: 1800
 # Risk signals that escalate the default (unpinned) gear fit test past `direct`/`light`/
 # `quick`/`direct+review` into `express`, and that resolve any `risk_forced` gate to True
 # regardless of which gear ends up selected. `blast_radius` and `size_class` come from

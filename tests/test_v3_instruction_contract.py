@@ -103,18 +103,19 @@ class TestNoPlannerUserProhibitionSurvives(unittest.TestCase):
 class TestTrackingIssuePrecedesPlanning(unittest.TestCase):
     """The v2 tracking guarantee is restored without moving the v3 planner's intent freeze."""
 
+    # Auto Office 3.1: the tracking issue is filed before the run starts and is
+    # recorded by `office start --issue`; there is no separate registry write.
     def test_tracking_issue_is_required_before_planning_spoke(self):
         text = (ROOT / 'SKILL.md').read_text(encoding='utf-8')
-        issue_pos = text.index('file a github issue')
-        planning_pos = text.index('take the `auto-planning` receipt')
+        issue_pos = text.index('Create or reuse exactly one tracking GitHub issue')
+        planning_pos = text.index('you plan inline')
         self.assertLess(issue_pos, planning_pos)
-        self.assertRegex(text[issue_pos:planning_pos], r'create or reuse exactly one tracking GitHub issue')
-        self.assertRegex(text[issue_pos:planning_pos], r'family-update .*--issue')
+        self.assertRegex(text[issue_pos:planning_pos], r'office start "<goal>" --issue')
 
     def test_tracking_issue_is_not_waiting_for_routine_approval(self):
         text = (ROOT / 'SKILL.md').read_text(encoding='utf-8')
-        section = text[text.index('file a github issue'):text.index('## Fixed lifecycle')]
-        self.assertRegex(section, r'Do not ask for a draft or routine approval')
+        section = text[text.index('## Start'):text.index('## Execute')]
+        self.assertRegex(section, r'do not ask for a draft or routine approval')
 
 
 class TestPhaseSelfReviewFloor(unittest.TestCase):
@@ -132,9 +133,11 @@ class TestPhaseSelfReviewFloor(unittest.TestCase):
         self.assertRegex(section, r'does not waive an independent gate that the run.s risk')
 
     def test_control_plane_points_to_phase_self_review_floor(self):
+        # 3.1 keeps phase self-review as judgement and retires its receipt
+        # (v3.1 charter §3: no routine receipt rituals for normal agents).
         text = (ROOT / 'SKILL.md').read_text(encoding='utf-8')
-        self.assertRegex(text, r'Every lifecycle phase that is entered has a recorded self-review checkpoint')
-        self.assertRegex(text, r'missing or\s+unverifiable checkpoint blocks advancement')
+        self.assertRegex(text, r'Self-review before each phase advances')
+        self.assertRegex(text, r'then proceed, amend, or stop')
 
 
 class TestNoUnconditionalReviewEscalation(unittest.TestCase):
@@ -326,3 +329,17 @@ class TestReviewTierVocabularyMatchesT0Schema(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestNativeQuestionTool(unittest.TestCase):
+    """User decisions go through the harness's native question tool, with a plain-text fallback,
+    and the recorded --quote stays the user's own words or selected answer."""
+
+    def test_skill_maps_native_question_tool_per_harness(self):
+        text = (ROOT / 'SKILL.md').read_text(encoding='utf-8')
+        section = text[text.index('## Asking the user'):text.index('## Install check')]
+        self.assertRegex(section, r'native question tool')
+        self.assertRegex(section, r'Claude Code: `AskUserQuestion`')
+        self.assertRegex(section, r'"\(Recommended\)"')
+        self.assertRegex(section, r'plain-text questions')
+        self.assertRegex(section, r'`--quote` records the user.s selected answer or typed words verbatim')
