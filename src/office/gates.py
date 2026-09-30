@@ -608,6 +608,9 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
                 "finished_at=?, route=COALESCE(?, route) WHERE id=?",
                 (verdict, evidence_status, outcome.get("summary"), now_iso(), outcome.get("route"), gate_id))
     kind_label = {"checks": "checks", "code_review": "code", "visual": "ui"}.get(gate["kind"], gate["kind"])
+    if gate["kind"] in ("code_review", "visual") and verdict in ("PASS", "CHANGES_REQUIRED"):
+        from office import prs
+        prs.queue(con, run, task["id"], "verdict", gate_id)
     if parsed:
         for code in parsed.resolved:
             _set_state(con, run, task, gate["kind"], code, "resolved")
@@ -840,6 +843,8 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
                + (f" ({basis})" if basis != "all required gates PASS" else "")
                + (f" with user waiver of {', '.join(sorted(waived))}" if waived else ""), task_id=task_id,
                payload={"basis": basis, "waived": sorted(waived)})
+    from office import prs
+    prs.queue(con, run, task_id, "accepted", rev_id)
     dispatch_mod.start_stacked(con, run, task_id)
     for other in state.tasks(con, run["id"]):
         if task_id in other["depends"] and other["status"] == "submitted":

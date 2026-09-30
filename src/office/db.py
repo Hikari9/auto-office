@@ -63,8 +63,8 @@ SHARED_COLUMNS = {
         "session_id TEXT", "resumed_from TEXT", "keep_pane INTEGER", "pane_closed_at TEXT",
     ],
     # v2 (#185): user-declared model overrides.
-    "tasks": ["review_override_json TEXT"],
-    # v3 (3.2): the route preview shown in the plan diagram.
+    "tasks": ["review_override_json TEXT", "pr_json TEXT"],
+    # v3 (3.2): the route preview shown in the plan diagram; a task's GitHub PR.
     "plans": ["preview_json TEXT"],
     "findings": [
         "run_id TEXT", "task_id TEXT", "gate_id TEXT", "revision_id TEXT", "gate_kind TEXT",

@@ -70,8 +70,9 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
     review_decision = candidates.declared_decision(review_as, flag="--review-as") if review_as else None
     if state.is_terminal(run):
         raise Refused("run-terminal", f"run is {run['phase']}")
-    from office import guide, plan_view, plans
+    from office import guide, plan_view, plans, prs
     plans.require_dispatchable(con, run)
+    prs.settings(con, run)  # detected once, outside the transaction (it asks GitHub)
     # Route before the write transaction: routing reads evidence and probes quota.
     routes = {}
     for tid in task_ids:
@@ -483,11 +484,27 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
         "base_commit": dispatch["base_commit"],
         "worktree": dispatch["worktree"],
         "route": dispatch["route"].get("selection_disclosure"),
+        "branch": dispatch.get("branch"),
+        "pr": _pr_packet(con, run, task, dispatch) if role == "executor" else None,
         "requirements": req["frozen"],
         "fix_of": extra.get("fix_of"),
         "contract_request": extra.get("contract_request"),
     }
     return state.packet_envelope(run, f"{role}-dispatch", body)
+
+
+def _pr_packet(con, run: dict, task: dict, dispatch: dict) -> dict | None:
+    """What the executor needs to push and open its draft PR (3.2), or None."""
+    from office import prs
+    if not prs.enabled(run):
+        return None
+    ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch["id"]
+    ddir.mkdir(parents=True, exist_ok=True)
+    body_path = ddir / "pr-body.md"
+    body_path.write_text(prs.body(con, run, task, dispatch), encoding="utf-8")
+    return {"push": f"git push -u origin HEAD:refs/heads/{dispatch['branch']}",
+            "open": None if (task.get("pr") or {}).get("number") else prs.create_command(con, run, task, dispatch, body_path),
+            "number": (task.get("pr") or {}).get("number")}
 
 
 def job_launch_agent(con, run: dict, job: dict) -> dict:
