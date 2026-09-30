@@ -2,7 +2,7 @@
 plus the one command it runs when done; nothing about receipts or telemetry."""
 from __future__ import annotations
 
-from office import state
+from office import planpath, state
 
 PLAN_FORMAT = """\
 ## Requirements
@@ -74,18 +74,18 @@ def planner_brief(con, run: dict, packet: dict) -> str:
         f"RUN {run['id'][:8]} (Auto Office {run['office_version']})",
         f"GOAL {run['goal']}",
         "AUTHORITY propose the implementation plan. Do not change requirements; list product decisions under",
-        "## Questions instead of guessing. Do not edit code; only write .office/PLAN.md in this worktree.",
+        f"## Questions instead of guessing. Do not edit code; only write {planpath.rel(run)} in this worktree.",
         f"REQUIREMENTS r{packet['requirements_version']}",
     ]
     out += _lines("known done criteria:", req.get("done_criteria"))
     out += _lines("non-goals:", req.get("non_goals"))
     if packet.get("contract_request"):
         out += ["", "CONTRACT AMENDMENT REQUEST (from the orchestrator):", packet["contract_request"],
-                "Revise .office/PLAN.md so the contract reflects this, keeping unaffected tasks unchanged."]
+                f"Revise {planpath.rel(run)} so the contract reflects this, keeping unaffected tasks unchanged."]
     plan = state.current_plan(con, run["id"])
     if plan:
         out += ["", f"CURRENT PLAN p{plan['version']} (revise it; do not start over):", plan["body"]]
-    out += ["", "FORMAT for .office/PLAN.md:", PLAN_FORMAT,
+    out += ["", f"FORMAT for {planpath.rel(run)}:", PLAN_FORMAT,
             "Keep tasks small, independently checkable, with disjoint scopes unless ordered by depends.",
             "WHEN DONE run: office submit", "Then stop. Review findings, if any, come back through the orchestrator."]
     return "\n".join(out) + "\n"

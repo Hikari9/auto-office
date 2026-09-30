@@ -115,8 +115,9 @@ if action.get("git_commit"):
     subprocess.run(["git", "add", "-A"], check=True)
     subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=w", "commit", "-qm", action["git_commit"]], check=True)
 if action.get("plan") is not None:
-    Path(".office").mkdir(exist_ok=True)
-    Path(".office/PLAN.md").write_text(action["plan"])
+    draft = Path(".office/plans") / os.environ["OFFICE_RUN_ID"].split("-", 1)[0][:8] / "PLAN.md"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text(action["plan"])
 if action.get("ack"):
     r = office("ack", action["ack"])
     print(r.stdout)

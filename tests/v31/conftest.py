@@ -159,9 +159,16 @@ class Env:
         finally:
             con.close()
 
-    def write_plan(self, text: str, where: Path | None = None):
-        d = (where or self.repo) / ".office"
-        d.mkdir(exist_ok=True)
+    def write_plan(self, text: str, where: Path | None = None, run_id: str | None = None):
+        """Write the plan draft of run_id (default: the newest run)."""
+        if run_id is None:
+            con = self.con()
+            try:
+                run_id = con.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()[0]
+            finally:
+                con.close()
+        d = (where or self.repo) / ".office" / "plans" / run_id.split("-", 1)[0][:8]
+        d.mkdir(parents=True, exist_ok=True)
         (d / "PLAN.md").write_text(text)
 
     def calls(self):

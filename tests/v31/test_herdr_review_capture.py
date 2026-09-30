@@ -302,7 +302,7 @@ def test_contract_amendment_without_a_plan_edit_is_refused(env):
     _inline(env)
     before = _versions(env)
     code, out = env.office("amend", "T1", "--contract", "--", "T1 also owns the docs")
-    assert code == 4 and "plan-not-edited" in out and "edit .office/PLAN.md" in out, out
+    assert code == 4 and "plan-not-edited" in out and "edit .office/plans/" in out, out
     assert _versions(env) == before
 
 

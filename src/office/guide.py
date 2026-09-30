@@ -9,7 +9,7 @@ import re
 
 import os
 
-from office import amend, plans, state
+from office import amend, planpath, plans, state
 from office.result import Result
 from office.util import short
 
@@ -47,7 +47,7 @@ def next_action(con, run: dict) -> str:
     if not run["plan_version"]:
         if run.get("planner_mode") == "dedicated":
             return "no action; the planner is working (office status)"
-        return "write .office/PLAN.md (office submit --help shows the format), then office submit"
+        return f"write {planpath.rel(run)} (office submit --help shows the format), then office submit"
     plan = state.current_plan(con, run["id"])
     from office import planfile
     if planfile.parse(plan["body"]).questions and not plans._answered(con, run):
@@ -56,7 +56,7 @@ def next_action(con, run: dict) -> str:
     if rs["required"] and not rs["ended"] and rs["first_verdict"] is None:
         return "no action; plan review is running"
     if rs["first_verdict"] == "CHANGES_REQUIRED" and run["plan_version"] <= (rs["first_version"] or 0) and not rs["ended"]:
-        return 'amend the plan: office amend plan -- "<changes>" (edit .office/PLAN.md for task changes); safe work may launch right after'
+        return f'amend the plan: office amend plan -- "<changes>" (edit {planpath.rel(run)} for task changes); safe work may launch right after'
     live_ids = {t["id"] for t in state.tasks(con, run["id"]) if t["status"] != "cancelled"}
     for d in rs["open_defects"]:
         named = set(re.findall(r"\bT\d+\b", d.get("location") or ""))
@@ -64,7 +64,7 @@ def next_action(con, run: dict) -> str:
             continue  # every task it names was cancelled
         return f"plan defect {d['code']} blocks {d.get('location') or 'the plan'}; " + (
             'request the fix: office amend plan --contract -- "<fix>"' if run.get("planner_mode") == "dedicated"
-            else "fix .office/PLAN.md, then office amend plan --contract -- \"<fix>\"")
+            else f"fix {planpath.rel(run)}, then office amend plan --contract -- \"<fix>\"")
     if not state.active_authorization(con, run, "plan"):
         return f'ask the user (native question tool) for authorization of r{run["requirements_version"]}, then office approve plan --quote "<user\'s words>"'
     for e in run.get("envelope") or []:
