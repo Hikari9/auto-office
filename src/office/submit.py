@@ -27,10 +27,19 @@ def _draft(con, root: Path, run: dict) -> Path:
     return planpath.draft(root, run)
 
 
-def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None) -> Result:
+def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect: dict | None = None) -> Result:
+    """`redirect` ({defect, quote, root_cause, requirement, reviewer}) submits a plan
+    revision that follows the user's redirect of a plan defect (office.redirect)."""
     dispatch_id = os.environ.get("OFFICE_DISPATCH_ID")
     if os.environ.get("OFFICE_ROLE") == "reviewer":
         raise Refused("reviewer-cannot-submit", "reviewers return their verdict in their reply; they do not submit")
+    if redirect is not None:
+        from office import redirect as redirect_mod
+        d = state.get_dispatch(con, dispatch_id) if dispatch_id else None
+        if d is not None and d["role"] != "planner":
+            raise Refused("redirect-not-planner", "only the planner submits a defect redirect",
+                          next_step="office submit")
+        redirect = redirect_mod.validate(con, run, redirect, form=redirect_mod.SUBMIT_FORM)
     if dispatch_id:
         d = state.get_dispatch(con, dispatch_id)
         if d is None or d["run_id"] != run["id"]:
@@ -39,7 +48,7 @@ def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None) -> Result
             top = paths.repo_identity(cwd)
             base = top[0] if top else Path(d["worktree"])
             return plans.submit_plan(con, run, Path(plan_path) if plan_path else _draft(con, base, run),
-                                     submitter=dispatch_id, dispatch_id=dispatch_id)
+                                     submitter=dispatch_id, dispatch_id=dispatch_id, redirect=redirect)
         return submit_revision(con, run, d, cwd)
     if run.get("planner_mode") == "dedicated" and not plan_path:
         raise Refused("orchestrator-no-submit", "in this run the dedicated planner owns the plan",
@@ -48,7 +57,7 @@ def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None) -> Result
     if ident is None and not plan_path:
         raise Usage("no-repository", "run office submit from the repository", next_step="cd into the repository")
     path = Path(plan_path) if plan_path else _draft(con, ident[0], run)
-    return plans.submit_plan(con, run, path, submitter="orchestrator")
+    return plans.submit_plan(con, run, path, submitter="orchestrator", redirect=redirect)
 
 
 def capture_tree(worktree: Path, scratch: Path, leave_out: list[str] | None = None) -> tuple[str, str]:

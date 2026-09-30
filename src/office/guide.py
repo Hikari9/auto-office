@@ -62,9 +62,23 @@ def next_action(con, run: dict) -> str:
         named = set(re.findall(r"\bT\d+\b", d.get("location") or ""))
         if named and not (named & live_ids):
             continue  # every task it names was cancelled
-        return f"plan defect {d['code']} blocks {d.get('location') or 'the plan'}; " + (
-            'request the fix: office amend plan --contract -- "<fix>"' if run.get("planner_mode") == "dedicated"
-            else f"fix {planpath.rel(run)}, then office amend plan --contract -- \"<fix>\"")
+        code = d["code"]
+        if rs["pending"]:
+            return f"no action; plan re-review is running (open defect {code})"
+        redirect = (f'office amend plan --contract --redirect {code} --root-cause "<requirement or assumption>" '
+                    f'--quote "<user\'s words>" [--requirement "<new requirement>"] [--reviewer same|fresh] -- "<fix>"')
+        waive = f'if the user judges it wrong: office approve waive {code} --quote "<words>"'
+        head = f"plan defect {code} blocks {d.get('location') or 'the plan'}; "
+        if d["category"] == "brief":
+            return head + ('request the fix: office amend plan --contract -- "<fix>"' if run.get("planner_mode") == "dedicated"
+                           else f"fix {planpath.rel(run)}, then office amend plan --contract -- \"<fix>\"")
+        if run.get("planner_mode") == "dedicated":
+            return head + (f'have the planner trace it to its requirement or assumption: office amend plan --contract -- '
+                           f'"resolve {code}". If the planner asks the user (plan Questions), ask them (native question '
+                           f"tool), then {redirect}; {waive}")
+        return head + (f"trace it to the requirement or assumption behind it. Plan-only cause: fix {planpath.rel(run)}, "
+                       f'then office amend plan --contract -- "<fix>". Requirement or assumption cause: ask the user '
+                       f"(native question tool) how to redirect it, revise {planpath.rel(run)}, then {redirect}; {waive}")
     if not state.active_authorization(con, run, "plan"):
         return f'ask the user (native question tool) for authorization of r{run["requirements_version"]}, then office approve plan --quote "<user\'s words>"'
     for e in run.get("envelope") or []:

@@ -62,7 +62,32 @@ Checks (task `checks:` and the run-level `checks:` under Requirements):
   it reports "command not found" and integration stops UNAVAILABLE.
 - Inline planning: to change a task's contract, edit its entry in
   the run's PLAN.md first, then office amend <T> --contract; an amendment whose
-  PLAN.md does not change the named task is refused."""
+  PLAN.md does not change the named task is refused.
+
+Plan defects (PLAN_DEFECT): trace each to the requirement or assumption behind it.
+A plan-only cause is fixed in the plan. A requirement or assumption cause goes to
+the user, and the revision that follows their answer is submitted with it:
+  office submit --redirect P3 --root-cause "<requirement or assumption>" \
+      --quote "<user's words>" [--requirement "<new requirement>"] [--reviewer same|fresh]
+A redirect resets the plan-review round budget. --requirement records requirements
+r(n+1), authorized by the same quote. --reviewer same resumes the reviewer that raised
+the defect; fresh (the default) routes a new reviewer on another route. The defect
+still clears only when a reviewer says CLEARED. If the user judges the defect wrong:
+  office approve waive P3 --quote "<user's words>" [--root-cause "<why>"]"""
+
+
+def _redirect_args(s: argparse.ArgumentParser) -> None:
+    s.add_argument("--redirect", metavar="P<n>", help="the plan defect the user redirected (with --quote)")
+    s.add_argument("--root-cause", help="with --redirect: the requirement or assumption that causes the defect")
+    s.add_argument("--requirement", help="with --redirect: the redirected requirement; records r(n+1)")
+    s.add_argument("--reviewer", choices=("same", "fresh"), help="with --redirect: who re-reviews (default fresh)")
+
+
+def _redirect(args) -> dict | None:
+    if not getattr(args, "redirect", None):
+        return None
+    return {"defect": args.redirect, "quote": args.quote, "root_cause": args.root_cause,
+            "requirement": args.requirement, "reviewer": args.reviewer}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -117,12 +142,15 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("submit", parents=[common], add_help=False)
     s.add_argument("-h", "--help", action="store_true")
     s.add_argument("--plan", help=argparse.SUPPRESS)
+    s.add_argument("--quote", help="the user's words (a defect redirect)")
+    _redirect_args(s)
     s = sp.add_parser("amend", parents=[common])
     s.add_argument("scope")
     s.add_argument("delta", nargs="*")
     s.add_argument("--contract", action="store_true", help="a contract amendment (planner-owned)")
     s.add_argument("--requirements", action="store_true", help="a user-originated requirements change")
-    s.add_argument("--quote", help="the user's words (requirements changes)")
+    s.add_argument("--quote", help="the user's words (requirements changes, defect redirects)")
+    _redirect_args(s)
     s = sp.add_parser("ack", parents=[common])
     s.add_argument("amendment")
     s = sp.add_parser("close", parents=[common])
@@ -149,6 +177,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("target")
     s.add_argument("extra", nargs="*")
     s.add_argument("--quote")
+    s.add_argument("--root-cause", help="with waive P<n>: why the user judged the defect wrong")
     s = sp.add_parser("revoke", parents=[common])
     s.add_argument("task")
     s.add_argument("--reason", default="orchestrator revoke")
@@ -348,12 +377,12 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                                  review_external=args.review_external)
     if cmd == "submit":
         from office import submit
-        return submit.submit(con, run, cwd=cwd, plan_path=args.plan)
+        return submit.submit(con, run, cwd=cwd, plan_path=args.plan, redirect=_redirect(args))
     if cmd == "amend":
         from office import amend
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()
         return amend.amend(con, run, args.scope, delta, contract=args.contract, requirements=args.requirements,
-                           quote=args.quote, cwd=cwd)
+                           quote=args.quote, cwd=cwd, redirect=_redirect(args))
     if cmd == "ack":
         from office import amend
         return amend.ack(con, run, args.amendment)
@@ -367,7 +396,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return inspect_cmd.inspect(con, run, args.what, args.ident)
     if cmd == "approve":
         from office import authority
-        return authority.approve(con, run, args.target, args.quote, args.extra)
+        return authority.approve(con, run, args.target, args.quote, args.extra, root_cause=args.root_cause)
     if cmd == "revoke":
         from office import dispatch
         return dispatch.revoke(con, run, args.task.upper(), args.reason)

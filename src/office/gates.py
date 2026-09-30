@@ -204,9 +204,13 @@ def _check_env(run: dict) -> dict:
 
 def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path, plan_review: bool = False,
                  visual: bool = False, images: list[Path] | None = None, include_dirs: list[Path] | None = None,
-                 exclude: list[str] | None = None, kind: str | None = None) -> dict:
+                 exclude: list[str] | None = None, kind: str | None = None, resume_from: str | None = None) -> dict:
     """Route, launch, and parse one independent review, substituting routes on
-    environment/adapter/schema failure up to the configured bound."""
+    environment/adapter/schema failure up to the configured bound.
+
+    `resume_from` names an earlier reviewer dispatch to continue (a plan-defect
+    redirect with --reviewer same): its session is resumed when the harness can,
+    else a fresh session runs on the same route."""
     limit = int((run.get("gates") or {}).get("environment_retry_max", 2))
     excluded = set(exclude or [])
     producer = _producer_route(con, gate)
@@ -219,8 +223,18 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     producer_family = candidates.model_family(producer_model)
     if producer_declared and producer_family and not pinned:
         excluded.add(f"family:{producer_family}")
+    profile_kind = kind or ("vision" if visual else "reviewer")
+    resume, same_route = (_reviewer_resume(con, run, resume_from, profile_kind, cwd) if resume_from
+                          else (None, None))
     for attempt in range(limit + 1):
-        if pinned:
+        if attempt == 0 and same_route:
+            decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
+                                             exact=same_route)
+            if decision.get("status") != "selected":
+                resume = None
+                decision = candidates.route_role(con, state.pinned_config(run), run, role,
+                                                 task_id=gate.get("task_id"), exclude=excluded)
+        elif pinned:
             decision = candidates.declared_decision(pinned["as"], flag="--review-as")
             decision["launch"] = {k: pinned[k] for k in ("cli", "external") if pinned.get(k)}
             if producer_family and candidates.model_family(decision["candidate"]["model_id"]) == producer_family:
@@ -245,11 +259,14 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         output = ddir / "reply.txt"
         from office import dispatch as dispatch_mod
         d = state.get_dispatch(con, dispatch_id)
-        profile_kind = kind or ("vision" if visual else "reviewer")
         launch_form = decision.get("launch") or {}
+        if resume and attempt == 0:
+            with db.transaction(con):
+                con.execute("UPDATE dispatches SET resumed_from=? WHERE id=?", (resume["parent"], dispatch_id))
         dispatch_mod.launch(run, d, profile_kind, ddir, cwd=cwd, wait=True, output=output, images=images,
                             include_dirs=include_dirs, cli=launch_form.get("cli"),
-                            external=bool(launch_form.get("external")))
+                            external=bool(launch_form.get("external")),
+                            resume=resume if attempt == 0 else None)
         d = state.get_dispatch(con, dispatch_id)
         text = _reply_text(d, ddir, output)
         parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual)
@@ -402,6 +419,38 @@ def _producer_route(con, gate: dict) -> str | None:
     row = con.execute("SELECT d.triple FROM revisions r JOIN dispatches d ON d.id=r.dispatch_id WHERE r.id=?",
                       (gate["revision_id"],)).fetchone()
     return row["triple"] if row else None
+
+
+def _reviewer_resume(con, run: dict, parent_id: str, profile_kind: str, cwd: Path) -> tuple[dict | None, str | None]:
+    """(resume spec or None, the parent's route) for continuing reviewer `parent_id`.
+    Without a resumable session the route alone is reused: a fresh session there."""
+    from office import adapters, dispatch as dispatch_mod, rerun
+    parent = state.get_dispatch(con, parent_id)
+    if parent is None:
+        return None, None
+    same_route = parent["triple"]
+    adapter = adapters.load_all().get(parent.get("adapter_id") or parent.get("harness") or "")
+    argv = None
+    why = None
+    if not parent.get("session_id"):
+        why = "no stored harness session id"
+    elif adapter is None:
+        why = f"no adapter {parent.get('adapter_id') or parent.get('harness')}"
+    elif not dispatch_mod.herdr_usable():
+        why = "a native resume needs a herdr session"
+    else:
+        argv = adapters.resume_argv(adapter, profile_kind, session_id=parent["session_id"],
+                                    model=parent.get("model") or "", effort=parent.get("effort") or "", cwd=cwd)
+        if argv is None:
+            why = f"adapter {adapter.get('id')} declares no resume form"
+        elif rerun.agent_alive(parent) is not False:
+            why = "its agent may still be running"
+    if why:
+        with db.transaction(con):
+            state.emit(con, run, "review.resume_fallback", f"cannot resume reviewer {parent_id} ({why}); "
+                       f"a fresh session runs on its route {same_route}", audience="runtime")
+        return None, same_route
+    return {"parent": parent_id, "session_id": parent["session_id"], "argv": argv[0], "herdr_kind": argv[1]}, same_route
 
 
 def _reviewer_dispatch(con, run: dict, gate: dict, role: str, decision: dict) -> str:
