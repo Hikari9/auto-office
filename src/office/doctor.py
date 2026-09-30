@@ -5,7 +5,7 @@ import json
 import shutil
 from pathlib import Path
 
-from office import adapters, config_repairs, db, frontdoor, install, legacy, paths, runtime_default, state, version
+from office import adapters, config_repairs, db, frontdoor, install, legacy, paths, read_scope, runtime_default, state, version
 from office.result import Result
 
 
@@ -82,6 +82,14 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
             problems += 1
             res.add(f"{harness}: {path.name} is not valid JSON")
             continue
+        if harness == "claude":
+            lacking = read_scope.missing(data)
+            if lacking:
+                problems += 1
+            total = len(read_scope.allow_rules())
+            res.add(f"claude: reviewer read rules {total - len(lacking)}/{total} in permissions.allow"
+                    + (" (office install; reviewers' context-mode cannot read Office state or global guidance without them)"
+                       if lacking else " ok"))
         managed = [h.get("command") for entries in (data.get("hooks") or {}).values() for e in entries
                    for h in (e.get("hooks") or []) if install.MARKER in (h.get("command") or "")]
         if not managed:
