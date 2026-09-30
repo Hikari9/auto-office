@@ -472,7 +472,7 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
         con.execute("UPDATE dispatches SET packet_hash=?, packet_path=?, log_path=? WHERE id=?",
                     (packet["packet_hash"], str(ddir / "packet.json"), str(ddir / "output.log"), dispatch["id"]))
     launcher = launch(run, dispatch, "worker", ddir, cwd=wt, cli=payload.get("cli"),
-                      external=bool(payload.get("external")))
+                      external=bool(payload.get("external")), resume=payload.get("resume"))
     return {"dispatch_id": dispatch["id"], **launcher}
 
 
@@ -499,7 +499,8 @@ def worker_env(run: dict, dispatch: dict, role: str) -> dict:
 
 def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait: bool = False,
            output: Path | None = None, images: list[Path] | None = None, include_dirs: list[Path] | None = None,
-           prompt_file: Path | None = None, cli: str | None = None, external: bool = False) -> dict:
+           prompt_file: Path | None = None, cli: str | None = None, external: bool = False,
+           resume: dict | None = None) -> dict:
     """Start `office _supervise` for a dispatch, in a Herdr pane when running
     inside Herdr (visible delegation), else as a detached process."""
     spec = {"dispatch_id": dispatch["id"], "kind": kind, "cwd": str(cwd), "output": str(output) if output else None,
@@ -523,6 +524,14 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
     if cli and not use_herdr:
         _launch_notice(run, dispatch, f"--cli needs a herdr session; left external instead. Start it by hand: {cli}")
         external = True
+    if resume and not use_herdr:
+        # A native resume reopens the session in a pane; never fall back to a
+        # fresh headless session under the resume's name (R7).
+        _launch_notice(run, dispatch, "resume needs a herdr session; left external. Start it by hand: "
+                       f"{resume.get('herdr_kind')} {shlex.join(resume.get('argv') or [])}")
+        external = True
+    if resume:
+        spec["resume_findings"] = resume.get("findings") or ""
     if external or (kind == "worker" and os.environ.get("OFFICE_WORKER_LAUNCHER") == "external"):
         # Hosted outside Office's process control (an interactive session the
         # user or a test drives). A worker is live until it submits; a reviewer
@@ -535,7 +544,10 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         return _wait_terminal(dispatch["id"], timeout=5) if wait else {"launcher": "sync"}
     headless = "process"
     if use_herdr:
-        if cli:
+        if resume:
+            # office rerun --resume: the harness's own resume argv for the parent's session.
+            inter = (list(resume.get("argv") or []), resume.get("herdr_kind") or kind)
+        elif cli:
             # The user's exact argv; herdr supplies the executable from --kind.
             argv_cli = shlex.split(cli)
             inter = (argv_cli[1:], Path(argv_cli[0]).name)
@@ -703,7 +715,11 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
             con.close()
     _pane_ledger(run, dispatch, pane, agent=name, kind=herdr_kind, worktree=cwd, session_id=session)
     # A long brief pasted as the prompt does not land; a one-line pointer does.
-    if worker:
+    if worker and spec.get("resume_findings") is not None:
+        # A resumed session already knows the task; hand it the findings and the updated brief.
+        pointer = (f"Office resumed this session. Open findings: {spec['resume_findings'][:600]} "
+                   f"The updated brief is at {spec['prompt_file']}. Fix them, then run: office submit")
+    elif worker:
         pointer = (f"Read and carry out the brief at {spec['prompt_file']} exactly. "
                    "When the work and its checks are complete, run: office submit")
     else:

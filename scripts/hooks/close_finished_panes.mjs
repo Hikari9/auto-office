@@ -248,9 +248,21 @@ const paneRecords = (rows) => {
   return byPane;
 };
 
+/**
+ * The runtime writes `.office/active` pointers only in the primary checkout
+ * (state.py), so a hook fired from a linked worktree must look there too.
+ */
+const primaryCheckout = () => {
+  try {
+    const common = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return common ? resolve(common, "..") : process.cwd();
+  } catch { return process.cwd(); }
+};
+
 /** Close accepted, snapshotted v3.1 dispatch panes the runtime did not get to. */
 const sweepRunLedgers = (closedOut) => {
-  const activeDir = join(process.cwd(), ".office", "active");
+  const activeDir = join(primaryCheckout(), ".office", "active");
   let runIds;
   try { runIds = readdirSync(activeDir).filter((n) => !n.startsWith(".")); } catch { return; }
   if (!runIds.length || !onPath("herdr")) return;
