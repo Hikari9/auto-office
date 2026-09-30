@@ -6,16 +6,11 @@ import re
 import sys
 from pathlib import Path
 
-from conftest import GOOD_ADD, PLAN_ONE, PLAN_TWO, start_inline
+import pytest
+
+from conftest import GOOD_ADD, PLAN_TWO, approved_run
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
-
-
-def _go(env, plan=PLAN_ONE, gear="direct+review", **script):
-    env.trust()
-    env.script(**script)
-    start_inline(env, plan=plan, gear=gear)
-    env.office("approve", "plan", "--quote", "approved", check=0)
 
 
 def _dispatch_row(env, tid="T1"):
@@ -24,8 +19,9 @@ def _dispatch_row(env, tid="T1"):
     return dict(con.execute("SELECT * FROM dispatches WHERE id=?", (did,)).fetchone())
 
 
+@pytest.mark.approved
 def test_as_dispatches_an_unrouted_model_and_records_the_override(env):
-    _go(env)
+    approved_run(env)
     # Not in the registry at all: routing alone would refuse it.
     code, out = env.office("dispatch", "T1", "--as", "claude/some-future-model@low", env=EXTERNAL)
     assert code == 0 and "(user override)" in out, out
@@ -36,16 +32,18 @@ def test_as_dispatches_an_unrouted_model_and_records_the_override(env):
     assert "user override" in out, out
 
 
+@pytest.mark.approved
 def test_as_resolves_the_catalog_invocation_slug(env):
     # agy takes the combined native-Gemini slug; the user types the model and effort.
-    _go(env)
+    approved_run(env)
     env.office("dispatch", "T1", "--as", "agy/gemini-3.8-flash@medium", env=EXTERNAL, check=0)
     d = _dispatch_row(env)
     assert d["model"] == "gemini-3.8-flash-medium" and d["effort"] == "medium"
 
 
+@pytest.mark.approved
 def test_dispatch_prints_paths_and_a_valid_herdr_command(env):
-    _go(env)
+    approved_run(env)
     code, out = env.office("dispatch", "T1", "--as", "claude/claude-sonnet-5-5@high", env=EXTERNAL)
     d = _dispatch_row(env)
     for key in ("brief:", "env:", "worktree:", "herdr agent start", "herdr agent prompt"):
@@ -55,8 +53,9 @@ def test_dispatch_prints_paths_and_a_valid_herdr_command(env):
     assert "--model claude-sonnet-5-5" in out and d["worktree"] in out
 
 
+@pytest.mark.approved
 def test_external_launches_nothing_and_says_how(env):
-    _go(env)
+    approved_run(env)
     code, out = env.office("dispatch", "T1", "--as", "claude/claude-sonnet-5-5@high", "--external")
     assert code == 0, out
     d = _dispatch_row(env)
@@ -71,8 +70,9 @@ def test_external_launches_nothing_and_says_how(env):
     assert f"OFFICE_DISPATCH_ID={d['id']}" in env_text
 
 
+@pytest.mark.approved
 def test_flag_combinations_are_validated(env):
-    _go(env)
+    approved_run(env)
     for args, why in ((["--cli", "claude --model x"], "--cli needs --as"),
                       (["--as", "claude/x", "--cli", "claude", "--external"], "mutually exclusive"),
                       (["--review-external"], "need --review-as"),
@@ -86,7 +86,7 @@ def test_cli_starts_that_exact_argv_in_herdr(env, monkeypatch):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from test_herdr_agent_launch import BUSY, _calls, _fake
     state_file = _fake(env, monkeypatch, reads=[BUSY])
-    _go(env)
+    approved_run(env)
     env.office("dispatch", "T1", "--as", "agy/gemini-3.8-flash@medium", "--external", check=0)
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
@@ -106,8 +106,9 @@ def test_cli_starts_that_exact_argv_in_herdr(env, monkeypatch):
     assert start[start.index("--") + 1:] == ["--model", "gemini-3.8-flash-medium", "--yolo"]
 
 
+@pytest.mark.approved
 def test_cli_without_herdr_is_left_external_not_run_headless(env):
-    _go(env)
+    approved_run(env)
     code, out = env.office("dispatch", "T1", "--as", "claude/claude-sonnet-5-5@high", "--cli", "claude --model x")
     assert code == 0, out
     assert _dispatch_row(env)["launcher"] == "external"
@@ -117,7 +118,7 @@ def test_cli_without_herdr_is_left_external_not_run_headless(env):
 
 
 def test_stacked_task_keeps_the_override_and_launch_form(env):
-    _go(env, plan=PLAN_TWO)
+    approved_run(env, plan=PLAN_TWO)
     code, out = env.office("dispatch", "T1", "T2", "--as", "claude/claude-sonnet-5-5@high", "--external")
     assert "T2 stacked after T1" in out, out
     con = env.con()
@@ -126,8 +127,9 @@ def test_stacked_task_keeps_the_override_and_launch_form(env):
     assert stash["candidate"]["invocation_model_id"] == "claude-sonnet-5-5"
 
 
+@pytest.mark.approved
 def test_relaunch_keeps_the_override(env):
-    _go(env)
+    approved_run(env)
     env.office("dispatch", "T1", "--as", "claude/some-future-model@low", env=EXTERNAL, check=0)
     first = _dispatch_row(env)
     from office import db, dispatch, state
@@ -141,8 +143,9 @@ def test_relaunch_keeps_the_override(env):
     assert again["triple"] == first["triple"] and json.loads(again["override_json"])["declared"] is True
 
 
+@pytest.mark.approved
 def test_review_as_same_family_as_the_executor_is_refused(env):
-    _go(env)
+    approved_run(env)
     code, out = env.office("dispatch", "T1", "--as", "claude/claude-sonnet-5-5@high",
                            "--review-as", "claude/claude-opus-5-5@low", env=EXTERNAL)
     assert code != 0 and "review-not-independent" in out and "claude" in out, out
@@ -154,8 +157,9 @@ def _dispatch_row_or_none(env):
     return con.execute("SELECT current_dispatch_id FROM tasks WHERE id='T1'").fetchone()[0]
 
 
+@pytest.mark.approved
 def test_review_as_is_pinned_on_the_task(env):
-    _go(env)
+    approved_run(env)
     code, out = env.office("dispatch", "T1", "--as", "agy/gemini-3.8-flash@medium",
                            "--review-as", "codex/gpt-6-luna@xhigh", "--review-external", env=EXTERNAL)
     assert code == 0, out
@@ -166,10 +170,11 @@ def test_review_as_is_pinned_on_the_task(env):
     assert "review pinned by user: codex/gpt-6-luna@xhigh (external)" in out, out
 
 
+@pytest.mark.approved
 def test_pinned_reviewer_rechecks_independence_against_the_real_producer(env):
     # The executor was relaunched on a different route after --review-as: the
     # gate compares against whoever actually produced the revision.
-    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", "--as", "claude/claude-sonnet-5-5@high", "--review-as", "codex/gpt-6-luna@xhigh",
                check=0)
     con = env.con()
@@ -189,7 +194,7 @@ def test_pinned_reviewer_rechecks_independence_against_the_real_producer(env):
 
 def test_routed_review_excludes_a_declared_producers_family(env):
     env.trust()
-    from office import candidates, config, state
+    from office import candidates, config
     con = env.con()
     cfg = config.load_yaml(config.default_config_path())
     run = {"id": "r", "gear": "", "playbook": "Change", "risk": {}}
@@ -199,9 +204,10 @@ def test_routed_review_excludes_a_declared_producers_family(env):
     assert all(candidates.model_family(c["model_id"]) != "gpt" for c in got["request"]["candidates"])
 
 
+@pytest.mark.approved
 def test_external_reviewer_ends_when_its_review_file_is_written(env, tmp_path):
-    from office import db, dispatch, state
-    _go(env)
+    from office import db, dispatch
+    approved_run(env)
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     d = _dispatch_row(env)
     out = tmp_path / "reply.txt"
@@ -222,7 +228,8 @@ def test_model_family():
     assert model_family(None) is None
 
 
+@pytest.mark.approved
 def test_external_dispatch_says_nothing_was_launched(env):
-    _go(env)
+    approved_run(env)
     code, out = env.office("dispatch", "T1", "--as", "claude/claude-sonnet-5-5@high", "--external")
     assert code == 0 and "nothing launched" in out and " launching" not in out, out

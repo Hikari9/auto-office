@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
-import hashlib, importlib.util, json, os, sqlite3, subprocess, sys, tempfile, unittest, shutil
+import hashlib, json, os, re, signal, sqlite3, subprocess, sys, tempfile, unittest, shutil
 from pathlib import Path
 
+import office_family as fam
+import office_runtime as rt
+
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def _load(name, relpath):
-    spec = importlib.util.spec_from_file_location(name, ROOT / relpath)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-fam = _load("office_family", "scripts/office_family.py")
-rt = _load("office_runtime", "scripts/office_runtime.py")
 
 FIXED_EMPTY_HASH = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
@@ -398,32 +390,50 @@ class TestReview(unittest.TestCase):
 
     # ---- office_spawn.sh: optional start-receipt wiring ----
 
+    def _spawn(self, *args):
+        """Run office_spawn.sh. The agent it starts outlives the script, so the
+        output goes to a file: a pipe would stay open until the agent exits.
+        The agent is stopped when the test ends."""
+        out = self.repo / 'spawn.out'
+        with out.open('w') as fh:
+            r = subprocess.run([str(ROOT / 'scripts' / 'office_spawn.sh'), *args], cwd=self.repo,
+                               stdout=fh, stderr=subprocess.STDOUT, text=True)
+        text = out.read_text()
+        pid = re.search(r'"pid": (\d+)', text)
+        if pid:
+            self.addCleanup(self._stop_agent, int(pid[1]))
+        return r.returncode, text
+
+    @staticmethod
+    def _stop_agent(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
     def test_office_spawn_without_receipt_flags_is_unchanged(self):
         """Backward compatibility: omitting the new optional flags must not
         attempt to record a start receipt (existing callers, e.g.
         tests/test_dogfood.py, never pass them)."""
         adapter = self.repo / 'adapter.yaml'
         adapter.write_text(
-            # Outlives the 1s liveness check on a loaded machine; exits on its own
-            # (office_spawn.sh parses --timeout but does not enforce it).
-            "invocation:\n  executable: /bin/sleep\n  argv:\n    - \"8\"\n  prompt_transport: argv\n",
+            # Outlives the 1s liveness check on a loaded machine; stopped by the test.
+            "invocation:\n  executable: /bin/sleep\n  argv:\n    - \"30\"\n  prompt_transport: argv\n",
             encoding='utf-8',
         )
-        r = subprocess.run([
-            str(ROOT / 'scripts' / 'office_spawn.sh'),
+        code, out = self._spawn(
             '--adapter', str(adapter), '--model', 'm', '--effort', 'low',
             '--worktree', str(self.repo), '--dispatch-id', 'disp-nospawn',
-            '--run-id', 'run-1', '--state-dir', str(self.state_dir), '--timeout', '5',
-        ], cwd=self.repo, capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            '--run-id', 'run-1', '--state-dir', str(self.state_dir), '--timeout', '5')
+        self.assertEqual(code, 0, out)
         self.assertFalse((self.state_dir / 'dispatches' / 'disp-nospawn' / 'start_receipt.json').exists())
 
     def test_office_spawn_with_full_disclosure_records_start_receipt(self):
         adapter = self.repo / 'adapter.yaml'
         adapter.write_text(
             # Outlives the receipt write and the 1s liveness check on a loaded
-            # machine (`sleep 2` exited first and read as "died"); exits on its own.
-            "invocation:\n  executable: /bin/sleep\n  argv:\n    - \"8\"\n  prompt_transport: argv\n",
+            # machine (`sleep 2` exited first and read as "died"); stopped by the test.
+            "invocation:\n  executable: /bin/sleep\n  argv:\n    - \"30\"\n  prompt_transport: argv\n",
             encoding='utf-8',
         )
         disclosure = json.dumps({
@@ -431,17 +441,15 @@ class TestReview(unittest.TestCase):
             "invocation_model_id": "gemini", "model_id": "gemini", "effort": "medium",
             "harness": "agy", "harness_version": "local", "reason": "test",
         })
-        r = subprocess.run([
-            str(ROOT / 'scripts' / 'office_spawn.sh'),
+        code, out = self._spawn(
             '--adapter', str(adapter), '--model', 'gemini', '--effort', 'medium',
             '--worktree', str(self.repo), '--dispatch-id', 'disp-recpt', '--run-id', 'run-1',
             '--state-dir', str(self.state_dir), '--timeout', '5',
             '--session-id', 'sess-1', '--family-id', 'fam-1',
             '--requirements-version', '1', '--plan-version', '1', '--routing-version', '1',
             '--effective-config-hash', 'sha256:' + ('a' * 64),
-            '--selection-disclosure', disclosure,
-        ], cwd=self.repo, capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            '--selection-disclosure', disclosure)
+        self.assertEqual(code, 0, out)
         receipt = json.loads((self.state_dir / 'dispatches' / 'disp-recpt' / 'start_receipt.json').read_text())
         self.assertEqual(receipt['dispatch_id'], 'disp-recpt')
         self.assertEqual(receipt['session_id'], 'sess-1')

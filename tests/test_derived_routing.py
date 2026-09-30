@@ -7,7 +7,6 @@ raises trust; a missing capability-floor field fails closed and names itself; un
 reward never ranks as a measured zero; and an override is rejected without a recorded
 authorization and honoured (and disclosed) with one.
 """
-import importlib.util
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -16,16 +15,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _load(name, relpath):
-    spec = importlib.util.spec_from_file_location(name, ROOT / relpath)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-office_runtime = _load('office_runtime', 'scripts/office_runtime.py')
-scoring = _load('office_scoring', 'scripts/office_scoring.py')
-routing = _load('office_routing', 'scripts/office_routing.py')
+import office_routing as routing
+import office_runtime
+import office_scoring as scoring
 
 
 def cand(harness, model_id='m', effort='high', money=1.0, remaining=80, burn=1,

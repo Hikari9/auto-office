@@ -10,7 +10,6 @@ file stays at the command-level contract (argument handling, exit codes, stdout 
 """
 import contextlib
 import copy
-import importlib.util
 import io
 import json
 import tempfile
@@ -20,16 +19,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _load(name, relpath):
-    spec = importlib.util.spec_from_file_location(name, ROOT / relpath)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-rt = _load("office_runtime", "scripts/office_runtime.py")
-fam = _load("office_family", "scripts/office_family.py")
-monitor = _load("office_monitor", "scripts/office_monitor.py")
+import office_family as fam
+import office_monitor as monitor
+import office_runtime as rt
 
 FIXTURES = ROOT / "tests" / "fixtures"
 

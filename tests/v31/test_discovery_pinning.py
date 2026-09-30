@@ -5,10 +5,9 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
-from conftest import PLAN_ONE, ROOT, SRC, start_inline
+from conftest import SRC, start_inline
 
 
 def _run_count(env):

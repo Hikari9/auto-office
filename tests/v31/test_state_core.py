@@ -4,12 +4,11 @@ from __future__ import annotations
 import json
 import multiprocessing
 import sqlite3
-import subprocess
 import sys
 
 import pytest
 
-from conftest import GOOD_ADD, PLAN_ONE, SRC, start_inline
+from conftest import GOOD_ADD, SRC, approved_run, start_inline
 
 
 def test_version_identity_is_exact_pep440(env):
@@ -20,12 +19,10 @@ def test_version_identity_is_exact_pep440(env):
     assert not version.is_exact("dev") and not version.is_exact("3.1-dev")
 
 
+@pytest.mark.approved
 def test_every_run_and_packet_carries_office_version(env):
     from office import version
-    env.trust()
-    env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
-    start_inline(env)
-    env.office("approve", "plan", "--quote", "go", check=0)
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", check=0)
     con = env.con()
     run = dict(con.execute("SELECT * FROM runs WHERE office_version IS NOT NULL").fetchone())
@@ -67,13 +64,11 @@ def test_job_with_foreign_office_version_never_executes(env, monkeypatch):
     assert con.execute("SELECT COUNT(*) FROM gates").fetchone()[0] == 0  # the handler never ran
 
 
+@pytest.mark.approved
 def test_crash_after_commit_before_external_work_recovers_once(env, monkeypatch):
     """The dispatch transition commits its launch job; the process dies before
     running it. The next office command runs it exactly once."""
-    env.trust()
-    env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
-    start_inline(env)
-    env.office("approve", "plan", "--quote", "go", check=0)
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env={"OFFICE_JOBS": "manual"}, check=0)
     con = env.con()
     assert con.execute("SELECT COUNT(*) FROM outbox WHERE kind='launch_agent' AND status='queued'").fetchone()[0] == 1

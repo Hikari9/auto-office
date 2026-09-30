@@ -1,5 +1,4 @@
 """Reuse-vs-compact dispatch plan tests (issue #161)."""
-import importlib.util
 import json
 import subprocess
 import sys
@@ -9,14 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _load(name, relpath):
-    spec = importlib.util.spec_from_file_location(name, ROOT / relpath)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-rt = _load("office_runtime", "scripts/office_runtime.py")
+import office_runtime as rt
 
 
 class TestReuseDispatchPlan(unittest.TestCase):

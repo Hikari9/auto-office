@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from conftest import GOOD_ADD, PLAN_ONE, PLAN_TWO, ROOT, start_inline
-from test_herdr_agent_launch import BUSY, _fake, _live_dispatch
+from test_herdr_agent_launch import BUSY, _fake, _live_dispatch, launch_in_herdr
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
@@ -211,22 +211,13 @@ def test_pane_text_is_never_the_reply(env, monkeypatch):
 
 
 def _herdr_worker(env, monkeypatch):
-    state_file = _fake(env, monkeypatch, reads=[BUSY])
-    run, d = _live_dispatch(env, monkeypatch)
-    monkeypatch.setenv("HERDR_ENV", "1")
-    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
-    monkeypatch.setenv("OFFICE_LAUNCHER", "herdr")
-    from office import dispatch, paths
-    monkeypatch.setattr(dispatch.frontdoor, "current_argv", lambda: (["true"], {}))
-    d = {**d, "adapter_id": "claude", "model": "fake-model", "effort": "high"}
-    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
-    ddir.mkdir(parents=True, exist_ok=True)
-    (ddir / "brief.md").write_text("ROLE executor\n")
-    res = dispatch.launch(run, d, "worker", ddir, cwd=env.repo)
+    _, run, d, _, res = launch_in_herdr(env, monkeypatch, reads=[BUSY], adapter="claude", model="fake-model", effort="high")
+    from office import paths
     rows = [json.loads(line) for line in (paths.run_dir(run["id"]) / "panes.jsonl").read_text().splitlines()]
     return run, d, res, rows
 
 
+@pytest.mark.approved
 def test_ledger_row_records_its_owner_agent_and_kind(env, monkeypatch):
     run, d, res, rows = _herdr_worker(env, monkeypatch)
     row = rows[-1]
@@ -238,6 +229,7 @@ def test_ledger_row_records_its_owner_agent_and_kind(env, monkeypatch):
     assert row["spawned_at"] and row["worktree"] == str(env.repo)
 
 
+@pytest.mark.approved
 def test_ledger_owner_falls_back_to_the_split_anchor(env, monkeypatch):
     run, d = _live_dispatch(env, monkeypatch)
     from office import dispatch, paths

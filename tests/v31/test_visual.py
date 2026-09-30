@@ -7,7 +7,6 @@ import pytest
 
 pytest.importorskip("playwright")
 
-from conftest import start_inline  # noqa: E402
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 

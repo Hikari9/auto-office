@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import importlib.util, json, re, unittest
+import json, re, unittest
 from pathlib import Path
 from jsonschema import Draft202012Validator
 import yaml
@@ -670,9 +670,7 @@ class TestRouteNoNetworkAccess(unittest.TestCase):
         }
         socket.socket = _forbidden
         try:
-            spec = importlib.util.spec_from_file_location('office_runtime', ROOT / 'scripts/office_runtime.py')
-            rt = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(rt)
+            import office_runtime as rt
             result = rt.route({'role': 'worker', 'candidates': [candidate]})
         finally:
             socket.socket = original_socket

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 
-from conftest import GOOD_ADD, PLAN_ONE, PLAN_TWO, start_inline
+import pytest
+
+from conftest import GOOD_ADD, PLAN_ONE, PLAN_TWO, approved_run
 from office import planfile
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
@@ -17,13 +19,6 @@ PLAN_BAD_CHECK = PLAN_ONE.replace("blast_radius: repo\n", "blast_radius: repo\nc
 
 PLAN_TWO_RC = PLAN_TWO.replace("blast_radius: repo\n", 'blast_radius: repo\nchecks: python3 -c "assert 1 == 1"\n')
 PLAN_TWO_RC2 = PLAN_TWO_RC.replace('checks: python3 -c "assert 1 == 1"', 'checks: python3 -c "assert 2 == 2"')
-
-
-def _go(env, plan=PLAN_ONE, gear="direct+review", **script):
-    env.trust()
-    env.script(**script)
-    start_inline(env, plan=plan, gear=gear)
-    env.office("approve", "plan", "--quote", "approved", check=0)
 
 
 def _landing(con, run_id):
@@ -110,7 +105,7 @@ def test_amend_contract_rederives_run_checks(env):
 
 
 def test_amend_removing_bad_run_check_retriggers_integration(env):
-    _go(env, plan=PLAN_BAD_CHECK, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+    approved_run(env, plan=PLAN_BAD_CHECK, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
         code_reviewer=[{"reply": "VERDICT: PASS"}])
     code, out = env.office("dispatch", "T1", check=0)
     con = env.con()
@@ -130,7 +125,7 @@ def test_amend_removing_bad_run_check_retriggers_integration(env):
 
 
 def test_no_recheck_while_a_task_is_not_accepted(env):
-    _go(env, plan=PLAN_TWO_RC,
+    approved_run(env, plan=PLAN_TWO_RC,
         executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}}, "submit": True}],
         code_reviewer=[{"reply": "VERDICT: PASS"}])
     code, out = env.office("dispatch", "T1", check=0)
@@ -155,10 +150,11 @@ def test_planner_brief_says_how_to_cap_vitest_workers(env):
     assert "--maxWorkers=N --minWorkers=1" in text
 
 
+@pytest.mark.approved
 def test_stray_worktree_holding_the_integration_branch_is_named_and_resume_retries(env, tmp_path):
     # rock-mcp run C10: a manual worktree on office/<run>/integration made
     # `git worktree add -B` fail with no hint of which worktree held it.
-    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]
     stray = tmp_path / "stray"

@@ -8,33 +8,18 @@ not up, because that text goes to the shell.
 from __future__ import annotations
 
 import json
-from test_herdr_agent_launch import BUSY, EMPTY, _calls, _fake, _launch_events, _live_dispatch
+
+import pytest
+
+from test_herdr_agent_launch import BUSY, EMPTY, _calls, _launch_events, _live_dispatch, launch_in_herdr
 
 TRUST = ("Folder access\n  /runs/x/dispatches/D1\n  Trust this folder? Codex can read, edit, and run files here\n"
          "> 1. Trust and continue\n  2. Quit\n  enter continue · esc quit")
 
 
-def _launch(env, monkeypatch, *, reads, adapter="codex", owned=True, harness=None):
-    state_file = _fake(env, monkeypatch, reads=() if callable(reads) else reads)
-    run, d = _live_dispatch(env, monkeypatch)
-    monkeypatch.setenv("HERDR_ENV", "1")
-    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
-    monkeypatch.setenv("OFFICE_LAUNCHER", "herdr")
-    monkeypatch.setenv("OFFICE_HERDR_LAND_TIMEOUT", "0")
-    monkeypatch.setenv("OFFICE_HERDR_KEY_DELAY", "0")
-    from office import dispatch, paths
-    monkeypatch.setattr(dispatch.frontdoor, "current_argv", lambda: (["true"], {}))
-    d = {**d, "adapter_id": adapter, "model": "m-x", "effort": "high", "harness": harness or adapter}
-    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
-    ddir.mkdir(parents=True, exist_ok=True)
-    (ddir / "brief.md").write_text("You are a code reviewer\n")
-    if callable(reads):
-        data = json.loads(state_file.read_text())
-        data["reads"] = reads(ddir / "brief.md")
-        state_file.write_text(json.dumps(data))
-    cwd = ddir if owned else env.repo
-    res = dispatch.launch(run, d, "reviewer", ddir, cwd=cwd, output=ddir / "reply.txt")
-    return state_file, run, d, ddir, res
+def _launch(env, monkeypatch, *, reads, adapter="codex", owned=True):
+    return launch_in_herdr(env, monkeypatch, reads=reads, adapter=adapter, model="m-x", effort="high", role="reviewer",
+                           brief="You are a code reviewer\n", output=True, owned_cwd=owned)
 
 
 def test_codex_interactive_launch_pre_trusts_its_cwd(tmp_path):
@@ -49,6 +34,7 @@ def test_codex_interactive_launch_pre_trusts_its_cwd(tmp_path):
         assert not any(a.startswith("projects=") for a in argv)
 
 
+@pytest.mark.approved
 def test_trust_dialog_on_an_office_dir_is_answered_before_the_prompt(env, monkeypatch):
     state_file, run, d, ddir, res = _launch(env, monkeypatch, reads=[TRUST, BUSY])
     assert res["prompt_landed"] is True
@@ -59,6 +45,7 @@ def test_trust_dialog_on_an_office_dir_is_answered_before_the_prompt(env, monkey
     assert _launch_events(env, run) == []
 
 
+@pytest.mark.approved
 def test_trust_dialog_outside_office_dirs_is_reported_not_answered(env, monkeypatch):
     state_file, run, d, ddir, res = _launch(env, monkeypatch, reads=[TRUST], owned=False)
     assert res["prompt_landed"] is False
@@ -69,6 +56,7 @@ def test_trust_dialog_outside_office_dirs_is_reported_not_answered(env, monkeypa
     assert len(events) == 1 and "folder-trust dialog" in events[0] and "re-prompt it" in events[0]
 
 
+@pytest.mark.approved
 def test_nothing_is_typed_into_a_pane_without_an_agent(env, monkeypatch):
     monkeypatch.setenv("FAKE_HERDR_NO_AGENT", "1")
     state_file, run, d, ddir, res = _launch(env, monkeypatch, reads=["rico@mac ~ %"])
@@ -86,6 +74,7 @@ def test_rising_claude_ctx_counts_as_landed_without_a_busy_footer(env, monkeypat
     assert not any(c[:2] == ["pane", "send-text"] for c in _calls(state_file))
 
 
+@pytest.mark.approved
 def test_transcript_logging_the_prompt_counts_as_landed(env, monkeypatch):
     from office import transcripts
     monkeypatch.setattr(transcripts, "prompt_seen", lambda *a, **k: True)
@@ -138,6 +127,7 @@ def test_external_transcript_without_a_verdict_keeps_waiting(env, monkeypatch):
     assert dispatch._external_transcript_reply(dispatch.state_dispatch(d["id"]), spec) is None
 
 
+@pytest.mark.approved
 def test_external_reviewer_instructions_allow_a_reply_and_warn_about_the_ui(env, monkeypatch):
     run, d = _live_dispatch(env, monkeypatch)
     from office import dispatch

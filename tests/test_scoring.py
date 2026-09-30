@@ -3,20 +3,14 @@ trust-act write-path pieces of the Task T2B contract (docs/v3-runtime-contracts.
 section 7, deliverables F2/F3/F4). The adapter-trust invariant itself (§7.1) is proven
 by tests/test_trust_conformance.py, which this file does not duplicate.
 """
-import importlib.util
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('office_scoring', ROOT / 'scripts' / 'office_scoring.py')
-scoring = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(scoring)
-
-_rt_spec = importlib.util.spec_from_file_location('office_runtime', ROOT / 'scripts' / 'office_runtime.py')
-office_runtime = importlib.util.module_from_spec(_rt_spec)
-_rt_spec.loader.exec_module(office_runtime)
+import office_runtime
+import office_scoring as scoring
 
 
 def _con():
