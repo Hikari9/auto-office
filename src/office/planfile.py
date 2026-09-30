@@ -36,6 +36,17 @@ VISUAL_KEYS = {"url", "start", "reference", "viewports", "states", "selectors", 
                "deviations"}
 
 
+# office writes the plan diagram into PLAN.md between these markers; the block
+# is output, never plan content, so it is stripped before parsing and hashing.
+DIAGRAM_BEGIN = "<!-- office:diagram"
+DIAGRAM_END = "<!-- /office:diagram -->"
+_DIAGRAM_BLOCK = re.compile(r"\n*<!-- office:diagram.*?<!-- /office:diagram -->\n*", re.S)
+
+
+def strip_generated(text: str) -> str:
+    return _DIAGRAM_BLOCK.sub("\n", text).rstrip("\n") + "\n" if DIAGRAM_BEGIN in text else text
+
+
 @dataclass
 class ParsedPlan:
     requirements: dict = field(default_factory=dict)
@@ -58,6 +69,7 @@ def _split_list(value: str) -> list[str]:
 
 
 def parse(text: str) -> ParsedPlan:
+    text = strip_generated(text)
     plan = ParsedPlan()
     section = None
     task: dict | None = None

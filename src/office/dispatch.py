@@ -70,7 +70,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
     review_decision = candidates.declared_decision(review_as, flag="--review-as") if review_as else None
     if state.is_terminal(run):
         raise Refused("run-terminal", f"run is {run['phase']}")
-    from office import guide, plans
+    from office import guide, plan_view, plans
     plans.require_dispatchable(con, run)
     # Route before the write transaction: routing reads evidence and probes quota.
     routes = {}
@@ -152,6 +152,9 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 _stash_route(con, run, tid, decision)
                 res.add(f"{tid} stacked after {stack_after}")
             else:
+                drift = plan_view.drift(con, run, tid, decision)
+                if drift:
+                    res.add(drift)
                 did = request_launch(con, run, tid, role="executor", decision=decision, base=base)
                 verb = "prepared for you to start (external; nothing launched)" if external else "launching"
                 res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} {verb}"
