@@ -139,8 +139,11 @@ def _waiting_on(con, run: dict, task: dict) -> str:
     """What a live task is actually waiting on, so `live` never hides a stall:
     an amendment its session must ack, a submission held for one, or gates."""
     rid = run["id"]
+    # Only a held revision newer than the current one is still waiting; an older
+    # one was replaced by a later submission.
     held = con.execute("SELECT id FROM revisions WHERE run_id=? AND task_id=? AND status='amendment_pending' "
-                       "ORDER BY seq DESC LIMIT 1", (rid, task["id"])).fetchone()
+                       "AND seq > COALESCE((SELECT seq FROM revisions WHERE id=?), 0) ORDER BY seq DESC LIMIT 1",
+                       (rid, task["id"], task.get("current_revision_id"))).fetchone()
     parts = []
     for dl in con.execute("SELECT amendment_id, dispatch_id FROM deliveries WHERE run_id=? AND task_id=? "
                           "AND status IN ('queued','delivered') ORDER BY created_at", (rid, task["id"])).fetchall():
