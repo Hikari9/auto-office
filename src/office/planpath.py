@@ -33,8 +33,9 @@ def relocate_legacy(con, root: Path) -> str | None:
     if not legacy.is_file():
         return None
     text = legacy.read_text(encoding="utf-8")
+    from office import planfile
     row = con.execute("SELECT run_id FROM plans WHERE content_hash=? ORDER BY created_at DESC LIMIT 1",
-                      (sha256_bytes(text.encode()),)).fetchone()
+                      (sha256_bytes(planfile.strip_generated(text).encode()),)).fetchone()
     if row is not None:
         dest = draft(root, {"id": row["run_id"]})
         if dest.exists():

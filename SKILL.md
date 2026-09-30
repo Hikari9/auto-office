@@ -62,14 +62,19 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 3. If the output says a planner was queued, wait (`office wait`). Otherwise you plan inline:
    interview the user directly for anything you would otherwise guess, write `.office/plans/<run>/PLAN.md` (the path `office start` prints)
    (format: `office submit --help`), then `office submit`.
-4. When `next:` asks for authorization, show the user the plan and requirements, ask for their
-   decision (see Asking the user), and record it: `office approve plan --quote "<their words>"`.
+4. `office submit` prints the plan diagram (also written into PLAN.md, and reprinted by
+   `office inspect plan`): waves of parallel tasks, what each task stacks on, its route preview
+   and why, and the checkpoint chain. When `next:` asks for authorization, show the user the
+   requirements and that diagram verbatim, ask for their decision (see Asking the user), and
+   record it: `office approve plan --quote "<their words>"`. After an amendment, show only the
+   printed delta against the previous plan version.
 
 ## Execute
 
-- `office dispatch T1 T2 --parallel` for independent work; `office dispatch T1 T2` stacks T2 on
-  T1. Choose by dependencies, shared interfaces, and risk; the runtime enforces scope ownership,
-  but it does not decide your strategy and does not maximize concurrency for you.
+- Dispatch as the approved diagram shows: a wave's roots with `office dispatch T1 T2 --parallel`,
+  and dependents stacked on what they depend on (`office dispatch T1 T3` stacks T3 on T1). The
+  runtime enforces scope ownership but does not maximize concurrency for you. Routes re-resolve
+  at dispatch; a line `route differs from the plan preview` names the change and why.
 - To wait on the run, use `office wait`: exit 0 means act, 3 means a stall to resolve, 124 means nothing
   new. Key on the exit code, never on matching status text.
 - Executors submit their own work; reviewers are dispatched and read by the runtime, only from their

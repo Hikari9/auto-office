@@ -61,6 +61,8 @@ SHARED_COLUMNS = {
     ],
     # v2 (#185): user-declared model overrides.
     "tasks": ["review_override_json TEXT"],
+    # v3 (3.2): the route preview shown in the plan diagram.
+    "plans": ["preview_json TEXT"],
     "findings": [
         "run_id TEXT", "task_id TEXT", "gate_id TEXT", "revision_id TEXT", "gate_kind TEXT",
         "code TEXT", "fingerprint TEXT", "location TEXT", "category TEXT", "action TEXT",

@@ -30,7 +30,7 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
     """`redirect` is a validated defect redirect (office.redirect) this revision follows."""
     if not plan_path.is_file():
         raise Usage("no-plan-file", f"no plan at {plan_path}", next_step=f"write {plan_path}, then office submit")
-    text = plan_path.read_text(encoding="utf-8")
+    text = planfile.strip_generated(plan_path.read_text(encoding="utf-8"))
     parsed = planfile.parse(text)
     if parsed.errors:
         raise Refused("plan-invalid", "plan has problems: " + "; ".join(parsed.errors[:6]),
@@ -101,11 +101,31 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
             res.add(f"plan p{new_version} submitted" + ("" if review_required(run) else " | no plan review funded"))
         if changes.get("cancelled"):
             res.add(f"removed tasks: {', '.join(changes['cancelled'])}")
+    show_diagram(con, state.get_run(con, run["id"]), new_version, parsed.tasks, plan_path, res)
     jobs.kick(con, run["id"])
     for w in parsed.warnings[:3]:
         res.notices.append(w)
     res.next = ("no action; findings will be delivered" if dispatch_id else _after_plan_next(con, state.get_run(con, run["id"])))
     return res
+
+
+def show_diagram(con, run: dict, version: int, tasks: list[dict], plan_path: Path | None, res: Result) -> None:
+    """Route-preview the plan outside the submit transaction (routing probes
+    quota), store it, and show the diagram, or only its delta on a revision."""
+    from office import plan_view
+    pv = plan_view.preview(con, run, tasks)
+    with db.transaction(con):
+        plan_view.store(con, run, version, pv)
+    full = plan_view.render(run, version, pv)
+    if plan_path is not None:
+        plan_view.write_into(plan_path, version, full)
+    prev = plan_view.load(con, run["id"], version - 1) if version > 1 else None
+    if prev:
+        res.lines.extend(plan_view.diff(prev, pv, version - 1))
+        res.lines.append("full diagram: office inspect plan")
+    else:
+        res.lines.extend(["", *full])
+    res.data["diagram"] = pv
 
 
 def apply_run_checks(con, run: dict, run_checks: list[str]) -> None:

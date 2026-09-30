@@ -44,10 +44,11 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
     if requirements or scope == "requirements":
         return _requirements_change(con, run, delta, quote)
     scope_ids = _scope_ids(con, run, scope)
-    plan_text = _orchestrator_plan_text(con, run, cwd)
+    plan_path = _orchestrator_plan_path(con, run, cwd)
+    plan_text = planfile.strip_generated(plan_path.read_text(encoding="utf-8")) if plan_path else None
     if contract:
-        return _contract(con, run, scope, scope_ids, delta, plan_text, redirect)
-    return _ordinary(con, run, scope, scope_ids, delta, plan_text)
+        return _contract(con, run, scope, scope_ids, delta, plan_text, redirect, plan_path)
+    return _ordinary(con, run, scope, scope_ids, delta, plan_text, plan_path)
 
 
 def _scope_ids(con, run: dict, scope: str) -> list[str]:
@@ -61,13 +62,13 @@ def _scope_ids(con, run: dict, scope: str) -> list[str]:
     return ids
 
 
-def _orchestrator_plan_text(con, run: dict, cwd: Path | None) -> str | None:
+def _orchestrator_plan_path(con, run: dict, cwd: Path | None) -> Path | None:
     ident = paths.repo_identity(cwd)
     if ident is None:
         return None
     planpath.relocate_legacy(con, ident[0])
     draft = planpath.draft(ident[0], run)
-    return draft.read_text(encoding="utf-8") if draft.is_file() else None
+    return draft if draft.is_file() else None
 
 
 def _requirements_change(con, run: dict, delta: str, quote: str | None) -> Result:
@@ -99,7 +100,8 @@ def record_requirements(con, run: dict, delta: str, quote: str) -> int:
     return version
 
 
-def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan_text: str | None) -> Result:
+def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan_text: str | None,
+             plan_path: Path | None = None) -> Result:
     current = state.current_plan(con, run["id"])
     if current is None:
         raise Refused("no-plan", "there is no plan to amend", next_step="office submit the plan first")
@@ -151,13 +153,14 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
     if delivered:
         parts.append(f"delivering to {','.join(delivered)}")
     res.add(" | ".join(parts))
+    plans.show_diagram(con, state.get_run(con, run["id"]), version, parsed.tasks, plan_path, res)
     from office import guide
     res.next = guide.next_action(con, state.get_run(con, run["id"]))
     return res
 
 
 def _contract(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan_text: str | None,
-              redirect: dict | None = None) -> Result:
+              redirect: dict | None = None, plan_path: Path | None = None) -> Result:
     """Contract amendments belong to the planner. In a run whose orchestrator is
     the planner (inline mode), its edited PLAN.md is the contract amendment."""
     if run.get("planner_mode") == "inline":
@@ -165,7 +168,7 @@ def _contract(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
             raise Usage("no-plan-file", f"edit {planpath.rel(run)} with the contract change first",
                         next_step=f'edit {planpath.rel(run)}, then office amend {scope} --contract -- "<summary>"')
         return _apply_contract_text(con, run, scope_ids, delta, plan_text, author="orchestrator-as-planner",
-                                    redirect=redirect)
+                                    redirect=redirect, plan_path=plan_path)
     from office import dispatch
     from office import redirect as redirect_mod
     with db.transaction(con):
@@ -196,7 +199,8 @@ def _contract(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
                   next="no action; the revised plan returns here (unaffected work continues)")
 
 
-def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dict | None = None) -> Result:
+def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dict | None = None,
+                         plan_path: Path | None = None) -> Result:
     parsed = planfile.parse(text)
     if parsed.errors:
         raise Refused("plan-invalid", "plan has problems: " + "; ".join(parsed.errors[:5]),
@@ -230,8 +234,10 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
     lines = [f"plan p{version} | {amendment_id} contract | affected {','.join(affected) or 'none'}", *redirect_lines]
     if flagged:
         lines.append(f"new authority entries need user authorization: {', '.join(flagged)}")
-    return Result(lines=lines, next=('ask the user (native question tool) for authorization, then office approve ' + flagged[0] + ' --quote "<words>"')
-                  if flagged else "exceptions only; office status")
+    res = Result(lines=lines, next=('ask the user (native question tool) for authorization, then office approve ' + flagged[0] + ' --quote "<words>"')
+                 if flagged else "exceptions only; office status")
+    plans.show_diagram(con, state.get_run(con, run["id"]), version, parsed.tasks, plan_path, res)
+    return res
 
 
 def _task_changed(cur: dict, planned: dict | None) -> bool:

@@ -32,7 +32,20 @@ def inspect(con, run: dict, what: str | None, ident: str | None) -> Result:
         return _events(con, run, ident)
     if what == "route":
         return _route(con, run, ident)
-    raise Usage("unknown-view", f"cannot inspect {what!r}", next_step="office inspect run|task|gate|evidence|events|route [id]")
+    if what == "plan":
+        return _plan(con, run, ident)
+    raise Usage("unknown-view", f"cannot inspect {what!r}",
+                next_step="office inspect run|plan|task|gate|evidence|events|route [id]")
+
+
+def _plan(con, run, ident) -> Result:
+    """The plan diagram: current version, or `pN` for an earlier one."""
+    from office import plan_view
+    version = int(str(ident).lstrip("pP")) if ident else run["plan_version"]
+    pv = plan_view.load(con, run["id"], version) if version else None
+    if not pv:
+        raise Usage("no-diagram", f"no diagram recorded for plan p{version}", next_step="office submit")
+    return Result(lines=plan_view.render(run, version, pv), data={"diagram": pv})
 
 
 def _run(con, run) -> Result:
