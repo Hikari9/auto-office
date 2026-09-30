@@ -101,6 +101,34 @@ def matches_revision(worktree: Path, commit: str, scratch: Path) -> bool:
             pass
 
 
+def restore_tracked_paths(worktree: Path, commit: str, scratch: Path) -> list[str]:
+    """Restore tracked worktree changes from `commit`, preserving untracked output."""
+    import subprocess
+    scratch.mkdir(parents=True, exist_ok=True)
+    fd, index = tempfile.mkstemp(prefix="restore.", dir=str(scratch))
+    os.close(fd)
+    os.unlink(index)
+    env = dict(os.environ, GIT_INDEX_FILE=index)
+    try:
+        paths.git(worktree, "read-tree", commit, env=env)
+        paths.git(worktree, "update-index", "-q", "--refresh", env=env, check=False)
+        changed = subprocess.run(
+            ["git", "-C", str(worktree), "diff-files", "--name-only", "-z", "--ignore-submodules"],
+            env=env, capture_output=True, check=True).stdout.split(b"\0")
+        tracked = sorted(os.fsdecode(path) for path in changed if path)
+        if tracked:
+            # The temporary index contains only paths from the submitted revision.
+            # checkout-index therefore restores tracked content and leaves all
+            # untracked and ignored serve output in place.
+            paths.git(worktree, "checkout-index", "--force", "--all", env=env)
+        return tracked
+    finally:
+        try:
+            os.unlink(index)
+        except OSError:
+            pass
+
+
 def worktree_equals_commit(worktree: Path, commit: str) -> bool:
     """Read-only: every file in `commit` is unchanged and every untracked,
     non-ignored file in the worktree is identical in `commit`. Writes no git
