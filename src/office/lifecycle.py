@@ -56,7 +56,8 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
     sdir.mkdir(parents=True, exist_ok=True)
     os.chmod(sdir, 0o700)
     hashes = cfg.snapshot_hashes()
-    ver = version.current()
+    exact = version.current()
+    ver = version.release_line(exact)  # the run is pinned to MAJOR.MINOR; plugin_commit keeps the exact creator
     planner_mode = planner or ("dedicated" if gates["dedicated_planner"] else "inline")
     plan_review = {"required": bool(gates["plan_review"]), "ended": False}
     frozen = {"goal": goal.strip(), "done_criteria": [], "blast_radius": blast_radius,
@@ -83,7 +84,7 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                 "state_dir, requirements_version, plan_version, routing_version, policy_json, risk_json, gates_json, "
                 "envelope_json, plan_review_json, planner_mode, updated_at, escalations_used) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
-                (run_id, run_id, now, ver, hashes["policy_hash"], hashes["catalog_hash"], hashes["adapter_hash"],
+                (run_id, run_id, now, exact, hashes["policy_hash"], hashes["catalog_hash"], hashes["adapter_hash"],
                  sha256_obj(config), "planning", ver, str(top), str(common), goal.strip(), "planning", gear,
                  playbook, base_sha, str(sdir), 1, 0, 1, dumps(config), dumps(risk), dumps(gates), dumps([]),
                  dumps(plan_review), planner_mode, now))
@@ -125,7 +126,7 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
             res.next = f"write the plan to {planpath.rel(run)} (office submit --help shows the format), then office submit"
         res.data = {"run_id": run_id, "office_version": ver, "gear": gear, "risk": risk, "gates": gates,
                     "planner_mode": planner_mode, "bound": [f"{h}:{s}" for h, s in bound], "warnings": warnings}
-        res.verbose = [f"office_version {ver}", f"state {sdir}", f"base {base_sha[:12]}",
+        res.verbose = [f"office_version {ver} (created by {exact})", f"state {sdir}", f"base {base_sha[:12]}",
                        f"bindings {', '.join(f'{h}' for h, _ in bound) or 'none (use OFFICE_RUN_ID or --run)'}"]
         return res
     finally:
@@ -287,7 +288,7 @@ def list_runs(con, *, all_runs: bool = False, cwd: Path | None = None) -> Result
         runs = [r for r in runs if not state.is_terminal(r)]
     lines = []
     for r in runs:
-        tag = "" if r["office_version"] == version.current() else f"  [pinned {r['office_version']}]"
+        tag = "" if version.same_line(r["office_version"], version.current()) else f"  [on {version.release_line(r['office_version'])}]"
         pr = " pruned" if r.get("pruned_at") else ""
         lines.append(f"{short(r['id'])}  {r['phase']:<10} {r['goal'][:60]}{tag}{pr}")
     legacy_rows = []

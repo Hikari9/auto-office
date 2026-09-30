@@ -21,7 +21,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, routing, state
+from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, routing, state, version
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import atomic_write_json, dumps, now_iso, pid_alive, sha256_obj, short
@@ -304,7 +304,7 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
         "adapter_id, applied_plan_version, route_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (dispatch_id, run["id"], role, dispatch_id, routing.candidate_id(cand), cand.get("invocation_model_id"),
          (decision.get("selection_disclosure") or {}).get("reason"), run.get("playbook"), now_iso(), task_id, role,
-         run["office_version"], "launching", worktree, branch, base or (prior or {}).get("base_commit") or run["base_sha"],
+         version.current(), "launching", worktree, branch, base or (prior or {}).get("base_commit") or run["base_sha"],
          lease["id"], cand["harness"], cand.get("invocation_model_id"), cand.get("effort"), cand.get("adapter_id"),
          applied, dumps(_route_payload(decision))))
     if decision.get("override") or decision.get("launch"):
@@ -540,7 +540,7 @@ def worker_env(run: dict, dispatch: dict, role: str) -> dict:
         "OFFICE_TASK_ID": dispatch["task_id"] or "",
         "OFFICE_DISPATCH_ID": dispatch["id"],
         "OFFICE_ROLE": role,
-        "OFFICE_VERSION": run["office_version"],
+        "OFFICE_VERSION": version.current(),
     })
     argv, extra = frontdoor.current_argv()
     env.update(extra)

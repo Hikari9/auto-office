@@ -1,7 +1,9 @@
-"""Exact Office version identity.
+"""Exact Office version identity and the MAJOR.MINOR release line.
 
-Every run and every runtime-owned packet carries this string, so it has to name
-exactly one runtime. A released wheel reports its distribution version
+Every runtime-owned packet, job, dispatch and event records the exact identity
+of the runtime that wrote it. A run records its release line ("3.2"): PATCH
+releases on that line are bugfix-compatible, so the newest installed patch
+serves the run. Crossing a MINOR or MAJOR takes an explicit `office upgrade`. A released wheel reports its distribution version
 ("3.1.0"). A source checkout reports a PEP 440 local version that names the
 commit and, when runtime files are modified, a digest of that modification
 ("3.1.0+g1a2b3c4d5e6f.d0badc0de"). The word "dev" is never an identity.
@@ -217,3 +219,13 @@ def release_line(version: str) -> str:
     """'3.1.0+g…' -> '3.1'. Used for compatibility-window checks."""
     parts = re.split(r"[.+]", version)
     return ".".join(parts[:2])
+
+
+def same_line(a: str | None, b: str | None) -> bool:
+    return bool(a) and bool(b) and release_line(a) == release_line(b)
+
+
+def release_key(version: str) -> tuple[int, ...]:
+    """Numeric release tuple for ordering ('3.2.1+g…' -> (3, 2, 1))."""
+    m = re.match(r"\d+(\.\d+)*", version or "")
+    return tuple(int(x) for x in m.group(0).split(".")) if m else ()

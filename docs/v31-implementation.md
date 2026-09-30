@@ -68,13 +68,21 @@ its result in a second transaction. A claim whose process is dead is reclaimed b
 `office --version` is exact: a wheel reports `3.1.0`; a source checkout reports
 `3.1.0+g<sha12>` and adds `.d<digest>` when runtime files are modified (PEP 440 local version).
 
-- Every run has `office_version`. Every runtime-owned packet (planner, executor, reviewer,
-  capture receipt, amendment delivery, gate/integration job, relaunch) carries the same value;
-  `state.check_packet` rejects a mismatch and `jobs.execute` refuses a job whose payload or
-  runtime differs from the run's pinned version.
-- `frontdoor.ensure_runtime` re-executes a command under the registered runtime for the run's
-  version (`~/.local/share/auto-office/runtimes/<version>.json`, written by `office install`) or
-  exits 5 with the exact version it needs. It never falls back to the current runtime.
+- Every run has `office_version`, its MAJOR.MINOR release line (`3.2`); `plugin_commit` keeps
+  the exact creating runtime. Runs created before 3.2 hold an exact version (`3.1.0`) and are
+  read as its line. Every runtime-owned packet, job, dispatch and event records the exact
+  runtime that wrote it; `state.check_packet` and `jobs.execute` compare release lines only.
+- PATCH releases (`3.2.0` → `3.2.1`) are bugfix-only and reach every run on their line with no
+  action. `frontdoor.ensure_runtime` re-executes a command under the newest registered patch of
+  the run's line (`~/.local/share/auto-office/runtimes/<version>.json`, written by
+  `office install`), or exits 5 naming the line and `office upgrade`.
+- Crossing a MINOR or MAJOR is explicit: `office upgrade [run] [--to X.Y]` dry-runs by default
+  and `--apply` commits. It refuses, naming them, while dispatches are live or jobs claimed;
+  restamps queued jobs; runs any `upgrade.MIGRATIONS` entry for the pair (the runs.db schema
+  itself migrates additively on open); records `run.upgraded` with from/to; and leaves
+  requirements, plans, tasks, gates, amendments and authorizations unchanged. Rollback is
+  `office upgrade <run> --to <previous line> --apply`, allowed only to a line the run was on.
+  `office doctor` and `office status` print the upgrade command for a run on an older line.
 - A 3.0 run (its `state.json` has no `office_version`) is pinned to its `plugin_commit`. The
   runtime materializes exactly that commit with `git archive` into `runtimes/legacy-<sha>` and
   serves the run from there (`office resume`, `office raw`, and the guard in

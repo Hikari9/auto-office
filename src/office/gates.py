@@ -19,7 +19,7 @@ import time
 import uuid
 from pathlib import Path
 
-from office import briefs, candidates, db, jobs, paths, planfile, review_parse, routing, state
+from office import briefs, candidates, db, jobs, paths, planfile, review_parse, routing, state, version
 from office.util import dumps, now_iso, pid_alive, sha256_bytes, sha256_obj
 
 TASK_GATES = ("checks", "code_review", "visual")
@@ -496,7 +496,7 @@ def _reviewer_dispatch(con, run: dict, gate: dict, role: str, decision: dict) ->
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (dispatch_id, run["id"], role, dispatch_id, routing.candidate_id(cand), cand.get("invocation_model_id"),
                  (decision.get("selection_disclosure") or {}).get("reason"), now_iso(), gate.get("task_id"), "reviewer",
-                 run["office_version"], "launching", cand["harness"], cand.get("invocation_model_id"), cand.get("effort"),
+                 version.current(), "launching", cand["harness"], cand.get("invocation_model_id"), cand.get("effort"),
                  cand.get("adapter_id"), dumps(dispatch_mod._route_payload(decision)), gate["id"]))
     if decision.get("override"):
         con.execute("UPDATE dispatches SET override_json=? WHERE id=?",

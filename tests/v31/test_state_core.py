@@ -21,6 +21,7 @@ def test_version_identity_is_exact_pep440(env):
 
 
 def test_every_run_and_packet_carries_office_version(env):
+    from office import version
     env.trust()
     env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     start_inline(env)
@@ -30,10 +31,12 @@ def test_every_run_and_packet_carries_office_version(env):
     run = dict(con.execute("SELECT * FROM runs WHERE office_version IS NOT NULL").fetchone())
     assert run["office_version"]
     for row in con.execute("SELECT payload_json, office_version FROM outbox").fetchall():
-        assert json.loads(row["payload_json"])["office_version"] == run["office_version"] == row["office_version"]
+        assert json.loads(row["payload_json"])["office_version"] == row["office_version"]
+        assert version.same_line(row["office_version"], run["office_version"])
     for d in con.execute("SELECT packet_path, office_version FROM dispatches WHERE packet_path IS NOT NULL").fetchall():
         packet = json.loads(open(d["packet_path"]).read())
-        assert packet["office_version"] == run["office_version"] == d["office_version"]
+        assert packet["office_version"] == d["office_version"]
+        assert version.same_line(packet["office_version"], run["office_version"])
 
 
 def test_packet_version_mismatch_is_rejected(env):

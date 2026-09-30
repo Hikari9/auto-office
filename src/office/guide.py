@@ -127,8 +127,11 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     tasks = state.tasks(con, run["id"])
     c = _counts(tasks)
     res = Result()
-    res.add(f"{short(run['id'])} {run['phase']} | req r{run['requirements_version']} | plan p{run['plan_version']}"
-            + ("" if run["office_version"] else ""))
+    res.add(f"{short(run['id'])} {run['phase']} | req r{run['requirements_version']} | plan p{run['plan_version']}")
+    from office import upgrade
+    stale = upgrade.notice(run)
+    if stale:
+        res.add(stale)
     if tasks:
         parts = [f"accepted {len(c.get('accepted', []))}/{len([t for t in tasks if t['status'] != 'cancelled'])}"]
         for label, keys in (("live", ("running", "launching", "submitted", "changes_required")), ("queued", ("queued",)),

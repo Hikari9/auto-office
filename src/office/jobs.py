@@ -132,11 +132,12 @@ def execute(con, job_id: str) -> int:
     job = state.get_job(con, job_id)
     run = state.get_run(con, job["run_id"])
     try:
-        if job["office_version"] != run["office_version"] or job["payload"].get("office_version") != run["office_version"]:
+        if not (version.same_line(job["office_version"], run["office_version"])
+                and version.same_line(job["payload"].get("office_version"), run["office_version"])):
             raise state.Refused("packet-version-mismatch",
                                 f"job {job_id} carries {job['payload'].get('office_version')} but run is pinned to "
                                 f"{run['office_version']}")
-        if run["office_version"] != version.current():
+        if not version.same_line(run["office_version"], version.current()):
             raise state.Refused("runtime-version-mismatch",
                                 f"runtime {version.current()} will not execute a job for a run pinned to "
                                 f"{run['office_version']}")

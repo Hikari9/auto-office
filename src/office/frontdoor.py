@@ -1,9 +1,10 @@
 """Version-pinned runtime dispatch.
 
-The globally installed `office` resolves the target run first. When that run
-is pinned to a different Office version, the command is re-executed under the
-registered runtime for exactly that version. There is no fallback to the
-current runtime: an old packet is never reinterpreted by new code.
+The globally installed `office` resolves the target run first. A run is pinned
+to a MAJOR.MINOR release line; the newest installed PATCH on that line serves
+it. When this process is on another line, or a newer patch of the run's line
+is registered, the command is re-executed under that runtime. A run never
+crosses a MINOR or MAJOR implicitly: that takes `office upgrade`.
 """
 from __future__ import annotations
 
@@ -72,26 +73,55 @@ def list_registered() -> list[dict]:
     return out
 
 
+def newest_on_line(line: str) -> dict | None:
+    """The registered runtime with the highest patch on `line`, if any."""
+    best = None
+    for entry in list_registered():
+        ver = entry.get("office_version") or ""
+        if not version.same_line(ver, line) or registered(ver) is None:
+            continue
+        if best is None or version.release_key(ver) > version.release_key(best["office_version"]):
+            best = entry
+    return best
+
+
+def installed_lines() -> list[str]:
+    """Release lines this machine can serve, newest first."""
+    lines = {version.release_line(version.current())}
+    for entry in list_registered():
+        ver = entry.get("office_version") or ""
+        if ver and registered(ver) is not None:
+            lines.add(version.release_line(ver))
+    return sorted(lines, key=version.release_key, reverse=True)
+
+
 def ensure_runtime(run: dict) -> None:
     """Raise unless this process may operate on `run`, re-executing under the
-    pinned runtime when one is registered. Returns only when versions match."""
+    newest registered patch of the run's release line when that is not this
+    process. Returns only when this runtime serves the run."""
     pinned = run.get("office_version")
     if not pinned:
         raise RuntimeUnavailable("unpinned-run", f"run {run['id'][:8]} has no office_version",
                                  next_step="office doctor")
-    if pinned == version.current():
+    line = version.release_line(pinned)
+    cur = version.current()
+    best = newest_on_line(line)
+    if version.same_line(cur, line) and (best is None or version.release_key(best["office_version"])
+                                          <= version.release_key(cur)):
         return
     hops = int(os.environ.get(HOP_ENV, "0"))
-    entry = registered(pinned)
-    if entry is None or hops >= 1:
+    if best is None or hops >= 1:
+        if version.same_line(cur, line):
+            return  # the newer patch is registered but unreachable; this patch is compatible
         raise RuntimeUnavailable(
             "pinned-runtime-unavailable",
-            f"run {run['id'][:8]} is pinned to Auto Office {pinned}; this is {version.current()}",
+            f"run {run['id'][:8]} is on Auto Office {line}; this is {cur}",
             scope=f"run {run['id'][:8]}",
             preserved="all run state; nothing was changed",
-            next_step=(f"install that exact runtime and register it (office install from it), "
-                       f"or check office doctor; the run never migrates to {version.current()}"),
-            data={"pinned": pinned, "current": version.current()})
+            next_step=(f"office upgrade {run['id'][:8]} to move it to {version.release_line(cur)}, "
+                       f"or install a {line}.x runtime and register it (office install from it)"),
+            data={"pinned": line, "current": cur})
+    entry = best
     env = dict(os.environ)
     env.update(entry.get("env") or {})
     env[HOP_ENV] = str(hops + 1)
