@@ -53,11 +53,24 @@
  * Contract, same as the eval hooks: never blocks, exits 0 on any internal error,
  * and prints nothing when it closed nothing. A hygiene hook that can fail a turn
  * is worse than a dead pane.
+ *
+ * v3.1 run ledgers (safety net). The 3.1 runtime closes a dispatch pane itself
+ * once it has an accepted result: it writes the pane's final text, appends
+ * `{result: "accepted", snapshot}` to `<state root>/runs/<run_id>/panes.jsonl`,
+ * closes the pane, then appends `{closed_at}`. If the runtime died between the
+ * accepted row and the close, this hook finishes the job. Runs are found from
+ * the repo's `.office/active/<run_id>` pointers (never the legacy v3
+ * `.office/runs/*.ref`). Per pane the latest launch row starts a fresh record;
+ * a pane closes only with an accepted row whose snapshot file exists and is
+ * non-empty, no later `kept` or `closed_at` row, and an explicit run and
+ * dispatch identity. The caller's own pane is never closed, and a herdr outage
+ * closes nothing.
  */
-import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, accessSync, constants } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, accessSync, constants, readdirSync,
+  statSync, appendFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { tmpdir } from "node:os";
-import { join, delimiter } from "node:path";
+import { tmpdir, homedir } from "node:os";
+import { join, delimiter, resolve } from "node:path";
 
 const LEDGER = process.env.OFFICE_PANE_LEDGER || join(process.env.OFFICE_STATE_DIR || ".office", "panes.jsonl");
 const FINISHED = new Set(["done", "gone", "halted", "dead", "stopped", "exited", "terminated"]);
@@ -183,19 +196,105 @@ const drainStdin = () =>
     setTimeout(() => res(b), 2000).unref();
   });
 
+/** Where `paths.state_home()` (src/office/paths.py) puts run directories. */
+const stateHome = () => {
+  if (process.env.OFFICE_STATE_HOME) return resolve(process.env.OFFICE_STATE_HOME.replace(/^~(?=\/|$)/, homedir()));
+  const xdg = process.env.XDG_STATE_HOME ? process.env.XDG_STATE_HOME.replace(/^~(?=\/|$)/, homedir())
+    : join(homedir(), ".local", "state");
+  return resolve(xdg, "auto-office");
+};
+
+const readRows = (path) => {
+  let raw;
+  try { raw = readFileSync(path, "utf8"); } catch { return []; }
+  const rows = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try { rows.push(JSON.parse(line)); } catch { /* skip malformed */ }
+  }
+  return rows;
+};
+
+const nonEmptyFile = (p) => {
+  try { return Boolean(p) && statSync(p).isFile() && statSync(p).size > 0; } catch { return false; }
+};
+
+/**
+ * Per pane, the record since its latest launch row. A launch row is one with a
+ * dispatch identity and none of result/kept/closed_at (a reused pane id starts
+ * a fresh record). Rows naming only a dispatch are attributed to that
+ * dispatch's pane.
+ */
+const paneRecords = (rows) => {
+  const byPane = new Map();
+  const paneOfDispatch = new Map();
+  for (const r of rows) {
+    const pane = r.pane_id || (r.dispatch_id && paneOfDispatch.get(r.dispatch_id)) || null;
+    if (!pane) continue;
+    if (r.dispatch_id && r.pane_id) paneOfDispatch.set(r.dispatch_id, r.pane_id);
+    const isClose = Boolean(r.closed_at) || r.closed === true;
+    const isKept = r.kept === true;
+    const isAccepted = r.result === "accepted";
+    if (!isClose && !isKept && !isAccepted) {
+      if (r.dispatch_id) byPane.set(pane, { launch: r, accepted: null, kept: false, closed: false });
+      continue;
+    }
+    const rec = byPane.get(pane) || { launch: null, accepted: null, kept: false, closed: false };
+    if (isAccepted) rec.accepted = r;
+    if (isKept) rec.kept = true;
+    if (isClose) rec.closed = true;
+    byPane.set(pane, rec);
+  }
+  return byPane;
+};
+
+/** Close accepted, snapshotted v3.1 dispatch panes the runtime did not get to. */
+const sweepRunLedgers = (closedOut) => {
+  const activeDir = join(process.cwd(), ".office", "active");
+  let runIds;
+  try { runIds = readdirSync(activeDir).filter((n) => !n.startsWith(".")); } catch { return; }
+  if (!runIds.length || !onPath("herdr")) return;
+  const panes = listItems(herdr(["pane", "list"]), "panes");
+  if (!panes) return; // herdr unreachable: no liveness evidence, close nothing
+  const self = process.env.HERDR_PANE_ID || null;
+  for (const runId of runIds) {
+    const ledger = join(stateHome(), "runs", runId, "panes.jsonl");
+    if (!existsSync(ledger)) continue;
+    for (const [pane, rec] of paneRecords(readRows(ledger))) {
+      if (!rec.accepted || rec.kept || rec.closed) continue;
+      if (self && pane === self) continue;
+      const acc = rec.accepted;
+      const rid = acc.run_id || rec.launch?.run_id || null;
+      const did = acc.dispatch_id || rec.launch?.dispatch_id || null;
+      if (!rid || !did || rid !== runId) continue;
+      if (!nonEmptyFile(acc.snapshot)) continue;
+      const present = panes.some((p) => field(p, "pane_id", "pane") === pane);
+      if (present) {
+        herdr(["pane", "close", pane]);
+        const probe = herdr(["pane", "get", pane]);
+        if (!(probe?.error?.code && /not_?found/.test(probe.error.code))) continue; // still open: retry next Stop
+      }
+      try {
+        appendFileSync(ledger, JSON.stringify({ pane_id: pane, run_id: rid, dispatch_id: did,
+          closed_at: new Date().toISOString(), closed_by: "stop_hook" }) + "\n");
+      } catch { /* the close happened; the next sweep sees the pane gone */ }
+      if (present) closedOut.push({ pane, name: rec.launch?.agent || did, status: "accepted", session: rec.launch?.session_id || null });
+    }
+  }
+};
+
 const closed = [];
-try {
-  await drainStdin(); // the hook payload is unused; not reading it can block the caller
-  if (!existsSync(LEDGER)) process.exit(0);
-  if (!onPath("herdr")) process.exit(0);
+const sweepLegacyLedger = () => {
+  if (!existsSync(LEDGER)) return;
+  if (!onPath("herdr")) return;
 
   const agents = listItems(herdr(["agent", "list"]), "agents");
   const panes = listItems(herdr(["pane", "list"]), "panes");
-  if (!agents || !panes) process.exit(0); // no liveness evidence: fail safe
+  if (!agents || !panes) return; // no liveness evidence: fail safe
 
   const raw = readFileSync(LEDGER, "utf8");
   const lines = raw.split("\n").filter((l) => l.trim());
-  if (!lines.length) process.exit(0);
+  if (!lines.length) return;
 
   const kept = [];
   for (const line of lines) {
@@ -240,6 +339,12 @@ try {
       renameSync(tmp, LEDGER); // atomic: a concurrent reader never sees a half file
     }
   }
+};
+
+try {
+  await drainStdin(); // the hook payload is unused; not reading it can block the caller
+  try { sweepLegacyLedger(); } catch { /* independent of the run-ledger pass */ }
+  try { sweepRunLedgers(closed); } catch { /* swallow, see contract */ }
 } catch {
   // Swallow. See contract above.
 }

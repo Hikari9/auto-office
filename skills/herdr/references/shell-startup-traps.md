@@ -1,0 +1,5 @@
+# Observed 2026-09-24: shell and startup traps
+
+- zsh does not word-split unquoted variables, so `for x in "a b" "c d"; do set -- $x; herdr agent prompt "$1" ...; done` targets an agent literally named `a b` and fails with `agent_not_found`, silently when stdout/stderr are discarded, and the same bug writes malformed ledger rows (pane_id containing spaces). Call `herdr agent prompt <name> ...` with explicit arguments, or use `IFS=: read -r a b <<< "$row"`. Confirm each dispatch with `herdr agent get` reporting `working`.
+- A Claude pane started in a directory under `$HOME` can block at startup on "Allow external CLAUDE.md file imports?" when a parent CLAUDE.md imports a file outside the cwd; `agent start` returns `agent_not_ready`. Read the pane: the least-privilege answer is the default "No, disable external imports" (Enter), which grants nothing. Starting the pane in a repo/worktree directory avoids it.
+- `herdr-ledger.mjs update --status done` does not set `closed`; after closing panes, mark rows closed (or run the sweep) so closeout accounting reflects reality.
