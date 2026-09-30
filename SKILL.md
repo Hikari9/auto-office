@@ -72,8 +72,11 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
   but it does not decide your strategy and does not maximize concurrency for you.
 - To wait on the run, use `office wait`: exit 0 means act, 3 means a stall to resolve, 124 means nothing
   new. Key on the exit code, never on matching status text.
-- Executors submit their own work; reviewers are dispatched and read by the runtime. You hear
-  about acceptances, blockers, escalations, and plan-review results, not routine findings.
+- Executors submit their own work; reviewers are dispatched and read by the runtime, only from their
+  reply files, never pane text. A bad reply re-prompts the same reviewer; after three it needs you.
+- Findings never relaunch anything on their own. When `next:` says a task's findings wait for you, run
+  `office rerun T2 --resume` (the same harness session, in a fresh pane) or `office rerun T2 --fresh`;
+  resume refuses with the reason and the `--fresh` command when the session cannot be reopened.
 - After a first plan review of CHANGES_REQUIRED: edit `.office/PLAN.md`, run
   `office amend plan -- "<what changed>"`, then dispatch eligible work immediately; the re-review
   runs concurrently. A PLAN_DEFECT blocks its scope until an independent reviewer clears it.
@@ -93,18 +96,14 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 ## Herdr agents
 
 Inside Herdr, Office starts each dispatch as a real interactive agent in a pane beside yours and
-confirms the brief pointer landed. A `launch` notice in `office status` means it could not: the
+confirms the brief pointer landed. A pane closes itself once its result is accepted, after saving
+`pane-final.txt` in the dispatch dir; a failed end keeps it open. `office dismiss <T2|dispatch|--all>`
+closes kept panes, and `OFFICE_KEEP_PANES=1` on `office dispatch` keeps them for debugging. A `launch` notice in `office status` means it could not: the
 pane agent never started (the dispatch ran headless) or the prompt never landed (re-prompt it).
 To relaunch a dispatch by hand, `office revoke T1`, then `office dispatch T1 --external` (plus `--as`
-for another model), which prints these paths and commands:
-1. `herdr pane split --current --direction right`, then `herdr pane run <pane> ". agent.env && cd <worktree>"`.
-2. `herdr agent start office-<dispatch id, lowercased> --kind <harness> --pane <pane> -- <native args>`
-   (names must match `[a-z][a-z0-9_-]{0,31}`; agy takes the combined Gemini slug, no `--effort`).
-3. `herdr agent prompt <name> "Read and carry out the brief at <brief.md> exactly. When the work
-   and its checks are complete, run: office submit"`. It has landed only when the pane shows
-   `esc to cancel`/`esc to interrupt` or the agent reports `working`. If neither, type it with
-   `herdr pane send-text <pane> "<pointer>"` plus `herdr pane send-keys <pane> Enter`.
-agy's status field reads `idle` mid-turn. Judge an agy pane by its footer and `git status`, never the status.
+for another model); it prints the `herdr pane run`, `herdr agent start`, and `herdr agent prompt` commands
+to run. A prompt has landed when the agent reports `working` or its pane shows a running turn. agy
+reads `idle` mid-turn, so judge an agy pane by its footer and `git status`, never the status.
 
 ## Land and close
 
