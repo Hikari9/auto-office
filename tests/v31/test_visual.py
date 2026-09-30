@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import socket
+from importlib.util import find_spec
 
 import pytest
 
-pytest.importorskip("playwright")
+requires_playwright = pytest.mark.skipif(
+    find_spec("playwright") is None,
+    reason="install the visual extra to run browser capture integration tests",
+)
 
 from conftest import start_inline  # noqa: E402
 
@@ -189,6 +193,7 @@ def test_worktree_edit_before_capture_stays_invalid_and_is_not_restored(monkeypa
     assert not marker.exists()
 
 
+@requires_playwright
 def test_matching_capture_passes_with_measured_dom(env):
     con, out, wt, wenv = _setup(env, PAGE, port=_port())
     g = _gate(con)
@@ -210,6 +215,7 @@ def test_matching_capture_passes_with_measured_dom(env):
     assert any(m.get("property") == "width" for f in data["frames"] for m in f["measurements"])
 
 
+@requires_playwright
 def test_broken_interaction_is_a_product_failure_not_invalid(env):
     con, out, wt, wenv = _setup(env, BROKEN, port=_port())
     g = _gate(con)
@@ -219,6 +225,7 @@ def test_broken_interaction_is_a_product_failure_not_invalid(env):
     assert not [c for c in env.calls() if c["role"] == "visual_reviewer"]  # no judgment spent
 
 
+@requires_playwright
 def test_clipped_element_is_measured_material_drift(env):
     con, out, wt, wenv = _setup(env, CLIPPED, port=_port())
     g = _gate(con)
@@ -227,6 +234,7 @@ def test_clipped_element_is_measured_material_drift(env):
     assert any("viewport clearance" in (r or "") or "scrollWidth" in (r or "") for r in rows), rows
 
 
+@requires_playwright
 def test_wrong_state_is_invalid_comparison_then_blocks_after_one_recapture(env):
     con, out, wt, wenv = _setup(env, PAGE, port=_port(), extra="  auth: [data-test=signed-in]\n")
     g = _gate(con)
@@ -235,12 +243,14 @@ def test_wrong_state_is_invalid_comparison_then_blocks_after_one_recapture(env):
     assert _task(con)["status"] == "blocked"
 
 
+@requires_playwright
 def test_no_reference_passes_with_fidelity_unmeasured(env):
     con, out, wt, wenv = _setup(env, PAGE, port=_port(), reference=None)
     g = _gate(con)
     assert g["verdict"] == "PASS" and "fidelity unmeasured" in (g["summary"] or ""), g
 
 
+@requires_playwright
 def test_route_without_image_capability_never_passes(env):
     con, out, wt, wenv = _setup(env, PAGE, port=_port(), probe="PROBE NO_IMAGE")
     g = _gate(con)
@@ -249,6 +259,7 @@ def test_route_without_image_capability_never_passes(env):
     assert con.execute("SELECT COUNT(*) FROM capability_proofs WHERE result='pass'").fetchone()[0] == 0
 
 
+@requires_playwright
 def test_unrelated_edit_reuses_visual_evidence_but_reference_change_invalidates(env):
     port = _port()
     con, out, wt, wenv = _setup(env, BROKEN, port=port)
