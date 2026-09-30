@@ -12,7 +12,7 @@ import re
 import uuid
 from pathlib import Path
 
-from office import db, jobs, paths, planfile, plans, state
+from office import db, jobs, paths, planfile, planpath, plans, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_bytes
@@ -36,7 +36,7 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
     if requirements or scope == "requirements":
         return _requirements_change(con, run, delta, quote)
     scope_ids = _scope_ids(con, run, scope)
-    plan_text = _orchestrator_plan_text(run, cwd)
+    plan_text = _orchestrator_plan_text(con, run, cwd)
     if contract:
         return _contract(con, run, scope, scope_ids, delta, plan_text)
     return _ordinary(con, run, scope, scope_ids, delta, plan_text)
@@ -53,13 +53,13 @@ def _scope_ids(con, run: dict, scope: str) -> list[str]:
     return ids
 
 
-def _orchestrator_plan_text(run: dict, cwd: Path | None) -> str | None:
+def _orchestrator_plan_text(con, run: dict, cwd: Path | None) -> str | None:
     ident = paths.repo_identity(cwd)
-    candidates = [ident[0] / ".office" / "PLAN.md"] if ident else []
-    for c in candidates:
-        if c.is_file():
-            return c.read_text(encoding="utf-8")
-    return None
+    if ident is None:
+        return None
+    planpath.relocate_legacy(con, ident[0])
+    draft = planpath.draft(ident[0], run)
+    return draft.read_text(encoding="utf-8") if draft.is_file() else None
 
 
 def _requirements_change(con, run: dict, delta: str, quote: str | None) -> Result:
@@ -147,8 +147,8 @@ def _contract(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
     the planner (inline mode), its edited PLAN.md is the contract amendment."""
     if run.get("planner_mode") == "inline":
         if plan_text is None:
-            raise Usage("no-plan-file", "edit .office/PLAN.md with the contract change first",
-                        next_step=f'edit .office/PLAN.md, then office amend {scope} --contract -- "<summary>"')
+            raise Usage("no-plan-file", f"edit {planpath.rel(run)} with the contract change first",
+                        next_step=f'edit {planpath.rel(run)}, then office amend {scope} --contract -- "<summary>"')
         return _apply_contract_text(con, run, scope_ids, delta, plan_text, author="orchestrator-as-planner")
     from office import dispatch
     with db.transaction(con):
@@ -178,7 +178,7 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author) -> Result:
     parsed = planfile.parse(text)
     if parsed.errors:
         raise Refused("plan-invalid", "plan has problems: " + "; ".join(parsed.errors[:5]),
-                      next_step="fix .office/PLAN.md, then retry the amendment")
+                      next_step=f"fix {planpath.rel(run)}, then retry the amendment")
     _require_contract_edit(con, run, scope_ids, delta, text, parsed)
     with db.transaction(con):
         run = state.get_run(con, run["id"])
@@ -223,11 +223,11 @@ def _require_contract_edit(con, run: dict, scope_ids: list[str], delta: str, tex
     would bump the plan version while the named task keeps its old contract, so
     a relaunched executor works to the old scope; refuse instead."""
     scope = ",".join(scope_ids) or "plan"
-    nxt = (f"edit .office/PLAN.md so {'the ' + scope + ' task entry' if scope_ids else 'the plan'} states the "
+    nxt = (f"edit {planpath.rel(run)} so {'the ' + scope + ' task entry' if scope_ids else 'the plan'} states the "
            f'contract change, then office amend {scope} --contract -- "{delta.strip()[:80]}"')
     current = state.current_plan(con, run["id"])
     if current and sha256_bytes(text.encode()) == current["content_hash"]:
-        raise Refused("plan-not-edited", ".office/PLAN.md is identical to the current plan "
+        raise Refused("plan-not-edited", f"{planpath.rel(run)} is identical to the current plan "
                       f"p{current['version']}; a contract amendment records the edited plan, not the request text",
                       scope=scope, preserved="plan and task contracts unchanged", next_step=nxt)
     if not scope_ids:
@@ -238,12 +238,12 @@ def _require_contract_edit(con, run: dict, scope_ids: list[str], delta: str, tex
         changed = sorted(tid for tid, p in planned.items()
                          if tid not in scope_ids and (state.get_task(con, run["id"], tid) is None
                                                       or _task_changed(state.get_task(con, run["id"], tid), p)))
-        raise Refused("contract-not-edited", f".office/PLAN.md does not change the entry for {', '.join(unchanged)}; "
+        raise Refused("contract-not-edited", f"{planpath.rel(run)} does not change the entry for {', '.join(unchanged)}; "
                       "its contract would stay at the old version"
                       + (f" (the edit changes {', '.join(changed)})" if changed else ""),
                       scope=scope, preserved="plan and task contracts unchanged",
                       next_step=nxt if not changed else
-                      f"edit {', '.join(unchanged)} in .office/PLAN.md, or name the tasks the edit changes: "
+                      f"edit {', '.join(unchanged)} in {planpath.rel(run)}, or name the tasks the edit changes: "
                       f'office amend {",".join(changed)} --contract -- "<summary>"')
 
 
@@ -276,8 +276,8 @@ def _next_plan_text(current: dict, plan_text: str | None, scope_ids: list[str], 
     if plan_text and sha256_bytes(plan_text.encode()) != current["content_hash"]:
         parsed = planfile.parse(plan_text)
         if parsed.errors:
-            raise Refused("plan-invalid", "the edited .office/PLAN.md has problems: " + "; ".join(parsed.errors[:5]),
-                          next_step="fix .office/PLAN.md, then retry the amendment")
+            raise Refused("plan-invalid", "the edited plan draft has problems: " + "; ".join(parsed.errors[:5]),
+                          next_step=f"fix {planpath.rel(run)}, then retry the amendment")
         return plan_text, parsed
     note = f"\n\n<!-- amendment -->\nAmendment ({', '.join(scope_ids) or 'plan'}): {delta.strip()}\n"
     text = current["body"].rstrip() + note

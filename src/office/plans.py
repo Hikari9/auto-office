@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from office import briefs, candidates, db, jobs, planfile, review_parse, routing, state
+from office import briefs, candidates, db, jobs, planfile, planpath, review_parse, routing, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_bytes, short
@@ -27,13 +27,13 @@ PLAN_SUBJECT = "plan"
 
 def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id: str | None = None) -> Result:
     if not plan_path.is_file():
-        raise Usage("no-plan-file", f"no plan at {plan_path}", next_step="write .office/PLAN.md, then office submit")
+        raise Usage("no-plan-file", f"no plan at {plan_path}", next_step=f"write {plan_path}, then office submit")
     text = plan_path.read_text(encoding="utf-8")
     parsed = planfile.parse(text)
     if parsed.errors:
         raise Refused("plan-invalid", "plan has problems: " + "; ".join(parsed.errors[:6]),
-                      scope="plan", preserved=".office/PLAN.md is unchanged",
-                      next_step="fix .office/PLAN.md, then office submit (office submit --help shows the format)",
+                      scope="plan", preserved=f"{plan_path} is unchanged",
+                      next_step=f"fix {plan_path}, then office submit (office submit --help shows the format)",
                       data={"errors": parsed.errors})
     digest = sha256_bytes(text.encode())
     current = state.current_plan(con, run["id"])
@@ -245,7 +245,7 @@ def require_dispatchable(con, run: dict) -> None:
     run = state.get_run(con, run["id"])
     if not run["plan_version"]:
         raise Refused("no-plan", "there is no plan to dispatch from",
-                      next_step="write .office/PLAN.md then office submit" if run.get("planner_mode") != "dedicated"
+                      next_step=f"write {planpath.rel(run)} then office submit" if run.get("planner_mode") != "dedicated"
                       else "wait for the planner; office status")
     plan = state.current_plan(con, run["id"])
     if planfile.parse(plan["body"]).questions and not _answered(con, run):
@@ -269,7 +269,7 @@ def require_dispatchable(con, run: dict) -> None:
                           next_step='resolve the reviewer route, or the user may waive: office approve waive plan-review --quote "<words>"')
         if rs["first_verdict"] == "CHANGES_REQUIRED" and run["plan_version"] <= rs["first_version"]:
             raise Refused("plan-amendment-required", "the first plan review asked for changes that are not yet in the plan",
-                          scope="plan", next_step='office amend plan -- "<what changed>" (edit .office/PLAN.md first for task changes)')
+                          scope="plan", next_step=f'office amend plan -- "<what changed>" (edit {planpath.rel(run)} first for task changes)')
     for d in rs["open_defects"]:
         if not _task_ids_in(d.get("location") or ""):
             raise Refused("plan-defect", f"open plan defect {d['code']}: {d['summary'][:120]}", scope="whole plan",

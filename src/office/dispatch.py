@@ -21,7 +21,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, routing, state
+from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, routing, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import atomic_write_json, dumps, now_iso, pid_alive, sha256_obj, short
@@ -43,7 +43,7 @@ def create_planner_task(con, run: dict, *, contract_request: str | None = None, 
             "INSERT INTO tasks(run_id, id, title, role, scope_json, depends_json, interfaces_json, accept_json, "
             "checks_json, visual_json, status, introduced_plan_version, contract_version, acceptance_version, "
             "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (run["id"], PLANNER_TASK, "Plan the run", "planner", dumps([".office/PLAN.md"]), dumps([]), dumps([]),
+            (run["id"], PLANNER_TASK, "Plan the run", "planner", dumps([planpath.rel(run)]), dumps([]), dumps([]),
              dumps(["a plan that satisfies the frozen requirements"]), dumps([]), None, "queued", 0, 0, 0, now, now))
     else:
         state.update_task(con, run["id"], PLANNER_TASK, status="queued", pause_reason=None)

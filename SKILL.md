@@ -60,7 +60,7 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 2. `office start "<goal>" --issue <n>` (add `--blast-radius`, `--size-class`, `--irreversible`
    from your provisional read; unset is unknown, never low risk).
 3. If the output says a planner was queued, wait (`office wait`). Otherwise you plan inline:
-   interview the user directly for anything you would otherwise guess, write `.office/PLAN.md`
+   interview the user directly for anything you would otherwise guess, write `.office/plans/<run>/PLAN.md` (the path `office start` prints)
    (format: `office submit --help`), then `office submit`.
 4. When `next:` asks for authorization, show the user the plan and requirements, ask for their
    decision (see Asking the user), and record it: `office approve plan --quote "<their words>"`.
@@ -77,7 +77,7 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 - Findings never relaunch anything on their own. When `next:` says a task's findings wait for you, run
   `office rerun T2 --resume` (the same harness session, in a fresh pane) or `office rerun T2 --fresh`;
   resume refuses with the reason and the `--fresh` command when the session cannot be reopened.
-- After a first plan review of CHANGES_REQUIRED: edit `.office/PLAN.md`, run
+- After a first plan review of CHANGES_REQUIRED: edit the run's `PLAN.md`, run
   `office amend plan -- "<what changed>"`, then dispatch eligible work immediately; the re-review
   runs concurrently. A PLAN_DEFECT blocks its scope until an independent reviewer clears it.
 - Ordinary amendments (decomposition, ordering, acceptance detail, tests) are yours:

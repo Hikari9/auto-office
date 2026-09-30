@@ -49,7 +49,7 @@ Executor (inside your task worktree): captures the worktree exactly as it is,
 committed and uncommitted, and starts every applicable check and review.
 Submitting the same tree again is safe; it reports the existing submission.
 
-Planner / orchestrator planning inline: submits .office/PLAN.md. Format:
+Planner / orchestrator planning inline: submits .office/plans/<run>/PLAN.md (one draft per run). Format:
 
 {fmt}
 Checks (task `checks:` and the run-level `checks:` under Requirements):
@@ -61,7 +61,7 @@ Checks (task `checks:` and the run-level `checks:` under Requirements):
   them itself, e.g. `pnpm install --frozen-lockfile && pnpm lint`. Otherwise
   it reports "command not found" and integration stops UNAVAILABLE.
 - Inline planning: to change a task's contract, edit its entry in
-  .office/PLAN.md first, then office amend <T> --contract; an amendment whose
+  the run's PLAN.md first, then office amend <T> --contract; an amendment whose
   PLAN.md does not change the named task is refused."""
 
 
