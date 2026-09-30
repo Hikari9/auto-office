@@ -5,28 +5,28 @@ silent through an amendment deadlock and a stalled gate that printed none of the
 """
 from __future__ import annotations
 
+import pytest
 from pathlib import Path
 
-from conftest import GOOD_ADD, PLAN_ONE, start_inline
+from conftest import GOOD_ADD, approved_run
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
 
 def _go(env):
-    env.trust()
-    env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
-    start_inline(env, plan=PLAN_ONE, gear="direct+review")
-    env.office("approve", "plan", "--quote", "approved", check=0)
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     env.office("status", check=0)  # consume the dispatch events
 
 
+@pytest.mark.approved
 def test_wait_times_out_with_124_when_nothing_changes(env):
     _go(env)
     code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
     assert code == 124 and "nothing new" in out, out
 
 
+@pytest.mark.approved
 def test_wait_reports_a_gate_nothing_can_advance_as_a_stall(env):
     _go(env)
     con = env.con()
@@ -38,6 +38,7 @@ def test_wait_reports_a_gate_nothing_can_advance_as_a_stall(env):
     assert code == 3 and "stall:" in out and "Gstuck" in out, out
 
 
+@pytest.mark.approved
 def test_wait_returns_0_at_once_when_a_task_already_needs_the_orchestrator(env):
     _go(env)
     # A blocker already present when wait starts ends it at once.

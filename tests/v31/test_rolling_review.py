@@ -1,7 +1,7 @@
 """Rolling plan review and authority (docs/v31-rolling-review-gates.md S1-S3, N1-N3, N10-N11)."""
 from __future__ import annotations
 
-from conftest import GOOD_ADD, GOOD_MUL, PLAN_ONE, PLAN_TWO
+from conftest import PLAN_ONE, PLAN_TWO
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 CR = ("VERDICT: CHANGES_REQUIRED\n"

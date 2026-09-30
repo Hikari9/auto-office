@@ -9,7 +9,6 @@ Covers the T2 dispatch-brief receipts about amendments specifically:
   8. F8 amendment transition matrix, written so that a naive implementation which bumps
      every version on every delta fails it.
 """
-import importlib.util
 import json
 import tempfile
 import unittest
@@ -18,15 +17,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _load(name, relpath):
-    spec = importlib.util.spec_from_file_location(name, ROOT / relpath)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-fam = _load("office_family", "scripts/office_family.py")
-pk = _load("office_packets", "scripts/office_packets.py")
+import office_family as fam
+import office_packets as pk
 
 EVIDENCE_HASH = "sha256:" + ("a" * 64)
 

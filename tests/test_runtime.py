@@ -1,10 +1,9 @@
-import contextlib, hashlib, importlib.util, io, json, os, sqlite3, subprocess, tempfile, unittest
-from datetime import datetime, timezone
+import contextlib, hashlib, io, json, os, sqlite3, subprocess, tempfile, unittest
+from datetime import datetime
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
-spec=importlib.util.spec_from_file_location('office_runtime', ROOT/'scripts/office_runtime.py')
-rt=importlib.util.module_from_spec(spec); spec.loader.exec_module(rt)
+import office_runtime as rt
 
 def cand(name, money=1, quota=1, reward=0, state='proven', caps=('builder',), floor=True, remaining=80, advisory=True, model_id='m', effort='high'):
     return {'harness':name,'harness_version':'1','model_id':model_id,'effort':effort,'adapter_state':state,'capabilities':list(caps),'absolute_floor_pass':floor,'supported_playbooks':['Change'],'advisory_pass':advisory,'local_reward':reward,'quota':{'status':'ok','tightest_remaining_percent':remaining,'projected_burn_percent':quota},'cost':{'money_estimate':money,'quota_burn':quota,'wall_clock_seconds':10}}

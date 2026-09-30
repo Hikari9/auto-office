@@ -11,7 +11,6 @@ requires_playwright = pytest.mark.skipif(
     reason="install the visual extra to run browser capture integration tests",
 )
 
-from conftest import start_inline  # noqa: E402
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 

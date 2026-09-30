@@ -5,7 +5,9 @@ import hashlib
 import os
 from pathlib import Path
 
-from conftest import GOOD_ADD, start_inline
+import pytest
+
+from conftest import GOOD_ADD, approved_run
 
 
 def _snapshot(env) -> tuple:
@@ -25,16 +27,14 @@ def _snapshot(env) -> tuple:
 
 
 def _finished_run(env) -> str:
-    env.trust()
-    env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
-    start_inline(env)
-    env.office("approve", "plan", "--quote", "go", check=0)
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", check=0)
     env.office("close", "--handoff", "https://example.test/pr/9", check=0)
     con = env.con()
     return con.execute("SELECT id FROM runs WHERE phase='closed'").fetchone()[0]
 
 
+@pytest.mark.approved
 def test_dry_run_mutates_nothing(env):
     run_id = _finished_run(env)
     env.office("start", "still active", "--planner", "inline", check=0)
@@ -44,6 +44,7 @@ def test_dry_run_mutates_nothing(env):
     assert _snapshot(env) == before
 
 
+@pytest.mark.approved
 def test_force_prunes_terminal_only_and_keeps_tombstone(env):
     run_id = _finished_run(env)
     env.office("start", "still active", "--planner", "inline", check=0)
@@ -72,7 +73,7 @@ def test_force_prunes_terminal_only_and_keeps_tombstone(env):
 def test_force_rechecks_eligibility_at_deletion(env, monkeypatch):
     """A stale candidate list (as if a run became resumable after planning)
     never deletes it: the check under the write lock wins."""
-    from office import db, prune, state
+    from office import prune, state
     env.office("start", "active", "--planner", "inline", check=0)
     con = env.con()
     active = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
@@ -96,6 +97,7 @@ def test_abandoned_run_is_prunable_but_paused_is_not(env):
     assert rid[:8] in out and "would prune 1" in out
 
 
+@pytest.mark.approved
 def test_run_flag_restricts_prune_to_that_run(env):
     """`--run` names one run; it must never widen to every finished run."""
     first = _finished_run(env)
@@ -119,6 +121,7 @@ def test_run_flag_restricts_prune_to_that_run(env):
     assert code != 0 and "already-pruned" in out, out
 
 
+@pytest.mark.approved
 def test_run_flag_refuses_unknown_and_unfinished_runs(env):
     _finished_run(env)
     env.office("start", "still active", "--planner", "inline", check=0)

@@ -8,7 +8,6 @@ input source is left unstated.
 """
 import re
 import unittest
-from pathlib import Path
 
 from scripts.check_ecosystem import ROOT
 

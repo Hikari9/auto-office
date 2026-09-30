@@ -4,34 +4,25 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from conftest import BAD_ADD, GOOD_ADD, PLAN_ONE, PLAN_TWO, start_inline
+import pytest
+
+from conftest import GOOD_ADD, PLAN_ONE, PLAN_TWO, approved_run, task_row
 
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
 
-def _go(env, plan=PLAN_ONE, gear="direct+review", **script):
-    env.trust()
-    env.script(**script)
-    start_inline(env, plan=plan, gear=gear)
-    env.office("approve", "plan", "--quote", "approved", check=0)
-
-
-def _task(env, tid="T1"):
-    con = env.con()
-    return dict(con.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
-
-
 def _worker(env, tid="T1"):
     con = env.con()
-    t = _task(env, tid)
+    t = task_row(env, tid)
     d = dict(con.execute("SELECT * FROM dispatches WHERE id=?", (t["current_dispatch_id"],)).fetchone())
     return {"OFFICE_RUN_ID": d["run_id"], "OFFICE_DISPATCH_ID": d["id"], "OFFICE_TASK_ID": tid, "OFFICE_ROLE": "executor"}, Path(d["worktree"])
 
 
+@pytest.mark.approved
 def test_duplicate_submit_reuses_the_operation(env):
     # The executor submits, then its response is "lost" and it submits again.
-    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
         code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", check=0)
     con = env.con()
@@ -46,8 +37,9 @@ def test_duplicate_submit_reuses_the_operation(env):
     assert [c["role"] for c in env.calls()].count("code_reviewer") == 1
 
 
+@pytest.mark.approved
 def test_dirty_edit_with_unchanged_head_invalidates_prior_pass(env):
-    _go(env, executor=[{}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=[{}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
     (wt / "calc.py").write_text(GOOD_ADD)
@@ -65,16 +57,17 @@ def test_dirty_edit_with_unchanged_head_invalidates_prior_pass(env):
     r1 = {r["kind"]: r["status"] for r in con.execute("SELECT kind, status FROM gates WHERE revision_id=?", (R1,))}
     assert r1 == {"checks": "cancelled", "code_review": "cancelled"}, r1
     assert con.execute("SELECT verdict FROM gates WHERE revision_id=? AND kind='code_review'", (R2,)).fetchone()[0] == "PASS"
-    assert _task(env)["accepted_revision_id"] == R2
+    assert task_row(env)["accepted_revision_id"] == R2
     # Accepted work is closed to further edits from that session.
     (wt / "calc.py").write_text(GOOD_ADD + "\n# after acceptance\n")
     code, out = env.office("submit", cwd=wt, env=wenv)
     assert code == 4 and "lease" in out
 
 
+@pytest.mark.approved
 def test_stale_pass_is_audit_only(env):
     from office import db, gates, review_parse, state
-    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}],
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}],
         code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     con = env.con()
@@ -90,11 +83,12 @@ def test_stale_pass_is_audit_only(env):
                                                       "route": "late"})
     row = con.execute("SELECT status, verdict FROM gates WHERE id=?", (stale_gate,)).fetchone()
     assert row["status"] == "stale" and row["verdict"] == "PASS"
-    assert _task(env)["status"] != "accepted"
+    assert task_row(env)["status"] != "accepted"
 
 
+@pytest.mark.approved
 def test_amendment_delivered_but_not_applied_cannot_satisfy(env, monkeypatch):
-    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}],
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}],
         code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
@@ -106,18 +100,19 @@ def test_amendment_delivered_but_not_applied_cannot_satisfy(env, monkeypatch):
     assert "AMENDMENT A1 delivered" in out and "office ack A1" in out, out
     code, out = env.office("submit", cwd=wt, env=wenv)
     assert "amendment pending" in out, out
-    assert _task(env)["status"] != "accepted"
+    assert task_row(env)["status"] != "accepted"
     con = env.con()
     assert con.execute("SELECT status FROM deliveries").fetchone()[0] == "delivered"
     code, out = env.office("ack", "A1", cwd=wt, env=wenv)
     assert code == 0 and "applied" in out, out
     code, out = env.office("submit", cwd=wt, env=wenv)
     assert "captured" in out
-    assert _task(env)["status"] == "accepted"
+    assert task_row(env)["status"] == "accepted"
 
 
+@pytest.mark.approved
 def test_superseded_amendment_ack_is_rejected(env):
-    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}],
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}],
         code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
@@ -131,8 +126,9 @@ def test_superseded_amendment_ack_is_rejected(env):
     assert con.execute("SELECT applied_plan_version FROM dispatches WHERE id=?", (wenv["OFFICE_DISPATCH_ID"],)).fetchone()[0] == 3
 
 
+@pytest.mark.approved
 def test_crash_after_amendment_commit_redelivers_without_rebump(env):
-    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}],
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}],
         code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
@@ -149,7 +145,7 @@ def test_crash_after_amendment_commit_redelivers_without_rebump(env):
 
 def test_repeated_finding_stops_after_one_escalation(env):
     finding = "VERDICT: CHANGES_REQUIRED\nFINDING F1 | material | calc.py:2 | add ignores overflow | clamp the result"
-    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True},
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True},
                        {"write": {"calc.py": GOOD_ADD + "# try 2\n"}, "submit": True},
                        {"write": {"calc.py": GOOD_ADD + "# try 3\n"}, "submit": True}],
         code_reviewer=[{"reply": finding}])
@@ -157,10 +153,10 @@ def test_repeated_finding_stops_after_one_escalation(env):
     # Each fix round is the orchestrator's choice now (R8): rerun fresh until
     # convergence gives up.
     for _ in range(3):
-        if _task(env)["status"] != "changes_required":
+        if task_row(env)["status"] != "changes_required":
             break
         env.office("rerun", "T1", "--fresh", check=0)
-    t = _task(env)
+    t = task_row(env)
     assert t["status"] == "paused", t
     assert "escalation" in t["pause_reason"] or "exhausted" in t["pause_reason"], t["pause_reason"]
     con = env.con()
@@ -171,13 +167,14 @@ def test_repeated_finding_stops_after_one_escalation(env):
     assert "resolve T1" in data["next"]
 
 
+@pytest.mark.approved
 def test_invalid_reviewer_reply_is_kept_not_substituted(env):
     # R11: an unparseable reply is the reviewer's work, not a route failure. No
     # other reviewer is tried and the gate is never UNAVAILABLE for this reason.
-    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
         code_reviewer=[{"reply": "Looks great to me!"}])
     env.office("dispatch", "T1", check=0)
-    t = _task(env)
+    t = task_row(env)
     assert t["status"] == "blocked" and "needs attention" in t["pause_reason"], t
     con = env.con()
     g = con.execute("SELECT verdict, env_failures FROM gates WHERE kind='code_review'").fetchone()
@@ -185,31 +182,32 @@ def test_invalid_reviewer_reply_is_kept_not_substituted(env):
     assert con.execute("SELECT COUNT(*) FROM dispatches WHERE role='code_reviewer'").fetchone()[0] == 1
 
 
+@pytest.mark.approved
 def test_quota_failure_substitutes_route(env):
-    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
         **{"codex:code_reviewer": [{"stderr": "Error: usage limit reached (429)", "exit": 1}],
            "claude:code_reviewer": [{"reply": "VERDICT: PASS"}], "gemini:code_reviewer": [{"reply": "VERDICT: PASS"}]})
     env.office("dispatch", "T1", check=0)
-    assert _task(env)["status"] == "accepted"
+    assert task_row(env)["status"] == "accepted"
     con = env.con()
     assert con.execute("SELECT COUNT(*) FROM dispatches WHERE role='code_reviewer' AND outcome='environment_failure'").fetchone()[0] == 1
 
 
 def test_missing_check_command_is_never_pass(env):
     plan = PLAN_ONE.replace('checks: python3 -c "import calc; assert calc.add(2, 3) == 5"', "checks: definitely-not-a-command --x")
-    _go(env, plan=plan, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+    approved_run(env, plan=plan, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
         code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", check=0)
-    t = _task(env)
+    t = task_row(env)
     assert t["status"] == "blocked", t
     con = env.con()
     assert con.execute("SELECT verdict FROM gates WHERE kind='checks'").fetchone()[0] == "UNAVAILABLE"
     assert [c["role"] for c in env.calls()].count("code_reviewer") == 0
 
 
+@pytest.mark.approved
 def test_process_endings_always_classified(env):
-    from office import db
-    _go(env, executor=[{"exit": 0}, {"exit": 3}, {"signal": "TERM"}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=[{"exit": 0}, {"exit": 3}, {"signal": "TERM"}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", check=0)
     con = env.con()
     rows = con.execute("SELECT terminal_classification, exit_code, signal FROM dispatches WHERE role='executor' "
@@ -217,12 +215,12 @@ def test_process_endings_always_classified(env):
     kinds = [r["terminal_classification"] for r in rows]
     assert kinds[:3] == ["success", "nonzero", "signal"], kinds
     assert rows[1]["exit_code"] == 3 and rows[2]["signal"] == 15
-    t = _task(env)
+    t = task_row(env)
     assert t["status"] == "blocked" and "without submitting" in t["pause_reason"]
 
 
 def test_parallel_independent_tasks_accept_and_integrate(env):
-    _go(env, plan=PLAN_TWO,
+    approved_run(env, plan=PLAN_TWO,
         executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": "def mul(a, b):\n    return a * b\n"}},
                    "submit": True}],
         code_reviewer=[{"reply": "VERDICT: PASS"}])
@@ -237,14 +235,14 @@ def test_parallel_independent_tasks_accept_and_integrate(env):
 
 def test_shared_scope_cannot_be_double_held(env):
     plan = PLAN_TWO.replace("scope: mul.py", "scope: calc.py")
-    _go(env, plan=plan, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}],
+    approved_run(env, plan=plan, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}],
         code_reviewer=[{"reply": "VERDICT: PASS"}])
     code, out = env.office("dispatch", "T1", "T2", "--parallel")
     assert code == 4 and "scope-held" in out, out
 
 
 def test_stacked_dispatch_launches_the_next_task_after_acceptance(env):
-    _go(env, plan=PLAN_TWO,
+    approved_run(env, plan=PLAN_TWO,
         executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": "def mul(a, b):\n    return a * b\n"}},
                    "submit": True}],
         code_reviewer=[{"reply": "VERDICT: PASS"}])
@@ -261,7 +259,7 @@ def test_stacked_dispatch_launches_the_next_task_after_acceptance(env):
 
 def test_integration_conflict_is_surfaced_not_landed(env):
     plan = PLAN_TWO.replace("scope: mul.py", "scope: mul.py, README.md").replace("scope: calc.py\n", "scope: calc.py, README.md\n")
-    _go(env, plan=plan,
+    approved_run(env, plan=plan,
         executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD, "README.md": "one\n"},
                                      "T2": {"mul.py": "def mul(a, b):\n    return a * b\n", "README.md": "two\n"}},
                    "submit": True}],
@@ -275,10 +273,11 @@ def test_integration_conflict_is_surfaced_not_landed(env):
     assert code == 4 and "integration conflict" in out, out
 
 
+@pytest.mark.approved
 def test_revision_ids_are_unique_across_runs(env):
     """revisions.id is a global primary key: a second run's first revision must not collide
     with any earlier run's R1 (regression: every run after the first failed office submit)."""
-    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]
@@ -297,16 +296,16 @@ PLAN_NO_GATES = PLAN_ONE.replace('checks: python3 -c "import calc; assert calc.a
 def test_no_gate_revision_is_accepted_on_submit(env):
     # Direct gear funds no review and the task declares checks: none, so no gate
     # exists to finish; acceptance must be evaluated on submit (it hung "submitted").
-    _go(env, plan=PLAN_NO_GATES, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
+    approved_run(env, plan=PLAN_NO_GATES, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
     code, out = env.office("submit", cwd=wt, env=wenv, check=0)
     assert code == 0 and "accepted (no gate required by policy)" in out, out
-    assert _task(env)["status"] == "accepted"
+    assert task_row(env)["status"] == "accepted"
 
 
 def test_stuck_no_gate_revision_is_accepted_by_reconcile(env):
-    _go(env, plan=PLAN_NO_GATES, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
+    approved_run(env, plan=PLAN_NO_GATES, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
     env.office("submit", cwd=wt, env=wenv, check=0)
@@ -314,38 +313,40 @@ def test_stuck_no_gate_revision_is_accepted_by_reconcile(env):
     con = env.con()
     con.execute("UPDATE tasks SET status='submitted', accepted_revision_id=NULL WHERE id='T1'")
     con.commit()
-    assert _task(env)["status"] == "submitted"
+    assert task_row(env)["status"] == "submitted"
     env.office("status", check=0)
-    assert _task(env)["status"] == "accepted"
+    assert task_row(env)["status"] == "accepted"
 
 
 def test_revision_with_checks_is_not_accepted_without_them(env):
     # The no-gate path must not accept a task whose checks never ran.
-    _go(env, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
+    approved_run(env, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
     env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"}, check=0)
     env.office("status", check=0)
-    assert _task(env)["status"] != "accepted"
+    assert task_row(env)["status"] != "accepted"
 
 
+@pytest.mark.approved
 def test_not_logged_in_reviewer_skips_the_whole_harness(env):
     # Every route on a harness that is not signed in fails the same way; the
     # retry must not spend the bound on the same harness's other models.
-    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
         **{"codex:code_reviewer": [{"stderr": "Not logged in · Please run /login", "exit": 1}],
            "claude:code_reviewer": [{"reply": "VERDICT: PASS"}], "gemini:code_reviewer": [{"reply": "VERDICT: PASS"}]})
     env.office("dispatch", "T1", check=0)
-    assert _task(env)["status"] == "accepted"
+    assert task_row(env)["status"] == "accepted"
     reviewers = [c["harness"] for c in env.calls() if c.get("role") == "code_reviewer"]
     assert reviewers.count("codex") == 1 and reviewers[-1] != "codex", reviewers
 
 
+@pytest.mark.approved
 def test_amendment_for_an_earlier_session_does_not_hold_a_relaunch(env):
     # An amendment delivered to D1, then the task relaunched as D2 (e.g. an
     # external relaunch): D2 starts from the amended contract, so its submit must
     # not sit at amendment_pending waiting on an ack only D1 could give.
-    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     env.office("amend", "T1", "--", "also handle negative numbers the same way", check=0)
     env.office("revoke", "T1", check=0)
@@ -357,14 +358,15 @@ def test_amendment_for_an_earlier_session_does_not_hold_a_relaunch(env):
     (wt / "calc.py").write_text(GOOD_ADD)
     code, out = env.office("submit", cwd=wt, env=wenv)
     assert "captured" in out and "amendment pending" not in out, out
-    assert _task(env)["status"] == "accepted"
+    assert task_row(env)["status"] == "accepted"
 
 
+@pytest.mark.approved
 def test_requirements_amendment_follows_a_relaunch_to_the_new_session(env):
     # A requirements change targets a plan version past the task contract, so the
     # relaunch rule above does not supersede it. It must move to the new session
     # (the only one that can ack it) instead of holding every submit forever.
-    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     env.office("amend", "requirements", "--quote", "also log each call", "--", "R9: log each call", check=0)
     env.office("approve", "plan", "--quote", "approve", check=0)
@@ -376,7 +378,7 @@ def test_requirements_amendment_follows_a_relaunch_to_the_new_session(env):
     env.office("revoke", "T1", check=0)
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     con = env.con()
-    current = _task(env)["current_dispatch_id"]
+    current = task_row(env)["current_dispatch_id"]
     pending = con.execute("SELECT amendment_id, dispatch_id FROM deliveries WHERE status IN ('queued','delivered')").fetchall()
     assert pending and all(r["dispatch_id"] == current for r in pending), [dict(r) for r in con.execute("SELECT amendment_id, status, dispatch_id, target_version FROM deliveries")]
     _, out = env.office("status", check=0)
@@ -387,15 +389,16 @@ def test_requirements_amendment_follows_a_relaunch_to_the_new_session(env):
     (wt / "calc.py").write_text(GOOD_ADD)
     code, out = env.office("submit", cwd=wt, env=wenv)
     assert "amendment pending" not in out, out
-    assert _task(env)["status"] == "accepted"
+    assert task_row(env)["status"] == "accepted"
 
 
+@pytest.mark.approved
 def test_current_session_can_ack_an_amendment_left_on_an_ended_session(env):
     # State an older runtime left behind: the delivery still names an ended
     # session. The task's current session acks it instead of being refused.
-    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
-    first = _task(env)["current_dispatch_id"]
+    first = task_row(env)["current_dispatch_id"]
     env.office("revoke", "T1", check=0)
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     env.office("amend", "T1", "--", "also handle negative numbers the same way", check=0)
@@ -409,12 +412,13 @@ def test_current_session_can_ack_an_amendment_left_on_an_ended_session(env):
     assert code == 0 and "applied" in out, out
 
 
+@pytest.mark.approved
 def test_headless_worker_past_its_wall_cap_is_stopped_and_surfaces(env):
     # agy once idled 3.5h past its own --print-timeout; the supervisor's cap
     # stops it, relaunches within the bound, then blocks with a named reason.
-    _go(env, executor=[{"sleep": 60}, {"sleep": 60}, {"sleep": 60}])
+    approved_run(env, executor=[{"sleep": 60}, {"sleep": 60}, {"sleep": 60}])
     code, out = env.office("dispatch", "T1", env={"OFFICE_WORKER_MAX_MINUTES": "0.02"}, check=0)
-    t = _task(env)
+    t = task_row(env)
     assert t["status"] == "blocked" and "timeout" in (t["pause_reason"] or ""), t
     con = env.con()
     assert {r[0] for r in con.execute("SELECT terminal_classification FROM dispatches WHERE role='executor'")} == {"timeout"}
@@ -429,13 +433,14 @@ def test_agy_profiles_carry_a_wall_cap():
     assert dispatch._wall_cap_seconds(adapters.profile(adapters.load_all()["claude"], "worker")) is None
 
 
+@pytest.mark.approved
 def test_dispatch_of_a_task_blocked_on_an_unavailable_review_reruns_only_the_review(env):
     # rock-mcp run 2fc0f696 C5: `dispatch T2 --review-as ...` on a submitted
     # revision blocked by an UNAVAILABLE code review launched a fresh executor.
-    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
         code_reviewer=[{"reply": "", "exit": 1}])
     env.office("dispatch", "T1", check=0)
-    blocked = _task(env)
+    blocked = task_row(env)
     assert blocked["status"] == "blocked", blocked
     executors = [c for c in env.calls() if c["role"] == "executor"]
     env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
@@ -443,7 +448,7 @@ def test_dispatch_of_a_task_blocked_on_an_unavailable_review_reruns_only_the_rev
     reviewer = "codex/gpt-6-luna@xhigh" if "claude" in producer else "claude/claude-opus-5-5@high"
     code, out = env.office("dispatch", "T1", "--review-as", reviewer)
     assert code == 0 and "code review re-run" in out and "no executor launched" in out, out
-    t = _task(env)
+    t = task_row(env)
     assert t["current_revision_id"] == blocked["current_revision_id"]
     assert t["current_dispatch_id"] == blocked["current_dispatch_id"]
     assert [c for c in env.calls() if c["role"] == "executor"] == executors
