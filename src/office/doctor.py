@@ -5,9 +5,7 @@ import json
 import shutil
 from pathlib import Path
 
-import yaml
-
-from office import adapters, db, frontdoor, install, legacy, paths, runtime_default, state, version
+from office import adapters, config_repairs, db, frontdoor, install, legacy, paths, runtime_default, state, version
 from office.result import Result
 
 
@@ -23,12 +21,12 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
             problems += 1
             shown = ", ".join(drift["differ"][:3]) + (f" (+{len(drift['differ']) - 3} more)" if len(drift["differ"]) > 3 else "")
             res.add(f"install: STALE — {len(drift['differ'])} runtime file(s) differ from {at}: {shown}. "
-                    f"The version string cannot show this. Reinstall: uv tool install --force {drift['source']} "
+                    f"The version string cannot show this. Reinstall: uv tool install --force --reinstall {drift['source']} "
                     "&& office install (runs pinned to this version pick up the new code)")
         else:
             res.add(f"install: matches its source {at}")
     if fix:
-        frontdoor.register_current()
+        res.lines.extend(install.install().lines)
     reg = frontdoor.registered(ver)
     if not reg:
         problems += 1
@@ -91,19 +89,10 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
         if not good:
             problems += 1
         res.add(f"{harness}: {len(managed)} office hook(s) -> {'ok' if good else 'binary missing: ' + exe}")
-    legacy_gemini = Path("~/.gemini/config/hooks.json").expanduser()
-    if legacy_gemini.exists():
-        problems += 1
-        res.add("known defect: legacy ~/.gemini/config/hooks.json is not read by Gemini CLI 0.46 (hooks belong in settings.json)")
-    for prof in Path("~/.hermes/profiles").expanduser().glob("*/config.yaml"):
-        try:
-            data = yaml.safe_load(prof.read_text()) or {}
-        except (OSError, yaml.YAMLError):
-            continue
-        for key, val in (data.get("hooks") or {}).items():
-            if isinstance(val, str):
-                problems += 1
-                res.add(f"known defect: {prof.parent.name}/config.yaml hooks.{key} is a bare string; Hermes needs a list of dicts")
+    for check in (config_repairs.gemini_legacy, config_repairs.hermes_hooks):
+        lines, count = check(fix)
+        res.lines.extend(lines)
+        problems += count
     res.add("known gap: Codex tool.pre denial is unverified; Codex hooks stay warn-only and are not installed")
     res.add("known gap: compact_advisor.sh was never wired to PostCompact; 3.1 keeps state durable in runs.db instead")
     all_adapters = adapters.load_all()

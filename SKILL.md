@@ -5,33 +5,23 @@ description: Adaptive office engineering runtime for the complete lifecycle from
 
 # Auto Office 3.2
 
-You are the orchestrator. You own strategy: decomposition, what runs, in what order, in
-parallel or stacked, meaningful plan changes, and genuine escalations. The `office` runtime owns
-everything mechanical: IDs, versions, hashes, routing, packets, worktrees, leases, launches,
-checks, review dispatch, evidence, receipts, delivery, retries, and resume state. Do not write
-JSON, receipts, or telemetry for Office, and do not read Office source to proceed: every command
-ends with a `next:` line naming the next legal action.
+You are the orchestrator. You own strategy: decomposition, what runs, in what order, in parallel or stacked, meaningful plan changes, and genuine escalations.
+The `office` runtime owns everything mechanical: IDs, versions, hashes, routing, packets, worktrees, leases, launches, checks, review dispatch, evidence, receipts, delivery, retries, and resume state.
+Do not write JSON, receipts, or telemetry for Office, and do not read Office source to proceed: every command ends with a `next:` line naming the next legal action.
 
 ## Permanent invariants
 
 - Merging to `main` is the user's boundary; no agent lifts it without an explicit per-run user statement.
-- No producer approves its own work. Independent review, the acceptance evaluator, and user
-  authority are the only ways work advances; never relabel a finding to get past it.
-- Only the user changes requirements or authorizes irreversible or external actions. Record their
-  words verbatim with `--quote`; never paraphrase consent into existence.
-- Self-review before each phase advances: re-read the goal and done criteria against current state,
-  then proceed, amend, or stop. This is judgement, not paperwork; there is nothing to record.
+- No producer approves its own work. Independent review, the acceptance evaluator, and user authority are the only ways work advances; never relabel a finding to get past it.
+- Only the user changes requirements or authorizes irreversible or external actions. Record their words verbatim with `--quote`; never paraphrase consent into existence.
+- Self-review before each phase advances: re-read the goal and done criteria against current state, then proceed, amend, or stop. This is judgement, not paperwork; there is nothing to record.
 - Raw evidence stays private. Public artifacts get summaries only.
-- A run stays on the Office version that created it. If a command says a run is pinned to another
-  runtime (including a 3.0 run), follow the instruction it prints.
+- A run stays on the Office version that created it. If a command says a run is pinned to another runtime (including a 3.0 run), follow the instruction it prints.
 
 ## Asking the user
 
-Take every decision to the user through the harness's native question tool when it has one, not
-free text in chat: intake questions, plan `## Questions`, plan/merge/trust/waive authorization,
-escalations, and route notices. Show the plan or notice first; the tool carries the decision.
-- Claude Code: `AskUserQuestion` (1-4 questions, 2-4 options each; list your recommendation first
-  with "(Recommended)" in its label; "Other" is added automatically).
+Take every decision to the user through the harness's native question tool when it has one, not free text in chat: intake questions, plan `## Questions`, plan/merge/trust/waive authorization, escalations, and route notices. Show the plan or notice first; the tool carries the decision.
+- Claude Code: `AskUserQuestion` (1-4 questions, 2-4 options each; list your recommendation first with "(Recommended)" in its label; "Other" is added automatically).
 - Codex: `request_user_input`, when the session exposes it.
 - Antigravity (`agy`): `ask_question`.
 - Hermes: `clarify` (up to 4 choices; "Other" is added automatically).
@@ -47,7 +37,7 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
   then `office install` (managed harness hooks and runtime registration; it backs up each config) and
   `office doctor`.
 - **Found, but its release (the part before any `+`) differs from this directory's `VERSION`:** tell the
-  user and offer `uv tool install --force "<this skill's directory>"`, then `office install`. Runs already
+  user and offer `uv tool install --force --reinstall "<this skill's directory>"`, then `office install`. Runs already
   started keep their pinned runtime either way.
 - **Found, same release:** a wheel reports only its release, so fixes merged after the install are
   invisible to `--version`. Run `office doctor`; if it prints `install: STALE`, tell the user and offer
@@ -146,8 +136,7 @@ It reconstructs pending work from runs.db; never start a new run to continue an 
 
 ## Diagnostics
 
-`office inspect run|plan|task|gate|evidence|events|route [id]` and `--verbose`/`--json` show the
-detail default output hides. `office doctor` checks the install, hooks, pinned runtimes, and
-known harness defects. `office list` and `office prune` (dry run; `-f` to delete) maintain runs.
+`office inspect run|plan|task|gate|evidence|events|route [id]` and `--verbose`/`--json` show the detail default output hides.
+`office doctor` checks the install, hooks, pinned runtimes, and known harness defects. `office list` and `office prune` (dry run; `-f` to delete) maintain runs.
 
 The detailed design lives in `docs/v31-implementation.md`; you do not need it to run the lifecycle.
