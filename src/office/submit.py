@@ -55,10 +55,12 @@ def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect:
     return plans.submit_plan(con, run, path, submitter="orchestrator", redirect=redirect)
 
 
-def capture_tree(worktree: Path, scratch: Path, leave_out: list[str] | None = None) -> tuple[str, str]:
+def capture_tree(worktree: Path, scratch: Path, leave_out: list[str] | None = None,
+                 restore: list[str] | None = None) -> tuple[str, str]:
     """(tree_sha, head_sha) of the worktree including uncommitted edits,
     without touching the worker's own index. `leave_out` names untracked
-    paths that are not part of the revision."""
+    paths that are not part of the revision; `restore` names tracked paths
+    whose uncommitted edits are not part of it (they keep their HEAD content)."""
     scratch.mkdir(parents=True, exist_ok=True)
     fd, index = tempfile.mkstemp(prefix="index.", dir=str(scratch))
     os.close(fd)
@@ -70,6 +72,8 @@ def capture_tree(worktree: Path, scratch: Path, leave_out: list[str] | None = No
         paths.git(worktree, "add", "-A", env=env)
         if leave_out:
             paths.git(worktree, "rm", "-q", "--cached", "--", *leave_out, env=env)
+        if restore:
+            paths.git(worktree, "reset", "-q", "HEAD", "--", *restore, env=env)
         tree = paths.git(worktree, "write-tree", env=env)
     finally:
         try:
@@ -91,9 +95,15 @@ def matches_revision(worktree: Path, commit: str, scratch: Path) -> bool:
         paths.git(worktree, "read-tree", commit, env=env)
         paths.git(worktree, "update-index", "-q", "--refresh", env=env, check=False)
         import subprocess
-        proc = subprocess.run(["git", "-C", str(worktree), "diff-files", "--quiet", "--ignore-submodules"],
-                              env=env, capture_output=True)
-        return proc.returncode == 0
+        proc = subprocess.run(["git", "-C", str(worktree), "diff-files", "--name-only", "-z", "--ignore-submodules"],
+                              env=env, capture_output=True, text=True)
+        if proc.returncode:
+            return False
+        # Harness config edits were left out of the revision at submit (it carries
+        # HEAD's content there), so they are not a change to what was submitted.
+        return all(_harness_path(f) and paths.git(worktree, "rev-parse", "--verify", "-q", f"{commit}:{f}", check=False)
+                   == paths.git(worktree, "rev-parse", "--verify", "-q", f"HEAD:{f}", check=False)
+                   for f in proc.stdout.split("\0") if f)
     finally:
         try:
             os.unlink(index)
@@ -123,23 +133,31 @@ def worktree_equals_commit(worktree: Path, commit: str) -> bool:
     return True
 
 
-# Directory names that only tools write (harness hooks drop session caches such
-# as graft/.cache/ into whatever directory an agent runs in).
-_TOOL_DIRS = {"node_modules", ".venv", "__pycache__"}
+# Directories where harnesses keep their own config and hook output. Edits to
+# tracked files here are the harness's, not the task's, unless the task owns them.
+_HARNESS_DIRS = {".claude", ".codex", ".agents", ".office"}
 
 
-def _tool_artifact(rel: str) -> bool:
-    parts = rel.split("/")[:-1]
-    return any(p in _TOOL_DIRS or "cache" in p.lower() for p in parts)
+def _harness_path(rel: str) -> bool:
+    return bool(_HARNESS_DIRS.intersection(rel.split("/")[:-1]))
 
 
 def untracked_outside(worktree: Path, scope) -> list[str]:
-    """New, non-ignored files outside the task's scope that sit under a tool
-    cache directory. They are not the task's work and stay out of the revision;
-    any other file outside the scope is still refused."""
+    """New, non-ignored files outside the task's scope. They are not the task's
+    work and stay out of the revision. Tracked edits outside the scope are a
+    different case and are still refused (see `harness_edits_outside`)."""
     from office import planfile
     others = paths.git(worktree, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
-    return sorted(f for f in others if f and _tool_artifact(f) and not planfile.path_in_scope(f, scope))
+    return sorted(f for f in others if f and not planfile.path_in_scope(f, scope))
+
+
+def harness_edits_outside(worktree: Path, scope) -> list[str]:
+    """Tracked files under harness config paths that are edited (or deleted) in
+    the worktree, outside the task's scope. They keep their HEAD content in the
+    revision. Tracked edits to any other path outside the scope are not listed."""
+    from office import planfile
+    changed = paths.git(worktree, "diff", "--name-only", "-z", "HEAD").split("\0")
+    return sorted(f for f in changed if f and _harness_path(f) and not planfile.path_in_scope(f, scope))
 
 
 def make_commit(worktree: Path, tree: str, head: str, message: str) -> str:
@@ -161,7 +179,8 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
         raise Refused("wrong-worktree", f"submit from the task worktree ({task['id']}), not {cwd}",
                       scope=task["id"], next_step=f"cd {wt} && office submit")
     left_out = untracked_outside(wt, task["scope"])
-    tree, head = capture_tree(wt, paths.run_dir(run["id"]) / "tmp", left_out)
+    restored = harness_edits_outside(wt, task["scope"])
+    tree, head = capture_tree(wt, paths.run_dir(run["id"]) / "tmp", left_out, restored)
     applied = d["applied_plan_version"] or 0
     op_id = sha256_obj({"task": task["id"], "lease": d["lease_id"], "tree": tree, "applied": applied})
     existing = con.execute("SELECT * FROM revisions WHERE operation_id=?", (op_id,)).fetchone()
@@ -233,9 +252,10 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     jobs.kick(con, run["id"])
     parts = [f"rev {rev_id} captured"] + ([f"supersedes {prev}"] if prev else []) + planned["summary"]
     res.add(" | ".join(parts))
-    if left_out:
-        shown = ", ".join(left_out[:4]) + (f" (+{len(left_out) - 4} more)" if len(left_out) > 4 else "")
-        res.add(f"left out of {rev_id} (tool cache outside {task['id']} scope): {shown}")
+    for label, names in (("untracked files outside", left_out), ("harness config edits outside", restored)):
+        if names:
+            shown = ", ".join(names[:4]) + (f" (+{len(names) - 4} more)" if len(names) > 4 else "")
+            res.add(f"warning: left out of {rev_id} ({label} {task['id']} scope): {shown}")
     res.next = "you may stop; results will be delivered"
     res.data = {"revision": rev_id, "commit": commit, "gates": planned["gates"]}
     return res
