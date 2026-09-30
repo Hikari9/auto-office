@@ -137,8 +137,9 @@ def advance_branch(run: dict, dispatch: dict, commit: str) -> None:
         paths.git(wt, "reset", "-q", commit)
 
 
-def push(run: dict, dispatch: dict, *, force: bool = False) -> tuple[bool, str]:
-    args = ["git", "-C", dispatch["worktree"], "push", "-u", "origin", f"HEAD:refs/heads/{dispatch['branch']}"]
+def push(run: dict, dispatch: dict, *, commit: str = "HEAD", force: bool = False) -> tuple[bool, str]:
+    """Push `commit` (the reviewed revision, not whatever the worker made since) to the task branch."""
+    args = ["git", "-C", dispatch["worktree"], "push", "origin", f"{commit}:refs/heads/{dispatch['branch']}"]
     if force:
         args.insert(4, "--force-with-lease")
     proc = subprocess.run(args, capture_output=True, text=True, timeout=120)
@@ -216,7 +217,7 @@ def _sync(con, run: dict, task: dict, event: str, ref: str) -> dict:
     if event == "revision":
         rev = con.execute("SELECT * FROM revisions WHERE id=?", (ref,)).fetchone()
         dispatch = state.get_dispatch(con, rev["dispatch_id"])
-        ok, err = push(run, dispatch)
+        ok, err = push(run, dispatch, commit=rev["commit_sha"])
         if not ok:
             raise RuntimeError(f"push of {dispatch['branch']} failed: {err}"[:300])
         pr = ensure_pr(con, run, task, dispatch)
