@@ -38,6 +38,12 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
         mode = con.execute("PRAGMA journal_mode").fetchone()[0]
         schema = con.execute("SELECT value FROM schema_meta WHERE key='office_schema'").fetchone()
         res.add(f"runs.db: {paths.runs_db()} ({mode}, schema {schema[0] if schema else '?'})")
+        missing = db.missing_columns(con)
+        if missing:
+            problems += 1
+            res.add("schema: MISSING COLUMNS " + ", ".join(missing))
+        else:
+            res.add("schema: all columns present")
         rows = con.execute("SELECT id, office_version, phase FROM runs WHERE office_version IS NOT NULL "
                            "AND phase NOT IN ('closed','abandoned')").fetchall()
         pinned = {}
