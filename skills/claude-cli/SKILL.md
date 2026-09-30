@@ -40,3 +40,4 @@ Probe before dispatch: `python3 ../../scripts/claude-usage.py --json` (bare for 
 The authoritative read is the `claude agents --json` row for that id — its `status`/`state`. Corroborate only with signals that actually can see it: `ps -eo pid,command | grep claude` matching that row's `pid`, and artifact mtimes moving in its tree. `claude logs <id>` works only for background sessions, and failing with `connect ENOENT .../control.sock` means the log channel is unreachable, not that the agent is dead.
 
 Attribute invocation/stdio bugs (idle-prompt, missing MCP tools, fork-on-resume) to adapter, checkout/liveness-observability gaps to harness, and logical implementation defects to the producer model/role only when evidence supports it.
+A pane-hosted Claude reads idle between its own background notifications: see `references/pane-idle-between-notifications.md`.
