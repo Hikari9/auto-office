@@ -40,9 +40,7 @@ def end_state(con, run: dict) -> dict:
     return {"mode": frozen.get("end_state") or "ask", "deploy": frozen.get("deploy") or {}}
 
 
-def land(con, run: dict, *, mode: str | None = None, quote: str | None = None, detect: bool = False) -> Result:
-    if detect:
-        return detect_deploy(Path(run["repo_root"]))
+def land(con, run: dict, *, mode: str | None = None, quote: str | None = None) -> Result:
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-land", "a worker cannot land the run")
     commit = integration.final_commit(con, run)

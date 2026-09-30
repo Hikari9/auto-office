@@ -5,8 +5,8 @@ decides strategy; routed specialist agents plan, implement, and independently re
 owns every mechanical step behind one transactional state store (`runs.db`).
 
 - **Distribution:** `auto-office` · **Python package:** `office` · **Executable:** `office`
-- **Version:** 3.1.0 (`office --version` prints the exact identity; source checkouts report a
-  PEP 440 local version such as `3.1.0+g1a2b3c4d5e6f`)
+- **Version:** 3.2.0 (`office --version` prints the exact identity; source checkouts report a
+  PEP 440 local version such as `3.2.0+g1a2b3c4d5e6f`)
 
 ## Install
 
@@ -70,13 +70,24 @@ reviewers receive runtime-generated briefs and never write JSON or receipts.
 Design and contracts: [`docs/v31-implementation.md`](docs/v31-implementation.md),
 [`docs/v31-rolling-review-gates.md`](docs/v31-rolling-review-gates.md), [`CONTEXT.md`](CONTEXT.md).
 
+## New in 3.2
+
+- `office submit` prints a plan diagram: parallel waves, what each task stacks on, a route preview
+  with its why, and the checkpoint chain through landing. Amendments print only the delta.
+- Each task gets a draft PR stacked on GitHub (dependents target their parent's branch). Executors
+  push work in progress; the runtime pushes the reviewed revision at submit, posts one-line
+  verdicts, and marks the PR ready on acceptance. `office start --no-prs` keeps work local.
+- The plan's `end_state:` (asked at intake) decides how far `office land` goes: ask, preview
+  deploy, merge, or merge + prod deploy and verify. `office land --detect` proposes deploy commands.
+- Runs pinned to 3.1 keep 3.1 behavior; they run under their registered 3.1 runtime.
+
 ## Migrating from 3.0
 
 - Runs started by 3.0 stay on 3.0. `office list` shows them as `3.0 legacy`; `office resume <id>`
   points at the exact retained runtime (materialized from git history for the run's pinned
   commit). `scripts/office_runtime.py` forwards a 3.0 state directory there automatically.
-- `scripts/` is the retained 3.0 helper surface, available through the 3.1.x line and removed in
-  3.2.0. `office raw <subcommand>` reaches it with a deprecation warning; every call is recorded
+- `scripts/` is the retained 3.0 helper surface. It was slated for removal in 3.2.0 and stays through
+  3.2.x; its removal is a separate change. `office raw <subcommand>` reaches it with a deprecation warning; every call is recorded
   (`office doctor` lists remaining consumers). Legacy helpers can never write a 3.1 run.
 - New runs use 3.1 by default. Roll new runs back without touching existing ones by setting
   `runtime: {new_runs: "3.0"}` in `~/.config/auto-office/config.yaml`.

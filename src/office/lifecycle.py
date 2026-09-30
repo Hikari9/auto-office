@@ -36,7 +36,7 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
           volume: bool = False, interview: bool = False, adversarial: bool = False,
           sets: list[str] | None = None, harness: str | None = None, session: str | None = None,
           base: str | None = None, planner: str | None = None, issue: str | None = None,
-          no_prs: bool = False) -> Result:
+          no_prs: bool = False, end_state: str | None = None, deploy: dict | None = None) -> Result:
     if not goal or not goal.strip():
         raise Usage("missing-goal", "office start needs a goal", next_step='office start "<goal>"')
     ident = paths.repo_identity(cwd)
@@ -61,6 +61,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
     plan_review = {"required": bool(gates["plan_review"]), "ended": False}
     frozen = {"goal": goal.strip(), "done_criteria": [], "blast_radius": blast_radius,
               "non_goals": [], "named_actions": []}
+    if end_state:
+        frozen["end_state"] = end_state  # the user's intake answer; the plan may restate it
+    if deploy:
+        frozen["deploy"] = deploy
     con = db.connect()
     planner_decision, planner_problem = None, None
     if planner_mode == "dedicated":

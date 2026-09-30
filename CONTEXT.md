@@ -84,7 +84,19 @@ _Avoid_: pass, green, done
 **Integration review**:
 A review of composed output, required only where one checkpoint consumes another's unmerged output or a landing combines scopes that share an interface or file.
 
-## Runtime (3.1)
+**Plan diagram**:
+The runtime's rendering of a plan before approval: waves, stacking derived from `depends`, a non-binding route preview with its why, and the checkpoint chain through the end state.
+_Avoid_: plan graph, flowchart
+
+**Task PR**:
+The draft GitHub PR for one task's branch. A root task targets the default branch; a dependent targets the branch it stacks on. Its head is always the latest submitted revision.
+_Avoid_: integration PR
+
+**End state**:
+How far the user asked the run to go after the task PRs: `ask`, `preview`, `merge`, or `e2e` (merge, prod deploy, verify). Recorded in the plan requirements, so plan authorization covers it.
+_Avoid_: deploy mode, landing mode
+
+## Runtime (3.1+)
 
 **Office version**:
 The exact PEP 440 identity of the runtime that owns a run (`3.1.0`, or `3.1.0+g<sha>` from a source checkout). Pinned on the run and every packet; a mismatch is rejected.
