@@ -55,3 +55,11 @@ if [ "${VALIDATE_BUILD:-0}" = "1" ]; then
 fi
 
 echo "== Validation passed"
+# Record the pass against the committed tree, so the pre-push hook can skip a
+# rerun: a 12-minute gate inside `git push` holds the SSH connection idle and
+# GitHub drops it (the push dies with SIGPIPE). Only a clean tree is stamped,
+# since otherwise the tree that passed is not the one being pushed.
+if [ -z "$(git status --porcelain --untracked-files=no)" ]; then
+  stamps="$(git rev-parse --git-common-dir)/office-validated"
+  mkdir -p "$stamps" && touch "$stamps/$(git rev-parse 'HEAD^{tree}')"
+fi
