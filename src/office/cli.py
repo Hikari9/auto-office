@@ -22,6 +22,7 @@ Auto Office {ver}
   office start "<goal>"             create a run; queues the planner when policy requires one
   office resume [run]               bind this session to a run and show where it stands
   office status                     what matters now, ending with the next legal action
+  office wait [--timeout S]         block until something needs you (exit 0), a stall (3), or timeout (124)
   office dispatch <task>... [--parallel]
                                     launch tasks (routing, worktrees, leases are automatic)
   office submit                     planner/executor: submit your plan or your work
@@ -92,6 +93,9 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("resume", parents=[common])
     s.add_argument("target", nargs="?")
     sp.add_parser("status", parents=[common])
+    s = sp.add_parser("wait", parents=[common])
+    s.add_argument("--timeout", type=float, default=1500.0, help="seconds before exit 124 (default 1500)")
+    s.add_argument("--poll", type=float, default=10.0, help=argparse.SUPPRESS)
     s = sp.add_parser("dispatch", parents=[common])
     s.add_argument("tasks", nargs="*")
     s.add_argument("--parallel", action="store_true")
@@ -322,6 +326,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                 lifecycle.reconcile(con, run)
             jobs.kick(con, run["id"])
         return guide.status(con, run, verbose=args.verbose)
+    if cmd == "wait":
+        from office import guide
+        return guide.wait(con, run, timeout=args.timeout, poll=args.poll)
     if cmd == "dispatch":
         from office import dispatch
         return dispatch.dispatch(con, run, args.tasks, parallel=args.parallel, route=args.route,

@@ -387,7 +387,14 @@ def ack(con, run: dict, amendment_id: str) -> Result:
                           + (f" by {current['amendment_id']}:\n{current['content']}" if current else ""),
                           scope=d["task_id"], next_step=nxt)
         if row["dispatch_id"] != dispatch_id:
-            raise Refused("wrong-holder", f"{amendment_id} was delivered to another session of {d['task_id']}")
+            holder = state.get_dispatch(con, row["dispatch_id"]) if row["dispatch_id"] else None
+            task = state.get_task(con, run["id"], d["task_id"])
+            if (holder and holder.get("ended_at") is None and holder.get("status") in ("launching", "running")) \
+                    or task["current_dispatch_id"] != dispatch_id:
+                raise Refused("wrong-holder", f"{amendment_id} was delivered to another session of {d['task_id']}")
+            # The session it was delivered to has ended and this one holds the
+            # task now: the amendment is this session's to apply.
+            con.execute("UPDATE deliveries SET dispatch_id=? WHERE id=?", (dispatch_id, row["id"]))
         con.execute("UPDATE deliveries SET status='applied', applied_at=?, delivered_at=COALESCE(delivered_at, ?) WHERE id=?",
                     (now_iso(), now_iso(), row["id"]))
         con.execute("UPDATE dispatches SET applied_plan_version=? WHERE id=?", (row["target_version"], dispatch_id))

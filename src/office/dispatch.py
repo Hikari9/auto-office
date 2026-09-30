@@ -281,6 +281,12 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
     con.execute("UPDATE deliveries SET status='superseded', superseded_by='relaunch' WHERE run_id=? AND task_id=? "
                 "AND status IN ('queued','delivered') AND dispatch_id IS NOT ? AND target_version<=?",
                 (run["id"], task_id, dispatch_id, applied))
+    # A newer amendment (a requirements change can target a plan version past
+    # the task contract) is not in this brief: hand it to this session, or no
+    # session could ever ack it and every submit would stay amendment_pending.
+    con.execute("UPDATE deliveries SET dispatch_id=?, status='queued' WHERE run_id=? AND task_id=? "
+                "AND status IN ('queued','delivered') AND dispatch_id IS NOT ?",
+                (dispatch_id, run["id"], task_id, dispatch_id))
     state.update_task(con, run["id"], task_id, status="launching", current_dispatch_id=dispatch_id,
                       pause_reason=None, stack_after=None)
     payload = {"dispatch_id": dispatch_id, "task_id": task_id, "role": role, "fix_of": fix_of,

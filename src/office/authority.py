@@ -110,6 +110,13 @@ def _waive(con, run, spec: str, quote: str) -> Result:
             pr = dict(run.get("plan_review") or {})
             pr.update({"ended": True, "ended_reason": "waived by the user"})
             state.update_run(con, run["id"], plan_review=pr)
+            # No reviewer will run again, so nothing could ever clear an open
+            # defect: record each as a waived gap and release what it paused.
+            con.execute("UPDATE findings SET state='waived', updated_at=? WHERE run_id=? AND gate_kind='plan_review' "
+                        "AND state='open'", (now_iso(), run["id"]))
+            con.execute("UPDATE gates SET status='cancelled', stale_reason='plan review waived' WHERE run_id=? "
+                        "AND kind='plan_review' AND status IN ('queued','running')", (run["id"],))
+            plans.unpause_cleared(con, run)
             state.emit(con, run, "authority.waiver", "user waived further plan review")
             line = "plan review waived by the user (recorded)"
         else:

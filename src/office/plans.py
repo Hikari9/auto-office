@@ -219,6 +219,8 @@ def review_state(con, run: dict) -> dict:
 
 def queue_plan_review(con, run: dict, plan_version: int, *, escalated: bool = False, exclude: list[str] | None = None) -> str | None:
     """Queue one plan-review round. Caller holds the tx."""
+    if (state.get_run(con, run["id"]).get("plan_review") or {}).get("ended_reason") == "waived by the user":
+        return None  # the user waived plan review; no further round runs
     gates = plan_gates(con, run["id"])
     rounds = len([g for g in gates if not g["escalated"]])
     maximum = int((run.get("gates") or {}).get("plan_review_max_rounds") or 1)
@@ -416,4 +418,6 @@ def unpause_cleared(con, run: dict) -> None:
         return
     for t in state.tasks(con, run["id"]):
         if t["status"] == "paused" and t.get("pause_reason") == "plan defect":
-            state.update_task(con, run["id"], t["id"], status="running", pause_reason=None)
+            # Back to where it was: a submitted revision still has gates to finish.
+            from office import gates
+            state.update_task(con, run["id"], t["id"], status=gates.derive_status(con, run, t), pause_reason=None)

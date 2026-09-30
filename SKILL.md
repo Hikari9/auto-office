@@ -56,7 +56,7 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
    do not ask for a draft or routine approval). Stop if you cannot file it safely.
 2. `office start "<goal>" --issue <n>` (add `--blast-radius`, `--size-class`, `--irreversible`
    from your provisional read; unset is unknown, never low risk).
-3. If the output says a planner was queued, wait (`office status`). Otherwise you plan inline:
+3. If the output says a planner was queued, wait (`office wait`). Otherwise you plan inline:
    interview the user directly for anything you would otherwise guess, write `.office/PLAN.md`
    (format: `office submit --help`), then `office submit`.
 4. When `next:` asks for authorization, show the user the plan and requirements, ask for their
@@ -67,6 +67,8 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 - `office dispatch T1 T2 --parallel` for independent work; `office dispatch T1 T2` stacks T2 on
   T1. Choose by dependencies, shared interfaces, and risk; the runtime enforces scope ownership,
   but it does not decide your strategy and does not maximize concurrency for you.
+- To wait on the run, use `office wait`: exit 0 means act, 3 means a stall to resolve, 124 means nothing
+  new. Key on the exit code, never on matching status text.
 - Executors submit their own work; reviewers are dispatched and read by the runtime. You hear
   about acceptances, blockers, escalations, and plan-review results, not routine findings.
 - After a first plan review of CHANGES_REQUIRED: edit `.office/PLAN.md`, run
