@@ -63,20 +63,51 @@ def _register(env, ver: str):
         "env": {"PYTHONPATH": str(SRC), "OFFICE_VERSION_OVERRIDE": ver}}))
 
 
-def test_old_version_run_stays_usable_after_new_default(env):
-    old = "3.1.0"
-    code, out = env.office("start", "old run", "--planner", "inline", env={"OFFICE_VERSION_OVERRIDE": old})
+def test_run_pins_release_line_and_patch_serves_it(env):
+    code, out = env.office("start", "old run", "--planner", "inline", env={"OFFICE_VERSION_OVERRIDE": "3.1.0"})
     assert code == 0, out
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]
-    assert con.execute("SELECT office_version FROM runs").fetchone()[0] == old
-    new_env = {"OFFICE_VERSION_OVERRIDE": "3.1.1"}
-    code, out = env.office("status", "--run", run_id, env=new_env)
-    assert code == 5 and "pinned-runtime-unavailable" in out and "3.1.0" in out, out
-    _register(env, old)
-    code, data = env.ojson("status", "--run", run_id, env=new_env)
-    assert code == 0 and data["data"]["office_version"] == old, data
-    assert con.execute("SELECT office_version FROM runs WHERE id=?", (run_id,)).fetchone()[0] == old
+    assert con.execute("SELECT office_version FROM runs").fetchone()[0] == "3.1"
+    # A PATCH on the same line serves the run with no user action.
+    code, data = env.ojson("status", "--run", run_id, env={"OFFICE_VERSION_OVERRIDE": "3.1.1"})
+    assert code == 0 and data["data"]["office_version"] == "3.1", data
+    # Another MINOR refuses and names the upgrade command.
+    code, out = env.office("status", "--run", run_id, env={"OFFICE_VERSION_OVERRIDE": "3.2.0"})
+    assert code == 5 and "pinned-runtime-unavailable" in out and "office upgrade" in out, out
+    _register(env, "3.1.0")
+    _register(env, "3.2.0")
+    code, data = env.ojson("status", "--run", run_id, env={"OFFICE_VERSION_OVERRIDE": "3.2.0"})
+    assert code == 0 and data["data"]["office_version"] == "3.1", data
+    assert any("office upgrade" in l for l in data["lines"]), data
+
+
+def test_upgrade_moves_run_across_minor(env):
+    new = {"OFFICE_VERSION_OVERRIDE": "3.2.0"}
+    env.office("start", "old run", "--planner", "inline", env={"OFFICE_VERSION_OVERRIDE": "3.1.0"}, check=0)
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    before = [con.execute(f"SELECT COUNT(*) FROM {t} WHERE run_id=?", (run_id,)).fetchone()[0]
+              for t in ("tasks", "gates", "amendments", "authorizations", "requirements")]
+    code, out = env.office("upgrade", run_id[:8], env=new)
+    assert code == 0 and "dry run" in out and "3.1 -> 3.2" in out, out
+    assert con.execute("SELECT office_version FROM runs").fetchone()[0] == "3.1"
+    con.execute("INSERT INTO dispatches(id, run_id, task_id, kind, status) VALUES('Dlive', ?, 'T1', 'executor', 'running')",
+                (run_id,))
+    code, out = env.office("upgrade", run_id[:8], "--apply", env=new)
+    assert code != 0 and "live-dispatches" in out and "Dlive" in out, out
+    con.execute("UPDATE dispatches SET status='exited', ended_at='x' WHERE id='Dlive'")
+    code, out = env.office("upgrade", run_id[:8], "--apply", env=new)
+    assert code == 0 and "upgraded" in out, out
+    assert con.execute("SELECT office_version FROM runs").fetchone()[0] == "3.2"
+    assert con.execute("SELECT COUNT(*) FROM events WHERE kind='run.upgraded'").fetchone()[0] == 1
+    after = [con.execute(f"SELECT COUNT(*) FROM {t} WHERE run_id=?", (run_id,)).fetchone()[0]
+             for t in ("tasks", "gates", "amendments", "authorizations", "requirements")]
+    assert after == before
+    code, out = env.office("upgrade", run_id[:8], "--apply", env=new)
+    assert code == 0 and "no change" in out, out
+    code, data = env.ojson("status", "--run", run_id, env=new)
+    assert code == 0 and data["data"]["office_version"] == "3.2", data
 
 
 def test_rollback_changes_future_runs_only(env):

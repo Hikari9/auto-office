@@ -155,8 +155,8 @@ def _bound(event: str, harness: str, payload: dict, bound_files: list[Path], wor
         if run is None or state.is_terminal(run):
             return 0
         from office import version
-        if run["office_version"] != version.current():
-            return 0  # a pinned run is served only by its own runtime
+        if not version.same_line(run["office_version"], version.current()):
+            return 0  # a run is served only by a runtime on its release line
         if event == "session.start":
             source = payload.get("source", "startup")
             if source in ("resume", "compact", "startup"):

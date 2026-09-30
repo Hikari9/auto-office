@@ -14,7 +14,7 @@ import uuid
 import zlib
 from pathlib import Path
 
-from office import adapters, db, paths, routing, state
+from office import adapters, db, paths, routing, state, version
 from office.util import now_iso, sha256_bytes, sha256_file
 
 # 5x7 bitmap digits.
@@ -98,7 +98,7 @@ def probe_vision(con, run: dict, cand: dict, adapter: dict) -> dict:
         con.execute("INSERT INTO dispatches(id, run_id, role, holder_id, triple, invocation_model_id, started_at, kind, "
                     "office_version, status, harness, model, effort, adapter_id, route_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (dispatch_id, run["id"], "visual_reviewer", dispatch_id, routing.candidate_id(cand),
-                     cand.get("invocation_model_id"), now_iso(), "conformance", run["office_version"], "launching",
+                     cand.get("invocation_model_id"), now_iso(), "conformance", version.current(), "launching",
                      cand["harness"], cand.get("invocation_model_id"), cand.get("effort"), cand.get("adapter_id"),
                      "{}"))
     d = state.get_dispatch(con, dispatch_id)

@@ -46,12 +46,15 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
                            "AND phase NOT IN ('closed','abandoned')").fetchall()
         pinned = {}
         for r in rows:
-            pinned.setdefault(r["office_version"], []).append(r["id"][:8])
-        for pv, ids in sorted(pinned.items()):
-            ok = pv == ver or frontdoor.registered(pv)
+            pinned.setdefault(version.release_line(r["office_version"]), []).append(r["id"][:8])
+        newest = frontdoor.installed_lines()[0]
+        for line, ids in sorted(pinned.items(), key=lambda kv: version.release_key(kv[0])):
+            ok = version.same_line(line, ver) or frontdoor.newest_on_line(line)
             if not ok:
                 problems += 1
-            res.add(f"pinned {pv}: {len(ids)} active run(s) {'ok' if ok else 'RUNTIME MISSING — install and register it'}")
+            res.add(f"on {line}: {len(ids)} active run(s) {'ok' if ok else 'RUNTIME MISSING — install and register a ' + line + '.x runtime'}")
+            if version.release_key(newest) > version.release_key(line):
+                res.add(f"  {newest} is installed; upgrade with: " + "; ".join(f"office upgrade {i}" for i in ids))
         compat = con.execute("SELECT command, COUNT(*) AS n FROM compat_calls GROUP BY command ORDER BY n DESC LIMIT 5").fetchall()
         if compat:
             res.add("compat (removed in 3.2.0): " + ", ".join(f"{c['command']}×{c['n']}" for c in compat))

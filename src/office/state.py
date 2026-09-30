@@ -158,7 +158,7 @@ def emit(con: sqlite3.Connection, run: dict, kind: str, summary: str, *, audienc
         "INSERT INTO events(run_id, kind, audience, task_id, dispatch_id, summary, payload_json, office_version, created_at) "
         "VALUES(?,?,?,?,?,?,?,?,?)",
         (run["id"], kind, audience, task_id, dispatch_id, summary, dumps(payload or {}),
-         run["office_version"], now_iso()))
+         version.current(), now_iso()))
     return cur.lastrowid
 
 
@@ -188,13 +188,13 @@ def enqueue(con: sqlite3.Connection, run: dict, kind: str, payload: dict, *, ded
     None when an identical job (same dedup key) already exists."""
     job_id = "J" + uuid.uuid4().hex[:10]
     payload = dict(payload)
-    payload.setdefault("office_version", run["office_version"])
-    if payload["office_version"] != run["office_version"]:
-        raise ValueError("job payload office_version must equal the run's pinned version")
+    payload.setdefault("office_version", version.current())
+    if not version.same_line(payload["office_version"], run["office_version"]):
+        raise ValueError("job payload office_version must be on the run's release line")
     cur = con.execute(
         "INSERT OR IGNORE INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, attempts, "
         "max_attempts, not_before, created_at) VALUES(?,?,?,?,?,?,'queued',0,?,?,?)",
-        (job_id, run["id"], kind, dedup_key, dumps(payload), run["office_version"], max_attempts, not_before, now_iso()))
+        (job_id, run["id"], kind, dedup_key, dumps(payload), payload["office_version"], max_attempts, not_before, now_iso()))
     return job_id if cur.rowcount else None
 
 
@@ -319,11 +319,12 @@ def write_projection(con: sqlite3.Connection, run_id: str) -> None:
 
 
 def packet_envelope(run: dict, kind: str, body: dict) -> dict:
-    """Every runtime-owned packet carries the run-pinned office_version."""
+    """Every runtime-owned packet carries the exact runtime that wrote it; its
+    release line must be the run's."""
     packet = {
         "packet_kind": kind,
         "packet_schema": 1,
-        "office_version": run["office_version"],
+        "office_version": version.current(),
         "run_id": run["id"],
         "created_at": now_iso(),
         **body,
@@ -336,11 +337,11 @@ def check_packet(run: dict, packet: dict) -> None:
     """Reject a packet whose Office version is not the run's pinned version,
     and refuse to process any packet under a different runtime."""
     pv = packet.get("office_version")
-    if pv != run["office_version"]:
+    if not version.same_line(pv, run["office_version"]):
         raise Refused("packet-version-mismatch",
                       f"packet office_version {pv!r} does not match run {run['id'][:8]} pinned {run['office_version']!r}",
                       next_step="this packet cannot be used; the runtime regenerates packets for the pinned version")
-    if run["office_version"] != version.current():
+    if not version.same_line(run["office_version"], version.current()):
         raise Refused("runtime-version-mismatch",
                       f"runtime {version.current()} may not process packets for a run pinned to {run['office_version']}",
                       next_step="invoke the pinned runtime through the office front door", exit_code=5)

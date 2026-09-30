@@ -37,6 +37,7 @@ Auto Office {ver}
   office list                       runs in this repository (--all for every run)
   office inspect [run|task|gate|evidence|events|route] [id]
   office doctor                     check the installation, hooks, and runtimes
+  office upgrade [run] [--to X.Y]   move a run to a newer release line (dry run; --apply)
   office prune [--run <id>]         show finished runs that office prune -f would remove
 
 Global flags: --run <id>, --json, --verbose. Every command ends with `next:`.
@@ -175,6 +176,10 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("doctor", parents=[common])
     s.add_argument("--fix", action="store_true")
     s.add_argument("--probe-vision", action="store_true", help="run image-capability probes on visual routes (uses quota)")
+    s = sp.add_parser("upgrade", parents=[common])
+    s.add_argument("target", nargs="?", help="the run (default: this session's run)")
+    s.add_argument("--to", metavar="X.Y", help="the release line (default: this runtime's)")
+    s.add_argument("--apply", action="store_true", help="commit the upgrade (default is a dry run)")
     s = sp.add_parser("prune", parents=[common])
     s.add_argument("-f", "--force", action="store_true")
     s = sp.add_parser("install", parents=[common])
@@ -331,6 +336,19 @@ def _run(args, unknown) -> int:
         con = _con()
         try:
             return emit(lifecycle.list_runs(con, all_runs=args.all, cwd=cwd), args)
+        finally:
+            con.close()
+    if cmd == "upgrade":
+        # Resolved without the front door: the run is on another line by design.
+        from office import discovery, upgrade
+        con = _con()
+        try:
+            target = discovery.resolve(con, run_arg=args.target or args.run_arg, state_dir=args.state_dir,
+                                       harness=args.harness, session=args.session)
+            if target.legacy is not None:
+                raise OfficeError("legacy-run", f"run {target.legacy.run_id[:8]} is a 3.0 run pinned to its plugin_commit; "
+                                  "it is not upgraded", next_step="finish it on its pinned runtime (office resume)")
+            return emit(upgrade.upgrade(con, target.run, to=args.to, apply=args.apply), args)
         finally:
             con.close()
     if cmd == "prune":
