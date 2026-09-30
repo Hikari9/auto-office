@@ -190,21 +190,21 @@ def _watch_reviewer(env, monkeypatch, harness, pane_text):
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex"])
-def test_read_only_reviewer_reply_comes_from_its_transcript_not_the_pane(env, monkeypatch, harness):
-    """The pane shows only chrome; the transcript has the full review."""
+def test_reviewer_result_is_never_taken_from_its_transcript(env, monkeypatch, harness):
+    """R13: results come only from the reply file. A transcript holding a full
+    review does not become the reply; the missing file is left for R11."""
     from office import dispatch
     d, cwd, brief, out, spec = _watch_reviewer(env, monkeypatch, harness, "? for shortcuts\n")
     (_claude_transcript if harness == "claude" else _codex_transcript)(env.home, cwd, brief, FINAL_CR)
     assert dispatch.watch_herdr_agent(d["id"], spec, poll=0) == (0, "success")
-    assert out.read_text() == FINAL_CR
-    assert _parse(out.read_text()).verdict == "CHANGES_REQUIRED"
+    assert not out.exists()
 
 
-def test_pane_text_is_still_the_last_resort(env, monkeypatch):
+def test_pane_text_is_never_the_reply(env, monkeypatch):
     from office import dispatch
     d, cwd, brief, out, spec = _watch_reviewer(env, monkeypatch, "claude", "⏺ VERDICT: PASS")
     assert dispatch.watch_herdr_agent(d["id"], spec, poll=0) == (0, "success")
-    assert _parse(out.read_text()).verdict == "PASS"
+    assert not out.exists()
 
 
 # ------------------------------------------------------------------ pane ledger

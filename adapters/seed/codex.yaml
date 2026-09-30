@@ -57,19 +57,20 @@ office_profiles:
     herdr_kind: codex
     interactive:
       argv: [--yolo, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}"]
+      resume_argv: [resume, "{session_id}"]
   reviewer:
-    argv: [exec, --sandbox, read-only, --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}", -o, "{output}", "-"]
+    argv: [exec, --sandbox, workspace-write, --add-dir, "{output_dir}", --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}", -o, "{output}", "-"]
     prompt: stdin
     output: file
     herdr_kind: codex
     interactive:
-      argv: [--sandbox, read-only, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}"]
+      argv: [--sandbox, workspace-write, --add-dir, "{output_dir}", -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}"]
   vision:
-    argv: [exec, --sandbox, read-only, --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}", -o, "{output}", "{images}", "-"]
+    argv: [exec, --sandbox, workspace-write, --add-dir, "{output_dir}", --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}", -o, "{output}", "{images}", "-"]
     image_arg: [--image, "{image}"]
     image_transport: argv
     prompt: stdin
     output: file
     herdr_kind: codex
     interactive:
-      argv: [--sandbox, read-only, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}"]
+      argv: [--sandbox, workspace-write, --add-dir, "{output_dir}", -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}"]

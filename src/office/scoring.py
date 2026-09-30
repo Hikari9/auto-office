@@ -116,10 +116,17 @@ def evaluate_trust_state(con: sqlite3.Connection, target_triple: str) -> tuple[i
     # including rows stored with a full version before identity keyed on the major.
     target_triple = normalize_triple(target_triple)
     cur = con.cursor()
+    # A reviewer that exited cleanly but whose reply Office could not read was
+    # labelled adapter/environment_failure by older runtimes; that was Office's
+    # capture bug, not the adapter's, so such rows never count against a route.
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(dispatches)").fetchall()}
+    extra = ("kind, outcome, terminal_classification" if {"kind", "outcome", "terminal_classification"} <= cols
+             else "NULL, NULL, NULL")
     attribution_by_dispatch = {
         row[0]: row[1]
-        for row in cur.execute("SELECT id, attribution, triple FROM dispatches").fetchall()
+        for row in cur.execute(f"SELECT id, attribution, triple, {extra} FROM dispatches").fetchall()
         if normalize_triple(row[2] or "") == target_triple
+        and not (row[3] == "reviewer" and row[4] == "environment_failure" and row[5] == "success")
     }
 
     qualifying: set[str] = set()

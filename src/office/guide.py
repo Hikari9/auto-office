@@ -5,6 +5,8 @@ agent never needs an `office next` command or the Office source to proceed.
 """
 from __future__ import annotations
 
+import re
+
 import os
 
 from office import amend, plans, state
@@ -55,7 +57,11 @@ def next_action(con, run: dict) -> str:
         return "no action; plan review is running"
     if rs["first_verdict"] == "CHANGES_REQUIRED" and run["plan_version"] <= (rs["first_version"] or 0) and not rs["ended"]:
         return 'amend the plan: office amend plan -- "<changes>" (edit .office/PLAN.md for task changes); safe work may launch right after'
+    live_ids = {t["id"] for t in state.tasks(con, run["id"]) if t["status"] != "cancelled"}
     for d in rs["open_defects"]:
+        named = set(re.findall(r"\bT\d+\b", d.get("location") or ""))
+        if named and not (named & live_ids):
+            continue  # every task it names was cancelled
         return f"plan defect {d['code']} blocks {d.get('location') or 'the plan'}; " + (
             'request the fix: office amend plan --contract -- "<fix>"' if run.get("planner_mode") == "dedicated"
             else "fix .office/PLAN.md, then office amend plan --contract -- \"<fix>\"")
@@ -71,6 +77,11 @@ def next_action(con, run: dict) -> str:
             tid = c[status][0]
             t = next(x for x in tasks if x["id"] == tid)
             return f"resolve {tid} ({t.get('pause_reason') or status}); office inspect task {tid}"
+    from office import gates as gates_mod
+    for t in tasks:
+        if t["status"] == "changes_required" and not gates_mod.worker_live(con, t.get("current_dispatch_id")):
+            # Findings wait for the orchestrator's choice (R8); nothing relaunches on its own.
+            return f"findings on {t['id']} wait for you: office rerun {t['id']} --resume | --fresh"
     ready = ready_tasks(con, run)
     if ready:
         return "choose execution strategy; office dispatch " + " ".join(ready) + (" --parallel" if len(ready) > 1 else "")
@@ -141,7 +152,7 @@ def _snapshot(con, run: dict) -> tuple:
     return run["phase"], run["requirements_version"], run["plan_version"], tasks
 
 
-def stalls(con, run: dict) -> list[str]:
+def stalls(con, run: dict, since: str = "") -> list[str]:
     """Work Office believes is in progress with nothing left to advance it."""
     out = []
     live_jobs = con.execute("SELECT COUNT(*) FROM outbox WHERE run_id=? AND status IN ('queued','claimed')",
@@ -151,7 +162,7 @@ def stalls(con, run: dict) -> list[str]:
         if not live_jobs:
             out.append(f"{g['task_id'] or 'plan'} {g['kind']} gate {g['id']} is {g['status']} but no job is queued or running")
     for j in con.execute("SELECT kind, error FROM outbox WHERE run_id=? AND status='failed' AND finished_at > ?",
-                         (run["id"], run.get("updated_at") or "")).fetchall():
+                         (run["id"], since)).fetchall():
         out.append(f"job {j['kind']} failed: {(j['error'] or '')[:120]}")
     return out
 
@@ -170,7 +181,9 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
     on matching status text."""
     import time
     from office import db, jobs, lifecycle
+    from office.util import now_iso
     start = _snapshot(con, run)
+    started_at = now_iso()  # only a job that fails while waiting is news
     deadline = time.time() + timeout
     first = True
     while True:
@@ -178,7 +191,7 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
             lifecycle.reconcile(con, run)
             jobs.reclaim(con, run["id"])
         jobs.kick(con, run["id"])
-        stuck = stalls(con, run)
+        stuck = stalls(con, run, since=started_at)
         changed = _snapshot(con, run) != start
         news = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=1)
         # Something already waiting on the orchestrator ends the wait at once;

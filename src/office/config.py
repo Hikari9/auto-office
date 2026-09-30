@@ -166,6 +166,7 @@ def resolve_gates(gear: str, risk_high: bool, config: dict) -> dict:
         "visual_review_max_rounds": verification.get("visual_review_max_rounds", code_rounds or 1),
         "environment_retry_max": int(verification.get("environment_retry_max", 2)),
         "recapture_max": int(verification.get("recapture_max", 1)),
+        "review_reprompt_max": int(verification.get("review_reprompt_max", 3)),
         "dedicated_planner": planner is True,
     }
 
