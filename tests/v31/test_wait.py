@@ -88,7 +88,7 @@ def _herdr(env, **files) -> dict:
     state.mkdir(exist_ok=True)
     for name, text in files.items():
         (state / name).write_text(text)
-    return {**EXTERNAL, "FAKE_HERDR_DIR": str(state), "OFFICE_EXECUTOR_IDLE_STALL_MIN": "0"}
+    return {**EXTERNAL, "FAKE_HERDR_DIR": str(state), "OFFICE_EXECUTOR_IDLE_STALL_S": "0"}
 
 
 def _as_herdr(env) -> dict:
@@ -117,6 +117,7 @@ def test_an_agent_idle_past_the_threshold_without_submitting_is_a_stall(env):
     d = _as_herdr(env)
     code, out = _wait(env, e, timeout="3")
     assert code == 3 and "stall:" in out and d["id"] in out and "idle" in out, out
+    assert "herdr agent prompt" in out and "office rerun T1" in out and "office revoke T1" in out, out
     tail = Path(paths_run_dir(env)) / "dispatches" / d["id"] / "pane-tail.txt"
     assert "waiting for input" in tail.read_text()
 
@@ -130,7 +131,7 @@ def paths_run_dir(env) -> str:
 def test_the_idle_threshold_holds_across_wait_invocations(env):
     _go(env)
     e = _herdr(env, status="idle", pane="> waiting")
-    e["OFFICE_EXECUTOR_IDLE_STALL_MIN"] = "30"
+    e["OFFICE_EXECUTOR_IDLE_STALL_S"] = "1800"
     d = _as_herdr(env)
     code, out = _wait(env, e)
     assert code == 124, out
@@ -194,3 +195,11 @@ def test_the_stall_line_cites_a_refused_submit(env):
     assert code == 4 and "wrong-worktree" in out, out
     code, out = _wait(env, e, timeout="3")
     assert code == 3 and "last submit was refused" in out and "wrong-worktree" in out, out
+
+
+def test_the_idle_threshold_defaults_to_60_seconds(monkeypatch):
+    from office import guide
+    monkeypatch.delenv("OFFICE_EXECUTOR_IDLE_STALL_S", raising=False)
+    assert guide.idle_stall_s() == 60
+    monkeypatch.setenv("OFFICE_EXECUTOR_IDLE_STALL_S", "5")
+    assert guide.idle_stall_s() == 5
