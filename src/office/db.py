@@ -23,7 +23,7 @@ from office import paths
 # Bump when SHARED_COLUMNS or the DDL changes. The version is a record, not the
 # gate: every open also runs the additive column pass (see `migrate`), so a
 # column added without a bump still reaches existing databases.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -61,6 +61,10 @@ SHARED_COLUMNS = {
         "route_json TEXT", "gate_id TEXT", "override_json TEXT",
         # #200: pane lifecycle (session capture for resume, reclaim on accept).
         "session_id TEXT", "resumed_from TEXT", "keep_pane INTEGER", "pane_closed_at TEXT",
+        # v4 (3.2): when an executor's agent was first seen idle, and the pane
+        # content then; `office wait` persists them so the stall threshold holds
+        # across invocations.
+        "idle_since TEXT", "idle_hash TEXT",
     ],
     # v2 (#185): user-declared model overrides.
     "tasks": ["review_override_json TEXT", "pr_json TEXT"],
