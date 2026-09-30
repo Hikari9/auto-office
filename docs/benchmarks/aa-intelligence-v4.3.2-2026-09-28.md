@@ -74,3 +74,20 @@ runs takes precedence when the two disagree:
   token counts. Our own token usage has not confirmed it.
 - GPT-6 Sol has used far more tokens in practice than its advertised cost suggests.
   It is not in any preferred seed.
+
+## Rescore: Claude Sonnet 5.5 and GPT-6.1 Sol (2026-10-01)
+
+The following effort-level scores use the same Artificial Analysis Intelligence Index
+v4.3.2 as the snapshot above. Values are from Artificial Analysis's current model
+release pages; they are public benchmark priors, not local Auto Office outcomes.
+
+| Model | max | xhigh | high | medium | low |
+|---|---:|---:|---:|---:|---:|
+| Claude Sonnet 5.5 | 56 | 52 | 47 | 41 | not scored |
+| GPT-6.1 Sol | 52 | 51 | 50 | 48 | 42 |
+
+Source: [Claude Sonnet 5.5 release](https://artificialanalysis.ai/models/releases/claude-sonnet-5-5),
+[GPT-6.1 Sol release](https://artificialanalysis.ai/models/releases/gpt-6-1-sol).
+The catalog records the newly listed effort rows as non-dispatchable until each model
+and effort is verified against its local harness. Existing GPT-6 Sol entries are retained
+as historical model data.
