@@ -21,6 +21,9 @@ if args[:2] == ["pane", "split"]:
 elif args[:2] == ["agent", "start"] and os.environ.get("FAKE_HERDR_START_FAIL"):
     code = 1
     result = {{"error": {{"code": "invalid_agent_name"}}}}
+elif args[:2] == ["agent", "start"] and not os.environ.get("FAKE_HERDR_NO_AGENT"):
+    # herdr sees the agent in its pane once it has started.
+    data.setdefault("pane_agents", {{}})[args[args.index("--pane") + 1]] = args[2]
 elif args[:2] == ["pane", "get"]:
     result = {{"pane": {{"pane_id": args[2], "agent": data.get("pane_agents", {{}}).get(args[2])}}}}
 elif args[:2] == ["agent", "get"]:
@@ -45,6 +48,9 @@ sys.exit(code)
 
 
 BUSY = "Working (1s \u2022 esc to interrupt)"
+EMPTY = "> composer empty"
+# Two pane reads precede the prompt: the agent-UI wait and the ctx baseline.
+PRE = [EMPTY, EMPTY]
 
 
 def _fake(env, monkeypatch, gets=(), reads=()) -> Path:
@@ -264,7 +270,7 @@ def _launch_events(env, run):
 
 
 def test_unlanded_prompt_is_retried_by_typing_it(env, monkeypatch):
-    state_file, run, d, res = _herdr_launch(env, monkeypatch, reads=["> composer empty", BUSY])
+    state_file, run, d, res = _herdr_launch(env, monkeypatch, reads=[*PRE, EMPTY, EMPTY, BUSY])
     assert res["launcher"] == "herdr" and res["prompt_landed"] is True
     calls = _calls(state_file)
     assert any(c[:2] == ["pane", "send-text"] and "brief.md" in c[3] for c in calls)
@@ -334,7 +340,7 @@ def test_hung_prompt_call_does_not_escape_the_launch(env, monkeypatch):
         return real(args, *a, **k)
 
     monkeypatch.setattr(dispatch.subprocess, "run", run)
-    state_file, run_, d, res = _herdr_launch(env, monkeypatch, reads=["> composer empty", BUSY])
+    state_file, run_, d, res = _herdr_launch(env, monkeypatch, reads=[*PRE, EMPTY, EMPTY, BUSY])
     assert res["launcher"] == "herdr" and res["prompt_landed"] is True and res["watcher_pid"]
 
 
@@ -411,8 +417,8 @@ def test_recovered_busy_pane_is_not_settled_by_the_blind_limit(env, monkeypatch)
 
 def test_typed_pointer_left_in_the_composer_gets_a_second_enter(env, monkeypatch):
     monkeypatch.setenv("OFFICE_HERDR_KEY_DELAY", "0")
-    state_file, run, d, res = _herdr_launch(env, monkeypatch, reads=["> composer empty", "> pointer typed, not sent",
-                                                                     BUSY])
+    state_file, run, d, res = _herdr_launch(env, monkeypatch, reads=[*PRE, EMPTY, EMPTY,
+                                                                     "> pointer typed, not sent", BUSY])
     assert res["prompt_landed"] is True
     enters = [c for c in _calls(state_file) if c[:2] == ["pane", "send-keys"] and c[-1] == "Enter"]
     assert len(enters) == 2

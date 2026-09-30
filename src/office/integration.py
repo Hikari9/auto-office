@@ -86,6 +86,43 @@ def retrigger(con, run: dict) -> bool:
     return True
 
 
+def branch_holder(repo: Path, branch: str, *, exclude: Path | None = None) -> str | None:
+    """The worktree (other than `exclude`) that has `branch` checked out."""
+    listing = paths.git(repo, "worktree", "list", "--porcelain", check=False)
+    path = None
+    for line in listing.splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree "):]
+        elif line == f"branch refs/heads/{branch}" and path:
+            try:
+                same = exclude is not None and Path(path).resolve() == Path(exclude).resolve()
+            except OSError:
+                same = False
+            if not same:
+                return path
+    return None
+
+
+def retry_failed(con, run: dict) -> bool:
+    """`office resume`: re-run a blocked or unavailable integration (or one
+    whose job failed outright) on the current accepted set once its cause has
+    been fixed outside Office. A conflict needs a plan change, not a retry.
+    Caller holds the tx."""
+    if accepted_set(con, run) is None:
+        return False
+    if con.execute("SELECT 1 FROM outbox WHERE run_id=? AND kind='integrate' AND status IN ('queued','claimed')",
+                   (run["id"],)).fetchone():
+        return False
+    s = status(con, run)
+    failed_job = con.execute("SELECT status FROM outbox WHERE run_id=? AND kind='integrate' ORDER BY rowid DESC LIMIT 1",
+                             (run["id"],)).fetchone()
+    if s["status"] not in ("blocked", "unavailable") and not (failed_job and failed_job["status"] == "failed"
+                                                              and s["status"] == "pending"):
+        return False
+    state.emit(con, run, "integration.retry", f"integration {s['status']}; retry queued")
+    return retrigger(con, run)
+
+
 def _set_integration(con, run: dict, **fields) -> None:
     run = state.get_run(con, run["id"])
     landing = dict(run.get("landing") or {})
@@ -108,16 +145,30 @@ def job_integrate(con, run: dict, job: dict) -> dict:
     if (wt / ".git").exists():
         subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)], capture_output=True)
     wt.parent.mkdir(parents=True, exist_ok=True)
-    paths.git(repo, "worktree", "add", "-B", branch, str(wt), run["base_sha"])
-    env = {"GIT_AUTHOR_NAME": "Auto Office", "GIT_AUTHOR_EMAIL": "office@localhost",
-           "GIT_COMMITTER_NAME": "Auto Office", "GIT_COMMITTER_EMAIL": "office@localhost"}
+    holder = branch_holder(repo, branch, exclude=wt)
+    if holder:
+        # `worktree add -B` refuses a branch checked out elsewhere; say where.
+        detail = (f"{branch} is checked out in another worktree: {holder}; remove it "
+                  f"(git worktree remove {holder}), then office resume retries integration")
+        with db.transaction(con):
+            _set_integration(con, run, key=key, status="blocked", detail=detail, branch=branch)
+            state.emit(con, run, "integration.failed", f"INTEGRATION blocked: {detail}")
+        return {"status": "blocked"}
+    try:
+        paths.git(repo, "worktree", "add", "-B", branch, str(wt), run["base_sha"])
+    except paths.GitError as exc:
+        detail = f"could not create the integration worktree: {exc.stderr[:200]}; fix it, then office resume"
+        with db.transaction(con):
+            _set_integration(con, run, key=key, status="blocked", detail=detail, branch=branch)
+            state.emit(con, run, "integration.failed", f"INTEGRATION blocked: {detail}")
+        return {"status": "blocked"}
     import os
-    genv = dict(os.environ, **env)
+    genv = dict(os.environ, **paths.commit_identity_env(repo))
     for t in tasks:
         commit = revs[t["id"]]["commit_sha"]
         if subprocess.run(["git", "-C", str(wt), "merge-base", "--is-ancestor", commit, "HEAD"], capture_output=True).returncode == 0:
             continue
-        proc = subprocess.run(["git", "-C", str(wt), "merge", "--no-ff", "--no-edit", "-m", f"office: land {t['id']}", commit],
+        proc = subprocess.run(["git", "-C", str(wt), "merge", "--no-ff", "--no-edit", "-m", f"office: land {t['id']}\n\n{paths.office_trailer(run['id'])}", commit],
                               capture_output=True, text=True, env=genv)
         if proc.returncode != 0:
             conflicted = paths.git(wt, "diff", "--name-only", "--diff-filter=U", check=False)

@@ -1,6 +1,7 @@
 """Submission, gates, convergence bounds, amendments, and terminal classification."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from conftest import BAD_ADD, GOOD_ADD, PLAN_ONE, PLAN_TWO, start_inline
@@ -426,3 +427,28 @@ def test_agy_profiles_carry_a_wall_cap():
     agy = adapters.load_all()["agy"]
     assert dispatch._wall_cap_seconds(adapters.profile(agy, "worker")) == 50 * 60
     assert dispatch._wall_cap_seconds(adapters.profile(adapters.load_all()["claude"], "worker")) is None
+
+
+def test_dispatch_of_a_task_blocked_on_an_unavailable_review_reruns_only_the_review(env):
+    # rock-mcp run 2fc0f696 C5: `dispatch T2 --review-as ...` on a submitted
+    # revision blocked by an UNAVAILABLE code review launched a fresh executor.
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+        code_reviewer=[{"reply": "", "exit": 1}])
+    env.office("dispatch", "T1", check=0)
+    blocked = _task(env)
+    assert blocked["status"] == "blocked", blocked
+    executors = [c for c in env.calls() if c["role"] == "executor"]
+    env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    producer = env.con().execute("SELECT d.model FROM revisions r JOIN dispatches d ON d.id=r.dispatch_id").fetchone()[0]
+    reviewer = "codex/gpt-6-luna@xhigh" if "claude" in producer else "claude/claude-opus-5-5@high"
+    code, out = env.office("dispatch", "T1", "--review-as", reviewer)
+    assert code == 0 and "code review re-run" in out and "no executor launched" in out, out
+    t = _task(env)
+    assert t["current_revision_id"] == blocked["current_revision_id"]
+    assert t["current_dispatch_id"] == blocked["current_dispatch_id"]
+    assert [c for c in env.calls() if c["role"] == "executor"] == executors
+    assert t["status"] == "accepted", t
+    con = env.con()
+    rows = con.execute("SELECT verdict FROM gates WHERE kind='code_review' ORDER BY created_at").fetchall()
+    assert [r[0] for r in rows] == ["UNAVAILABLE", "PASS"]
+    assert json.loads(t["review_override_json"])["as"] == reviewer

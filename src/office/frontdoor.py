@@ -33,6 +33,8 @@ def current_argv() -> tuple[list[str], dict]:
     src = Path(__file__).resolve().parents[1]
     if (src / "office").is_dir() and src.name == "src":
         env["PYTHONPATH"] = str(src)
+    if "PYTHONUSERBASE" in os.environ:
+        env["PYTHONUSERBASE"] = os.environ["PYTHONUSERBASE"]
     return [sys.executable, "-m", "office"], env
 
 

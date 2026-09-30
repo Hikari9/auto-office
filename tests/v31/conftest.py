@@ -99,7 +99,14 @@ class Env:
         # Only fake harnesses and system tools: a real harness on PATH must never run in tests.
         system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
         monkeypatch.setenv("PATH", os.pathsep.join([str(self.bin)] + system))
-        monkeypatch.setenv("PYTHONPATH", str(SRC))
+        pythonpath = [str(SRC)]
+        import site
+        if site.ENABLE_USER_SITE and hasattr(site, "USER_BASE") and Path(site.USER_BASE).exists():
+            monkeypatch.setenv("PYTHONUSERBASE", site.USER_BASE)
+        for p in sys.path:
+            if "site-packages" in p and p not in pythonpath and Path(p).is_dir():
+                pythonpath.append(p)
+        monkeypatch.setenv("PYTHONPATH", os.pathsep.join(pythonpath))
         monkeypatch.setenv("GIT_AUTHOR_NAME", "t")
         monkeypatch.setenv("GIT_AUTHOR_EMAIL", "t@t")
         monkeypatch.setenv("GIT_COMMITTER_NAME", "t")

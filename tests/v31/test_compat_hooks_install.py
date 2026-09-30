@@ -88,6 +88,9 @@ def test_worker_write_outside_worktree_is_denied_on_claude(env):
 
 def test_install_is_idempotent_backs_up_and_uninstall_removes_only_managed(env, monkeypatch):
     home = env.home
+    import site
+    if site.ENABLE_USER_SITE and hasattr(site, "USER_BASE") and Path(site.USER_BASE).exists():
+        monkeypatch.setenv("PYTHONUSERBASE", site.USER_BASE)
     monkeypatch.setenv("HOME", str(home))
     (home / ".claude").mkdir()
     settings = home / ".claude" / "settings.json"

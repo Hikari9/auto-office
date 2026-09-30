@@ -145,3 +145,30 @@ def test_no_recheck_while_a_task_is_not_accepted(env):
     assert landing["run_checks"] == ['python3 -c "assert 2 == 2"']  # still re-derived
     assert "integration.recheck" not in _events(con, run_id)  # but no recheck: T2 isn't accepted
     assert landing.get("integration", {}).get("status") != "accepted"
+
+
+def test_planner_brief_says_how_to_cap_vitest_workers(env):
+    # rock-mcp run 2fc0f696 C7: `vitest run --maxWorkers=2` fails on vitest 1.6.
+    from office import briefs
+    run = {"id": "r" * 32, "office_version": "3.1.0", "goal": "g"}
+    text = briefs.planner_brief(env.con(), run, {"requirements": {}, "requirements_version": 1})
+    assert "--maxWorkers=N --minWorkers=1" in text
+
+
+def test_stray_worktree_holding_the_integration_branch_is_named_and_resume_retries(env, tmp_path):
+    # rock-mcp run C10: a manual worktree on office/<run>/integration made
+    # `git worktree add -B` fail with no hint of which worktree held it.
+    _go(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    stray = tmp_path / "stray"
+    env.git("worktree", "add", "-q", "-b", f"office/{run_id[:8]}/integration", str(stray))
+    env.office("dispatch", "T1", check=0)
+    integ = _landing(con, run_id)["integration"]
+    assert integ["status"] == "blocked" and str(stray) in integ["detail"] and "office resume" in integ["detail"], integ
+    code, data = env.ojson("status")
+    assert "office resume" in data["next"], data
+    env.git("worktree", "remove", "--force", str(stray))
+    env.office("resume", check=0)
+    assert _landing(con, run_id)["integration"]["status"] == "accepted", _landing(con, run_id)
+    assert "integration.retry" in _events(con, run_id)
