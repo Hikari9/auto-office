@@ -5,6 +5,10 @@ from conftest import PLAN_TWO, start_inline
 
 from office import plan_view, planfile
 
+
+def _draft(env):
+    return next((env.repo / ".office" / "plans").glob("*/PLAN.md"))
+
 PLAN_STACKED = PLAN_TWO.replace("### T2: Implement mul\nscope: mul.py\ndepends: none",
                                 "### T2: Implement mul\nscope: mul.py\ndepends: T1")
 PLAN_THREE = PLAN_TWO + """
@@ -28,7 +32,7 @@ def test_submit_shows_parallel_lanes_routes_and_checkpoints(env):
     assert ("checkpoints: T1 accepted [checks, code review] -> T2 accepted [checks, code review] "
             "-> integration review -> handoff PR (task PRs off: no origin remote)") in out, out
     assert "end state: ask" in out, out
-    body = (env.repo / ".office" / "PLAN.md").read_text()
+    body = _draft(env).read_text()
     assert planfile.DIAGRAM_BEGIN in body and planfile.DIAGRAM_END in body
     # The generated block is output, not plan content: resubmitting is a no-op.
     code, out = env.office("submit")
@@ -53,7 +57,7 @@ def test_contract_amendment_shows_only_the_delta(env):
     assert code == 0, out
     assert "changes vs p1:" in out and "T3 added: Docs" in out and "stacked on T2 (+ needs T1)" in out, out
     assert "wave 1" not in out and "full diagram: office inspect plan" in out, out
-    assert "<!-- office:diagram p2" in (env.repo / ".office" / "PLAN.md").read_text()
+    assert "<!-- office:diagram p2" in _draft(env).read_text()
 
 
 def test_layout_and_diff_units():
