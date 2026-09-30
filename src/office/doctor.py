@@ -16,6 +16,17 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
     problems = 0
     ver = version.current()
     res.add(f"office {ver} (exact identity: {'yes' if version.is_exact(ver) else 'NO'})")
+    drift = version.install_drift()
+    if drift is not None:
+        at = f"{drift['source']} @ {drift['head']}" if drift["head"] else drift["source"]
+        if drift["differ"]:
+            problems += 1
+            shown = ", ".join(drift["differ"][:3]) + (f" (+{len(drift['differ']) - 3} more)" if len(drift["differ"]) > 3 else "")
+            res.add(f"install: STALE — {len(drift['differ'])} runtime file(s) differ from {at}: {shown}. "
+                    f"The version string cannot show this. Reinstall: uv tool install --force {drift['source']} "
+                    "&& office install (runs pinned to this version pick up the new code)")
+        else:
+            res.add(f"install: matches its source {at}")
     if fix:
         frontdoor.register_current()
     reg = frontdoor.registered(ver)
