@@ -129,11 +129,11 @@ def test_requirements_change_needs_the_user_and_invalidates_authorization(env):
     assert code == 4 and "authorization-required" in out
 
 
-def test_unavailable_plan_reviewer_blocks_dispatch(env):
+def test_unreadable_plan_review_needs_attention_and_blocks_dispatch(env):
     _start(env, plan_reviewer=[{"reply": "no idea", "exit": 0}])
     env.office("approve", "plan", "--quote", "go", check=0)
     code, out = env.office("dispatch", "T1", env=EXTERNAL)
-    assert code == 4 and "plan-review-unavailable" in out, out
+    assert code == 4 and "plan-review-attention" in out, out
     code, out = env.office("approve", "waive", "plan-review", "--quote", "skip the plan review this time")
     assert code == 0
     code, out = env.office("dispatch", "T1", env=EXTERNAL)
