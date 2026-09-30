@@ -20,6 +20,9 @@ from typing import Iterator
 
 from office import paths
 
+# Bump when SHARED_COLUMNS or the DDL changes. The version is a record, not the
+# gate: every open also runs the additive column pass (see `migrate`), so a
+# column added without a bump still reaches existing databases.
 SCHEMA_VERSION = 3
 
 LEGACY_DDL = """
@@ -124,6 +127,7 @@ def migrate(con: sqlite3.Connection) -> None:
     # The version alone is not enough: #200 added columns without a bump, so
     # every runs.db already at v2 skipped them (#211). A missing table or
     # column re-runs the idempotent migration whatever the stored version says.
+    # The fast path is read-only; the slow path re-checks under BEGIN IMMEDIATE.
     if _schema_version(con) >= SCHEMA_VERSION and not _drifted(con):
         return
     with transaction(con):
@@ -132,10 +136,9 @@ def migrate(con: sqlite3.Connection) -> None:
         for stmt in _statements(LEGACY_DDL + OFFICE_DDL):
             con.execute(stmt)
         for table, columns in SHARED_COLUMNS.items():
-            have = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
+            have = _columns(con, table)
             for col in columns:
-                name = col.split()[0]
-                if name not in have:
+                if col.split()[0] not in have:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
         con.execute(TRIGGERS)
         con.execute("CREATE INDEX IF NOT EXISTS runs_repo ON runs(git_common_dir, phase)")
@@ -144,6 +147,19 @@ def migrate(con: sqlite3.Connection) -> None:
         # Never lower a stamp a newer runtime wrote; drift repair runs below it.
         con.execute("INSERT OR REPLACE INTO schema_meta(key, value) VALUES('office_schema', ?)",
                     (str(max(SCHEMA_VERSION, _schema_version(con))),))
+
+
+def missing_columns(con: sqlite3.Connection) -> list[str]:
+    """`table.column` for every SHARED_COLUMNS entry the database lacks."""
+    out = []
+    for table, columns in SHARED_COLUMNS.items():
+        have = _columns(con, table)
+        out.extend(f"{table}.{c.split()[0]}" for c in columns if c.split()[0] not in have)
+    return out
+
+
+def _columns(con: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
 
 
 def _schema_version(con: sqlite3.Connection) -> int:
