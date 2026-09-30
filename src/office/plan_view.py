@@ -100,7 +100,11 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
         out[t["id"]] = {"title": t["title"], "depends": list(t.get("depends") or []), **lay[t["id"]],
                         "route": ex.get("route"), "why": ex.get("why"), "gates": task_gates,
                         "review": rv.get("route"), "review_why": rv.get("why")}
-    return {"tasks": out}
+    from office import prs
+    frozen = state.current_requirements(con, run["id"])["frozen"]
+    s = prs.settings(con, run)
+    return {"tasks": out, "end_state": frozen.get("end_state") or "ask", "deploy": frozen.get("deploy") or {},
+            "prs": {k: s.get(k) for k in ("enabled", "reason", "base_branch", "merge_method")}}
 
 
 def store(con, run: dict, version: int, pv: dict) -> None:
@@ -124,8 +128,22 @@ def _where(entry: dict) -> str:
 def checkpoints(run: dict, pv: dict) -> str:
     order = sorted(pv["tasks"], key=lambda t: (pv["tasks"][t]["wave"], int(t[1:]) if t[1:].isdigit() else 0))
     chain = [f"{t} accepted" + (f" [{', '.join(pv['tasks'][t]['gates'])}]" if pv["tasks"][t].get("gates") else "")
-             for t in order] + ["integration review", "closeout"]
+             for t in order] + ["integration review"] + landing_chain(pv)
     return " -> ".join(chain)
+
+
+def landing_chain(pv: dict) -> list[str]:
+    """What happens after the integration review, per the user's end state."""
+    p, end, deploy = pv.get("prs") or {}, pv.get("end_state") or "ask", pv.get("deploy") or {}
+    if not p.get("enabled"):
+        tail = ["handoff PR (task PRs off: " + (p.get("reason") or "unknown") + ")"]
+        return tail + (["merge/deploy need task PRs"] if end in ("merge", "e2e") else [])
+    verify = [f"verify `{deploy['verify']}`"] if deploy.get("verify") else []
+    merge = f"merge PRs bottom-up into {p.get('base_branch')} ({p.get('merge_method')})"
+    return {"ask": ["PRs ready", "ask: merge / preview / e2e / stop"],
+            "preview": ["PRs ready", f"deploy preview `{deploy.get('preview')}`", *verify, "PRs left open"],
+            "merge": ["PRs ready", merge, "closeout"],
+            "e2e": ["PRs ready", merge, f"deploy prod `{deploy.get('prod')}`", *verify, "closeout"]}[end]
 
 
 def render(run: dict, version: int, pv: dict) -> list[str]:
@@ -149,6 +167,7 @@ def render(run: dict, version: int, pv: dict) -> list[str]:
                 lines.append(f"  {'':<{width}}  review: {e['review']}" + (f" ({e['review_why']})" if e.get("review_why") else ""))
         lines.append("")
     lines.append(f"checkpoints: {checkpoints(run, pv)}")
+    lines.append(f"end state: {pv.get('end_state') or 'ask'}")
     return lines
 
 

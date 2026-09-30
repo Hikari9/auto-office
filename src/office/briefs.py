@@ -14,6 +14,10 @@ non_goals:
 actions:
 - <irreversible or external action> | preconditions: <a>; <b>
 checks: <command run on the composed result: a fresh checkout, so install deps in it>   (optional)
+end_state: ask | preview | merge | e2e   (the user's intake answer; default ask)
+deploy_preview: <command>   (needed by preview; the user confirmed it at intake)
+deploy_prod: <command>      (needed by e2e)
+deploy_verify: <command that exits 0 when the deploy is healthy>   (recommended)
 
 ## Questions            (only if a product decision is needed from the user)
 - <question>

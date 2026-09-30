@@ -12,6 +12,9 @@ lines per task so a planner never writes JSON:
     actions:
     - deploy preview | preconditions: tests pass
     checks: pytest -q
+    end_state: e2e
+    deploy_prod: vercel deploy --prod
+    deploy_verify: curl -fsS https://example.test/health
 
     ## Tasks
     ### T1: Reset endpoint
@@ -31,6 +34,9 @@ TASK_HEADING = re.compile(r"^###\s+(T\d+)\s*[:.\-–]\s*(.+?)\s*$")
 SECTION = re.compile(r"^##\s+(.+?)\s*$")
 KEYVAL = re.compile(r"^([A-Za-z_][A-Za-z_ ]*?)\s*:\s*(.*)$")
 BLAST = ("local", "repo", "production", "production-data")
+# How far a run goes after its PRs (3.2): stop and ask, preview deploy only,
+# merge only, or merge + prod deploy end to end.
+END_STATES = ("ask", "preview", "merge", "e2e")
 LIST_KEYS = {"accept", "done", "non_goals", "non-goals", "actions", "checks", "notes", "interfaces", "questions"}
 VISUAL_KEYS = {"url", "start", "reference", "viewports", "states", "selectors", "strict", "affects", "ready", "auth",
                "deviations"}
@@ -190,6 +196,8 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
         "blast_radius": req.get("blast_radius"),
         "non_goals": (req.get("non_goals") or req.get("non-goals") or []),
         "named_actions": actions,
+        "end_state": req.get("end_state"),
+        "deploy": {k: req[f"deploy_{k}"] for k in ("preview", "prod", "verify") if req.get(f"deploy_{k}")},
     }
 
 
@@ -220,6 +228,15 @@ def _validate(plan: ParsedPlan) -> None:
     r = plan.requirements
     if r.get("blast_radius") and r["blast_radius"] not in BLAST:
         plan.errors.append(f"requirements blast_radius must be one of {', '.join(BLAST)}")
+    end = r.get("end_state")
+    if end and end not in END_STATES:
+        plan.errors.append(f"requirements end_state must be one of {', '.join(END_STATES)}")
+    if end == "preview" and not r["deploy"].get("preview"):
+        plan.errors.append("end_state preview needs `deploy_preview: <command>`")
+    if end == "e2e" and not r["deploy"].get("prod"):
+        plan.errors.append("end_state e2e needs `deploy_prod: <command>`")
+    if end in ("preview", "e2e") and not r["deploy"].get("verify"):
+        plan.warnings.append("no `deploy_verify:` command; the deploy is recorded without verification")
     for a, b in _parallel_overlaps(plan.tasks):
         plan.warnings.append(f"{a} and {b} may run in parallel but their scopes overlap; leases will serialize them")
 

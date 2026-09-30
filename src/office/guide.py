@@ -111,6 +111,9 @@ def next_action(con, run: dict) -> str:
             return (f"integration {integ['status']}: {integ.get('detail', '')}; fix the cause, then office resume "
                     "to retry integration")
         return "no action; integration verification is running"
+    if ((run.get("landing") or {}).get("prs") or {}).get("enabled"):
+        from office import land
+        return f"office land (end state: {land.end_state(con, run)['mode']})"
     branch = integ.get("branch")
     return (f"land it: push {branch} and open a PR (merge to main stays with the user), then office close --handoff <pr-url>"
             if branch else "office close --handoff <ref>")

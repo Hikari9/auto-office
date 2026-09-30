@@ -118,6 +118,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--base", help=argparse.SUPPRESS)
     s.add_argument("--planner", choices=["dedicated", "inline"], help="override who writes the plan")
     s.add_argument("--issue", help="the tracking GitHub issue (number or URL)")
+    s.add_argument("--no-prs", action="store_true", help="keep task work local: no pushes or per-task PRs")
 
     s = sp.add_parser("resume", parents=[common])
     s.add_argument("target", nargs="?")
@@ -153,6 +154,12 @@ def _parser() -> argparse.ArgumentParser:
     _redirect_args(s)
     s = sp.add_parser("ack", parents=[common])
     s.add_argument("amendment")
+    s = sp.add_parser("land", parents=[common])
+    mode = s.add_mutually_exclusive_group()
+    for m in ("merge", "preview", "e2e"):
+        mode.add_argument(f"--{m}", dest="land_mode", action="store_const", const=m)
+    s.add_argument("--quote", help="the user's words choosing this end state (ask mode)")
+    s.add_argument("--detect", action="store_true", help="propose deploy commands for intake")
     s = sp.add_parser("close", parents=[common])
     s.add_argument("--handoff", help="PR URL or branch handed to the user for merge")
     s.add_argument("--abandon", metavar="REASON", help="end the run without landing")
@@ -311,7 +318,7 @@ def _run(args, unknown) -> int:
                               size_class=args.size_class, irreversible=args.irreversible, volume=args.volume,
                               interview=args.interview, adversarial=args.adversarial, sets=args.set,
                               harness=args.harness, session=args.session, base=args.base, planner=args.planner,
-                              issue=args.issue)
+                              issue=args.issue, no_prs=args.no_prs)
         return emit(res, args)
     if cmd == "list":
         from office import lifecycle
@@ -388,6 +395,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "ack":
         from office import amend
         return amend.ack(con, run, args.amendment)
+    if cmd == "land":
+        from office import land
+        return land.land(con, run, mode=args.land_mode, quote=args.quote, detect=args.detect)
     if cmd == "close":
         from office import lifecycle
         if args.abandon:
