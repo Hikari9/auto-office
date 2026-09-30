@@ -28,6 +28,10 @@ Auto Office {ver}
   office submit                     planner/executor: submit your plan or your work
   office amend <scope> -- "<delta>" change the plan (scope: plan, T2, or T2,T3)
   office ack <amendment-id>         worker: record that you applied a delivered amendment
+  office rerun <task> --resume|--fresh
+                                    after a worker ends: continue its session, or start a new one with the findings
+  office dismiss <task|dispatch|--all>
+                                    close the kept panes of ended dispatches (final text is saved first)
   office close                      finish the run after acceptance and landing
 
   office list                       runs in this repository (--all for every run)
@@ -148,6 +152,13 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("revoke", parents=[common])
     s.add_argument("task")
     s.add_argument("--reason", default="orchestrator revoke")
+    s = sp.add_parser("rerun", parents=[common])
+    s.add_argument("task")
+    s.add_argument("--resume", action="store_true", help="continue the ended session (native harness resume)")
+    s.add_argument("--fresh", action="store_true", help="start a new session with the open findings in its brief")
+    s = sp.add_parser("dismiss", parents=[common])
+    s.add_argument("target", nargs="?")
+    s.add_argument("--all", dest="dismiss_all", action="store_true")
     s = sp.add_parser("raw", add_help=False)
     s.add_argument("rest", nargs=argparse.REMAINDER)
     s = sp.add_parser("hook", add_help=False)
@@ -360,6 +371,12 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "revoke":
         from office import dispatch
         return dispatch.revoke(con, run, args.task.upper(), args.reason)
+    if cmd == "rerun":
+        from office import rerun
+        return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh)
+    if cmd == "dismiss":
+        from office import rerun
+        return rerun.dismiss(con, run, args.target, all_=args.dismiss_all)
     from office.state import OfficeError
     raise OfficeError("usage", f"unknown command {cmd}", exit_code=2)
 
