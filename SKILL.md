@@ -75,9 +75,9 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
   `uv.lock`), and `office submit` then refuses them as out of scope. Reproduce a check in a scratch copy.
 - A task `checks:` command must install what its tests import (e.g. `uv run --extra visual ...` for
   Playwright). A suite that skips every test makes pytest exit 5, which fails the gate.
-- A dispatch can sit `running` after its agent has stopped (a refused submit, an ended turn) while
-  `office wait` still reports nothing new (#233). If a dispatch goes quiet, read its pane and
-  `git status`, fix the blocker, and re-prompt with `herdr agent prompt`.
+- An executor idle 60s without submitting (or whose process died) is a stall: `office wait` exits 3 and
+  the stall line names the dispatch, any refused-submit reason, its `pane-tail.txt`, and the next command.
+  Fix the blocker, then re-prompt with `herdr agent prompt` or follow that command.
 - Findings never relaunch anything on their own. When `next:` says a task's findings wait for you, run
   `office rerun T2 --resume` (the same harness session, in a fresh pane) or `office rerun T2 --fresh`;
   resume refuses with the reason and the `--fresh` command when the session cannot be reopened.
