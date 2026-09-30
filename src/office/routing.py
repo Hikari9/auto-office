@@ -327,7 +327,10 @@ def route(request: dict) -> dict:
             cid = candidate_id(c)
             caps = set(c.get("capabilities", []))
             if not required.issubset(caps):
-                rejected.append({"candidate": cid, "stage": 3, "reason": f"missing capabilities {sorted(required - caps)}"})
+                reason = f"missing capabilities {sorted(required - caps)}"
+                if "vision" in required - caps:
+                    reason += " (vision is proven per exact harness version and adapter: office doctor --probe-vision)"
+                rejected.append({"candidate": cid, "stage": 3, "reason": reason})
                 continue
             nxt.append(c)
         stage = nxt

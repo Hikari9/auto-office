@@ -135,6 +135,43 @@ def input_key(con, run: dict, task: dict, rev_id: str, app: dict) -> str:
                        "env": [run["office_version"], run["config_hash"]]})
 
 
+# ------------------------------------------------------------------ preflight
+
+LOCAL_ORIGIN = re.compile(r"^https?://(localhost|127\.0\.0\.1|\[::1\]|[a-z0-9-]+\.(test|local|localhost))(:\d+)?(/|$)", re.I)
+
+
+def capture_backend_missing() -> str | None:
+    try:
+        from playwright.sync_api import sync_playwright  # noqa: F401
+    except ImportError:
+        return "browser capture unavailable: install the visual extra (uv tool install 'auto-office[visual]')"
+    return None
+
+
+def preflight(tasks: list[dict]) -> tuple[list[str], list[str]]:
+    """(errors, warnings) for visual blocks the capture step could never
+    satisfy. Found at plan submit, not after an executor has done the work (#211)."""
+    errors, warnings = [], []
+    for t in tasks:
+        spec = t.get("visual") or {}
+        url = spec.get("url")
+        if spec.get("none") or not url:
+            continue
+        if not LOCAL_ORIGIN.match(url) and not spec.get("allow_remote_preview"):
+            errors.append(f"{t['id']}: visual url {url} is not a local/test origin; capture only runs against local "
+                          "servers (serve it locally with `start:`, or set `allow_remote_preview: yes` for a preview)")
+        elif not spec.get("start"):
+            problem = _wait_url(url, 2)
+            if problem and problem.startswith("not reachable"):
+                errors.append(f"{t['id']}: visual url {url} is {problem} and the block has no `start:`; add "
+                              "`start: <command that serves the app from the worktree>`, or start the server first")
+    if any(not (t.get("visual") or {}).get("none") and (t.get("visual") or {}).get("url") for t in tasks):
+        missing = capture_backend_missing()
+        if missing:
+            warnings.append(f"visual gates will report CAPTURE_BLOCKED: {missing}; install it before a task submits")
+    return errors, warnings
+
+
 # ------------------------------------------------------------------ capture
 
 def job_capture(con, run: dict, job: dict) -> dict:
@@ -218,8 +255,7 @@ def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Pat
         return {"evidence_status": "INVALID_COMPARISON", "cause": "worktree changed after submit (stale capture)",
                 "product_failures": []}
     url = spec["url"]
-    if not re.match(r"^https?://(localhost|127\.0\.0\.1|\[::1\]|[a-z0-9-]+\.(test|local|localhost))(:\d+)?(/|$)", url, re.I) \
-            and not spec.get("allow_remote_preview"):
+    if not LOCAL_ORIGIN.match(url) and not spec.get("allow_remote_preview"):
         return {"evidence_status": "CAPTURE_BLOCKED",
                 "cause": f"{url} is not a local/test origin; capture is limited to authorized local and preview environments",
                 "product_failures": []}
@@ -232,12 +268,9 @@ def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Pat
         problem = _wait_url(url, 90 if spec.get("start") else 10)
         if problem and problem.startswith("not reachable"):
             return {"evidence_status": "CAPTURE_BLOCKED", "cause": f"{url} {problem}", "product_failures": []}
-        try:
-            from playwright.sync_api import sync_playwright  # noqa: F401
-        except ImportError:
-            return {"evidence_status": "CAPTURE_BLOCKED",
-                    "cause": "browser capture unavailable: install the visual extra (uv tool install 'auto-office[visual]')",
-                    "product_failures": []}
+        missing = capture_backend_missing()
+        if missing:
+            return {"evidence_status": "CAPTURE_BLOCKED", "cause": missing, "product_failures": []}
         ref = reference_path(run, task, worktree)
         with db.transaction(con):
             ref_row = register_reference(con, run, task, ref) if ref else None

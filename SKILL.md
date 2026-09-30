@@ -98,7 +98,10 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
   user's words: `office amend requirements --quote "<words>" -- "<change>"`.
 - A paused or blocked task names its blocker and what was preserved. Resolve it, or take the
   decision to the user; after exhausted convergence the user may accept a named gap with
-  `office approve waive T2:<gate> --quote "<words>"`.
+  `office approve waive T2:<gate> --quote "<words>"`. When a visual gate is UNAVAILABLE and the user has a
+  reviewer run it by hand, record that review file as the gate result:
+  `office approve visual T2 --by <harness>/<model>[@effort] --report <file> --quote "<words>"` (never the
+  producer's model family).
 - If a command reports a missing route or trust, show the user the route notice; only they can
   promote trust (`office approve trust <route> --quote "<words>"`).
 - When the user names a model, dispatch with `--as <harness>/<model>[@effort]` (add `--cli "<argv>"` for an

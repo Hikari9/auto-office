@@ -11,6 +11,7 @@ the same file without schema errors.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -19,7 +20,7 @@ from typing import Iterator
 
 from office import paths
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -120,11 +121,13 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
 
 
 def migrate(con: sqlite3.Connection) -> None:
-    current = _schema_version(con)
-    if current >= SCHEMA_VERSION:
+    # The version alone is not enough: #200 added columns without a bump, so
+    # every runs.db already at v2 skipped them (#211). A missing table or
+    # column re-runs the idempotent migration whatever the stored version says.
+    if _schema_version(con) >= SCHEMA_VERSION and not _drifted(con):
         return
     with transaction(con):
-        if _schema_version(con) >= SCHEMA_VERSION:
+        if _schema_version(con) >= SCHEMA_VERSION and not _drifted(con):
             return
         for stmt in _statements(LEGACY_DDL + OFFICE_DDL):
             con.execute(stmt)
@@ -138,8 +141,9 @@ def migrate(con: sqlite3.Connection) -> None:
         con.execute("CREATE INDEX IF NOT EXISTS runs_repo ON runs(git_common_dir, phase)")
         con.execute("CREATE INDEX IF NOT EXISTS findings_task ON findings(run_id, task_id, state)")
         con.execute("CREATE INDEX IF NOT EXISTS dispatches_run ON dispatches(run_id, task_id)")
+        # Never lower a stamp a newer runtime wrote; drift repair runs below it.
         con.execute("INSERT OR REPLACE INTO schema_meta(key, value) VALUES('office_schema', ?)",
-                    (str(SCHEMA_VERSION),))
+                    (str(max(SCHEMA_VERSION, _schema_version(con))),))
 
 
 def _schema_version(con: sqlite3.Connection) -> int:
@@ -148,6 +152,21 @@ def _schema_version(con: sqlite3.Connection) -> int:
     except sqlite3.OperationalError:
         return 0
     return int(row[0]) if row else 0
+
+
+_TABLES = re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", LEGACY_DDL + OFFICE_DDL)
+
+
+def _drifted(con: sqlite3.Connection) -> bool:
+    """True when a table or shared column this version expects is absent."""
+    have = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not have.issuperset(_TABLES):
+        return True
+    for table, columns in SHARED_COLUMNS.items():
+        cols = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
+        if any(col.split()[0] not in cols for col in columns):
+            return True
+    return False
 
 
 def _statements(ddl: str):

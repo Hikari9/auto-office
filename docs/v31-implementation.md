@@ -141,6 +141,11 @@ plan defect on the scope, dependencies accepted on the revision this one built o
 superseded revision is stale: audit-only, its findings carried forward. A revision with no gates
 is accepted only when policy explicitly requires none (`checks: none`, a gear funding no review,
 nothing user-visible). User waivers (`office approve waive T2:visual`) are recorded as named gaps.
+A visual review the user had run outside Office (`office approve visual T2 --by <route> --report
+<file>`) is recorded as a new visual gate on the current revision: the file must parse as a visual
+review with a PASS or CHANGES_REQUIRED verdict, and the reviewer must not share the producer's
+model family. Plan submit refuses a visual block capture could never reach (a non-local URL, or
+an unreachable local URL with no `start:`) and warns when no capture backend is installed.
 
 **Convergence.** Rounds count per (task, gate). A repeated finding fingerprint across rounds, or
 the round budget, triggers the task's single escalation (a different route, told to diagnose);

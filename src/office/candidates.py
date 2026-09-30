@@ -170,6 +170,19 @@ def vision_proven(con: sqlite3.Connection, candidate: dict, adapter: dict) -> bo
     return conformance.proof_status(con, candidate, adapter, "vision") == "pass"
 
 
+def vision_note(con: sqlite3.Connection, candidate: dict) -> str:
+    """Why a visual route has no `vision` capability yet. A proof binds to the
+    exact harness version and adapter, so an upgrade leaves it unproven (#211)."""
+    row = con.execute("SELECT harness_version, result, proved_at FROM capability_proofs WHERE capability='vision' "
+                      "AND harness=? AND model=? AND effort IS ? ORDER BY proved_at DESC LIMIT 1",
+                      (candidate.get("harness"), candidate.get("invocation_model_id"), candidate.get("effort"))).fetchone()
+    how = "the first visual gate probes it, or office doctor --probe-vision"
+    if row is None:
+        return f"vision never probed on this route; {how}"
+    return (f"vision unproven for {candidate.get('harness')} {candidate.get('harness_version')} "
+            f"(last {row['result']} on {row['harness_version']}, {row['proved_at'][:10]}); {how}")
+
+
 _FAMILY_VERSION = re.compile(r"^([a-z]+)-(\d+(?:\.\d+)*)")
 
 
@@ -392,5 +405,7 @@ def trust_report(con: sqlite3.Connection) -> list[str]:
             line = f"trust {role} {triple}: {state}"
             if state != "proven":
                 line += f" | office approve trust {triple} --quote \"<user's words>\""
+            if KIND_FOR_ROLE.get(role) == "vision" and "vision" not in c["capabilities"]:
+                line += f" | {vision_note(con, c)}"
             lines.append(line)
     return lines
