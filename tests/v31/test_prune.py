@@ -94,3 +94,39 @@ def test_abandoned_run_is_prunable_but_paused_is_not(env):
     env.office("start", "paused one", "--planner", "inline", check=0)
     code, out = env.office("prune")
     assert rid[:8] in out and "would prune 1" in out
+
+
+def test_run_flag_restricts_prune_to_that_run(env):
+    """`--run` names one run; it must never widen to every finished run."""
+    first = _finished_run(env)
+    env.office("start", "second", "--planner", "inline", check=0)
+    con = env.con()
+    second = con.execute("SELECT id FROM runs WHERE id<>? ORDER BY created_at DESC", (first,)).fetchone()[0]
+    code, out = env.office("close", "--abandon", "not needed", "--run", second)
+    assert code == 0, out
+    code, out = env.office("prune")
+    assert "would prune 2" in out, out
+    before = _snapshot(env)
+    code, out = env.office("prune", "--run", second[:8])
+    assert code == 0 and "would prune 1" in out and second[:8] in out and first[:8] not in out, out
+    assert f"--run {second[:8]}" in out, out
+    assert _snapshot(env) == before
+    code, out = env.office("prune", "-f", "--run", second[:8])
+    assert code == 0 and "pruned 1" in out, out
+    assert con.execute("SELECT pruned_at FROM runs WHERE id=?", (second,)).fetchone()[0]
+    assert con.execute("SELECT pruned_at FROM runs WHERE id=?", (first,)).fetchone()[0] is None
+    code, out = env.office("prune", "--run", second[:8])
+    assert code != 0 and "already-pruned" in out, out
+
+
+def test_run_flag_refuses_unknown_and_unfinished_runs(env):
+    _finished_run(env)
+    env.office("start", "still active", "--planner", "inline", check=0)
+    con = env.con()
+    active = con.execute("SELECT id FROM runs WHERE phase NOT IN ('closed','abandoned')").fetchone()[0]
+    before = _snapshot(env)
+    code, out = env.office("prune", "-f", "--run", active[:8])
+    assert code != 0 and "run-not-finished" in out, out
+    code, out = env.office("prune", "-f", "--run", "ffffffff0000")
+    assert code != 0 and "unknown-run" in out, out
+    assert _snapshot(env) == before

@@ -189,11 +189,17 @@ import json, sys
 print(json.dumps({
     'pane_id': sys.argv[1],
     'agent': sys.argv[2] or None,
+    'kind': sys.argv[7] or None,
     'dispatch_id': sys.argv[3],
     'run_id': sys.argv[4],
+    'spawned_at': sys.argv[5],
     'recorded_at': sys.argv[5],
+    # herdr-ledger sweep only closes rows owned by the caller's pane.
+    'orchestrator_pane_id': sys.argv[6] or None,
+    'status': 'working',
+    'closed': False,
 }))
-" "$PANE_ID" "$AGENT_NAME" "$DISPATCH_ID" "$RUN_ID" "$NOW" >> "$LEDGER"
+" "$PANE_ID" "$AGENT_NAME" "$DISPATCH_ID" "$RUN_ID" "$NOW" "${HERDR_PANE_ID:-}" "${ADAPTER:-}" >> "$LEDGER"
 fi
 
 # Record a start receipt when the full identity/version/disclosure surface is

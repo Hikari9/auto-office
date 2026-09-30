@@ -145,9 +145,14 @@ def job_integrate(con, run: dict, job: dict) -> dict:
                         (outcome["verdict"], outcome.get("summary"), now_iso(), gid))
         results["checks"] = outcome["verdict"]
         if outcome["verdict"] != "PASS":
+            detail = f"run checks {outcome['verdict']}: {outcome.get('summary', '')[:160]}"
+            hint = missing_deps_hint(outcome)
+            if hint:
+                detail += f" | {hint}"
             with db.transaction(con):
-                _set_integration(con, run, status="blocked", detail=f"run checks {outcome['verdict']}: {outcome.get('summary', '')[:160]}")
-                state.emit(con, run, "integration.failed", f"INTEGRATION checks {outcome['verdict']} on the composed result")
+                _set_integration(con, run, status="blocked", detail=detail)
+                state.emit(con, run, "integration.failed", f"INTEGRATION checks {outcome['verdict']} on the composed result"
+                           + (f"; {hint}" if hint else ""))
             return results
     if needs_review:
         gid = _gate(con, run, integ_rev, "integration_review", commit)
@@ -176,6 +181,21 @@ def job_integrate(con, run: dict, job: dict) -> dict:
         _set_integration(con, run, status="accepted", detail="composed result verified")
         state.emit(con, run, "integration.accepted", f"READY: integration PASS on {commit[:10]} ({branch})")
     return results
+
+
+MISSING_DEPS_HINT = ("the composed worktree is a fresh checkout with no installed dependencies (anything not in git, "
+                     "such as node_modules or a virtualenv, is absent and is recreated on every compose); make the "
+                     "plan's run-level `checks:` install them first, e.g. `pnpm install --frozen-lockfile && pnpm lint`, "
+                     "then office amend plan")
+
+
+def missing_deps_hint(outcome: dict) -> str | None:
+    """When a run-level check could not find its command, say why that happens
+    on the composed tree and what the plan must do. Office never runs a package
+    manager on its own."""
+    if outcome.get("verdict") == "UNAVAILABLE" and "command not found" in (outcome.get("summary") or ""):
+        return MISSING_DEPS_HINT
+    return None
 
 
 def _gate(con, run, rev, kind, commit) -> str:

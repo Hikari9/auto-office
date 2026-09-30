@@ -179,6 +179,7 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author) -> Result:
     if parsed.errors:
         raise Refused("plan-invalid", "plan has problems: " + "; ".join(parsed.errors[:5]),
                       next_step="fix .office/PLAN.md, then retry the amendment")
+    _require_contract_edit(con, run, scope_ids, delta, text, parsed)
     with db.transaction(con):
         run = state.get_run(con, run["id"])
         version = run["plan_version"] + 1
@@ -204,6 +205,46 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author) -> Result:
         lines.append(f"new authority entries need user authorization: {', '.join(flagged)}")
     return Result(lines=lines, next=('ask the user (native question tool) for authorization, then office approve ' + flagged[0] + ' --quote "<words>"')
                   if flagged else "exceptions only; office status")
+
+
+def _task_changed(cur: dict, planned: dict | None) -> bool:
+    """Whether the plan's entry for a task differs from the task's recorded
+    contract and acceptance (the fields plans.sync_tasks versions)."""
+    if planned is None:
+        return cur["status"] != "cancelled"  # removed from the plan
+    return (cur["scope"] != planned["scope"] or (cur["interfaces"] or []) != planned["interfaces"]
+            or cur["accept"] != planned["accept"] or cur["checks"] != (planned["checks"] or [])
+            or cur["visual"] != planned["visual"] or cur["depends"] != planned["depends"]
+            or cur["title"] != planned["title"])
+
+
+def _require_contract_edit(con, run: dict, scope_ids: list[str], delta: str, text: str, parsed) -> None:
+    """An inline contract amendment is the edited PLAN.md. Without the edit it
+    would bump the plan version while the named task keeps its old contract, so
+    a relaunched executor works to the old scope; refuse instead."""
+    scope = ",".join(scope_ids) or "plan"
+    nxt = (f"edit .office/PLAN.md so {'the ' + scope + ' task entry' if scope_ids else 'the plan'} states the "
+           f'contract change, then office amend {scope} --contract -- "{delta.strip()[:80]}"')
+    current = state.current_plan(con, run["id"])
+    if current and sha256_bytes(text.encode()) == current["content_hash"]:
+        raise Refused("plan-not-edited", ".office/PLAN.md is identical to the current plan "
+                      f"p{current['version']}; a contract amendment records the edited plan, not the request text",
+                      scope=scope, preserved="plan and task contracts unchanged", next_step=nxt)
+    if not scope_ids:
+        return
+    planned = {p["id"]: p for p in parsed.tasks}
+    unchanged = [tid for tid in scope_ids if not _task_changed(state.get_task(con, run["id"], tid), planned.get(tid))]
+    if unchanged:
+        changed = sorted(tid for tid, p in planned.items()
+                         if tid not in scope_ids and (state.get_task(con, run["id"], tid) is None
+                                                      or _task_changed(state.get_task(con, run["id"], tid), p)))
+        raise Refused("contract-not-edited", f".office/PLAN.md does not change the entry for {', '.join(unchanged)}; "
+                      "its contract would stay at the old version"
+                      + (f" (the edit changes {', '.join(changed)})" if changed else ""),
+                      scope=scope, preserved="plan and task contracts unchanged",
+                      next_step=nxt if not changed else
+                      f"edit {', '.join(unchanged)} in .office/PLAN.md, or name the tasks the edit changes: "
+                      f'office amend {",".join(changed)} --contract -- "<summary>"')
 
 
 def contract_from_planner(con, run: dict, amendment_id: str | None, changes: dict, version: int) -> None:

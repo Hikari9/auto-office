@@ -33,9 +33,17 @@ class Parsed:
         return not self.errors
 
 
+# What a TUI puts around a reply line when it is read off a pane: message
+# bullets (`• `, `⏺ `), tree and box-drawing gutters, and check marks.
+_LEAD_GLYPHS = "•●⏺◦▪▸►‣∙·○◆⎿└├│┃║▌▎▏╭╰✓✔"
+_LEAD = re.compile(r"^(?:[-*>]\s+|[" + _LEAD_GLYPHS + r"]\s*)+")
+_TRAIL = re.compile(r"\s*[│┃║▌▐╮╯]+\s*$")
+
+
 def _clean(line: str) -> str:
     line = line.strip().strip("`").strip()
-    line = re.sub(r"^[-*>]\s+", "", line)
+    line = _LEAD.sub("", line)
+    line = _TRAIL.sub("", line).strip().strip("`").strip()
     return line.replace("**", "")
 
 
