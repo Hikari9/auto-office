@@ -80,6 +80,18 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 - After a first plan review of CHANGES_REQUIRED: edit the run's `PLAN.md`, run
   `office amend plan -- "<what changed>"`, then dispatch eligible work immediately; the re-review
   runs concurrently. A PLAN_DEFECT blocks its scope until an independent reviewer clears it.
+- A PLAN_DEFECT means a requirement or assumption the plan rests on is unachievable or wrong;
+  CHANGES_REQUIRED is only a plan amendment. On a defect, trace it to the requirement or assumption
+  behind it. A plan-only cause (a task split, an ordering) is a normal `--contract` fix. Otherwise
+  ask the user (native question tool) how to redirect that requirement, revise the plan, then
+  `office amend plan --contract --redirect P3 --root-cause "<requirement>" --quote "<words>"
+  [--requirement "<new requirement>"] [--reviewer same|fresh] -- "<fix>"`. The redirect resets the
+  plan-review budget. `--requirement` records r(n+1), which the same quote authorizes. Choose
+  `--reviewer same` (resumes the reviewer that raised it) when its context helps judge the fix, and
+  `fresh` (the default, another route) when its framing rested on the old requirement. A dedicated
+  planner asks the user in its own pane when it can, then runs `office submit --redirect ...`.
+  Otherwise it lists the question under `## Questions`, and you ask the user and redirect. If the
+  user judges the defect wrong, run `office approve waive P3 --quote "<words>"`.
 - Ordinary amendments (decomposition, ordering, acceptance detail, tests) are yours:
   `office amend <T2|plan> -- "<delta>"`. Scope, interfaces, ownership, and authority are contract
   amendments: `office amend <scope> --contract -- "<request>"`. Requirements change only on the

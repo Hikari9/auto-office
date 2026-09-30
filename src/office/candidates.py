@@ -322,8 +322,9 @@ def _preferred_seed(policy_cfg: dict, run: dict):
 
 def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                task_id: str | None = None, override: str | None = None,
-               exclude: set[str] | None = None, probe: bool = True) -> dict:
-    """Build the request and route. Returns the routing result plus request."""
+               exclude: set[str] | None = None, probe: bool = True, exact: str | None = None) -> dict:
+    """Build the request and route. Returns the routing result plus request.
+    `exact` keeps only the candidate with that route identity (harness@major/model@effort)."""
     policy_cfg = role_policy(config, role)
     # An explicit --route names its model, so it is not held to the family floor.
     floors = None if override else config.get("model_family_floors")
@@ -337,6 +338,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                     or f"model:{c['harness']}/{c['invocation_model_id']}" in exclude
                     or f"family:{model_family(c['model_id'])}" in exclude)
         candidates = [c for c in candidates if not excluded(c)]
+    if exact:
+        candidates = [c for c in candidates if routing.candidate_id(c) == exact]
     if override:
         want = parse_route_override(override)
         candidates = [c for c in candidates

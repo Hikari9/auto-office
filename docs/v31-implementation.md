@@ -186,6 +186,19 @@ while the re-review runs; a PLAN_DEFECT (closed class list, cited evidence) bloc
 dependants until an independent review names it `CLEARED` on a later plan version; UNAVAILABLE
 blocks until a substitute answers or the user waives.
 
+A PLAN_DEFECT is a requirement or assumption problem, not an amendment. The planner traces it to
+the requirement or assumption behind it and, unless the cause is plan-only, asks the user how to
+redirect it. `office amend plan --contract --redirect P<n>` (or a planner's `office submit
+--redirect P<n>`) records the user's quote and the root cause (`src/office/redirect.py`). An
+optional `--requirement` records r(n+1), authorized by the same quote when r(n) was authorized.
+The redirect cancels queued rounds, resets the plan-review round budget and the escalation, and
+sets the next reviewer. `same` resumes the defect's reviewer session when the harness and herdr
+allow it, otherwise it runs a fresh session on the exact same route. `fresh`, the default, excludes
+that route. The defect still clears only by `CLEARED`, and the re-review brief carries the
+redirect. `office approve waive P<n> --quote` closes a defect the user judges wrong without
+another review. The runtime does not gate the user exchange itself. It is guidance in `next:`, the
+planner brief, and `office submit --help`.
+
 `office amend` re-reads the run's draft `.office/plans/<run>/PLAN.md`: ordinary amendments may change decomposition, ordering,
 acceptance and tests; a change to a task's scope or interfaces, a new overlapping task, a new named
 action, or authority words in the delta is refused as contract-level. Contract amendments go to the

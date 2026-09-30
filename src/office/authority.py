@@ -14,7 +14,8 @@ from office.state import Refused, Usage
 from office.util import dumps, now_iso, short
 
 
-def approve(con, run: dict, target: str, quote: str | None, extra: list[str] | None = None) -> Result:
+def approve(con, run: dict, target: str, quote: str | None, extra: list[str] | None = None,
+            root_cause: str | None = None) -> Result:
     import os
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-approve", "a worker cannot approve anything")
@@ -36,8 +37,8 @@ def approve(con, run: dict, target: str, quote: str | None, extra: list[str] | N
         return _trust(con, run, extra[0], quote)
     if t == "waive":
         if not extra:
-            raise Usage("missing-gate", "name what to waive", next_step="office approve waive <T2:visual|plan-review> --quote ...")
-        return _waive(con, run, extra[0], quote)
+            raise Usage("missing-gate", "name what to waive", next_step="office approve waive <T2:visual|plan-review|P3> --quote ...")
+        return _waive(con, run, extra[0], quote, root_cause)
     raise Usage("unknown-authority", f"nothing named {target!r} needs approval",
                 next_step="office status shows any authority the run needs")
 
@@ -99,8 +100,8 @@ def _trust(con, run, triple: str, quote: str) -> Result:
                   data={"trust_act_id": act["trust_act_id"]})
 
 
-def _waive(con, run, spec: str, quote: str) -> Result:
-    from office import gates, plans
+def _waive(con, run, spec: str, quote: str, root_cause: str | None = None) -> Result:
+    from office import gates, plans, redirect
     with db.transaction(con):
         run = state.get_run(con, run["id"])
         con.execute("INSERT INTO authorizations(id, run_id, kind, target, requirements_version, authorized_by, quote, created_at) "
@@ -119,6 +120,9 @@ def _waive(con, run, spec: str, quote: str) -> Result:
             plans.unpause_cleared(con, run)
             state.emit(con, run, "authority.waiver", "user waived further plan review")
             line = "plan review waived by the user (recorded)"
+        elif re.fullmatch(r"P\d+", spec, re.I):
+            # The user judged a plan defect wrong: the requirement stands.
+            line = redirect.waive(con, run, spec, quote, root_cause)
         else:
             m = re.fullmatch(r"(T\d+):(checks|code_review|code|visual|ui)", spec, re.I)
             if not m:

@@ -25,7 +25,9 @@ PLAN_SUBJECT = "plan"
 
 # ------------------------------------------------------------------ submit
 
-def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id: str | None = None) -> Result:
+def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id: str | None = None,
+                redirect: dict | None = None) -> Result:
+    """`redirect` is a validated defect redirect (office.redirect) this revision follows."""
     if not plan_path.is_file():
         raise Usage("no-plan-file", f"no plan at {plan_path}", next_step=f"write {plan_path}, then office submit")
     text = plan_path.read_text(encoding="utf-8")
@@ -37,11 +39,19 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
                       data={"errors": parsed.errors})
     digest = sha256_bytes(text.encode())
     current = state.current_plan(con, run["id"])
+    if current and current["content_hash"] == digest and redirect:
+        raise Refused("plan-unchanged", "a redirect submits the revision that follows it; the plan is unchanged",
+                      scope="plan", next_step=f"revise {plan_path} to follow the redirect, then submit again")
     if current and current["content_hash"] == digest:
         return Result(lines=[f"plan p{current['version']} already submitted"], next=_after_plan_next(con, run))
     res = Result()
     with db.transaction(con):
         run = state.get_run(con, run["id"])
+        if redirect:
+            from office import redirect as redirect_mod
+            for line in redirect_mod.record(con, run, redirect):
+                res.add(line)
+            run = state.get_run(con, run["id"])
         new_version = (run["plan_version"] or 0) + 1
         kind = "initial" if new_version == 1 else "contract"
         _apply_requirements(con, run, parsed.requirements, submitter)
@@ -212,9 +222,21 @@ def review_state(con, run: dict) -> dict:
         "first_version": first["plan_version"] if first else None,
         "last_verdict": done[-1]["verdict"] if done else None,
         "pending": bool(pending),
-        "rounds_used": len([g for g in gates if g["status"] in ("done", "queued", "running") and not g["escalated"]]),
+        "rounds_used": len([g for g in gates if g["status"] in ("done", "queued", "running") and not g["escalated"]])
+                       - _round_base(run),
         "open_defects": open_defects(con, run["id"]),
     }
+
+
+def _round_base(run: dict) -> int:
+    """Rounds spent before the latest defect redirect; a redirect resets the budget."""
+    return int((run.get("plan_review") or {}).get("round_base") or 0)
+
+
+def budget_rounds(con, run: dict) -> int:
+    """Non-escalated plan-review rounds counted against plan_review_max_rounds."""
+    run = state.get_run(con, run["id"])
+    return len([g for g in plan_gates(con, run["id"]) if not g["escalated"]]) - _round_base(run)
 
 
 def queue_plan_review(con, run: dict, plan_version: int, *, escalated: bool = False, exclude: list[str] | None = None) -> str | None:
@@ -222,19 +244,25 @@ def queue_plan_review(con, run: dict, plan_version: int, *, escalated: bool = Fa
     if (state.get_run(con, run["id"]).get("plan_review") or {}).get("ended_reason") == "waived by the user":
         return None  # the user waived plan review; no further round runs
     gates = plan_gates(con, run["id"])
-    rounds = len([g for g in gates if not g["escalated"]])
+    rounds = budget_rounds(con, run)
     maximum = int((run.get("gates") or {}).get("plan_review_max_rounds") or 1)
     if not escalated and rounds >= maximum:
         return None
     if any(g["plan_version"] == plan_version and g["status"] in ("queued", "running") for g in gates):
         return None
+    from office import redirect
+    payload = {"exclude": list(exclude or [])}
+    choice = redirect.take_next_reviewer(con, run)
+    if choice and choice["mode"] == "same" and choice.get("dispatch"):
+        payload["resume_from"] = choice["dispatch"]
+    elif choice and choice.get("route") and choice["route"] not in payload["exclude"]:
+        payload["exclude"].append(choice["route"])
     gate_id = "G" + uuid.uuid4().hex[:8]
     con.execute("INSERT INTO gates(id, run_id, subject, plan_version, kind, input_key, status, round, escalated, created_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (gate_id, run["id"], PLAN_SUBJECT, plan_version, "plan_review", f"plan:{plan_version}", "queued",
                  rounds + 1, 1 if escalated else 0, now_iso()))
-    state.enqueue(con, run, "plan_review", {"gate_id": gate_id, "plan_version": plan_version,
-                                            "exclude": exclude or []},
+    state.enqueue(con, run, "plan_review", {"gate_id": gate_id, "plan_version": plan_version, **payload},
                   dedup_key=f"plan_review:{gate_id}", max_attempts=2)
     return gate_id
 
@@ -311,10 +339,11 @@ def job_plan_review(con, run: dict, job: dict) -> dict:
         return {"skipped": gate["status"]}
     plan = state.get_plan(con, run["id"], gate["plan_version"])
     req = state.current_requirements(con, run["id"])
-    rereview = gate["round"] > 1
+    rereview = gate["round"] > 1 or len(plan_gates(con, run["id"])) > 1
     brief = briefs.plan_review_brief(run, plan, req["frozen"], open_defects(con, run["id"]), rereview)
     outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
-                                       plan_review=True, exclude=job["payload"].get("exclude"))
+                                       plan_review=True, exclude=job["payload"].get("exclude"),
+                                       resume_from=job["payload"].get("resume_from"))
     with db.transaction(con):
         ingest_plan_review(con, state.get_run(con, run["id"]), gate["id"], outcome)
     return {"verdict": outcome.get("verdict")}
@@ -358,7 +387,7 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
     else:
         state.emit(con, run, "plan.unavailable", f"PLAN REVIEW UNAVAILABLE p{gate['plan_version']}: "
                    f"{outcome.get('summary') or 'no qualifying reviewer answered'}")
-    rounds = len([g for g in plan_gates(con, run["id"]) if not g["escalated"]])
+    rounds = budget_rounds(con, run)
     maximum = int((run.get("gates") or {}).get("plan_review_max_rounds") or 1)
     if verdict != "PASS" and rounds >= maximum and not pr.get("ended"):
         if open_defects(con, run["id"]) and not run.get("escalations_used"):

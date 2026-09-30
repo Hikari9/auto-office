@@ -497,6 +497,12 @@ def worker_env(run: dict, dispatch: dict, role: str) -> dict:
     return env
 
 
+def herdr_usable() -> bool:
+    """Whether launches here open Herdr panes (a native resume needs one)."""
+    return bool(os.environ.get("OFFICE_LAUNCHER", "auto") in ("auto", "herdr")
+                and os.environ.get("HERDR_ENV") == "1" and shutil.which("herdr"))
+
+
 def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait: bool = False,
            output: Path | None = None, images: list[Path] | None = None, include_dirs: list[Path] | None = None,
            prompt_file: Path | None = None, cli: str | None = None, external: bool = False,
@@ -520,7 +526,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
     env.update(extra)
     env.pop(frontdoor.HOP_ENV, None)
     launcher = os.environ.get("OFFICE_LAUNCHER", "auto")
-    use_herdr = (launcher in ("auto", "herdr") and os.environ.get("HERDR_ENV") == "1" and shutil.which("herdr"))
+    use_herdr = herdr_usable()
     if cli and not use_herdr:
         _launch_notice(run, dispatch, f"--cli needs a herdr session; left external instead. Start it by hand: {cli}")
         external = True

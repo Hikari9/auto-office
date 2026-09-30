@@ -67,6 +67,17 @@ def _lines(title: str, items) -> list[str]:
     return [title] + [f"- {i}" for i in items] if items else []
 
 
+PLANNER_DEFECT_PROTOCOL = """\
+For each defect, find the requirement or assumption that causes it. If a plan-only fix
+removes it (a task split, an ordering), fix the plan. If the cause is a requirement or
+assumption, do not work around it: ask the user how to redirect that requirement. If the
+user can answer you in this session, ask here, then submit with their words:
+  {submit}
+--reviewer same resumes the reviewer that raised it; fresh (default) routes a new one.
+If the user cannot answer here, put the question under ## Questions, naming the defect
+and the requirement, and submit; the orchestrator asks the user and returns the answer."""
+
+
 def planner_brief(con, run: dict, packet: dict) -> str:
     req = packet["requirements"]
     out = [
@@ -82,6 +93,12 @@ def planner_brief(con, run: dict, packet: dict) -> str:
     if packet.get("contract_request"):
         out += ["", "CONTRACT AMENDMENT REQUEST (from the orchestrator):", packet["contract_request"],
                 f"Revise {planpath.rel(run)} so the contract reflects this, keeping unaffected tasks unchanged."]
+    from office import plans, redirect
+    defects = [d for d in plans.open_defects(con, run["id"]) if d["category"] != "brief"]
+    if defects:
+        out += ["", "OPEN PLAN DEFECTS (a requirement or assumption the plan rests on does not hold):"]
+        out += [f"- {d['code']} {d['category']}: {d['summary']}" for d in defects]
+        out += [PLANNER_DEFECT_PROTOCOL.format(submit=redirect.SUBMIT_FORM)]
     plan = state.current_plan(con, run["id"])
     if plan:
         out += ["", f"CURRENT PLAN p{plan['version']} (revise it; do not start over):", plan["body"]]
@@ -161,5 +178,7 @@ def plan_review_brief(run: dict, plan: dict, requirements: dict, open_defects: l
         out.append("OPEN DEFECTS — say CLEARED <id> only if this revision fixes it, else repeat the DEFECT line:")
         for d in open_defects:
             out.append(f"- {d['code']} {d['category']}: {d['summary']}")
+        from office import redirect
+        out += redirect.brief_lines(run, open_defects)
     out += ["", PLAN_REVIEW_FORMAT, "", "PLAN:", plan["body"]]
     return "\n".join(out) + "\n"

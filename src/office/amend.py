@@ -25,7 +25,9 @@ AUTHORITY_TERMS = re.compile(
 
 
 def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, requirements: bool = False,
-          quote: str | None = None, cwd: Path | None = None) -> Result:
+          quote: str | None = None, cwd: Path | None = None, redirect: dict | None = None) -> Result:
+    """`redirect` ({defect, root_cause, requirement, reviewer}) marks a contract
+    amendment as the user's redirect of a plan defect (see office.redirect)."""
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-amend", "workers do not amend the plan; report the problem in your submission",
                       next_step="office submit")
@@ -33,12 +35,18 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
         raise Usage("missing-delta", "an amendment needs a delta", next_step='office amend <scope> -- "<delta>"')
     if state.is_terminal(run):
         raise Refused("run-terminal", f"run is {run['phase']}")
+    if redirect is not None:
+        from office import redirect as redirect_mod
+        if not contract or requirements or scope == "requirements":
+            raise Usage("redirect-needs-contract", "a defect redirect is a contract amendment",
+                        next_step=redirect_mod.AMEND_FORM)
+        redirect = redirect_mod.validate(con, run, dict(redirect, quote=quote))
     if requirements or scope == "requirements":
         return _requirements_change(con, run, delta, quote)
     scope_ids = _scope_ids(con, run, scope)
     plan_text = _orchestrator_plan_text(con, run, cwd)
     if contract:
-        return _contract(con, run, scope, scope_ids, delta, plan_text)
+        return _contract(con, run, scope, scope_ids, delta, plan_text, redirect)
     return _ordinary(con, run, scope, scope_ids, delta, plan_text)
 
 
@@ -67,22 +75,28 @@ def _requirements_change(con, run: dict, delta: str, quote: str | None) -> Resul
         raise Refused("user-quote-required", "only the user can change requirements; record their words",
                       next_step='office amend requirements --quote "<user\'s exact words>" -- "<change>"')
     with db.transaction(con):
-        run = state.get_run(con, run["id"])
-        cur = state.current_requirements(con, run["id"])
-        frozen = dict(cur["frozen"])
-        frozen.setdefault("user_changes", []).append(delta.strip())
-        version = cur["version"] + 1
-        con.execute("INSERT INTO requirements(run_id, version, frozen_json, source, quote, created_at) VALUES(?,?,?,?,?,?)",
-                    (run["id"], version, dumps(frozen), "user", quote.strip(), now_iso()))
-        state.update_run(con, run["id"], requirements_version=version)
-        amendment_id = _record(con, run, "requirements", [], delta, run["plan_version"], run["plan_version"])
-        live = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] not in ("accepted", "cancelled", "planned")]
-        _deliver(con, state.get_run(con, run["id"]), amendment_id, live, f"requirements r{version}: {delta.strip()}",
-                 run["plan_version"])
+        version = record_requirements(con, state.get_run(con, run["id"]), delta, quote)
         state.emit(con, run, "requirements.changed", f"REQUIREMENTS r{version}: {delta.strip()[:100]}; authorization required")
     jobs.kick(con, run["id"])
     return Result(lines=[f"requirements r{version} recorded | authorization for r{version} required"],
                   next='ask the user (native question tool) for authorization, then office approve plan --quote "<user\'s words>"')
+
+
+def record_requirements(con, run: dict, delta: str, quote: str) -> int:
+    """Record requirements r(n+1) from the user's words and deliver it to live
+    workers. Caller holds the tx. Returns the new version."""
+    cur = state.current_requirements(con, run["id"])
+    frozen = dict(cur["frozen"])
+    frozen.setdefault("user_changes", []).append(delta.strip())
+    version = cur["version"] + 1
+    con.execute("INSERT INTO requirements(run_id, version, frozen_json, source, quote, created_at) VALUES(?,?,?,?,?,?)",
+                (run["id"], version, dumps(frozen), "user", quote.strip(), now_iso()))
+    state.update_run(con, run["id"], requirements_version=version)
+    amendment_id = _record(con, run, "requirements", [], delta, run["plan_version"], run["plan_version"])
+    live = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] not in ("accepted", "cancelled", "planned")]
+    _deliver(con, state.get_run(con, run["id"]), amendment_id, live, f"requirements r{version}: {delta.strip()}",
+             run["plan_version"])
+    return version
 
 
 def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan_text: str | None) -> Result:
@@ -142,18 +156,26 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
     return res
 
 
-def _contract(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan_text: str | None) -> Result:
+def _contract(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan_text: str | None,
+              redirect: dict | None = None) -> Result:
     """Contract amendments belong to the planner. In a run whose orchestrator is
     the planner (inline mode), its edited PLAN.md is the contract amendment."""
     if run.get("planner_mode") == "inline":
         if plan_text is None:
             raise Usage("no-plan-file", f"edit {planpath.rel(run)} with the contract change first",
                         next_step=f'edit {planpath.rel(run)}, then office amend {scope} --contract -- "<summary>"')
-        return _apply_contract_text(con, run, scope_ids, delta, plan_text, author="orchestrator-as-planner")
+        return _apply_contract_text(con, run, scope_ids, delta, plan_text, author="orchestrator-as-planner",
+                                    redirect=redirect)
     from office import dispatch
+    from office import redirect as redirect_mod
     with db.transaction(con):
         run = state.get_run(con, run["id"])
         amendment_id = _record(con, run, "contract", scope_ids, delta, run["plan_version"], None)
+        request = f"{amendment_id}: {delta.strip()}"
+        if redirect:
+            redirect_lines = redirect_mod.record(con, run, redirect)
+            run = state.get_run(con, run["id"])
+            request += "\n" + redirect_mod.planner_note(redirect)
         graph = {t["id"]: t["depends"] for t in state.tasks(con, run["id"])}
         targets = set(scope_ids)
         for tid in scope_ids:
@@ -165,16 +187,16 @@ def _contract(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
             if t["id"] in targets and t["status"] not in ("accepted", "cancelled", "planned", "paused"):
                 state.update_task(con, run["id"], t["id"], status="paused", pause_reason=f"contract amendment {amendment_id}")
                 paused.append(t["id"])
-        dispatch.create_planner_task(con, run, contract_request=f"{amendment_id}: {delta.strip()}")
+        dispatch.create_planner_task(con, run, contract_request=request)
         state.emit(con, run, "plan.contract_requested", f"contract amendment {amendment_id} requested; planner queued",
                    audience="runtime")
     jobs.kick(con, run["id"])
     return Result(lines=[f"contract amendment {amendment_id} | planner P1 queued"
-                         + (f" | paused {','.join(paused)}" if paused else "")],
+                         + (f" | paused {','.join(paused)}" if paused else "")] + (redirect_lines if redirect else []),
                   next="no action; the revised plan returns here (unaffected work continues)")
 
 
-def _apply_contract_text(con, run, scope_ids, delta, text, author) -> Result:
+def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dict | None = None) -> Result:
     parsed = planfile.parse(text)
     if parsed.errors:
         raise Refused("plan-invalid", "plan has problems: " + "; ".join(parsed.errors[:5]),
@@ -182,6 +204,11 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author) -> Result:
     _require_contract_edit(con, run, scope_ids, delta, text, parsed)
     with db.transaction(con):
         run = state.get_run(con, run["id"])
+        redirect_lines = []
+        if redirect:
+            from office import redirect as redirect_mod
+            redirect_lines = redirect_mod.record(con, run, redirect)
+            run = state.get_run(con, run["id"])
         version = run["plan_version"] + 1
         amendment_id = _record(con, run, "contract", scope_ids, delta, run["plan_version"], version)
         con.execute("INSERT INTO plans(run_id, version, kind, body, tasks_json, requirements_json, created_by, created_at, "
@@ -200,7 +227,7 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author) -> Result:
             plans.queue_plan_review(con, run, version, escalated=plans.plan_review_ended(con, run))
         state.emit(con, run, "plan.amended", f"plan p{version} ({amendment_id}, contract)", audience="runtime")
     jobs.kick(con, run["id"])
-    lines = [f"plan p{version} | {amendment_id} contract | affected {','.join(affected) or 'none'}"]
+    lines = [f"plan p{version} | {amendment_id} contract | affected {','.join(affected) or 'none'}", *redirect_lines]
     if flagged:
         lines.append(f"new authority entries need user authorization: {', '.join(flagged)}")
     return Result(lines=lines, next=('ask the user (native question tool) for authorization, then office approve ' + flagged[0] + ' --quote "<words>"')
