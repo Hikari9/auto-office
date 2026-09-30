@@ -180,7 +180,7 @@ def test_no_interactive_profile_stays_headless(env, monkeypatch):
     assert not any(c[:1] == ["agent"] for c in _calls(state_file))
 
 
-def test_reviewer_dispatch_launches_read_only_in_herdr(env, monkeypatch):
+def test_reviewer_dispatch_launches_in_herdr_able_to_write_its_reply(env, monkeypatch):
     state_file = _fake(env, monkeypatch, reads=[BUSY])
     run, d = _live_dispatch(env, monkeypatch)
     monkeypatch.setenv("HERDR_ENV", "1")
@@ -201,12 +201,14 @@ def test_reviewer_dispatch_launches_read_only_in_herdr(env, monkeypatch):
         assert start[start.index("--kind") + 1] == kind
         args = start[start.index("--") + 1:]
         assert "fake-model" in args and "high" in " ".join(args)
+        # R12: a reviewer may write its reply file, and gets that file's directory.
+        assert str(out.parent) in args, args
         if kind == "claude":
-            assert args[args.index("--disallowedTools") + 1] == "Edit,Write,Bash,NotebookEdit"
-            assert args[args.index("--allowedTools") + 1] == "Read,Grep,Glob"
+            assert args[args.index("--disallowedTools") + 1] == "Edit,Bash,NotebookEdit"
+            assert args[args.index("--allowedTools") + 1] == "Read,Grep,Glob,Write"
             assert str(env.tmp) in args
         else:
-            assert args[args.index("--sandbox") + 1] == "read-only"
+            assert args[args.index("--sandbox") + 1] == "workspace-write"
         prompt = [c for c in calls if c[:2] == ["agent", "prompt"]][-1]
         assert str(out) in prompt[3] and "office submit" not in prompt[3]
         assert not any(c[-1].startswith("sh ") for c in calls)
@@ -214,7 +216,8 @@ def test_reviewer_dispatch_launches_read_only_in_herdr(env, monkeypatch):
     assert "OFFICE_ROLE=reviewer" in env_text and "OFFICE_DISPATCH_ID" not in env_text
 
 
-def test_reviewer_pane_reply_is_kept_when_no_file_was_written(env, monkeypatch):
+def test_reviewer_pane_text_is_never_taken_as_the_reply(env, monkeypatch):
+    # R13: the pane shows a verdict but no file was written; nothing is scraped.
     state_file = _fake(env, monkeypatch, gets=["done", "done", "done"])
     data = json.loads(state_file.read_text())
     data["content"] = "VERDICT: PASS"
@@ -223,7 +226,7 @@ def test_reviewer_pane_reply_is_kept_when_no_file_was_written(env, monkeypatch):
     from office import dispatch
     out = env.tmp / "reply.txt"
     assert dispatch.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0) == (0, "success")
-    assert "VERDICT: PASS" in out.read_text()
+    assert not out.exists()
 
 
 def test_agent_names_are_valid_for_herdr():

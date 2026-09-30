@@ -176,8 +176,10 @@ def _tree_digests(root: Path, rel_to: Path) -> dict[str, str]:
         files = sorted(p for p in root.rglob("*") if p.is_file())
     else:
         files = []
+    # Files a wheel never ships (OS metadata, bytecode) are not drift.
+    skip = {".DS_Store", "Thumbs.db"}
     return {str(f.relative_to(rel_to)): hashlib.sha256(f.read_bytes()).hexdigest()
-            for f in files if "__pycache__" not in f.parts and f.suffix != ".pyc"}
+            for f in files if "__pycache__" not in f.parts and f.suffix != ".pyc" and f.name not in skip}
 
 
 def install_drift(package_root: Path = PACKAGE_ROOT, source: Path | None = None) -> dict | None:

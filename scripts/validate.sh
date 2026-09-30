@@ -9,6 +9,11 @@ cd "$(git rev-parse --show-toplevel)"
 # own temp fixture repos would inherit them and commit onto the branch being pushed.
 unset $(git rev-parse --local-env-vars)
 
+# The tree under test, taken before any check runs: a commit that lands during
+# the run must not be stamped as validated.
+start_tree=""
+[ -z "$(git status --porcelain --untracked-files=no)" ] && start_tree="$(git rev-parse 'HEAD^{tree}')"
+
 # Same install as the old CI job: an editable package plus test deps, in a repo-local venv.
 # A user-site install is not enough: some tests point HOME at a temp dir, which hides it.
 # pip is configured for --user installs on some hosts, which a venv (and build's isolated env) rejects.
@@ -59,7 +64,8 @@ echo "== Validation passed"
 # rerun: a 12-minute gate inside `git push` holds the SSH connection idle and
 # GitHub drops it (the push dies with SIGPIPE). Only a clean tree is stamped,
 # since otherwise the tree that passed is not the one being pushed.
-if [ -z "$(git status --porcelain --untracked-files=no)" ]; then
+if [ -n "$start_tree" ] && [ -z "$(git status --porcelain --untracked-files=no)" ] \
+    && [ "$(git rev-parse 'HEAD^{tree}')" = "$start_tree" ]; then
   stamps="$(git rev-parse --git-common-dir)/office-validated"
-  mkdir -p "$stamps" && touch "$stamps/$(git rev-parse 'HEAD^{tree}')"
+  mkdir -p "$stamps" && touch "$stamps/$start_tree"
 fi

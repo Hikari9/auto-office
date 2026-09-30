@@ -153,6 +153,12 @@ def test_repeated_finding_stops_after_one_escalation(env):
                        {"write": {"calc.py": GOOD_ADD + "# try 3\n"}, "submit": True}],
         code_reviewer=[{"reply": finding}])
     env.office("dispatch", "T1", check=0)
+    # Each fix round is the orchestrator's choice now (R8): rerun fresh until
+    # convergence gives up.
+    for _ in range(3):
+        if _task(env)["status"] != "changes_required":
+            break
+        env.office("rerun", "T1", "--fresh", check=0)
     t = _task(env)
     assert t["status"] == "paused", t
     assert "escalation" in t["pause_reason"] or "exhausted" in t["pause_reason"], t["pause_reason"]

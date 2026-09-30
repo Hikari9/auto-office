@@ -42,10 +42,16 @@ def test_code_review_failure_then_fix(env):
     code, out = env.office("dispatch", "T1")
     assert code == 0, out
     code, data = env.ojson("status")
+    # The first submission failed its deterministic check. Findings wait for the
+    # orchestrator (R8): nothing relaunches until it picks resume or fresh.
+    assert data["data"]["tasks"]["T1"] == "changes_required", data
+    assert "office rerun T1 --resume | --fresh" in data["next"], data
+    assert [c["role"] for c in env.calls()].count("executor") == 1
+    code, out = env.office("rerun", "T1", "--fresh")
+    assert code == 0, out
+    code, data = env.ojson("status")
     assert data["data"]["tasks"]["T1"] == "accepted", data
     roles = [c["role"] for c in env.calls()]
-    # First submission failed its deterministic check; the runtime relaunched
-    # the executor with the finding (no orchestrator turn), then review ran once.
     assert roles.count("executor") == 2 and roles.count("code_reviewer") == 1, roles
 
 
