@@ -389,7 +389,7 @@ def stop_dispatch(run: dict, d: dict, *, wait: float = 5.0) -> bool:
     while sup and pid_alive(sup) and time.time() < deadline:
         time.sleep(0.05)  # let the supervisor record its own `signal` end
     if d.get("launcher") == "herdr" and d.get("pane_id") and shutil.which("herdr"):
-        subprocess.run(["herdr", "pane", "close", d["pane_id"]], capture_output=True, timeout=30)
+        reclaim_pane(run, d["id"], explicit=True)  # snapshot, then close
         signalled = True
     con = db.connect()
     try:
@@ -472,7 +472,7 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
         con.execute("UPDATE dispatches SET packet_hash=?, packet_path=?, log_path=? WHERE id=?",
                     (packet["packet_hash"], str(ddir / "packet.json"), str(ddir / "output.log"), dispatch["id"]))
     launcher = launch(run, dispatch, "worker", ddir, cwd=wt, cli=payload.get("cli"),
-                      external=bool(payload.get("external")))
+                      external=bool(payload.get("external")), resume=payload.get("resume"))
     return {"dispatch_id": dispatch["id"], **launcher}
 
 
@@ -499,7 +499,8 @@ def worker_env(run: dict, dispatch: dict, role: str) -> dict:
 
 def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait: bool = False,
            output: Path | None = None, images: list[Path] | None = None, include_dirs: list[Path] | None = None,
-           prompt_file: Path | None = None, cli: str | None = None, external: bool = False) -> dict:
+           prompt_file: Path | None = None, cli: str | None = None, external: bool = False,
+           resume: dict | None = None) -> dict:
     """Start `office _supervise` for a dispatch, in a Herdr pane when running
     inside Herdr (visible delegation), else as a detached process."""
     spec = {"dispatch_id": dispatch["id"], "kind": kind, "cwd": str(cwd), "output": str(output) if output else None,
@@ -523,6 +524,14 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
     if cli and not use_herdr:
         _launch_notice(run, dispatch, f"--cli needs a herdr session; left external instead. Start it by hand: {cli}")
         external = True
+    if resume and not use_herdr:
+        # A native resume reopens the session in a pane; never fall back to a
+        # fresh headless session under the resume's name (R7).
+        _launch_notice(run, dispatch, "resume needs a herdr session; left external. Start it by hand: "
+                       f"{resume.get('herdr_kind')} {shlex.join(resume.get('argv') or [])}")
+        external = True
+    if resume:
+        spec["resume_findings"] = resume.get("findings") or ""
     if external or (kind == "worker" and os.environ.get("OFFICE_WORKER_LAUNCHER") == "external"):
         # Hosted outside Office's process control (an interactive session the
         # user or a test drives). A worker is live until it submits; a reviewer
@@ -535,7 +544,10 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         return _wait_terminal(dispatch["id"], timeout=5) if wait else {"launcher": "sync"}
     headless = "process"
     if use_herdr:
-        if cli:
+        if resume:
+            # office rerun --resume: the harness's own resume argv for the parent's session.
+            inter = (list(resume.get("argv") or []), resume.get("herdr_kind") or kind)
+        elif cli:
             # The user's exact argv; herdr supplies the executable from --kind.
             argv_cli = shlex.split(cli)
             inter = (argv_cli[1:], Path(argv_cli[0]).name)
@@ -657,7 +669,7 @@ def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = Tru
 
 
 def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
-                       cwd: Path, ddir: Path) -> dict | None:
+                       cwd: Path, ddir: Path, *, retried: bool = False) -> dict | None:
     """Start the real harness in the pane with `herdr agent start`, hand it a
     one-line brief pointer, and leave a detached watcher to record the end.
     The pane runs the agent itself, never a shell wrapper around it."""
@@ -677,14 +689,37 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         return None
     if proc.returncode != 0:
         why = (proc.stdout or proc.stderr or "").strip()[:200]
+        if "agent_pane_busy" in why and not retried:
+            # The pane still holds an agent (a finished session herdr keeps):
+            # split a fresh one and try once more before going headless (#200 B7).
+            fresh = _herdr_fresh_pane(run, cwd, pane)
+            if fresh:
+                return _herdr_agent_start(run, dispatch, spec, env, inter, fresh, cwd, ddir, retried=True)
         _launch_notice(run, dispatch, f"herdr agent start failed ({why}); running headless instead")
         return None
     spec.update({"herdr_agent": name, "pane": pane})
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
     _record_launch(run, dispatch["id"], launcher="herdr", pane_id=pane)
-    _pane_ledger(run, dispatch, pane, agent=name, kind=herdr_kind, worktree=cwd, session_id=_started_session(proc.stdout))
+    session = _started_session(proc.stdout) or _capture_session(name)
+    if session:
+        _set_dispatch(dispatch["id"], session_id=session)
+    else:
+        # Not a launch failure: the agent runs. Recorded where `office inspect` shows it.
+        con = db.connect()
+        try:
+            with db.transaction(con):
+                state.emit(con, run, "launch.session", f"{dispatch.get('task_id') or dispatch['id']}: herdr reported "
+                           f"no session id for {name}; office rerun --resume will refuse it", audience="runtime",
+                           task_id=dispatch.get("task_id"), dispatch_id=dispatch["id"])
+        finally:
+            con.close()
+    _pane_ledger(run, dispatch, pane, agent=name, kind=herdr_kind, worktree=cwd, session_id=session)
     # A long brief pasted as the prompt does not land; a one-line pointer does.
-    if worker:
+    if worker and spec.get("resume_findings") is not None:
+        # A resumed session already knows the task; hand it the findings and the updated brief.
+        pointer = (f"Office resumed this session. Open findings: {spec['resume_findings'][:600]} "
+                   f"The updated brief is at {spec['prompt_file']}. Fix them, then run: office submit")
+    elif worker:
         pointer = (f"Read and carry out the brief at {spec['prompt_file']} exactly. "
                    "When the work and its checks are complete, run: office submit")
     else:
@@ -723,8 +758,10 @@ def _herdr_agent_sample(name: str) -> dict | None:
     if proc.returncode != 0 or not agent:
         return None
     read = _herdr_agent_text(name)
-    return {"status": agent.get("status") or agent.get("agent_status"), "content_hash": sha256_obj(read),
-            "busy": None if read is None else _pane_busy(read)}
+    status = agent.get("status") or agent.get("agent_status")
+    text_busy = None if read is None else _pane_busy(read)
+    busy = None if read is None else (status == "working" or text_busy)
+    return {"status": status, "content_hash": sha256_obj(read), "busy": busy, "text_busy": text_busy}
 
 
 def _herdr_agent_text(name: str, *extra: str) -> str | None:
@@ -739,11 +776,15 @@ def _herdr_agent_text(name: str, *extra: str) -> str | None:
 # Footer text a harness shows only while a turn is running. agy's reported
 # status is not a liveness signal (it reads idle mid-turn); its pane is.
 BUSY_MARKERS = ("esc to cancel", "esc to interrupt")
+# Current Claude Code shows no footer while working, only a spinner status
+# line with an elapsed time: "✽ Harmonizing… (1m 2s)". Without this every
+# working Claude pane read as idle (#200 B14).
+_SPINNER = re.compile(r"(?:…|\.\.\.)\s*\(\s*(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b")
 
 
 def _pane_busy(text: str) -> bool:
     low = (text or "").lower()
-    return any(m in low for m in BUSY_MARKERS)
+    return any(m in low for m in BUSY_MARKERS) or bool(_SPINNER.search(text or ""))
 
 
 def herdr_agent_name(dispatch_id: str) -> str:
@@ -818,18 +859,28 @@ def _launch_notice(run: dict, dispatch: dict, text: str) -> None:
 
 
 def _submitted(con, dispatch: dict) -> bool:
-    return bool(con.execute("SELECT 1 FROM revisions WHERE dispatch_id=?", (dispatch["id"],)).fetchone()
+    """A submission that ends the session. One held at amendment_pending does
+    not: the session still has to ack the amendment and resubmit (#200 B12)."""
+    return bool(con.execute("SELECT 1 FROM revisions WHERE dispatch_id=? AND status<>'amendment_pending'",
+                            (dispatch["id"],)).fetchone()
                 or con.execute("SELECT 1 FROM plans WHERE run_id=? AND created_by=?",
                                (dispatch["run_id"], dispatch["id"])).fetchone())
 
 
 def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None, stable_samples: int = 3) -> tuple:
     """(exit_code, classification) for a pane-hosted agent. A submit or the
-    output file ends the dispatch. A single `done`/`idle` sample is never
-    trusted: only `stable_samples` consecutive settled samples with unchanged
-    pane content end it. The agent disappearing (process exit) ends it."""
+    output file ends the dispatch. The agent disappearing (process exit) ends
+    it. For a reviewer, a single `done`/`idle` sample is never trusted: only
+    `stable_samples` consecutive settled samples with unchanged pane content
+    end it. A worker never ends on idle: an agent waiting on a background test
+    run looks settled, and ending it started a second writer on the same
+    worktree (#200 B10). An idle worker gets one notice instead."""
     poll = float(os.environ.get("OFFICE_HERDR_POLL", "5")) if poll is None else poll
     output = Path(spec["output"]) if spec.get("output") else None
+    worker = spec.get("kind") == "worker"
+    idle_notice = float(os.environ.get("OFFICE_WORKER_IDLE_NOTICE_MIN", "20")) * 60
+    idle_since = None
+    noticed = False
     history: list[dict] = []
     last_size = None
     unknown = 0
@@ -857,7 +908,10 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
             # ends on submit, exit, or revoke.
             _watch_notice(dispatch_id, f"herdr agent {spec['herdr_agent']} has been unreadable for "
                                        f"{unknown_limit} polls; check its pane, or office revoke")
-        if size and size == last_size and (sample is None or sample.get("busy") is False or blind):
+        # The result file is the evidence (R13): only a pane still drawing a
+        # turn (text busy) holds it back, not a `working` status alone.
+        if size and size == last_size and (sample is None or sample.get("text_busy", sample.get("busy")) is False
+                                           or blind):
             # Complete: written, no longer growing between two polls, and the
             # agent is not still mid-turn (it may rewrite the file). After the
             # pane has been unreadable past the limit, a file that stopped
@@ -866,6 +920,17 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
         last_size = size or None
         if sample is None:
             return None, "nonzero"
+        if worker:
+            if sample.get("busy") is False:
+                idle_since = idle_since or time.time()
+                if not noticed and time.time() - idle_since >= idle_notice:
+                    noticed = True
+                    _watch_notice(dispatch_id, f"herdr agent {spec['herdr_agent']} has been idle for "
+                                               f"{int(idle_notice // 60)} min without submitting; check its pane")
+            else:
+                idle_since, noticed = None, False
+            time.sleep(poll)
+            continue
         history.append(sample)
         window = history[-stable_samples:]
         if (len(window) == stable_samples and all(w["status"] in ("done", "idle") for w in window)
@@ -994,12 +1059,27 @@ def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None) 
 def close_herdr_tab(run: dict) -> None:
     """Close what the run created: its panes in the caller's tab, or its own tab."""
     tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
-    if tab_file.is_file() and shutil.which("herdr"):
+    if not shutil.which("herdr"):
+        return
+    # Each dispatch pane is snapshotted before it closes.
+    con = db.connect()
+    try:
+        owned = [r["id"] for r in con.execute("SELECT id FROM dispatches WHERE run_id=? AND launcher='herdr' "
+                                              "AND pane_id IS NOT NULL AND pane_closed_at IS NULL", (run["id"],))]
+    finally:
+        con.close()
+    for did in owned:
+        try:
+            reclaim_pane(run, did, explicit=True)
+        except Exception:
+            pass
+    if tab_file.is_file():
         try:
             tab = json.loads(tab_file.read_text())
             if tab.get("mode") == "split":
                 for pane in tab.get("panes") or []:
-                    subprocess.run(["herdr", "pane", "close", pane], capture_output=True, timeout=30)
+                    if _pane_exists(pane):
+                        subprocess.run(["herdr", "pane", "close", pane], capture_output=True, timeout=30)
             else:
                 subprocess.run(["herdr", "tab", "close", tab["tab_id"]], capture_output=True, timeout=30)
         except (OSError, ValueError, subprocess.SubprocessError, KeyError):
@@ -1048,6 +1128,135 @@ def _pane_ledger(run: dict, dispatch: dict, pane: str, *, agent: str | None = No
         fh.write(json.dumps(row) + "\n")
 
 
+def _capture_session(name: str) -> str | None:
+    """The harness session id herdr detected for the agent (`agent_session.value`),
+    polled briefly: detection lags `agent start` by a moment."""
+    deadline = time.time() + float(os.environ.get("OFFICE_HERDR_SESSION_WAIT", "2"))
+    while True:
+        agent = _herdr_json(["agent", "get", name]).get("agent") or {}
+        value = (agent.get("agent_session") or {}).get("value")
+        if value:
+            return str(value)
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.5)
+
+
+def _set_dispatch(dispatch_id: str, **cols) -> None:
+    con = db.connect()
+    try:
+        with db.transaction(con):
+            sets = ", ".join(f"{k}=?" for k in cols)
+            con.execute(f"UPDATE dispatches SET {sets} WHERE id=?", (*cols.values(), dispatch_id))
+    finally:
+        con.close()
+
+
+def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str) -> str | None:
+    """A new pane split from one herdr refused as busy, recorded in the run's layout."""
+    res = _herdr_json(["pane", "split", "--pane", busy_pane, "--direction", "down", "--cwd", str(cwd), "--no-focus"])
+    pane = (res.get("pane") or {}).get("pane_id")
+    if not pane:
+        return None
+    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
+    try:
+        layout = json.loads(tab_file.read_text()) if tab_file.is_file() else None
+    except (OSError, ValueError):
+        layout = None
+    if layout is not None:
+        layout.setdefault("panes", []).append(pane)
+        atomic_write_json(tab_file, layout)
+    return pane
+
+
+def _pane_exists(pane: str) -> bool:
+    """False only when herdr says the pane is gone; an unreachable herdr counts
+    as present, so nothing is recorded closed that may still be open."""
+    try:
+        proc = subprocess.run(["herdr", "pane", "get", pane], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return "pane_not_found" not in (proc.stdout or "") + (proc.stderr or "")
+
+
+def _pane_snapshot(name: str, pane: str) -> str:
+    """The pane's final text, trying the unwrapped scrollback first. Argument
+    lists only: a command held in a string never reaches herdr intact."""
+    for args in (["agent", "read", name, "--source", "recent-unwrapped", "--lines", "5000"],
+                 ["pane", "read", pane, "--source", "recent-unwrapped", "--lines", "5000"],
+                 ["pane", "read", pane, "--source", "recent"]):
+        try:
+            proc = subprocess.run(["herdr", *args], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode == 0 and (proc.stdout or "").strip():
+            return proc.stdout
+    return ""
+
+
+def _ledger_event(run: dict, d: dict, **fields) -> None:
+    ledger = paths.run_dir(run["id"]) / "panes.jsonl"
+    row = {"pane_id": d.get("pane_id"), "dispatch_id": d["id"], "run_id": run["id"], "role": d.get("role"),
+           "recorded_at": now_iso(), **fields}
+    with ledger.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+
+def reclaim_pane(run: dict, dispatch_id: str, *, explicit: bool = False) -> str:
+    """Snapshot, then close, the herdr pane Office opened for this dispatch.
+
+    Returns "closed", "kept", or "skipped". Order: pane-final.txt, the ledger
+    row (`result: accepted` carrying the snapshot path; the Stop hook closes
+    only rows whose snapshot exists), `herdr pane close`, a check that the pane
+    is gone, then `pane_closed_at` and a `closed_at` row. Only this dispatch's
+    own pane is ever touched. On the automatic path a failed snapshot or
+    `keep_pane` (OFFICE_KEEP_PANES=1 at launch) keeps the pane with a `kept`
+    row; `explicit` (dismiss, close, revoke) closes regardless."""
+    con = db.connect()
+    try:
+        d = state.get_dispatch(con, dispatch_id)
+    finally:
+        con.close()
+    if not d or d.get("launcher") != "herdr" or not d.get("pane_id") or not shutil.which("herdr"):
+        return "skipped"
+    if d.get("pane_closed_at"):
+        return "closed"
+    pane = d["pane_id"]
+    if not _pane_exists(pane):
+        _set_dispatch(dispatch_id, pane_closed_at=now_iso())
+        _ledger_event(run, d, closed_at=now_iso(), note="pane already gone")
+        return "closed"
+    ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch_id
+    ddir.mkdir(parents=True, exist_ok=True)
+    snap = ddir / "pane-final.txt"
+    text = _pane_snapshot(herdr_agent_name(dispatch_id), pane)
+    if text:
+        snap.write_text(text, encoding="utf-8")
+    if d.get("keep_pane") and not explicit:
+        _ledger_event(run, d, kept=True, reason="OFFICE_KEEP_PANES", snapshot=str(snap) if text else None)
+        return "kept"
+    if not text and not explicit:
+        _ledger_event(run, d, kept=True, reason="snapshot failed")
+        _launch_notice(run, d, f"pane {pane} kept open: its final text could not be saved; "
+                               f"close it with office dismiss {d.get('task_id') or dispatch_id}")
+        return "kept"
+    _ledger_event(run, d, result="accepted" if not explicit else "dismissed", snapshot=str(snap) if text else None)
+    grace = float(os.environ.get("OFFICE_RECLAIM_GRACE", "3"))
+    if grace and not explicit:
+        time.sleep(grace)  # let the agent's own `office submit` finish printing
+    try:
+        subprocess.run(["herdr", "pane", "close", pane], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if _pane_exists(pane):
+        _ledger_event(run, d, kept=True, reason="herdr pane close did not close it")
+        _launch_notice(run, d, f"pane {pane} did not close; close it by hand: herdr pane close {pane}")
+        return "kept"
+    _set_dispatch(dispatch_id, pane_closed_at=now_iso())
+    _ledger_event(run, d, closed_at=now_iso())
+    return "closed"
+
+
 def _record_launch(run: dict, dispatch_id: str, *, launcher: str, pid: int | None = None, pane_id: str | None = None) -> None:
     con = db.connect()
     try:
@@ -1055,6 +1264,9 @@ def _record_launch(run: dict, dispatch_id: str, *, launcher: str, pid: int | Non
             con.execute("UPDATE dispatches SET launcher=?, pid=COALESCE(?, pid), pane_id=?, launched_at=?, "
                         "status=CASE WHEN status='launching' THEN 'running' ELSE status END WHERE id=?",
                         (launcher, pid, pane_id, now_iso(), dispatch_id))
+            if os.environ.get("OFFICE_KEEP_PANES") == "1":
+                # R10: this dispatch's pane stays open after it ends (snapshot still written).
+                con.execute("UPDATE dispatches SET keep_pane=1 WHERE id=?", (dispatch_id,))
             d = state.get_dispatch(con, dispatch_id)
             if d.get("task_id"):
                 task = state.get_task(con, run["id"], d["task_id"])
@@ -1250,6 +1462,7 @@ def _mark(dispatch_id: str, pid_child: int) -> None:
 
 
 def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> None:
+    accepted = False
     con = db.connect()
     try:
         with db.transaction(con):
@@ -1264,8 +1477,17 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> No
                        payload={"exit_code": code, "signal": sig, "classification": classification})
             if d["kind"] in ("planner", "executor"):
                 after_worker_exit(con, run, dispatch_id)
+            accepted = (d["kind"] in ("planner", "executor") and classification == "success"
+                        and _submitted(con, d))
     finally:
         con.close()
+    if accepted:
+        # R1: a worker that ended with an accepted submission leaves no pane
+        # behind. Every other end keeps its pane for diagnosis (R4).
+        try:
+            reclaim_pane(run, dispatch_id)
+        except Exception as exc:  # reclaiming must never lose the recorded end
+            _launch_notice(run, d, f"pane reclaim failed: {exc}")
     con = db.connect()
     try:
         jobs.kick(con, d["run_id"])

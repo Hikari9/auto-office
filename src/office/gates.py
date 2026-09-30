@@ -283,6 +283,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                                   digest=sha256_bytes(text.encode()))
         if parsed.valid:
             # A valid reply file is the result, whatever the exit classification.
+            # The reviewer is done: snapshot and close its pane (R1).
+            dispatch_mod.reclaim_pane(run, dispatch_id)
             return {"verdict": parsed.verdict, "parsed": parsed, "route": triple, "dispatch_id": dispatch_id,
                     "summary": f"{parsed.verdict} by {triple}", "producer_route": producer}
         # Only a launch failure reaches here: the agent never produced a reply
