@@ -80,7 +80,10 @@ def write_allows(output: Path | None) -> list[str]:
     write access at all. Reviewer launches
     run with `--permission-mode dontAsk`, so a write no rule allows is denied
     (including another run's dispatch dir, which a deny rule could not name
-    without also covering this one: deny beats allow)."""
+    without also covering this one: deny beats allow). The profiles also pass
+    `--restricted`, which ignores the user, project and local settings files, so
+    an allow rule the operator already has (a broad `Write` or `Edit(<state>/**)`)
+    cannot widen this fence."""
     out_dir = dispatch_dir(output)
     return [f"Edit(/{out_dir}/**)"] if out_dir else []
 
