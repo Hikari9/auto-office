@@ -52,6 +52,9 @@ def test_ambiguous_runs_never_select_latest_mtime(env):
     assert data["data"]["run_id"] == ids[0]
     code, data = env.ojson("status", "--run", ids[1][:8])
     assert data["data"]["run_id"] == ids[1]
+    # The global form from the usage line: flags before the subcommand.
+    code, out = env.office("--run", ids[1][:8], "--json", "status")
+    assert json.loads(out[out.index("{"):])["data"]["run_id"] == ids[1], out
 
 
 def _register(env, ver: str):
