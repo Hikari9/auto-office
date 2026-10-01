@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from test_herdr_agent_launch import BUSY, EMPTY, _calls, _launch_events, _live_dispatch, launch_in_herdr
+from test_herdr_agent_launch import BUSY, EMPTY, _calls, _fake, _launch_events, _live_dispatch, launch_in_herdr
 
 TRUST = ("Folder access\n  /runs/x/dispatches/D1\n  Trust this folder? Codex can read, edit, and run files here\n"
          "> 1. Trust and continue\n  2. Quit\n  enter continue · esc quit")
@@ -137,3 +137,114 @@ def test_external_reviewer_instructions_allow_a_reply_and_warn_about_the_ui(env,
     assert "end your reply with the complete review" in text
     assert "Trust this folder?" in text and "never `pane run`" in text
     assert 'trust_level="trusted"' in text  # the printed codex argv pre-trusts its cwd
+
+
+# Unsubmitted prompts: `agent prompt` types the text, but a TUI that is not
+# ready to submit (a resumed Claude session, a slow start) can keep it in the
+# composer. Office presses Enter for it and never sends the text again.
+
+def _claude_box(text: str) -> str:
+    """Claude's composer: bordered, a prompt glyph, the pointer wrapped over rows."""
+    rows = [text[i:i + 30] for i in range(0, len(text), 30)]
+    body = "\n".join(f"│ {'>' if i == 0 else ' '} {r:<30} │" for i, r in enumerate(rows))
+    return f"╭{'─' * 34}╮\n{body}\n╰{'─' * 34}╯\n  Opus 5.5 · ctx: 0k · $0"
+
+
+def _sends(calls):
+    prompts = [c for c in calls if c[:2] == ["agent", "prompt"]]
+    enters = [c for c in calls if c[1:2] == ["send-keys"] and c[-1] == "Enter"]
+    typed = [c for c in calls if c[:2] == ["pane", "send-text"]]
+    return prompts, enters, typed
+
+
+def test_wrapped_pointer_left_unsubmitted_gets_one_enter_and_no_duplicate(env, monkeypatch):
+    def reads(brief):
+        held = _claude_box(f"Read and carry out the review brief at {brief} exactly.")
+        return [EMPTY, EMPTY, held, held, BUSY]
+
+    state_file, run, d, ddir, res = _launch(env, monkeypatch, adapter="claude", reads=reads)
+    assert res["prompt_landed"] is True
+    prompts, enters, typed = _sends(_calls(state_file))
+    assert len(prompts) == 1 and len(enters) == 1 and typed == []
+    assert _launch_events(env, run) == []
+
+
+def test_collapsed_paste_placeholder_counts_as_unsubmitted(env, monkeypatch):
+    held = "╭───╮\n│ > [Pasted text #1 +4 lines] │\n╰───╯"
+    state_file, run, d, ddir, res = _launch(env, monkeypatch, adapter="claude",
+                                            reads=[EMPTY, EMPTY, held, held, BUSY])
+    assert res["prompt_landed"] is True
+    prompts, enters, typed = _sends(_calls(state_file))
+    assert len(prompts) == 1 and len(enters) == 1 and typed == []
+
+
+def test_landed_prompt_gets_no_enter(env, monkeypatch):
+    state_file, run, d, ddir, res = _launch(env, monkeypatch, adapter="claude", reads=[EMPTY, EMPTY, BUSY])
+    assert res["prompt_landed"] is True
+    prompts, enters, typed = _sends(_calls(state_file))
+    assert len(prompts) == 1 and enters == [] and typed == []
+
+
+def test_enter_that_never_submits_is_bounded_then_reported(env, monkeypatch):
+    monkeypatch.setenv("OFFICE_HERDR_ENTER_TRIES", "3")
+
+    def reads(brief):
+        return [EMPTY, EMPTY, _claude_box(f"Read and carry out the review brief at {brief} exactly.")]
+
+    state_file, run, d, ddir, res = _launch(env, monkeypatch, adapter="claude", reads=reads)
+    assert res["prompt_landed"] is False
+    prompts, enters, typed = _sends(_calls(state_file))
+    assert len(prompts) == 1 and len(enters) == 3 and typed == []
+    events = _launch_events(env, run)
+    assert len(events) == 1 and "typed but unsubmitted" in events[0]
+    assert f"herdr pane send-keys {res['pane']} Enter" in events[0] and "agent prompt" not in events[0]
+
+
+def test_enter_that_empties_the_composer_counts_as_submitted(env, monkeypatch):
+    # A narrow pane can show no landed signal; an Enter that cleared the
+    # composer was the submit, so the pointer is not typed again.
+    def reads(brief):
+        held = f"› Read and carry out the review brief at {brief} exactly."
+        return [EMPTY, EMPTY, held, held, EMPTY]
+
+    state_file, run, d, ddir, res = _launch(env, monkeypatch, reads=reads)
+    assert res["prompt_landed"] is True
+    prompts, enters, typed = _sends(_calls(state_file))
+    assert len(prompts) == 1 and len(enters) == 1 and typed == []
+
+
+def _reviewer_reprompt(env, monkeypatch, reads):
+    state_file = _fake(env, monkeypatch, gets=["idle"], reads=reads)
+    run, d = _live_dispatch(env, monkeypatch)
+    monkeypatch.setenv("OFFICE_HERDR_LAND_TIMEOUT", "0")
+    monkeypatch.setenv("OFFICE_HERDR_KEY_DELAY", "0")
+    monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_WAIT", "0")
+    monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_POLL", "0")
+    from office import gates, review_parse
+    d = {**d, "launcher": "herdr", "pane_id": "w1:p7", "role": "code_reviewer"}
+    run = {**run, "gates": {"review_reprompt_max": 1}}
+    con = env.con()
+    try:
+        got = gates._reprompt_until_valid(con, run, d, env.tmp, env.tmp / "reply.txt", review_parse.parse(""),
+                                          plan_review=False, visual=False)
+    finally:
+        con.close()
+    return state_file, got
+
+
+def test_reviewer_reprompt_left_unsubmitted_gets_enter_not_a_second_prompt(env, monkeypatch):
+    held = "› Office could not read your review (empty reply). Write your complete review again"
+    state_file, (text, parsed, reason) = _reviewer_reprompt(env, monkeypatch, [EMPTY, held, held, BUSY])
+    prompts, enters, typed = _sends(_calls(state_file))
+    assert len(prompts) == 1 and len(enters) == 1 and typed == []
+    assert enters[0][:3] == ["pane", "send-keys", "w1:p7"]
+    assert "unsubmitted" not in (reason or "")
+
+
+def test_reviewer_reprompt_that_never_submits_stops_with_an_enter_hint(env, monkeypatch):
+    monkeypatch.setenv("OFFICE_HERDR_ENTER_TRIES", "2")
+    held = "› Office could not read your review (empty reply). Write your complete review again"
+    state_file, (text, parsed, reason) = _reviewer_reprompt(env, monkeypatch, [EMPTY, held])
+    prompts, enters, typed = _sends(_calls(state_file))
+    assert len(prompts) == 1 and len(enters) == 2 and typed == []
+    assert "typed but unsubmitted" in reason and "send-keys" in reason

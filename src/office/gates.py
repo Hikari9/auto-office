@@ -395,14 +395,18 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
             output.replace(output.with_name(f"reply.invalid-{n}.txt"))
         prompt = (f"Office could not read your review ({'; '.join(errors[:4])}). Write your complete review again, "
                   f"in the format the brief requires (a VERDICT line first), to {output}. {REPLY_FILE_RULE}")
-        try:
-            subprocess.run(["herdr", "agent", "prompt", name, prompt], capture_output=True, timeout=30)
-        except (OSError, subprocess.SubprocessError):
-            break
+        # Left unsubmitted in the composer, it gets Enter, never a second copy.
+        got = dispatch_mod.submit_prompt(name, prompt, pane=d.get("pane_id"))
+        unsent = " (typed but unsubmitted)" if got == "held" else ""
         with db.transaction(con):
             state.emit(con, run, "review.reprompt", f"{d.get('task_id') or 'plan'} {d['role']} {d['id']}: re-prompted "
-                       f"{n}/{limit} ({'; '.join(errors[:2])})", audience="runtime", task_id=d.get("task_id"),
+                       f"{n}/{limit}{unsent} ({'; '.join(errors[:2])})", audience="runtime", task_id=d.get("task_id"),
                        dispatch_id=d["id"])
+        if got == "held":
+            # No reply can come from a prompt the reviewer never received.
+            return text, parsed, (f"reviewer {d['id']} ({d.get('triple')}): Office's re-prompt is typed but "
+                                  f"unsubmitted in herdr agent {name}; submit it (herdr agent send-keys {name} "
+                                  "Enter) or waive the gate")
         text = _await_file(output, wait_s, poll)
         parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual)
         if parsed.valid:
