@@ -37,9 +37,12 @@ def prompt(con, run: dict, target: str | None, text: str) -> Result:
     who = d.get("task_id") or d["id"]
     if d.get("launcher") != "herdr" or not d.get("pane_id"):
         raise Refused("no-pane", f"{d['id']} ({who}) has no Herdr pane to prompt", scope=who)
-    if not gates.worker_live(con, d["id"]) or d.get("ended_at"):
-        raise Refused("dispatch-ended", f"{d['id']} ({who}) has ended; nothing is listening in its pane", scope=who,
-                      next_step=f"office rerun {who} --resume | --fresh" if d.get("task_id") else "office status")
+    # Ask herdr, not the dispatch row: a reviewer that settled without a reply
+    # is recorded as exited while its agent still waits in the pane for this.
+    if not gates._agent_alive(dispatch.herdr_agent_name(d["id"])):
+        raise Refused("dispatch-ended", f"{d['id']} ({who}) has no live agent; nothing is listening in its pane",
+                      scope=who, next_step=f"office rerun {who} --resume | --fresh"
+                      if d.get("task_id") and d.get("role") == "executor" else "office status")
     pane = d["pane_id"]
     got = dispatch.submit_prompt(pane, text, pane=pane)
     outcome = {"landed": "landed", "held": "typed but unsubmitted"}.get(got, "sent, not confirmed")

@@ -13,8 +13,9 @@ from test_herdr_agent_launch import BUSY, EMPTY, _calls, _fake, _live_dispatch
 TEXT = "AMENDMENT A2: run office status, apply it, then office ack A2."
 
 
-def _herdr_worker(env, monkeypatch, *, reads, status="running"):
-    state_file = _fake(env, monkeypatch, reads=reads)
+def _herdr_worker(env, monkeypatch, *, reads, status="running", agent="working"):
+    """A herdr-hosted T1 dispatch; `agent` is what `herdr agent get` reports ("gone": no agent)."""
+    state_file = _fake(env, monkeypatch, gets=[agent], reads=reads)
     for k, v in {"OFFICE_HERDR_LAND_TIMEOUT": "0", "OFFICE_HERDR_ENTER_WAIT": "0"}.items():
         monkeypatch.setenv(k, v)
     run, d = _live_dispatch(env, monkeypatch)
@@ -55,12 +56,12 @@ def test_prompt_left_in_the_composer_gets_enter_and_is_never_sent_twice(env, mon
 
 
 @pytest.mark.approved
-def test_prompt_refuses_an_ended_dispatch(env, monkeypatch):
-    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY], status="exited")
+def test_prompt_refuses_a_dispatch_whose_agent_is_gone(env, monkeypatch):
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY], status="exited", agent="gone")
     from office import prompting
     with pytest.raises(prompting.Refused) as err:
         prompting.prompt(con, run, "T1", TEXT)
-    assert "has ended" in err.value.message and "office rerun T1" in err.value.next_step
+    assert "no live agent" in err.value.message and "office rerun T1" in err.value.next_step
     assert not _sent(_calls(state_file))[0]
 
 
@@ -69,3 +70,16 @@ def test_prompt_cli_needs_a_message(env, monkeypatch):
     _herdr_worker(env, monkeypatch, reads=[EMPTY])
     code, out = env.office("prompt", "T1")
     assert code == 2 and "office prompt <task|dispatch>" in out, out
+
+
+@pytest.mark.approved
+def test_prompt_reaches_a_reviewer_recorded_exited_whose_agent_still_waits(env, monkeypatch):
+    # A reviewer that settles without a reply file is recorded exited; its
+    # agent stays up for the re-prompt that Office's attention reason names.
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY, BUSY], status="exited", agent="idle")
+    con.execute("UPDATE dispatches SET role='code_reviewer', ended_at=started_at WHERE id=?", (d["id"],))
+    con.commit()
+    from office import prompting
+    res = prompting.prompt(con, run, d["id"], "Write your complete review to the reply file.")
+    assert "landed" in res.lines[0]
+    assert len(_sent(_calls(state_file))[0]) == 1

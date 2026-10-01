@@ -472,8 +472,8 @@ def test_setup_line_dropped_by_a_fresh_shell_is_cleared_and_sent_again(env, monk
     calls = _calls(state_file)
     runs = [i for i, c in enumerate(calls) if c[:2] == ["pane", "run"] and "agent.env" in c[3]]
     assert len(runs) == 3 and (ddir / "shell-ready").exists()
-    # Each resend follows a Ctrl-C that clears what the shell left typed.
-    assert all(calls[i - 1][:2] == ["pane", "send-keys"] and calls[i - 1][-1] == "C-c" for i in runs[1:])
+    # Each resend follows a Ctrl-U that clears what the shell left typed (never a SIGINT).
+    assert all(calls[i - 1][:2] == ["pane", "send-keys"] and calls[i - 1][-1] == "ctrl+u" for i in runs[1:])
     start = next(i for i, c in enumerate(calls) if c[:2] == ["agent", "start"])
     assert runs[-1] < start
 

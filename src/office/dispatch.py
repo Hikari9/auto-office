@@ -250,7 +250,7 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
             *([f"output: {output}"] if output else []),
             f"herdr: herdr pane run <pane> {shlex.quote('. ' + str(ddir / 'agent.env') + ' && cd ' + wt)}",
             "       (a new pane's shell drops a line sent before it is ready: confirm it ran with `herdr pane read`, "
-            "else Ctrl-C and run it again)",
+            "else clear the line with `herdr pane send-keys <pane> ctrl+u` and run it again)",
             f"       herdr agent start {name} --kind {kind} --pane <pane> -- {shlex.join(args)}".rstrip(),
             "       (wait until `herdr pane get <pane>` shows the agent and its UI is up; answer a codex "
             "'Trust this folder?' with Enter; send the pointer with `agent prompt`, never `pane run`)",
@@ -1023,8 +1023,10 @@ def _shell_run(pane: str, command: str, marker: Path, timeout: float | None = No
     pane draws its prompt before the shell reads input (zsh with an instant
     prompt), and a `pane run` sent then is dropped or left typed on the line.
     The command touches `marker` once it has run; until it does, the line is
-    cleared with Ctrl-C and the command sent again, so it must be safe to run
-    twice. False when it never ran within OFFICE_HERDR_SHELL_TIMEOUT."""
+    cleared with Ctrl-U and the command sent again, so it must be safe to run
+    twice. Ctrl-U, not Ctrl-C: a SIGINT while the shell is still sourcing its
+    rc file would abort it and leave PATH half set. False when it never ran
+    within OFFICE_HERDR_SHELL_TIMEOUT."""
     marker.unlink(missing_ok=True)
     line = f"{command} && touch {shlex.quote(str(marker))}"
     retry = float(os.environ.get("OFFICE_HERDR_SHELL_RETRY", "3"))
@@ -1032,7 +1034,7 @@ def _shell_run(pane: str, command: str, marker: Path, timeout: float | None = No
     first = True
     while True:
         if not first:
-            _herdr_quiet("pane", "send-keys", pane, "C-c")
+            _herdr_quiet("pane", "send-keys", pane, "ctrl+u")
         _herdr_quiet("pane", "run", pane, line)
         first = False
         until = min(deadline, time.time() + retry)

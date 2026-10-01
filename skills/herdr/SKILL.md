@@ -165,7 +165,7 @@ herdr pane wait-output <returned-pane-id> --match "test result" --timeout 120000
 herdr pane read <returned-pane-id> --source recent-unwrapped --lines 120
 ```
 
-`pane run` atomically sends command text and Enter. It is for shells only; never use it on an agent pane (see `agent prompt` above). A newly split pane can draw its prompt before the shell reads input (zsh with an instant prompt), and a `pane run` sent then is dropped or left typed. Make the command's effect checkable (touch a marker file), and if it never appears, send `C-c` and run it again. `pane wait-output` searches the selected snapshot immediately, so output that already exists can match. Use `--match <text>` for a literal substring or `--regex <pattern>` for a Rust regular expression. Omitting `--timeout` allows an indefinite wait.
+`pane run` atomically sends command text and Enter. It is for shells only; never use it on an agent pane (see `agent prompt` above). A newly split pane can draw its prompt before the shell reads input (zsh with an instant prompt), and a `pane run` sent then is dropped or left typed. Make the command's effect checkable (touch a marker file), and if it never appears, send `ctrl+u` (clears the line; `C-c` would interrupt a shell still sourcing its rc file) and run it again. `pane wait-output` searches the selected snapshot immediately, so output that already exists can match. Use `--match <text>` for a literal substring or `--regex <pattern>` for a Rust regular expression. Omitting `--timeout` allows an indefinite wait.
 
 Use the read source that matches the task:
 
