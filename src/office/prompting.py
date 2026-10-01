@@ -1,0 +1,56 @@
+"""office prompt: send a live Herdr agent a message and confirm it was submitted.
+
+Use this, never `herdr pane run` or `pane send-text`, to reach a worker or
+reviewer by hand. `pane run` writes the text and its Enter in one chunk, and
+Claude's composer takes that Enter as part of the paste: the text stays typed,
+unsubmitted. `herdr agent prompt` (which Office sends) pauses before the Enter,
+and Office checks the prompt landed and presses Enter for one left in the
+composer, never sending the text twice.
+"""
+from __future__ import annotations
+
+from office import db, dispatch, gates, state
+from office.result import Result
+from office.state import Refused, Usage
+
+
+def _resolve(con, run: dict, target: str) -> dict:
+    if target[:1].upper() == "D":
+        d = state.get_dispatch(con, target[0].upper() + target[1:])
+        if d is None or d.get("run_id") != run["id"]:
+            raise Refused("no-dispatch", f"{target} is not a dispatch of this run", scope=target)
+        return d
+    task = state.get_task(con, run["id"], target.upper())
+    if task is None:
+        raise Refused("no-task", f"{target} is not a task of this run", scope=target)
+    if not task.get("current_dispatch_id"):
+        raise Refused("no-dispatch", f"{task['id']} has no dispatch", scope=task["id"],
+                      next_step=f"office dispatch {task['id']}")
+    return state.get_dispatch(con, task["current_dispatch_id"])
+
+
+def prompt(con, run: dict, target: str | None, text: str) -> Result:
+    if not target or not text.strip():
+        raise Usage("prompt-usage", "name the task or dispatch and the message",
+                    next_step='office prompt <task|dispatch> -- "<message>"')
+    d = _resolve(con, run, target)
+    who = d.get("task_id") or d["id"]
+    if d.get("launcher") != "herdr" or not d.get("pane_id"):
+        raise Refused("no-pane", f"{d['id']} ({who}) has no Herdr pane to prompt", scope=who)
+    if not gates.worker_live(con, d["id"]) or d.get("ended_at"):
+        raise Refused("dispatch-ended", f"{d['id']} ({who}) has ended; nothing is listening in its pane", scope=who,
+                      next_step=f"office rerun {who} --resume | --fresh" if d.get("task_id") else "office status")
+    pane = d["pane_id"]
+    got = dispatch.submit_prompt(pane, text, pane=pane)
+    outcome = {"landed": "landed", "held": "typed but unsubmitted"}.get(got, "sent, not confirmed")
+    with db.transaction(con):
+        state.emit(con, run, "prompt", f"{who} {d['id']}: orchestrator prompt {outcome}", audience="runtime",
+                   task_id=d.get("task_id"), dispatch_id=d["id"], payload={"text": text[:500], "outcome": got})
+    if got == "held":
+        raise Refused("prompt-held", f"the prompt is typed but unsubmitted in pane {pane} after Office's Enters",
+                      scope=who, next_step=f"herdr pane send-keys {pane} Enter (never send the text again)")
+    if got == "landed":
+        return Result(lines=[f"{who} {d['id']}: prompt landed in pane {pane}"], next="office status")
+    return Result(lines=[f"{who} {d['id']}: prompt sent to pane {pane}; no landed signal and nothing left in the "
+                         "composer (a busy agent may have queued it)"],
+                  next=f"herdr pane read {pane}, then office status")

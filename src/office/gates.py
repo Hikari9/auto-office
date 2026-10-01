@@ -413,7 +413,7 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
             return text, parsed, None
         errors = parsed.errors or ["no reply file"]
     reason = (f"reviewer {d['id']} ({d.get('triple')}) left no valid reply file after re-prompting: "
-              f"{'; '.join(errors[:3])}; its pane is kept. Re-prompt it (herdr agent prompt {name} ...) "
+              f"{'; '.join(errors[:3])}; its pane is kept. Re-prompt it (office prompt {d['id']} -- \"<message>\") "
               "or waive the gate")
     return text, parsed, reason
 

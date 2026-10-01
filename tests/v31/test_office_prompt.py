@@ -1,0 +1,71 @@
+"""office prompt: message a live pane agent with `agent prompt` and confirm it landed.
+
+`herdr pane run` into a Claude pane leaves the text typed but unsubmitted:
+Claude takes the Enter written in the same chunk as part of the paste
+(reproduced 2026-10-01, herdr 0.9.3, Claude Code 2.1.286).
+"""
+from __future__ import annotations
+
+import pytest
+
+from test_herdr_agent_launch import BUSY, EMPTY, _calls, _fake, _live_dispatch
+
+TEXT = "AMENDMENT A2: run office status, apply it, then office ack A2."
+
+
+def _herdr_worker(env, monkeypatch, *, reads, status="running"):
+    state_file = _fake(env, monkeypatch, reads=reads)
+    for k, v in {"OFFICE_HERDR_LAND_TIMEOUT": "0", "OFFICE_HERDR_ENTER_WAIT": "0"}.items():
+        monkeypatch.setenv(k, v)
+    run, d = _live_dispatch(env, monkeypatch)
+    con = env.con()
+    con.execute("UPDATE dispatches SET launcher='herdr', pane_id='w1:p7', status=? WHERE id=?", (status, d["id"]))
+    con.commit()
+    return state_file, run, d, con
+
+
+def _sent(calls):
+    prompts = [c for c in calls if c[:2] == ["agent", "prompt"]]
+    raw = [c for c in calls if c[:2] in (["pane", "run"], ["pane", "send-text"])]
+    return prompts, raw
+
+
+@pytest.mark.approved
+def test_prompt_goes_through_agent_prompt_and_reports_it_landed(env, monkeypatch):
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY, BUSY])
+    from office import prompting
+    res = prompting.prompt(con, run, "T1", TEXT)
+    assert "landed" in res.lines[0]
+    prompts, raw = _sent(_calls(state_file))
+    assert prompts == [["agent", "prompt", "w1:p7", TEXT]] and not raw
+    assert con.execute("SELECT count(*) FROM events WHERE kind='prompt' AND dispatch_id=?", (d["id"],)).fetchone()[0] == 1
+
+
+@pytest.mark.approved
+def test_prompt_left_in_the_composer_gets_enter_and_is_never_sent_twice(env, monkeypatch):
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[f"> {TEXT}"])
+    from office import prompting
+    with pytest.raises(prompting.Refused) as err:
+        prompting.prompt(con, run, d["id"], TEXT)
+    assert err.value.category == "prompt-held" and "send-keys w1:p7 Enter" in err.value.next_step
+    calls = _calls(state_file)
+    prompts, raw = _sent(calls)
+    assert len(prompts) == 1 and not raw
+    assert any(c[:2] == ["pane", "send-keys"] and c[-1] == "Enter" for c in calls)
+
+
+@pytest.mark.approved
+def test_prompt_refuses_an_ended_dispatch(env, monkeypatch):
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY], status="exited")
+    from office import prompting
+    with pytest.raises(prompting.Refused) as err:
+        prompting.prompt(con, run, "T1", TEXT)
+    assert "has ended" in err.value.message and "office rerun T1" in err.value.next_step
+    assert not _sent(_calls(state_file))[0]
+
+
+@pytest.mark.approved
+def test_prompt_cli_needs_a_message(env, monkeypatch):
+    _herdr_worker(env, monkeypatch, reads=[EMPTY])
+    code, out = env.office("prompt", "T1")
+    assert code == 2 and "office prompt <task|dispatch>" in out, out

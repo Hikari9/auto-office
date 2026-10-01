@@ -10,7 +10,7 @@ import pytest
 from conftest import approved_run
 
 FAKE_HERDR = r'''#!{python}
-import json, os, sys
+import json, os, shlex, sys
 state = os.environ["FAKE_HERDR_STATE"]
 data = json.load(open(state)) if os.path.exists(state) else {{"calls": [], "n": 0, "get": []}}
 args = sys.argv[1:]
@@ -20,6 +20,13 @@ code = 0
 if args[:2] == ["pane", "split"]:
     data["n"] += 1
     result = {{"pane": {{"pane_id": "w1:p%d" % (100 + data["n"]), "tab_id": "w1:t1"}}}}
+elif args[:2] == ["pane", "run"] and " && touch " in args[3]:
+    # The shell runs Office's setup line, except the first FAKE_HERDR_SHELL_DROP
+    # sent before it was ready (a fresh pane); "deaf" never runs it.
+    data["shell_runs"] = data.get("shell_runs", 0) + 1
+    drop = os.environ.get("FAKE_HERDR_SHELL_DROP", "0")
+    if drop != "deaf" and data["shell_runs"] > int(drop):
+        open(shlex.split(args[3])[-1], "w").close()
 elif args[:2] == ["agent", "start"] and os.environ.get("FAKE_HERDR_START_FAIL"):
     code = 1
     result = {{"error": {{"code": "invalid_agent_name"}}}}
@@ -452,3 +459,30 @@ def test_typed_pointer_left_in_the_composer_gets_a_second_enter(env, monkeypatch
     assert res["prompt_landed"] is True
     enters = [c for c in _calls(state_file) if c[:2] == ["pane", "send-keys"] and c[-1] == "Enter"]
     assert len(enters) == 2
+
+
+# A freshly split pane draws its prompt before the shell reads input, and a
+# `pane run` sent then is dropped (5 of 5 on zsh with an instant prompt).
+
+@pytest.mark.approved
+def test_setup_line_dropped_by_a_fresh_shell_is_cleared_and_sent_again(env, monkeypatch):
+    state_file, run, d, ddir, res = launch_in_herdr(env, monkeypatch, reads=[BUSY],
+                                                    settings={"FAKE_HERDR_SHELL_DROP": "2", "OFFICE_HERDR_SHELL_RETRY": "0"})
+    assert res["launcher"] == "herdr", res
+    calls = _calls(state_file)
+    runs = [i for i, c in enumerate(calls) if c[:2] == ["pane", "run"] and "agent.env" in c[3]]
+    assert len(runs) == 3 and (ddir / "shell-ready").exists()
+    # Each resend follows a Ctrl-C that clears what the shell left typed.
+    assert all(calls[i - 1][:2] == ["pane", "send-keys"] and calls[i - 1][-1] == "C-c" for i in runs[1:])
+    start = next(i for i, c in enumerate(calls) if c[:2] == ["agent", "start"])
+    assert runs[-1] < start
+
+
+@pytest.mark.approved
+def test_shell_that_never_runs_the_setup_line_falls_back_to_headless(env, monkeypatch):
+    state_file, run, d, ddir, res = launch_in_herdr(env, monkeypatch, reads=[BUSY],
+                                                    settings={"FAKE_HERDR_SHELL_DROP": "deaf", "OFFICE_HERDR_SHELL_RETRY": "0",
+                                                              "OFFICE_HERDR_SHELL_TIMEOUT": "0.2"})
+    assert res["launcher"] == "process-fallback"
+    assert not any(c[:2] == ["agent", "start"] for c in _calls(state_file))
+    assert any("never ran Office's setup line" in e for e in _launch_events(env, run))

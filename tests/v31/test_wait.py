@@ -118,7 +118,7 @@ def test_an_agent_idle_past_the_threshold_without_submitting_is_a_stall(env):
     d = _as_herdr(env)
     code, out = _wait(env, e, timeout="3")
     assert code == 3 and "stall:" in out and d["id"] in out and "idle" in out, out
-    assert "herdr agent prompt" in out and "office rerun T1" in out and "office revoke T1" in out, out
+    assert "office prompt D" in out and "office rerun T1" in out and "office revoke T1" in out, out
     tail = Path(paths_run_dir(env)) / "dispatches" / d["id"] / "pane-tail.txt"
     assert "waiting for input" in tail.read_text()
 

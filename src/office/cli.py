@@ -30,6 +30,8 @@ Auto Office {ver}
   office ack <amendment-id>         worker: record that you applied a delivered amendment
   office rerun <task> --resume|--fresh
                                     after a worker ends: continue its session, or start a new one with the findings
+  office prompt <task|dispatch> -- "<message>"
+                                    message a live pane agent and confirm it was submitted (never herdr pane run)
   office dismiss <task|dispatch|--all>
                                     close the kept panes of ended dispatches (final text is saved first)
   office close                      finish the run after acceptance and landing
@@ -208,6 +210,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("task")
     s.add_argument("--resume", action="store_true", help="continue the ended session (native harness resume)")
     s.add_argument("--fresh", action="store_true", help="start a new session with the open findings in its brief")
+    s = sp.add_parser("prompt", parents=[common])
+    s.add_argument("target", nargs="?")
+    s.add_argument("message", nargs="*")
     s = sp.add_parser("dismiss", parents=[common])
     s.add_argument("target", nargs="?")
     s.add_argument("--all", dest="dismiss_all", action="store_true")
@@ -452,6 +457,10 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "dismiss":
         from office import rerun
         return rerun.dismiss(con, run, args.target, all_=args.dismiss_all)
+    if cmd == "prompt":
+        from office import prompting
+        text = " ".join([*(args.message or []), *[u for u in unknown if u != "--"]]).strip()
+        return prompting.prompt(con, run, args.target, text)
     from office.state import OfficeError
     raise OfficeError("usage", f"unknown command {cmd}", exit_code=2)
 
