@@ -17,6 +17,11 @@ lease first. Required checks must pass before each merge, and a branch that
 must be up to date is updated once. After the last merge the default branch's
 tree is compared with the reviewed integration tree; if main moved meanwhile
 the run checks re-run on it before any prod deploy.
+
+`office land --rebase` moves a run onto a default branch that moved after
+`office start`: when every accepted revision still merges cleanly onto the
+new head, integration re-composes there and re-runs the run checks plus an
+independent integration review. A conflict refuses with the by-hand steps.
 """
 from __future__ import annotations
 
@@ -83,6 +88,59 @@ def land(con, run: dict, *, mode: str | None = None, quote: str | None = None) -
     _record(con, run, merged={"commit": main, "rollback": before, "at": now_iso()})
     res.next = "office close"
     return res
+
+
+# ------------------------------------------------------------------ rebase
+
+COMPOSE_BY_HAND = ("compose by hand: a scratch worktree from origin/{base}, cherry-pick each accepted task's commits, "
+                   "resolve the conflicts, run the full suite, have an independent reviewer check the resolution, open "
+                   "one PR, close the task PRs as superseded, then office close --abandon \"landed as #<N>\"")
+
+
+def rebase(con, run: dict) -> Result:
+    if os.environ.get("OFFICE_DISPATCH_ID"):
+        raise Refused("worker-cannot-land", "a worker cannot rebase the run")
+    tasks = integration.accepted_set(con, run)
+    if tasks is None:
+        raise Refused("not-ready", "rebase needs every task accepted", next_step="office status")
+    base = prs.settings(con, run).get("base_branch") or "main"
+    if any((t.get("pr") or {}).get("merged") for t in tasks):
+        raise Refused("already-merging", "some task PRs are merged; office land restacks the rest itself",
+                      next_step="office land")
+    repo = Path(run["repo_root"])
+    if _git(repo, "fetch", "-q", "origin", base).returncode != 0:
+        raise Refused("fetch-failed", f"could not fetch origin/{base}")
+    new, old = paths.git(repo, "rev-parse", f"origin/{base}"), integration.compose_base(run)
+    if _git(repo, "merge-base", "--is-ancestor", new, old).returncode == 0:
+        return Result(lines=[f"already on origin/{base} {new[:12]}; nothing to rebase"], next="office land")
+    if _git(repo, "merge-base", "--is-ancestor", old, new).returncode != 0:
+        raise Refused("base-diverged", f"origin/{base} {new[:12]} does not contain the run base {old[:12]}",
+                      next_step=COMPOSE_BY_HAND.format(base=base))
+    checkout = gates.detached_checkout(run, new, "rebase-trial")
+    try:
+        genv = dict(os.environ, **paths.commit_identity_env(repo))
+        for t in tasks:
+            commit = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (t["accepted_revision_id"],)).fetchone()[0]
+            proc = subprocess.run(["git", "-C", str(checkout), "merge", "--no-ff", "--no-edit", commit],
+                                  capture_output=True, text=True, env=genv)
+            if proc.returncode != 0:
+                files = paths.git(checkout, "diff", "--name-only", "--diff-filter=U", check=False).replace("\n", ", ")
+                raise Refused("rebase-conflict", f"{t['id']} conflicts with origin/{base} {new[:12]} on {files or 'files'}",
+                              preserved="the run, its PRs, and its accepted integration",
+                              next_step=COMPOSE_BY_HAND.format(base=base))
+    finally:
+        gates.remove_checkout(run, checkout)
+    with db.transaction(con):
+        _record(con, run, rebase={"from": old, "onto": new, "at": now_iso()})
+        run = state.get_run(con, run["id"])
+        integration._set_integration(con, run, status="pending", detail=f"rebasing onto {new[:12]}")
+        state.emit(con, run, "integration.rebase", f"rebased onto origin/{base} {new[:12]}; integration re-check queued")
+        integration.retrigger(con, run)
+    from office import jobs
+    jobs.kick(con, run["id"])
+    return Result(lines=[f"every accepted task merges cleanly onto origin/{base} {new[:12]}",
+                         "integration re-composes there and re-runs the run checks and an integration review"],
+                  next="office status (then office land once integration is accepted)")
 
 
 # ------------------------------------------------------------------ ask

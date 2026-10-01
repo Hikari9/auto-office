@@ -141,7 +141,9 @@ def executor_brief(con, run: dict, packet: dict) -> str:
     pr = packet.get("pr")
     if pr:
         out += ["", f"GIT commit and push your work to this branch as you go: {pr['push']}",
-                "    (this branch only; never force-push, never push another branch)."]
+                "    (this branch only; never force-push, never push another branch).",
+                "    To report anything in the PR body, add it below the `<!-- office:pr ... -->` line;",
+                "    Office rewrites only the block above it on each push."]
         if pr.get("open"):
             out.append(f"    After your first push, open its draft PR: {pr['open']}")
         else:

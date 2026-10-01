@@ -77,7 +77,7 @@ def main(argv: list[str]) -> int:
                 git_merge(pr, method)
                 pr["state"], pr["merged_with"] = "merged", method
         elif argv[1] == "view":
-            out = json.dumps({"number": pr["number"], "state": pr["state"].upper(), "isDraft": pr["draft"],
+            out = json.dumps({"number": pr["number"], "body": pr["body"], "state": pr["state"].upper(), "isDraft": pr["draft"],
                               "baseRefName": pr["base"], "mergeStateStatus": s.get("merge_state", "CLEAN"),
                               "statusCheckRollup": s.get("checks", [])})
         elif argv[1] == "checks":

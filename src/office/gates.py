@@ -142,6 +142,24 @@ def rerun_unavailable_review(con, run: dict, task: dict) -> str | None:
     return gid
 
 
+def rerun_unavailable_checks(con, run: dict, task: dict) -> bool:
+    """`office resume`: re-plan the gates of the task's current revision when
+    its checks were UNAVAILABLE (a timeout under host load, say). The
+    submission is kept and no executor is launched. Caller holds the tx."""
+    if task["status"] != "blocked" or not (task.get("pause_reason") or "").startswith("checks gate unavailable"):
+        return False
+    rev = con.execute("SELECT * FROM revisions WHERE id=?", (task["current_revision_id"],)).fetchone()
+    if rev is None:
+        return False
+    rev = dict(rev)
+    changed = json.loads(rev["changed_json"] or "[]")
+    state.update_task(con, run["id"], task["id"], status="submitted", pause_reason=None)
+    plan_for_revision(con, run, state.get_task(con, run["id"], task["id"]), rev["id"], changed,
+                      state.get_dispatch(con, rev["dispatch_id"]))
+    state.emit(con, run, "gate.rerun", f"{task['id']} checks re-run on {rev['id']} (were UNAVAILABLE)", task_id=task["id"])
+    return True
+
+
 def stale_open_gates(con, run: dict, task_id: str, new_rev: str) -> None:
     """A new revision supersedes the old one: unfinished gates on it never run
     or, if already running, are ingested as stale audit evidence."""
@@ -200,6 +218,9 @@ def run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate
             code, out = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
         except subprocess.TimeoutExpired as exc:
             code, out = 124, f"timed out after {timeout}s\n{exc.stdout or ''}"
+        loaded = host_overloaded() if code == 124 else None
+        if loaded:
+            out = f"{loaded}\n{out}"
         log.write_text(out, encoding="utf-8")
         os.chmod(log, 0o600)
         passed = code == 0
@@ -210,6 +231,9 @@ def run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate
             con.execute("INSERT INTO validations(id, dispatch_id, kind, command, passed, known_bad_proven, evidence_hash, created_at) "
                         "VALUES(?,?,?,?,?,?,?,?)", (uuid.uuid4().hex, rev["dispatch_id"], "check", command, int(passed), 0,
                                                     sha256_bytes(out.encode()), now_iso()))
+        if loaded:
+            return {"verdict": "UNAVAILABLE", "summary": f"`{command}` timed out after {timeout}s; {loaded}; "
+                    "rerun when the host is quieter: office resume", "results": results}
         if code == 127 or ("command not found" in out[-400:] and code != 0):
             return {"verdict": "UNAVAILABLE", "summary": f"check command not found: {command}", "results": results}
         if not passed:
@@ -222,6 +246,19 @@ def run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate
     parsed = review_parse.Parsed(verdict=verdict, findings=findings)
     return {"verdict": verdict, "parsed": parsed, "results": results, "route": "deterministic",
             "summary": f"{len(commands) - len(findings)}/{len(commands)} checks passed"}
+
+
+def host_overloaded() -> str | None:
+    """A timeout under heavy host load (parallel suites) is the environment,
+    not the code: the same tree that timed out at 1800s with load 100+ passed
+    in 223s alone. Says why when the 1-minute load is over twice the CPU count."""
+    try:
+        load = os.getloadavg()[0]
+    except OSError:
+        return None
+    cpus = os.cpu_count() or 1
+    limit = float(os.environ.get("OFFICE_CHECK_LOAD_FACTOR", "2")) * cpus
+    return f"host load {load:.0f} exceeds {limit:.0f} ({cpus} CPUs)" if load > limit else None
 
 
 def _check_env(run: dict) -> dict:

@@ -117,6 +117,7 @@ Design and contracts: [`docs/v31-implementation.md`](docs/v31-implementation.md)
   verdicts, and marks the PR ready on acceptance. `office start --no-prs` keeps work local.
 - The plan's `end_state:` (asked at intake) decides how far `office land` goes: ask, preview
   deploy, merge, or merge + prod deploy and verify. `office land --detect` proposes deploy commands.
+  `office land --rebase` moves an accepted run onto a default branch that moved since start.
 - Runs pinned to 3.1 keep 3.1 behavior; they run under their registered 3.1 runtime.
 
 ## Migrating from 3.0
