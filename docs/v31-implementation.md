@@ -358,8 +358,9 @@ directories under `~/.office-eval`; no live run read or wrote the user's `runs.d
 
 Defects the live runs found and fixed: harness hook caches (`graft/.cache/`) written into a worktree
 were refused as out-of-scope and the executor was relaunched into the same refusal (cache
-directories are now left out of the revision; any other out-of-scope file blocks the task with the
-reason); two quota probes ran serially for ~43s per dispatch (now parallel with a shared 2-minute
+directories were left out of the revision; since #222 every untracked out-of-scope file and every edit to a
+tracked harness config file (`.claude/`, `.codex/`, `.agents/`, `.office/`) is left out with a warning, while
+any other tracked out-of-scope edit still blocks the task with the reason); two quota probes ran serially for ~43s per dispatch (now parallel with a shared 2-minute
 cache); the run phase stayed `planning` during execution.
 
 ## 17. Prospective evaluation (spec §24): status

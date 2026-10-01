@@ -74,11 +74,49 @@ def test_tool_cache_outside_scope_is_left_out_of_the_revision(env):
     assert files == ["calc.py"], files
 
 
-def test_refused_submit_blocks_instead_of_relaunching(env):
-    # A real out-of-scope file is refused; a fresh session would hit the same
-    # refusal, so the task blocks with the reason instead of relaunching.
+def _submitted_files(env):
+    import subprocess
+    commit = env.con().execute("SELECT commit_sha FROM revisions WHERE task_id='T1'").fetchone()[0]
+    return subprocess.run(["git", "-C", str(env.repo), "show", "--name-only", "--format=", commit],
+                          capture_output=True, text=True).stdout.split()
+
+
+def test_untracked_file_outside_scope_is_left_out_with_a_warning(env):
     env.trust()
     env.script(executor=[{"write": {"calc.py": GOOD_ADD, "notes.txt": "x"}, "submit": True}],
+               code_reviewer=[{"reply": "VERDICT: PASS"}])
+    start_inline(env)
+    _approve(env)
+    code, out = env.office("dispatch", "T1")
+    assert code == 0, out
+    code, data = env.ojson("status")
+    assert data["data"]["tasks"]["T1"] == "accepted", data
+    assert _submitted_files(env) == ["calc.py"]
+
+
+def test_harness_config_edit_outside_scope_is_left_out_with_a_warning(env):
+    env.git("config", "commit.gpgsign", "false")
+    (env.repo / ".claude").mkdir()
+    (env.repo / ".claude" / "settings.json").write_text("{}\n")
+    env.git("add", "-A")
+    env.git("commit", "-qm", "harness config")
+    env.trust()
+    env.script(executor=[{"write": {"calc.py": GOOD_ADD, ".claude/settings.json": '{"hooks": {}}\n'}, "submit": True}],
+               code_reviewer=[{"reply": "VERDICT: PASS"}])
+    start_inline(env)
+    _approve(env)
+    code, out = env.office("dispatch", "T1")
+    assert code == 0, out
+    code, data = env.ojson("status")
+    assert data["data"]["tasks"]["T1"] == "accepted", data
+    assert _submitted_files(env) == ["calc.py"]
+
+
+def test_refused_submit_blocks_instead_of_relaunching(env):
+    # A tracked source edit outside scope is refused; a fresh session would hit the same
+    # refusal, so the task blocks with the reason instead of relaunching.
+    env.trust()
+    env.script(executor=[{"write": {"calc.py": GOOD_ADD, "README.md": "changed\n"}, "submit": True}],
                code_reviewer=[{"reply": "VERDICT: PASS"}])
     start_inline(env)
     _approve(env)
@@ -89,7 +127,7 @@ def test_refused_submit_blocks_instead_of_relaunching(env):
     assert roles.count("executor") == 1, roles
     con = env.con()
     reason = con.execute("SELECT pause_reason FROM tasks WHERE id='T1'").fetchone()[0]
-    assert "outside its scope" in reason and "notes.txt" in reason, reason
+    assert "outside its scope" in reason and "README.md" in reason, reason
 
 
 def test_dispatch_returns_while_the_worker_is_still_running(env):
