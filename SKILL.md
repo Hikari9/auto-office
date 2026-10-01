@@ -77,7 +77,7 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
   Playwright). A suite that skips every test makes pytest exit 5, which fails the gate.
 - An executor idle 60s without submitting (or whose process died) is a stall: `office wait` exits 3 and
   the stall line names the dispatch, any refused-submit reason, its `pane-tail.txt`, and the next command.
-  Fix the blocker, then re-prompt with `herdr agent prompt` or follow that command.
+  Fix the blocker, then re-prompt with `office prompt T2 -- "<message>"` or follow that command.
 - Findings never relaunch anything on their own. When `next:` says a task's findings wait for you, run
   `office rerun T2 --resume` (the same harness session, in a fresh pane) or `office rerun T2 --fresh`;
   resume refuses with the reason and the `--fresh` command when the session cannot be reopened.
@@ -120,7 +120,10 @@ confirms the brief pointer landed. A pane closes itself once its result is accep
 closes kept panes, and `OFFICE_KEEP_PANES=1` on `office dispatch` keeps them for debugging. A `launch` notice in `office status` means it could not: the
 pane agent never started (the dispatch ran headless) or the prompt never landed (re-prompt it).
 Office presses Enter for a prompt left typed but unsubmitted; a notice saying it is still unsubmitted
-means `herdr pane send-keys <pane> Enter`, not a re-prompt, which would send it twice.
+means `herdr pane send-keys <pane> Enter`, not a re-prompt, which would send it twice. To message a live worker or
+reviewer yourself (an amendment nudge, a missing detail), run `office prompt <T2|dispatch> -- "<message>"`: it sends
+with `herdr agent prompt`, confirms it landed, and presses Enter for one left typed. Never use `herdr pane run` or
+`pane send-text` on an agent pane; Claude takes their Enter as part of the paste and leaves the text unsubmitted.
 To relaunch a dispatch by hand, `office revoke T1`, then `office dispatch T1 --external` (plus `--as`
 for another model); it prints the `herdr pane run`, `herdr agent start`, and `herdr agent prompt` commands
 to run. A prompt has landed when the agent reports `working` or its pane shows a running turn. agy

@@ -205,7 +205,7 @@ def _idle_executors(con, run: dict) -> list[str]:
     """Executors whose agent stopped without submitting. Nothing else ends that
     wait: the session is alive, so no exit is recorded and no job is pending.
     Liveness unknown (herdr unreachable) is never a stall."""
-    from office import db, dispatch, rerun
+    from office import db, rerun
     from office.util import now_iso, parse_iso
     threshold = idle_stall_s()
     out = []
@@ -246,8 +246,7 @@ def _idle_executors(con, run: dict) -> list[str]:
         tail = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "pane-tail.txt"
         if act["text"] is not None:
             atomic_write_text(tail, "\n".join(act["text"].splitlines()[-40:]) + "\n")
-        name = dispatch.herdr_agent_name(d["id"])
-        prompt = f"herdr agent prompt {name}, " if d["launcher"] == "herdr" else ""
+        prompt = f'office prompt {d["id"]} -- "<message>", ' if d["launcher"] == "herdr" else ""
         out.append(f"{who}: idle {int(idle)}s without submitting{why}; pane tail in {tail}; "
                    f"next: {prompt}{actions}")
     return out

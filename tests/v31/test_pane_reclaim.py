@@ -11,7 +11,7 @@ import pytest
 from conftest import approved_run
 
 FAKE_HERDR = r'''#!{python}
-import json, os, sys
+import json, os, shlex, sys
 state = os.environ["FAKE_HERDR_STATE"]
 data = json.load(open(state))
 args = sys.argv[1:]
@@ -27,6 +27,8 @@ elif args[:2] == ["pane", "get"]:
         print(json.dumps({{"error": {{"code": "pane_not_found"}}}}))
     else:
         result = {{"pane": {{"pane_id": args[2], "agent": data.get("pane_agents", {{}}).get(args[2])}}}}
+elif args[:2] == ["pane", "run"] and " && touch " in args[3]:
+    open(shlex.split(args[3])[-1], "w").close()  # the shell ran Office's setup line
 elif args[:2] == ["pane", "close"]:
     if not data.get("close_fails"):
         closed.append(args[2])

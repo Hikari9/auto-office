@@ -249,6 +249,8 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
     return [f"brief: {ddir / 'brief.md'}", f"env: {ddir / 'agent.env'}", f"worktree: {wt}",
             *([f"output: {output}"] if output else []),
             f"herdr: herdr pane run <pane> {shlex.quote('. ' + str(ddir / 'agent.env') + ' && cd ' + wt)}",
+            "       (a new pane's shell drops a line sent before it is ready: confirm it ran with `herdr pane read`, "
+            "else clear the line with `herdr pane send-keys <pane> ctrl+u` and run it again)",
             f"       herdr agent start {name} --kind {kind} --pane <pane> -- {shlex.join(args)}".rstrip(),
             "       (wait until `herdr pane get <pane>` shows the agent and its UI is up; answer a codex "
             "'Trust this folder?' with Enter; send the pointer with `agent prompt`, never `pane run`)",
@@ -759,8 +761,11 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     # The pane's shell does not inherit this process's environment: source the
     # dispatch identity into it first, so the agent's own `office submit` works.
     env_file = write_agent_env(run, dispatch, ddir, worker=worker)
-    subprocess.run(["herdr", "pane", "run", pane, f". {shlex.quote(str(env_file))} && cd {shlex.quote(str(cwd))}"],
-                   capture_output=True, timeout=30)
+    setup = f". {shlex.quote(str(env_file))} && cd {shlex.quote(str(cwd))}"
+    if not _shell_run(pane, setup, ddir / "shell-ready"):
+        _launch_notice(run, dispatch, f"the shell in pane {pane} never ran Office's setup line (env and cd) within "
+                                      f"{_shell_timeout():g}s; running headless instead")
+        return None
     try:
         proc = subprocess.run(["herdr", "agent", "start", name, "--kind", herdr_kind, "--pane", pane, "--", *args],
                               capture_output=True, text=True, timeout=120)
@@ -831,7 +836,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
             why = (" a folder-trust dialog holds the composer; answer it in the pane (1. Trust and continue) and"
                    if trust else "")
             _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
-                                          f"re-prompt it: herdr agent prompt {name} {shlex.quote(pointer)}")
+                                          f"re-prompt it: office prompt {dispatch['id']} -- {shlex.quote(pointer)}")
     spec["prompt_landed"] = landed
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
     log = open(ddir / "supervisor.log", "ab")
@@ -1007,6 +1012,40 @@ def _herdr_quiet(*args: str) -> None:
 
 def _land_timeout() -> float:
     return float(os.environ.get("OFFICE_HERDR_LAND_TIMEOUT", "30"))
+
+
+def _shell_timeout() -> float:
+    return float(os.environ.get("OFFICE_HERDR_SHELL_TIMEOUT", "30"))
+
+
+def _shell_run(pane: str, command: str, marker: Path, timeout: float | None = None) -> bool:
+    """Run `command` in the pane's shell and confirm it ran. A freshly split
+    pane draws its prompt before the shell reads input (zsh with an instant
+    prompt), and a `pane run` sent then is dropped or left typed on the line.
+    The command touches `marker` once it has run; until it does, the line is
+    cleared with Ctrl-U and the command sent again, so it must be safe to run
+    twice. Ctrl-U, not Ctrl-C: a SIGINT while the shell is still sourcing its
+    rc file would abort it and leave PATH half set. False when it never ran
+    within OFFICE_HERDR_SHELL_TIMEOUT."""
+    marker.unlink(missing_ok=True)
+    line = f"{command} && touch {shlex.quote(str(marker))}"
+    retry = float(os.environ.get("OFFICE_HERDR_SHELL_RETRY", "3"))
+    deadline = time.time() + (_shell_timeout() if timeout is None else timeout)
+    first = True
+    while True:
+        if not first:
+            _herdr_quiet("pane", "send-keys", pane, "ctrl+u")
+        _herdr_quiet("pane", "run", pane, line)
+        first = False
+        until = min(deadline, time.time() + retry)
+        while True:
+            if marker.exists():
+                return True
+            if time.time() >= until:
+                break
+            time.sleep(0.25)
+        if time.time() >= deadline:
+            return False
 
 
 # Claude shows a long paste in its composer as this placeholder, not the text.
