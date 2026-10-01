@@ -225,14 +225,17 @@ def test_claude_denial_skips_a_cwd_that_is_the_dispatch_dir(scope):
     assert f"Edit(/{out.parent}/**)" not in deny and f"Edit(/{env.data}/**)" in deny
 
 
-def _can_write(argv: list[str], target: Path) -> bool:
+def _can_write(argv: list[str], target: Path, inherited_allow: tuple[str, ...] = ()) -> bool:
     """Claude Code's decision for a file write under `argv`'s rules: a deny rule
     wins, then an allow rule, else `dontAsk` denies. Only `Edit(path)` rules are
-    consulted for file writes; `//abs` is an absolute path. A bare `Write` or
-    `Edit` allow would grant every path."""
+    consulted for file writes; `//abs` is an absolute path. `inherited_allow` are
+    allow rules from the user/project/local settings files, which `--restricted`
+    makes Claude Code ignore. A bare `Write` or `Edit` allow grants every path."""
     mode = argv[argv.index("--permission-mode") + 1]
     allowed = argv[argv.index("--allowedTools") + 1].split(",")
     denied = argv[argv.index("--disallowedTools") + 1].split(",")
+    if "--restricted" not in argv:
+        allowed = allowed + list(inherited_allow)
 
     def matches(rules: list[str]) -> bool:
         for rule in rules:
@@ -295,3 +298,31 @@ def test_claude_worker_argv_has_no_reviewer_write_rules(scope):
     env, adapters, _ = scope
     argv, _ = adapters.build_argv(adapters.load_all()["claude"], "worker", model="m", effort="high", cwd=env.repo)
     assert "--allowedTools" not in argv and "dontAsk" not in argv
+
+
+@pytest.mark.parametrize("kind", ["reviewer", "vision"])
+def test_preexisting_broad_write_allow_does_not_widen_a_claude_reviewer(scope, kind):
+    """The operator's own settings may allow writes anywhere. A reviewer launch
+    ignores them (`--restricted`), so a sibling run's dispatch stays unwritable."""
+    env, adapters, _ = scope
+    sibling = env.state / "runs" / "other-run" / "dispatches" / "Dxyz" / "reply.txt"
+    own = env.tmp / "dispatch" / "reply.txt"
+    broad = ("Write", "Edit", f"Edit(/{env.state}/**)", f"Edit(/{env.home}/**)")
+    argv = _reviewer_argv(adapters, "claude", kind, env)
+    assert "--restricted" in argv
+    assert not _can_write(argv, sibling, inherited_allow=broad)
+    assert not _can_write(argv, env.home / "scratch.txt", inherited_allow=broad)
+    assert _can_write(argv, own, inherited_allow=broad)
+    # The model is not vacuous: without `--restricted` the same settings do widen the fence.
+    unrestricted = [a for a in argv if a != "--restricted"]
+    assert _can_write(unrestricted, sibling, inherited_allow=broad)
+    inter, _ = adapters.interactive_argv(adapters.load_all()["claude"], kind, model="m", effort="high",
+                                         cwd=env.repo, include_dirs=[env.repo], output=own)
+    assert "--restricted" in inter
+    assert not _can_write(inter, sibling, inherited_allow=broad)
+
+
+def test_claude_worker_is_not_restricted(scope):
+    env, adapters, _ = scope
+    argv, _ = adapters.build_argv(adapters.load_all()["claude"], "worker", model="m", effort="high", cwd=env.repo)
+    assert "--restricted" not in argv
