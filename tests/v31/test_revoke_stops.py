@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import os
 import signal
+import threading
 import time
 
-from conftest import start_inline
-from test_herdr_agent_launch import _calls, _fake, _live_dispatch
+import pytest
+
+from conftest import approved_run
+from test_herdr_agent_launch import BUSY, _calls, launch_in_herdr
 
 
 def _dispatch(env, task="T1"):
@@ -38,6 +41,13 @@ def _lease_revoked(env) -> bool:
         con.close()
 
 
+def _reap_when_done(pid: int) -> None:
+    """The supervisor is a child of this process, so a finished one lingers as a
+    zombie that still answers kill 0, and `office revoke` would wait out its
+    whole grace period for it. Reap it the moment it exits."""
+    threading.Thread(target=os.waitpid, args=(pid, 0), daemon=True).start()
+
+
 def _dead(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -46,17 +56,16 @@ def _dead(pid: int) -> bool:
     return False
 
 
+@pytest.mark.approved
 def test_revoke_stops_a_headless_dispatch(env, monkeypatch):
-    env.trust()
-    env.script(executor=[{"sleep": 60}])
-    start_inline(env)
-    env.office("approve", "plan", "--quote", "yes, go ahead", check=0)
+    approved_run(env, executor=[{"sleep": 60}])
     env.office("dispatch", "T1", env={"OFFICE_LAUNCHER": "auto"}, check=0)
     from office import paths
     d = _until(lambda: (lambda d: d if d["status"] == "running" else None)(_dispatch(env)))
     pgid_file = paths.run_dir(d["run_id"]) / "dispatches" / d["id"] / "agent.pgid"
     agent = int(_until(lambda: pgid_file.is_file() and pgid_file.read_text().strip()))
     sup = d["pid"]
+    _reap_when_done(sup)
     code, out = env.office("revoke", "T1", "--reason", "test stop")
     assert code == 0, out
     assert "SIGTERM" in out
@@ -66,31 +75,18 @@ def test_revoke_stops_a_headless_dispatch(env, monkeypatch):
     assert _lease_revoked(env)
 
 
+@pytest.mark.approved
 def test_revoke_stops_a_herdr_agent_dispatch(env, monkeypatch):
-    state_file = _fake(env, monkeypatch, gets=["working"])
-    run, d = _live_dispatch(env, monkeypatch)
-    monkeypatch.setenv("HERDR_ENV", "1")
-    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
-    monkeypatch.setenv("OFFICE_LAUNCHER", "herdr")
-    monkeypatch.setenv("OFFICE_HERDR_POLL", "0.2")
-    from office import db, dispatch, paths
-    con = env.con()
-    try:
-        with db.transaction(con):
-            con.execute("UPDATE dispatches SET adapter_id='claude', model='fake-model', effort='high' WHERE id=?", (d["id"],))
-    finally:
-        con.close()
-    d = _dispatch(env)
-    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
-    ddir.mkdir(parents=True, exist_ok=True)
-    (ddir / "brief.md").write_text("ROLE executor\n")
-    res = dispatch.launch(run, d, "worker", ddir, cwd=env.repo)
+    state_file, run, _, _, res = launch_in_herdr(env, monkeypatch, gets=["working"], reads=[BUSY], adapter="claude",
+                                                 model="fake-model", effort="high", real_watcher=True,
+                                                 settings={"OFFICE_HERDR_POLL": "0.2"})
     assert res["launcher"] == "herdr", res
-    d = _until(lambda: (lambda d: d if d["status"] == "running" and d["pid"] == res["watcher_pid"] else None)(_dispatch(env)))
+    _reap_when_done(res["watcher_pid"])
+    _until(lambda: (lambda d: d if d["status"] == "running" and d["pid"] == res["watcher_pid"] else None)(_dispatch(env)))
     code, out = env.office("revoke", "T1", "--reason", "test stop")
     assert code == 0, out
     d = _until(lambda: (lambda d: d if d["ended_at"] else None)(_dispatch(env)))
     assert d["terminal_classification"] == "signal" and d["signal"] == signal.SIGTERM
     assert ["pane", "close", res["pane"]] in _calls(state_file), [c for c in _calls(state_file) if c[0] == "pane"]
-    _until(lambda: _dead(res["watcher_pid"]) or os.waitpid(res["watcher_pid"], os.WNOHANG)[0])
+    _until(lambda: _dead(res["watcher_pid"]))
     assert _lease_revoked(env)

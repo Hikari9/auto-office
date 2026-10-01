@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import GOOD_ADD, PLAN_ONE, start_inline
+from conftest import GOOD_ADD, approved_run
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
@@ -30,10 +30,7 @@ print(json.dumps({{"result": {{}}}}))
 
 
 def _setup(env, monkeypatch, *, session="sess-123", launcher="herdr"):
-    env.trust()
-    env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}] * 3)
-    start_inline(env, plan=PLAN_ONE, gear="direct+review")
-    env.office("approve", "plan", "--quote", "approved", check=0)
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}] * 3)
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     herdr = env.bin / "herdr"
     herdr.write_text(FAKE_HERDR.format(python=sys.executable))
@@ -72,6 +69,7 @@ def test_resume_argv_appends_the_session_or_says_none():
     assert adapters.resume_argv(NO_RESUME, "worker", session_id="S1", model="m", effort="high", cwd=Path(".")) is None
 
 
+@pytest.mark.approved
 def test_rerun_needs_exactly_one_mode(env, monkeypatch):
     _setup(env, monkeypatch)
     code, out = env.office("rerun", "T1", env=EXTERNAL)
@@ -80,6 +78,7 @@ def test_rerun_needs_exactly_one_mode(env, monkeypatch):
     assert code == 2, out
 
 
+@pytest.mark.approved
 def test_fresh_starts_a_new_executor_on_the_same_worktree(env, monkeypatch):
     parent = _setup(env, monkeypatch)
     code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
@@ -89,12 +88,14 @@ def test_fresh_starts_a_new_executor_on_the_same_worktree(env, monkeypatch):
     assert len(rows) == 2 and rows[0]["worktree"] == rows[1]["worktree"] and rows[1]["id"] != parent
 
 
+@pytest.mark.approved
 def test_resume_refuses_without_a_session_id(env, monkeypatch):
     _setup(env, monkeypatch, session=None)
     code, out = env.office("rerun", "T1", "--resume", env=EXTERNAL)
     assert code == 4 and "no stored harness session id" in out and "office rerun T1 --fresh" in out, out
 
 
+@pytest.mark.approved
 @pytest.mark.parametrize("mode,reason", [("alive", "still running"), ("down", "herdr unreachable")])
 def test_resume_refuses_a_live_or_unknown_parent(env, monkeypatch, mode, reason):
     _setup(env, monkeypatch)
@@ -107,6 +108,7 @@ def test_resume_refuses_a_live_or_unknown_parent(env, monkeypatch, mode, reason)
     assert reason in err.value.message and err.value.next_step == "office rerun T1 --fresh"
 
 
+@pytest.mark.approved
 def test_resume_refuses_an_adapter_without_a_resume_form(env, monkeypatch):
     _setup(env, monkeypatch)
     from office import adapters, rerun
@@ -117,6 +119,7 @@ def test_resume_refuses_an_adapter_without_a_resume_form(env, monkeypatch):
     assert "declares no resume form" in err.value.message
 
 
+@pytest.mark.approved
 def test_resume_launches_a_linked_dispatch_carrying_the_resume_argv(env, monkeypatch):
     parent = _setup(env, monkeypatch)
     monkeypatch.setenv("FAKE_HERDR_AGENT", "gone")
@@ -135,6 +138,7 @@ def test_resume_launches_a_linked_dispatch_carrying_the_resume_argv(env, monkeyp
     assert f"resumed from {parent}" in out, out
 
 
+@pytest.mark.approved
 def test_dismiss_closes_ended_panes_and_refuses_live_ones(env, monkeypatch):
     parent = _setup(env, monkeypatch)
     from office import dispatch, rerun

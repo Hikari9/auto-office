@@ -1,7 +1,9 @@
 """End-to-end lifecycle through the real CLI with scripted fake harnesses."""
 from __future__ import annotations
 
-from conftest import BAD_ADD, GOOD_ADD, GOOD_MUL, PLAN_ONE, PLAN_TWO, start_inline
+import pytest
+
+from conftest import BAD_ADD, GOOD_ADD, approved_run, start_inline
 
 
 def _approve(env):
@@ -32,13 +34,11 @@ def test_normal_code_task_to_close(env):
     assert "closed" in out
 
 
+@pytest.mark.approved
 def test_code_review_failure_then_fix(env):
-    env.trust()
-    env.script(executor=[{"write": {"calc.py": BAD_ADD}, "submit": True},
-                         {"write": {"calc.py": GOOD_ADD}, "submit": True}],
-               code_reviewer=[{"reply": "VERDICT: PASS"}])
-    start_inline(env)
-    _approve(env)
+    approved_run(env, executor=[{"write": {"calc.py": BAD_ADD}, "submit": True},
+                           {"write": {"calc.py": GOOD_ADD}, "submit": True}],
+                 code_reviewer=[{"reply": "VERDICT: PASS"}])
     code, out = env.office("dispatch", "T1")
     assert code == 0, out
     code, data = env.ojson("status")
@@ -55,13 +55,11 @@ def test_code_review_failure_then_fix(env):
     assert roles.count("executor") == 2 and roles.count("code_reviewer") == 1, roles
 
 
+@pytest.mark.approved
 def test_tool_cache_outside_scope_is_left_out_of_the_revision(env):
     # A harness hook (graft) drops a session cache into the worktree; it is not the task's work.
-    env.trust()
-    env.script(executor=[{"write": {"calc.py": GOOD_ADD, "graft/.cache/session/s.json": "{}"}, "submit": True}],
-               code_reviewer=[{"reply": "VERDICT: PASS"}])
-    start_inline(env)
-    _approve(env)
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD, "graft/.cache/session/s.json": "{}"}, "submit": True}],
+                 code_reviewer=[{"reply": "VERDICT: PASS"}])
     code, out = env.office("dispatch", "T1")
     assert code == 0, out
     code, data = env.ojson("status")
@@ -112,14 +110,12 @@ def test_harness_config_edit_outside_scope_is_left_out_with_a_warning(env):
     assert _submitted_files(env) == ["calc.py"]
 
 
+@pytest.mark.approved
 def test_refused_submit_blocks_instead_of_relaunching(env):
     # A tracked source edit outside scope is refused; a fresh session would hit the same
     # refusal, so the task blocks with the reason instead of relaunching.
-    env.trust()
-    env.script(executor=[{"write": {"calc.py": GOOD_ADD, "README.md": "changed\n"}, "submit": True}],
-               code_reviewer=[{"reply": "VERDICT: PASS"}])
-    start_inline(env)
-    _approve(env)
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD, "README.md": "changed\n"}, "submit": True}],
+                 code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1")
     code, data = env.ojson("status")
     assert data["data"]["tasks"]["T1"] == "blocked", data
@@ -134,11 +130,8 @@ def test_dispatch_returns_while_the_worker_is_still_running(env):
     # #125: completion delivery must not block the orchestrator. With the real
     # process launcher, dispatch returns at once and the result arrives later.
     import time
-    env.trust()
-    env.script(executor=[{"sleep": 6, "write": {"calc.py": GOOD_ADD}, "submit": True}],
-               code_reviewer=[{"reply": "VERDICT: PASS"}])
-    start_inline(env)
-    _approve(env)
+    approved_run(env, executor=[{"sleep": 6, "write": {"calc.py": GOOD_ADD}, "submit": True}],
+                 code_reviewer=[{"reply": "VERDICT: PASS"}])
     t = time.time()
     code, out = env.office("dispatch", "T1", env={"OFFICE_LAUNCHER": "process"})
     elapsed = time.time() - t

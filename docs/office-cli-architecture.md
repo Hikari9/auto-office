@@ -163,6 +163,22 @@ For disabled hooks, absent runs, or unbound sessions, the hook shim executes wit
   - Creates a timestamped backup before modifying any configuration.
   - Retains run state directories and `runs.db` unless `--purge` is passed.
 
+### 3.5.1 Reviewer Read Scope
+
+Reviewers and vision checks read Office state (the state and data homes) and global guidance (`~/AGENTS.md`, `~/CLAUDE.md`, `~/.claude/*.md`, `~/.claude/rules`, `~/.claude/skills`, `~/.codex/AGENTS.md`). `src/office/read_scope.py` is the single definition.
+
+- **context-mode** (`ctx_execute_file`) refuses paths outside the project root unless a `permissions.allow` `Read(<glob>)` rule in Claude settings covers them. `office install` adds those rules to `~/.claude/settings.json`, each in both absolute spellings (`Read(//abs/**)` for Claude Code, `Read(/abs/**)` for context-mode's literal match). Rules Office added are recorded in `<data home>/read-rules.json`, so re-install and `office uninstall` remove exactly those and never a rule the user wrote. The settings file is backed up first, like the hook edits. `office doctor` reports `N/M` rules present and counts a shortfall as a problem.
+- **Launch flags**: reviewer and vision argv get the existing read roots through each profile's `include_arg` (claude and agy `--add-dir`, gemini `--include-directories`). Workers are never widened. Codex's `workspace-write` sandbox already reads the whole filesystem, so it needs no flag.
+
+Write access of a reviewer:
+
+| Harness | Writable | Enforced |
+|---|---|---|
+| codex | dispatch dir only (`--cd <dispatch dir>`, no `--add-dir`; also the tmp dirs codex always allows) | yes, by the sandbox |
+| claude | its dispatch dir only: `--permission-mode dontAsk` with a single `Edit(<dispatch dir>/**)` allow (Claude Code checks only `Edit(path)` rules for writes, and one covers the Write tool). `--restricted` ignores the user, project and local settings files, so an allow rule the operator already has cannot widen the fence (managed settings still apply). Everything else is denied, including other runs' dispatch dirs. Explicit `Edit(...)` denies cover the checkout, the worktrees dir, the data home and the read-only guidance roots (`~/.claude`, `~/.codex`, `~/.agents`, `~/AGENTS.md`, `~/CLAUDE.md`); a deny is skipped when it would contain the dispatch dir, since deny beats allow | yes, by the permission rules (Bash is denied, so no shell path around them) |
+| gemini | `--approval-mode plan` (read-only) | yes |
+| agy | `--dangerously-skip-permissions`, no scoping flag exists | no |
+
 ### 3.6 Legacy Migration (D139-6, D142-6)
 - `office install` scans for and removes legacy `install_hooks.sh` entries and local `.office/hooks/` directories (backing them up first). Both are officially deprecated.
 - `office_shortcut.sh` is retained for one deprecation release as a forwarding wrapper that executes the global `office` binary if present.

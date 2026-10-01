@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import re
 
-from conftest import GOOD_ADD, start_inline
+import pytest
+
+from conftest import GOOD_ADD, approved_run
 
 from office import scoring
 
@@ -11,11 +13,8 @@ HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _accepted_run(env):
-    env.trust()
-    env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
-               code_reviewer=[{"reply": "VERDICT: PASS"}])
-    start_inline(env)
-    env.office("approve", "plan", "--quote", "approved", check=0)
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+                 code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", check=0)
     con = env.con()
     assert con.execute("SELECT status FROM tasks WHERE id='T1'").fetchone()[0] == "accepted"
@@ -26,6 +25,7 @@ def _labels(con):
     return [dict(r) for r in con.execute("SELECT * FROM outcome_labels").fetchall()]
 
 
+@pytest.mark.approved
 def test_close_labels_accepted_work_once(env):
     con = _accepted_run(env)
     run_id = con.execute("SELECT id FROM runs WHERE phase IS NOT NULL").fetchone()[0]
@@ -47,6 +47,7 @@ def test_close_labels_accepted_work_once(env):
     assert len(_labels(env.con())) == 1
 
 
+@pytest.mark.approved
 def test_abandon_labels_evidenced_dispatches_abandoned(env):
     con = _accepted_run(env)
     run_id = con.execute("SELECT id FROM runs WHERE phase IS NOT NULL").fetchone()[0]

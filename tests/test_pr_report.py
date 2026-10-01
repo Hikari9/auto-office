@@ -6,7 +6,6 @@ prose. These tests also cover the before/after shape: a compact row per PR
 version comparing it to the immediately previous version and to a fixed
 baseline, with numbers only -- no agent-generated narrative.
 """
-import importlib.util
 import json
 import subprocess
 import sys
@@ -16,9 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-spec = importlib.util.spec_from_file_location("pr_report", ROOT / "scripts" / "pr_report.py")
-pr_report = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(pr_report)
+import pr_report
 
 SAMPLE_INPUT = {
     "baseline_version": "v1",

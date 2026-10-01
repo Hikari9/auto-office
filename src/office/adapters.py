@@ -21,7 +21,7 @@ from pathlib import Path
 
 import yaml
 
-from office import paths
+from office import paths, read_scope
 from office.util import atomic_write_json, sha256_obj
 
 PROFILE_KINDS = ("worker", "reviewer", "vision")
@@ -118,6 +118,9 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
         raise AdapterError(f"adapter {adapter.get('id')} has no {kind} profile")
     exe = executable(adapter)
     mapped_effort = effort_value(adapter, effort)
+    include_dirs = read_scope.with_read_dirs(kind, include_dirs)
+    # The one directory a sandboxed reviewer may write: its dispatch dir, else cwd.
+    sandbox_dir = Path(output).parent if output else Path(cwd)
     argv = [exe]
     for raw in prof.get("argv") or []:
         arg = str(raw)
@@ -142,8 +145,16 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
             if argv and argv[-1].startswith("-"):
                 argv.pop()
             continue
+        if "{write_allow}" in arg:
+            allow = read_scope.write_allows(output) if kind in read_scope.READER_KINDS else []
+            arg = arg.replace("{write_allow}", "".join("," + r for r in allow))
+        if "{write_deny}" in arg:
+            deny = read_scope.write_denials(cwd, output) if kind in read_scope.READER_KINDS else []
+            arg = arg.replace("{write_deny}", "".join("," + r for r in deny))
         arg = (arg.replace("{model}", model).replace("{effort}", mapped_effort or "")
                .replace("{cwd_toml}", toml_path(cwd))
+               .replace("{sandbox_dir_toml}", toml_path(sandbox_dir))
+               .replace("{sandbox_dir}", str(sandbox_dir))
                .replace("{cwd}", str(cwd)).replace("{output_dir}", str(Path(output).parent) if output else "")
                .replace("{output}", str(output or "")))
         argv.append(arg)

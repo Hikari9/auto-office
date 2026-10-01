@@ -5,12 +5,15 @@ fake harness binaries. Nothing touches the real ~/.local or any real harness.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -68,7 +71,9 @@ GOOD_MUL = "def mul(a, b):\n    return a * b\n"
 
 
 class Env:
-    def __init__(self, tmp: Path, monkeypatch):
+    def __init__(self, tmp: Path, monkeypatch, *, restored: bool = False):
+        """`restored`: tmp already holds a repository copied from a snapshot."""
+        self.approved = False
         self.tmp = tmp
         self.home = tmp / "home"
         self.data = tmp / "data"
@@ -112,7 +117,8 @@ class Env:
         monkeypatch.setenv("GIT_COMMITTER_NAME", "t")
         monkeypatch.setenv("GIT_COMMITTER_EMAIL", "t@t")
         self.scenario.write_text("{}")
-        self._init_repo()
+        if not restored:
+            self._init_repo()
 
     def _init_repo(self):
         self.repo.mkdir()
@@ -131,10 +137,34 @@ class Env:
             c.unlink()
 
     def office(self, *args, cwd=None, env=None, check=None):
-        e = dict(os.environ)
-        e.update(env or {})
+        """Run `office <args>` in this process under `cwd` and the `env` overrides.
+
+        Returns (exit code, stdout+stderr). Work the command hands to other
+        processes (workers, reviewers, checks) still runs as real subprocesses.
+        """
+        if "OFFICE_VERSION_OVERRIDE" in (env or {}):
+            return self._office_subprocess(args, cwd, env, check)
+        from office import cli
+        out = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(contextlib.redirect_stdout(out))
+            stack.enter_context(contextlib.redirect_stderr(out))
+            stack.enter_context(mock.patch.dict(os.environ, env or {}))
+            stack.enter_context(mock.patch.object(sys, "argv", ["office", *args]))
+            stack.enter_context(contextlib.chdir(cwd or self.repo))
+            try:
+                code = cli.main(list(args))
+            except SystemExit as exit_:
+                code = exit_.code if isinstance(exit_.code, int) else (0 if exit_.code is None else 1)
+        if check is not None and code != check:
+            raise AssertionError(f"office {' '.join(args)} exit {code} (want {check}):\n{out.getvalue()}")
+        return code, out.getvalue()
+
+    def _office_subprocess(self, args, cwd, env, check):
+        """A real `python -m office`, for behavior that replaces the process (the
+        front door re-executes under a run's pinned release)."""
         proc = subprocess.run([sys.executable, "-m", "office", *args], cwd=str(cwd or self.repo), capture_output=True,
-                              text=True, env=e)
+                              text=True, env={**os.environ, **(env or {})})
         out = proc.stdout + proc.stderr
         if check is not None and proc.returncode != check:
             raise AssertionError(f"office {' '.join(args)} exit {proc.returncode} (want {check}):\n{out}")
@@ -183,16 +213,47 @@ class Env:
         return [json.loads(l) for l in log.read_text().splitlines()] if log.exists() else []
 
 
-@pytest.fixture
-def env(tmp_path, monkeypatch):
-    e = Env(tmp_path, monkeypatch)
+def _activate(e: Env, monkeypatch) -> Env:
+    """Point this process at `e`: its repo as cwd, fresh version and quota caches."""
     monkeypatch.chdir(e.repo)
     sys.path.insert(0, str(SRC))
-    from office import version
+    from office import candidates, version
     version.current.cache_clear()
-    from office import candidates
     candidates._QUOTA_CACHE.clear()
     return e
+
+
+@pytest.fixture(scope="module")
+def _approved_snapshot(tmp_path_factory):
+    """The state `trust + start + approve plan` for PLAN_ONE, built once per module.
+
+    The steps cost about a second each time; tests marked `approved` restore this
+    copy instead. Paths inside Office state are absolute, so every restore lands
+    at the same directory the snapshot was built in.
+    """
+    root = tmp_path_factory.mktemp("approved")
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        e = _activate(Env(root / "env", monkeypatch), monkeypatch)
+        approved_run(e)
+        shutil.copytree(e.tmp, root / "snapshot", symlinks=True)
+    finally:
+        monkeypatch.undo()
+    return root / "env", root / "snapshot"
+
+
+@pytest.fixture
+def env(request, tmp_path, monkeypatch):
+    """An isolated Env. With `@pytest.mark.approved`, one whose default plan is already approved."""
+    if request.node.get_closest_marker("approved"):
+        live, snapshot = request.getfixturevalue("_approved_snapshot")
+        shutil.rmtree(live, ignore_errors=True)
+        shutil.copytree(snapshot, live, symlinks=True)
+        e = Env(live, monkeypatch, restored=True)
+        e.approved = True
+    else:
+        e = Env(tmp_path, monkeypatch)
+    return _activate(e, monkeypatch)
 
 
 def start_inline(env, plan=PLAN_ONE, gear="direct+review", extra=()):
@@ -202,3 +263,27 @@ def start_inline(env, plan=PLAN_ONE, gear="direct+review", extra=()):
     code, out = env.office("submit")
     assert code == 0, out
     return out
+
+
+def approved_run(env, plan=PLAN_ONE, gear="direct+review", **script):
+    """Trust the fake routes, script the harnesses by role, start an inline run and approve its plan.
+
+    An Env from a test marked `approved` already holds that state for the default
+    plan and gear; only the scripting is left to do.
+    """
+    if env.approved:
+        assert (plan, gear) == (PLAN_ONE, "direct+review"), "an approved Env holds the default plan and gear"
+        env.script(**script)
+        return
+    env.trust()
+    env.script(**script)
+    start_inline(env, plan=plan, gear=gear)
+    env.office("approve", "plan", "--quote", "approved", check=0)
+
+
+def task_row(env, tid="T1") -> dict:
+    con = env.con()
+    try:
+        return dict(con.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
+    finally:
+        con.close()

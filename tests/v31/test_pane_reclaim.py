@@ -6,7 +6,9 @@ import json
 import sys
 from pathlib import Path
 
-from conftest import start_inline
+import pytest
+
+from conftest import approved_run
 
 FAKE_HERDR = r'''#!{python}
 import json, os, sys
@@ -70,9 +72,7 @@ def _data(state: Path) -> dict:
 
 
 def _dispatch(env, *, pane="w1:p7", launcher="herdr", keep=None):
-    env.trust()
-    start_inline(env)
-    env.office("approve", "plan", "--quote", "yes", check=0)
+    approved_run(env)
     env.office("dispatch", "T1", env={"OFFICE_WORKER_LAUNCHER": "external"}, check=0)
     from office import state
     con = env.con()
@@ -98,6 +98,7 @@ def _col(env, did, col):
         con.close()
 
 
+@pytest.mark.approved
 def test_reclaim_snapshots_then_records_then_closes_and_is_idempotent(env, monkeypatch):
     state_file = _fake(env, monkeypatch, text="VERDICT: PASS\nfinal words")
     run, did = _dispatch(env)
@@ -119,6 +120,7 @@ def test_reclaim_snapshots_then_records_then_closes_and_is_idempotent(env, monke
     assert len(_data(state_file)["calls"]) == n  # nothing touched twice
 
 
+@pytest.mark.approved
 def test_failed_snapshot_keeps_the_pane_unless_explicit(env, monkeypatch):
     state_file = _fake(env, monkeypatch, text="")
     run, did = _dispatch(env)
@@ -134,6 +136,7 @@ def test_failed_snapshot_keeps_the_pane_unless_explicit(env, monkeypatch):
     assert "w1:p7" in _data(state_file)["closed"]
 
 
+@pytest.mark.approved
 def test_keep_panes_keeps_after_snapshot_and_dismiss_still_closes(env, monkeypatch):
     state_file = _fake(env, monkeypatch, text="work log")
     run, did = _dispatch(env, keep=1)
@@ -144,6 +147,7 @@ def test_keep_panes_keeps_after_snapshot_and_dismiss_still_closes(env, monkeypat
     assert dispatch.reclaim_pane(run, did, explicit=True) == "closed"
 
 
+@pytest.mark.approved
 def test_non_herdr_or_paneless_dispatch_is_skipped(env, monkeypatch):
     state_file = _fake(env, monkeypatch, text="x")
     run, did = _dispatch(env, launcher="process", pane=None)
@@ -152,6 +156,7 @@ def test_non_herdr_or_paneless_dispatch_is_skipped(env, monkeypatch):
     assert _data(state_file)["calls"] == []
 
 
+@pytest.mark.approved
 def test_pane_that_will_not_close_is_kept_not_recorded_closed(env, monkeypatch):
     _fake(env, monkeypatch, text="x", close_fails=True)
     run, did = _dispatch(env)
@@ -160,6 +165,7 @@ def test_pane_that_will_not_close_is_kept_not_recorded_closed(env, monkeypatch):
     assert not _col(env, did, "pane_closed_at")
 
 
+@pytest.mark.approved
 def test_accepted_worker_end_closes_its_pane_and_a_failed_end_keeps_it(env, monkeypatch):
     state_file = _fake(env, monkeypatch, text="done")
     run, did = _dispatch(env)
@@ -186,6 +192,7 @@ def test_spinner_status_line_counts_as_busy():
     assert not dispatch._pane_busy("✻ Cooked for 10m 49s · done 1:41 PM\n❯ ")
 
 
+@pytest.mark.approved
 def test_idle_worker_is_never_ended_and_a_held_submit_does_not_end_it(env, monkeypatch):
     _fake(env, monkeypatch, get=["idle"] * 8 + ["gone"], text="❯ ")
     run, did = _dispatch(env)
@@ -207,12 +214,11 @@ def test_idle_worker_is_never_ended_and_a_held_submit_does_not_end_it(env, monke
     con.close()
 
 
+@pytest.mark.approved
 def test_session_id_is_captured_and_a_busy_pane_gets_a_fresh_split(env, monkeypatch):
     state_file = _fake(env, monkeypatch, session="sess-123", busy_panes=["w1:p101"],
                        text="Working (1s • esc to interrupt)")
-    env.trust()
-    start_inline(env)
-    env.office("approve", "plan", "--quote", "yes", check=0)
+    approved_run(env)
     env.office("dispatch", "T1", env={"OFFICE_WORKER_LAUNCHER": "external"}, check=0)
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
@@ -234,6 +240,7 @@ def test_session_id_is_captured_and_a_busy_pane_gets_a_fresh_split(env, monkeypa
     assert _col(env, d["id"], "session_id") == "sess-123"
 
 
+@pytest.mark.approved
 def test_keep_panes_env_is_recorded_at_launch(env, monkeypatch):
     _fake(env, monkeypatch, text="x")
     run, did = _dispatch(env)

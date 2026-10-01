@@ -5,7 +5,6 @@ Deterministic harness fakes only — a fake `herdr` binary this test suite
 controls, never the real Herdr server. No test in this file touches a real
 Herdr pane.
 """
-import importlib.util
 import json
 import os
 import shutil
@@ -17,12 +16,11 @@ import textwrap
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
-spec = importlib.util.spec_from_file_location("office_monitor", ROOT / "scripts/office_monitor.py")
-mon = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mon)
+import office_monitor as mon
 
 
 def _resolve_node() -> str | None:
@@ -385,40 +383,23 @@ class HerdrSnapshotParsingTestCase(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def _snapshot(self, target):
+        with mock.patch.object(mon, "HERDR_BIN", str(self.fake.herdr_path)), \
+                mock.patch.dict(os.environ, {"FAKE_HERDR_STATE": str(self.fake.state_path)}):
+            return mon.herdr_agent_snapshot(target)
+
     def test_snapshot_unwraps_nested_agent_and_reads_plain_text(self):
         self.fake.write_state({
             "agent_get": {"t0exec": [{"agent_status": "working", "pane_id": "w1:p1"}]},
             "agent_read": {"t0exec": ["Reading file... (esc to cancel)\n"]},
         })
-        script = (
-            "import sys; sys.path.insert(0, %r)\n"
-            "import importlib.util as u\n"
-            "spec = u.spec_from_file_location('office_monitor', %r)\n"
-            "m = u.module_from_spec(spec); spec.loader.exec_module(m)\n"
-            "snap = m.herdr_agent_snapshot('t0exec')\n"
-            "print(__import__('json').dumps(snap))\n"
-        ) % (str(ROOT / "scripts"), str(ROOT / "scripts" / "office_monitor.py"))
-        env = self.fake.env()
-        env["OFFICE_HERDR_BIN"] = str(self.fake.herdr_path)
-        result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        snap = json.loads(result.stdout.strip().splitlines()[-1])
+        snap = self._snapshot("t0exec")
         self.assertEqual(snap["status"], "working")
         self.assertIn("Reading file", snap["content"])
 
     def test_snapshot_returns_none_on_agent_not_found(self):
         self.fake.write_state({"agent_get": {}})
-        script = (
-            "import importlib.util as u\n"
-            "spec = u.spec_from_file_location('office_monitor', %r)\n"
-            "m = u.module_from_spec(spec); spec.loader.exec_module(m)\n"
-            "print(__import__('json').dumps(m.herdr_agent_snapshot('missing')))\n"
-        ) % (str(ROOT / "scripts" / "office_monitor.py"),)
-        env = self.fake.env()
-        env["OFFICE_HERDR_BIN"] = str(self.fake.herdr_path)
-        result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip().splitlines()[-1], "null")
+        self.assertIsNone(self._snapshot("missing"))
 
 
 @unittest.skipUnless(NODE_BIN, "no node binary resolvable in this environment")

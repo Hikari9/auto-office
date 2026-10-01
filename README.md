@@ -28,7 +28,39 @@ The visual extra installs Playwright and uses the local Chrome; without it, visu
 installation source's git history, retires obsolete Office entries from Gemini's unused legacy
 hook file, and converts Hermes scalar hook commands to lists of command mappings. Config edits
 are backed up first and preserve unrelated settings; Hermes still requires its own hook approval.
-For visual capture after a checkout reinstall, use `uv tool install --force --reinstall '.[visual]'`.
+For a checkout reinstall, see [Deploy (this repo)](#deploy-this-repo).
+
+## Deploy (this repo)
+
+To put the current checkout on your PATH as the installed `office`:
+
+```bash
+uv tool install --force --reinstall --no-cache "auto-office[visual] @ <checkout>"
+office install
+office doctor                          # expect: install: matches its source <checkout> @ <commit>
+```
+
+- `--reinstall --no-cache`: without both, uv can reuse a cached wheel built from an older commit of the same
+  version. The install succeeds but lacks your changes, and `office --version` looks current.
+- `[visual]`: a reinstall without the extra removes Playwright, and visual gates report `CAPTURE_BLOCKED`.
+- `office install` re-registers the runtime and refreshes the managed hooks.
+- Verify with `office doctor`. `install: matches` means the installed runtime files equal the checkout. `install: STALE`
+  lists the files that differ and means the reinstall did not take effect.
+
+**Cross-release installs (MAJOR.MINOR changes).** Runs are pinned to a release line, and each registered runtime in
+`runtimes/<version>.json` points at a Python environment. The uv tool venv is overwritten by the new install, so
+runs pinned to the old release would start running new code. Before installing the new release, pin the old one in
+its own venv from a checkout at that release:
+
+```bash
+uv venv ~/.local/share/auto-office/pinned/<old-version>
+uv pip install --python ~/.local/share/auto-office/pinned/<old-version>/bin/python "auto-office[visual] @ <checkout at old release>"
+~/.local/share/auto-office/pinned/<old-version>/bin/python -c "from office import frontdoor; frontdoor.register_current()"
+```
+
+Then run the deploy commands above. `office doctor` prints `on <line>: N active run(s) ok` per pinned line, or
+`RUNTIME MISSING` when no runtime is registered for that line. A PATCH release on the same line needs no pinning.
+Moving a run across lines is `office upgrade`.
 
 ## Use
 
