@@ -119,6 +119,8 @@ confirms the brief pointer landed. A pane closes itself once its result is accep
 `pane-final.txt` in the dispatch dir; a failed end keeps it open. `office dismiss <T2|dispatch|--all>`
 closes kept panes, and `OFFICE_KEEP_PANES=1` on `office dispatch` keeps them for debugging. A `launch` notice in `office status` means it could not: the
 pane agent never started (the dispatch ran headless) or the prompt never landed (re-prompt it).
+Office presses Enter for a prompt left typed but unsubmitted; a notice saying it is still unsubmitted
+means `herdr pane send-keys <pane> Enter`, not a re-prompt, which would send it twice.
 To relaunch a dispatch by hand, `office revoke T1`, then `office dispatch T1 --external` (plus `--as`
 for another model); it prints the `herdr pane run`, `herdr agent start`, and `herdr agent prompt` commands
 to run. A prompt has landed when the agent reports `working` or its pane shows a running turn. agy

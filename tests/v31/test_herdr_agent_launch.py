@@ -257,7 +257,7 @@ def launch_in_herdr(env, monkeypatch, *, gets=(), reads=(), adapter="agy", model
     state_file = _fake(env, monkeypatch, gets=gets, reads=() if callable(reads) else reads)
     run, d = _live_dispatch(env, monkeypatch)
     for key, value in {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:pQ", "OFFICE_LAUNCHER": "herdr",
-                       "OFFICE_HERDR_LAND_TIMEOUT": "0", **(settings or {})}.items():
+                       "OFFICE_HERDR_LAND_TIMEOUT": "0", "OFFICE_HERDR_KEY_DELAY": "0", **(settings or {})}.items():
         monkeypatch.setenv(key, value)
     from office import db, dispatch, paths
     d = {**d, "adapter_id": adapter, "model": model, "effort": effort, "harness": adapter}

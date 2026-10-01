@@ -821,11 +821,17 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     if not landed:
         # The agent is up in a pane the user can see; a second headless copy
         # would race it. Say so and leave the pane for a manual re-prompt.
-        trust = _trust_dialog(_pane_view(name))
-        why = (" a folder-trust dialog holds the composer; answer it in the pane (1. Trust and continue) and"
-               if trust else "")
-        _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
-                                      f"re-prompt it: herdr agent prompt {name} {shlex.quote(pointer)}")
+        view = _pane_view(name)
+        if _composer_holds(view, pointer):
+            # Prompting again would submit the pointer twice.
+            _launch_notice(run, dispatch, f"brief pointer is typed but unsubmitted in herdr agent {name} (pane "
+                                          f"{pane}); submit it: herdr pane send-keys {pane} Enter")
+        else:
+            trust = _trust_dialog(view)
+            why = (" a folder-trust dialog holds the composer; answer it in the pane (1. Trust and continue) and"
+                   if trust else "")
+            _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
+                                          f"re-prompt it: herdr agent prompt {name} {shlex.quote(pointer)}")
     spec["prompt_landed"] = landed
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
     log = open(ddir / "supervisor.log", "ab")
@@ -990,21 +996,93 @@ def _office_owned(run: dict, cwd: Path | str | None) -> bool:
     return any(where == r or r in where.parents for r in roots)
 
 
+def _herdr_quiet(*args: str) -> None:
+    """Run a herdr command whose failure must not escape: the agent is already
+    recorded as launched, so a hung or missing herdr must not abort the caller."""
+    try:
+        subprocess.run(["herdr", *args], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _land_timeout() -> float:
+    return float(os.environ.get("OFFICE_HERDR_LAND_TIMEOUT", "30"))
+
+
+# Claude shows a long paste in its composer as this placeholder, not the text.
+_PASTE_PLACEHOLDER = re.compile(r"\[Pasted text #\d+")
+# The composer sits at the bottom of the pane; a long pointer wraps over many rows.
+_COMPOSER_ROWS = 20
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"[^0-9a-z]+", "", (text or "").lower())
+
+
+def _composer_holds(text: str | None, prompt: str) -> bool:
+    """The prompt sits typed but unsubmitted near the bottom of the pane. Only
+    letters and digits are compared, so the composer's wrapping, borders and
+    prompt glyph (`>`, `›`, `│`) do not hide it."""
+    if not text:
+        return False
+    tail = "\n".join(text.splitlines()[-_COMPOSER_ROWS:])
+    if _PASTE_PLACEHOLDER.search(tail):
+        return True
+    head = _squash(prompt)[:40]
+    return bool(head) and head in _squash(tail)
+
+
+def _press_enter(name: str, pane: str | None, herdr=_herdr_quiet) -> None:
+    if pane:
+        herdr("pane", "send-keys", pane, "Enter")
+    else:
+        herdr("agent", "send-keys", name, "Enter")
+
+
+def _submit_held(name: str, pane: str | None, prompt: str, timeout: float, *, baseline_ctx: float | None = None,
+                 seen=None, herdr=_herdr_quiet) -> str:
+    """Submit a prompt left typed in the composer with Enter, never by sending
+    the text again (that would submit it twice). `agent prompt` writes the text
+    and Enter together; a TUI that is not ready to submit yet, or that takes the
+    Enter as part of the paste, keeps the text. Returns 'landed'; 'absent' when
+    the composer never held it; 'held' when it is still there after
+    OFFICE_HERDR_ENTER_TRIES Enters. A composer an Enter emptied counts as
+    landed: the harness took the submit."""
+    tries = int(os.environ.get("OFFICE_HERDR_ENTER_TRIES", "3"))
+    delay = float(os.environ.get("OFFICE_HERDR_KEY_DELAY", "1"))
+    wait = min(timeout, float(os.environ.get("OFFICE_HERDR_ENTER_WAIT", "5")))
+    for n in range(tries):
+        if not _composer_holds(_pane_view(name), prompt):
+            return "landed" if n else "absent"
+        time.sleep(delay)
+        _press_enter(name, pane, herdr)
+        if _prompt_landed(name, wait, baseline_ctx=baseline_ctx, seen=seen) == "landed":
+            return "landed"
+    return "landed" if not _composer_holds(_pane_view(name), prompt) else "held"
+
+
+def submit_prompt(name: str, text: str, *, pane: str | None = None) -> str:
+    """Send `text` to a live herdr agent with `agent prompt` and confirm it was
+    submitted, pressing Enter for it when it is left in the composer. Returns
+    'landed', 'held' (still unsubmitted after the bounded Enters) or '' (no
+    landed signal, nothing left in the composer). Never sends the text twice."""
+    timeout = _land_timeout()
+    baseline = _ctx_k(_pane_view(name))
+    _herdr_quiet("agent", "prompt", name, text)
+    if _prompt_landed(name, timeout, baseline_ctx=baseline) == "landed":
+        return "landed"
+    got = _submit_held(name, pane, text, timeout, baseline_ctx=baseline)
+    return "" if got == "absent" else got
+
+
 def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = False, seen=None) -> bool:
-    """Wait for the agent UI, send the one-line pointer and confirm it landed;
-    retry once by typing it into the pane and pressing Enter (agy can drop a
-    prompt sent right after `agent start` returns). Nothing is typed into a
-    pane where herdr sees no agent: that text would go to the shell."""
-    timeout = float(os.environ.get("OFFICE_HERDR_LAND_TIMEOUT", "30"))
-
-    def herdr(*args: str) -> None:
-        # The agent is already recorded as launched: a hung or missing herdr
-        # here must not escape before the watcher starts.
-        try:
-            subprocess.run(["herdr", *args], capture_output=True, timeout=30)
-        except (OSError, subprocess.SubprocessError):
-            pass
-
+    """Wait for the agent UI, send the one-line pointer and confirm it landed.
+    A pointer left in the composer is submitted with Enter; a lost one is typed
+    into the pane once and submitted (agy can drop a prompt sent right after
+    `agent start` returns). Nothing is typed into a pane where herdr sees no
+    agent: that text would go to the shell."""
+    timeout = _land_timeout()
+    herdr = _herdr_quiet
     ui = _await_agent_ui(name, pane, timeout, answer_trust=answer_trust, herdr=herdr)
     if ui == "trust":
         return False
@@ -1026,14 +1104,13 @@ def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = 
             return True
     if not _agent_up(pane, name):
         return False
-    # A pointer already sitting in the composer only needs submitting; typing
-    # it again would send it twice.
-    view = _pane_view(name) or ""
-    if pointer[:48] not in view:
-        herdr("pane", "send-text", pane, pointer)
-    # A TUI can take an Enter that follows typed text too closely as part of
-    # the paste and leave it in the composer: pause, submit, and submit once
-    # more if it still has not landed.
+    held = _submit_held(name, pane, pointer, timeout, baseline_ctx=baseline, seen=seen, herdr=herdr)
+    if held != "absent":
+        return held == "landed"
+    # The composer is empty: the pointer was lost, so type it once. A TUI can
+    # take an Enter that follows typed text too closely as part of the paste:
+    # pause, submit, and submit once more if it still has not landed.
+    herdr("pane", "send-text", pane, pointer)
     delay = float(os.environ.get("OFFICE_HERDR_KEY_DELAY", "1"))
     for _ in range(2):
         time.sleep(delay)
@@ -1758,8 +1835,8 @@ def job_notify_worker(con, run: dict, job: dict) -> dict:
     if not d or d.get("launcher") != "herdr" or not d.get("pane_id") or d["status"] != "running":
         return {"sent": False}
     text = job["payload"].get("text", "office status has an update for you.")
-    subprocess.run(["herdr", "agent", "prompt", d["pane_id"], text], capture_output=True, timeout=30)
-    return {"sent": True}
+    landed = submit_prompt(d["pane_id"], text, pane=d["pane_id"])
+    return {"sent": True, "landed": landed}
 
 
 def start_stacked(con, run: dict, accepted_task: str) -> list[str]:
