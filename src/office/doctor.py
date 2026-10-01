@@ -74,7 +74,9 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
                         + ("runtime ok" if have else "RUNTIME MISSING"))
     for harness, path in install.CONFIG.items():
         path = path.expanduser()
-        if not path.exists() and harness != "claude":
+        # Claude settings are checked even when the file is absent (the read rules are then
+        # missing), but not when Claude itself is absent: office install skips it then too.
+        if not path.exists() and (harness != "claude" or not path.parent.exists()):
             continue
         try:
             # An absent claude settings file is empty settings: the rules are missing.
