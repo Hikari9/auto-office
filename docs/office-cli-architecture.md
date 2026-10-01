@@ -175,7 +175,7 @@ Write access of a reviewer:
 | Harness | Writable | Enforced |
 |---|---|---|
 | codex | dispatch dir only (`--cd <dispatch dir>`, no `--add-dir`; also the tmp dirs codex always allows) | yes, by the sandbox |
-| claude | its reply file needs `Write`, so path scoping is by deny: `Edit(<checkout>/**)`, the worktrees dir and the data home are denied (an `Edit(path)` deny also blocks the Write tool) | partial: the rest of the state home is writable, because a deny cannot carve the dispatch dir out of it |
+| claude | its dispatch dir only: `--permission-mode dontAsk` with a single `Edit(<dispatch dir>/**)` allow (Claude Code checks only `Edit(path)` rules for writes, and one covers the Write tool). Everything else is denied, including other runs' dispatch dirs. Explicit `Edit(...)` denies cover the checkout, the worktrees dir, the data home and the read-only guidance roots (`~/.claude`, `~/.codex`, `~/.agents`, `~/AGENTS.md`, `~/CLAUDE.md`); a deny is skipped when it would contain the dispatch dir, since deny beats allow | yes, by the permission rules (Bash is denied, so no shell path around them) |
 | gemini | `--approval-mode plan` (read-only) | yes |
 | agy | `--dangerously-skip-permissions`, no scoping flag exists | no |
 

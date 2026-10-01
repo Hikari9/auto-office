@@ -211,7 +211,9 @@ def test_reviewer_dispatch_launches_in_herdr_able_to_write_its_reply(env, monkey
         assert str(out.parent) in args, args
         if kind == "claude":
             assert args[args.index("--disallowedTools") + 1].startswith("Edit,Bash,NotebookEdit,Edit(/")
-            assert args[args.index("--allowedTools") + 1] == "Read,Grep,Glob,Write"
+            # Writes are allowed to the dispatch dir alone; dontAsk denies the rest.
+            assert args[args.index("--allowedTools") + 1] == f"Read,Grep,Glob,Edit(/{out.parent}/**)"
+            assert args[args.index("--permission-mode") + 1] == "dontAsk"
             assert str(env.tmp) in args
         else:
             assert args[args.index("--sandbox") + 1] == "workspace-write"

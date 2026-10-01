@@ -104,6 +104,18 @@ def test_reinstall_removes_owned_rules_for_a_moved_root(scope, monkeypatch):
     assert f"Read({old_state}/**)" not in allow
 
 
+def test_doctor_treats_absent_settings_as_empty(scope):
+    env, _, read_scope = scope
+    assert not _settings(env).exists()
+    code, out = env.office("doctor")
+    total = len(read_scope.allow_rules())
+    assert f"reviewer read rules 0/{total}" in out and code == 1, out
+    assert not _settings(env).exists()  # doctor never creates it
+    _claude_install(env)
+    code, out = env.office("doctor")
+    assert f"reviewer read rules {total}/{total}" in out, out
+
+
 def test_doctor_reports_rules_present_and_missing(scope):
     env, _, read_scope = scope
     _settings(env).write_text("{}")
@@ -204,7 +216,6 @@ def test_claude_reviewer_cannot_edit_the_checkout_or_office_data(scope):
     assert f"Edit(/{env.repo}/**)" in denied and f"Edit(/{env.data}/**)" in denied
     assert f"Edit(/{env.state}/worktrees/**)" in denied
     assert not any(str(out.parent) in d for d in denied)
-    assert "Write" in argv[argv.index("--allowedTools") + 1].split(",")
 
 
 def test_claude_denial_skips_a_cwd_that_is_the_dispatch_dir(scope):
@@ -212,3 +223,75 @@ def test_claude_denial_skips_a_cwd_that_is_the_dispatch_dir(scope):
     out = env.tmp / "dispatch" / "reply.txt"
     deny = read_scope.write_denials(out.parent, out)
     assert f"Edit(/{out.parent}/**)" not in deny and f"Edit(/{env.data}/**)" in deny
+
+
+def _can_write(argv: list[str], target: Path) -> bool:
+    """Claude Code's decision for a file write under `argv`'s rules: a deny rule
+    wins, then an allow rule, else `dontAsk` denies. Only `Edit(path)` rules are
+    consulted for file writes; `//abs` is an absolute path. A bare `Write` or
+    `Edit` allow would grant every path."""
+    mode = argv[argv.index("--permission-mode") + 1]
+    allowed = argv[argv.index("--allowedTools") + 1].split(",")
+    denied = argv[argv.index("--disallowedTools") + 1].split(",")
+
+    def matches(rules: list[str]) -> bool:
+        for rule in rules:
+            if rule in ("Write", "Edit"):
+                return True
+            if not rule.startswith("Edit(//"):
+                continue
+            pat = rule[len("Edit(/"):-1]
+            if pat.endswith("/**"):
+                if str(target).startswith(pat[:-2]):
+                    return True
+            elif str(target) == pat:
+                return True
+        return False
+
+    # Bare `Edit` in the deny list removes the Edit tool, not the Write tool.
+    if matches([d for d in denied if d != "Edit"]):
+        return False
+    return matches(allowed) or mode != "dontAsk"
+
+
+@pytest.mark.parametrize("kind", ["reviewer", "vision"])
+def test_claude_reviewer_writes_only_to_its_dispatch_dir(scope, kind):
+    env, adapters, _ = scope
+    out = env.tmp / "dispatch" / "reply.txt"
+    other = env.state / "runs" / "other-run" / "dispatches" / "Dxyz" / "reply.txt"
+    argv = _reviewer_argv(adapters, "claude", kind, env)
+    assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
+    assert "Write" not in argv[argv.index("--allowedTools") + 1].split(",")
+    assert _can_write(argv, out)
+    assert _can_write(argv, out.parent / "notes.md")
+    home = env.home
+    for target in (home / ".claude" / "rules" / "x.md", home / ".claude" / "settings.json",
+                   home / ".claude" / "skills" / "s" / "SKILL.md", home / ".codex" / "AGENTS.md",
+                   home / ".agents" / "skills" / "a.md", home / "AGENTS.md", home / "CLAUDE.md",
+                   other, env.repo / "src" / "f.py", env.state / "worktrees" / "r" / "T1" / "f.py",
+                   env.data / "runs.db"):
+        assert not _can_write(argv, target), target
+
+
+def test_claude_reviewer_without_a_reply_path_writes_nothing(scope):
+    env, adapters, _ = scope
+    adapter = adapters.load_all()["claude"]
+    argv, _ = adapters.build_argv(adapter, "reviewer", model="m", effort="high", cwd=env.repo, output=None)
+    assert not _can_write(argv, env.tmp / "dispatch" / "reply.txt")
+    assert not _can_write(argv, env.repo / "f.py")
+
+
+def test_claude_interactive_reviewer_writes_only_to_its_dispatch_dir(scope):
+    env, adapters, _ = scope
+    out = env.tmp / "dispatch" / "reply.txt"
+    args, _ = adapters.interactive_argv(adapters.load_all()["claude"], "reviewer", model="m", effort="high",
+                                        cwd=env.repo, include_dirs=[env.repo], output=out)
+    assert _can_write(args, out)
+    assert not _can_write(args, env.home / ".claude" / "rules" / "x.md")
+    assert not _can_write(args, env.state / "runs" / "other-run" / "dispatches" / "Dxyz" / "reply.txt")
+
+
+def test_claude_worker_argv_has_no_reviewer_write_rules(scope):
+    env, adapters, _ = scope
+    argv, _ = adapters.build_argv(adapters.load_all()["claude"], "worker", model="m", effort="high", cwd=env.repo)
+    assert "--allowedTools" not in argv and "dontAsk" not in argv

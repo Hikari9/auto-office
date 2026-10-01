@@ -145,6 +145,9 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
             if argv and argv[-1].startswith("-"):
                 argv.pop()
             continue
+        if "{write_allow}" in arg:
+            allow = read_scope.write_allows(output) if kind in read_scope.READER_KINDS else []
+            arg = arg.replace("{write_allow}", "".join("," + r for r in allow))
         if "{write_deny}" in arg:
             deny = read_scope.write_denials(cwd, output) if kind in read_scope.READER_KINDS else []
             arg = arg.replace("{write_deny}", "".join("," + r for r in deny))

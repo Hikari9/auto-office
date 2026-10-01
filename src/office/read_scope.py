@@ -29,6 +29,10 @@ from office import paths
 GUIDANCE_DIRS = (".claude/rules", ".claude/skills")
 GUIDANCE_FILES = ("AGENTS.md", "CLAUDE.md", ".claude/CLAUDE.md", ".claude/*.md", ".codex/AGENTS.md")
 
+# Never writable by a reviewer: harness config and global guidance.
+READONLY_DIRS = (".claude", ".codex", ".agents")
+READONLY_FILES = ("AGENTS.md", "CLAUDE.md")
+
 # Profile kinds that read the operator's checkout and state but never change them.
 READER_KINDS = ("reviewer", "vision")
 
@@ -65,17 +69,41 @@ def with_read_dirs(kind: str, include_dirs: list[Path] | None) -> list[Path]:
     return base + [d for d in add_dirs() if d not in base]
 
 
+def dispatch_dir(output: Path | None) -> Path | None:
+    return Path(output).parent if output else None
+
+
+def write_allows(output: Path | None) -> list[str]:
+    """Claude `Edit(<abs>/**)` allow rules for a reviewer: its dispatch dir and
+    nothing else. (Claude Code consults only `Edit(path)` rules for file writes;
+    a `Write(path)` rule is accepted but never checked.) No reply path means no
+    write access at all. Reviewer launches
+    run with `--permission-mode dontAsk`, so a write no rule allows is denied
+    (including another run's dispatch dir, which a deny rule could not name
+    without also covering this one: deny beats allow)."""
+    out_dir = dispatch_dir(output)
+    return [f"Edit(/{out_dir}/**)"] if out_dir else []
+
+
+def readonly_roots() -> list[str]:
+    """Absolute paths and globs a reviewer never writes: global guidance and
+    harness config. Directories grant `<dir>/**`."""
+    home = Path.home()
+    roots = [f"{home / d}/**" for d in READONLY_DIRS] + [str(home / f) for f in READONLY_FILES]
+    return roots
+
+
 def write_denials(cwd: Path, output: Path | None) -> list[str]:
-    """Claude `Edit(<abs>/**)` deny rules (they also block the Write tool) for
-    what a reviewer must not change: the checkout it runs in, Office's worktrees
-    and its data directory. They cannot carve the dispatch dir out of the state
-    root (deny beats allow), so claude may still write elsewhere under the
-    state root; that gap is named in the docs."""
-    out_dir = Path(output).parent if output else None
-    targets = [paths.data_home(), paths.worktrees_dir()]
-    if out_dir is None or Path(cwd) != out_dir:
-        targets.insert(0, Path(cwd))
-    return [f"Edit(/{t}/**)" for t in dict.fromkeys(targets)]
+    """Claude `Edit(<abs>)` deny rules (they also block the Write tool) for what
+    a reviewer must not change: the checkout it runs in, Office's worktrees and
+    data directory, and the read-only guidance roots. A target that contains
+    the dispatch dir is skipped, since deny beats allow."""
+    out_dir = dispatch_dir(output)
+    targets = [str(Path(cwd)), str(paths.data_home()), str(paths.worktrees_dir())]
+    rules = [f"Edit(/{t}/**)" for t in targets
+             if out_dir is None or not (out_dir == Path(t) or Path(t) in out_dir.parents)]
+    rules += [f"Edit(/{r})" for r in readonly_roots()]
+    return list(dict.fromkeys(rules))
 
 
 def allow_rules() -> list[str]:
