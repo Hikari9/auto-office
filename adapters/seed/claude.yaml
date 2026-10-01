@@ -63,19 +63,19 @@ office_profiles:
       argv: [--model, "{model}", --effort, "{effort}", --permission-mode, bypassPermissions, --add-dir, "{cwd}"]
       resume_argv: [--resume, "{session_id}"]
   reviewer:
-    argv: [-p, --model, "{model}", --effort, "{effort}", --allowedTools, "Read,Grep,Glob,Write", --disallowedTools, "Edit,Bash,NotebookEdit{write_deny}", --add-dir, "{output_dir}", --output-format, text, "{include_dirs}"]
+    argv: [-p, --model, "{model}", --effort, "{effort}", --permission-mode, dontAsk, --allowedTools, "Read,Grep,Glob{write_allow}", --disallowedTools, "Edit,Bash,NotebookEdit{write_deny}", --add-dir, "{output_dir}", --output-format, text, "{include_dirs}"]
     include_arg: [--add-dir, "{dir}"]
     prompt: stdin
     output: stdout
     herdr_kind: claude
     interactive:
-      argv: [--model, "{model}", --effort, "{effort}", --allowedTools, "Read,Grep,Glob,Write", --disallowedTools, "Edit,Bash,NotebookEdit{write_deny}", --add-dir, "{output_dir}", "{include_dirs}"]
+      argv: [--model, "{model}", --effort, "{effort}", --permission-mode, dontAsk, --allowedTools, "Read,Grep,Glob{write_allow}", --disallowedTools, "Edit,Bash,NotebookEdit{write_deny}", --add-dir, "{output_dir}", "{include_dirs}"]
   vision:
-    argv: [-p, --model, "{model}", --effort, "{effort}", --allowedTools, "Read,Grep,Glob,Write", --disallowedTools, "Edit,Bash,NotebookEdit{write_deny}", --add-dir, "{output_dir}", --output-format, text, "{include_dirs}"]
+    argv: [-p, --model, "{model}", --effort, "{effort}", --permission-mode, dontAsk, --allowedTools, "Read,Grep,Glob{write_allow}", --disallowedTools, "Edit,Bash,NotebookEdit{write_deny}", --add-dir, "{output_dir}", --output-format, text, "{include_dirs}"]
     include_arg: [--add-dir, "{dir}"]
     image_transport: prompt-path
     prompt: stdin
     output: stdout
     herdr_kind: claude
     interactive:
-      argv: [--model, "{model}", --effort, "{effort}", --allowedTools, "Read,Grep,Glob,Write", --disallowedTools, "Edit,Bash,NotebookEdit{write_deny}", --add-dir, "{output_dir}", "{include_dirs}"]
+      argv: [--model, "{model}", --effort, "{effort}", --permission-mode, dontAsk, --allowedTools, "Read,Grep,Glob{write_allow}", --disallowedTools, "Edit,Bash,NotebookEdit{write_deny}", --add-dir, "{output_dir}", "{include_dirs}"]

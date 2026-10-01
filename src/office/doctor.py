@@ -74,10 +74,11 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
                         + ("runtime ok" if have else "RUNTIME MISSING"))
     for harness, path in install.CONFIG.items():
         path = path.expanduser()
-        if not path.exists():
+        if not path.exists() and harness != "claude":
             continue
         try:
-            data = json.loads(path.read_text())
+            # An absent claude settings file is empty settings: the rules are missing.
+            data = json.loads(path.read_text()) if path.exists() else {}
         except ValueError:
             problems += 1
             res.add(f"{harness}: {path.name} is not valid JSON")
@@ -90,6 +91,8 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
             res.add(f"claude: reviewer read rules {total - len(lacking)}/{total} in permissions.allow"
                     + (" (office install; reviewers' context-mode cannot read Office state or global guidance without them)"
                        if lacking else " ok"))
+            if not path.exists():
+                continue
         managed = [h.get("command") for entries in (data.get("hooks") or {}).values() for e in entries
                    for h in (e.get("hooks") or []) if install.MARKER in (h.get("command") or "")]
         if not managed:
