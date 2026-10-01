@@ -92,15 +92,20 @@ def _redirect(args) -> dict | None:
 
 
 def _parser() -> argparse.ArgumentParser:
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--run", dest="run_arg")
-    common.add_argument("--state-dir", dest="state_dir", help=argparse.SUPPRESS)
-    common.add_argument("--harness", help=argparse.SUPPRESS)
-    common.add_argument("--session", help=argparse.SUPPRESS)
-    common.add_argument("--json", action="store_true")
-    common.add_argument("--verbose", "-v", action="store_true")
+    def flags(**default):
+        f = argparse.ArgumentParser(add_help=False)
+        f.add_argument("--run", dest="run_arg", **default)
+        f.add_argument("--state-dir", dest="state_dir", help=argparse.SUPPRESS, **default)
+        f.add_argument("--harness", help=argparse.SUPPRESS, **default)
+        f.add_argument("--session", help=argparse.SUPPRESS, **default)
+        f.add_argument("--json", action="store_true", **default)
+        f.add_argument("--verbose", "-v", action="store_true", **default)
+        return f
 
-    p = argparse.ArgumentParser(prog="office", add_help=False, parents=[common])
+    # Subcommands repeat the global flags without defaults, so a flag given
+    # before the subcommand (office --run X status) is not reset by it.
+    common = flags(default=argparse.SUPPRESS)
+    p = argparse.ArgumentParser(prog="office", add_help=False, parents=[flags()])
     p.add_argument("-h", "--help", action="store_true")
     p.add_argument("--version", action="store_true")
     sp = p.add_subparsers(dest="cmd")
