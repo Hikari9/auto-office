@@ -100,7 +100,7 @@ def body(con, run: dict, task: dict, dispatch: dict | None) -> str:
     base = pr_base(con, run, task)
     stack = f"stacked on {up['id']}" + (f" (#{up['pr']['number']})" if (up.get("pr") or {}).get("number") else "") \
         if up and base != (landing.get("prs") or {}).get("base_branch") else f"base `{base}`"
-    lines = [f"**{task['id']}: {task['title']}** (Office run `{run['id'][:8]}`)", "", f"Stack: {stack}"]
+    lines = [BEGIN, f"**{task['id']}: {task['title']}** (Office run `{run['id'][:8]}`)", "", f"Stack: {stack}"]
     disclosure = ((dispatch or {}).get("route") or {}).get("selection_disclosure")
     if disclosure:
         why = plan_view.short_why(disclosure)
@@ -111,6 +111,23 @@ def body(con, run: dict, task: dict, dispatch: dict | None) -> str:
         lines += ["", f"Part of #{str(landing['issue']).rstrip('/').rsplit('/', 1)[-1]}"]
     lines += ["", f"<!-- office:pr run={run['id']} task={task['id']} -->"]
     return "\n".join(lines) + "\n"
+
+
+BEGIN = "<!-- office:begin -->"
+END_RE = re.compile(r"<!-- office:pr [^>]*-->\n?")
+
+
+def merge_body(current: str, managed: str) -> str:
+    """Replace only Office's block in a PR body. Text before `office:begin` and
+    after the `office:pr` end marker belongs to the executor or the user and is
+    kept, so acceptance data reported in the PR body survives every push."""
+    end = END_RE.search(current or "")
+    if not end:
+        return managed
+    start = current.find(BEGIN, 0, end.start())
+    before = current[:start] if start >= 0 else ""  # no begin marker: a pre-3.2.1 body, all Office's
+    after = current[end.end():]
+    return before + managed + after
 
 
 def create_command(con, run: dict, task: dict, dispatch: dict, body_path: Path) -> str:
@@ -178,6 +195,10 @@ def ensure_pr(con, run: dict, task: dict, dispatch: dict) -> dict:
         url = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
         found = {"number": _number(url), "url": url, "baseRefName": base, "isDraft": True}
     else:
+        view = _gh(["pr", "view", str(found["number"]), "--json", "body"], repo)
+        if view.returncode == 0:
+            current = json.loads(view.stdout or "{}").get("body") or ""
+            body_path.write_text(merge_body(current, body_path.read_text(encoding="utf-8")), encoding="utf-8")
         args = ["pr", "edit", str(found["number"]), "--body-file", str(body_path)]
         if found.get("baseRefName") != base:
             args += ["--base", base]

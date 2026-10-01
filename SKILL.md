@@ -134,6 +134,12 @@ then follows the end state. `ask` lists the task PRs: ask the user and record th
 `preview` deploys and verifies the integrated result. `merge`/`e2e` merge the PRs bottom-up after
 required checks, confirm the default branch matches the reviewed tree, close the issue, and (e2e)
 deploy prod and verify; a failure names what merged and the rollback target. Then `office close`.
+If the default branch moved after `office start`, run `office land --rebase` first. It re-composes the
+accepted work onto the new head and re-runs the run checks and an integration review. A conflict refuses
+and prints the steps to compose by hand. Office rewrites only the block above the PR body's
+`<!-- office:pr ... -->` line, so put criteria that report data in the PR body below that line. A
+check that times out while host load exceeds twice the CPU count is UNAVAILABLE, not a failure.
+Rerun it with `office resume`.
 With task PRs off (local, no GitHub, `--no-prs`), push the integration branch it names, open a PR
 with `Closes #<issue>`, and `office close --handoff <pr-url>`. Stop early with
 `office close --abandon "<reason>"`; nothing is deleted until `office prune -f`.

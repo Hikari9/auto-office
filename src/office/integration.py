@@ -123,6 +123,12 @@ def retry_failed(con, run: dict) -> bool:
     return retrigger(con, run)
 
 
+def compose_base(run: dict) -> str:
+    """Where integration composes: the run base, or the newer default-branch
+    commit `office land --rebase` moved the run onto."""
+    return ((run.get("landing") or {}).get("rebase") or {}).get("onto") or run["base_sha"]
+
+
 def _set_integration(con, run: dict, **fields) -> None:
     run = state.get_run(con, run["id"])
     landing = dict(run.get("landing") or {})
@@ -133,6 +139,8 @@ def _set_integration(con, run: dict, **fields) -> None:
 
 
 def job_integrate(con, run: dict, job: dict) -> dict:
+    run = state.get_run(con, run["id"])  # a rebase may have moved the compose base since this job was queued
+    base = compose_base(run)
     tasks = accepted_set(con, run)
     key = job["payload"]["key"]
     if tasks is None or _set_key(con, tasks) != key:
@@ -155,7 +163,7 @@ def job_integrate(con, run: dict, job: dict) -> dict:
             state.emit(con, run, "integration.failed", f"INTEGRATION blocked: {detail}")
         return {"status": "blocked"}
     try:
-        paths.git(repo, "worktree", "add", "-B", branch, str(wt), run["base_sha"])
+        paths.git(repo, "worktree", "add", "-B", branch, str(wt), compose_base(run))
     except paths.GitError as exc:
         detail = f"could not create the integration worktree: {exc.stderr[:200]}; fix it, then office resume"
         with db.transaction(con):
@@ -181,8 +189,12 @@ def job_integrate(con, run: dict, job: dict) -> dict:
     commit = paths.git(wt, "rev-parse", "HEAD")
     tree = paths.git(wt, "rev-parse", "HEAD^{tree}")
     needs_review, why = review_boundary(con, run, tasks, revs)
+    if compose_base(run) != run["base_sha"]:
+        # The accepted revisions were reviewed against the old base; the
+        # composition onto the newer one gets its own independent review.
+        needs_review, why = True, f"rebased onto {compose_base(run)[:12]}" + (f"; {why}" if why else "")
     run_checks = list((run.get("landing") or {}).get("run_checks") or [])
-    integ_rev = {"id": "I" + commit[:7], "commit_sha": commit, "tree_sha": tree, "base_commit": run["base_sha"],
+    integ_rev = {"id": "I" + commit[:7], "commit_sha": commit, "tree_sha": tree, "base_commit": compose_base(run),
                  "dispatch_id": None}
     with db.transaction(con):
         _set_integration(con, run, key=key, status="verifying", detail=why, branch=branch, commit=commit,
@@ -208,7 +220,7 @@ def job_integrate(con, run: dict, job: dict) -> dict:
     if needs_review:
         gid = _gate(con, run, integ_rev, "integration_review", commit)
         gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gid,)).fetchone())
-        diff = paths.git(repo, "diff", run["base_sha"], commit)[: gates.MAX_DIFF_CHARS]
+        diff = paths.git(repo, "diff", compose_base(run), commit)[: gates.MAX_DIFF_CHARS]
         checkout = gates.detached_checkout(run, commit, f"integration-{gid}")
         try:
             brief = briefs.code_review_brief(run, None, integ_rev, diff, ", ".join(f"{k} {v}" for k, v in results.items()) or "none",
@@ -229,6 +241,8 @@ def job_integrate(con, run: dict, job: dict) -> dict:
                 state.emit(con, run, "integration.failed", f"INTEGRATION review {outcome['verdict']}: {detail[:140]}")
             return results
     with db.transaction(con):
+        if compose_base(state.get_run(con, run["id"])) != base:
+            return {"skipped": "rebased while composing"}
         _set_integration(con, run, status="accepted", detail="composed result verified")
         state.emit(con, run, "integration.accepted", f"READY: integration PASS on {commit[:10]} ({branch})")
     return results

@@ -170,6 +170,7 @@ def _parser() -> argparse.ArgumentParser:
         mode.add_argument(f"--{m}", dest="land_mode", action="store_const", const=m)
     s.add_argument("--quote", help="the user's words choosing this end state (ask mode)")
     s.add_argument("--detect", action="store_true", help="propose deploy commands for intake")
+    s.add_argument("--rebase", action="store_true", help="move the run onto the newer default branch first")
     s = sp.add_parser("close", parents=[common])
     s.add_argument("--handoff", help="PR URL or branch handed to the user for merge")
     s.add_argument("--abandon", metavar="REASON", help="end the run without landing")
@@ -428,6 +429,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "ack":
         from office import amend
         return amend.ack(con, run, args.amendment)
+    if cmd == "land" and args.rebase:
+        from office import land
+        return land.rebase(con, run)
     if cmd == "land":
         from office import land
         return land.land(con, run, mode=args.land_mode, quote=args.quote)

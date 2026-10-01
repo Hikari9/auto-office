@@ -153,6 +153,9 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
             # something fixed outside Office (a stray worktree, missing deps).
             from office import integration
             integration.retry_failed(con, state.get_run(con, run["id"]))
+            from office import gates
+            for t in state.tasks(con, run["id"]):
+                gates.rerun_unavailable_checks(con, state.get_run(con, run["id"]), t)
     jobs.kick(con, run["id"])
     from office import guide
     return guide.status(con, state.get_run(con, run["id"]), resumed=True)
