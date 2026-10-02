@@ -873,9 +873,14 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
         dt = state.get_task(con, run["id"], dep)
         if not dt or dt["status"] != "accepted":
             return False
-        dep_rev = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (dt["accepted_revision_id"],)).fetchone()
-        if dep_rev and not _is_ancestor(run, dep_rev["commit_sha"], rev["commit_sha"]):
-            return False
+    stale = stale_dependency(con, run, task)
+    if stale:
+        # Built on a dependency revision that was superseded before acceptance:
+        # say so once per revision, or the task sits at `submitted` unexplained.
+        if not con.execute("SELECT 1 FROM events WHERE run_id=? AND kind='task.restack_needed' AND task_id=? "
+                           "AND summary LIKE ?", (run["id"], task_id, f"{task_id} {rev_id} %")).fetchone():
+            state.emit(con, run, "task.restack_needed", f"{task_id} {rev_id} {stale}", task_id=task_id)
+        return False
     state.update_task(con, run["id"], task_id, status="accepted", accepted_revision_id=rev_id, pause_reason=None)
     con.execute("UPDATE leases SET released_at=? WHERE run_id=? AND task_id=? AND released_at IS NULL AND revoked_at IS NULL",
                 (now_iso(), run["id"], task_id))
@@ -893,6 +898,29 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
     from office import integration
     integration.maybe_queue(con, run)
     return True
+
+
+def stale_dependency(con, run: dict, task: dict) -> str | None:
+    """Why the task's current revision cannot be accepted although its
+    dependencies are: it does not contain a dependency's accepted revision
+    (it was built on, or stacked onto, a revision that review superseded)."""
+    rev = con.execute("SELECT commit_sha, base_commit FROM revisions WHERE id=?",
+                      (task.get("current_revision_id"),)).fetchone()
+    if rev is None:
+        return None
+    for dep in task["depends"]:
+        dt = state.get_task(con, run["id"], dep)
+        if not dt or dt["status"] != "accepted" or not dt.get("accepted_revision_id"):
+            continue
+        dep_rev = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (dt["accepted_revision_id"],)).fetchone()
+        if dep_rev is None or _is_ancestor(run, dep_rev["commit_sha"], rev["commit_sha"]):
+            continue
+        built = con.execute("SELECT id FROM revisions WHERE run_id=? AND task_id=? AND commit_sha=?",
+                            (run["id"], dep, rev["base_commit"])).fetchone()
+        on = f"{dep} {built['id']}" if built else f"{dep} {(rev['base_commit'] or '')[:7]}"
+        return (f"built on {on}, but {dep} was accepted on {dt['accepted_revision_id']}; restack: "
+                f"office rerun {task['id']} --resume|--fresh merges it into the worktree first")
+    return None
 
 
 def _is_ancestor(run: dict, ancestor: str, descendant: str) -> bool:
