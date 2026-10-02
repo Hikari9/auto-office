@@ -21,6 +21,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+try:
+    import termios
+except ImportError:  # not POSIX: a pane's terminal mode cannot be read
+    termios = None
+
 from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, state, version
 from office.result import Result
 from office.state import Refused, Usage
@@ -1019,24 +1024,74 @@ def _shell_timeout() -> float:
     return float(os.environ.get("OFFICE_HERDR_SHELL_TIMEOUT", "30"))
 
 
+def _pane_tty(pid: int) -> str | None:
+    """The terminal device of a pane's shell (`/dev/ttys005`, `/dev/pts/3`)."""
+    try:
+        name = subprocess.run(["ps", "-o", "tty=", "-p", str(pid)], capture_output=True, text=True,
+                              timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return f"/dev/{name}" if name and not name.startswith("?") else None
+
+
+def _shell_at_line_editor(pane: str) -> bool | None:
+    """Whether the pane's shell is reading a command line in its line editor:
+    it owns the terminal and has switched it to raw input (no canonical mode,
+    no echo), which zle, readline and fish do only once the rc files are done.
+    False while the shell is still starting (an instant prompt keeps echo on)
+    or a command is running; None when the terminal cannot be inspected."""
+    if termios is None:
+        return None
+    info = _herdr_json(["pane", "process-info", "--pane", pane]).get("process_info") or {}
+    pid = info.get("shell_pid")
+    if not pid:
+        return None
+    if info.get("foreground_process_group_id") != pid:
+        return False
+    tty = _pane_tty(pid)
+    if not tty:
+        return None
+    try:
+        fd = os.open(tty, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            lflag = termios.tcgetattr(fd)[3]
+        finally:
+            os.close(fd)
+    except (OSError, termios.error):
+        return None
+    return not lflag & (termios.ICANON | termios.ECHO)
+
+
 def _shell_run(pane: str, command: str, marker: Path, timeout: float | None = None) -> bool:
     """Run `command` in the pane's shell and confirm it ran. A freshly split
     pane draws its prompt before the shell reads input (zsh with an instant
-    prompt), and a `pane run` sent then is dropped or left typed on the line.
-    The command touches `marker` once it has run; until it does, the line is
-    cleared with Ctrl-U and the command sent again, so it must be safe to run
-    twice. Ctrl-U, not Ctrl-C: a SIGINT while the shell is still sourcing its
-    rc file would abort it and leave PATH half set. False when it never ran
-    within OFFICE_HERDR_SHELL_TIMEOUT."""
+    prompt), and a `pane run` sent then is dropped, queued until the rc files
+    finish, or left typed on the line. The command touches `marker` once it has
+    run; until it does, it is sent again, so it must be safe to run twice.
+
+    A resend waits for the shell's line editor. While the shell is still
+    starting, the first line is queued in the terminal, and a resend would
+    queue a copy plus a Ctrl-U that cuts the queued lines apart, leaving a
+    broken line (often an unclosed quote) that swallows the agent command
+    `herdr agent start` types next. At the line editor, Ctrl-C clears a line
+    left typed, including a continuation (`quote>`) that Ctrl-U cannot leave;
+    it is safe there because the rc files are done. When the terminal cannot
+    be inspected, the line is cleared with Ctrl-U (a SIGINT during the rc
+    files would abort them) and sent again. False when it never ran within
+    OFFICE_HERDR_SHELL_TIMEOUT."""
     marker.unlink(missing_ok=True)
     line = f"{command} && touch {shlex.quote(str(marker))}"
     retry = float(os.environ.get("OFFICE_HERDR_SHELL_RETRY", "3"))
     deadline = time.time() + (_shell_timeout() if timeout is None else timeout)
     first = True
     while True:
-        if not first:
-            _herdr_quiet("pane", "send-keys", pane, "ctrl+u")
-        _herdr_quiet("pane", "run", pane, line)
+        if first:
+            _herdr_quiet("pane", "run", pane, line)
+        else:
+            editor = _shell_at_line_editor(pane)
+            if editor is not False:
+                _herdr_quiet("pane", "send-keys", pane, "ctrl+c" if editor else "ctrl+u")
+                _herdr_quiet("pane", "run", pane, line)
         first = False
         until = min(deadline, time.time() + retry)
         while True:
