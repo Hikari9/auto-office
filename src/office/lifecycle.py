@@ -217,26 +217,104 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
                   data={"archive_digest": receipt["digest"]})
 
 
-def abandon(con, run: dict, reason: str) -> Result:
-    if not reason or not reason.strip():
-        raise Usage("missing-reason", "abandoning needs a reason", next_step='office close --abandon "<reason>"')
+LANDED_FORM = 'office close --landed-externally <merged PR URL> [--quote "<user\'s words>"]'
+
+
+def _merged_pr(run: dict, ref: str) -> dict:
+    """The merged PR `ref` as GitHub reports it: {url, number, merge_commit}."""
+    import json
+    import subprocess
+    try:
+        proc = subprocess.run(["gh", "pr", "view", ref, "--json", "state,mergeCommit,url,number"], cwd=run["repo_root"],
+                              capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refused("pr-unverified", f"cannot ask GitHub about {ref}: {exc}", next_step=LANDED_FORM)
+    try:
+        info = json.loads(proc.stdout or "{}") if proc.returncode == 0 else {}
+    except ValueError:
+        info = {}
+    if not info:
+        raise Refused("pr-unverified", f"gh pr view {ref} failed: {(proc.stderr or proc.stdout).strip()[:200]}",
+                      next_step=LANDED_FORM)
+    if info.get("state") != "MERGED" or not (info.get("mergeCommit") or {}).get("oid"):
+        raise Refused("pr-not-merged", f"{info.get('url') or ref} is {info.get('state') or 'unknown'}, not merged",
+                      next_step="merge it first, or office close --handoff <pr-url> to hand it to the user")
+    return {"url": info.get("url") or ref, "number": info.get("number"), "merge_commit": info["mergeCommit"]["oid"]}
+
+
+def _contains(run: dict, commit: str, merge: str) -> bool:
+    repo = run["repo_root"]
+    if not paths.git(repo, "cat-file", "-t", merge, check=False):
+        paths.git(repo, "fetch", "-q", "origin", check=False)  # the merge happened on GitHub
+    import subprocess
+    return subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", commit, merge],
+                          capture_output=True).returncode == 0
+
+
+def close_landed_externally(con, run: dict, ref: str, quote: str | None = None) -> Result:
+    """Close a run whose work reached the target through a PR Office did not
+    open (#239). The PR must be merged. It is landing evidence on its own when
+    its merge commit contains every accepted revision and no task is left;
+    otherwise the user's words (--quote) record the override. Open gates,
+    blockers, and an unaccepted integration no longer apply: the work has landed."""
+    if state.is_terminal(run):
+        return Result(lines=[f"{short(run['id'])} already {run['phase']}"], next=None)
+    pr = _merged_pr(run, ref)
+    tasks = state.tasks(con, run["id"])
+    accepted = {t["id"]: con.execute("SELECT commit_sha FROM revisions WHERE id=?", (t["accepted_revision_id"],)
+                                     ).fetchone()["commit_sha"] for t in tasks if t["status"] == "accepted"}
+    contained = sorted(tid for tid, sha in accepted.items() if _contains(run, sha, pr["merge_commit"]))
+    unproven = sorted(set(accepted) - set(contained)) + [f"{t['id']} ({t['status']})" for t in tasks
+                                                         if t["status"] not in ("accepted", "cancelled")]
+    if (unproven or not accepted) and not (quote and quote.strip()):
+        raise Refused("landing-unproven", f"{pr['url']} is merged, but its merge commit {pr['merge_commit'][:12]} does not "
+                      f"contain {', '.join(unproven) or 'any accepted revision'}", scope=f"run {short(run['id'])}",
+                      preserved="the run", next_step=f"ask the user (native question tool) whether {pr['url']} landed "
+                      f"this run's work, then {LANDED_FORM.replace('<merged PR URL>', pr['url'])}")
+    landing = {"status": "landed-externally", "pr": pr["url"], "merge_commit": pr["merge_commit"],
+               "contains": contained, "unproven": unproven, "quote": (quote or "").strip() or None}
     with db.transaction(con):
         current = state.get_run(con, run["id"])
         if state.is_terminal(current):
-            return Result(lines=[f"{short(run['id'])} already {current['phase']}"])
-        con.execute("UPDATE outbox SET status='cancelled', finished_at=? WHERE run_id=? AND status='queued'",
-                    (now_iso(), run["id"]))
-        live = con.execute("SELECT id, pid FROM dispatches WHERE run_id=? AND status IN ('launching','running')",
-                           (run["id"],)).fetchall()
-        for row in live:
-            con.execute("UPDATE dispatches SET status='cancelled', ended_at=? WHERE id=?", (now_iso(), row["id"]))
-        receipt = _archive_receipt(con, current, {"status": "abandoned"}, None)
-        scoring.label_run_outcomes(con, run["id"], "abandoned")
-        state.update_run(con, run["id"], phase="abandoned", terminal_at=now_iso(),
-                         terminal_reason=reason.strip()[:500], archive_digest=receipt["digest"])
-        state.emit(con, current, "run.abandoned", f"run abandoned: {reason.strip()[:80]}")
-        _release_all(con, run["id"], "abandoned")
+            return Result(lines=[f"{short(run['id'])} already {current['phase']}"], next=None)
+        live = _stop_work(con, run)
+        con.execute("UPDATE gates SET status='cancelled', stale_reason='landed externally' WHERE run_id=? "
+                    "AND status IN ('queued','running','waiting')", (run["id"],))
+        if landing["quote"]:
+            import uuid
+            con.execute("INSERT INTO authorizations(id, run_id, kind, target, requirements_version, authorized_by, quote, "
+                        "created_at) VALUES(?,?,?,?,?,?,?,?)", ("Z" + uuid.uuid4().hex[:8], run["id"], "landing", pr["url"],
+                                                               current["requirements_version"], "user", landing["quote"], now_iso()))
+        receipt = _archive_receipt(con, current, landing, pr["url"])
+        scoring.label_run_outcomes(con, run["id"], "closed")
+        state.update_run(con, run["id"], phase="closed", terminal_at=now_iso(),
+                         terminal_reason=f"landed externally via {pr['url']}", archive_digest=receipt["digest"],
+                         landing={**landing, "handoff": pr["url"]})
+        state.emit(con, current, "run.closed", f"run closed: landed externally via {pr['url']}, archive "
+                   f"{receipt['digest'][7:19]}")
+        _release_all(con, run["id"], "closed")
         _end_bindings(con, run["id"])
+    _finish_terminal(con, run, live)
+    lines = [f"{short(run['id'])} closed | landed externally via {pr['url']} ({pr['merge_commit'][:12]})"]
+    if unproven:
+        lines.append(f"not in the merge commit, closed on the user's word: {', '.join(unproven)}")
+    return Result(lines=lines + [f"archive receipt {receipt['digest'][7:15]}"], data={"archive_digest": receipt["digest"],
+                                                                                    "landing": landing})
+
+
+def _stop_work(con, run: dict) -> list:
+    """Cancel queued jobs and mark live dispatches cancelled. Caller holds the tx."""
+    con.execute("UPDATE outbox SET status='cancelled', finished_at=? WHERE run_id=? AND status='queued'",
+                (now_iso(), run["id"]))
+    live = con.execute("SELECT id, pid FROM dispatches WHERE run_id=? AND status IN ('launching','running')",
+                       (run["id"],)).fetchall()
+    for row in live:
+        con.execute("UPDATE dispatches SET status='cancelled', ended_at=? WHERE id=?", (now_iso(), row["id"]))
+    return live
+
+
+def _finish_terminal(con, run: dict, live: list) -> None:
+    """After a run ends: stop live agents, close panes and tab, drop the plan draft."""
     for row in live:
         if row["pid"] and pid_alive(row["pid"]):
             try:
@@ -248,6 +326,24 @@ def abandon(con, run: dict, reason: str) -> Result:
     rerun.reclaim_all(run)  # snapshot, then close each dispatch pane
     dispatch.close_herdr_tab(run)
     planpath.remove(Path(run["repo_root"]), run)
+
+
+def abandon(con, run: dict, reason: str) -> Result:
+    if not reason or not reason.strip():
+        raise Usage("missing-reason", "abandoning needs a reason", next_step='office close --abandon "<reason>"')
+    with db.transaction(con):
+        current = state.get_run(con, run["id"])
+        if state.is_terminal(current):
+            return Result(lines=[f"{short(run['id'])} already {current['phase']}"])
+        live = _stop_work(con, run)
+        receipt = _archive_receipt(con, current, {"status": "abandoned"}, None)
+        scoring.label_run_outcomes(con, run["id"], "abandoned")
+        state.update_run(con, run["id"], phase="abandoned", terminal_at=now_iso(),
+                         terminal_reason=reason.strip()[:500], archive_digest=receipt["digest"])
+        state.emit(con, current, "run.abandoned", f"run abandoned: {reason.strip()[:80]}")
+        _release_all(con, run["id"], "abandoned")
+        _end_bindings(con, run["id"])
+    _finish_terminal(con, run, live)
     return Result(lines=[f"{short(run['id'])} abandoned | work preserved in its worktrees until office prune -f"])
 
 
