@@ -448,6 +448,11 @@ def _record_plan_finding(con, run, gate, f, reviewer, *, defect: bool) -> None:
     if existing:
         con.execute("UPDATE findings SET summary=?, location=?, updated_at=?, gate_id=? WHERE id=?",
                     (f["summary"], f.get("location"), now_iso(), gate["id"], existing["id"]))
+        if defect:
+            # A DEFECT line that reuses an open finding's code makes it a defect;
+            # left as a plain finding, --redirect and waive could not name it.
+            con.execute("UPDATE findings SET category=?, severity='material', evidence=?, action=? WHERE id=?",
+                        (category, f.get("evidence"), f.get("action"), existing["id"]))
         return
     con.execute("INSERT INTO findings(id, dispatch_id, reviewer_dispatch_id, status, severity, summary, evidence_hash, created_at, "
                 "run_id, gate_id, gate_kind, code, location, category, action, state, origin_gate_id, evidence, updated_at) "
