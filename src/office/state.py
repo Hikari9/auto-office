@@ -71,14 +71,15 @@ def _run(row) -> dict | None:
     if row is None:
         return None
     d = dict(row)
-    for key in ("policy_json", "risk_json", "gates_json", "envelope_json", "plan_review_json", "landing_json"):
+    for key in ("policy_json", "risk_json", "gates_json", "envelope_json", "plan_review_json", "landing_json",
+                "benchmark_refresh_json"):
         d[key[:-5]] = loads(d.get(key), {} if key != "envelope_json" else [])
     return d
 
 
 def update_run(con: sqlite3.Connection, run_id: str, **fields) -> None:
     fields["updated_at"] = now_iso()
-    for key in ("policy", "risk", "gates", "envelope", "plan_review", "landing"):
+    for key in ("policy", "risk", "gates", "envelope", "plan_review", "landing", "benchmark_refresh"):
         if key in fields:
             fields[key + "_json"] = dumps(fields.pop(key))
     if "phase" in fields:

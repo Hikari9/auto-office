@@ -205,7 +205,7 @@ def _route_payload(decision: dict) -> dict:
     """What a dispatch keeps of its decision, so a stacked start or a relaunch
     reproduces the same route, override, and launch form."""
     out = {"candidate": decision.get("candidate"), "selection_disclosure": decision.get("selection_disclosure")}
-    for key in ("override", "launch"):
+    for key in ("override", "launch", "benchmark_snapshot"):
         if decision.get(key):
             out[key] = decision[key]
     return out

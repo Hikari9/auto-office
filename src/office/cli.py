@@ -36,6 +36,7 @@ Auto Office {ver}
                                     close the kept panes of ended dispatches (final text is saved first)
   office close                      finish the run after acceptance and landing
                                     (--landed-externally <pr>: its work merged through another PR)
+  office benchmarks brief|submit <f> opted-in runs: one background refresh of missing benchmark scores
 
   office list                       runs in this repository (--all for every run)
   office inspect [run|task|gate|evidence|events|route] [id]
@@ -128,6 +129,8 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--planner", choices=["dedicated", "inline"], help="override who writes the plan")
     s.add_argument("--issue", help="the tracking GitHub issue (number or URL)")
     s.add_argument("--no-prs", action="store_true", help="keep task work local: no pushes or per-task PRs")
+    s.add_argument("--benchmark-refresh", action="store_true",
+                   help="the user's intake opt-in: refresh missing benchmark scores in the background")
     s.add_argument("--end-state", choices=["ask", "preview", "merge", "e2e"],
                    help="the user's intake answer: how far to go after the task PRs")
     for step in ("preview", "prod", "verify"):
@@ -185,6 +188,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--quote", help="the user's words, when the merged PR does not contain every accepted revision")
     s = sp.add_parser("list", parents=[common])
     s.add_argument("--all", action="store_true")
+    s = sp.add_parser("benchmarks", parents=[common])
+    s.add_argument("action", choices=["brief", "submit"])
+    s.add_argument("file", nargs="?")
     s = sp.add_parser("inspect", parents=[common])
     s.add_argument("what", nargs="?")
     s.add_argument("ident", nargs="?")
@@ -346,6 +352,7 @@ def _run(args, unknown) -> int:
                               interview=args.interview, adversarial=args.adversarial, sets=args.set,
                               harness=args.harness, session=args.session, base=args.base, planner=args.planner,
                               issue=args.issue, no_prs=args.no_prs, end_state=args.end_state,
+                              benchmark_refresh=args.benchmark_refresh,
                               deploy={k: v for k in ("preview", "prod", "verify")
                                       if (v := getattr(args, f"deploy_{k}"))})
         return emit(res, args)
@@ -455,6 +462,13 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         if args.landed_externally:
             return lifecycle.close_landed_externally(con, run, args.landed_externally, args.quote)
         return lifecycle.close(con, run, handoff=args.handoff)
+    if cmd == "benchmarks":
+        from office import benchmarks
+        if args.action == "brief":
+            return benchmarks.brief(con, run)
+        if not args.file:
+            raise OfficeError("usage", "name the delta file", next_step=benchmarks.SUBMIT_FORM, exit_code=2)
+        return benchmarks.submit(con, run, args.file)
     if cmd == "inspect":
         from office import inspect_cmd
         return inspect_cmd.inspect(con, run, args.what, args.ident)
