@@ -163,6 +163,10 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--contract", action="store_true", help="a contract amendment (planner-owned)")
     s.add_argument("--requirements", action="store_true", help="a user-originated requirements change")
     s.add_argument("--quote", help="the user's words (requirements changes, defect redirects)")
+    s.add_argument("--drop-criterion", action="append", default=[], metavar="TEXT",
+                   help="requirements: remove the frozen done criterion this names")
+    s.add_argument("--add-criterion", action="append", default=[], metavar="TEXT",
+                   help="requirements: add a done criterion")
     _redirect_args(s)
     s = sp.add_parser("ack", parents=[common])
     s.add_argument("amendment")
@@ -430,7 +434,8 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         from office import amend
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()
         return amend.amend(con, run, args.scope, delta, contract=args.contract, requirements=args.requirements,
-                           quote=args.quote, cwd=cwd, redirect=_redirect(args))
+                           quote=args.quote, cwd=cwd, redirect=_redirect(args),
+                           drop_criteria=args.drop_criterion, add_criteria=args.add_criterion)
     if cmd == "ack":
         from office import amend
         return amend.ack(con, run, args.amendment)

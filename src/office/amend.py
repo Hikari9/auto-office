@@ -25,9 +25,11 @@ AUTHORITY_TERMS = re.compile(
 
 
 def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, requirements: bool = False,
-          quote: str | None = None, cwd: Path | None = None, redirect: dict | None = None) -> Result:
+          quote: str | None = None, cwd: Path | None = None, redirect: dict | None = None,
+          drop_criteria: list[str] | None = None, add_criteria: list[str] | None = None) -> Result:
     """`redirect` ({defect, root_cause, requirement, reviewer}) marks a contract
-    amendment as the user's redirect of a plan defect (see office.redirect)."""
+    amendment as the user's redirect of a plan defect (see office.redirect).
+    `drop_criteria`/`add_criteria` edit the frozen done criteria (requirements only)."""
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-amend", "workers do not amend the plan; report the problem in your submission",
                       next_step="office submit")
@@ -41,8 +43,11 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
             raise Usage("redirect-needs-contract", "a defect redirect is a contract amendment",
                         next_step=redirect_mod.AMEND_FORM)
         redirect = redirect_mod.validate(con, run, dict(redirect, quote=quote))
+    if (drop_criteria or add_criteria) and not (requirements or scope == "requirements"):
+        raise Usage("criteria-are-requirements", "done criteria change only with a requirements amendment",
+                    next_step=CRITERIA_FORM)
     if requirements or scope == "requirements":
-        return _requirements_change(con, run, delta, quote)
+        return _requirements_change(con, run, delta, quote, drop_criteria or [], add_criteria or [])
     scope_ids = _scope_ids(con, run, scope)
     plan_path = _orchestrator_plan_path(con, run, cwd)
     plan_text = planfile.strip_generated(plan_path.read_text(encoding="utf-8")) if plan_path else None
@@ -71,23 +76,29 @@ def _orchestrator_plan_path(con, run: dict, cwd: Path | None) -> Path | None:
     return draft if draft.is_file() else None
 
 
-def _requirements_change(con, run: dict, delta: str, quote: str | None) -> Result:
+def _requirements_change(con, run: dict, delta: str, quote: str | None, drop: list[str], add: list[str]) -> Result:
     if not quote or not quote.strip():
         raise Refused("user-quote-required", "only the user can change requirements; record their words",
                       next_step='office amend requirements --quote "<user\'s exact words>" -- "<change>"')
     with db.transaction(con):
-        version = record_requirements(con, state.get_run(con, run["id"]), delta, quote)
+        version = record_requirements(con, state.get_run(con, run["id"]), delta, quote, drop=drop, add=add)
         state.emit(con, run, "requirements.changed", f"REQUIREMENTS r{version}: {delta.strip()[:100]}; authorization required")
     jobs.kick(con, run["id"])
     return Result(lines=[f"requirements r{version} recorded | authorization for r{version} required"],
                   next='ask the user (native question tool) for authorization, then office approve plan --quote "<user\'s words>"')
 
 
-def record_requirements(con, run: dict, delta: str, quote: str) -> int:
+def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[str] = (), add: list[str] = ()) -> int:
     """Record requirements r(n+1) from the user's words and deliver it to live
-    workers. Caller holds the tx. Returns the new version."""
+    workers. Caller holds the tx. Returns the new version. `drop` names frozen
+    done criteria the user removed (each must match one); `add` appends new ones."""
     cur = state.current_requirements(con, run["id"])
     frozen = dict(cur["frozen"])
+    criteria = list(frozen.get("done_criteria") or [])
+    for text in drop:
+        criteria.remove(_match_criterion(criteria, text))
+    criteria += [a.strip() for a in add if a.strip() and a.strip() not in criteria]
+    frozen["done_criteria"] = criteria
     frozen.setdefault("user_changes", []).append(delta.strip())
     version = cur["version"] + 1
     con.execute("INSERT INTO requirements(run_id, version, frozen_json, source, quote, created_at) VALUES(?,?,?,?,?,?)",
@@ -100,16 +111,38 @@ def record_requirements(con, run: dict, delta: str, quote: str) -> int:
     return version
 
 
+CRITERIA_FORM = ('office amend requirements --quote "<user\'s words>" [--drop-criterion "<criterion>"]... '
+                 '[--add-criterion "<criterion>"]... -- "<change>"')
+
+
+def _match_criterion(criteria: list[str], text: str) -> str:
+    """The one frozen done criterion `text` names: an exact match, else the only one containing it."""
+    want = " ".join(text.split()).lower()
+    exact = [c for c in criteria if " ".join(str(c).split()).lower() == want]
+    hits = exact or [c for c in criteria if want and want in " ".join(str(c).split()).lower()]
+    if len(hits) == 1:
+        return hits[0]
+    listing = "; ".join(str(c)[:80] for c in criteria) or "none"
+    raise Refused("ambiguous-criterion" if hits else "unknown-criterion",
+                  f"{text!r} names {len(hits)} frozen done criteria (current: {listing})", scope="requirements",
+                  preserved="requirements unchanged", next_step=CRITERIA_FORM)
+
+
 def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan_text: str | None,
              plan_path: Path | None = None) -> Result:
     current = state.current_plan(con, run["id"])
     if current is None:
         raise Refused("no-plan", "there is no plan to amend", next_step="office submit the plan first")
-    if AUTHORITY_TERMS.search(delta):
+    new_text, parsed = _next_plan_text(current, plan_text, scope_ids, delta)
+    # Only what the amendment adds can widen authority: an edited plan is judged
+    # by its new lines (removing a line that names a deploy adds no action), a
+    # delta-only amendment by its delta, which becomes plan text.
+    old_lines = set(current["body"].splitlines())
+    added = "\n".join(line for line in new_text.splitlines() if line not in old_lines)
+    if AUTHORITY_TERMS.search(added):
         raise Refused("contract-level-change", "this delta touches the authority envelope (external, irreversible, or "
                       "destructive action); it is not an ordinary amendment", scope=scope,
                       next_step=f'office amend {scope} --contract -- "<request>" (and user authorization for the new action)')
-    new_text, parsed = _next_plan_text(current, plan_text, scope_ids, delta)
     changes = _diff(con, run, parsed.tasks)
     contract_hits = changes["contract"] + [f"{t} (new, overlapping scope)" for t in changes["overlap_new"]]
     if parsed.requirements.get("named_actions") and parsed.requirements["named_actions"] != (current["requirements"] or {}).get("named_actions"):
@@ -310,7 +343,7 @@ def _next_plan_text(current: dict, plan_text: str | None, scope_ids: list[str], 
         parsed = planfile.parse(plan_text)
         if parsed.errors:
             raise Refused("plan-invalid", "the edited plan draft has problems: " + "; ".join(parsed.errors[:5]),
-                          next_step=f"fix {planpath.rel(run)}, then retry the amendment")
+                          next_step="fix the edited plan draft, then retry the amendment")
         return plan_text, parsed
     note = f"\n\n<!-- amendment -->\nAmendment ({', '.join(scope_ids) or 'plan'}): {delta.strip()}\n"
     text = current["body"].rstrip() + note

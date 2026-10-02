@@ -203,6 +203,9 @@ def plan_review_brief(run: dict, plan: dict, requirements: dict, open_defects: l
     ]
     for k in ("done_criteria", "blast_radius", "non_goals", "named_actions"):
         out.append(f"  {k}: {requirements.get(k)}")
+    if requirements.get("user_changes"):
+        out.append("  user changes (the user's own decisions; they override the plan's earlier wording):")
+        out += [f"  - {c}" for c in requirements["user_changes"]]
     if open_defects:
         out.append("OPEN DEFECTS — say CLEARED <id> only if this revision fixes it, else repeat the DEFECT line:")
         for d in open_defects:
