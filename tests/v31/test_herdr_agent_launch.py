@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -472,7 +474,8 @@ def test_setup_line_dropped_by_a_fresh_shell_is_cleared_and_sent_again(env, monk
     calls = _calls(state_file)
     runs = [i for i, c in enumerate(calls) if c[:2] == ["pane", "run"] and "agent.env" in c[3]]
     assert len(runs) == 3 and (ddir / "shell-ready").exists()
-    # Each resend follows a Ctrl-U that clears what the shell left typed (never a SIGINT).
+    # The fake reports no process info, so the terminal cannot be inspected: each
+    # resend follows a Ctrl-U that clears what the shell left typed (never a SIGINT).
     assert all(calls[i - 1][:2] == ["pane", "send-keys"] and calls[i - 1][-1] == "ctrl+u" for i in runs[1:])
     start = next(i for i, c in enumerate(calls) if c[:2] == ["agent", "start"])
     assert runs[-1] < start
@@ -486,3 +489,85 @@ def test_shell_that_never_runs_the_setup_line_falls_back_to_headless(env, monkey
     assert res["launcher"] == "process-fallback"
     assert not any(c[:2] == ["agent", "start"] for c in _calls(state_file))
     assert any("never ran Office's setup line" in e for e in _launch_events(env, run))
+
+
+# A shell under load can take longer than the resend interval to finish its rc
+# files. Its terminal queues the first setup line meanwhile, and resending then
+# queued copies cut apart by Ctrl-U: zsh read them as one broken line with an
+# unclosed quote, which swallowed the agent command `herdr agent start` typed
+# (startup timeout) and left the pane at `quote>`, where every later dispatch
+# reusing it timed out on its setup line.
+
+def _scripted_shell(monkeypatch, editor_states, runs_when=lambda sent: False):
+    """Patch the pane probe and herdr input. `editor_states` yields what the
+    probe reports per check (the last value repeats); `runs_when(sent)` decides,
+    after each `pane run`, whether the shell ran it (touches the marker)."""
+    from office import dispatch
+    sent, states = [], list(editor_states)
+
+    def quiet(*args):
+        sent.append(list(args))
+        if args[:2] == ("pane", "run") and runs_when(sent):
+            open(shlex.split(args[3])[-1], "w").close()
+
+    def probe(pane):
+        return states.pop(0) if len(states) > 1 else states[0]
+
+    monkeypatch.setattr(dispatch, "_herdr_quiet", quiet)
+    monkeypatch.setattr(dispatch, "_shell_at_line_editor", probe)
+    monkeypatch.setenv("OFFICE_HERDR_SHELL_RETRY", "0")
+    return dispatch, sent
+
+
+def test_setup_line_queued_by_a_starting_shell_is_not_sent_again(tmp_path, monkeypatch):
+    marker = tmp_path / "shell-ready"
+    checks = []
+
+    def starting(pane):
+        # The rc files are still running; on the third check they finish and the queued line runs.
+        checks.append(pane)
+        if len(checks) == 3:
+            marker.touch()
+        return False
+
+    dispatch, sent = _scripted_shell(monkeypatch, [False])
+    monkeypatch.setattr(dispatch, "_shell_at_line_editor", starting)
+    assert dispatch._shell_run("w1:p1", "cd /w", marker, timeout=5) is True
+    assert [c[:2] for c in sent] == [["pane", "run"]]  # one line, no keys that would cut it apart
+
+
+def test_line_left_open_at_the_line_editor_is_cleared_with_ctrl_c(tmp_path, monkeypatch):
+    # The editor holds an unclosed quote: only Ctrl-C leaves it, Ctrl-U does not.
+    dispatch, sent = _scripted_shell(monkeypatch, [True],
+                                     runs_when=lambda sent: any(c[-1] == "ctrl+c" for c in sent[:-1]))
+    assert dispatch._shell_run("w1:p1", "cd /w", tmp_path / "shell-ready", timeout=5) is True
+    assert sent[-2:] == [["pane", "send-keys", "w1:p1", "ctrl+c"], ["pane", "run", "w1:p1", sent[-1][3]]]
+    assert not any(c[-1] == "ctrl+u" for c in sent)
+
+
+@pytest.mark.skipif(not hasattr(os, "openpty"), reason="needs a POSIX pty")
+def test_line_editor_probe_reads_the_pane_terminal_mode(monkeypatch):
+    import termios
+    from office import dispatch
+    master, slave = os.openpty()
+    try:
+        info = {"shell_pid": 4242, "foreground_process_group_id": 4242}
+        monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {"process_info": info})
+        monkeypatch.setattr(dispatch, "_pane_tty", lambda pid: os.ttyname(slave))
+        attrs = termios.tcgetattr(slave)
+
+        def lflag(on):
+            attrs[3] = attrs[3] | termios.ICANON | termios.ECHO if on else attrs[3] & ~(termios.ICANON | termios.ECHO)
+            termios.tcsetattr(slave, termios.TCSANOW, attrs)
+
+        lflag(True)   # cooked: rc files still running (an instant prompt keeps echo on)
+        assert dispatch._shell_at_line_editor("w1:p1") is False
+        lflag(False)  # raw, no echo: zle/readline reading a line
+        assert dispatch._shell_at_line_editor("w1:p1") is True
+        info["foreground_process_group_id"] = 4343  # a command owns the terminal
+        assert dispatch._shell_at_line_editor("w1:p1") is False
+        info.clear()  # herdr gave no process info
+        assert dispatch._shell_at_line_editor("w1:p1") is None
+    finally:
+        os.close(master)
+        os.close(slave)
