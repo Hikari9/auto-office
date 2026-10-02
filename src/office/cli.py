@@ -35,6 +35,7 @@ Auto Office {ver}
   office dismiss <task|dispatch|--all>
                                     close the kept panes of ended dispatches (final text is saved first)
   office close                      finish the run after acceptance and landing
+                                    (--landed-externally <pr>: its work merged through another PR)
 
   office list                       runs in this repository (--all for every run)
   office inspect [run|task|gate|evidence|events|route] [id]
@@ -180,6 +181,8 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("close", parents=[common])
     s.add_argument("--handoff", help="PR URL or branch handed to the user for merge")
     s.add_argument("--abandon", metavar="REASON", help="end the run without landing")
+    s.add_argument("--landed-externally", metavar="PR", help="the run's work landed through this merged PR")
+    s.add_argument("--quote", help="the user's words, when the merged PR does not contain every accepted revision")
     s = sp.add_parser("list", parents=[common])
     s.add_argument("--all", action="store_true")
     s = sp.add_parser("inspect", parents=[common])
@@ -449,6 +452,8 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         from office import lifecycle
         if args.abandon:
             return lifecycle.abandon(con, run, args.abandon)
+        if args.landed_externally:
+            return lifecycle.close_landed_externally(con, run, args.landed_externally, args.quote)
         return lifecycle.close(con, run, handoff=args.handoff)
     if cmd == "inspect":
         from office import inspect_cmd

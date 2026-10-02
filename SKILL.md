@@ -145,7 +145,9 @@ check that times out while host load exceeds twice the CPU count is UNAVAILABLE,
 Rerun it with `office resume`.
 With task PRs off (local, no GitHub, `--no-prs`), push the integration branch it names, open a PR
 with `Closes #<issue>`, and `office close --handoff <pr-url>`. Stop early with
-`office close --abandon "<reason>"`; nothing is deleted until `office prune -f`.
+`office close --abandon "<reason>"`; nothing is deleted until `office prune -f`. When the work landed
+through a PR Office did not open, `office close --landed-externally <merged-pr-url>` closes it as landed;
+if that merge does not contain every accepted revision, ask the user and add `--quote "<words>"`.
 
 ## Resume
 
