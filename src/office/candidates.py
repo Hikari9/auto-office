@@ -342,6 +342,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     # An explicit --route names its model, so it is not held to the family floor.
     floors = None if override else config.get("model_family_floors")
     candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors)
+    from office import benchmarks
+    snapshot = benchmarks.apply(run, candidates)
     if exclude:
         # Entries: an exact triple, "model:<harness>/<model>" (every effort of a
         # model that misbehaved), "harness:<name>" (a shared quota/auth wall), or
@@ -380,9 +382,11 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "run_id": run.get("id"),
         "family_id": run.get("family_id"),
         "task_id": task_id,
+        "benchmark_snapshot": snapshot,
         "candidates": candidates,
     }
     result = routing.route(request)
+    result["benchmark_snapshot"] = snapshot
     result["skipped"] = skipped
     result["request"] = request
     return result

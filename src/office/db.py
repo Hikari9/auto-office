@@ -49,7 +49,7 @@ SHARED_COLUMNS = {
         "policy_json TEXT", "risk_json TEXT", "gates_json TEXT", "envelope_json TEXT",
         "plan_review_json TEXT", "planner_mode TEXT", "terminal_at TEXT", "terminal_reason TEXT",
         "archive_digest TEXT", "pruned_at TEXT", "prune_status TEXT", "updated_at TEXT",
-        "landing_json TEXT", "escalations_used INTEGER",
+        "landing_json TEXT", "escalations_used INTEGER", "benchmark_refresh_json TEXT",
     ],
     "dispatches": [
         "invocation_model_id TEXT", "selection_reason TEXT",
