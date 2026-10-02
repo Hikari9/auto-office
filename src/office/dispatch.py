@@ -492,6 +492,7 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
         "requirements": req["frozen"],
         "fix_of": extra.get("fix_of"),
         "contract_request": extra.get("contract_request"),
+        "restack": extra.get("restack"),
     }
     return state.packet_envelope(run, f"{role}-dispatch", body)
 

@@ -8,11 +8,12 @@ open findings in its brief. `office dismiss` closes the panes of ended dispatche
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 from pathlib import Path
 
-from office import adapters, db, dispatch, gates, jobs, state
+from office import adapters, db, dispatch, gates, jobs, paths, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import pid_alive, sha256_obj
@@ -91,6 +92,43 @@ def _findings_text(con, run: dict, tid: str) -> str:
     return "; ".join(f"{r['code']} {r['location'] or ''} {r['summary'][:120]}".strip() for r in rows[:8])
 
 
+def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
+    """Bring the task worktree up to its dependencies' accepted revisions.
+
+    A task built on a dependency revision that review later superseded can
+    never be accepted (gates.stale_dependency). Office merges each accepted
+    revision the worktree lacks; a merge is never a rebase, so the pushed
+    branch needs no force-push. On a conflict the merge is aborted and the
+    executor is told to make it. Returns {"base", "merged", "conflict", "line"}."""
+    if not worktree or not (Path(worktree) / ".git").exists():
+        return None
+    wt = Path(worktree)
+    pending = []
+    for dep in task["depends"]:
+        dt = state.get_task(con, run["id"], dep)
+        if not dt or dt["status"] != "accepted" or not dt.get("accepted_revision_id"):
+            continue
+        row = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (dt["accepted_revision_id"],)).fetchone()
+        if row and not gates._is_ancestor(run, row["commit_sha"], paths.git(wt, "rev-parse", "HEAD")):
+            pending.append((dep, dt["accepted_revision_id"], row["commit_sha"]))
+    if not pending:
+        return None
+    env = {**os.environ, **paths.commit_identity_env(wt)}
+    merged = []
+    for dep, rev_id, sha in pending:
+        proc = subprocess.run(["git", "-C", str(wt), "merge", "--no-edit", "-m",
+                               f"office: restack {task['id']} onto {dep} {rev_id}\n\n{paths.office_trailer(run['id'])}", sha],
+                              capture_output=True, text=True, env=env)
+        if proc.returncode != 0:
+            subprocess.run(["git", "-C", str(wt), "merge", "--abort"], capture_output=True)
+            return {"base": None, "merged": merged, "conflict": {"task": dep, "revision": rev_id, "commit": sha},
+                    "line": f"restack onto {dep} {rev_id} conflicts; the executor merges {sha[:7]} first"}
+        merged.append({"task": dep, "revision": rev_id, "commit": sha})
+    base = merged[-1]["commit"] if len(task["depends"]) == 1 else None
+    return {"base": base, "merged": merged, "conflict": None,
+            "line": "restacked onto " + ", ".join(f"{m['task']} {m['revision']}" for m in merged)}
+
+
 def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool) -> Result:
     if resume == fresh:
         raise Usage("rerun-mode", f"say how to rerun {tid}: --resume continues the ended session with its context "
@@ -135,15 +173,24 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool) -> Result:
         found = _findings_text(con, run, tid)
         extra = {"resume": {"parent": parent["id"], "session_id": session, "argv": argv[0], "herdr_kind": argv[1],
                             "findings": found}}
+    restack = _restack(con, run, task, parent.get("worktree"))
+    if restack:
+        extra = {**(extra or {}), "restack": {k: restack[k] for k in ("merged", "conflict")}}
+        if resume:
+            # A resumed session reads only its prompt pointer first: name the restack there.
+            extra["resume"]["findings"] = "; ".join(x for x in (restack["line"], extra["resume"]["findings"]) if x)
     with db.transaction(con):
         did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
-                                      extra=extra)
+                                      extra=extra, base=(restack or {}).get("base"))
+        if restack:
+            state.emit(con, run, "task.restacked", f"{tid} {restack['line']}", task_id=tid, dispatch_id=did)
         if resume:
             _set_resumed_from(con, did, parent["id"])
         state.emit(con, run, "task.rerun", f"{tid} rerun {'--resume from ' + parent['id'] if resume else '--fresh'} "
                    f"as {did}", task_id=tid, dispatch_id=did)
     jobs.kick(con, run["id"])
-    res = Result(lines=[f"{tid} -> {did} executor {'resuming ' + parent['id'] if resume else 'fresh session'} launching"])
+    res = Result(lines=[f"{tid} -> {did} executor {'resuming ' + parent['id'] if resume else 'fresh session'} launching"]
+                 + ([f"{tid} {restack['line']}"] if restack else []))
     res.lines.extend(f"  {line}" for line in dispatch.launch_instructions(run, state.get_dispatch(con, did)))
     res.next = "exceptions only; office status"
     return res

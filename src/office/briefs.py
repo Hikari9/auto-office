@@ -130,6 +130,15 @@ def executor_brief(con, run: dict, packet: dict) -> str:
         out.append(f"VISUAL the runtime will capture {vis.get('url')} at {vis.get('viewports') or 'desktop, mobile'}"
                    + (f" against reference {vis['reference']}" if vis.get("reference") else " (no reference: fidelity unmeasured)"))
     out.append(f"VERSIONS plan p{packet['plan_version']} / requirements r{packet['requirements_version']}")
+    restack = packet.get("restack") or {}
+    if restack.get("merged"):
+        out.append("RESTACKED Office merged " + ", ".join(f"{m['task']} {m['revision']}" for m in restack["merged"])
+                   + " into this worktree; build on it")
+    if restack.get("conflict"):
+        c = restack["conflict"]
+        out += ["", f"RESTACK FIRST: {c['task']} was accepted on {c['revision']}, which this worktree lacks. Run "
+                f"`git merge {c['commit']}`, resolve the conflicts inside your scope, and commit the merge. "
+                "Never rebase or force-push."]
     fix = packet.get("fix_of")
     if fix:
         findings = con.execute("SELECT code, severity, location, summary, action FROM findings WHERE run_id=? AND task_id=? "

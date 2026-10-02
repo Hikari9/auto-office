@@ -62,6 +62,11 @@ def _submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect
             return plans.submit_plan(con, run, Path(plan_path) if plan_path else _draft(con, base, run),
                                      submitter=dispatch_id, dispatch_id=dispatch_id, redirect=redirect)
         return submit_revision(con, run, d, cwd)
+    d = None if plan_path else _worktree_dispatch(con, run, cwd)
+    if d is not None:
+        # A restarted executor session lost OFFICE_DISPATCH_ID; its task
+        # worktree still names the dispatch, and the lease check still fences it.
+        return submit_revision(con, run, d, cwd)
     if run.get("planner_mode") == "dedicated" and not plan_path:
         raise Refused("orchestrator-no-submit", "in this run the dedicated planner owns the plan",
                       next_step='use office amend for ordinary changes, or office amend plan --contract -- "<request>"')
@@ -70,6 +75,32 @@ def _submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect
         raise Usage("no-repository", "run office submit from the repository", next_step="cd into the repository")
     path = Path(plan_path) if plan_path else _draft(con, ident[0], run)
     return plans.submit_plan(con, run, path, submitter="orchestrator", redirect=redirect)
+
+
+def _worktree_dispatch(con, run: dict, cwd: Path) -> dict | None:
+    """The current executor dispatch whose task worktree is `cwd`, if any."""
+    ident = paths.repo_identity(cwd)
+    if ident is None:
+        return None
+    for t in state.tasks(con, run["id"]):
+        d = state.get_dispatch(con, t["current_dispatch_id"]) if t.get("current_dispatch_id") else None
+        if d and d["role"] == "executor" and d.get("worktree") and Path(d["worktree"]).resolve() == ident[0]:
+            return d
+    return None
+
+
+def _dependency_bases(con, run: dict, task: dict, commit: str) -> list[str]:
+    """Commits of the task's dependencies' newest revisions (accepted, else
+    current) that `commit` already contains: a stacked task that merged its
+    parent's later revision builds on it, not on the revision it started from."""
+    out = []
+    for dep in task["depends"]:
+        dt = state.get_task(con, run["id"], dep) or {}
+        rev_id = dt.get("accepted_revision_id") or dt.get("current_revision_id")
+        row = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (rev_id,)).fetchone() if rev_id else None
+        if row and gates._is_ancestor(run, row["commit_sha"], commit):
+            out.append(row["commit_sha"])
+    return out
 
 
 def capture_tree(worktree: Path, scratch: Path, leave_out: list[str] | None = None,
@@ -242,7 +273,16 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     commit = make_commit(wt, tree, head, f"office: {task['id']} submission\n\nrun {run['id'][:8]} task {task['id']}\n\n"
                          f"{paths.office_trailer(run['id'])}")
     from office import planfile, prs
-    touched = paths.git(wt, "diff", "--name-only", d["base_commit"], commit).split()
+    base = d["base_commit"]
+    touched = paths.git(wt, "diff", "--name-only", base, commit).split()
+    dep_bases = [b for b in _dependency_bases(con, run, task, commit) if b != base]
+    for b in dep_bases:
+        # A file counts only if it differs from every base the task builds on,
+        # so a dependency's own later files are not this task's changes.
+        also = set(paths.git(wt, "diff", "--name-only", b, commit).split())
+        touched = [f for f in touched if f in also]
+    if len(dep_bases) == 1 and gates._is_ancestor(run, base, dep_bases[0]):
+        base = dep_bases[0]  # reviewers diff against the dependency revision it now contains
     outside = [f for f in touched if not planfile.path_in_scope(f, task["scope"])]
     if outside:
         with db.transaction(con):
@@ -267,7 +307,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
         rev_id = f"R{seq}-{run['id'][:8]}"
         prev = task.get("current_revision_id")
         prev_row = con.execute("SELECT * FROM revisions WHERE id=?", (prev,)).fetchone() if prev else None
-        changed = paths.git(wt, "diff", "--name-only", prev_row["commit_sha"] if prev_row else d["base_commit"], commit).split()
+        changed = paths.git(wt, "diff", "--name-only", prev_row["commit_sha"] if prev_row else base, commit).split()
         status = "amendment_pending" if pending else "current"
         env_fp = sha256_obj({"office": run["office_version"], "policy": run["config_hash"]})
         con.execute("INSERT INTO revisions(id, run_id, task_id, seq, dispatch_id, lease_id, fencing, commit_sha, tree_sha, "
@@ -275,7 +315,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                     "supersedes, changed_json, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (rev_id, run["id"], task["id"], seq, d["id"], d["lease_id"],
                      (dispatch_mod.live_lease(con, run["id"], d["lease_id"]) or {}).get("fencing"), commit, tree,
-                     d["base_commit"], run["requirements_version"], run["plan_version"], applied, env_fp, op_id, status,
+                     base, run["requirements_version"], run["plan_version"], applied, env_fp, op_id, status,
                      prev, dumps(changed), now_iso()))
         paths.git(wt, "update-ref", f"refs/office/{run['id'][:8]}/{task['id']}/{rev_id}", commit)
         if prs.enabled(run):

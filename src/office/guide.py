@@ -106,6 +106,11 @@ def next_action(con, run: dict) -> str:
         if t["status"] == "changes_required" and not gates_mod.worker_live(con, t.get("current_dispatch_id")):
             # Findings wait for the orchestrator's choice (R8); nothing relaunches on its own.
             return f"findings on {t['id']} wait for you: office rerun {t['id']} --resume | --fresh"
+    for t in tasks:
+        if t["status"] == "submitted":
+            stale = gates_mod.stale_dependency(con, run, t)
+            if stale:
+                return f"{t['id']} {stale}"
     ready = ready_tasks(con, run)
     if ready:
         return "choose execution strategy; office dispatch " + " ".join(ready) + (" --parallel" if len(ready) > 1 else "")
@@ -153,7 +158,7 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     rs = plans.review_state(con, run)
     if rs["required"]:
         pr = "plan review " + ("ended (" + (rs["ended_reason"] or "") + ")" if rs["ended"] else
-                               ("running" if rs["pending"] else (rs["last_verdict"] or "pending")))
+                               (_plan_review_live(con, run) if rs["pending"] else (rs["last_verdict"] or "pending")))
         res.add(pr)
     for t in tasks:
         if t["status"] in ("paused", "blocked"):
@@ -179,6 +184,16 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     return res
 
 
+def _plan_review_live(con, run: dict) -> str:
+    """A pending plan-review round, named by the reviewer actually working it."""
+    g = [g for g in plans.plan_gates(con, run["id"]) if g["status"] in ("queued", "running")][-1]
+    d = con.execute("SELECT id, pane_id FROM dispatches WHERE gate_id=? AND ended_at IS NULL ORDER BY started_at DESC "
+                    "LIMIT 1", (g["id"],)).fetchone()
+    if d is None:
+        return f"queued (p{g['plan_version']} {g['id']}; no reviewer running yet)"
+    return f"running (p{g['plan_version']} reviewer {d['id']}" + (f" pane {d['pane_id']})" if d["pane_id"] else ")")
+
+
 def _snapshot(con, run: dict) -> tuple:
     run = state.get_run(con, run["id"])
     tasks = tuple((t["id"], t["status"], t.get("current_revision_id")) for t in state.tasks(con, run["id"]))
@@ -188,11 +203,13 @@ def _snapshot(con, run: dict) -> tuple:
 def stalls(con, run: dict, since: str = "") -> list[str]:
     """Work Office believes is in progress with nothing left to advance it."""
     out = []
-    live_jobs = con.execute("SELECT COUNT(*) FROM outbox WHERE run_id=? AND status IN ('queued','claimed')",
-                            (run["id"],)).fetchone()[0]
     for g in con.execute("SELECT id, task_id, kind, status FROM gates WHERE run_id=? AND status IN ('queued','running')",
                          (run["id"],)).fetchall():
-        if not live_jobs:
+        # Each gate is advanced by its own job or reviewer, not by unrelated work in the run.
+        job = con.execute("SELECT 1 FROM outbox WHERE run_id=? AND status IN ('queued','claimed') AND payload_json LIKE ?",
+                          (run["id"], f'%"{g["id"]}"%')).fetchone()
+        reviewer = con.execute("SELECT 1 FROM dispatches WHERE gate_id=? AND ended_at IS NULL", (g["id"],)).fetchone()
+        if not job and not reviewer:
             out.append(f"{g['task_id'] or 'plan'} {g['kind']} gate {g['id']} is {g['status']} but no job is queued or running")
     for j in con.execute("SELECT kind, error FROM outbox WHERE run_id=? AND status='failed' AND finished_at > ?",
                          (run["id"], since)).fetchall():
@@ -318,6 +335,11 @@ def _waiting_on(con, run: dict, task: dict) -> str:
         for g in con.execute("SELECT kind, status FROM gates WHERE revision_id=? AND status IN ('queued','running','waiting')",
                              (task["current_revision_id"],)).fetchall():
             parts.append(f"{g['kind']} {g['status']}")
+        if task["status"] == "submitted" and not parts:
+            from office import gates
+            stale = gates.stale_dependency(con, run, task)
+            if stale:
+                parts.append(stale)
     return "; ".join(parts)
 
 
