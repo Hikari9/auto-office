@@ -127,7 +127,7 @@ function cmdAdd(flags) {
     dispatch_id: flags.dispatch || null,
     status: "working",
     suggestion: null,
-    note: null,
+    note: flags.note || null,
     closed: false,
     updated_at: nowIso(),
   };

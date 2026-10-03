@@ -191,8 +191,20 @@ a separate bookkeeping pass. This skill owns recording, because recording happen
 
 ```bash
 <this skill's directory>/scripts/herdr-ledger.mjs add \
-  --pane <pane-id> --agent <name> --kind <kind> --session <session_id> [--run <run-id>]
+  --pane <pane-id> --agent <name> --kind <kind> --session <session_id> [--run <run-id>] \
+  [--note "<what> PR#<n>"]
 ```
+
+Label every pane for a human right after the split, so a narrow tab bar says what it is doing
+(Office dispatches do this for you as `<task> <role> PR#<n> <short id>`, e.g. `T3 executor PR#261 D4f2a`).
+For ad-hoc agents started outside an Office run, name the work and put the PR or issue number in the
+label and in the ledger line (`--note`), most identifying part first, under about 40 characters:
+
+```bash
+herdr pane rename <pane> "<what> PR#<n>"   # e.g. "fix login PR#261" or "triage issue#88"
+```
+
+If the PR is opened after the pane starts, rename the pane again once the number is known.
 
 It defaults to `$HERDR_LEDGER`, else `$OFFICE_STATE_DIR/panes.jsonl` — the same ledger
 `scripts/office_spawn.sh` writes and `scripts/hooks/close_finished_panes.mjs` sweeps. One ledger

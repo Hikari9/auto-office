@@ -52,7 +52,7 @@ def test_first_dispatch_splits_caller_pane_right_in_current_tab(env, monkeypatch
     monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
     from office import dispatch, paths
     run = _run(env)
-    pane = dispatch._herdr_pane(run, env.repo, label="office plan_reviewer D1")
+    pane = dispatch._herdr_pane(run, env.repo, label="plan plan_reviewer Dabcd")
     assert pane == "w1:p101"
     calls = _calls(state)
     assert ["tab", "create"] not in [c[:2] for c in calls]
@@ -60,7 +60,7 @@ def test_first_dispatch_splits_caller_pane_right_in_current_tab(env, monkeypatch
     assert split[split.index("--pane") + 1] == "w1:pQ"
     assert split[split.index("--direction") + 1] == "right"
     assert "--no-focus" in split
-    assert ["pane", "rename", "w1:p101", "office plan_reviewer D1"] in calls
+    assert ["pane", "rename", "w1:p101", "plan plan_reviewer Dabcd"] in calls
     layout = json.loads((paths.run_dir(run["id"]) / "herdr-tab.json").read_text())
     assert layout["mode"] == "split" and layout["panes"] == ["w1:p101"] and layout["anchor"] == "w1:pQ"
 
@@ -111,3 +111,185 @@ def test_legacy_own_tab_run_keeps_its_tab(env, monkeypatch):
     assert not any(c[:2] == ["pane", "split"] for c in _calls(state))
     dispatch.close_herdr_tab(run)
     assert ["tab", "close", "w1:tD"] in _calls(state)
+
+
+def test_label_task_role_pr_and_short_id(env):
+    from office import dispatch
+    run = {"id": "r1"}
+    d = {"id": "D4f2a91c0", "role": "executor", "task_id": None}
+    assert dispatch.pane_label(run, d) == "plan executor D4f2a"
+    d["gate_id"] = None
+    assert dispatch.pane_label(run, {"id": "D9c1bffff", "role": "plan_reviewer"}) == "plan plan_reviewer D9c1b"
+
+
+def test_label_with_task_pr_and_integration(env, monkeypatch):
+    from office import dispatch, state
+    task = {"pr": {"number": 261}}
+    monkeypatch.setattr(state, "get_task", lambda con, rid, tid: task if tid == "T3" else None)
+    run = {"id": "r1"}
+    assert dispatch.pane_label(run, {"id": "D4f2a0000", "role": "executor", "task_id": "T3"}) == "T3 executor PR#261 D4f2a"
+    assert dispatch.pane_label(run, {"id": "D9c1b0000", "role": "code_reviewer", "task_id": "T3"}) == "T3 code_reviewer PR#261 D9c1b"
+    task["pr"] = {}
+    assert dispatch.pane_label(run, {"id": "D4f2a0000", "role": "executor", "task_id": "T3"}) == "T3 executor D4f2a"
+
+
+def test_integration_label_and_pr(env, monkeypatch):
+    from office import dispatch, state
+    class Con:
+        def execute(self, *a):
+            class R:
+                def fetchone(self_): return {"subject": "integration"}
+            return R()
+        def close(self): pass
+    monkeypatch.setattr(dispatch.db, "connect", lambda: Con())
+    monkeypatch.setattr(state, "get_run", lambda con, rid: {"landing": {"integration": {"pr": 270}}})
+    d = {"id": "D7e0c1234", "role": "code_reviewer", "task_id": None, "gate_id": "G1"}
+    assert dispatch.pane_label({"id": "r1"}, d) == "integration code_reviewer PR#270 D7e0c"
+    monkeypatch.setattr(state, "get_run", lambda con, rid: {"landing": {}})
+    assert dispatch.pane_label({"id": "r1"}, d) == "integration code_reviewer D7e0c"
+
+
+def test_reused_pane_gets_the_new_dispatch_label(env, monkeypatch):
+    state = _fake(env, monkeypatch)
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
+    from office import dispatch
+    run = _run(env)
+    first = dispatch._herdr_pane(run, env.repo, label="T1 executor D1111")
+    assert dispatch._herdr_pane(run, env.repo, label="T2 executor PR#9 D2222") == first
+    renames = [c for c in _calls(state) if c[:2] == ["pane", "rename"]]
+    assert renames[-1] == ["pane", "rename", first, "T2 executor PR#9 D2222"]
+
+
+def test_relabel_task_panes_renames_live_panes_and_swallows_failures(env, monkeypatch):
+    state_file = _fake(env, monkeypatch)
+    from office import dispatch
+    class Con:
+        def execute(self, *a):
+            class R:
+                def fetchall(self_): return [{"id": "D4f2a0000", "role": "executor", "task_id": "T3", "kind": "worker",
+                                              "pane_id": "w1:p101"}]
+            return R()
+        def close(self): pass
+    monkeypatch.setattr(dispatch.db, "connect", lambda: Con())
+    monkeypatch.setattr(dispatch, "pane_label", lambda run, d, kind="": f"T3 {d['role']} PR#261 {d['id'][:5]}")
+    dispatch.relabel_task_panes({"id": "r1"}, "T3")
+    assert ["pane", "rename", "w1:p101", "T3 executor PR#261 D4f2a"] in _calls(state_file)
+    monkeypatch.setattr(dispatch.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
+    dispatch.relabel_task_panes({"id": "r1"}, "T3")  # must not raise
+
+
+def test_ensure_pr_relabels_when_pr_becomes_known(env, monkeypatch):
+    from office import dispatch, prs
+    calls = []
+    monkeypatch.setattr(dispatch, "relabel_task_panes", lambda run, tid: calls.append(tid))
+    monkeypatch.setattr(prs, "body", lambda *a: "b")
+    monkeypatch.setattr(prs, "pr_base", lambda *a: "main")
+    monkeypatch.setattr(prs, "_find", lambda repo, branch: {"number": 261, "url": "u", "baseRefName": "main"})
+    monkeypatch.setattr(prs, "_gh", lambda *a, **k: type("P", (), {"returncode": 1, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(prs.state, "update_task", lambda *a, **k: None)
+    monkeypatch.setattr(prs.db, "transaction", lambda con: __import__("contextlib").nullcontext())
+    run = {"id": "r1", "repo_root": str(env.repo)}
+    prs.ensure_pr(None, run, {"id": "T3", "title": "t"}, {"id": "D1", "branch": "b"})
+    assert calls == ["T3"]
+    calls.clear()
+    prs.ensure_pr(None, run, {"id": "T3", "title": "t", "pr": {"number": 261}}, {"id": "D1", "branch": "b"})
+    assert calls == []
+
+
+def test_rename_failure_never_fails_pane_setup(env, monkeypatch):
+    import subprocess
+    _fake(env, monkeypatch)
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
+    from office import dispatch
+    real = subprocess.run
+    for exc in (OSError("no herdr"), subprocess.TimeoutExpired("herdr", 30)):
+        def run(args, *a, _exc=exc, **k):
+            if args[:3] == ["herdr", "pane", "rename"]:
+                raise _exc
+            return real(args, *a, **k)
+        monkeypatch.setattr(dispatch.subprocess, "run", run)
+        run_ = _run(env)
+        first = dispatch._herdr_pane(run_, env.repo, label="T1 executor D1111")  # fresh pane
+        assert first
+        assert dispatch._herdr_pane(run_, env.repo, label="T2 executor D2222") == first  # reused pane
+
+
+def test_relabel_continues_past_one_failing_pane(env, monkeypatch):
+    import subprocess
+    from office import dispatch
+    rows = [{"id": f"D{i}0000000", "role": "executor", "task_id": "T3", "kind": "worker", "pane_id": f"w1:p{i}"}
+            for i in (1, 2, 3)]
+    class Con:
+        def execute(self, *a):
+            class R:
+                def fetchall(self_): return rows
+            return R()
+        def close(self): pass
+    monkeypatch.setattr(dispatch.db, "connect", lambda: Con())
+    monkeypatch.setattr(dispatch, "pane_label", lambda run, d, kind="": "L " + d["pane_id"])
+    done = []
+    def run(args, *a, **k):
+        if args[3] == "w1:p2":
+            raise subprocess.TimeoutExpired("herdr", 30)
+        done.append(args[3])
+    monkeypatch.setattr(dispatch.subprocess, "run", run)
+    dispatch.relabel_task_panes({"id": "r1"}, "T3")
+    assert done == ["w1:p1", "w1:p3"]
+
+
+def test_pane_label_survives_db_connect_failure_during_launch(env, monkeypatch):
+    from office import dispatch
+    def boom(*a, **k):
+        raise RuntimeError("db locked")
+    monkeypatch.setattr(dispatch.db, "connect", boom)
+    d = {"id": "D4f2a0000", "role": "executor", "task_id": "T3"}
+    assert dispatch.pane_label({"id": "r1"}, d) == "T3 executor D4f2a"
+    assert dispatch.pane_label({"id": "r1"}, {"id": "D9c1b0000", "role": "code_reviewer"}) == "code_reviewer D9c1b"
+    dispatch.relabel_task_panes({"id": "r1"}, "T3")  # must not raise either
+
+
+def test_prs_relabel_hook_failure_is_swallowed(env, monkeypatch):
+    from office import dispatch, prs
+    monkeypatch.setattr(dispatch, "relabel_task_panes", lambda run, tid: (_ for _ in ()).throw(RuntimeError("x")))
+    monkeypatch.setattr(prs, "body", lambda *a: "b")
+    monkeypatch.setattr(prs, "pr_base", lambda *a: "main")
+    monkeypatch.setattr(prs, "_find", lambda repo, branch: {"number": 5, "url": "u", "baseRefName": "main"})
+    monkeypatch.setattr(prs, "_gh", lambda *a, **k: type("P", (), {"returncode": 1, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(prs.state, "update_task", lambda *a, **k: None)
+    monkeypatch.setattr(prs.db, "transaction", lambda con: __import__("contextlib").nullcontext())
+    pr = prs.ensure_pr(None, {"id": "r1", "repo_root": str(env.repo)}, {"id": "T3", "title": "t"}, {"id": "D1", "branch": "b"})
+    assert pr["number"] == 5
+
+
+def test_label_refreshed_when_pr_lands_before_pane_id_is_recorded(env, monkeypatch):
+    import types
+    import pytest
+    from office import dispatch
+    calls = []
+    monkeypatch.setattr(dispatch, "write_agent_env", lambda *a, **k: Path("/dev/null"))
+    monkeypatch.setattr(dispatch, "_shell_run", lambda *a, **k: True)
+    monkeypatch.setattr(dispatch, "_record_launch", lambda *a, **k: None)
+    monkeypatch.setattr(dispatch, "_started_session", lambda out: "sess")
+    monkeypatch.setattr(dispatch, "_set_dispatch", lambda *a, **k: None)
+    monkeypatch.setattr(dispatch, "atomic_write_json", lambda *a, **k: None)
+    monkeypatch.setattr(dispatch, "pane_label", lambda run, d, kind="": "T3 executor PR#261 D4f2a")
+
+    class Stop(Exception):
+        pass
+
+    def stop(*a, **k):
+        raise Stop
+    monkeypatch.setattr(dispatch, "_pane_ledger", stop)
+    monkeypatch.setattr(dispatch.subprocess, "run", lambda args, **k: calls.append(args) or
+                        types.SimpleNamespace(returncode=0, stdout="", stderr=""))
+    run = _run(env)
+    d = {"id": "D4f2a0000", "role": "executor", "task_id": "T3", "kind": "worker"}
+    with pytest.raises(Stop):
+        dispatch._herdr_agent_start(run, d, {"kind": "worker"}, {}, (["x"], "claude"), "w1:p101", env.repo,
+                                    env.tmp, label="T3 executor D4f2a")
+    assert ["herdr", "pane", "rename", "w1:p101", "T3 executor PR#261 D4f2a"] in calls
+    calls.clear()
+    with pytest.raises(Stop):  # label unchanged: no extra rename
+        dispatch._herdr_agent_start(run, d, {"kind": "worker"}, {}, (["x"], "claude"), "w1:p101", env.repo,
+                                    env.tmp, label="T3 executor PR#261 D4f2a")
+    assert not any(c[:3] == ["herdr", "pane", "rename"] for c in calls)

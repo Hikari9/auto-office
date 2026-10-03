@@ -621,11 +621,12 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
             inter = (argv_cli[1:], Path(argv_cli[0]).name)
         else:
             inter = _interactive(dispatch, kind, cwd, include_dirs, output=output)
-        pane = _herdr_pane(run, cwd, label=f"office {dispatch.get('role') or kind} {dispatch['id']}") if inter else None
+        label = pane_label(run, dispatch, kind)
+        pane = _herdr_pane(run, cwd, label=label) if inter else None
         if inter and not pane:
             _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
         if pane:
-            started = _herdr_agent_start(run, dispatch, spec, env, inter, pane, cwd, ddir)
+            started = _herdr_agent_start(run, dispatch, spec, env, inter, pane, cwd, ddir, label=label)
             if started:
                 if wait:
                     return _wait_terminal(dispatch["id"])
@@ -757,7 +758,7 @@ def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = Tru
 
 
 def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
-                       cwd: Path, ddir: Path, *, retried: bool = False) -> dict | None:
+                       cwd: Path, ddir: Path, *, retried: bool = False, label: str | None = None) -> dict | None:
     """Start the real harness in the pane with `herdr agent start`, hand it a
     one-line brief pointer, and leave a detached watcher to record the end.
     The pane runs the agent itself, never a shell wrapper around it."""
@@ -785,12 +786,16 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
             # split a fresh one and try once more before going headless (#200 B7).
             fresh = _herdr_fresh_pane(run, cwd, pane)
             if fresh:
-                return _herdr_agent_start(run, dispatch, spec, env, inter, fresh, cwd, ddir, retried=True)
+                return _herdr_agent_start(run, dispatch, spec, env, inter, fresh, cwd, ddir, retried=True, label=label)
         _launch_notice(run, dispatch, f"herdr agent start failed ({why}); running headless instead")
         return None
     spec.update({"herdr_agent": name, "pane": pane})
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
     _record_launch(run, dispatch["id"], launcher="herdr", pane_id=pane)
+    # A PR recorded between the first label and the pane id landing is missed by relabel_task_panes.
+    fresh_label = pane_label(run, dispatch, dispatch.get("kind") or "")
+    if fresh_label != label or retried:
+        _herdr_rename(pane, fresh_label)
     session = _started_session(proc.stdout) or _capture_session(name)
     if session:
         _set_dispatch(dispatch["id"], session_id=session)
@@ -1367,8 +1372,61 @@ def _herdr_pane(run: dict, cwd: Path, label: str | None = None) -> str | None:
     else:
         pane = _herdr_split_pane(run, cwd, tab_file, layout, anchor)
     if pane and label:
-        subprocess.run(["herdr", "pane", "rename", pane, label], capture_output=True, timeout=30)
+        _herdr_rename(pane, label)
     return pane
+
+
+def _herdr_rename(pane: str, label: str) -> None:
+    """A label is cosmetic: a rename that fails or times out never fails a launch."""
+    try:
+        subprocess.run(["herdr", "pane", "rename", pane, label], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def pane_label(run: dict, dispatch: dict, kind: str = "") -> str:
+    """What a human sees on a pane tab: `<task> <role> [PR#n] <short id>`, e.g.
+    `T3 executor PR#261 D4f2`. Integration and plan dispatches carry no task, so
+    they lead with `integration` or `plan` (plus the integration PR when known)."""
+    role = dispatch.get("role") or kind
+    short = str(dispatch["id"])[:5]
+    pr = None
+    scope = dispatch.get("task_id")
+    try:
+        con = db.connect()
+        try:
+            if scope:
+                task = state.get_task(con, run["id"], scope)
+                pr = ((task or {}).get("pr") or {}).get("number")
+            else:
+                gate = con.execute("SELECT subject FROM gates WHERE id=?", (dispatch.get("gate_id"),)).fetchone() \
+                    if dispatch.get("gate_id") else None
+                scope = "integration" if gate and gate["subject"] == "integration" else "plan"
+                if scope == "integration":
+                    pr = (((state.get_run(con, run["id"]) or {}).get("landing") or {}).get("integration") or {}).get("pr")
+                    pr = pr.get("number") if isinstance(pr, dict) else pr
+        finally:
+            con.close()
+    except Exception:  # a label is cosmetic; fall back to the fields known without the DB
+        pr = None
+    return " ".join(p for p in (scope, role, f"PR#{pr}" if pr else "", short) if p)
+
+
+def relabel_task_panes(run: dict, task_id: str) -> None:
+    """Best-effort: rename the task's live herdr panes once its PR number is known."""
+    try:
+        con = db.connect()
+        try:
+            rows = con.execute("SELECT * FROM dispatches WHERE run_id=? AND task_id=? AND launcher='herdr' "
+                               "AND pane_id IS NOT NULL AND status IN ('launching','running')",
+                               (run["id"], task_id)).fetchall()
+            labels = [(r["pane_id"], pane_label(run, dict(r), r["kind"] or "")) for r in rows]
+        finally:
+            con.close()
+        for pane, label in labels:
+            _herdr_rename(pane, label)
+    except Exception:
+        pass
 
 
 def _busy_panes(run: dict) -> set:
