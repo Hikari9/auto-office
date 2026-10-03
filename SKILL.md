@@ -70,6 +70,19 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 
 - Dispatch as the approved diagram shows: a wave's roots with `office dispatch T1 T2 --parallel`,
   dependents stacked (`office dispatch T1 T3`). A `route differs from the plan preview` line names why.
+- Plan for throughput. Lanes come from file disjointness, not plan waves: docs-only tasks run beside
+  code. Put append-only registries several tasks must touch (auth/gate manifests, endpoint and grant
+  lists, exhaustive policy maps, shared mock tables) under a task's `shared:` key. Shared entries never
+  serialize tasks or count as double-scope ownership, and the compose step merges the appends. Put
+  existing tests that a change predictably breaks (call-count assertions) in scope up front.
+- Check suites share a host-wide cap (`verification.check_concurrency`, default CPUs/4). A test-runner
+  timeout (vitest `Test timed out in`, jest, mocha, playwright, pytest-timeout) while load exceeds
+  twice the CPU count is UNAVAILABLE, not a finding: `office resume` reruns it.
+- A worker that ends on a harness quota wall (`hit your session limit`, `usage limit`, 429) blocks at
+  once and names the wall. It is never relaunched into the same quota. Rerun it after the reset, or
+  on another route with `--as`.
+- Ask each worker for a structured final report: commit sha, gate counts, the mutation it verified, and
+  any out-of-scope file it needed with the reason. That makes verifying the worker cheap.
 - To wait on the run, use `office wait`: exit 0 means act, 3 means a stall to resolve, 124 means nothing
   new. Key on the exit code, never on matching status text.
 - Executors push their task branch as they work and submit; the runtime pushes the reviewed revision

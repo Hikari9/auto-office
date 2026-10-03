@@ -9,6 +9,8 @@ plan defect on the task's scope.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -201,8 +203,45 @@ def job_run_checks(con, run: dict, job: dict) -> dict:
 
 
 def run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate: dict, *, check_tree: bool = True) -> dict:
-    from office.submit import matches_revision
     cfgv = state.pinned_config(run).get("verification") or {}
+    with check_slot(check_concurrency(cfgv)):
+        return _run_commands(con, run, commands, cwd, rev, gate, cfgv, check_tree=check_tree)
+
+
+def check_concurrency(cfgv: dict) -> int:
+    """How many check suites may run at once across every run on this host.
+    N parallel full test suites push load past the CPU count and turn per-test
+    timeouts into flakes (issue #268); 0 or unset means max(1, CPUs // 4)."""
+    n = int(cfgv.get("check_concurrency") or 0)
+    return n if n > 0 else max(1, (os.cpu_count() or 1) // 4)
+
+
+@contextlib.contextmanager
+def check_slot(limit: int, *, poll: float = 2.0):
+    """Hold one of `limit` host-wide check slots (flock'd files under the state
+    home, released by the kernel if this process dies). Waits for a free one."""
+    slots = paths.state_home() / "check-slots"
+    slots.mkdir(parents=True, exist_ok=True)
+    while True:
+        for i in range(limit):
+            fh = open(slots / f"slot-{i}.lock", "a")
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                fh.close()
+                continue
+            try:
+                yield i
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+                fh.close()
+            return
+        time.sleep(poll)
+
+
+def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate: dict, cfgv: dict, *,
+                  check_tree: bool = True) -> dict:
+    from office.submit import matches_revision
     timeout = int(cfgv.get("check_timeout_seconds", 1800))
     evdir = paths.run_dir(run["id"]) / "evidence" / (gate.get("task_id") or "integration") / rev["id"]
     evdir.mkdir(parents=True, exist_ok=True)

@@ -2,7 +2,7 @@
 plus the one command it runs when done; nothing about receipts or telemetry."""
 from __future__ import annotations
 
-from office import planpath, state
+from office import planfile, planpath, state
 
 PLAN_FORMAT = """\
 ## Requirements
@@ -25,6 +25,7 @@ deploy_verify: <command that exits 0 when the deploy is healthy>   (recommended)
 ## Tasks
 ### T1: <title>
 scope: <paths/globs this task may write>, <more>
+shared: <append-only registry files other tasks also edit>   (optional; e.g. an auth gate manifest)
 depends: none | T<n>, T<m>
 interfaces: <what it provides or consumes>   (optional)
 checks: <deterministic, non-mutating command> | none
@@ -62,7 +63,9 @@ FINDING <P-id> | material|minor | <task or section> | <what is wrong> | <smalles
 DEFECT <P-id> | <class> | <task or section> | <what is wrong> | <evidence: quoted requirement, file:line, or reproducible fact>
 CLEARED <P-id>   (only for a defect named below that this plan revision fixes)
 A DEFECT is only one of these classes: requirement-contradiction, false-contract-assumption,
-unsafe-or-unauthorized-action, double-scope-ownership. It must cite evidence. Everything else is an
+unsafe-or-unauthorized-action, double-scope-ownership. It must cite evidence. A path two tasks list
+under `shared:` (scope entries shown with a leading +) is an append-only registry merged at compose,
+never double-scope-ownership; if such a file is not append-only, say so as a FINDING. Everything else is an
 ordinary FINDING. Do not ask for polish: an approvable plan gets PASS."""
 
 
@@ -108,6 +111,9 @@ def planner_brief(con, run: dict, packet: dict) -> str:
         out += ["", f"CURRENT PLAN p{plan['version']} (revise it; do not start over):", plan["body"]]
     out += ["", f"FORMAT for {planpath.rel(run)}:", PLAN_FORMAT,
             "Keep tasks small, independently checkable, with disjoint scopes unless ordered by depends.",
+            "List append-only registries several tasks must touch (auth/gate manifests, endpoint or grant lists, "
+            "exhaustive policy maps, shared mock tables) under `shared:` rather than serializing those tasks. "
+            "Include in scope the existing tests a change predictably breaks (e.g. ones asserting call counts).",
             "Write each check for the tool versions the repo pins. Vitest 1.x rejects `--maxWorkers=N` on its "
             "own (\"minThreads and maxThreads must not conflict\"): cap workers with `--maxWorkers=N --minWorkers=1`.",
             "WHEN DONE run: office submit", "Then stop. Review findings, if any, come back through the orchestrator."]
@@ -120,6 +126,9 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
         f"TASK {packet['task_id']} {packet['title']}",
         f"SCOPE {', '.join(packet['scope'])}  (write only inside this; this worktree is yours)",
     ]
+    if any(planfile.is_shared(p) for p in packet["scope"]):
+        out.append("SHARED (+) entries are registries other tasks also edit: add your own entries only, never "
+                   "reorder, reformat, or remove others'; append where a conflict is easy to resolve.")
     if packet.get("depends"):
         out.append(f"BUILDS ON {', '.join(packet['depends'])} (already in this worktree's base)")
     out += _lines("ACCEPT", packet.get("accept"))
@@ -172,7 +181,10 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
                 "RULES do not merge, push, deploy, publish, or send anything external. Committed and uncommitted",
                 "edits are both captured at submit. Do not write JSON or receipts for Office."]
     out += ["If an office command prints AMENDMENT <id>: apply it at a safe boundary, then run office ack <id>.",
-            "WHEN DONE run: office submit   (from this worktree). Then stop; results are delivered."]
+            "WHEN DONE run: office submit   (from this worktree). Then stop; results are delivered.",
+            "FINAL REPORT in your last message: commit sha; each check you ran with its pass/fail counts; the "
+            "mutation you made to prove a new test fails without the fix (and that it failed); any file outside "
+            "SCOPE you needed, with the reason. A refused submit is part of the report, quoted."]
     return "\n".join(out) + "\n"
 
 
