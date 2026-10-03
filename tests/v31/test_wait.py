@@ -392,3 +392,41 @@ def test_a_landed_outcome_from_an_earlier_episode_does_not_carry_over(env, monke
     con.commit()
     assert guide.stalls(con, run) == [] and len(sent) == 1
     assert con.execute("SELECT limit_continue_outcome FROM dispatches WHERE id=?", (d["id"],)).fetchone()[0] == "landed"
+
+
+REAL_LIMIT = """\
+● Edited src/office/guide.py (+12 -3)
+
+⚠ Usage limit reached · limit resets 9:30pm
+  /upgrade to keep using Claude Code
+
+╭──────────────────────────────────────────────╮
+│ >                                            │
+╰──────────────────────────────────────────────╯
+  ? for shortcuts
+"""
+
+
+def test_a_limit_followed_by_a_continue_and_activity_is_resolved():
+    from office import dispatch
+    assert dispatch._usage_limit(REAL_LIMIT)["label"] == "9:30pm"  # limit only: a stall
+    for later in ("> continue\n", "> continue\n✽ Pondering… (3s)\n", "esc to interrupt\n",
+                  "> continue\n\n● Picking the task back up\n", "❯ continue\n"):
+        assert dispatch._usage_limit(REAL_LIMIT + later) is None, later
+    # The old limit stays in scrollback while the agent works: not a stall.
+    assert dispatch._usage_limit(REAL_LIMIT + "> continue\n● Reading files\n" + "  ⎿ Read 40 lines\n") is None
+
+
+def test_a_new_limit_after_a_continue_is_a_stall_with_the_new_reset():
+    from office import dispatch
+    again = "> continue\n● Working\n⚠ Usage limit reached · limit resets 2:15am\n"
+    got = dispatch._usage_limit(REAL_LIMIT + again)
+    assert got is not None and got["label"] == "2:15am"
+
+
+def test_the_empty_composer_and_a_weekly_warning_are_not_activity_or_limits():
+    from office import dispatch
+    # Placeholder text inside the composer box starts with a border, not a prompt echo.
+    boxed = REAL_LIMIT.replace("│ >                  ", "│ > Try \"fix the bug\"  ")
+    assert dispatch._usage_limit(boxed) is not None
+    assert dispatch._usage_limit("● Done\nYou've used 95% of your weekly limit\n> ") is None

@@ -919,6 +919,9 @@ def _pane_busy(text: str) -> bool:
 _LIMIT_HIT = re.compile(r"usage limit reached|hit your session limit", re.I)
 _LIMIT_RESETS = re.compile(r"resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([^)]+)\))?", re.I)
 LIMIT_TAIL_LINES = 40
+# Lines that show the turn moved past the limit: an echoed prompt ("> continue",
+# not the composer box, which starts with a border) or new assistant output.
+_LIMIT_ACTIVITY = re.compile(r"^\s*(?:[>❯]\s+\S|[●⏺]\s+\S)")
 
 
 def _usage_limit(text: str | None, now: datetime | None = None) -> dict | None:
@@ -927,17 +930,14 @@ def _usage_limit(text: str | None, now: datetime | None = None) -> dict | None:
     "tz": zone name, "local": "21:30"}. A reset without a zone is in the local
     zone; a reset time already past rolls to the next day."""
     lines = (text or "").splitlines()[-LIMIT_TAIL_LINES:]
-    tail = "\n".join(lines)
-    hit = None
-    for hit in _LIMIT_HIT.finditer(tail):
-        pass
-    if hit is None:
+    last = max((i for i, ln in enumerate(lines) if _LIMIT_HIT.search(ln)), default=None)
+    if last is None:
         return None
-    found = None
-    for found in _LIMIT_RESETS.finditer(tail, hit.start()):
-        pass
-    if found is None:
-        found = next(iter(_LIMIT_RESETS.finditer(tail)), None)
+    # A limit counts only while it is the latest state on screen: a prompt echo,
+    # spinner, busy footer or new assistant output below it means the agent went on.
+    if any(_LIMIT_ACTIVITY.search(ln) or _pane_busy(ln) for ln in lines[last + 1:]):
+        return None
+    found = next((m for m in map(_LIMIT_RESETS.search, lines[last:last + 3]) if m), None)
     if found is None:
         return {"resets_at": None, "label": None, "tz": None, "local": None}
     hour, minute, meridiem, zone = int(found.group(1)), int(found.group(2) or 0), found.group(3).lower(), found.group(4)
