@@ -147,6 +147,11 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     stale = upgrade.notice(run)
     if stale:
         res.add(stale)
+    if not state.is_terminal(run):
+        from office import config as cfg
+        drift = cfg.config_drift(run)
+        if drift:
+            res.add(drift)
     if tasks:
         parts = [f"accepted {len(c.get('accepted', []))}/{len([t for t in tasks if t['status'] != 'cancelled'])}"]
         for label, keys in (("live", ("running", "launching", "submitted", "changes_required")), ("queued", ("queued",)),
@@ -222,7 +227,7 @@ def _idle_executors(con, run: dict) -> list[str]:
     """Executors whose agent stopped without submitting. Nothing else ends that
     wait: the session is alive, so no exit is recorded and no job is pending.
     Liveness unknown (herdr unreachable) is never a stall."""
-    from office import db, rerun
+    from office import db, dispatch, rerun
     from office.util import now_iso, parse_iso
     threshold = idle_stall_s()
     out = []
@@ -246,6 +251,14 @@ def _idle_executors(con, run: dict) -> list[str]:
             what = f"process {d['pid']}" if d["launcher"] != "herdr" else f"herdr agent {d['pane_id'] or ''}".strip()
             out.append(f"{who}: {what} is gone but the dispatch is still running{why}; next: {actions}")
             continue
+        limit = dispatch._usage_limit(act["text"])
+        if limit is not None:
+            out.append(_usage_limit_stall(con, run, d, act, limit, who))
+            continue
+        if any(d.get(k) for k in ("stall_kind", "resets_at", "limit_label", "limit_fingerprint")):
+            with db.transaction(con):
+                con.execute("UPDATE dispatches SET stall_kind=NULL, resets_at=NULL, limit_label=NULL, "
+                            "limit_fingerprint=NULL WHERE id=?", (d["id"],))
         changed = act["hash"] is not None and d.get("idle_hash") not in (None, act["hash"])
         if act["busy"] or changed:
             idle_since = None
@@ -267,6 +280,37 @@ def _idle_executors(con, run: dict) -> list[str]:
         out.append(f"{who}: idle {int(idle)}s without submitting{why}; pane tail in {tail}; "
                    f"next: {prompt}{actions}")
     return out
+
+
+def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str) -> str:
+    """A pane stopped on a Claude usage limit is a stall whatever its busy
+    markers say (scrollback keeps a spinner line). Records the stop on the
+    dispatch, writes pane-tail.txt, and names the manual `continue`."""
+    from datetime import datetime, timezone
+    from office import db
+    from office.util import parse_iso
+    # The pane cannot prove two limits with the same screen and label are one
+    # episode (the same work can hit the same limit again), so every poll stores
+    # and shows the reset parsed now. When a stored limit with the same screen
+    # has already reset, the output says so: the agent may only need `continue`.
+    resets_at = limit["resets_at"]
+    prior = parse_iso(d["resets_at"]) if d.get("resets_at") else None
+    passed = (prior is not None and prior <= datetime.now(timezone.utc) and prior != resets_at
+              and d.get("limit_fingerprint") == limit["fingerprint"] and d.get("limit_label") == limit["label"])
+    fields = {"stall_kind": "usage_limit", "resets_at": resets_at.isoformat() if resets_at else None,
+              "limit_label": limit["label"], "limit_fingerprint": limit["fingerprint"]}
+    if any(d.get(k) != v for k, v in fields.items()):
+        with db.transaction(con):
+            con.execute("UPDATE dispatches SET stall_kind=?, resets_at=?, limit_label=?, limit_fingerprint=? "
+                        "WHERE id=?", (*fields.values(), d["id"]))
+    tail = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "pane-tail.txt"
+    atomic_write_text(tail, "\n".join(act["text"].splitlines()[-40:]) + "\n")
+    when = (f"resets {resets_at.strftime('%Y-%m-%dT%H:%MZ')}" + (f" ({limit['tz']} {limit['local']})" if limit["tz"] else "")
+            if resets_at else f"resets {limit['label'] or 'at an unknown time'} (time not resolved)")
+    if passed:
+        when += (f"; the same limit screen was stored with reset {prior.strftime('%Y-%m-%dT%H:%MZ')}, now past, "
+                 f"so if this is that limit `continue` may already work")
+    return f"{who}: usage_limit, {when}; pane tail in {tail}; next: office prompt {d['id']} -- continue"
 
 
 def _needs_orchestrator(con, run: dict) -> bool:

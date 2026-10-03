@@ -76,6 +76,12 @@ def land(con, run: dict, *, mode: str | None = None, quote: str | None = None) -
         _record(con, run, delivered=f"preview deployed from {commit[:12]}; PRs left open for review")
         res.next = "office close (PRs stay open for the user to merge)"
         return res
+    if not prs.enabled(run) and not any(prs.has_pr(t) for t in integration.accepted_set(con, run) or []):
+        # PRs are off and no accepted task has file scope: nothing to merge or deploy.
+        res.add("nothing to merge: no accepted task has a PR (all have no file scope)")
+        _record(con, run, delivered="no task PRs to merge")
+        res.next = "office close"
+        return res
     before = _merge_all(con, run, res)
     main = _verify_main(con, run, commit, res)
     if mode == "e2e":
@@ -148,6 +154,8 @@ def rebase(con, run: dict) -> Result:
 def _ask(con, run: dict) -> Result:
     lines = ["integration verified; the task PRs are ready:"]
     for t in integration._topo(integration.accepted_set(con, run) or []):
+        if not prs.has_pr(t):
+            continue
         pr = t.get("pr") or {}
         lines.append(f"  {t['id']} {pr.get('url') or '(no PR: ' + _pr_reason(run) + ')'}")
     return Result(lines=lines, next='ask the user (native question tool): merge | preview deploy | merge + prod | stop; '
@@ -196,6 +204,9 @@ def _merge_all(con, run: dict, res: Result) -> str:
     merged: list[str] = []
     for t in integration._topo(integration.accepted_set(con, run) or []):
         t = state.get_task(con, run["id"], t["id"])
+        if not prs.has_pr(t):
+            res.add(f"{t['id']} has no file scope and no PR; skipped")
+            continue
         pr = t.get("pr") or {}
         if not pr.get("number"):
             raise Refused("no-pr", f"{t['id']} has no PR", next_step="office status (a pr.error notice names why)")
