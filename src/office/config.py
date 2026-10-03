@@ -106,27 +106,55 @@ DRIFT_BLOCKS = ("quota", "roles")
 FILE_BLOCKS_KEY = "_file_blocks_at_start"
 
 
+def file_blocks(repo_root: Path | None) -> dict:
+    """The raw quota/roles blocks of the user and repo config files, without
+    defaults or --set: what a person edited, independent of the runtime."""
+    default = load_yaml(default_config_path()) or {}
+    files = {"user": paths.user_config_path()}
+    if repo_root is not None:
+        files["repo"] = Path(repo_root) / (default.get("paths") or {}).get("repo", ".auto-office/config.yaml")
+    out: dict = {}
+    for tier, path in files.items():
+        try:
+            data = load_yaml(path) if path.is_file() else None
+        except (OSError, yaml.YAMLError):
+            data = None
+        data = data if isinstance(data, dict) else {}
+        out[tier] = {b: data[b] for b in DRIFT_BLOCKS if b in data}
+    return out
+
+
 def config_drift(run: dict) -> str | None:
-    """A notice when the live config's quota or roles block differs from the
-    snapshot pinned at `office start`; those edits do not reach a running run."""
+    """A notice when the config files' quota or roles blocks differ from what
+    `office start` saw; those edits do not reach a running run. Runs without a
+    recorded baseline compare live resolved values to the pinned ones, so the
+    notice there is qualified (a --set at start looks the same)."""
     pinned = run.get("policy") or {}
     root = run.get("repo_root")
+    repo = Path(root) if root and Path(root).is_dir() else None
+    short = run["id"][:8]
+    reserve = (pinned.get("quota") or {}).get("reserve_percent", "-")
     try:
-        live, _ = resolve(Path(root) if root and Path(root).is_dir() else None)
-    except (OSError, ValueError):
+        live, _ = resolve(repo)
+        recorded = pinned.get(FILE_BLOCKS_KEY)
+        if recorded is not None:
+            now = file_blocks(repo)
+            differ = [b for b in DRIFT_BLOCKS
+                      if any((now.get(t) or {}).get(b) != (recorded.get(t) or {}).get(b) for t in ("user", "repo"))]
+            if not differ:
+                return None
+            detail = (f": quota.reserve_percent pinned {reserve}, live {(live.get('quota') or {}).get('reserve_percent', '-')}"
+                      if "quota" in differ else "")
+            return (f"config edited since run start; not applied to running run {short} "
+                    f"({', '.join(differ)} differ{detail})")
+    except (OSError, ValueError, yaml.YAMLError):
         return None
-    recorded = pinned.get(FILE_BLOCKS_KEY)
-    if recorded is None:
-        return None  # started before overrides were recorded: the comparison is not trustworthy
-    differ = [b for b in DRIFT_BLOCKS if (live.get(b) or {}) != (recorded.get(b) or {})]
+    differ = [b for b in DRIFT_BLOCKS if (live.get(b) or {}) != (pinned.get(b) or {})]
     if not differ:
         return None
-    detail = ""
-    if "quota" in differ:
-        detail = (f": quota.reserve_percent pinned {(pinned.get('quota') or {}).get('reserve_percent', '-')}, "
-                  f"live {(live.get('quota') or {}).get('reserve_percent', '-')}")
-    return (f"config edited since run start; not applied to running run {run['id'][:8]} "
-            f"({', '.join(differ)} differ{detail})")
+    return (f"config differs from run {short}'s pinned values (edited since start, or --set at start); "
+            f"not applied to this run ({', '.join(differ)} differ: quota.reserve_percent pinned {reserve}, "
+            f"live {(live.get('quota') or {}).get('reserve_percent', '-')})")
 
 
 def snapshot_hashes() -> dict:

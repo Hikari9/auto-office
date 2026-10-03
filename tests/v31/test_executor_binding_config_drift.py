@@ -3,12 +3,13 @@ config edits that cannot reach a running run are named instead of ignored."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 
 from conftest import GOOD_ADD, approved_run, task_row
-from office import candidates, dispatch
+from office import candidates, config as cfg, dispatch
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 SESSION = {"OFFICE_HARNESS": "claude", "OFFICE_SESSION": "sess-exec"}
@@ -183,13 +184,40 @@ def test_start_overrides_are_not_drift_but_file_edits_are(env):
     assert "config edited since run start" in out, out
 
 
-def test_runs_without_recorded_file_blocks_never_warn(env):
-    _write_reserve(env.tmp / "user-config.yaml", 7)
-    approved_run(env)
+def _make_legacy(env):
     con = env.con()
     pol = json.loads(con.execute("SELECT policy_json FROM runs").fetchone()[0])
     pol.pop("_file_blocks_at_start")
     con.execute("UPDATE runs SET policy_json=?", (json.dumps(pol),))
+
+
+def test_legacy_run_with_an_edited_file_warns_with_the_qualified_text(env):
+    _write_reserve(env.tmp / "user-config.yaml", 7)
+    approved_run(env)
+    _make_legacy(env)
     _write_reserve(env.tmp / "user-config.yaml", 3)
     code, out = env.office("status")
-    assert code == 0 and "config edited" not in out, out
+    assert "config differs from run" in out and "pinned values (edited since start, or --set at start)" in out, out
+    assert "not applied to this run" in out and "quota.reserve_percent pinned 7" in out, out
+
+
+def test_legacy_run_with_unchanged_files_does_not_warn(env):
+    _write_reserve(env.tmp / "user-config.yaml", 7)
+    approved_run(env)
+    _make_legacy(env)
+    code, out = env.office("status")
+    assert code == 0 and "config edited" not in out and "config differs" not in out, out
+
+
+def test_new_run_ignores_a_change_in_shipped_defaults_but_not_a_file_edit(env, monkeypatch):
+    approved_run(env)
+    changed = env.tmp / "default-config.yaml"
+    text = cfg.default_config_path().read_text(encoding="utf-8")
+    assert "reserve_percent" in text
+    changed.write_text(re.sub(r"reserve_percent:\s*\S+", "reserve_percent: 41", text, count=1), encoding="utf-8")
+    monkeypatch.setattr(cfg, "default_config_path", lambda: changed)
+    code, out = env.office("status")
+    assert code == 0 and "config edited" not in out and "config differs" not in out, out
+    _write_reserve(env.tmp / "user-config.yaml", 3)
+    code, out = env.office("status")
+    assert "config edited since run start" in out, out

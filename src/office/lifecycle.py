@@ -46,10 +46,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                     next_step="cd into the repository, then office start")
     top, common = ident
     config, warnings = cfg.resolve(top, sets)
-    # The file-resolved blocks at start (no --set), so a later drift check
-    # compares files to files and a launch override never reads as an edit.
-    file_config, _ = cfg.resolve(top)
-    pinned = {**config, cfg.FILE_BLOCKS_KEY: {b: file_config.get(b) or {} for b in cfg.DRIFT_BLOCKS}}
+    # The raw file blocks at start (no defaults, no --set), so a later drift
+    # check compares files to files: neither a launch override nor a changed
+    # shipped default reads as an edit.
+    pinned = {**config, cfg.FILE_BLOCKS_KEY: cfg.file_blocks(top)}
     risk = cfg.resolve_risk(config, blast_radius, size_class, irreversible)
     gear = cfg.fit_gear(gear, risk, volume, interview, adversarial)
     if gear not in cfg.GEARS:
