@@ -131,6 +131,20 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                         "no executor launched")
                 previous = tid
                 continue
+            after = task.get("stack_after")
+            if (task["status"] == "queued" and after
+                    and (state.get_task(con, run["id"], after) or {}).get("status") == "accepted"):
+                # Stacked after a task that was accepted before the stack was
+                # recorded: start_stacked already fired, so launch it now.
+                state.update_task(con, run["id"], tid, stack_after=None, pause_reason=None)
+                decision = routes.get(tid) if (routes.get(tid) or {}).get("status") == "selected" else None
+                if decision:
+                    _record_routing(con, run, decision)
+                did = request_launch(con, run, tid, role="executor", decision=decision,
+                                     base=_base_for(con, run, task, graph, after))
+                res.add(f"{tid} was stacked after {after}, which is already accepted -> {did} launching")
+                previous = tid
+                continue
             if task["status"] in ("running", "launching", "submitted", "changes_required", "queued"):
                 res.add(f"{tid} already {task['status']}")
                 previous = tid
@@ -142,6 +156,10 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             plans.require_scope_clear(con, run, tid)
             stack_after = None if parallel or previous is None else previous
             base = _base_for(con, run, task, graph, stack_after)
+            if stack_after and (state.get_task(con, run["id"], stack_after) or {}).get("status") == "accepted":
+                # Nothing would release a stack on an accepted task: launch now,
+                # based on its accepted revision (base above).
+                stack_after = None
             decision = routes[tid]
             if decision.get("status") != "selected":
                 raise Refused("no-route", _route_failure(tid, decision), scope=tid,

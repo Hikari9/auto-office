@@ -136,6 +136,10 @@ def _waive(con, run, spec: str, quote: str, root_cause: str | None = None) -> Re
             task = state.get_task(con, run["id"], tid)
             if task is None:
                 raise Usage("unknown-task", f"no task {tid}")
+            # A review of this kind still in flight (an escalation) must not
+            # land after the waiver and reopen the task: its result goes stale.
+            con.execute("UPDATE gates SET status='cancelled', stale_reason='gate waived by the user' WHERE run_id=? "
+                        "AND task_id=? AND kind=? AND status IN ('queued','running','waiting')", (run["id"], tid, kind))
             state.update_task(con, run["id"], tid, status=gates.derive_status(con, run, task) if task["status"] in ("paused", "blocked") else task["status"],
                               pause_reason=None)
             state.emit(con, run, "authority.waiver", f"user waived the {kind} gate for {tid} (named gap recorded)", task_id=tid)
