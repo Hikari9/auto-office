@@ -199,9 +199,10 @@ def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_s
     if carried:
         out.append("OPEN FINDINGS from earlier rounds — confirm (repeat the FINDING line), RESOLVED, or RETRACT each:")
         for f in carried:
-            out.append(f"- {f['code']} [{f['severity']}] {f['location'] or ''} {f['summary']}")
+            level = f.get("level") or ("high" if f["severity"] == "material" else "low")
+            out.append(f"- {f['code']} [{level}] {f['location'] or ''} {f['summary']}")
     if verify_only:
-        out.append("VERIFY-ONLY ROUND: the review round budget is spent. Confirm or resolve each OPEN FINDING. "
+        out.append("VERIFY-ONLY ROUND: the final fix round is spent. Confirm or resolve each OPEN FINDING. "
                    "Report a new finding only if it is high; medium and low findings become follow-ups and no "
                    "longer block acceptance.")
     out += ["", REVIEW_FORMAT, "", "DIFF (base -> revision):", diff]

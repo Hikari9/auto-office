@@ -13,7 +13,7 @@ DEFECT_CLASSES = ("requirement-contradiction", "false-contract-assumption",
                   "unsafe-or-unauthorized-action", "double-scope-ownership")
 EVIDENCE_STATUSES = ("COMPARABLE", "INVALID_COMPARISON", "NOT_APPLICABLE", "CAPTURE_BLOCKED")
 # Finding severity word -> (blocking severity, level). After the round budget,
-# only a `high` finding keeps a task from acceptance (gates._past_budget).
+# only a `high` finding keeps a task from acceptance (gates._verify_only).
 LEVELS = {"high": ("material", "high"), "medium": ("material", "medium"), "low": ("minor", "low"),
           "material": ("material", "high"), "minor": ("minor", "low")}
 _ALIASES = {"CHANGES REQUIRED": "CHANGES_REQUIRED", "PLAN DEFECT": "PLAN_DEFECT", "BRIEF DEFECT": "BRIEF_DEFECT",

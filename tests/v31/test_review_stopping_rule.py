@@ -53,3 +53,35 @@ def test_a_high_finding_in_the_verify_only_round_still_blocks(env):
     assert t["status"] != "accepted", t
     con = env.con()
     assert con.execute("SELECT COUNT(*) FROM findings WHERE code='F9' AND state='open'").fetchone()[0] == 1
+
+
+def test_a_repeat_triggered_final_fix_makes_the_next_review_verify_only(env):
+    same = "VERDICT: CHANGES_REQUIRED\nFINDING F1 | medium | calc.py:2 | a rare race | fix every caller"
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD + f"# try {i}\n"}, "submit": True} for i in range(6)],
+                 code_reviewer=[{"reply": same}] * 6)
+    env.office("dispatch", "T1", check=0)
+    for _ in range(6):
+        if task_row(env)["status"] != "changes_required":
+            break
+        env.office("rerun", "T1", "--fresh", check=0)
+    assert task_row(env)["status"] == "accepted", task_row(env)
+    con = env.con()
+    assert con.execute("SELECT COUNT(*) FROM events WHERE kind='gate.final_fix_round'").fetchone()[0] == 1
+    # round 1, round 2 (repeat -> the one final fix), then one verify-only review; no second final fix
+    assert con.execute("SELECT COUNT(*) FROM gates WHERE kind='code_review'").fetchone()[0] == 3
+
+
+def test_carried_findings_show_their_level():
+    from office import briefs
+    carried = [{"code": "F1", "severity": "material", "level": "medium", "location": "a.py:1", "summary": "race"},
+               {"code": "F2", "severity": "material", "level": None, "location": "a.py:2", "summary": "old"}]
+    rev = {"id": "R1", "commit_sha": "0" * 40}
+    text = briefs.code_review_brief({}, {"id": "T1", "title": "t", "accept": [], "scope": []}, rev, "", "none",
+                                    carried, "/tmp/x", verify_only=True)
+    assert "- F1 [medium] a.py:1 race" in text and "- F2 [high] a.py:2 old" in text
+
+
+def test_visual_review_is_not_governed_by_the_stopping_rule():
+    from office import gates
+    run = {"gates": {"visual_review_max_rounds": 1}}
+    assert gates._verify_only(None, run, {"kind": "visual", "round": 9, "task_id": "T1"}) is False

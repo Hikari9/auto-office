@@ -586,11 +586,11 @@ def job_review(con, run: dict, job: dict) -> dict:
             diff = diff[:MAX_DIFF_CHARS] + "\n[diff truncated; inspect the checkout for the rest]"
         checks = con.execute("SELECT summary, verdict FROM gates WHERE revision_id=? AND kind='checks' AND status='done'",
                              (rev["id"],)).fetchone()
-        carried = [dict(r) for r in con.execute("SELECT code, severity, location, summary FROM findings WHERE run_id=? AND "
-                                                "task_id=? AND gate_kind='code_review' AND state='open'",
+        carried = [dict(r) for r in con.execute("SELECT code, severity, level, location, summary FROM findings WHERE run_id=? "
+                                                "AND task_id=? AND gate_kind='code_review' AND state='open'",
                                                 (run["id"], task["id"])).fetchall()]
         brief = briefs.code_review_brief(run, task, rev, diff, checks["summary"] if checks else "none declared",
-                                         carried, str(checkout), verify_only=_past_budget(run, gate))
+                                         carried, str(checkout), verify_only=_verify_only(con, run, gate))
         exclude = [job["payload"]["exclude_route"]] if job["payload"].get("exclude_route") else None
         outcome = run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
                                exclude=exclude)
@@ -665,7 +665,7 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
         for f in parsed.findings:
             seen.add(f["code"])
             _upsert_finding(con, run, task, gate, f, outcome)
-        if verdict == "CHANGES_REQUIRED" and _past_budget(run, gate) and not _open_high(con, run, task, gate["kind"]):
+        if verdict == "CHANGES_REQUIRED" and _verify_only(con, run, gate) and not _open_high(con, run, task, gate["kind"]):
             _defer_findings(con, run, task, gate)
             verdict = "PASS"
         if verdict == "PASS":
@@ -753,9 +753,18 @@ def _open_high(con, run: dict, task: dict, kind: str) -> bool:
                        "AND COALESCE(level, 'high')='high' LIMIT 1", (run["id"], task["id"], kind)).fetchone() is not None
 
 
-def _past_budget(run: dict, gate: dict) -> bool:
-    """A review gate after the round budget is verify-only: only a high finding blocks."""
-    return gate["kind"] in ("code_review", "visual") and int(gate["round"] or 0) > _max_rounds(run, gate["kind"])
+def _final_fix_used(con, run: dict, task_id: str) -> bool:
+    return con.execute("SELECT 1 FROM events WHERE run_id=? AND task_id=? AND kind='gate.final_fix_round' LIMIT 1",
+                       (run["id"], task_id)).fetchone() is not None
+
+
+def _verify_only(con, run: dict, gate: dict) -> bool:
+    """A code review after the final fix round, or past the round budget, is
+    verify-only: only a high finding blocks. Visual review keeps its own
+    material|minor format and its escalation path."""
+    if gate["kind"] != "code_review":
+        return False
+    return int(gate["round"] or 0) > _max_rounds(run, "code_review") or _final_fix_used(con, run, gate["task_id"])
 
 
 def _defer_findings(con, run: dict, task: dict, gate: dict) -> None:
@@ -780,9 +789,10 @@ def _converge(con, run: dict, task: dict, gate: dict, outcome: dict) -> None:
     repeats = int((state.pinned_config(run).get("verification") or {}).get("no_progress_repeats", 2))
     no_progress = _no_progress(con, run, task, gate, repeats)
     budget_spent = gate["round"] >= int(maximum)
-    if (no_progress or budget_spent) and gate["kind"] in ("code_review", "visual") \
-            and not _open_high(con, run, task, gate["kind"]):
-        state.emit(con, run, "gate.final_fix_round", f"{task['id']} {gate['kind']}: round budget spent and every open "
+    if (no_progress or budget_spent) and gate["kind"] == "code_review" \
+            and not _open_high(con, run, task, gate["kind"]) and not _final_fix_used(con, run, task["id"]):
+        why = "no progress on a repeated finding" if no_progress else "round budget spent"
+        state.emit(con, run, "gate.final_fix_round", f"{task['id']} {gate['kind']}: {why} and every open "
                    "finding is medium or low; one final fix round, then a verify-only review where only a high "
                    "finding blocks", task_id=task["id"])
         deliver_findings(con, run, task, gate)
