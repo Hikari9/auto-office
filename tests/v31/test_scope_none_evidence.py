@@ -9,7 +9,7 @@ from office import briefs, submit
 _n = itertools.count()
 
 
-def _save(env, monkeypatch, setup, started_at=None):
+def _save(env, monkeypatch, setup):
     """Run submit's evidence copy in a scratch repo; return the saved text or None."""
     wt = env.tmp / f"evwt{next(_n)}"
     wt.mkdir()
@@ -19,9 +19,9 @@ def _save(env, monkeypatch, setup, started_at=None):
     dest.unlink(missing_ok=True)
     monkeypatch.setattr(briefs, "evidence_path", lambda run, did, rid: dest)
     _save.wt = wt
-    d = {"id": "d", "started_at": started_at}
+    d = {"id": "d"}
     with submit._evidence_commit() as staged:
-        evidence = submit._read_evidence(d, wt)
+        evidence = submit._read_evidence(wt)
         if evidence:
             submit._stage_evidence({"id": "r"}, d, "R1", evidence, staged)
     return dest.read_text() if dest.exists() else None
@@ -56,14 +56,6 @@ def test_evidence_is_consumed_at_submit(env, monkeypatch):
     assert not (_save.wt / briefs.EVIDENCE_FILE).exists()
 
 
-def test_stale_evidence_from_an_earlier_dispatch_is_ignored(env, monkeypatch):
-    from datetime import datetime, timedelta, timezone
-    later = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-    assert _save(env, monkeypatch, lambda wt: (wt / briefs.EVIDENCE_FILE).write_text("stale"), started_at=later) is None
-    earlier = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-    assert _save(env, monkeypatch, lambda wt: (wt / briefs.EVIDENCE_FILE).write_text("fresh"), started_at=earlier) == "fresh"
-
-
 def test_hard_linked_evidence_is_refused(env, monkeypatch):
     import os
     secret = env.tmp / "secret.txt"
@@ -81,7 +73,7 @@ def test_rollback_keeps_the_worktree_file_and_discards_the_staged_copy(env, monk
     monkeypatch.setattr(briefs, "evidence_path", lambda run, did, rid: dest)
     with pytest.raises(RuntimeError):
         with submit._evidence_commit() as staged:
-            submit._stage_evidence({"id": "r"}, {"id": "d"}, "R1", submit._read_evidence({"id": "d"}, wt), staged)
+            submit._stage_evidence({"id": "r"}, {"id": "d"}, "R1", submit._read_evidence(wt), staged)
             assert dest.read_text() == "posted"
             raise RuntimeError("commit failed")
     assert (wt / briefs.EVIDENCE_FILE).read_text() == "posted" and not dest.exists()
@@ -111,31 +103,50 @@ def _comment_only_run(env, reviews):
     return _dispatched(env)
 
 
-def test_touched_stale_evidence_is_refused_and_fresh_content_passes(env):
-    """A crash between commit and unlink leaves the ingested file in the reused
-    worktree. Touching it defeats the mtime filter, so its content digest must not."""
+def _end_and_rerun(env, con, first):
+    con.execute("UPDATE dispatches SET status='exited', ended_at='x' WHERE id=?", (first["id"],))  # the session ends
+    con.commit()
+    env.office("rerun", "T1", "--fresh", env=EXTERNAL, check=0)
+    wenv, wt, second = _dispatched(env)
+    assert second["id"] != first["id"]
+    return wenv, wt, second
+
+
+def test_unsubmitted_evidence_from_a_crashed_dispatch_is_moved_aside_at_launch(env):
+    """A crashed dispatch leaves a fresh-looking, never-submitted file. The next
+    launch moves it out of the worktree, so it cannot reach the reviewer."""
     import os
-    import time
+    from office import paths
+    wenv, wt, first = _comment_only_run(env, ["VERDICT: PASS"])
+    ev = wt / briefs.EVIDENCE_FILE
+    ev.write_text("half-done: comment not posted yet\n")
+    os.utime(ev)  # touched: newer than anything, so no timestamp could flag it
+    con = env.con()
+    wenv, wt2, second = _end_and_rerun(env, con, first)
+    assert wt2 == wt and not ev.exists()
+    aside = paths.run_dir(second["run_id"]) / "dispatches" / second["id"] / "stale-evidence.md"
+    assert aside.read_text() == "half-done: comment not posted yet\n"
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert code == 0 and "captured" in out, out
+    texts = [p.read_text(errors="replace") for p in env.state.rglob("*") if p.is_file() and p.suffix in (".md", ".txt")]
+    reviewer = [t for t in texts if "EXECUTOR EVIDENCE" in t]
+    assert reviewer and all("half-done" not in t and "none recorded" in t for t in reviewer), reviewer
+
+
+def test_resubmitted_ingested_evidence_is_refused_and_fresh_content_passes(env):
+    """Second guard: content already ingested for the task is refused even when
+    the executor writes it again during the new dispatch."""
     from conftest import task_row
     wenv, wt, first = _comment_only_run(env, [FINDING, "VERDICT: PASS"])
     ev = wt / briefs.EVIDENCE_FILE
     ev.write_text("comment https://github.com/o/r/issues/7#c1: shipped\n")
     code, out = env.office("submit", cwd=wt, env=wenv)
     assert code == 0 and "captured" in out, out
-    assert not ev.exists()
-    assert task_row(env)["status"] == "changes_required"
+    assert not ev.exists() and task_row(env)["status"] == "changes_required"
     con = env.con()
     assert con.execute("SELECT COUNT(*) FROM evidence WHERE kind='executor_evidence' AND sha256 IS NOT NULL").fetchone()[0] == 1
-    # The crash window: the ingested file survives. The fix round reuses the worktree.
+    wenv, wt, second = _end_and_rerun(env, con, first)
     ev.write_text("comment https://github.com/o/r/issues/7#c1: shipped\n")
-    os.utime(ev, (0, 0))  # older than the fix round: the mtime filter alone ignores it
-    time.sleep(1.1)
-    con.execute("UPDATE dispatches SET status='exited', ended_at='x' WHERE id=?", (first["id"],))  # the session ends
-    con.commit()
-    env.office("rerun", "T1", "--fresh", env=EXTERNAL, check=0)
-    wenv, wt2, second = _dispatched(env)
-    assert wt2 == wt and second["id"] != first["id"]
-    os.utime(ev)  # touch: the mtime now postdates the fix round
     code, out = env.office("submit", cwd=wt, env=wenv)
     assert code != 0 and "stale-evidence" in out and "redo or reconfirm" in out, out
     assert ev.exists()  # nothing consumed: the executor rewrites it
@@ -158,7 +169,7 @@ def test_evidence_saved_before_digests_were_recorded_still_counts(env):
     con.execute("DELETE FROM evidence WHERE kind='executor_evidence'")
     con.commit()
     run = state.get_run(con, d["run_id"])
-    assert submit._read_evidence({"id": "x"}, wt) is None  # consumed
+    assert submit._read_evidence(wt) is None  # consumed
     (wt / briefs.EVIDENCE_FILE).write_text("posted\n")
-    _, _, digest = submit._read_evidence({"id": "x"}, wt)
+    _, _, digest = submit._read_evidence(wt)
     assert digest in submit._ingested_digests(con, run, "T1")

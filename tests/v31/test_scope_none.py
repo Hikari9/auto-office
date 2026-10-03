@@ -50,7 +50,7 @@ def test_scope_none_task_is_accepted_without_a_pr_and_land_skips_it(env, monkeyp
     code, out = env.office("inspect", "events")
     assert "pr.error" not in out, out
     code, out = env.office("land", "--merge", "--quote", "merge it")
-    assert "no-pr" not in out and "T2 has no file scope and no open PR; skipped" in out, out
+    assert "no-pr" not in out and "T2 has no file scope and no PR; skipped" in out, out
     assert [p["state"] for p in gh(env)["prs"]] == ["merged"]
 
 
@@ -105,45 +105,58 @@ def test_land_with_prs_off_still_refuses_when_a_scoped_task_needs_merging(env):
     assert "prs-off" in out, out
 
 
-def test_scope_change_to_none_is_refused_while_the_task_pr_is_open(env, monkeypatch):
-    """Office stops syncing and landing a PR-free task, so it must not orphan an open PR."""
+TO_NONE = PLAN_COMMENT.replace("scope: calc.py\n", "scope: none\n", 1)
+
+
+def _amend_to_none(env):
+    env.write_plan(TO_NONE)
+    return env.office("amend", "T1", "--contract", "--", "T1 only comments now")
+
+
+def test_scope_change_to_none_is_refused_for_a_task_with_a_recorded_pr(env, monkeypatch):
+    """A PR-free task is never synced or landed, so a task with a PR (open or closed) keeps its scope."""
     import json
     from conftest import task_row
     _run(env, monkeypatch)
     assert json.loads(task_row(env, "T1")["pr_json"])["number"] == 1
-    env.write_plan(PLAN_COMMENT.replace("scope: calc.py\n", "scope: none\n", 1))
-    code, out = env.office("amend", "T1", "--contract", "--", "T1 only comments now")
-    assert code != 0 and "open-pr" in out and "#1" in out and "close" in out, out
-    assert json.loads(task_row(env, "T1")["scope_json"]) == ["calc.py"]  # plan unchanged
-    # The operator closes the PR; Office confirms that on GitHub and lets the change through.
     state = gh(env)
-    state["prs"][0]["state"] = "closed"
+    state["prs"][0]["state"] = "closed"  # closed or not, the record decides; Office asks GitHub nothing
     (env.tmp / "gh.json").write_text(json.dumps(state))
-    code, out = env.office("amend", "T1", "--contract", "--", "T1 only comments now")
+    calls = len(gh(env)["calls"])
+    code, out = _amend_to_none(env)
+    assert code != 0 and "scope-has-pr" in out and "#1" in out and "new task" in out, out
+    assert len(gh(env)["calls"]) == calls
+    assert json.loads(task_row(env, "T1")["scope_json"]) == ["calc.py"]  # plan unchanged
+
+
+def test_scope_change_to_none_is_refused_while_a_pr_job_is_pending(env, monkeypatch):
+    """A queued, claimed or failed PR job may have opened a PR that Office never recorded."""
+    import json
+    from conftest import task_row
+    _run(env, monkeypatch)
+    con = env.con()
+    con.execute("UPDATE tasks SET pr_json=NULL WHERE id='T1'")
+    con.execute("UPDATE outbox SET status='failed' WHERE kind='pr_sync' AND payload_json LIKE '%\"T1\"%'")
+    con.commit()
+    code, out = _amend_to_none(env)
+    assert code != 0 and "scope-has-pr" in out and "PR job" in out and "failed" in out, out
+    assert json.loads(task_row(env, "T1")["scope_json"]) == ["calc.py"]
+
+
+def test_a_task_that_never_had_a_pr_can_become_scope_none(env, monkeypatch):
+    import json
+    from conftest import task_row
+    github(env, monkeypatch)
+    env.trust()
+    start_inline(env, plan=PLAN_COMMENT, extra=("--issue", "7"))
+    env.office("approve", "plan", "--quote", "go", check=0)
+    code, out = _amend_to_none(env)
     assert code == 0, out
-    t = task_row(env, "T1")
-    assert json.loads(t["scope_json"]) == [] and json.loads(t["pr_json"])["closed"] is True, t
+    assert json.loads(task_row(env, "T1")["scope_json"]) == []
 
 
-def test_has_pr_keeps_a_prior_pr_until_it_is_closed():
+def test_has_pr_follows_scope_or_any_recorded_pr():
     from office import prs
     assert not prs.has_pr({"scope": []})
     assert prs.has_pr({"scope": ["a.py"]})
     assert prs.has_pr({"scope": [], "pr": {"number": 3}})
-    assert not prs.has_pr({"scope": [], "pr": {"number": 3, "closed": True}})
-
-
-def test_scope_change_to_none_refuses_when_github_cannot_confirm(env, monkeypatch):
-    import pytest
-    from office import prs
-    from office.state import Refused
-
-    def no_gh(*args, **kwargs):
-        raise OSError("gh not found")
-    monkeypatch.setattr(prs, "_gh", no_gh)
-    with pytest.raises(Refused) as exc:
-        prs.release_for_scope_none({"repo_root": str(env.tmp)}, {"id": "T1", "scope": ["a.py"], "pr": {"number": 4}})
-    assert exc.value.category == "open-pr" and "could not be confirmed closed" in str(exc.value)
-    merged = prs.release_for_scope_none({"repo_root": str(env.tmp)},
-                                        {"id": "T1", "scope": ["a.py"], "pr": {"number": 4, "merged": True}})
-    assert merged["closed"] is True

@@ -13,7 +13,6 @@ import stat
 import tempfile
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
 from pathlib import Path
 
 from office import briefs, db, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, state, version
@@ -297,7 +296,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                       next_step="revert those files, or stop and report that the scope must grow (the orchestrator amends it)")
     pending = con.execute("SELECT id, target_version FROM deliveries WHERE run_id=? AND task_id=? AND status IN "
                           "('queued','delivered') ORDER BY target_version DESC LIMIT 1", (run["id"], task["id"])).fetchone()
-    evidence = None if task["scope"] else _read_evidence(d, wt)
+    evidence = None if task["scope"] else _read_evidence(wt)
     if evidence and evidence[2] in _ingested_digests(con, run, task["id"]):
         with db.transaction(con):
             state.emit(con, run, "submit.refused", f"{task['id']} {briefs.EVIDENCE_FILE} repeats evidence already submitted",
@@ -382,8 +381,10 @@ def _evidence_commit():
 EVIDENCE_KIND = "executor_evidence"
 
 
-def _read_evidence(d: dict, wt: Path) -> tuple[Path, str, str] | None:
-    """A scope-none task's evidence file as (path, reviewer text, sha256 of that text), or None."""
+def _read_evidence(wt: Path) -> tuple[Path, str, str] | None:
+    """A scope-none task's evidence file as (path, reviewer text, sha256 of that text), or None.
+    Freshness is not judged here: the launch moves any earlier file out of the
+    worktree (dispatch._set_aside_evidence), and submit refuses content already ingested."""
     src = wt / briefs.EVIDENCE_FILE
     # Only a regular, untracked file the executor wrote: a symlink could point at
     # a credential file and a tracked file is not evidence of this submission.
@@ -391,12 +392,7 @@ def _read_evidence(d: dict, wt: Path) -> tuple[Path, str, str] | None:
         return None
     if paths.git(wt, "ls-files", "--", briefs.EVIDENCE_FILE).strip():
         return None
-    # The worktree is reused across dispatches: a file older than this dispatch is
-    # a leftover from an earlier submission. mtime is only a cheap first filter
-    # (`touch` defeats it); the content digest checked at submit is the real guard.
     try:
-        if d.get("started_at") and src.stat().st_mtime < datetime.fromisoformat(d["started_at"]).timestamp():
-            return None
         fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(fd, "rb") as fh:
             st = os.fstat(fh.fileno())

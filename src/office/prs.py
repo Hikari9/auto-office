@@ -140,44 +140,23 @@ def create_command(con, run: dict, task: dict, dispatch: dict, body_path: Path) 
 
 def has_pr(task: dict | None) -> bool:
     """A task with no file scope (a comment or issue edit) commits nothing, so it
-    gets no PR. A task that already has a PR keeps it, whatever its scope says
-    now, until Office has seen that PR closed or merged (`closed` in its record)."""
-    if not task:
-        return False
-    pr = task.get("pr") or {}
-    return bool(task["scope"]) or bool(pr and not pr.get("closed"))
+    gets no PR. A task with any recorded PR keeps PR handling whatever its scope;
+    plans.sync_tasks refuses to make such a task scope-none (`pr_blocker`)."""
+    return bool(task and (task["scope"] or task.get("pr")))
 
 
-def release_for_scope_none(run: dict, task: dict) -> dict | None:
-    """Called when a plan change gives `task` no file scope. Office would then stop
-    syncing, pushing and landing its PR, so an open PR must be closed first: closing
-    it is outward-facing and the operator's call. Returns the PR record marked
-    closed (to store on the task), None when the task has no live PR, or raises."""
-    pr = task.get("pr") or {}
-    if not pr or pr.get("closed"):
-        return None
-    ref = pr.get("number") or pr.get("url")
-    label = f"#{pr['number']}" if pr.get("number") else (pr.get("url") or "(number unknown)")
-    found, why = ("MERGED", "") if pr.get("merged") else (None, "")
-    if found is None and ref:
-        try:
-            proc = _gh(["pr", "view", str(ref), "--json", "state"], run["repo_root"], timeout=30)
-            if proc.returncode == 0:
-                found = (json.loads(proc.stdout or "{}").get("state") or "").upper() or None
-                why = "" if found else "gh reported no state"
-            else:
-                why = (proc.stderr or proc.stdout).strip()[:200]
-        except (OSError, subprocess.SubprocessError, ValueError) as exc:
-            why = str(exc)[:200]
-    if found in ("CLOSED", "MERGED"):
-        return {**pr, "closed": True, "state": found.lower()}
-    from office.state import Refused
-    detail = "is still open" if found else f"could not be confirmed closed ({why or 'no PR number or URL'})"
-    raise Refused("open-pr", f"{task['id']} would get `scope: none`, but its PR {label} {detail}; Office stops "
-                  "syncing and landing a PR-free task, so that PR would be left open",
-                  scope=task["id"], preserved="plan unchanged",
-                  next_step=f"close PR {label} yourself (gh pr close {ref}) or keep a file scope for {task['id']}, "
-                            "then submit the plan change again")
+def pr_blocker(con, run: dict, task: dict) -> str | None:
+    """Why `task` cannot become PR-free, or None. Local and conservative (no gh
+    call; the caller holds the tx): any recorded PR, open or closed, or a PR job
+    that is not done and so may have created a PR Office has not recorded."""
+    pr = task.get("pr")
+    if pr:
+        return f"it has PR {'#' + str(pr['number']) if pr.get('number') else pr.get('url') or '(unnumbered)'}"
+    for row in con.execute("SELECT id, status, payload_json FROM outbox WHERE run_id=? AND kind IN ('pr','pr_sync') "
+                           "AND status IN ('queued','claimed','failed')", (run["id"],)).fetchall():
+        if (json.loads(row["payload_json"] or "{}") or {}).get("task_id") == task["id"]:
+            return f"PR job {row['id']} is {row['status']} and may have opened a PR"
+    return None
 
 
 def queue(con, run: dict, task_id: str, event: str, ref: str) -> None:

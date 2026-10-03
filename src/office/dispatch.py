@@ -516,6 +516,25 @@ def _pr_packet(con, run: dict, task: dict, dispatch: dict) -> dict | None:
             "number": (task.get("pr") or {}).get("number")}
 
 
+def _set_aside_evidence(con, run: dict, dispatch: dict, wt: Path, ddir: Path) -> None:
+    """A scope-none task's worktree is reused across dispatches. Any evidence file
+    already there (left by a submitted round or a crashed one) is moved out before
+    the agent starts, so a file present at submit was written by this dispatch.
+    The file is renamed, never read: it may be a link to anything."""
+    task = state.get_task(con, run["id"], dispatch["task_id"])
+    src = wt / briefs.EVIDENCE_FILE
+    if task is None or task["scope"] or not (src.exists() or src.is_symlink()):
+        return
+    if paths.git(wt, "ls-files", "--", briefs.EVIDENCE_FILE).strip():
+        return  # a tracked file is repo content (submit never ingests it); moving it would delete it
+    dest = ddir / "stale-evidence.md"
+    n = 1
+    while dest.exists() or dest.is_symlink():  # a retried launch job keeps every copy it moved
+        n += 1
+        dest = ddir / f"stale-evidence-{n}.md"
+    os.rename(src, dest)
+
+
 def job_launch_agent(con, run: dict, job: dict) -> dict:
     payload = job["payload"]
     dispatch = state.get_dispatch(con, payload["dispatch_id"])
@@ -528,6 +547,7 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     ddir.mkdir(parents=True, exist_ok=True)
     setup = None
     if role == "executor":
+        _set_aside_evidence(con, run, dispatch, wt, ddir)
         # The repo's own install, before the agent's first prompt; a failure is surfaced, never fatal.
         setup = worktree_setup.prepare(run, wt, "task", ddir / "setup.log", created=created,
                                        task_id=dispatch["task_id"], dispatch_id=dispatch["id"])
