@@ -316,7 +316,9 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
                                              exclude=excluded)
         if decision.get("status") != "selected":
-            failures.append(f"no qualifying {role} route ({decision.get('status')})")
+            failures.append(f"no qualifying {role} route ({decision.get('status')})"
+                            + (f"; {candidates.protected_quota_remedy(run, role, gate.get('task_id'))}"
+                               if decision.get("status") == "protected_quota_would_be_consumed" else ""))
             break
         cand = decision["candidate"]
         triple = routing.candidate_id(cand)
@@ -589,8 +591,12 @@ def job_review(con, run: dict, job: dict) -> dict:
         carried = [dict(r) for r in con.execute("SELECT code, severity, location, summary FROM findings WHERE run_id=? AND "
                                                 "task_id=? AND gate_kind='code_review' AND state='open'",
                                                 (run["id"], task["id"])).fetchall()]
+        evidence = None
+        if not task["scope"]:
+            ev = briefs.evidence_path(run, rev["dispatch_id"], rev["id"])
+            evidence = ev.read_text(encoding="utf-8", errors="replace") if ev.is_file() else None
         brief = briefs.code_review_brief(run, task, rev, diff, checks["summary"] if checks else "none declared",
-                                         carried, str(checkout))
+                                         carried, str(checkout), evidence=evidence)
         exclude = [job["payload"]["exclude_route"]] if job["payload"].get("exclude_route") else None
         outcome = run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
                                exclude=exclude)
@@ -684,13 +690,13 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
                           pause_reason=f"{kind_label} review needs attention: {outcome.get('summary', '')[:200]}")
         return
     elif verdict == "UNAVAILABLE":
-        state.emit(con, run, "gate.unavailable", f"{task['id']} {kind_label} UNAVAILABLE: {outcome.get('summary', '')[:160]}; "
+        state.emit(con, run, "gate.unavailable", f"{task['id']} {kind_label} UNAVAILABLE: {outcome.get('summary', '')[:400]}; "
                    "valid unrelated results are preserved", task_id=task["id"])
         if gate["kind"] == "checks":
             con.execute("UPDATE gates SET status='cancelled', stale_reason='checks unavailable' WHERE revision_id=? "
                         "AND status='waiting'", (gate["revision_id"],))
         state.update_task(con, run["id"], task["id"], status="blocked",
-                          pause_reason=f"{kind_label} gate unavailable: {outcome.get('summary', '')[:160]}")
+                          pause_reason=f"{kind_label} gate unavailable: {outcome.get('summary', '')[:400]}")
         return
     elif verdict == "BRIEF_DEFECT":
         state.update_task(con, run["id"], task["id"], status="paused", pause_reason=f"brief defect from {kind_label} review")

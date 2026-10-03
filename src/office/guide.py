@@ -147,6 +147,11 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     stale = upgrade.notice(run)
     if stale:
         res.add(stale)
+    if not state.is_terminal(run):
+        from office import config as cfg
+        drift = cfg.config_drift(run)
+        if drift:
+            res.add(drift)
     if tasks:
         parts = [f"accepted {len(c.get('accepted', []))}/{len([t for t in tasks if t['status'] != 'cancelled'])}"]
         for label, keys in (("live", ("running", "launching", "submitted", "changes_required")), ("queued", ("queued",)),

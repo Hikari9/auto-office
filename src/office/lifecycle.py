@@ -45,7 +45,14 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         raise Usage("no-repository", "office start must run inside a git repository",
                     next_step="cd into the repository, then office start")
     top, common = ident
-    config, warnings = cfg.resolve(top, sets)
+    # One read of the config files feeds both the pinned policy and the raw
+    # file blocks recorded as its drift baseline (no defaults, no --set), so an
+    # edit during start cannot pin one value and record another; a later drift
+    # check compares files to files, and neither a launch override nor a
+    # changed shipped default reads as an edit.
+    files = cfg.read_files(top)
+    config, warnings = cfg.resolve(top, sets, files=files)
+    pinned = {**config, cfg.FILE_BLOCKS_KEY: cfg.file_blocks(top, files)}
     risk = cfg.resolve_risk(config, blast_radius, size_class, irreversible)
     gear = cfg.fit_gear(gear, risk, volume, interview, adversarial)
     if gear not in cfg.GEARS:
@@ -87,7 +94,7 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
                 (run_id, run_id, now, exact, hashes["policy_hash"], hashes["catalog_hash"], hashes["adapter_hash"],
                  sha256_obj(config), "planning", ver, str(top), str(common), goal.strip(), "planning", gear,
-                 playbook, base_sha, str(sdir), 1, 0, 1, dumps(config), dumps(risk), dumps(gates), dumps([]),
+                 playbook, base_sha, str(sdir), 1, 0, 1, dumps(pinned), dumps(risk), dumps(gates), dumps([]),
                  dumps(plan_review), planner_mode, now))
             landing = {**({"issue": issue} if issue else {}),
                        **({"prs": {"enabled": False, "reason": "--no-prs"}} if no_prs else {})}
@@ -138,7 +145,8 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         con.close()
 
 
-def resume(con, target: discovery.Target, *, harness: str | None = None, session: str | None = None) -> Result:
+def resume(con, target: discovery.Target, *, harness: str | None = None, session: str | None = None,
+           cwd: Path | None = None) -> Result:
     if target.legacy is not None:
         msg, nxt = legacy.guidance(target.legacy)
         return Result(lines=[msg], next=nxt, data={"legacy": True, "run_id": target.legacy.run_id,
@@ -149,6 +157,14 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
                       next_step='office start "<goal>" for new work')
     keys = discovery.session_keys(harness, session)
     worker = os.environ.get("OFFICE_DISPATCH_ID")
+    if not worker:
+        # An executor that lost its env must not become the orchestrator.
+        here = discovery.task_worktree(con, cwd)
+        if here:
+            raise discovery.refuse_executor_binding(here[0], here[1], "this task worktree")
+        by_session = discovery.executor_session_dispatch(con, keys)
+        if by_session:
+            raise discovery.refuse_executor_binding(by_session[0], by_session[1], "this session")
     with db.transaction(con):
         if not worker:
             discovery.bind(con, run, keys, "resume")

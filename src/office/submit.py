@@ -10,14 +10,16 @@ from __future__ import annotations
 
 import os
 import shlex
+import stat
 import tempfile
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
-from office import db, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, state, version
+from office import briefs, db, discovery, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, state, version
 from office.result import Result
 from office.state import Refused, Usage
-from office.util import dumps, now_iso, sha256_obj, short
+from office.util import dumps, now_iso, sha256_bytes, sha256_file, sha256_obj, short
 def _draft(con, root: Path, run: dict) -> Path:
     planpath.relocate_legacy(con, root)
     return planpath.draft(root, run)
@@ -239,6 +241,8 @@ def _submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect
         # A restarted executor session lost OFFICE_DISPATCH_ID; its task
         # worktree still names the dispatch, and the lease check still fences it.
         return submit_revision(con, run, d, cwd)
+    if not plan_path:
+        _refuse_lost_executor(con, run, cwd)
     if run.get("planner_mode") == "dedicated" and not plan_path:
         raise Refused("orchestrator-no-submit", "in this run the dedicated planner owns the plan",
                       next_step='use office amend for ordinary changes, or office amend plan --contract -- "<request>"')
@@ -247,6 +251,24 @@ def _submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect
         raise Usage("no-repository", "run office submit from the repository", next_step="cd into the repository")
     path = Path(plan_path) if plan_path else _draft(con, ident[0], run)
     return plans.submit_plan(con, run, path, submitter="orchestrator", redirect=redirect)
+
+
+def _refuse_lost_executor(con, run: dict, cwd: Path) -> None:
+    """The orchestrator path with no plan to submit while executors are open:
+    the caller is most likely an executor that lost its dispatch env."""
+    ident = paths.repo_identity(cwd)
+    if run.get("planner_mode") != "dedicated" and ident is not None and _draft(con, ident[0], run).exists():
+        return
+    open_ = discovery.open_executor_dispatches(con, run)
+    if open_:
+        raise Refused("executor-lost-binding",
+                      f"no plan draft to submit, and run {short(run['id'])} has open executor dispatches; if you are "
+                      "one of those executors your dispatch env was lost; each executor's recovery command:",
+                      # One labelled line per dispatch and nothing chaining
+                      # them, so pasting the block cannot submit every task.
+                      data={"candidates": [f"{d['task_id']} ({d['id']}): {discovery.recovery_command(run, d)}"
+                                           for d in open_]},
+                      next_step="run only your own task's line above")
 
 
 def _worktree_dispatch(con, run: dict, cwd: Path) -> dict | None:
@@ -483,8 +505,14 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                                 "and wait (the orchestrator amends the scope)")
     pending = con.execute("SELECT id, target_version FROM deliveries WHERE run_id=? AND task_id=? AND status IN "
                           "('queued','delivered') ORDER BY target_version DESC LIMIT 1", (run["id"], task["id"])).fetchone()
+    evidence = None if task["scope"] else _read_evidence(wt)
+    if evidence and evidence[2] in _ingested_digests(con, run, task["id"]):
+        with db.transaction(con):
+            state.emit(con, run, "submit.refused", f"{task['id']} {briefs.EVIDENCE_FILE} repeats evidence already submitted",
+                       audience="runtime", task_id=task["id"], dispatch_id=d["id"], payload={"code": "stale-evidence"})
+        raise _stale_evidence(task)
     res = Result()
-    with db.transaction(con):
+    with _evidence_commit() as staged, db.transaction(con):
         again = con.execute("SELECT * FROM revisions WHERE operation_id=?", (op_id,)).fetchone()
         if again:
             return _duplicate(con, run, dict(again))
@@ -498,6 +526,8 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
             # Recorded after this submit looked: keep it; only the block this submit resolves may clear.
             raise Refused("task-paused", f"{task['id']} is {now_task['status']}: {now_task.get('pause_reason') or ''}",
                           scope=task["id"], preserved="your worktree", next_step="stop and wait; the orchestrator is resolving it")
+        if evidence and evidence[2] in _ingested_digests(con, run, task["id"]):
+            raise _stale_evidence(task)  # a concurrent submit ingested the same file first
         seq = con.execute("SELECT COUNT(*) FROM revisions WHERE run_id=?", (run["id"],)).fetchone()[0] + 1
         # revisions.id is a GLOBAL primary key shared by every run in runs.db; a bare
         # per-run "R{seq}" collides with the first revision of any earlier run.
@@ -515,6 +545,11 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                      base, run["requirements_version"], run["plan_version"], applied, env_fp, op_id, status,
                      prev, dumps(changed), now_iso()))
         paths.git(wt, "update-ref", f"refs/office/{run['id'][:8]}/{task['id']}/{rev_id}", commit)
+        if evidence:
+            dest = _stage_evidence(run, d, rev_id, evidence, staged)
+            # The digest is the duplicate guard for every later submit of this task.
+            state.record_evidence(con, run["id"], EVIDENCE_KIND, dest, task_id=task["id"], revision_id=rev_id,
+                                  digest=evidence[2])
         if prs.enabled(run):
             prs.advance_branch(run, d, commit)
             prs.queue(con, run, task["id"], "revision", rev_id)
@@ -535,6 +570,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     jobs.kick(con, run["id"])
     parts = [f"rev {rev_id} captured"] + ([f"supersedes {prev}"] if prev else []) + planned["summary"]
     res.add(" | ".join(parts))
+    left_out = [f for f in left_out if f != briefs.EVIDENCE_FILE]
     for label, names in (("untracked files outside", left_out), ("harness config edits outside", restored)):
         if names:
             shown = ", ".join(names[:4]) + (f" (+{len(names) - 4} more)" if len(names) > 4 else "")
@@ -542,6 +578,86 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     res.next = "you may stop; results will be delivered"
     res.data = {"revision": rev_id, "commit": commit, "gates": planned["gates"]}
     return res
+
+
+@contextmanager
+def _evidence_commit():
+    """Yields a list that `_stage_evidence` fills. The worktree file is consumed
+    only after the surrounding transaction commits; on any failure the staged
+    copy is discarded and the worktree file is kept."""
+    staged: list[tuple[Path, Path]] = []
+    try:
+        yield staged
+    except BaseException:
+        for _, dest in staged:
+            dest.unlink(missing_ok=True)
+        raise
+    for src, _ in staged:
+        src.unlink(missing_ok=True)  # consumed: the next submission must write its own
+
+
+EVIDENCE_KIND = "executor_evidence"
+
+
+def _read_evidence(wt: Path) -> tuple[Path, str, str] | None:
+    """A scope-none task's evidence file as (path, reviewer text, sha256 of that text), or None.
+    Freshness is not judged here: the launch moves any earlier file out of the
+    worktree (dispatch._set_aside_evidence), and submit refuses content already ingested."""
+    src = wt / briefs.EVIDENCE_FILE
+    # Only a regular, untracked file the executor wrote: a symlink could point at
+    # a credential file and a tracked file is not evidence of this submission.
+    if src.is_symlink() or not src.is_file():
+        return None
+    if paths.git(wt, "ls-files", "--", briefs.EVIDENCE_FILE).strip():
+        return None
+    try:
+        fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            # A hard link to another file (a credential) shares its inode: ordinary evidence has one link.
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+                return None
+            raw = fh.read(briefs.EVIDENCE_MAX_CHARS * 4 + 1)
+    except (OSError, ValueError):
+        return None
+    text = raw.decode("utf-8", errors="replace")
+    if len(text) > briefs.EVIDENCE_MAX_CHARS:
+        text = text[:briefs.EVIDENCE_MAX_CHARS] + f"\n[evidence truncated at {briefs.EVIDENCE_MAX_CHARS} characters]\n"
+    return src, text, sha256_bytes(text.encode("utf-8"))
+
+
+def _ingested_digests(con, run: dict, task_id: str) -> set[str]:
+    """sha256 of every evidence text already ingested for this task, across all its dispatches."""
+    digests = {r[0] for r in con.execute("SELECT sha256 FROM evidence WHERE run_id=? AND task_id=? AND kind=?",
+                                         (run["id"], task_id, EVIDENCE_KIND)).fetchall() if r[0]}
+    # Copies saved before digests were recorded have no evidence row: hash the saved file.
+    for rev in con.execute("SELECT id, dispatch_id FROM revisions WHERE run_id=? AND task_id=? AND dispatch_id IS NOT NULL",
+                           (run["id"], task_id)).fetchall():
+        saved = briefs.evidence_path(run, rev["dispatch_id"], rev["id"])
+        try:
+            if saved.is_file() and not saved.is_symlink():
+                digests.add(sha256_file(saved))
+        except OSError:
+            pass  # an unreadable old copy cannot be compared; its evidence row, if any, still is
+    return digests
+
+
+def _stale_evidence(task: dict) -> Refused:
+    return Refused("stale-evidence", f"{briefs.EVIDENCE_FILE} has the same content as evidence already submitted for "
+                   f"{task['id']}; it does not show work done for this submission",
+                   scope=task["id"], preserved="your worktree (nothing was submitted)",
+                   next_step=f"redo or reconfirm the external action (comment, issue edit), rewrite {briefs.EVIDENCE_FILE} "
+                             "with what you found or did now (URLs, text, current state), then office submit")
+
+
+def _stage_evidence(run: dict, d: dict, rev_id: str, evidence: tuple[Path, str, str], staged: list) -> Path:
+    """Copy a scope-none task's evidence where the code reviewer's brief reads it."""
+    src, text, _ = evidence
+    dest = briefs.evidence_path(run, d["id"], rev_id)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    staged.append((src, dest))  # before the write, so a failed write still discards a partial copy
+    dest.write_bytes(text.encode("utf-8"))
+    return dest
 
 
 def _duplicate(con, run: dict, rev: dict) -> Result:
