@@ -54,6 +54,11 @@ Executor (inside your task worktree): captures the worktree exactly as it is,
 committed and uncommitted, and starts every applicable check and review.
 Submitting the same tree again is safe; it reports the existing submission.
 
+A submit refused for a file outside your scope blocks the task and the orchestrator sees it. To
+ask for more scope instead of reverting:
+  office submit --request-scope <path> [--request-scope <path> ...] -- "<reason>"
+It records a contract-amendment request with the diff and waits; you are told to resubmit once amended.
+
 Planner / orchestrator planning inline: submits .office/plans/<run>/PLAN.md (one draft per run). Format:
 
 {fmt}
@@ -160,6 +165,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("-h", "--help", action="store_true")
     s.add_argument("--plan", help=argparse.SUPPRESS)
     s.add_argument("--quote", help="the user's words (a defect redirect)")
+    s.add_argument("--request-scope", action="append", default=[], metavar="PATH",
+                   help="executor: ask the orchestrator to add PATH to this task's scope (reason after --)")
+    s.add_argument("reason", nargs="*", help=argparse.SUPPRESS)
     _redirect_args(s)
     s = sp.add_parser("amend", parents=[common])
     s.add_argument("scope")
@@ -439,7 +447,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                                  review_external=args.review_external)
     if cmd == "submit":
         from office import submit
-        return submit.submit(con, run, cwd=cwd, plan_path=args.plan, redirect=_redirect(args))
+        return submit.submit(con, run, cwd=cwd, plan_path=args.plan, redirect=_redirect(args),
+                             request_scope=args.request_scope,
+                             reason=" ".join(args.reason or []).strip())
     if cmd == "amend":
         from office import amend
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()

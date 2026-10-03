@@ -22,10 +22,35 @@ def _draft(con, root: Path, run: dict) -> Path:
     return planpath.draft(root, run)
 
 
-def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect: dict | None = None) -> Result:
+# A task blocked by its own worker's refused or scope-requesting submit. The
+# worker may still resubmit (revert, or after the amendment), so these do not
+# refuse a submit the way an orchestrator pause does.
+SELF_BLOCK = ("submit refused", "scope requested")
+
+
+def self_blocked(task: dict) -> bool:
+    return task["status"] == "blocked" and (task.get("pause_reason") or "").startswith(SELF_BLOCK)
+
+
+def _record_block(con, run: dict, task: dict, d: dict, reason: str, state_key: str, state_val: dict) -> None:
+    """Durable: the task is a blocker the orchestrator sees at once, and the
+    dispatch keeps what it was blocked on. Caller holds the transaction."""
+    import json
+    row = con.execute("SELECT override_json FROM dispatches WHERE id=?", (d["id"],)).fetchone()
+    data = json.loads((row["override_json"] if row else None) or "{}")
+    data[state_key] = state_val
+    con.execute("UPDATE dispatches SET override_json=? WHERE id=?", (json.dumps(data), d["id"]))
+    if task["status"] in ("running", "launching", "changes_required", "blocked"):
+        state.update_task(con, run["id"], task["id"], status="blocked", pause_reason=reason)
+
+
+def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect: dict | None = None,
+           request_scope: list[str] | None = None, reason: str = "") -> Result:
     """A refusal inside a dispatch is recorded on it, so a worker that stopped
     after one can be told from one that is still working."""
     try:
+        if request_scope:
+            return request_scope_change(con, run, cwd=cwd, files=request_scope, reason=reason)
         return _submit(con, run, cwd=cwd, plan_path=plan_path, redirect=redirect)
     except Refused as exc:
         dispatch_id = os.environ.get("OFFICE_DISPATCH_ID")
@@ -37,6 +62,41 @@ def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect:
                     state.emit(con, run, "submit.rejected", f"{exc.category}: {exc.message}", audience="runtime",
                                task_id=d.get("task_id"), dispatch_id=dispatch_id, payload={"code": exc.category})
         raise
+
+
+def request_scope_change(con, run: dict, *, cwd: Path, files: list[str], reason: str) -> Result:
+    """Executor: ask the orchestrator to widen this task's scope. Blocks the
+    task and wakes `office wait`/`status` with the files, reason and diff hunk."""
+    dispatch_id = os.environ.get("OFFICE_DISPATCH_ID")
+    d = state.get_dispatch(con, dispatch_id) if dispatch_id else None
+    if d is None:
+        d = _worktree_dispatch(con, run, cwd)
+    if d is None or d["role"] != "executor" or not d.get("task_id"):
+        raise Refused("not-an-executor", "--request-scope is for an executor inside its task worktree",
+                      next_step="office submit")
+    if not reason.strip():
+        raise Usage("scope-reason", "say why the scope must grow",
+                    next_step='office submit --request-scope <path> -- "<reason>"')
+    task = state.get_task(con, run["id"], d["task_id"])
+    wt = Path(d["worktree"]).resolve()
+    ident = paths.repo_identity(cwd)
+    if ident is None or ident[0] != wt:
+        raise Refused("wrong-worktree", f"run this from the task worktree ({task['id']}), not {cwd}",
+                      scope=task["id"], next_step=f'cd {wt} && office submit --request-scope {files[0]} -- "<reason>"')
+    files = list(dict.fromkeys(f.strip() for f in files if f.strip()))
+    hunk = paths.git(wt, "diff", "HEAD", "--", *files)[:6000]
+    if not hunk.strip():
+        hunk = "(no tracked diff for these paths yet; they are new or still unedited)"
+    amend_cmd = f'office amend {task["id"]} --contract -- "add {", ".join(files)} to {task["id"]} scope: {reason.strip()[:80]}"'
+    summary = f"{task['id']} requests scope {', '.join(files)}: {reason.strip()}"
+    with db.transaction(con):
+        _record_block(con, run, task, d, f"scope requested: {', '.join(files)}: {reason.strip()}",
+                      "scope_request", {"files": files, "reason": reason.strip()})
+        state.emit(con, run, "task.scope_requested", f"{summary}\n{hunk}\nnext: {amend_cmd}", task_id=task["id"],
+                   dispatch_id=d["id"], payload={"files": files, "reason": reason.strip(), "diff": hunk, "next": amend_cmd})
+    return Result(lines=[f"{task['id']} scope request recorded for {', '.join(files)}; the orchestrator was woken"],
+                  next="stop and wait; the orchestrator amends your contract and you are told to resubmit "
+                       f"(it runs: {amend_cmd})")
 
 
 def _submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect: dict | None = None) -> Result:
@@ -267,7 +327,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     if dispatch_mod.live_lease(con, run["id"], d["lease_id"]) is None:
         raise Refused("lease-lost", f"{task['id']} lease is no longer held by this session (revoked or taken over)",
                       scope=task["id"], preserved="your worktree", next_step="stop; the orchestrator decides what happens next")
-    if task["status"] in ("paused", "blocked", "cancelled"):
+    if task["status"] in ("paused", "blocked", "cancelled") and not self_blocked(task):
         raise Refused("task-paused", f"{task['id']} is {task['status']}: {task.get('pause_reason') or ''}",
                       scope=task["id"], preserved="your worktree", next_step="stop and wait; the orchestrator is resolving it")
     commit = make_commit(wt, tree, head, f"office: {task['id']} submission\n\nrun {run['id'][:8]} task {task['id']}\n\n"
@@ -287,11 +347,18 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     if outside:
         with db.transaction(con):
             # A deterministic refusal: relaunching the same brief would repeat it.
-            state.emit(con, run, "submit.refused", f"{task['id']} changed files outside its scope: {', '.join(outside[:6])}",
+            msg = f"{task['id']} changed files outside its scope: {', '.join(outside[:6])}"
+            state.emit(con, run, "submit.refused", msg,
                        audience="runtime", task_id=task["id"], dispatch_id=d["id"], payload={"code": "outside-scope"})
+            # Recorded now, not at worker exit or idle stall: a live worker sits in its pane after a refusal.
+            _record_block(con, run, task, d, f"submit refused: {msg}", "submit_refused", {"files": outside[:20]})
+            state.emit(con, run, "task.blocked", f"{task['id']} submit refused ({msg}); amend the scope "
+                       f"(office amend {task['id']} --contract -- ...) or tell the worker to revert; work is preserved "
+                       "in its worktree", task_id=task["id"], dispatch_id=d["id"])
         raise Refused("outside-scope", f"{task['id']} changed files outside its scope: {', '.join(outside[:6])}",
                       scope=task["id"], preserved="your worktree (nothing was submitted)",
-                      next_step="revert those files, or stop and report that the scope must grow (the orchestrator amends it)")
+                      next_step='revert those files, or run office submit --request-scope <path> -- "<reason>" '
+                                "and wait (the orchestrator amends the scope)")
     pending = con.execute("SELECT id, target_version FROM deliveries WHERE run_id=? AND task_id=? AND status IN "
                           "('queued','delivered') ORDER BY target_version DESC LIMIT 1", (run["id"], task["id"])).fetchone()
     res = Result()
@@ -331,7 +398,8 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
         if prev:
             con.execute("UPDATE revisions SET status='superseded' WHERE id=? AND status='current'", (prev,))
             gates.stale_open_gates(con, run, task["id"], rev_id)
-        state.update_task(con, run["id"], task["id"], current_revision_id=rev_id, status="submitted")
+        state.update_task(con, run["id"], task["id"], current_revision_id=rev_id, status="submitted",
+                           pause_reason=None)
         planned = gates.plan_for_revision(con, run, state.get_task(con, run["id"], task["id"]), rev_id, changed, d)
         state.emit(con, run, "submit", f"{task['id']} submitted {rev_id}", audience="runtime", task_id=task["id"])
     jobs.kick(con, run["id"])
