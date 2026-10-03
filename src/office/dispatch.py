@@ -144,7 +144,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             decision = routes[tid]
             if decision.get("status") != "selected":
                 raise Refused("no-route", _route_failure(tid, decision), scope=tid,
-                              preserved="plan and other dispatches", next_step=_route_next(decision, tid))
+                              preserved="plan and other dispatches", next_step=_route_next(decision, tid, run))
             _record_routing(con, run, decision)
             if review_as:
                 state.update_task(con, run["id"], tid, review_override={
@@ -184,13 +184,15 @@ def _route_failure(tid: str, decision: dict) -> str:
     return f"{tid}: no qualifying executor route ({status}){': ' + top if top else ''}{' | ' + skipped if skipped else ''}"
 
 
-def _route_next(decision: dict, tid: str) -> str:
+def _route_next(decision: dict, tid: str, run: dict | None = None) -> str:
     for r in decision.get("rejected") or []:
         if r.get("stage") == 2:
             return (f"a user may promote a route: office approve trust {r['candidate']} --quote \"<user's words>\"; "
                     "or office inspect route for details")
     if decision.get("status") == "protected_quota_would_be_consumed":
-        return "wait for quota, choose a cheaper strategy, or obtain explicit user authority"
+        remedy = candidates.protected_quota_remedy(run, tid, "--as") if run else ""
+        return ("wait for quota, choose a cheaper strategy, or obtain explicit user authority"
+                + (f"; {remedy} (code review: --review-as)" if remedy else ""))
     return f"office inspect route {tid}"
 
 

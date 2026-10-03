@@ -333,6 +333,14 @@ def _preferred_seed(policy_cfg: dict, run: dict):
     return by_size.get(size) or policy_cfg.get("preferred_seed")
 
 
+def protected_quota_remedy(run: dict, task_id: str | None, flag: str = "--review-as") -> str:
+    """What to do when routing stopped on the protected quota reserve. The
+    reserve is pinned at `office start`, so a config edit does not apply."""
+    reserve = float(((run.get("policy") or {}).get("quota") or {}).get("reserve_percent", routing.DEFAULT_RESERVE_PERCENT))
+    return (f"fix: office dispatch {task_id or '<T>'} {flag} <harness>/<model>[@effort]; quota.reserve_percent is "
+            f"pinned at {reserve:g}% for this run (set at office start), config edits do not apply to it")
+
+
 def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                task_id: str | None = None, override: str | None = None,
                exclude: set[str] | None = None, probe: bool = True, exact: str | None = None) -> dict:

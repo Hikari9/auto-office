@@ -138,7 +138,8 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         con.close()
 
 
-def resume(con, target: discovery.Target, *, harness: str | None = None, session: str | None = None) -> Result:
+def resume(con, target: discovery.Target, *, harness: str | None = None, session: str | None = None,
+           cwd: Path | None = None) -> Result:
     if target.legacy is not None:
         msg, nxt = legacy.guidance(target.legacy)
         return Result(lines=[msg], next=nxt, data={"legacy": True, "run_id": target.legacy.run_id,
@@ -149,6 +150,14 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
                       next_step='office start "<goal>" for new work')
     keys = discovery.session_keys(harness, session)
     worker = os.environ.get("OFFICE_DISPATCH_ID")
+    if not worker:
+        # An executor that lost its env must not become the orchestrator.
+        here = discovery.task_worktree(con, cwd)
+        if here:
+            raise discovery.refuse_executor_binding(here[0], here[1], "this task worktree")
+        by_session = discovery.executor_session_dispatch(con, keys)
+        if by_session:
+            raise discovery.refuse_executor_binding(by_session[0], by_session[1], "this session")
     with db.transaction(con):
         if not worker:
             discovery.bind(con, run, keys, "resume")

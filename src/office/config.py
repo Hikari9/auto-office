@@ -102,6 +102,29 @@ def resolve(repo_root: Path | None, sets: list[str] | None = None) -> tuple[dict
     return effective, warnings
 
 
+DRIFT_BLOCKS = ("quota", "roles")
+
+
+def config_drift(run: dict) -> str | None:
+    """A notice when the live config's quota or roles block differs from the
+    snapshot pinned at `office start`; those edits do not reach a running run."""
+    pinned = run.get("policy") or {}
+    root = run.get("repo_root")
+    try:
+        live, _ = resolve(Path(root) if root and Path(root).is_dir() else None)
+    except (OSError, ValueError):
+        return None
+    differ = [b for b in DRIFT_BLOCKS if (live.get(b) or {}) != (pinned.get(b) or {})]
+    if not differ:
+        return None
+    detail = ""
+    if "quota" in differ:
+        detail = (f": quota.reserve_percent pinned {(pinned.get('quota') or {}).get('reserve_percent', '-')}, "
+                  f"live {(live.get('quota') or {}).get('reserve_percent', '-')}")
+    return (f"config edited since run start; not applied to running run {run['id'][:8]} "
+            f"({', '.join(differ)} differ{detail})")
+
+
 def snapshot_hashes() -> dict:
     root = paths.resources_root()
     adapters = {p.name: load_yaml(p) for p in sorted((root / "adapters" / "seed").glob("*.yaml"))}

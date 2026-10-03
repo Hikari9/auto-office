@@ -1,18 +1,20 @@
 """Ambiguity-safe run resolution.
 
 Order: explicit --run/--state-dir > OFFICE_STATE_DIR/OFFICE_RUN_ID > session
-binding > the sole active run in this repository > error. Latest modification
+binding > the task worktree of an open executor dispatch > the sole active run
+in this repository > error. Latest modification
 time never selects a run, and opening a session never creates or binds one.
 """
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from office import legacy, paths
-from office.state import NoRun, Usage, find_run, get_run, TERMINAL_PHASES
+from office.state import NoRun, Refused, Usage, find_run, get_dispatch, get_run, get_task, TERMINAL_PHASES
 from office.util import now_iso, short
 
 HARNESS_NAMES = ("claude", "codex", "gemini", "agy", "hermes")
@@ -23,6 +25,7 @@ class Target:
     run: dict | None = None
     legacy: legacy.LegacyRun | None = None
     source: str = ""
+    dispatch: dict | None = None  # the executor dispatch a task-worktree cwd names
 
 
 def session_keys(harness: str | None = None, session: str | None = None) -> list[tuple[str, str]]:
@@ -85,9 +88,69 @@ def bound_run(con, keys: list[tuple[str, str]]) -> dict | None:
     return None
 
 
+OPEN_DISPATCH = ("launching", "running")
+
+
+def recovery_command(run: dict, d: dict) -> str:
+    """The shell line that restores an executor's dispatch identity."""
+    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    return f". {shlex.quote(str(ddir / 'agent.env'))} && cd {shlex.quote(str(d.get('worktree') or ''))} && office submit"
+
+
+def open_executor_dispatches(con, run: dict) -> list[dict]:
+    rows = con.execute("SELECT id FROM dispatches WHERE run_id=? AND role='executor' AND status IN ('launching','running') "
+                       "ORDER BY started_at, id", (run["id"],)).fetchall()
+    return [get_dispatch(con, r[0]) for r in rows]
+
+
+def task_worktree(con, cwd: Path | str | None = None) -> tuple[dict, dict] | None:
+    """(run, dispatch) when cwd is inside an Office task worktree
+    (<worktrees>/<run>/<T>) whose task's current executor dispatch is open."""
+    try:
+        rel = Path(cwd or os.getcwd()).resolve().relative_to(paths.worktrees_dir().resolve())
+    except (ValueError, OSError):
+        return None
+    if len(rel.parts) < 2:
+        return None
+    try:
+        run = find_run(con, rel.parts[0])
+    except Usage:
+        return None
+    if run is None or not run.get("office_version"):
+        return None
+    task = get_task(con, run["id"], rel.parts[1])
+    d = get_dispatch(con, task["current_dispatch_id"]) if task and task.get("current_dispatch_id") else None
+    if d and d["role"] == "executor" and d.get("status") in OPEN_DISPATCH:
+        return run, d
+    return None
+
+
+def executor_session_dispatch(con, keys: list[tuple[str, str]]) -> tuple[dict, dict] | None:
+    """(run, dispatch) of an open executor dispatch whose recorded session is one of `keys`."""
+    for _harness, session in keys:
+        row = con.execute("SELECT id, run_id FROM dispatches WHERE session_id=? AND role='executor' "
+                          "AND status IN ('launching','running')", (session,)).fetchone()
+        if row:
+            return get_run(con, row["run_id"]), get_dispatch(con, row["id"])
+    return None
+
+
+def refuse_executor_binding(run: dict, d: dict, what: str) -> Refused:
+    return Refused("executor-lost-binding",
+                   f"{what} belongs to executor dispatch {d['id']} for {d['task_id']} in run {short(run['id'])}; "
+                   "it must not be bound as the orchestrator",
+                   next_step=recovery_command(run, d))
+
+
 def bind(con, run: dict, keys: list[tuple[str, str]], bound_by: str) -> list[tuple[str, str]]:
-    """Record bindings (caller holds the transaction) and write fast-path stubs."""
+    """Record bindings (caller holds the transaction) and write fast-path stubs.
+    A session that belongs to an executor is never recorded as an orchestrator."""
     from office.util import atomic_write_json
+    if os.environ.get("OFFICE_DISPATCH_ID"):
+        return []
+    found = executor_session_dispatch(con, keys)
+    if found:
+        raise refuse_executor_binding(found[0], found[1], "this session")
     made = []
     primary = paths.primary_checkout(Path(run["git_common_dir"])) if run.get("git_common_dir") else None
     for harness, session in keys:
@@ -145,6 +208,10 @@ def resolve(con, *, run_arg: str | None = None, state_dir: str | None = None,
     run = bound_run(con, session_keys(harness, session))
     if run:
         return Target(run=run, source="session")
+    # 3b. an executor that lost its env: its task worktree names run and dispatch
+    found = task_worktree(con, cwd)
+    if found:
+        return Target(run=found[0], source="task-worktree", dispatch=found[1])
     # 4. sole active run in this repository
     ident = paths.repo_identity(cwd)
     if ident is None:

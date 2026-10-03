@@ -13,7 +13,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from office import db, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, state, version
+from office import db, discovery, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, state, version
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_obj, short
@@ -67,6 +67,8 @@ def _submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect
         # A restarted executor session lost OFFICE_DISPATCH_ID; its task
         # worktree still names the dispatch, and the lease check still fences it.
         return submit_revision(con, run, d, cwd)
+    if not plan_path:
+        _refuse_lost_executor(con, run, cwd)
     if run.get("planner_mode") == "dedicated" and not plan_path:
         raise Refused("orchestrator-no-submit", "in this run the dedicated planner owns the plan",
                       next_step='use office amend for ordinary changes, or office amend plan --contract -- "<request>"')
@@ -75,6 +77,20 @@ def _submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect
         raise Usage("no-repository", "run office submit from the repository", next_step="cd into the repository")
     path = Path(plan_path) if plan_path else _draft(con, ident[0], run)
     return plans.submit_plan(con, run, path, submitter="orchestrator", redirect=redirect)
+
+
+def _refuse_lost_executor(con, run: dict, cwd: Path) -> None:
+    """The orchestrator path with no plan to submit while executors are open:
+    the caller is most likely an executor that lost its dispatch env."""
+    ident = paths.repo_identity(cwd)
+    if run.get("planner_mode") != "dedicated" and ident is not None and _draft(con, ident[0], run).exists():
+        return
+    open_ = discovery.open_executor_dispatches(con, run)
+    if open_:
+        raise Refused("executor-lost-binding",
+                      f"no plan draft to submit, and run {short(run['id'])} has open executor dispatches; if you are "
+                      "one of those executors your dispatch env was lost",
+                      next_step="; ".join(f"{d['task_id']}: {discovery.recovery_command(run, d)}" for d in open_))
 
 
 def _worktree_dispatch(con, run: dict, cwd: Path) -> dict | None:
