@@ -405,6 +405,7 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
             # notify_worker job); `worker_live` alone can be a dead pane.
             state.enqueue(con, run, "notify_worker", {"dispatch_id": d["id"], "task_id": tid,
                           "unblock": submit_mod.self_blocked(task), "amendment_id": amendment_id,
+                          "block_id": submit_mod.block_id(con, d["id"]),
                           "text": f"AMENDMENT {amendment_id}: run office status, apply it, office ack {amendment_id}, "
                                   "then office submit again."},
                           dedup_key=f"notify:{did}", max_attempts=1)

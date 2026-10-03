@@ -51,6 +51,7 @@ def _record_block(con, run: dict, task: dict, d: dict, reason: str, state_key: s
     row = con.execute("SELECT override_json FROM dispatches WHERE id=?", (d["id"],)).fetchone()
     data = json.loads((row["override_json"] if row else None) or "{}")
     data[state_key] = state_val
+    data["block_id"] = uuid.uuid4().hex[:12]  # names this block: a stale notice cannot lift a newer one
     # Never replace another blocker (revoke, orchestrator pause) with this one. A
     # `submitted` task is blocked too: its revision and gates stay as they are (acceptance
     # waits while the task is blocked) and the status it had is kept to restore on unblock.
@@ -60,6 +61,12 @@ def _record_block(con, run: dict, task: dict, d: dict, reason: str, state_key: s
     elif self_blocked(task):
         state.update_task(con, run["id"], task["id"], pause_reason=reason)
     con.execute("UPDATE dispatches SET override_json=? WHERE id=?", (json.dumps(data), d["id"]))
+
+
+def block_id(con, dispatch_id: str | None) -> str | None:
+    import json
+    row = con.execute("SELECT override_json FROM dispatches WHERE id=?", (dispatch_id,)).fetchone() if dispatch_id else None
+    return json.loads((row["override_json"] if row else None) or "{}").get("block_id")
 
 
 def unblock_self(con, run: dict, task: dict) -> str | None:
@@ -138,9 +145,10 @@ def clean_request_paths(wt: Path, files: list[str]) -> list[str]:
     return out
 
 
-def _scope_hunk(wt: Path, files: list[str], limit: int = 6000) -> str:
-    """Tracked edits plus the contents of new (untracked) files, read up to `limit` bytes."""
-    text, cut = _bounded(["git", "--literal-pathspecs", "diff", "HEAD", "--", *files], wt, limit)
+def _scope_hunk(wt: Path, files: list[str], base: str = "HEAD", limit: int = 6000) -> str:
+    """Everything changed since `base` (committed, staged, unstaged) plus the contents of
+    new (untracked) files, read up to `limit` bytes."""
+    text, cut = _bounded(["git", "--literal-pathspecs", "diff", base, "--", *files], wt, limit)
     if not cut:
         new = paths.git(wt, "--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "-z", "--", *files)
         for f in [x for x in new.split("\0") if x and (wt / x).is_file()][:20]:
@@ -185,7 +193,7 @@ def request_scope_change(con, run: dict, *, cwd: Path, files: list[str], reason:
     if task["status"] in ("paused", "blocked", "cancelled") and not self_blocked(task):
         raise Refused("task-paused", f"{task['id']} is {task['status']}: {task.get('pause_reason') or ''}",
                       scope=task["id"], preserved="your worktree", next_step="stop and wait; the orchestrator is resolving it")
-    hunk = _scope_hunk(wt, files)
+    hunk = _scope_hunk(wt, files, d.get("base_commit") or "HEAD")
     # Executor-controlled text reaches a command the orchestrator copies: one quoted argument.
     amend_cmd = ("office amend " + shlex.quote(task["id"]) + " --contract -- "
                  + shlex.quote(f'add {", ".join(files)} to {task["id"]} scope: {reason.strip()[:80]}'))
@@ -415,6 +423,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     if ident is None or ident[0] != wt:
         raise Refused("wrong-worktree", f"submit from the task worktree ({task['id']}), not {cwd}",
                       scope=task["id"], next_step=f"cd {shlex.quote(str(wt))} && office submit")
+    seen_block = block_id(con, d["id"]) if self_blocked(task) else None  # the block this submit may resolve
     left_out = untracked_outside(wt, task["scope"])
     restored = harness_edits_outside(wt, task["scope"])
     tree, head = capture_tree(wt, paths.run_dir(run["id"]) / "tmp", left_out, restored)
@@ -478,6 +487,14 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
             return _duplicate(con, run, dict(again))
         if dispatch_mod.live_lease(con, run["id"], d["lease_id"]) is None:
             raise Refused("lease-lost", f"{task['id']} lease was revoked during submit", scope=task["id"])
+        now_task = state.get_task(con, run["id"], task["id"])
+        if now_task["current_dispatch_id"] != d["id"]:
+            raise Refused("superseded-dispatch", f"{task['id']} now belongs to a newer dispatch", scope=task["id"])
+        if now_task["status"] in ("paused", "blocked", "cancelled") and \
+                not (self_blocked(now_task) and block_id(con, d["id"]) == seen_block):
+            # Recorded after this submit looked: keep it; only the block this submit resolves may clear.
+            raise Refused("task-paused", f"{task['id']} is {now_task['status']}: {now_task.get('pause_reason') or ''}",
+                          scope=task["id"], preserved="your worktree", next_step="stop and wait; the orchestrator is resolving it")
         seq = con.execute("SELECT COUNT(*) FROM revisions WHERE run_id=?", (run["id"],)).fetchone()[0] + 1
         # revisions.id is a GLOBAL primary key shared by every run in runs.db; a bare
         # per-run "R{seq}" collides with the first revision of any earlier run.

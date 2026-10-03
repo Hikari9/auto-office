@@ -2011,7 +2011,13 @@ def job_notify_worker(con, run: dict, job: dict) -> dict:
             with db.transaction(con):
                 task = state.get_task(con, run["id"], payload["task_id"])
                 # Still this dispatch's own block (a revoke or newer owner since keeps its blocker).
-                if task and task["current_dispatch_id"] == d["id"] and submit.unblock_self(con, run, task):
+                current = con.execute("SELECT amendment_id FROM deliveries WHERE run_id=? AND task_id=? AND dispatch_id=? "
+                                      "AND status IN ('queued','delivered') ORDER BY target_version DESC LIMIT 1",
+                                      (run["id"], payload["task_id"], d["id"])).fetchone()
+                # Only the current amendment for the current block lifts it; a stale notice leaves it.
+                fresh = bool(current and current["amendment_id"] == payload.get("amendment_id")
+                             and submit.block_id(con, d["id"]) == payload.get("block_id"))
+                if task and fresh and task["current_dispatch_id"] == d["id"] and submit.unblock_self(con, run, task):
                     state.emit(con, run, "task.unblocked", f"{task['id']} unblocked: {payload.get('amendment_id')} "
                                "delivered to the live worker, which resubmits", audience="runtime", task_id=task["id"],
                                dispatch_id=d["id"])
@@ -2027,7 +2033,7 @@ def _amendment_undelivered(con, run: dict, payload: dict, d: dict) -> None:
     tid = payload["task_id"]
     with db.transaction(con):
         state.emit(con, run, "task.amend_undelivered", f"{tid} {payload.get('amendment_id')} not confirmed delivered "
-                   f"to {d['id']}; its blocker stays: office rerun {tid} --resume|--fresh", task_id=tid, dispatch_id=d["id"])
+                   f"to {d['id']}; its blocker stays: office revoke {tid}, then office rerun {tid} --resume|--fresh", task_id=tid, dispatch_id=d["id"])
 
 
 def start_stacked(con, run: dict, accepted_task: str) -> list[str]:

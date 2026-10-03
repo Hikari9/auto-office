@@ -24,7 +24,7 @@ def _worker(env, tid="T1"):
 MANUAL = {"OFFICE_JOBS": "manual"}
 
 
-def _notify(env, monkeypatch, *, alive: bool, landed: str):
+def _notify(env, monkeypatch, *, alive: bool, landed: str, first: bool = False):
     """Run the queued notify_worker job as a herdr-hosted worker whose agent is `alive`
     or not and whose prompt delivery reports `landed`."""
     from office import dispatch, gates, state
@@ -33,7 +33,7 @@ def _notify(env, monkeypatch, *, alive: bool, landed: str):
     con.commit()
     monkeypatch.setattr(gates, "_agent_alive", lambda name: alive)
     monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **kw: landed)
-    row = con.execute("SELECT id FROM outbox WHERE kind='notify_worker' ORDER BY created_at DESC").fetchone()
+    row = con.execute("SELECT id FROM outbox WHERE kind='notify_worker' ORDER BY created_at " + ("ASC" if first else "DESC")).fetchone()
     job = state.get_job(con, row["id"])
     run = state.get_run(con, job["run_id"])
     return dispatch.job_notify_worker(con, run, job)
@@ -266,7 +266,7 @@ def test_amendment_to_a_dead_or_unconfirmed_agent_keeps_the_blocker(env, monkeyp
     row = task_row(env)
     assert row["status"] == "blocked" and row["pause_reason"].startswith("scope requested"), row
     ev = env.con().execute("SELECT summary FROM events WHERE kind='task.amend_undelivered'").fetchone()
-    assert ev and "office rerun T1 --resume|--fresh" in ev[0], ev
+    assert ev and "office revoke T1, then office rerun T1 --resume|--fresh" in ev[0], ev
 
 
 @pytest.mark.approved
@@ -330,6 +330,63 @@ def test_bounded_reader_stops_an_endless_process():
     from office import submit as submit_mod
     text, cut = submit_mod._bounded([sys.executable, "-c", "import sys\nwhile True: sys.stdout.write('z'*1000)"], Path("."), 5000)
     assert cut and len(text) == 5000
+
+
+@pytest.mark.approved
+def test_stale_amendment_notice_leaves_a_newer_blocker(env, monkeypatch):
+    wenv, wt = _live_refused(env)
+    env.office("submit", "--request-scope", "README.md", "--", "first", cwd=wt, env=wenv)
+    env.write_plan(WIDER)
+    env.office("amend", "T1", "--contract", "--", "add README.md", env=MANUAL, check=0)  # A1 queued
+    env.office("submit", "--request-scope", "README.md", "--", "second", cwd=wt, env=wenv)
+    env.write_plan(WIDER.replace("README.md", "README.md, docs/x.md"))
+    env.office("amend", "T1", "--contract", "--", "more", env=MANUAL, check=0)  # A2
+    _notify(env, monkeypatch, alive=True, landed="landed", first=True)  # A1 lands late
+    row = task_row(env)
+    assert row["status"] == "blocked" and "second" in row["pause_reason"], row
+    _notify(env, monkeypatch, alive=True, landed="landed")  # the current one lifts it
+    assert task_row(env)["status"] == "running"
+
+
+@pytest.mark.approved
+def test_request_diff_covers_committed_staged_and_unstaged_changes(env):
+    approved_run(env, executor=[{}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    wenv, wt = _worker(env)
+    (wt / "README.md").write_text("committed line\n")
+    env.git("add", "README.md", cwd=wt)
+    env.git("commit", "-qm", "wip", cwd=wt)
+    code, out = env.office("submit", "--request-scope", "README.md", "--", "docs", cwd=wt, env=wenv)
+    assert code == 0, out
+    diff = json.loads(env.con().execute("SELECT payload_json FROM events WHERE kind='task.scope_requested'").fetchone()[0])["diff"]
+    assert "committed line" in diff, diff
+
+
+@pytest.mark.approved
+def test_submit_does_not_clear_a_scope_request_recorded_in_between(env, monkeypatch):
+    from office import submit as submit_mod
+    approved_run(env, executor=[{}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    wenv, wt = _worker(env)
+    (wt / "calc.py").write_text(GOOD_ADD)
+    real = submit_mod._dependency_bases
+    done = []
+
+    def racing(*a, **kw):
+        out = real(*a, **kw)
+        if not done:
+            done.append(1)
+            # the same worker's scope request lands after this submit's first status check
+            monkeypatch.setattr(submit_mod, "_dependency_bases", real)
+            env.office("submit", "--request-scope", "README.md", "--", "race", cwd=wt, env=wenv, check=0)
+        return out
+
+    monkeypatch.setattr(submit_mod, "_dependency_bases", racing)
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert code == 4, out
+    row = task_row(env)
+    assert row["status"] == "blocked" and row["pause_reason"].startswith("scope requested"), row
+    assert not env.con().execute("SELECT 1 FROM revisions").fetchone()
 
 
 def test_plan_review_brief_asks_for_registries_in_scope():
