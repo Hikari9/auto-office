@@ -190,9 +190,9 @@ def _route_next(decision: dict, tid: str, run: dict | None = None) -> str:
             return (f"a user may promote a route: office approve trust {r['candidate']} --quote \"<user's words>\"; "
                     "or office inspect route for details")
     if decision.get("status") == "protected_quota_would_be_consumed":
-        remedy = candidates.protected_quota_remedy(run, tid, "--as") if run else ""
+        remedy = candidates.protected_quota_remedy(run, "executor", tid) if run else ""
         return ("wait for quota, choose a cheaper strategy, or obtain explicit user authority"
-                + (f"; {remedy} (code review: --review-as)" if remedy else ""))
+                + (f"; {remedy}" if remedy else ""))
     return f"office inspect route {tid}"
 
 

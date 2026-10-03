@@ -45,11 +45,14 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         raise Usage("no-repository", "office start must run inside a git repository",
                     next_step="cd into the repository, then office start")
     top, common = ident
-    config, warnings = cfg.resolve(top, sets)
-    # The raw file blocks at start (no defaults, no --set), so a later drift
-    # check compares files to files: neither a launch override nor a changed
-    # shipped default reads as an edit.
-    pinned = {**config, cfg.FILE_BLOCKS_KEY: cfg.file_blocks(top)}
+    # One read of the config files feeds both the pinned policy and the raw
+    # file blocks recorded as its drift baseline (no defaults, no --set), so an
+    # edit during start cannot pin one value and record another; a later drift
+    # check compares files to files, and neither a launch override nor a
+    # changed shipped default reads as an edit.
+    files = cfg.read_files(top)
+    config, warnings = cfg.resolve(top, sets, files=files)
+    pinned = {**config, cfg.FILE_BLOCKS_KEY: cfg.file_blocks(top, files)}
     risk = cfg.resolve_risk(config, blast_radius, size_class, irreversible)
     gear = cfg.fit_gear(gear, risk, volume, interview, adversarial)
     if gear not in cfg.GEARS:

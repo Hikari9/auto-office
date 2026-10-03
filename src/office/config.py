@@ -6,6 +6,7 @@ pinned snapshot, never from the live files.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -51,19 +52,27 @@ def _same_shape(a: Any, b: Any) -> bool:
     return type(a) is type(b)
 
 
-def resolve(repo_root: Path | None, sets: list[str] | None = None) -> tuple[dict, list]:
-    """Return (effective config, warnings)."""
+def read_files(repo_root: Path | None) -> dict[str, str | None]:
+    """One snapshot of the user and repo config files: each file's text, read
+    once, or None when absent. Values derived together (a run's pinned policy
+    and its drift baseline) must come from the same snapshot, or an edit
+    between two reads pins one value and records another."""
+    default = load_yaml(default_config_path()) or {}
+    files = {"user": paths.user_config_path()}
+    if repo_root is not None:
+        files["repo"] = Path(repo_root) / (default.get("paths") or {}).get("repo", ".auto-office/config.yaml")
+    return {tier: (path.read_text(encoding="utf-8") if path.is_file() else None) for tier, path in files.items()}
+
+
+def resolve(repo_root: Path | None, sets: list[str] | None = None,
+            files: dict[str, str | None] | None = None) -> tuple[dict, list]:
+    """Return (effective config, warnings). `files` is a read_files() snapshot;
+    without one the files are read now."""
     default = load_yaml(default_config_path()) or {}
     allowed = set(default) - NON_CONFIGURABLE_KEYS
-    layers: list[tuple[str, Any]] = []
-    user = paths.user_config_path()
-    if user.is_file():
-        layers.append(("user", load_yaml(user) or {}))
-    if repo_root is not None:
-        rel = (default.get("paths") or {}).get("repo", ".auto-office/config.yaml")
-        repo_cfg = Path(repo_root) / rel
-        if repo_cfg.is_file():
-            layers.append(("repo", load_yaml(repo_cfg) or {}))
+    files = read_files(repo_root) if files is None else files
+    layers: list[tuple[str, Any]] = [(tier, yaml.safe_load(files[tier]) or {})
+                                     for tier in ("user", "repo") if files.get(tier) is not None]
     cli: dict = {}
     for expr in sets or []:
         if "=" not in expr:
@@ -106,66 +115,74 @@ DRIFT_BLOCKS = ("quota", "roles")
 FILE_BLOCKS_KEY = "_file_blocks_at_start"
 
 
-def file_blocks(repo_root: Path | None) -> dict:
+def file_blocks(repo_root: Path | None, files: dict[str, str | None] | None = None) -> dict:
     """The raw quota/roles blocks of the user and repo config files, without
-    defaults or --set: what a person edited, independent of the runtime."""
-    default = load_yaml(default_config_path()) or {}
-    files = {"user": paths.user_config_path()}
-    if repo_root is not None:
-        files["repo"] = Path(repo_root) / (default.get("paths") or {}).get("repo", ".auto-office/config.yaml")
+    defaults or --set: what a person edited, independent of the runtime.
+    `files` is a read_files() snapshot; without one the files are read now."""
+    files = read_files(repo_root) if files is None else files
     out: dict = {}
-    for tier, path in files.items():
+    for tier, text in files.items():
         try:
-            data = load_yaml(path) if path.is_file() else None
-        except (OSError, yaml.YAMLError):
+            data = yaml.safe_load(text) if text is not None else None
+        except yaml.YAMLError:
             data = None
         data = data if isinstance(data, dict) else {}
         out[tier] = {b: data[b] for b in DRIFT_BLOCKS if b in data}
     return out
 
 
-def _differs(raw: Any, pinned: Any) -> bool:
-    """Whether any key in `raw` has a different value in `pinned`."""
-    if isinstance(raw, dict):
-        return any(_differs(v, pinned.get(k) if isinstance(pinned, dict) else None) for k, v in raw.items())
-    return raw != pinned
+def _leaf_diffs(pinned: Any, live: Any, path: str) -> list[tuple[str, Any, Any]]:
+    """(dotted key, pinned, live) for each differing leaf; a key missing on
+    either side counts as a difference."""
+    if isinstance(pinned, dict) and isinstance(live, dict):
+        return [d for k in sorted(set(pinned) | set(live), key=str)
+                for d in _leaf_diffs(pinned.get(k), live.get(k), f"{path}.{k}")]
+    return [] if pinned == live else [(path, pinned, live)]
+
+
+def _describe(diffs: list[tuple[str, Any, Any]], limit: int = 3) -> str:
+    def show(v: Any) -> str:
+        return "unset" if v is None else (json.dumps(v, sort_keys=True) if isinstance(v, (dict, list)) else str(v))
+    parts = [f"{k} pinned {show(a)}, live {show(b)}" for k, a, b in diffs[:limit]]
+    if len(diffs) > limit:
+        parts.append(f"{len(diffs) - limit} more")
+    return "; ".join(parts)
 
 
 def config_drift(run: dict) -> str | None:
-    """A notice when the config files' quota or roles blocks differ from what
-    `office start` saw; those edits do not reach a running run. Runs without a
-    recorded baseline compare live resolved values to the pinned ones, so the
-    notice there is qualified (a --set at start looks the same)."""
+    """A notice when live config differs from what a running run pinned; the
+    live values never reach that run.
+
+    A run that recorded its files' raw quota/roles blocks at start compares
+    files to files, so only a real file edit warns (a --set at start or a
+    changed shipped default does not). An older run has no such baseline: its
+    pinned quota/roles are compared to the live resolved values, and the
+    notice does not claim a cause."""
     pinned = run.get("policy") or {}
     root = run.get("repo_root")
     repo = Path(root) if root and Path(root).is_dir() else None
     short = run["id"][:8]
-    reserve = (pinned.get("quota") or {}).get("reserve_percent", "-")
     try:
-        live, _ = resolve(repo)
+        files = read_files(repo)
+        live, _ = resolve(repo, files=files)
+        diffs = [d for b in DRIFT_BLOCKS for d in _leaf_diffs(pinned.get(b), live.get(b), b)]
         recorded = pinned.get(FILE_BLOCKS_KEY)
         if recorded is not None:
-            now = file_blocks(repo)
+            now = file_blocks(repo, files)
             differ = [b for b in DRIFT_BLOCKS
                       if any((now.get(t) or {}).get(b) != (recorded.get(t) or {}).get(b) for t in ("user", "repo"))]
             if not differ:
                 return None
-            detail = (f": quota.reserve_percent pinned {reserve}, live {(live.get('quota') or {}).get('reserve_percent', '-')}"
-                      if "quota" in differ else "")
+            diffs = [d for d in diffs if d[0].split(".", 1)[0] in differ]
             return (f"config edited since run start; not applied to running run {short} "
-                    f"({', '.join(differ)} differ{detail})")
+                    f"({', '.join(differ)} differ{': ' + _describe(diffs) if diffs else ''})")
     except (OSError, ValueError, yaml.YAMLError):
         return None
-    # Only keys present in the files are compared; a key that exists only in the
-    # shipped defaults can change between releases without being an edit.
-    now = file_blocks(repo)
-    raw = {b: deep_merge(now["user"].get(b) or {}, (now.get("repo") or {}).get(b) or {}, "repo", []) for b in DRIFT_BLOCKS}
-    differ = [b for b in DRIFT_BLOCKS if _differs(raw[b], pinned.get(b))]
-    if not differ:
+    if not diffs:
         return None
-    return (f"config differs from run {short}'s pinned values (edited since start, or --set at start); "
-            f"not applied to this run ({', '.join(differ)} differ: quota.reserve_percent pinned {reserve}, "
-            f"live {(live.get('quota') or {}).get('reserve_percent', '-')})")
+    return (f"config differs from run {short}'s pinned values (pinned before Office recorded a baseline, so the "
+            "cause is unknown: a file edit, a --set at start, or a changed default); "
+            f"not applied to this run ({_describe(diffs)})")
 
 
 def snapshot_hashes() -> dict:

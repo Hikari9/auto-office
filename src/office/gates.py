@@ -317,7 +317,7 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                                              exclude=excluded)
         if decision.get("status") != "selected":
             failures.append(f"no qualifying {role} route ({decision.get('status')})"
-                            + (f"; {candidates.protected_quota_remedy(run, gate.get('task_id'))}"
+                            + (f"; {candidates.protected_quota_remedy(run, role, gate.get('task_id'))}"
                                if decision.get("status") == "protected_quota_would_be_consumed" else ""))
             break
         cand = decision["candidate"]

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
 
-from conftest import GOOD_ADD, approved_run, task_row
+from conftest import GOOD_ADD, PLAN_ONE, approved_run, task_row
 from office import candidates, config as cfg, dispatch
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
@@ -125,8 +126,44 @@ def test_protected_quota_gate_names_review_as_and_the_pinned_reserve(env, monkey
 def test_route_next_for_protected_quota_names_the_remedy():
     run = {"policy": {"quota": {"reserve_percent": 9}}}
     text = dispatch._route_next({"status": "protected_quota_would_be_consumed"}, "T4", run)
-    assert "office dispatch T4 --as" in text and "--review-as" in text and "pinned at 9%" in text, text
-    assert "explicit user authority" in text
+    assert "office dispatch T4 --as <harness>/<model>[@effort]" in text and "pinned at 9%" in text, text
+    assert "--review-as" not in text and "explicit user authority" in text, text
+
+
+def test_protected_quota_remedy_fits_the_role():
+    run = {"policy": {"quota": {"reserve_percent": 9}}}
+    code = candidates.protected_quota_remedy(run, "code_reviewer", "T4")
+    assert "office dispatch T4 --review-as <harness>/<model>[@effort]" in code and "pinned at 9%" in code, code
+    visual = candidates.protected_quota_remedy(run, "visual_reviewer", "T4")
+    assert "office approve visual T4 --by" in visual and "--review-as" not in visual, visual
+    for role in ("plan_reviewer", "integration_reviewer"):
+        text = candidates.protected_quota_remedy(run, role, None)
+        assert "office dispatch" not in text and "--review-as" not in text, text
+        assert "wait for quota" in text and "pinned at 9%" in text and "config edits do not apply" in text, text
+
+
+def test_protected_quota_plan_gate_gives_quota_guidance_not_review_as(env, monkeypatch):
+    real = candidates.route_role
+
+    def route(con, config, run, role, **kw):
+        if role == "plan_reviewer":
+            return {"status": "protected_quota_would_be_consumed", "rejected": [], "skipped": []}
+        return real(con, config, run, role, **kw)
+
+    monkeypatch.setattr(candidates, "route_role", route)
+    env.trust()
+    env.script()
+    code, out = env.office("start", "g", "--gear", "express", "--planner", "inline")
+    assert code == 0, out
+    env.write_plan(PLAN_ONE)
+    env.office("submit", check=0)
+    con = env.con()
+    rows = [dict(r) for r in con.execute("SELECT verdict, summary FROM gates WHERE subject='plan'").fetchall()]
+    assert rows and rows[-1]["verdict"] == "UNAVAILABLE", rows
+    summary = rows[-1]["summary"]
+    pinned = json.loads(con.execute("SELECT policy_json FROM runs").fetchone()[0])["quota"]["reserve_percent"]
+    assert "protected_quota_would_be_consumed" in summary and f"pinned at {float(pinned):g}%" in summary, summary
+    assert "wait for quota" in summary and "--review-as" not in summary and "office dispatch" not in summary, summary
 
 
 @pytest.mark.parametrize("where", ["user", "repo"])
@@ -191,17 +228,22 @@ def _make_legacy(env):
     con.execute("UPDATE runs SET policy_json=?", (json.dumps(pol),))
 
 
-def test_legacy_run_with_an_edited_file_warns_with_the_qualified_text(env):
+LEGACY_CAUSE_UNKNOWN = ("pinned values (pinned before Office recorded a baseline, so the cause is unknown: "
+                        "a file edit, a --set at start, or a changed default)")
+
+
+def test_legacy_run_with_an_edited_file_warns_without_claiming_a_cause(env):
     _write_reserve(env.tmp / "user-config.yaml", 7)
     approved_run(env)
     _make_legacy(env)
     _write_reserve(env.tmp / "user-config.yaml", 3)
     code, out = env.office("status")
-    assert "config differs from run" in out and "pinned values (edited since start, or --set at start)" in out, out
-    assert "not applied to this run" in out and "quota.reserve_percent pinned 7" in out, out
+    assert "config differs from run" in out and LEGACY_CAUSE_UNKNOWN in out, out
+    assert "not applied to this run" in out and "quota.reserve_percent pinned 7, live 3" in out, out
+    assert "config edited" not in out, out
 
 
-def test_legacy_run_with_unchanged_files_does_not_warn(env):
+def test_legacy_run_with_unchanged_config_does_not_warn(env):
     _write_reserve(env.tmp / "user-config.yaml", 7)
     approved_run(env)
     _make_legacy(env)
@@ -249,17 +291,58 @@ def test_recovery_keeps_the_sessions_binding_to_another_run(env):
     assert row["run_id"] == other and row["ended_at"] is None, dict(row)
 
 
-def test_legacy_run_ignores_a_change_in_shipped_defaults(env, monkeypatch):
-    _write_reserve(env.tmp / "user-config.yaml", 7)
+def test_legacy_run_with_a_changed_default_warns_without_claiming_an_edit(env, monkeypatch):
     approved_run(env)
     _make_legacy(env)
+    pinned = json.loads(env.con().execute("SELECT policy_json FROM runs").fetchone()[0])["quota"]["reserve_percent"]
     changed = env.tmp / "default-config.yaml"
     text = cfg.default_config_path().read_text(encoding="utf-8")
     changed.write_text(re.sub(r"reserve_percent:\s*\S+", "reserve_percent: 41", text, count=1), encoding="utf-8")
     monkeypatch.setattr(cfg, "default_config_path", lambda: changed)
     code, out = env.office("status")
-    assert code == 0 and "config edited" not in out and "config differs" not in out, out
-    # An edit of a key the files do mention still warns.
-    _write_reserve(env.tmp / "user-config.yaml", 3)
+    assert LEGACY_CAUSE_UNKNOWN in out and "not applied to this run" in out, out
+    assert f"quota.reserve_percent pinned {pinned}, live 41" in out and "config edited" not in out, out
+    code, out = env.office("doctor")
+    assert LEGACY_CAUSE_UNKNOWN in out and "config edited" not in out, out
+
+
+def test_legacy_run_with_a_removed_pinned_key_warns(env):
+    user = env.tmp / "user-config.yaml"
+    _write_reserve(user, 7)
+    approved_run(env)
+    _make_legacy(env)
+    user.write_text("{}\n")
+    live = cfg.load_yaml(cfg.default_config_path())["quota"]["reserve_percent"]
+    assert live != 7
     code, out = env.office("status")
-    assert "config differs from run" in out, out
+    assert LEGACY_CAUSE_UNKNOWN in out and f"quota.reserve_percent pinned 7, live {live}" in out, out
+    assert "config edited" not in out, out
+
+
+def test_start_reads_each_config_file_once_so_pin_and_baseline_agree(env, monkeypatch):
+    """An edit landing between two reads during `office start` must not pin
+    one value and record another as the drift baseline."""
+    user = env.tmp / "user-config.yaml"
+    _write_reserve(user, 7)
+    real = Path.read_text
+    reads = []
+
+    def read_text(self, *a, **kw):
+        # Count the config module's reads; runs_db and new_runs lookups read
+        # other keys of the same file.
+        if self == user and sys._getframe(1).f_globals.get("__name__") == "office.config":
+            reads.append(1)
+            if len(reads) > 1:  # the edit lands after the first read
+                return "quota:\n  reserve_percent: 3\n"
+        return real(self, *a, **kw)
+
+    env.trust()
+    env.script()
+    monkeypatch.setattr(Path, "read_text", read_text)
+    code, out = env.office("start", "g", "--planner", "inline")
+    monkeypatch.setattr(Path, "read_text", real)
+    assert code == 0, out
+    assert len(reads) == 1, reads
+    pol = json.loads(env.con().execute("SELECT policy_json FROM runs").fetchone()[0])
+    assert pol["quota"]["reserve_percent"] == 7
+    assert pol[cfg.FILE_BLOCKS_KEY]["user"]["quota"]["reserve_percent"] == 7
