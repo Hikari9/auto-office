@@ -9,9 +9,11 @@ lost response never duplicates work.
 from __future__ import annotations
 
 import os
-from datetime import datetime
+import stat
 import tempfile
 import uuid
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 from office import briefs, db, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, state, version
@@ -296,7 +298,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     pending = con.execute("SELECT id, target_version FROM deliveries WHERE run_id=? AND task_id=? AND status IN "
                           "('queued','delivered') ORDER BY target_version DESC LIMIT 1", (run["id"], task["id"])).fetchone()
     res = Result()
-    with db.transaction(con):
+    with _evidence_commit() as staged, db.transaction(con):
         again = con.execute("SELECT * FROM revisions WHERE operation_id=?", (op_id,)).fetchone()
         if again:
             return _duplicate(con, run, dict(again))
@@ -320,7 +322,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                      prev, dumps(changed), now_iso()))
         paths.git(wt, "update-ref", f"refs/office/{run['id'][:8]}/{task['id']}/{rev_id}", commit)
         if not task["scope"]:
-            _save_evidence(run, d, wt, rev_id)
+            _stage_evidence(run, d, wt, rev_id, staged)
         if prs.enabled(run):
             prs.advance_branch(run, d, commit)
             prs.queue(con, run, task["id"], "revision", rev_id)
@@ -350,7 +352,23 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     return res
 
 
-def _save_evidence(run: dict, d: dict, wt: Path, rev_id: str) -> None:
+@contextmanager
+def _evidence_commit():
+    """Yields a list that `_stage_evidence` fills. The worktree file is consumed
+    only after the surrounding transaction commits; on any failure the staged
+    copy is discarded and the worktree file is kept."""
+    staged: list[tuple[Path, Path]] = []
+    try:
+        yield staged
+    except BaseException:
+        for _, dest in staged:
+            dest.unlink(missing_ok=True)
+        raise
+    for src, _ in staged:
+        src.unlink(missing_ok=True)  # consumed: the next submission must write its own
+
+
+def _stage_evidence(run: dict, d: dict, wt: Path, rev_id: str, staged: list) -> None:
     """Copy a scope-none task's evidence file where the code reviewer's brief reads it."""
     src = wt / briefs.EVIDENCE_FILE
     # Only a regular, untracked file the executor wrote: a symlink could point at
@@ -364,13 +382,14 @@ def _save_evidence(run: dict, d: dict, wt: Path, rev_id: str) -> None:
     try:
         if d.get("started_at") and src.stat().st_mtime < datetime.fromisoformat(d["started_at"]).timestamp():
             return
-    except (OSError, ValueError):
-        return
-    try:
         fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            # A hard link to another file (a credential) shares its inode: ordinary evidence has one link.
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+                return
             raw = fh.read(briefs.EVIDENCE_MAX_CHARS * 4 + 1)
-    except OSError:
+    except (OSError, ValueError):
         return
     text = raw.decode("utf-8", errors="replace")
     if len(text) > briefs.EVIDENCE_MAX_CHARS:
@@ -378,7 +397,7 @@ def _save_evidence(run: dict, d: dict, wt: Path, rev_id: str) -> None:
     dest = briefs.evidence_path(run, d["id"], rev_id)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(text, encoding="utf-8")
-    src.unlink(missing_ok=True)  # consumed: the next submission must write its own
+    staged.append((src, dest))
 
 
 def _duplicate(con, run: dict, rev: dict) -> Result:

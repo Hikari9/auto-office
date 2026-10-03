@@ -69,3 +69,37 @@ def test_scope_none_evidence_reaches_the_code_reviewer(env, monkeypatch):
               and "EXECUTOR EVIDENCE" in p.read_text(errors="replace")]
     assert briefs and all("comment https://github.com/o/r/issues/7#c1: shipped" in b for b in briefs), briefs
     assert any("SCOPE none" in p.read_text(errors="replace") for p in env.state.rglob("brief.md"))
+
+
+PLAN_ONLY_COMMENT = PLAN_ONE.split("## Tasks")[0] + """## Tasks
+### T1: Post the summary on the issue
+scope: none
+depends: none
+checks: none
+accept:
+- the summary comment is posted
+visual: none
+"""
+
+
+def test_land_with_prs_off_is_a_no_op_when_no_task_needs_a_pr(env):
+    env.trust()
+    env.script(executor=[{"submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}],
+               integration_reviewer=[{"reply": "VERDICT: PASS"}])
+    start_inline(env, plan=PLAN_ONLY_COMMENT, extra=("--no-prs",))
+    env.office("approve", "plan", "--quote", "go", check=0)
+    env.office("dispatch", "T1", check=0)
+    code, out = env.office("land", "--merge", "--quote", "merge it")
+    assert "prs-off" not in out and "nothing to merge" in out, out
+
+
+def test_land_with_prs_off_still_refuses_when_a_scoped_task_needs_merging(env):
+    env.trust()
+    env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}, {"submit": True}],
+               code_reviewer=[{"reply": "VERDICT: PASS"}, {"reply": "VERDICT: PASS"}],
+               integration_reviewer=[{"reply": "VERDICT: PASS"}])
+    start_inline(env, plan=PLAN_COMMENT, extra=("--no-prs",))
+    env.office("approve", "plan", "--quote", "go", check=0)
+    env.office("dispatch", "T1", "T2", check=0)
+    code, out = env.office("land", "--merge", "--quote", "merge it")
+    assert "prs-off" in out, out

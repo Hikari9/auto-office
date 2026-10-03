@@ -18,8 +18,9 @@ def _save(env, monkeypatch, setup, started_at=None):
     dest = env.tmp / "evidence-out.md"
     dest.unlink(missing_ok=True)
     monkeypatch.setattr(briefs, "evidence_path", lambda run, did, rid: dest)
-    submit._save_evidence({"id": "r"}, {"id": "d", "started_at": started_at}, wt, "R1")
     _save.wt = wt
+    with submit._evidence_commit() as staged:
+        submit._stage_evidence({"id": "r"}, {"id": "d", "started_at": started_at}, wt, "R1", staged)
     return dest.read_text() if dest.exists() else None
 
 
@@ -58,3 +59,26 @@ def test_stale_evidence_from_an_earlier_dispatch_is_ignored(env, monkeypatch):
     assert _save(env, monkeypatch, lambda wt: (wt / briefs.EVIDENCE_FILE).write_text("stale"), started_at=later) is None
     earlier = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     assert _save(env, monkeypatch, lambda wt: (wt / briefs.EVIDENCE_FILE).write_text("fresh"), started_at=earlier) == "fresh"
+
+
+def test_hard_linked_evidence_is_refused(env, monkeypatch):
+    import os
+    secret = env.tmp / "secret.txt"
+    secret.write_text("TOKEN=abc")
+    assert _save(env, monkeypatch, lambda wt: os.link(secret, wt / briefs.EVIDENCE_FILE)) is None
+
+
+def test_rollback_keeps_the_worktree_file_and_discards_the_staged_copy(env, monkeypatch):
+    import pytest
+    wt = env.tmp / "evwt-rollback"
+    wt.mkdir()
+    subprocess.run(["git", "init", "-q", str(wt)], check=True)
+    (wt / briefs.EVIDENCE_FILE).write_text("posted")
+    dest = env.tmp / "evidence-rollback.md"
+    monkeypatch.setattr(briefs, "evidence_path", lambda run, did, rid: dest)
+    with pytest.raises(RuntimeError):
+        with submit._evidence_commit() as staged:
+            submit._stage_evidence({"id": "r"}, {"id": "d"}, wt, "R1", staged)
+            assert dest.read_text() == "posted"
+            raise RuntimeError("commit failed")
+    assert (wt / briefs.EVIDENCE_FILE).read_text() == "posted" and not dest.exists()
