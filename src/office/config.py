@@ -124,6 +124,13 @@ def file_blocks(repo_root: Path | None) -> dict:
     return out
 
 
+def _differs(raw: Any, pinned: Any) -> bool:
+    """Whether any key in `raw` has a different value in `pinned`."""
+    if isinstance(raw, dict):
+        return any(_differs(v, pinned.get(k) if isinstance(pinned, dict) else None) for k, v in raw.items())
+    return raw != pinned
+
+
 def config_drift(run: dict) -> str | None:
     """A notice when the config files' quota or roles blocks differ from what
     `office start` saw; those edits do not reach a running run. Runs without a
@@ -149,7 +156,11 @@ def config_drift(run: dict) -> str | None:
                     f"({', '.join(differ)} differ{detail})")
     except (OSError, ValueError, yaml.YAMLError):
         return None
-    differ = [b for b in DRIFT_BLOCKS if (live.get(b) or {}) != (pinned.get(b) or {})]
+    # Only keys present in the files are compared; a key that exists only in the
+    # shipped defaults can change between releases without being an edit.
+    now = file_blocks(repo)
+    raw = {b: deep_merge(now["user"].get(b) or {}, (now.get("repo") or {}).get(b) or {}, "repo", []) for b in DRIFT_BLOCKS}
+    differ = [b for b in DRIFT_BLOCKS if _differs(raw[b], pinned.get(b))]
     if not differ:
         return None
     return (f"config differs from run {short}'s pinned values (edited since start, or --set at start); "

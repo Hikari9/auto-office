@@ -64,7 +64,7 @@ def test_resume_from_a_task_worktree_is_refused_and_writes_no_binding(env):
 def test_resume_by_a_session_recorded_on_an_open_executor_dispatch_is_refused(env):
     d, _ = _dispatch_external(env)
     con = env.con()
-    con.execute("UPDATE dispatches SET session_id='sess-exec' WHERE id=?", (d["id"],))
+    con.execute("UPDATE dispatches SET harness='claude', session_id='sess-exec' WHERE id=?", (d["id"],))
     code, out = env.office("resume", d["run_id"][:8], env=SESSION)
     assert code == 4 and "executor-lost-binding" in out and _agent_env_command(env, d) in out, out
     assert _bindings(env) == 0
@@ -160,7 +160,7 @@ def test_stale_orchestrator_binding_of_an_executor_session_is_repaired_not_rebou
     assert code == 0 and out.startswith("T1 "), out
     assert con.execute("SELECT COUNT(*) FROM session_bindings WHERE session_id='sess-exec' AND ended_at IS NULL").fetchone()[0] == 0
     # A session id recorded on the open dispatch wins from any cwd, too.
-    con.execute("UPDATE dispatches SET session_id='sess-exec' WHERE id=?", (d["id"],))
+    con.execute("UPDATE dispatches SET harness='claude', session_id='sess-exec' WHERE id=?", (d["id"],))
     con.execute("INSERT INTO session_bindings(harness, session_id, run_id, bound_at, bound_by) VALUES(?,?,?,?,?) "
                 "ON CONFLICT(harness, session_id) DO UPDATE SET ended_at=NULL",
                 ("claude", "sess-exec", d["run_id"], "2026-01-01T00:00:00Z", "resume"))
@@ -221,3 +221,45 @@ def test_new_run_ignores_a_change_in_shipped_defaults_but_not_a_file_edit(env, m
     _write_reserve(env.tmp / "user-config.yaml", 3)
     code, out = env.office("status")
     assert "config edited since run start" in out, out
+
+
+def test_session_id_collision_across_harnesses_is_not_an_executor(env):
+    d, _ = _dispatch_external(env)
+    env.con().execute("UPDATE dispatches SET harness='claude', session_id='sess-exec' WHERE id=?", (d["id"],))
+    codex = {"OFFICE_HARNESS": "codex", "OFFICE_SESSION": "sess-exec"}
+    code, out = env.office("resume", d["run_id"][:8], env=codex)
+    assert code == 0, out
+    code, out = env.office("status", env=codex)
+    assert code == 0 and not out.startswith("T1 "), out
+
+
+@pytest.mark.approved
+def test_recovery_keeps_the_sessions_binding_to_another_run(env):
+    d, wt = _dispatch_external(env)
+    env.office("start", "second", "--planner", "inline", check=0)
+    con = env.con()
+    other = con.execute("SELECT id FROM runs WHERE id<>?", (d["run_id"],)).fetchone()[0]
+    con.execute("DELETE FROM session_bindings")
+    con.execute("INSERT INTO session_bindings(harness, session_id, run_id, bound_at, bound_by) VALUES(?,?,?,?,?)",
+                ("claude", "sess-exec", other, "2026-01-01T00:00:00Z", "resume"))
+    con.execute("UPDATE dispatches SET harness='claude' WHERE id=?", (d["id"],))
+    code, out = env.office("status", cwd=wt, env=SESSION)
+    assert code == 0 and out.startswith("T1 "), out
+    row = con.execute("SELECT run_id, ended_at FROM session_bindings WHERE session_id='sess-exec'").fetchone()
+    assert row["run_id"] == other and row["ended_at"] is None, dict(row)
+
+
+def test_legacy_run_ignores_a_change_in_shipped_defaults(env, monkeypatch):
+    _write_reserve(env.tmp / "user-config.yaml", 7)
+    approved_run(env)
+    _make_legacy(env)
+    changed = env.tmp / "default-config.yaml"
+    text = cfg.default_config_path().read_text(encoding="utf-8")
+    changed.write_text(re.sub(r"reserve_percent:\s*\S+", "reserve_percent: 41", text, count=1), encoding="utf-8")
+    monkeypatch.setattr(cfg, "default_config_path", lambda: changed)
+    code, out = env.office("status")
+    assert code == 0 and "config edited" not in out and "config differs" not in out, out
+    # An edit of a key the files do mention still warns.
+    _write_reserve(env.tmp / "user-config.yaml", 3)
+    code, out = env.office("status")
+    assert "config differs from run" in out, out

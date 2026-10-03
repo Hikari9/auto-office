@@ -126,24 +126,29 @@ def task_worktree(con, cwd: Path | str | None = None) -> tuple[dict, dict] | Non
 
 
 def executor_session_dispatch(con, keys: list[tuple[str, str]]) -> tuple[dict, dict] | None:
-    """(run, dispatch) of an open executor dispatch whose recorded session is one of `keys`."""
-    for _harness, session in keys:
-        row = con.execute("SELECT id, run_id FROM dispatches WHERE session_id=? AND role='executor' "
-                          "AND status IN ('launching','running')", (session,)).fetchone()
+    """(run, dispatch) of an open executor dispatch whose recorded harness and
+    session id are one of `keys` (an id alone can collide across harnesses)."""
+    for harness, session in keys:
+        row = con.execute("SELECT id, run_id FROM dispatches WHERE harness=? AND session_id=? AND role='executor' "
+                          "AND status IN ('launching','running')", (harness, session)).fetchone()
         if row:
             return get_run(con, row["run_id"]), get_dispatch(con, row["id"])
     return None
 
 
 def _end_stale_bindings(con, keys: list[tuple[str, str]], run: dict) -> None:
-    """End bindings of an executor's own session; never rebinds."""
+    """End the caller's binding to the recovered executor's own run (the stale
+    orchestrator binding an executor made there); bindings to other runs stay.
+    Never rebinds."""
     from office import db
     live = [(h, s) for h, s in keys if con.execute(
-        "SELECT 1 FROM session_bindings WHERE harness=? AND session_id=? AND ended_at IS NULL", (h, s)).fetchone()]
+        "SELECT 1 FROM session_bindings WHERE harness=? AND session_id=? AND run_id=? AND ended_at IS NULL",
+        (h, s, run["id"])).fetchone()]
     if live:
         with db.transaction(con):
             for h, s in live:
-                con.execute("UPDATE session_bindings SET ended_at=? WHERE harness=? AND session_id=?", (now_iso(), h, s))
+                con.execute("UPDATE session_bindings SET ended_at=? WHERE harness=? AND session_id=? AND run_id=?",
+                            (now_iso(), h, s, run["id"]))
         if run.get("git_common_dir"):
             primary = paths.primary_checkout(Path(run["git_common_dir"]))
             for h, s in live:
