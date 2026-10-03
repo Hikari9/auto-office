@@ -5,8 +5,8 @@ decides strategy; routed specialist agents plan, implement, and independently re
 owns every mechanical step behind one transactional state store (`runs.db`).
 
 - **Distribution:** `auto-office` · **Python package:** `office` · **Executable:** `office`
-- **Version:** 3.2.2 (`office --version` prints the exact identity; source checkouts report a
-  PEP 440 local version such as `3.2.2+g1a2b3c4d5e6f`)
+- **Version:** 3.2.3 (`office --version` prints the exact identity; source checkouts report a
+  PEP 440 local version such as `3.2.3+g1a2b3c4d5e6f`)
 
 ## Install
 
