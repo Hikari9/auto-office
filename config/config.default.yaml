@@ -178,6 +178,10 @@ verification:
   no_progress_repeats: 2
   job_timeout_seconds: 3600
   check_timeout_seconds: 1800
+  # Host-wide cap on check suites running at once (task, run, and integration
+  # checks across every run). 0 = max(1, CPUs // 4). Parallel full suites push
+  # load past the CPU count and turn per-test timeouts into flakes.
+  check_concurrency: 0
 # Risk signals that escalate the default (unpinned) gear fit test past `direct`/`light`/
 # `quick`/`direct+review` into `express`, and that resolve any `risk_forced` gate to True
 # regardless of which gear ends up selected. `blast_radius` and `size_class` come from

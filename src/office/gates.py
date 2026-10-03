@@ -9,6 +9,8 @@ plan defect on the task's scope.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -201,8 +203,45 @@ def job_run_checks(con, run: dict, job: dict) -> dict:
 
 
 def run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate: dict, *, check_tree: bool = True) -> dict:
-    from office.submit import matches_revision
     cfgv = state.pinned_config(run).get("verification") or {}
+    with check_slot(check_concurrency(cfgv)):
+        return _run_commands(con, run, commands, cwd, rev, gate, cfgv, check_tree=check_tree)
+
+
+def check_concurrency(cfgv: dict) -> int:
+    """How many check suites may run at once across every run on this host.
+    N parallel full test suites push load past the CPU count and turn per-test
+    timeouts into flakes (issue #268); 0 or unset means max(1, CPUs // 4)."""
+    n = int(cfgv.get("check_concurrency") or 0)
+    return n if n > 0 else max(1, (os.cpu_count() or 1) // 4)
+
+
+@contextlib.contextmanager
+def check_slot(limit: int, *, poll: float = 2.0):
+    """Hold one of `limit` host-wide check slots (flock'd files under the state
+    home, released by the kernel if this process dies). Waits for a free one."""
+    slots = paths.state_home() / "check-slots"
+    slots.mkdir(parents=True, exist_ok=True)
+    while True:
+        for i in range(limit):
+            fh = open(slots / f"slot-{i}.lock", "a")
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                fh.close()
+                continue
+            try:
+                yield i
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+                fh.close()
+            return
+        time.sleep(poll)
+
+
+def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate: dict, cfgv: dict, *,
+                  check_tree: bool = True) -> dict:
+    from office.submit import matches_revision
     timeout = int(cfgv.get("check_timeout_seconds", 1800))
     evdir = paths.run_dir(run["id"]) / "evidence" / (gate.get("task_id") or "integration") / rev["id"]
     evdir.mkdir(parents=True, exist_ok=True)
@@ -218,7 +257,9 @@ def run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate
             code, out = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
         except subprocess.TimeoutExpired as exc:
             code, out = 124, f"timed out after {timeout}s\n{exc.stdout or ''}"
-        loaded = host_overloaded() if code == 124 else None
+        # Office's own timeout (124) or a test runner's per-test timeout (exit 1)
+        # under host load is the environment, not the code (issue #267 A2).
+        loaded = host_overloaded() if code == 124 or (code != 0 and runner_timeout(out)) else None
         if loaded:
             out = f"{loaded}\n{out}"
         log.write_text(out, encoding="utf-8")
@@ -232,7 +273,8 @@ def run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate
                         "VALUES(?,?,?,?,?,?,?,?)", (uuid.uuid4().hex, rev["dispatch_id"], "check", command, int(passed), 0,
                                                     sha256_bytes(out.encode()), now_iso()))
         if loaded:
-            return {"verdict": "UNAVAILABLE", "summary": f"`{command}` timed out after {timeout}s; {loaded}; "
+            what = f"timed out after {timeout}s" if code == 124 else "hit a test-runner timeout"
+            return {"verdict": "UNAVAILABLE", "summary": f"`{command}` {what}; {loaded}; "
                     "rerun when the host is quieter: office resume", "results": results}
         if code == 127 or ("command not found" in out[-400:] and code != 0):
             return {"verdict": "UNAVAILABLE", "summary": f"check command not found: {command}", "results": results}
@@ -259,6 +301,22 @@ def host_overloaded() -> str | None:
     cpus = os.cpu_count() or 1
     limit = float(os.environ.get("OFFICE_CHECK_LOAD_FACTOR", "2")) * cpus
     return f"host load {load:.0f} exceeds {limit:.0f} ({cpus} CPUs)" if load > limit else None
+
+
+_RUNNER_TIMEOUT = re.compile(
+    r"Test timed out in \d+\s*ms"                 # vitest
+    r"|Exceeded timeout of \d+\s*ms"              # jest
+    r"|Timeout of \d+\s*ms exceeded"              # mocha
+    r"|Test timeout of \d+\s*ms exceeded"         # playwright
+    r"|\+{3,} Timeout \+{3,}|Failed: Timeout >",  # pytest-timeout
+    re.I)
+
+
+def runner_timeout(out: str) -> bool:
+    """A test runner's own per-test timeout fired. Exits nonzero like any
+    failure, so on its own it proves nothing; under host load it is the
+    environment. The rerun on `office resume` still catches a real failure."""
+    return bool(_RUNNER_TIMEOUT.search(out))
 
 
 def _check_env(run: dict) -> dict:
@@ -566,7 +624,8 @@ def _last_block(text: str) -> str:
 
 
 def _quota_signature(text: str) -> bool:
-    return bool(re.search(r"rate.?limit|quota|usage limit|429|too many requests|exhausted", text[-2000:], re.I))
+    return bool(re.search(r"rate.?limit|quota|usage limit|session limit|weekly limit|429|too many requests|exhausted",
+                          text[-2000:], re.I))
 
 
 def _auth_signature(text: str) -> bool:

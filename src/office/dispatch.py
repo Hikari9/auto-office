@@ -2321,6 +2321,16 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
                        f"(office amend {task['id']} -- ...) or the brief; work is preserved in its worktree",
                        task_id=task["id"])
             return
+        wall = _quota_wall(run, d)
+        if wall:
+            # Relaunching on the same route lands in the same exhausted quota
+            # (issue #267 A3): block at once and say so, never retry.
+            state.update_task(con, run["id"], task["id"], status="blocked",
+                              pause_reason=f"harness quota exhausted on {d['triple']}: {wall}")
+            state.emit(con, run, "task.blocked", f"{task['id']} worker hit a harness quota wall on {d['triple']} "
+                       f"({wall}); not relaunching into the same quota. After it resets: office rerun {task['id']} "
+                       f"--fresh; work is preserved in its worktree", task_id=task["id"])
+            return
         retries = con.execute("SELECT COUNT(*) FROM dispatches d WHERE d.run_id=? AND d.task_id=? AND d.terminal_classification "
                               "IS NOT NULL AND NOT EXISTS (SELECT 1 FROM revisions r WHERE r.dispatch_id=d.id)",
                               (run["id"], task["id"])).fetchone()[0]
@@ -2334,6 +2344,20 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
                           pause_reason=f"worker ended ({d['terminal_classification']}) without submitting")
         state.emit(con, run, "task.blocked", f"{task['id']} worker ended without submitting "
                    f"({d['terminal_classification']}); work is preserved in its worktree", task_id=task["id"])
+
+
+def _quota_wall(run: dict, d: dict) -> str | None:
+    """The harness's own quota/rate-limit line when a worker ended nonzero on
+    one. Only the last few log lines count: the harness prints the wall last,
+    while the worker's narration above it may mention quotas for any reason."""
+    if d.get("terminal_classification") in (None, "success"):
+        return None
+    from office import gates
+    text = gates._log_text(d, paths.run_dir(run["id"]) / "dispatches" / d["id"])
+    for line in [ln.strip() for ln in text.splitlines() if ln.strip()][-5:][::-1]:
+        if not line.startswith("[office]") and gates._quota_signature(line):
+            return line[:200]
+    return None
 
 
 def job_notify_worker(con, run: dict, job: dict) -> dict:

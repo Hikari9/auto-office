@@ -19,6 +19,7 @@ lines per task so a planner never writes JSON:
     ## Tasks
     ### T1: Reset endpoint
     scope: src/auth/**, tests/auth/**
+    shared: src/auth/gateManifest.ts
     depends: none
     checks: pytest -q tests/auth
     accept:
@@ -37,6 +38,11 @@ BLAST = ("local", "repo", "production", "production-data")
 # How far a run goes after its PRs (3.2): stop and ask, preview deploy only,
 # merge only, or merge + prod deploy end to end.
 END_STATES = ("ask", "preview", "merge", "e2e")
+# A scope entry this prefix marks (written as `shared: <paths>` on a task) is an
+# append-only registry several tasks may edit (an auth gate manifest, an
+# endpoint list, a mock table). Two shared entries never overlap: leases and
+# plan review do not serialize them, and the compose step merges the appends.
+SHARED = "+"
 LIST_KEYS = {"accept", "done", "non_goals", "non-goals", "actions", "checks", "notes", "interfaces", "questions"}
 VISUAL_KEYS = {"url", "start", "reference", "viewports", "states", "selectors", "strict", "affects", "ready", "auth",
                "deviations"}
@@ -123,8 +129,10 @@ def parse(text: str) -> ParsedPlan:
         if task is not None:
             list_key = key if (not value and key in LIST_KEYS) else None
             if key == "scope":
-                task["scope"] = _split_list(value)
+                task["scope"] = _split_list(value) + [s for s in task["scope"] if is_shared(s)]
                 task["scope_none"] = _is_no_check(value)  # `none`: no file scope (a comment or issue edit)
+            elif key == "shared":
+                task["scope"] += [SHARED + p.lstrip(SHARED) for p in _split_list(value)]
             elif key == "depends":
                 task["depends"] = _split_list(value)
             elif key == "interfaces":
@@ -289,6 +297,10 @@ def dependants(graph: dict[str, list[str]], node: str) -> set[str]:
     return out
 
 
+def is_shared(pattern: str) -> bool:
+    return pattern.startswith(SHARED)
+
+
 def literal_prefix(pattern: str) -> str:
     m = re.search(r"[*?\[]", pattern)
     return pattern[: m.start()] if m else pattern
@@ -297,7 +309,9 @@ def literal_prefix(pattern: str) -> str:
 def scopes_overlap(a: list[str], b: list[str]) -> bool:
     for pa in a:
         for pb in b:
-            la, lb = literal_prefix(pa), literal_prefix(pb)
+            if is_shared(pa) and is_shared(pb):
+                continue  # both append to a shared registry; compose resolves it
+            la, lb = literal_prefix(pa.lstrip(SHARED)), literal_prefix(pb.lstrip(SHARED))
             if la.startswith(lb) or lb.startswith(la):
                 return True
     return False
@@ -315,6 +329,7 @@ def _parallel_overlaps(tasks: list[dict]):
 def path_in_scope(path: str, scope: list[str]) -> bool:
     import fnmatch
     for pattern in scope:
+        pattern = pattern.lstrip(SHARED)
         if pattern.endswith("/**"):
             if path == pattern[:-3] or path.startswith(pattern[:-2]):
                 return True

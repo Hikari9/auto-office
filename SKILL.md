@@ -70,6 +70,11 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 
 - Dispatch as the approved diagram shows: a wave's roots with `office dispatch T1 T2 --parallel`,
   dependents stacked (`office dispatch T1 T3`). A `route differs from the plan preview` line names why.
+- Lanes come from file disjointness, not plan waves. List append-only registries several tasks touch
+  (gate manifests, endpoint/grant lists, policy maps, shared mocks) under each task's `shared:`; they
+  never serialize tasks or count as double-scope ownership. Scope tests a change predictably breaks.
+- Check suites share a host-wide cap (`verification.check_concurrency`). A quota wall blocks the worker
+  without a relaunch; rerun after the reset or with `--as`.
 - To wait on the run, use `office wait`: exit 0 means act, 3 means a stall to resolve, 124 means nothing
   new. Key on the exit code, never on matching status text.
 - Executors push their task branch as they work and submit; the runtime pushes the reviewed revision
@@ -146,8 +151,8 @@ If the default branch moved after `office start`, run `office land --rebase` fir
 accepted work onto the new head and re-runs the run checks and an integration review. A conflict refuses
 and prints the steps to compose by hand. Office rewrites only the block above the PR body's
 `<!-- office:pr ... -->` line, so put criteria that report data in the PR body below that line. A
-check that times out while host load exceeds twice the CPU count is UNAVAILABLE, not a failure.
-Rerun it with `office resume`.
+check or test-runner timeout while host load exceeds twice the CPU count is UNAVAILABLE, not a
+failure. Rerun it with `office resume`.
 With task PRs off (local, no GitHub, `--no-prs`), push the integration branch it names, open a PR
 with `Closes #<issue>`, and `office close --handoff <pr-url>`. Stop early with
 `office close --abandon "<reason>"`; nothing is deleted until `office prune -f`. When the work landed
