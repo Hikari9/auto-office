@@ -50,4 +50,8 @@ include = ["src", "config", "schemas", "catalog", "adapters", "skills", "scripts
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", ".", "scripts"]
-markers = ["approved: the test starts from a run whose default plan is approved (restored from a per-module snapshot)"]
+markers = [
+    "approved: the test starts from a run whose default plan is approved (restored from a per-module snapshot)",
+    "slow: minutes-long real-gate tests (dogfood); skipped by default, run with -m slow or -m 'slow or not slow'",
+]
+addopts = "-m 'not slow'"

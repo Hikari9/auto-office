@@ -12,6 +12,26 @@ requires_playwright = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _shared_browser():
+    """One Chromium per worker process, reused by every capture in this module (each capture still gets
+    its own browser context). Production leaves the hook unset and launches its own browser."""
+    if find_spec("playwright") is None:
+        yield
+        return
+    from playwright.sync_api import sync_playwright
+
+    from office import visual
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(**visual.launch_args())
+        visual._shared_browser = browser
+        try:
+            yield
+        finally:
+            visual._shared_browser = None
+            browser.close()
+
+
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
 PAGE = """<!doctype html><html><head><style>
