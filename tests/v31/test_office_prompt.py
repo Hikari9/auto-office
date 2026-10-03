@@ -83,3 +83,20 @@ def test_prompt_reaches_a_reviewer_recorded_exited_whose_agent_still_waits(env, 
     res = prompting.prompt(con, run, d["id"], "Write your complete review to the reply file.")
     assert "landed" in res.lines[0]
     assert len(_sent(_calls(state_file))[0]) == 1
+
+
+@pytest.mark.approved
+def test_auto_continue_prompts_the_agent_by_its_herdr_name_not_the_pane(env, monkeypatch):
+    """Real submit_prompt through the fake herdr: `agent prompt <office-agent-name> continue`."""
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY, BUSY])
+    from office import dispatch, guide
+    con.execute("UPDATE dispatches SET resets_at='2020-01-01T00:00:00+00:00', limit_label='9:30pm' WHERE id=?", (d["id"],))
+    con.commit()
+    run["policy"] = {"executor_usage_limit": {"auto_continue": True, "continue_grace_seconds": 0}}
+    row = dict(con.execute("SELECT * FROM dispatches WHERE id=?", (d["id"],)).fetchone())
+    limit = {"resets_at": None, "label": "9:30pm", "tz": None, "local": None}
+    act = {"alive": True, "busy": False, "hash": "h", "text": "Usage limit reached · limit resets 9:30pm"}
+    assert guide._usage_limit_stall(con, run, row, act, limit, "T1 executor") is None
+    prompts, raw = _sent(_calls(state_file))
+    assert prompts == [["agent", "prompt", dispatch.herdr_agent_name(d["id"]), "continue"]] and not raw
+    assert con.execute("SELECT limit_continue_outcome FROM dispatches WHERE id=?", (d["id"],)).fetchone()[0] == "landed"

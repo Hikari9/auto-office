@@ -317,14 +317,14 @@ def test_auto_continue_is_off_by_default(env, monkeypatch):
 
 def test_auto_continue_sends_one_continue_after_the_reset(env, monkeypatch):
     from datetime import datetime, timedelta, timezone
-    from office import rerun
+    from office import dispatch, rerun
     con, run, d, sent, guide = _limit_run(env, monkeypatch, auto=True)
     first = guide.stalls(con, run)
     assert len(first) == 1 and sent == []  # before the reset: a stall, nothing sent
     _set_reset(con, d, (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat())
     assert len(guide.stalls(con, run)) == 1 and sent == []  # inside the grace window
     _set_reset(con, d, "2020-01-01T00:00:00+00:00")
-    assert guide.stalls(con, run) == [] and sent == [("w1:p1", "continue")]
+    assert guide.stalls(con, run) == [] and sent == [(dispatch.herdr_agent_name(d["id"]), "continue")]
     events = con.execute("SELECT 1 FROM events WHERE kind='usage_limit.continue' AND dispatch_id=?", (d["id"],)).fetchall()
     assert len(events) == 1
     for _ in range(3):  # the limit screen still showing never triggers a second send

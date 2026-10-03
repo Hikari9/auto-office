@@ -334,7 +334,7 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
             con.execute("UPDATE dispatches SET limit_continued_at=?, limit_continue_outcome='pending', idle_since=?, "
                         "idle_hash=? WHERE id=?", (now_iso(), now_iso(), act["hash"], d["id"]))
         try:
-            got = dispatch.submit_prompt(d["pane_id"], "continue", pane=d["pane_id"])
+            got = dispatch.submit_prompt(dispatch.herdr_agent_name(d["id"]), "continue", pane=d["pane_id"])
         except Exception as e:  # herdr unreachable or the send failed
             got, err = None, f"{type(e).__name__}: {e}"[:200]
         else:
