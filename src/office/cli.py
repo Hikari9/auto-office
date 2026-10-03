@@ -322,6 +322,11 @@ def _target(con, args, require_run=True):
                                state_dir=args.state_dir, harness=args.harness, session=args.session)
     if target.run is not None:
         frontdoor.ensure_runtime(target.run)
+    if target.dispatch is not None:
+        # An executor that lost its env: act as that dispatch (the lease still fences it).
+        for key, value in (("OFFICE_RUN_ID", target.run["id"]), ("OFFICE_TASK_ID", target.dispatch["task_id"] or ""),
+                           ("OFFICE_DISPATCH_ID", target.dispatch["id"]), ("OFFICE_ROLE", target.dispatch["role"])):
+            os.environ.setdefault(key, value)
     return target
 
 
@@ -420,7 +425,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     cmd = args.cmd
     if cmd == "resume":
         from office import lifecycle
-        return lifecycle.resume(con, target, harness=args.harness, session=args.session)
+        return lifecycle.resume(con, target, harness=args.harness, session=args.session, cwd=cwd)
     if cmd == "status":
         from office import guide, jobs, lifecycle, db, state
         if not state.is_terminal(run):

@@ -333,6 +333,28 @@ def _preferred_seed(policy_cfg: dict, run: dict):
     return by_size.get(size) or policy_cfg.get("preferred_seed")
 
 
+def protected_quota_remedy(run: dict, role: str, task_id: str | None = None) -> str:
+    """What to do when routing `role` stopped on the protected quota reserve.
+    Only a role with a user route override gets a command: the executor
+    (dispatch --as), task code review (dispatch --review-as), and a task's
+    visual review (approve visual). Plan and integration review have none.
+    The reserve is pinned at `office start`, so a config edit does not apply."""
+    reserve = float(((run.get("policy") or {}).get("quota") or {}).get("reserve_percent", routing.DEFAULT_RESERVE_PERCENT))
+    pinned = (f"quota.reserve_percent is pinned at {reserve:g}% for this run (set at office start), "
+              "config edits do not apply to it")
+    route = "<harness>/<model>[@effort]"
+    if role == "executor" and task_id:
+        fix = f"office dispatch {task_id} --as {route}"
+    elif role == "code_reviewer" and task_id:
+        fix = f"office dispatch {task_id} --review-as {route}"
+    elif role == "visual_reviewer" and task_id:
+        fix = (f"a user may record a visual review they ran: office approve visual {task_id} --by {route} "
+               "--report <review file> --quote \"<user's words>\"")
+    else:
+        return f"wait for quota, choose a cheaper strategy, or obtain explicit user authority; {pinned}"
+    return f"fix: {fix}; {pinned}"
+
+
 def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                task_id: str | None = None, override: str | None = None,
                exclude: set[str] | None = None, probe: bool = True, exact: str | None = None) -> dict:
