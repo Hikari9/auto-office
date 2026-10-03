@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
 from office import briefs, db, gates, paths, review_parse, state, worktree_setup
-from office.util import dumps, now_iso, sha256_obj
+from office.util import dumps, now_iso, pid_alive, sha256_obj
 
 
 def _topo(tasks: list[dict]) -> list[dict]:
@@ -84,7 +86,6 @@ def worktree_lock(run: dict, *, wait: float = 0.0):
     no second compose can remove the worktree under a running check. A flock
     dies with its process, so a crashed job never leaves it held."""
     import fcntl
-    import time
     path = paths.worktrees_dir() / run["id"][:8] / "_integration.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     fh = open(path, "a")
@@ -172,9 +173,46 @@ def _set_integration(con, run: dict, **fields) -> None:
     state.update_run(con, run["id"], landing=landing)
 
 
+def _fenced_dir(run: dict) -> Path:
+    return paths.worktrees_dir() / run["id"][:8] / "_integration.fenced"
+
+
+def live_integrate_pids(con, run: dict, *, unfenced_only: bool = False) -> list[int]:
+    """Processes running a claimed integrate job of this run. An integrate
+    process from an older patch holds no flock, so the flock alone cannot see
+    it; the job table can. `unfenced_only` drops processes that registered as
+    flock holders (this code), which wait on the flock instead."""
+    fenced = {p.name for p in _fenced_dir(run).glob("*")} if unfenced_only else set()
+    pids = [r["claimed_pid"] for r in con.execute("SELECT claimed_pid FROM outbox WHERE run_id=? AND kind='integrate' "
+                                                  "AND status='claimed'", (run["id"],)).fetchall()]
+    return [p for p in pids if p and p != os.getpid() and str(p) not in fenced and pid_alive(p)]
+
+
+def refuse_if_integrating(con, run: dict) -> None:
+    """Refuse while any integrate job is live, flock or not."""
+    pids = live_integrate_pids(con, run)
+    if pids:
+        raise state.Refused("integration-running", f"an integrate job (pid {', '.join(map(str, pids))}) is composing or "
+                            "running checks in _integration", preserved="the running checks",
+                            next_step="office wait, then retry")
+
+
 def job_integrate(con, run: dict, job: dict) -> dict:
-    with worktree_lock(run, wait=LOCK_WAIT_SECONDS):
-        return _integrate(con, run, job)
+    marker = _fenced_dir(run) / str(os.getpid())  # tells peers this process honors the flock
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    try:
+        with worktree_lock(run, wait=LOCK_WAIT_SECONDS):
+            # An integrate process from an older patch takes no flock: wait it out too.
+            deadline = time.time() + LOCK_WAIT_SECONDS
+            while live_integrate_pids(con, run, unfenced_only=True):
+                if time.time() >= deadline:
+                    raise state.Refused("integration-running", "an integrate job from an older Office patch is still "
+                                        "running in _integration", next_step="office wait, then office resume")
+                time.sleep(1.0)
+            return _integrate(con, run, job)
+    finally:
+        marker.unlink(missing_ok=True)
 
 
 def _integrate(con, run: dict, job: dict) -> dict:

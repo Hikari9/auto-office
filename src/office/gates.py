@@ -948,6 +948,21 @@ def derive_status(con, run: dict, task: dict) -> str:
 
 # ------------------------------------------------------------------ closeout
 
+def owning_jobs(con, run: dict, gate) -> list[dict]:
+    """The queued or claimed jobs that can still finish `gate`. A task or plan
+    gate's job names it in its payload. An integration gate is created by the
+    integrate job while it runs, so its owner is an integrate job claimed no
+    later than the gate was created. Unrelated jobs in the run never count."""
+    if gate["subject"] == "integration":
+        rows = con.execute("SELECT id, status, claimed_pid FROM outbox WHERE run_id=? AND kind='integrate' "
+                           "AND status='claimed' AND (claimed_at IS NULL OR claimed_at<=?)",
+                           (run["id"], gate["created_at"])).fetchall()
+    else:
+        rows = con.execute("SELECT id, status, claimed_pid FROM outbox WHERE run_id=? AND status IN ('queued','claimed') "
+                           "AND payload_json LIKE ?", (run["id"], f'%"{gate["id"]}"%')).fetchall()
+    return [dict(r) for r in rows]
+
+
 def superseded_integration_gate(con, run: dict, gate) -> bool:
     """A check or review of a composed revision that integration has since
     replaced. Its verdict can no longer matter, so it never blocks close."""
@@ -986,12 +1001,26 @@ def landing_state(con, run: dict, handoff: str | None) -> dict:
     if not commit:
         return {"status": "none", "detail": "no accepted work"}
     recorded = state.get_run(con, run["id"]).get("landing") or {}
-    if recorded.get("merged"):
-        return {"status": "landed", "detail": f"task PRs merged at {recorded['merged']['commit'][:12]}",
-                "commit": recorded["merged"]["commit"]}
-    if recorded.get("delivered"):
-        return {"status": "landed", "detail": recorded["delivered"], "commit": commit}
     repo = Path(run["repo_root"])
+    # A landing record covers the integration it names. When the integration
+    # moved afterwards, the record says nothing about the current one. Records
+    # from an older Office name no integration and keep their old meaning.
+    def tree(c: str) -> str:
+        return paths.git(repo, "rev-parse", f"{c}^{{tree}}", check=False)
+
+    merged = recorded.get("merged")
+    if merged:
+        landed = merged.get("integration_commit")
+        if landed and tree(landed) != tree(commit):
+            return {"status": "pending", "detail": f"the landing at {merged['commit'][:12]} is for integration "
+                    f"{landed[:12]}, but the accepted integration is now {commit[:12]}: office land", "commit": commit}
+        return {"status": "landed", "detail": f"task PRs merged at {merged['commit'][:12]}", "commit": merged["commit"]}
+    if recorded.get("delivered"):
+        previewed = ((recorded.get("deployed") or {}).get("preview") or {}).get("tree")
+        if previewed and previewed != tree(commit):
+            return {"status": "pending", "detail": f"the preview deploy was of another tree ({previewed[:12]}) than the "
+                    f"accepted integration {commit[:12]}: office land --preview", "commit": commit}
+        return {"status": "landed", "detail": recorded["delivered"], "commit": commit}
     for target in ("origin/main", "main", "origin/master", "master"):
         proc = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", target], capture_output=True, text=True)
         if proc.returncode != 0:

@@ -204,17 +204,11 @@ def stalls(con, run: dict, since: str = "") -> list[str]:
     """Work Office believes is in progress with nothing left to advance it."""
     out = []
     from office import gates as gates_mod
-    for g in con.execute("SELECT id, task_id, kind, status, subject, input_key FROM gates WHERE run_id=? "
-                         "AND status IN ('queued','running')", (run["id"],)).fetchall():
+    for g in con.execute("SELECT * FROM gates WHERE run_id=? AND status IN ('queued','running')", (run["id"],)).fetchall():
         if gates_mod.superseded_integration_gate(con, run, g):
             continue
         # Each gate is advanced by its own job or reviewer, not by unrelated work in the run.
-        job = con.execute("SELECT 1 FROM outbox WHERE run_id=? AND status IN ('queued','claimed') AND payload_json LIKE ?",
-                          (run["id"], f'%"{g["id"]}"%')).fetchone()
-        if not job and g["subject"] == "integration":
-            # The integrate job creates its gates while it runs, so its payload never names them.
-            job = con.execute("SELECT 1 FROM outbox WHERE run_id=? AND kind='integrate' AND status IN ('queued','claimed')",
-                              (run["id"],)).fetchone()
+        job = gates_mod.owning_jobs(con, run, g)
         reviewer = con.execute("SELECT 1 FROM dispatches WHERE gate_id=? AND ended_at IS NULL", (g["id"],)).fetchone()
         if not job and not reviewer:
             out.append(f"{g['task_id'] or 'plan'} {g['kind']} gate {g['id']} is {g['status']} but no job is queued or running")

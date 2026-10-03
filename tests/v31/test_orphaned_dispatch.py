@@ -239,17 +239,6 @@ def _strip_deployed(env):
     con.commit()
 
 
-def test_a_land_recorded_by_the_old_runtime_does_not_deploy_prod_again(env, monkeypatch):
-    marker = env.tmp / "deploys"
-    plan = _plan("e2e", prod=f"python3 -c \"open('{marker}','a').write('x')\"", verify=f"test -f {marker}")
-    _run(env, monkeypatch, plan)
-    assert env.office("land")[0] == 0
-    _strip_deployed(env)  # the old runtime recorded `merged` only
-    code, out = env.office("land")
-    assert code == 0 and "already landed" in out, out
-    assert marker.read_text() == "x"
-
-
 def test_a_merge_only_land_does_not_count_as_a_prod_deploy(env, monkeypatch):
     marker = env.tmp / "deploys"
     plan = _plan("merge", prod=f"python3 -c \"open('{marker}','a').write('x')\"", verify=f"test -f {marker}")
@@ -260,25 +249,44 @@ def test_a_merge_only_land_does_not_count_as_a_prod_deploy(env, monkeypatch):
     assert marker.read_text() == "x"
 
 
+def _legacy(env):
+    """Rewrite a land's records into the old runtime's shape: a merge record
+    with no integration commit, no `deployed` marker, deploy events that name
+    no tree or commit, and no start events."""
+    _strip_deployed(env)
+    con = env.con()
+    landing = json.loads(con.execute("SELECT landing_json FROM runs").fetchone()[0])
+    landing["merged"].pop("integration_commit", None)
+    con.execute("UPDATE runs SET landing_json=?", (json.dumps(landing),))
+    con.execute("DELETE FROM events WHERE kind='land.deploy.start'")
+    for seq, payload in con.execute("SELECT seq, payload_json FROM events WHERE kind IN ('land.deploy','land.verify')").fetchall():
+        p = json.loads(payload)
+        con.execute("UPDATE events SET payload_json=? WHERE seq=?",
+                    (json.dumps({"target": p["target"], "exit": p["exit"]}), seq))
+    con.commit()
+
+
 def _ambiguous(env, monkeypatch):
-    """An old-runtime land whose prod deploy event predates the merge record's invocation."""
+    """An old-runtime e2e land: merged, deployed, verified, recorded in the old shape."""
     marker = env.tmp / "deploys"
     plan = _plan("e2e", prod=f"python3 -c \"open('{marker}','a').write('x')\"", verify=f"test -f {marker}")
     _run(env, monkeypatch, plan)
     assert env.office("land")[0] == 0
-    _strip_deployed(env)
-    con = env.con()
-    con.execute("UPDATE events SET created_at='2000-01-01T00:00:00+00:00' WHERE kind='land.deploy'")
-    con.commit()
+    _legacy(env)
     return marker
 
 
-def test_an_untied_legacy_deploy_record_refuses_with_both_operator_commands(env, monkeypatch):
+def test_a_legacy_deploy_inside_the_merge_window_is_never_proof(env, monkeypatch):
+    """Finding r3-1: the deploy event falls between the last PR merge and
+    `merged.at`, which the old backfill credited. It names no tree, so Office
+    refuses rather than skip or repeat the prod deploy."""
     marker = _ambiguous(env, monkeypatch)
     code, out = env.office("land")
-    assert code == 4 and "blocked: deploy-unproven: run " in out and "but no deploy record names that tree" in out, out
+    assert code == 4 and "deploy-unproven" in out and "recorded before Office named deployed trees" in out, out
     assert "office land --e2e --redeploy" in out and "office land --e2e --mark-deployed" in out, out
     assert marker.read_text() == "x"
+    landing = json.loads(env.con().execute("SELECT landing_json FROM runs").fetchone()[0])
+    assert "deployed" not in landing  # nothing was credited
 
 
 def test_mark_deployed_records_the_operator_claim_without_deploying(env, monkeypatch):
@@ -315,3 +323,163 @@ def test_preview_deploys_from_an_isolated_checkout_not_the_integration_worktree(
     where = seen.read_text()
     assert "_integration" not in where and "checkouts" in where, where
     assert not os.path.exists(where)  # removed after the deploy
+
+
+def _move_integration(env) -> str:
+    """The accepted integration moves to a commit with another tree after the land."""
+    con = env.con()
+    landing = json.loads(con.execute("SELECT landing_json FROM runs").fetchone()[0])
+    base = con.execute("SELECT base_sha FROM runs").fetchone()[0]
+    old = landing["integration"]["commit"]
+    moved = env.git("commit-tree", f"{base}^{{tree}}", "-p", old, "-m", "moved").strip()
+    landing["integration"]["commit"] = moved
+    con.execute("UPDATE runs SET landing_json=?", (json.dumps(landing),))
+    con.commit()
+    return moved
+
+
+def test_a_land_of_an_older_integration_is_not_reported_as_landing_the_current_one(env, monkeypatch):
+    """Finding r3-2: the integration moved after tree A landed. With every task
+    PR merged there is nothing to land it with: land and close both refuse."""
+    _run(env, monkeypatch, _plan("merge"))
+    assert env.office("land")[0] == 0
+    moved = _move_integration(env)
+    code, out = env.office("land")
+    assert code == 4 and "landed-mismatch" in out and moved[:12] in out and "already landed" not in out, out
+    code, out = env.office("close")
+    assert code == 4 and "is for integration" in out and moved[:12] in out, out
+
+
+def test_a_moved_integration_with_an_open_task_pr_is_landed(env, monkeypatch):
+    """Finding r3-2: an open task PR carries the change, so land merges it and
+    records the new integration."""
+    _run(env, monkeypatch, _plan("merge"))
+    assert env.office("land")[0] == 0
+    moved = _move_integration(env)
+    con = env.con()
+    pr = json.loads(con.execute("SELECT pr_json FROM tasks WHERE id='T2'").fetchone()[0])
+    con.execute("UPDATE tasks SET pr_json=? WHERE id='T2'", (json.dumps({**pr, "merged": False}),))
+    con.commit()
+    code, out = env.office("land")
+    assert code == 0 and "landing it" in out and "already landed" not in out, out
+    landing = json.loads(env.con().execute("SELECT landing_json FROM runs").fetchone()[0])
+    assert landing["merged"]["integration_commit"] == moved
+
+
+def test_an_unrelated_live_job_does_not_keep_an_integration_gate_open(env, monkeypatch):
+    """Finding r3-3: only the gate's owning job counts."""
+    con, run = _orphan(env, monkeypatch)
+    con.execute("UPDATE outbox SET status='done' WHERE status IN ('queued','claimed')")
+    con.execute("INSERT INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, claimed_pid, "
+                "claimed_at, created_at) VALUES('Jrev', ?, 'review', 'k4', '{\"gate_id\": \"Gother\"}', ?, 'claimed', ?, "
+                "'2025-01-01', '2025-01-01')", (run["id"], run["office_version"], os.getpid()))
+    con.commit()
+    code, out = env.office("revoke", "integration", env={"FAKE_HERDR_AGENT": "gone"})
+    assert code == 0, out
+    con = env.con()
+    assert con.execute("SELECT status FROM gates WHERE id='Gorph'").fetchone()[0] == "done"
+    assert con.execute("SELECT status FROM outbox WHERE id='Jrev'").fetchone()[0] == "claimed"  # untouched
+
+
+@pytest.mark.approved
+def test_the_owning_integrate_job_keeps_its_gate_and_a_later_one_does_not(env, monkeypatch):
+    con, run = _orphan(env, monkeypatch)
+    con.execute("UPDATE dispatches SET ended_at='2026-01-02', status='failed' WHERE id='Dorph'")
+    con.execute("INSERT INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, claimed_pid, "
+                "claimed_at, created_at) VALUES('Jlater', ?, 'integrate', 'k5', '{\"key\": \"x\"}', ?, 'claimed', ?, "
+                "'2026-06-01', '2026-06-01')", (run["id"], run["office_version"], os.getpid()))
+    con.commit()
+    gate = con.execute("SELECT * FROM gates WHERE id='Gorph'").fetchone()
+    assert gates.owning_jobs(con, run, gate) == []  # claimed after the gate existed: not its owner
+    con.execute("UPDATE outbox SET claimed_at='2025-12-31' WHERE id='Jlater'")
+    con.commit()
+    assert [j["id"] for j in gates.owning_jobs(con, run, gate)] == ["Jlater"]
+    with con:
+        dispatch_mod._close_orphaned_gate(con, run, "Gorph", "test")
+    assert con.execute("SELECT status FROM gates WHERE id='Gorph'").fetchone()[0] == "running"
+
+
+@pytest.mark.approved
+def test_rebase_refuses_while_an_integrate_job_without_the_flock_is_live(env, monkeypatch):
+    """Finding r3-4: an integrate process from an older patch holds no flock;
+    the job table plus its pid still refuses the rebase, and a new compose waits."""
+    import subprocess
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    con = env.con()
+    run = _run_row(con)
+    old = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        con.execute("INSERT INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, claimed_pid, "
+                    "claimed_at, created_at) VALUES('Jold', ?, 'integrate', 'k6', '{\"key\": \"x\"}', ?, 'claimed', ?, "
+                    "'2026-01-01', '2026-01-01')", (run["id"], run["office_version"], old.pid))
+        con.commit()
+        code, out = env.office("land", "--rebase")
+        assert code == 4 and "integration-running" in out and str(old.pid) in out, out
+        monkeypatch.setattr(integration, "LOCK_WAIT_SECONDS", 0.3)
+        with pytest.raises(state.Refused) as err:
+            integration.job_integrate(con, run, {"payload": {"key": "x"}})
+        assert err.value.category == "integration-running" and "older Office patch" in str(err.value)
+        # A peer running this code registers as a flock holder and is left to the flock.
+        marker = integration._fenced_dir(run) / str(old.pid)
+        marker.touch()
+        assert integration.live_integrate_pids(con, run, unfenced_only=True) == []
+        assert integration.live_integrate_pids(con, run) == [old.pid]
+        marker.unlink()
+    finally:
+        old.kill()
+
+
+def test_each_deploy_uses_its_own_checkout_and_records_what_it_checked_out(env, monkeypatch):
+    """Finding r3-5: concurrent deploys never share or remove each other's
+    checkout, and the marker names the commit and tree actually checked out."""
+    from office import land
+    seen = env.tmp / "cwd"
+    plan = _plan("preview", preview=f"python3 -c \"import os; open('{seen}','w').write(os.getcwd())\"")
+    _run(env, monkeypatch, plan)
+    con = env.con()
+    run = _run_row(con)
+    commit = integration.final_commit(con, run)
+    with land._deploy_checkout(run, commit, "deploy-preview") as (a, head_a, tree_a):
+        with land._deploy_checkout(run, commit, "deploy-preview") as (b, _head_b, _tree_b):
+            assert a != b and a.is_dir() and b.is_dir()
+        assert a.is_dir() and not b.exists()
+    assert not a.exists()
+    assert head_a == commit and tree_a == env.git("rev-parse", f"{commit}^{{tree}}").strip()
+    code, out = env.office("land")
+    assert code == 0 and "preview deploy ok" in out, out
+    con = env.con()
+    landing = json.loads(con.execute("SELECT landing_json FROM runs").fetchone()[0])
+    assert (landing["deployed"]["preview"]["commit"], landing["deployed"]["preview"]["tree"]) == (head_a, tree_a)
+    started = [json.loads(p) for (p,) in con.execute("SELECT payload_json FROM events WHERE kind='land.deploy.start'")]
+    assert started and (started[0]["commit"], started[0]["tree"]) == (head_a, tree_a)
+
+
+def test_a_second_concurrent_land_refuses(env, monkeypatch):
+    from office import land
+    _run(env, monkeypatch, _plan("merge"))
+    with land._land_lock(_run_row(env.con())):
+        code, out = env.office("land")
+        assert code == 4 and "land-running" in out, out
+    assert env.office("land")[0] == 0
+
+
+def test_a_land_killed_mid_deploy_refuses_instead_of_deploying_again(env, monkeypatch):
+    """Crash window: a start with no result for this tree is unknown, not undeployed."""
+    marker = env.tmp / "deploys"
+    plan = _plan("e2e", prod=f"python3 -c \"open('{marker}','a').write('x')\"", verify=f"test -f {marker}")
+    _run(env, monkeypatch, plan)
+    assert env.office("land")[0] == 0
+    _strip_deployed(env)
+    con = env.con()
+    landing = json.loads(con.execute("SELECT landing_json FROM runs").fetchone()[0])
+    landing.pop("merged")
+    con.execute("UPDATE runs SET landing_json=?", (json.dumps(landing),))
+    con.execute("DELETE FROM events WHERE kind IN ('land.deploy','land.verify')")  # killed before the result
+    con.commit()
+    code, out = env.office("land")
+    assert code == 4 and "deploy-unproven" in out and "never reported its result" in out, out
+    assert marker.read_text() == "x"
+    code, out = env.office("land", "--e2e", "--mark-deployed", "--quote", "it is live")
+    assert code == 0 and "on the operator's word" in out, out
+    assert marker.read_text() == "x"

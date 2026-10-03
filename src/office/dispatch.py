@@ -439,9 +439,12 @@ def _close_orphaned_gate(con, run: dict, gate_id: str | None, why: str) -> None:
     from office import gates
     if con.execute("SELECT 1 FROM dispatches WHERE gate_id=? AND ended_at IS NULL", (gate_id,)).fetchone():
         return
-    for row in con.execute("SELECT claimed_pid FROM outbox WHERE run_id=? AND status='claimed'", (run["id"],)).fetchall():
-        if pid_alive(row["claimed_pid"]):
-            return  # a live job may still retry the review
+    gate = con.execute("SELECT * FROM gates WHERE id=?", (gate_id,)).fetchone()
+    if gate is None:
+        return
+    for job in gates.owning_jobs(con, run, gate):
+        if job["status"] == "queued" or pid_alive(job["claimed_pid"]):
+            return  # the gate's own job may still run or retry the review
     gates.mark_unavailable(con, run, gate_id, why)
 
 
