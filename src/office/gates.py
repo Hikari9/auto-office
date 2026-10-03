@@ -26,6 +26,13 @@ TASK_GATES = ("checks", "code_review", "visual")
 MAX_DIFF_CHARS = 120_000
 
 
+def cap_diff(diff: str) -> str:
+    """Cap a review diff and say so, so the reviewer knows to read the checkout."""
+    if len(diff) > MAX_DIFF_CHARS:
+        return diff[:MAX_DIFF_CHARS] + "\n[diff truncated; inspect the checkout for the rest]"
+    return diff
+
+
 # ------------------------------------------------------------------ planning
 
 def plan_for_revision(con, run: dict, task: dict, rev_id: str, changed: list[str], d: dict) -> dict:
@@ -584,8 +591,7 @@ def job_review(con, run: dict, job: dict) -> dict:
     checkout = detached_checkout(run, rev["commit_sha"], f"review-{gate['id']}", purpose="review")
     try:
         diff = paths.git(Path(run["repo_root"]), "diff", rev["base_commit"], rev["commit_sha"])
-        if len(diff) > MAX_DIFF_CHARS:
-            diff = diff[:MAX_DIFF_CHARS] + "\n[diff truncated; inspect the checkout for the rest]"
+        diff = cap_diff(diff)
         checks = con.execute("SELECT summary, verdict FROM gates WHERE revision_id=? AND kind='checks' AND status='done'",
                              (rev["id"],)).fetchone()
         carried = [dict(r) for r in con.execute("SELECT code, severity, level, location, summary FROM findings WHERE run_id=? "
