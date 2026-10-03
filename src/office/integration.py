@@ -223,7 +223,7 @@ def job_integrate(con, run: dict, job: dict) -> dict:
         gid = _gate(con, run, integ_rev, "integration_review", commit)
         gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gid,)).fetchone())
         diff = paths.git(repo, "diff", compose_base(run), commit)[: gates.MAX_DIFF_CHARS]
-        checkout = gates.detached_checkout(run, commit, f"integration-{gid}")
+        checkout = gates.detached_checkout(run, commit, f"integration-{gid}", purpose="review")
         try:
             brief = briefs.code_review_brief(run, None, integ_rev, diff, ", ".join(f"{k} {v}" for k, v in results.items()) or "none",
                                              [], str(checkout), integration=True)

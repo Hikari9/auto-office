@@ -153,3 +153,30 @@ def test_doctor_suggests_setup_when_pnpm_lock_exists_and_none_is_set(env):
     _config(env, "true")
     code, out = env.office("doctor")
     assert "worktree.setup is not set" not in out, out
+
+
+def test_missing_or_failed_marker_runs_setup_on_reuse_and_only_success_marks_done(tmp_path):
+    run = _run_dict("test -f ok-flag")
+    # Office stopped after creating the worktree and before setup finished: no marker.
+    assert worktree_setup.should_run(run, tmp_path, "task", created=False)
+    failed = worktree_setup.execute(run, tmp_path, tmp_path / "setup.log", marker=True)
+    assert failed["exit"] != 0 and not (tmp_path / worktree_setup.MARKER).exists()
+    assert worktree_setup.should_run(run, tmp_path, "task", created=False)  # a failure retries next launch
+    (tmp_path / "ok-flag").write_text("")
+    assert worktree_setup.execute(run, tmp_path, tmp_path / "setup.log", marker=True)["exit"] == 0
+    assert not worktree_setup.should_run(run, tmp_path, "task", created=False)  # completed: no rerun
+
+
+def test_only_check_checkouts_run_setup(env):
+    from office import gates, state
+    _config(env, "touch setup-ran")
+    approved_run(env, executor=EXECUTOR, code_reviewer=[{"reply": "VERDICT: PASS"}])
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    head = env.git("rev-parse", "HEAD").strip()
+    seen = {}
+    for purpose in ("review", "deploy", "rebase-trial", "check"):
+        path = gates.detached_checkout(run, head, f"t-{purpose}", purpose=purpose)
+        seen[purpose] = (path / "setup-ran").exists()
+        gates.remove_checkout(run, path)
+    assert seen == {"review": False, "deploy": False, "rebase-trial": False, "check": True}

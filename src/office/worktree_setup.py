@@ -58,9 +58,11 @@ def should_run(run: dict, wt: Path, kind: str, *, created: bool) -> bool:
         return False
     if created:
         return True
+    # Only a finished setup leaves a marker, so a missing one means setup never completed (an
+    # interrupted launch, or a failed run) and it runs before the agent starts. A completed
+    # marker suppresses reruns until a lockfile changes.
     marker = _marker(wt)
-    # A reused or resumed worktree re-runs only when the lockfile changed since the last setup.
-    return bool(marker) and marker.get("lock_hash") != lock_hash(wt)
+    return not marker.get("ok") or marker.get("lock_hash") != lock_hash(wt)
 
 
 def tail(log: Path, lines: int = 5) -> str:
@@ -94,11 +96,11 @@ def execute(run: dict, wt: Path, log: Path, *, marker: bool = False) -> dict:
     os.chmod(log, 0o600)
     result = {"command": cfg["setup"], "exit": code, "seconds": round(time.time() - started, 2),
               "timed_out": timed_out, "lock_hash": lock_hash(wt), "log": str(log)}
-    if not marker:  # only task worktrees outlive one run of setup (and ignore .office/)
+    if not marker or code != 0:  # only task worktrees outlive one run (and ignore .office/); only success marks done
         return result
     try:
         (Path(wt) / MARKER).parent.mkdir(parents=True, exist_ok=True)
-        (Path(wt) / MARKER).write_text(json.dumps({**result, "ok": code == 0}), encoding="utf-8")
+        (Path(wt) / MARKER).write_text(json.dumps({**result, "ok": True}), encoding="utf-8")
     except OSError:
         pass
     return result
