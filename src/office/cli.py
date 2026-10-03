@@ -181,6 +181,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--quote", help="the user's words choosing this end state (ask mode)")
     s.add_argument("--detect", action="store_true", help="propose deploy commands for intake")
     s.add_argument("--rebase", action="store_true", help="move the run onto the newer default branch first")
+    s.add_argument("--redeploy", action="store_true", help="with --e2e: deploy prod again from the merged tree")
+    s.add_argument("--mark-deployed", action="store_true",
+                   help="with --e2e: the operator confirms the merged tree is already live in prod")
     s = sp.add_parser("close", parents=[common])
     s.add_argument("--handoff", help="PR URL or branch handed to the user for merge")
     s.add_argument("--abandon", metavar="REASON", help="end the run without landing")
@@ -218,7 +221,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--by", help="approve visual: the reviewer route that wrote --report (harness/model[@effort])")
     s.add_argument("--report", help="approve visual: the review file to record as the visual gate result")
     s = sp.add_parser("revoke", parents=[common])
-    s.add_argument("task")
+    s.add_argument("task", help="a task id, a dispatch id, or `integration` (its reviews)")
     s.add_argument("--reason", default="orchestrator revoke")
     s = sp.add_parser("rerun", parents=[common])
     s.add_argument("task")
@@ -424,6 +427,8 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "status":
         from office import guide, jobs, lifecycle, db, state
         if not state.is_terminal(run):
+            from office import dispatch
+            dispatch.reap_orphans(con, run)
             with db.transaction(con):
                 lifecycle.reconcile(con, run)
             jobs.kick(con, run["id"])
@@ -454,7 +459,8 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return land.rebase(con, run)
     if cmd == "land":
         from office import land
-        return land.land(con, run, mode=args.land_mode, quote=args.quote)
+        return land.land(con, run, mode=args.land_mode, quote=args.quote, redeploy=args.redeploy,
+                         mark_deployed=args.mark_deployed)
     if cmd == "close":
         from office import lifecycle
         if args.abandon:
@@ -478,7 +484,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                                  by=args.by, report=args.report)
     if cmd == "revoke":
         from office import dispatch
-        return dispatch.revoke(con, run, args.task.upper(), args.reason)
+        return dispatch.revoke(con, run, args.task, args.reason)
     if cmd == "rerun":
         from office import rerun
         return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh)

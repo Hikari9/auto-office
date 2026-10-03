@@ -45,7 +45,8 @@ def end_state(con, run: dict) -> dict:
     return {"mode": frozen.get("end_state") or "ask", "deploy": frozen.get("deploy") or {}}
 
 
-def land(con, run: dict, *, mode: str | None = None, quote: str | None = None) -> Result:
+def land(con, run: dict, *, mode: str | None = None, quote: str | None = None, redeploy: bool = False,
+         mark_deployed: bool = False) -> Result:
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-land", "a worker cannot land the run")
     commit = integration.final_commit(con, run)
@@ -65,29 +66,109 @@ def land(con, run: dict, *, mode: str | None = None, quote: str | None = None) -
         mode = es["mode"]
     if mode == "ask":
         return _ask(con, run)
+    if (redeploy or mark_deployed) and mode != "e2e":
+        raise Usage("deploy-flag-needs-e2e", "--redeploy and --mark-deployed apply to a prod deploy (--e2e)")
+    if redeploy and mark_deployed:
+        raise Usage("deploy-flag-conflict", "--redeploy deploys again; --mark-deployed says it is already live; pick one")
     if mode in ("preview", "e2e") and not es["deploy"].get("preview" if mode == "preview" else "prod"):
         raise Refused("no-deploy-command", f"{mode} needs a confirmed deploy_{'preview' if mode == 'preview' else 'prod'} "
                       "command in the plan requirements", next_step='office amend requirements --quote "<words>" -- '
                       '"deploy_prod: <command>" (office land --detect proposes one)')
     res = Result()
+    repo = Path(run["repo_root"])
     if mode == "preview":
-        wt = paths.worktrees_dir() / run["id"][:8] / "_integration"
-        _deploy(con, run, "preview", es["deploy"], wt, res)
+        tree = paths.git(repo, "rev-parse", f"{commit}^{{tree}}")
+        if _deployed(con, run, "preview", tree):
+            res.add(f"preview already deployed from this tree ({tree[:12]}); skipped")
+        else:
+            # An isolated checkout: a compose may remove `_integration` while the deploy runs.
+            checkout = gates.detached_checkout(run, commit, "deploy-preview", purpose="deploy")
+            try:
+                _deploy(con, run, "preview", es["deploy"], checkout, res)
+            finally:
+                gates.remove_checkout(run, checkout)
+            _record_deployed(con, run, "preview", commit, tree)
         _record(con, run, delivered=f"preview deployed from {commit[:12]}; PRs left open for review")
         res.next = "office close (PRs stay open for the user to merge)"
         return res
+    landing = state.get_run(con, run["id"]).get("landing") or {}
+    done = (landing.get("merged") or {}).get("commit")
+    if mark_deployed:
+        if not done:
+            raise Usage("nothing-merged", "--mark-deployed needs a merged run; nothing is recorded as merged yet",
+                        next_step="office land --e2e --quote \"<words>\"")
+        _record_deployed(con, run, "prod", done, paths.git(repo, "rev-parse", f"{done}^{{tree}}"), by="operator-confirmed")
+    elif done and mode == "e2e" and not redeploy:
+        _require_deploy_proof(con, run, landing, done)
+    if done and not redeploy and (mode != "e2e" or _deployed(con, run, "prod", paths.git(repo, "rev-parse", f"{done}^{{tree}}"))):
+        res.add(f"already landed at {done[:12]}; merge and deploy steps skipped")
+        _close_issue(con, run, done, res)
+        res.next = "office close"
+        return res
     before = _merge_all(con, run, res)
+    before = landing.get("rollback") or before  # a rerun's `before` already holds the merges
+    _record(con, run, rollback=before)
     main = _verify_main(con, run, commit, res)
     if mode == "e2e":
-        checkout = gates.detached_checkout(run, main, "deploy-prod", purpose="deploy")
-        try:
-            _deploy(con, run, "prod", es["deploy"], checkout, res, rollback=before)
-        finally:
-            gates.remove_checkout(run, checkout)
+        tree = paths.git(repo, "rev-parse", f"{main}^{{tree}}")
+        if not redeploy and _deployed(con, run, "prod", tree):
+            res.add(f"prod already deployed from this tree ({tree[:12]}); skipped")
+        else:
+            checkout = gates.detached_checkout(run, main, "deploy-prod", purpose="deploy")
+            try:
+                _deploy(con, run, "prod", es["deploy"], checkout, res, rollback=before)
+            finally:
+                gates.remove_checkout(run, checkout)
+            _record_deployed(con, run, "prod", main, tree, by="redeploy" if redeploy else None)
     _close_issue(con, run, main, res)
     _record(con, run, merged={"commit": main, "rollback": before, "at": now_iso()})
     res.next = "office close"
     return res
+
+
+def _require_deploy_proof(con, run: dict, landing: dict, done: str) -> None:
+    """Decide whether the merged tree already went to prod, for a run recorded
+    before `deployed` existed. Legacy `land.deploy` events carry no commit or
+    tree, so one only counts when it falls in the same land invocation as the
+    merge record: after the last PR merge event and not after `merged.at`. Any
+    other earlier prod deploy is ambiguous, and Office neither deploys nor
+    skips on a guess: the operator picks."""
+    tree = paths.git(Path(run["repo_root"]), "rev-parse", f"{done}^{{tree}}")
+    if _deployed(con, run, "prod", tree):
+        return
+    at = landing["merged"].get("at") or ""
+    deploys = []
+    for row in con.execute("SELECT payload_json, created_at FROM events WHERE run_id=? AND kind='land.deploy'",
+                           (run["id"],)).fetchall():
+        payload = json.loads(row["payload_json"] or "{}")
+        if payload.get("target") == "prod" and payload.get("exit") == 0:
+            deploys.append(row["created_at"])
+    if not deploys:
+        return  # nothing ever went to prod: the normal path deploys it
+    last_merge = con.execute("SELECT MAX(created_at) FROM events WHERE run_id=? AND kind='pr.merged'",
+                             (run["id"],)).fetchone()[0]
+    if last_merge and at and any(last_merge <= t <= at for t in deploys):
+        _record_deployed(con, run, "prod", done, tree, by="legacy-same-invocation")
+        return
+    raise Refused("deploy-unproven", f"run {short(run['id'])} merged {done[:12]} but no deploy record names that tree",
+                  preserved="the merges and the earlier deploy record",
+                  next_step=f'office land --e2e --redeploy --quote "<words>" (deploy this tree) | '
+                            f'office land --e2e --mark-deployed --quote "<words>" (it is already live)')
+
+
+def _deployed(con, run: dict, target: str, tree: str) -> bool:
+    """Whether this tree already went out (and verified) to `target`: a land
+    run again after it must not deploy the same tree twice."""
+    landing = state.get_run(con, run["id"]).get("landing") or {}
+    return ((landing.get("deployed") or {}).get(target) or {}).get("tree") == tree
+
+
+def _record_deployed(con, run: dict, target: str, commit: str, tree: str, by: str | None = None) -> None:
+    with db.transaction(con):
+        landing = dict(state.get_run(con, run["id"]).get("landing") or {})
+        rec = {"commit": commit, "tree": tree, "at": now_iso(), **({"by": by} if by else {})}
+        landing["deployed"] = {**(landing.get("deployed") or {}), target: rec}
+        state.update_run(con, run["id"], landing=landing)
 
 
 # ------------------------------------------------------------------ rebase
@@ -103,6 +184,14 @@ def rebase(con, run: dict) -> Result:
     tasks = integration.accepted_set(con, run)
     if tasks is None:
         raise Refused("not-ready", "rebase needs every task accepted", next_step="office status")
+    with integration.worktree_lock(run):  # held until the next compose is queued
+        res = _rebase_locked(con, run, tasks)
+    from office import jobs
+    jobs.kick(con, run["id"])
+    return res
+
+
+def _rebase_locked(con, run: dict, tasks: list[dict]) -> Result:
     base = prs.settings(con, run).get("base_branch") or "main"
     if any((t.get("pr") or {}).get("merged") for t in tasks):
         raise Refused("already-merging", "some task PRs are merged; office land restacks the rest itself",
@@ -136,8 +225,6 @@ def rebase(con, run: dict) -> Result:
         integration._set_integration(con, run, status="pending", detail=f"rebasing onto {new[:12]}")
         state.emit(con, run, "integration.rebase", f"rebased onto origin/{base} {new[:12]}; integration re-check queued")
         integration.retrigger(con, run)
-    from office import jobs
-    jobs.kick(con, run["id"])
     return Result(lines=[f"every accepted task merges cleanly onto origin/{base} {new[:12]}",
                          "integration re-composes there and re-runs the run checks and an integration review"],
                   next="office status (then office land once integration is accepted)")
@@ -306,12 +393,15 @@ def _deploy(con, run: dict, target: str, deploy: dict, cwd: Path, res: Result, r
 
 
 def _close_issue(con, run: dict, main: str, res: Result) -> None:
-    issue = (run.get("landing") or {}).get("issue")
-    if not issue:
+    landing = state.get_run(con, run["id"]).get("landing") or {}
+    issue = landing.get("issue")
+    if not issue or landing.get("issue_closed"):
         return
     number = str(issue).rstrip("/").rsplit("/", 1)[-1]
     proc = _gh(run, "issue", "close", number, "--comment", f"Landed by Office run {short(run['id'])} at {main[:12]}.")
     res.add(f"issue #{number} closed" if proc.returncode == 0 else f"issue #{number} not closed: {proc.stderr.strip()[:120]}")
+    if proc.returncode == 0:
+        _record(con, run, issue_closed=main)
 
 
 def _record(con, run: dict, **fields) -> None:

@@ -193,7 +193,8 @@ def reconcile(con, run: dict) -> list[str]:
 
 
 def close(con, run: dict, *, handoff: str | None = None) -> Result:
-    from office import gates, guide
+    from office import dispatch, gates, guide
+    dispatch.reap_orphans(con, run)
     blockers = gates.close_blockers(con, run)
     landing = gates.landing_state(con, run, handoff)
     if landing["status"] != "landed" and not handoff:

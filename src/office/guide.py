@@ -203,11 +203,18 @@ def _snapshot(con, run: dict) -> tuple:
 def stalls(con, run: dict, since: str = "") -> list[str]:
     """Work Office believes is in progress with nothing left to advance it."""
     out = []
-    for g in con.execute("SELECT id, task_id, kind, status FROM gates WHERE run_id=? AND status IN ('queued','running')",
-                         (run["id"],)).fetchall():
+    from office import gates as gates_mod
+    for g in con.execute("SELECT id, task_id, kind, status, subject, input_key FROM gates WHERE run_id=? "
+                         "AND status IN ('queued','running')", (run["id"],)).fetchall():
+        if gates_mod.superseded_integration_gate(con, run, g):
+            continue
         # Each gate is advanced by its own job or reviewer, not by unrelated work in the run.
         job = con.execute("SELECT 1 FROM outbox WHERE run_id=? AND status IN ('queued','claimed') AND payload_json LIKE ?",
                           (run["id"], f'%"{g["id"]}"%')).fetchone()
+        if not job and g["subject"] == "integration":
+            # The integrate job creates its gates while it runs, so its payload never names them.
+            job = con.execute("SELECT 1 FROM outbox WHERE run_id=? AND kind='integrate' AND status IN ('queued','claimed')",
+                              (run["id"],)).fetchone()
         reviewer = con.execute("SELECT 1 FROM dispatches WHERE gate_id=? AND ended_at IS NULL", (g["id"],)).fetchone()
         if not job and not reviewer:
             out.append(f"{g['task_id'] or 'plan'} {g['kind']} gate {g['id']} is {g['status']} but no job is queued or running")
@@ -282,13 +289,14 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
     Exit 124: timeout with nothing new. A watcher keys on the exit code, never
     on matching status text."""
     import time
-    from office import db, jobs, lifecycle
+    from office import db, dispatch, jobs, lifecycle
     from office.util import now_iso
     start = _snapshot(con, run)
     started_at = now_iso()  # only a job that fails while waiting is news
     deadline = time.time() + timeout
     first = True
     while True:
+        dispatch.reap_orphans(con, run)
         with db.transaction(con):
             lifecycle.reconcile(con, run)
             jobs.reclaim(con, run["id"])

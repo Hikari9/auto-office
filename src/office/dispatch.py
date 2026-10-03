@@ -29,7 +29,7 @@ except ImportError:  # not POSIX: a pane's terminal mode cannot be read
 from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
-from office.util import atomic_write_json, dumps, now_iso, pid_alive, sha256_obj, short
+from office.util import atomic_write_json, dumps, now_iso, parse_iso, pid_alive, sha256_obj, short
 
 LEASE_TTL_SECONDS = 4 * 3600
 IDENTITY_ENV = ("OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE_ROLE", "OFFICE_STATE_DIR",
@@ -380,7 +380,23 @@ def renew_lease(con, lease_id: str) -> None:
                 ((now + timedelta(seconds=LEASE_TTL_SECONDS)).isoformat(), now.isoformat(), lease_id))
 
 
-def revoke(con, run: dict, task_id: str, reason: str) -> Result:
+def revoke(con, run: dict, target: str, reason: str) -> Result:
+    """Revoke a task's lease, or end one dispatch (`D...`), or the composed
+    result's reviews (`integration`)."""
+    task_id = target.upper()
+    if task_id == "INTEGRATION":
+        return revoke_integration(con, run, reason)
+    if state.get_task(con, run["id"], task_id) is None:
+        did = target[:1].upper() + target[1:]
+        d = state.get_dispatch(con, did)
+        if d is not None and d["run_id"] == run["id"]:
+            return revoke_dispatch(con, run, d, reason)
+        raise Usage("unknown-task", f"no task, dispatch, or scope {target}",
+                    next_step="office revoke <task id | dispatch id | integration>")
+    return _revoke_task(con, run, task_id, reason)
+
+
+def _revoke_task(con, run: dict, task_id: str, reason: str) -> Result:
     with db.transaction(con):
         task = state.get_task(con, run["id"], task_id)
         if task is None:
@@ -396,6 +412,120 @@ def revoke(con, run: dict, task_id: str, reason: str) -> Result:
     if stopped:
         lines.append(f"stopped {', '.join(stopped)} (SIGTERM)")
     return Result(lines=lines, next=f"office dispatch {task_id} to relaunch")
+
+
+def _end_dispatch(con, run: dict, d: dict, classification: str, why: str, *, stop: bool = True) -> bool:
+    """Record the end of a dispatch Office can no longer wait on. Closes its
+    gate when nothing else can finish it. Returns False when it had ended."""
+    if d.get("ended_at") or d["status"] not in ("launching", "running"):
+        return False
+    if stop and d.get("launcher") not in (None, "external", "sync"):
+        stop_dispatch(run, d)  # stops what is still alive and records the end itself
+    fresh = state.get_dispatch(con, d["id"])
+    if not fresh.get("ended_at"):
+        _finish(d["id"], None, None, classification, 0.0)
+    with db.transaction(con):
+        state.emit(con, run, "dispatch.reaped", f"{d['id']} {d['role']} ended: {why}", task_id=d.get("task_id"),
+                   dispatch_id=d["id"])
+        _close_orphaned_gate(con, run, d.get("gate_id"), why)
+    return True
+
+
+def _close_orphaned_gate(con, run: dict, gate_id: str | None, why: str) -> None:
+    """A review gate whose reviewer ended and whose job is dead has nothing
+    left to finish it. Caller holds the transaction."""
+    if not gate_id:
+        return
+    from office import gates
+    if con.execute("SELECT 1 FROM dispatches WHERE gate_id=? AND ended_at IS NULL", (gate_id,)).fetchone():
+        return
+    for row in con.execute("SELECT claimed_pid FROM outbox WHERE run_id=? AND status='claimed'", (run["id"],)).fetchall():
+        if pid_alive(row["claimed_pid"]):
+            return  # a live job may still retry the review
+    gates.mark_unavailable(con, run, gate_id, why)
+
+
+def revoke_dispatch(con, run: dict, d: dict, reason: str) -> Result:
+    if d.get("task_id") and d.get("role") in ("executor", "planner"):
+        task = state.get_task(con, run["id"], d["task_id"])
+        live = not d.get("ended_at") and d["status"] in ("launching", "running")
+        if task is None or task.get("current_dispatch_id") != d["id"] or not live:
+            why = "ended" if not live else f"not {d['task_id']}'s current dispatch ({task and task.get('current_dispatch_id')})"
+            return Result(lines=[f"{d['id']} is {why}; nothing revoked"],
+                          next=f"office revoke {d['task_id']} to revoke the task itself")
+        return _revoke_task(con, run, d["task_id"], reason)
+    ended = _end_dispatch(con, run, d, "revoked", f"revoked: {reason}")
+    line = f"{d['id']} {'ended' if ended else 'had already ended'} ({reason})"
+    return Result(lines=[line], next="office status")
+
+
+def _fence_integrate_jobs(con, run: dict, reason: str) -> list[str]:
+    """Stop and cancel the integrate jobs that own the integration reviews, so
+    ending a reviewer cannot make a live job start a fallback or retry."""
+    with db.transaction(con):
+        jobs_ = [dict(r) for r in con.execute("SELECT id, status, claimed_pid FROM outbox WHERE run_id=? AND kind='integrate' "
+                                              "AND status IN ('queued','claimed')", (run["id"],)).fetchall()]
+        for j in jobs_:
+            con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL, max_attempts=attempts "
+                        "WHERE id=?", (f"revoked: {reason}"[:200], now_iso(), j["id"]))
+    for j in jobs_:
+        if j["status"] == "claimed" and j["claimed_pid"] and pid_alive(j["claimed_pid"]):
+            _killpg(j["claimed_pid"])
+            deadline = time.time() + 5
+            while pid_alive(j["claimed_pid"]) and time.time() < deadline:
+                time.sleep(0.05)
+    return [j["id"] for j in jobs_]
+
+
+def revoke_integration(con, run: dict, reason: str) -> Result:
+    fenced = _fence_integrate_jobs(con, run, reason)
+    rows = [dict(r) for r in con.execute(
+        "SELECT d.* FROM dispatches d JOIN gates g ON g.id=d.gate_id WHERE d.run_id=? AND g.subject='integration' "
+        "AND d.ended_at IS NULL AND d.status IN ('launching','running')", (run["id"],)).fetchall()]
+    ended = [d["id"] for d in rows if _end_dispatch(con, run, d, "revoked", f"integration revoked: {reason}")]
+    from office import gates
+    with db.transaction(con):
+        stale = [r["id"] for r in con.execute("SELECT id FROM gates WHERE run_id=? AND subject='integration' "
+                                              "AND status IN ('queued','running','waiting')", (run["id"],)).fetchall()]
+        for gid in stale:
+            _close_orphaned_gate(con, run, gid, f"integration revoked: {reason}")
+        if fenced:  # a compose was cut short; a finished integration keeps its verdict
+            from office import integration
+            integration._set_integration(con, state.get_run(con, run["id"]), status="blocked",
+                                         detail=f"integration revoked: {reason}; office resume re-runs it")
+        state.emit(con, run, "integration.revoked", f"integration reviews revoked: {reason}")
+    lines = [f"integration revoked | ended {', '.join(ended) if ended else 'no live dispatch'}"
+             + (f" | cancelled job {', '.join(fenced)}" if fenced else "")]
+    return Result(lines=lines, next="office status (office resume re-runs a blocked integration)")
+
+
+# Reap only a reviewer that is certainly gone: its supervisor is dead, herdr
+# says its agent does not exist, and it left no reply. Unknown is never gone.
+REAP_GRACE_SECONDS = 60
+
+
+def reap_orphans(con, run: dict) -> list[str]:
+    """End review dispatches whose process and herdr agent are gone (a host
+    reboot leaves them `running` forever). Probes herdr, so call it outside a
+    transaction. Returns one note per dispatch reaped."""
+    from office import rerun
+    notes = []
+    for row in con.execute("SELECT * FROM dispatches WHERE run_id=? AND launcher='herdr' AND gate_id IS NOT NULL "
+                           "AND ended_at IS NULL AND status='running'", (run["id"],)).fetchall():
+        d = dict(row)
+        if pid_alive(d.get("pid")):
+            continue
+        started = parse_iso(d.get("launched_at") or d["started_at"])
+        if (datetime.now(timezone.utc) - started).total_seconds() < REAP_GRACE_SECONDS:
+            continue
+        reply = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "reply.txt"
+        if reply.is_file() and reply.stat().st_size > 0:
+            continue  # the review finished; its reader will record it
+        if rerun.agent_alive(d) is not False:
+            continue  # alive, or herdr could not say
+        if _end_dispatch(con, run, d, "lost", "its process and herdr agent are gone (no reply)", stop=False):
+            notes.append(f"{d['id']} reviewer is gone")
+    return notes
 
 
 def _agent_pgid_file(run: dict, dispatch_id: str) -> Path:

@@ -948,6 +948,15 @@ def derive_status(con, run: dict, task: dict) -> str:
 
 # ------------------------------------------------------------------ closeout
 
+def superseded_integration_gate(con, run: dict, gate) -> bool:
+    """A check or review of a composed revision that integration has since
+    replaced. Its verdict can no longer matter, so it never blocks close."""
+    if gate["subject"] != "integration":
+        return False
+    commit = ((state.get_run(con, run["id"]).get("landing") or {}).get("integration") or {}).get("commit")
+    return bool(commit) and gate["input_key"] != f"integration:{commit}"
+
+
 def close_blockers(con, run: dict) -> list[str]:
     from office import plans
     out = []
@@ -956,7 +965,8 @@ def close_blockers(con, run: dict) -> list[str]:
             out.append(f"{t['id']} is {t['status']}")
     if con.execute("SELECT 1 FROM deliveries WHERE run_id=? AND status IN ('queued','delivered')", (run["id"],)).fetchone():
         out.append("an amendment is delivered but not applied")
-    if con.execute("SELECT 1 FROM gates WHERE run_id=? AND status IN ('queued','running','waiting')", (run["id"],)).fetchone():
+    if any(not superseded_integration_gate(con, run, g) for g in
+           con.execute("SELECT * FROM gates WHERE run_id=? AND status IN ('queued','running','waiting')", (run["id"],))):
         out.append("reviews are still running")
     if plans.open_defects(con, run["id"]):
         out.append("a plan defect is open")

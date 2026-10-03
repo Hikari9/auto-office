@@ -8,6 +8,7 @@ or share a declared interface.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import uuid
@@ -71,6 +72,39 @@ def maybe_queue(con, run: dict) -> None:
         return
     key = _set_key(con, tasks)
     state.enqueue(con, run, "integrate", {"key": key}, dedup_key=f"integrate:{run['id']}:{key}", max_attempts=2)
+
+
+LOCK_WAIT_SECONDS = 7200.0  # a compose runs the run checks, which can take their whole timeout
+
+
+@contextlib.contextmanager
+def worktree_lock(run: dict, *, wait: float = 0.0):
+    """Exclusive ownership of the `_integration` worktree. Held by a compose for
+    its whole run and by `office land --rebase` while it queues the next one, so
+    no second compose can remove the worktree under a running check. A flock
+    dies with its process, so a crashed job never leaves it held."""
+    import fcntl
+    import time
+    path = paths.worktrees_dir() / run["id"][:8] / "_integration.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(path, "a")
+    deadline = time.time() + wait
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.time() >= deadline:
+                fh.close()
+                raise state.Refused("integration-running", "another integration is composing or running checks in "
+                                    "_integration", preserved="the running checks",
+                                    next_step="office wait, then retry")
+            time.sleep(0.2)
+    try:
+        yield
+    finally:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        fh.close()
 
 
 def retrigger(con, run: dict) -> bool:
@@ -139,6 +173,11 @@ def _set_integration(con, run: dict, **fields) -> None:
 
 
 def job_integrate(con, run: dict, job: dict) -> dict:
+    with worktree_lock(run, wait=LOCK_WAIT_SECONDS):
+        return _integrate(con, run, job)
+
+
+def _integrate(con, run: dict, job: dict) -> dict:
     run = state.get_run(con, run["id"])  # a rebase may have moved the compose base since this job was queued
     base = compose_base(run)
     tasks = accepted_set(con, run)
