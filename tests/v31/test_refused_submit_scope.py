@@ -389,6 +389,33 @@ def test_submit_does_not_clear_a_scope_request_recorded_in_between(env, monkeypa
     assert not env.con().execute("SELECT 1 FROM revisions").fetchone()
 
 
+@pytest.mark.approved
+def test_stale_undelivered_notice_recommends_nothing(env, monkeypatch):
+    wenv, wt = _live_refused(env)
+    env.office("submit", "--request-scope", "README.md", "--", "docs", cwd=wt, env=wenv)
+    env.write_plan(WIDER)
+    env.office("amend", "T1", "--contract", "--", "add README.md", env=MANUAL, check=0)
+    con = env.con()
+    con.execute("UPDATE tasks SET current_dispatch_id='Dnewowner' WHERE id='T1'")  # relaunched as another dispatch
+    con.commit()
+    _notify(env, monkeypatch, alive=False, landed="")
+    assert env.con().execute("SELECT COUNT(*) FROM events WHERE kind='task.amend_undelivered'").fetchone()[0] == 0
+
+
+@pytest.mark.approved
+def test_request_diff_includes_every_new_file_or_marks_truncation(env):
+    approved_run(env, executor=[{}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    wenv, wt = _worker(env)
+    names = [f"new{i:02d}.md" for i in range(30)]
+    for n in names:
+        (wt / n).write_text(f"body of {n}\n")
+    code, out = env.office("submit", *[a for n in names for a in ("--request-scope", n)], "--", "many", cwd=wt, env=wenv)
+    assert code == 0, out
+    diff = json.loads(env.con().execute("SELECT payload_json FROM events WHERE kind='task.scope_requested'").fetchone()[0])["diff"]
+    assert all(f"body of {n}" in diff for n in names), diff[-300:]
+
+
 def test_plan_review_brief_asks_for_registries_in_scope():
     from office import briefs
     assert "Scope registries" in briefs.PLAN_REVIEW_FORMAT and "gate" in briefs.PLAN_REVIEW_FORMAT

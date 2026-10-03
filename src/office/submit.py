@@ -151,12 +151,15 @@ def _scope_hunk(wt: Path, files: list[str], base: str = "HEAD", limit: int = 600
     text, cut = _bounded(["git", "--literal-pathspecs", "diff", base, "--", *files], wt, limit)
     if not cut:
         new = paths.git(wt, "--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "-z", "--", *files)
-        for f in [x for x in new.split("\0") if x and (wt / x).is_file()][:20]:
+        names = [x for x in new.split("\0") if x and (wt / x).is_file()]
+        over = len(names) > 200  # bound enumeration; the byte limit bounds the contents
+        for f in names[:200]:
             more, cut = _bounded(["git", "diff", "--no-index", "--", "/dev/null", f], wt, limit - len(text))
             text += ("\n" if text else "") + more
             if cut or len(text) >= limit:
                 cut = True
                 break
+        cut = cut or over
     if not text.strip():
         return "(no diff for these paths yet; they are unedited or do not exist)"
     return text + "\n... (truncated)" if cut else text

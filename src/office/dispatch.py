@@ -2030,8 +2030,19 @@ def _amendment_undelivered(con, run: dict, payload: dict, d: dict) -> None:
     """The amendment could not be confirmed delivered to a live agent: the blocker
     stays, and the orchestrator is told what to do instead."""
     from office import db
+    from office import submit
     tid = payload["task_id"]
     with db.transaction(con):
+        task = state.get_task(con, run["id"], tid)
+        current = con.execute("SELECT amendment_id FROM deliveries WHERE run_id=? AND task_id=? AND dispatch_id=? "
+                              "AND status IN ('queued','delivered') ORDER BY target_version DESC LIMIT 1",
+                              (run["id"], tid, d["id"])).fetchone()
+        # Only while this dispatch still owns the task, blocked by this block, with this delivery
+        # current: otherwise the notice is stale and "revoke" would hit the current owner.
+        if not (task and task["current_dispatch_id"] == d["id"] and submit.self_blocked(task)
+                and submit.block_id(con, d["id"]) == payload.get("block_id")
+                and current and current["amendment_id"] == payload.get("amendment_id")):
+            return
         state.emit(con, run, "task.amend_undelivered", f"{tid} {payload.get('amendment_id')} not confirmed delivered "
                    f"to {d['id']}; its blocker stays: office revoke {tid}, then office rerun {tid} --resume|--fresh", task_id=tid, dispatch_id=d["id"])
 
