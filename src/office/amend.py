@@ -399,8 +399,15 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
         if task["status"] == "accepted":
             state.update_task(con, run["id"], tid, status="changes_required", pause_reason=f"amended by {amendment_id}")
         if gates.worker_live(con, d["id"]):
+            from office import submit as submit_mod
+            # A task blocked by this worker's own refused submit or scope request is unblocked
+            # only once the prompt below is confirmed delivered to a live agent (the
+            # notify_worker job); `worker_live` alone can be a dead pane.
             state.enqueue(con, run, "notify_worker", {"dispatch_id": d["id"], "task_id": tid,
-                          "text": f"AMENDMENT {amendment_id}: run office status, apply it, then office ack {amendment_id}."},
+                          "unblock": submit_mod.self_blocked(task), "amendment_id": amendment_id,
+                          "block_id": submit_mod.block_id(con, d["id"]),
+                          "text": f"AMENDMENT {amendment_id}: run office status, apply it, office ack {amendment_id}, "
+                                  "then office submit again."},
                           dedup_key=f"notify:{did}", max_attempts=1)
         else:
             # The worker is gone: a fresh session starts from the current

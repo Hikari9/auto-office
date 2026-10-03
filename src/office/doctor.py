@@ -47,6 +47,11 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
         pinned = {}
         for r in rows:
             pinned.setdefault(version.release_line(r["office_version"]), []).append(r["id"][:8])
+        from office import config as cfg
+        for r in rows:
+            drift = cfg.config_drift(state.get_run(con, r["id"]))
+            if drift:
+                res.add(drift)
         newest = frontdoor.installed_lines()[0]
         for line, ids in sorted(pinned.items(), key=lambda kv: version.release_key(kv[0])):
             ok = version.same_line(line, ver) or frontdoor.newest_on_line(line)

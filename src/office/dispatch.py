@@ -145,7 +145,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             decision = routes[tid]
             if decision.get("status") != "selected":
                 raise Refused("no-route", _route_failure(tid, decision), scope=tid,
-                              preserved="plan and other dispatches", next_step=_route_next(decision, tid))
+                              preserved="plan and other dispatches", next_step=_route_next(decision, tid, run))
             _record_routing(con, run, decision)
             if review_as:
                 state.update_task(con, run["id"], tid, review_override={
@@ -185,13 +185,15 @@ def _route_failure(tid: str, decision: dict) -> str:
     return f"{tid}: no qualifying executor route ({status}){': ' + top if top else ''}{' | ' + skipped if skipped else ''}"
 
 
-def _route_next(decision: dict, tid: str) -> str:
+def _route_next(decision: dict, tid: str, run: dict | None = None) -> str:
     for r in decision.get("rejected") or []:
         if r.get("stage") == 2:
             return (f"a user may promote a route: office approve trust {r['candidate']} --quote \"<user's words>\"; "
                     "or office inspect route for details")
     if decision.get("status") == "protected_quota_would_be_consumed":
-        return "wait for quota, choose a cheaper strategy, or obtain explicit user authority"
+        remedy = candidates.protected_quota_remedy(run, "executor", tid) if run else ""
+        return ("wait for quota, choose a cheaper strategy, or obtain explicit user authority"
+                + (f"; {remedy}" if remedy else ""))
     return f"office inspect route {tid}"
 
 
@@ -720,7 +722,7 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
 def _pr_packet(con, run: dict, task: dict, dispatch: dict) -> dict | None:
     """What the executor needs to push and open its draft PR (3.2), or None."""
     from office import prs
-    if not prs.enabled(run):
+    if not prs.enabled(run) or not prs.has_pr(task):
         return None
     ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch["id"]
     ddir.mkdir(parents=True, exist_ok=True)
@@ -729,6 +731,25 @@ def _pr_packet(con, run: dict, task: dict, dispatch: dict) -> dict | None:
     return {"push": f"git push -u origin HEAD:refs/heads/{dispatch['branch']}",
             "open": None if (task.get("pr") or {}).get("number") else prs.create_command(con, run, task, dispatch, body_path),
             "number": (task.get("pr") or {}).get("number")}
+
+
+def _set_aside_evidence(con, run: dict, dispatch: dict, wt: Path, ddir: Path) -> None:
+    """A scope-none task's worktree is reused across dispatches. Any evidence file
+    already there (left by a submitted round or a crashed one) is moved out before
+    the agent starts, so a file present at submit was written by this dispatch.
+    The file is renamed, never read: it may be a link to anything."""
+    task = state.get_task(con, run["id"], dispatch["task_id"])
+    src = wt / briefs.EVIDENCE_FILE
+    if task is None or task["scope"] or not (src.exists() or src.is_symlink()):
+        return
+    if paths.git(wt, "ls-files", "--", briefs.EVIDENCE_FILE).strip():
+        return  # a tracked file is repo content (submit never ingests it); moving it would delete it
+    dest = ddir / "stale-evidence.md"
+    n = 1
+    while dest.exists() or dest.is_symlink():  # a retried launch job keeps every copy it moved
+        n += 1
+        dest = ddir / f"stale-evidence-{n}.md"
+    os.rename(src, dest)
 
 
 def job_launch_agent(con, run: dict, job: dict) -> dict:
@@ -743,6 +764,7 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     ddir.mkdir(parents=True, exist_ok=True)
     setup = None
     if role == "executor":
+        _set_aside_evidence(con, run, dispatch, wt, ddir)
         # The repo's own install, before the agent's first prompt; a failure is surfaced, never fatal.
         setup = worktree_setup.prepare(run, wt, "task", ddir / "setup.log", created=created,
                                        task_id=dispatch["task_id"], dispatch_id=dispatch["id"])
@@ -1125,6 +1147,91 @@ _SPINNER = re.compile(r"(?:…|\.\.\.)\s*\(\s*(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b")
 def _pane_busy(text: str) -> bool:
     low = (text or "").lower()
     return any(m in low for m in BUSY_MARKERS) or bool(_SPINNER.search(text or ""))
+
+
+# Claude Code stops on its session limit and sits on a screen like
+# "You've hit your session limit · resets 9:30pm (Asia/Manila)". The weekly
+# "You've used 95% of your weekly limit" line is a warning, not a stop, and is
+# deliberately not matched (#253).
+_LIMIT_HIT = re.compile(r"(?:usage|session|5-hour) limit reached|hit your (?:session|usage) limit", re.I)
+# "resets 9:30pm (Asia/Manila)" or the older "limit will reset at 9:30pm".
+_LIMIT_RESETS = re.compile(r"\breset(?:s|\s+at)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([^)]+)\))?", re.I)
+LIMIT_TAIL_LINES = 40
+# Lines that show the turn moved past the limit: an echoed prompt ("> continue",
+# not the composer box, which starts with a border) or new assistant output.
+_LIMIT_ACTIVITY = re.compile(r"^\s*(?:[>❯]\s+\S|[●⏺]\s+\S)")
+# How many non-blank lines above the limit line its fingerprint hashes, and what
+# is stripped from them first: spinner glyphs and running timers or token
+# counters, which tick on an otherwise unchanged screen.
+LIMIT_CONTEXT_LINES = 15
+_LIMIT_NOISE = re.compile(
+    r"[·✢✳✶✻✽*⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"
+    r"|\(\s*(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b[^)]*\)"
+    r"|\b\d+(?:\.\d+)?\s*(?:ms|h|m|s)\b"
+    r"|[↑↓]\s*[\d.,]+\s*k?\s*tokens")
+
+
+def _limit_fingerprint(lines: list[str]) -> str:
+    """sha256 of the up to LIMIT_CONTEXT_LINES non-blank lines just above the
+    limit line, normalized. A new limit after a `continue` has the echo and new
+    output above it, so it hashes differently from the screen it replaced."""
+    import hashlib
+    kept = [ln for ln in (_LIMIT_NOISE.sub("", ln).rstrip() for ln in lines) if ln.strip()]
+    return hashlib.sha256("\n".join(kept[-LIMIT_CONTEXT_LINES:]).encode()).hexdigest()
+
+
+def _wall_to_utc(day, hour: int, minute: int, tz) -> datetime:
+    """A wall-clock time on `day` in `tz` as UTC. `tz` None is the host's zone,
+    resolved for that date (time.mktime with tm_isdst=-1), so its DST applies."""
+    if tz is not None:
+        return datetime(day.year, day.month, day.day, hour, minute, tzinfo=tz).astimezone(timezone.utc)
+    naive = datetime(day.year, day.month, day.day, hour, minute)
+    return datetime.fromtimestamp(time.mktime((*naive.timetuple()[:8], -1)), timezone.utc)
+
+
+def _usage_limit(text: str | None, now: datetime | None = None) -> dict | None:
+    """The session-limit stop shown in the last pane lines, or None.
+    {"resets_at": aware UTC datetime or None, "label": "9:30pm (Asia/Manila)",
+    "tz": zone name, "local": "21:30", "fingerprint": hash of the screen above
+    the limit line}. A reset without a zone is in the host's zone; a reset time
+    already past rolls to the next day."""
+    all_lines = (text or "").splitlines()
+    offset = max(len(all_lines) - LIMIT_TAIL_LINES, 0)
+    lines = all_lines[offset:]
+    last = max((i for i, ln in enumerate(lines) if _LIMIT_HIT.search(ln)), default=None)
+    if last is None:
+        return None
+    # A limit counts only while it is the latest state on screen: a prompt echo,
+    # spinner, busy footer or new assistant output below it means the agent went on.
+    if any(_LIMIT_ACTIVITY.search(ln) or _pane_busy(ln) for ln in lines[last + 1:]):
+        return None
+    out = {"resets_at": None, "label": None, "tz": None, "local": None,
+           "fingerprint": _limit_fingerprint(all_lines[:offset + last])}
+    found = next((m for m in map(_LIMIT_RESETS.search, lines[last:last + 3]) if m), None)
+    if found is None:
+        return out
+    out["label"] = found.string[found.start(1):found.end()].strip()
+    hour, minute, meridiem, zone = int(found.group(1)), int(found.group(2) or 0), found.group(3).lower(), found.group(4)
+    if not 1 <= hour <= 12 or minute > 59:
+        return out
+    hour = hour % 12 + (12 if meridiem == "pm" else 0)
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    tz = None
+    if zone:
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(zone.strip())
+        except Exception:
+            # An explicit zone that cannot be resolved is not the host's: never guess a time.
+            return out
+    today = now.astimezone(tz).date() if tz is not None else datetime.fromtimestamp(now.timestamp()).date()
+    at = _wall_to_utc(today, hour, minute, tz)
+    if at <= now:
+        at = _wall_to_utc(today + timedelta(days=1), hour, minute, tz)
+    local = at.astimezone(tz) if tz is not None else datetime.fromtimestamp(at.timestamp()).astimezone()
+    out.update(resets_at=at, tz=getattr(tz, "key", None) or local.tzname() or "local",
+               local=local.strftime("%H:%M"))
+    return out
 
 
 def herdr_agent_name(dispatch_id: str) -> str:
@@ -2214,12 +2321,57 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
 def job_notify_worker(con, run: dict, job: dict) -> dict:
     """Best-effort native nudge to a live Herdr-hosted worker. Delivery truth
     stays in runs.db and rides on the worker's next office command."""
-    d = state.get_dispatch(con, job["payload"]["dispatch_id"])
-    if not d or d.get("launcher") != "herdr" or not d.get("pane_id") or d["status"] != "running":
+    from office import gates
+    payload = job["payload"]
+    d = state.get_dispatch(con, payload["dispatch_id"])
+    unblock = bool(payload.get("unblock"))
+    if not d or d.get("launcher") != "herdr" or not d.get("pane_id") or d["status"] != "running" \
+            or (unblock and not gates._agent_alive(herdr_agent_name(d["id"]))):
+        if unblock and d:
+            _amendment_undelivered(con, run, payload, d)
         return {"sent": False}
-    text = job["payload"].get("text", "office status has an update for you.")
+    text = payload.get("text", "office status has an update for you.")
     landed = submit_prompt(d["pane_id"], text, pane=d["pane_id"])
+    if unblock:
+        if landed == "landed":
+            from office import db, submit
+            with db.transaction(con):
+                task = state.get_task(con, run["id"], payload["task_id"])
+                # Still this dispatch's own block (a revoke or newer owner since keeps its blocker).
+                current = con.execute("SELECT amendment_id FROM deliveries WHERE run_id=? AND task_id=? AND dispatch_id=? "
+                                      "AND status IN ('queued','delivered') ORDER BY target_version DESC LIMIT 1",
+                                      (run["id"], payload["task_id"], d["id"])).fetchone()
+                # Only the current amendment for the current block lifts it; a stale notice leaves it.
+                fresh = bool(current and current["amendment_id"] == payload.get("amendment_id")
+                             and submit.block_id(con, d["id"]) == payload.get("block_id"))
+                if task and fresh and task["current_dispatch_id"] == d["id"] and submit.unblock_self(con, run, task):
+                    state.emit(con, run, "task.unblocked", f"{task['id']} unblocked: {payload.get('amendment_id')} "
+                               "delivered to the live worker, which resubmits", audience="runtime", task_id=task["id"],
+                               dispatch_id=d["id"])
+        else:
+            _amendment_undelivered(con, run, payload, d)
     return {"sent": True, "landed": landed}
+
+
+def _amendment_undelivered(con, run: dict, payload: dict, d: dict) -> None:
+    """The amendment could not be confirmed delivered to a live agent: the blocker
+    stays, and the orchestrator is told what to do instead."""
+    from office import db
+    from office import submit
+    tid = payload["task_id"]
+    with db.transaction(con):
+        task = state.get_task(con, run["id"], tid)
+        current = con.execute("SELECT amendment_id FROM deliveries WHERE run_id=? AND task_id=? AND dispatch_id=? "
+                              "AND status IN ('queued','delivered') ORDER BY target_version DESC LIMIT 1",
+                              (run["id"], tid, d["id"])).fetchone()
+        # Only while this dispatch still owns the task, blocked by this block, with this delivery
+        # current: otherwise the notice is stale and "revoke" would hit the current owner.
+        if not (task and task["current_dispatch_id"] == d["id"] and submit.self_blocked(task)
+                and submit.block_id(con, d["id"]) == payload.get("block_id")
+                and current and current["amendment_id"] == payload.get("amendment_id")):
+            return
+        state.emit(con, run, "task.amend_undelivered", f"{tid} {payload.get('amendment_id')} not confirmed delivered "
+                   f"to {d['id']}; its blocker stays: office revoke {tid}, then office rerun {tid} --resume|--fresh", task_id=tid, dispatch_id=d["id"])
 
 
 def start_stacked(con, run: dict, accepted_task: str) -> list[str]:

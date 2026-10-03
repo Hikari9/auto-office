@@ -138,8 +138,29 @@ def create_command(con, run: dict, task: dict, dispatch: dict, body_path: Path) 
 
 # ------------------------------------------------------------------ queueing (caller holds the tx)
 
+def has_pr(task: dict | None) -> bool:
+    """A task with no file scope (a comment or issue edit) commits nothing, so it
+    gets no PR. A task with any recorded PR keeps PR handling whatever its scope;
+    plans.sync_tasks refuses to make such a task scope-none (`pr_blocker`)."""
+    return bool(task and (task["scope"] or task.get("pr")))
+
+
+def pr_blocker(con, run: dict, task: dict) -> str | None:
+    """Why `task` cannot become PR-free, or None. Local and conservative (no gh
+    call; the caller holds the tx): any recorded PR, open or closed, or a PR job
+    that is not done and so may have created a PR Office has not recorded."""
+    pr = task.get("pr")
+    if pr:
+        return f"it has PR {'#' + str(pr['number']) if pr.get('number') else pr.get('url') or '(unnumbered)'}"
+    for row in con.execute("SELECT id, status, payload_json FROM outbox WHERE run_id=? AND kind IN ('pr','pr_sync') "
+                           "AND status IN ('queued','claimed','failed')", (run["id"],)).fetchall():
+        if (json.loads(row["payload_json"] or "{}") or {}).get("task_id") == task["id"]:
+            return f"PR job {row['id']} is {row['status']} and may have opened a PR"
+    return None
+
+
 def queue(con, run: dict, task_id: str, event: str, ref: str) -> None:
-    if enabled(run):
+    if enabled(run) and has_pr(state.get_task(con, run["id"], task_id)):
         state.enqueue(con, run, "pr_sync", {"task_id": task_id, "event": event, "ref": ref},
                       dedup_key=f"pr_sync:{run['id'][:8]}:{task_id}:{event}:{ref}", max_attempts=2)
 
@@ -232,6 +253,8 @@ def job_pr_sync(con, run: dict, job: dict) -> dict:
     task = state.get_task(con, run["id"], p["task_id"])
     if not enabled(run) or task is None:
         return {"skipped": "prs disabled"}
+    if not has_pr(task):
+        return {"skipped": "no file scope, no PR"}
     try:
         return _sync(con, run, task, p["event"], p["ref"])
     except Exception as exc:  # GitHub trouble is a notice, never a lifecycle failure

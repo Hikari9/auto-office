@@ -141,7 +141,8 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool) -> Result:
         raise Refused("task-done", f"{tid} is {task['status']}; nothing to rerun", scope=tid)
     if gates.worker_live(con, task.get("current_dispatch_id")):
         raise Refused("worker-live", f"{tid} still has a live worker ({task['current_dispatch_id']})", scope=tid,
-                      next_step=f"office revoke {tid}, or wait for it to end")
+                      next_step=f'office prompt {tid} -- "<message>" to reach it (an amendment already tells it to '
+                                f"resubmit), or office revoke {tid} to end it first")
     parent = _last_ended_executor(con, run, tid)
     if parent is None:
         raise Refused("no-ended-executor", f"{tid} has no ended executor session to rerun", scope=tid,
@@ -153,7 +154,8 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool) -> Result:
         adapter = adapters.load_all().get(parent.get("adapter_id") or parent.get("harness") or "")
         argv = None
         if not session:
-            why = f"{parent['id']} has no stored harness session id"
+            why = (f"{parent['id']} has no stored harness session id (it ran headless, so there is no session to "
+                   f"continue; a fresh session starts from the preserved worktree and the current contract)")
         elif adapter is None:
             why = f"no adapter {parent.get('adapter_id') or parent.get('harness')} for {parent['id']}"
         else:
