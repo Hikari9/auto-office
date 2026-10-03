@@ -135,6 +135,24 @@ def executor_session_dispatch(con, keys: list[tuple[str, str]]) -> tuple[dict, d
     return None
 
 
+def _end_stale_bindings(con, keys: list[tuple[str, str]], run: dict) -> None:
+    """End bindings of an executor's own session; never rebinds."""
+    from office import db
+    live = [(h, s) for h, s in keys if con.execute(
+        "SELECT 1 FROM session_bindings WHERE harness=? AND session_id=? AND ended_at IS NULL", (h, s)).fetchone()]
+    if live:
+        with db.transaction(con):
+            for h, s in live:
+                con.execute("UPDATE session_bindings SET ended_at=? WHERE harness=? AND session_id=?", (now_iso(), h, s))
+        if run.get("git_common_dir"):
+            primary = paths.primary_checkout(Path(run["git_common_dir"]))
+            for h, s in live:
+                try:
+                    binding_file(primary, h, s).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+
 def refuse_executor_binding(run: dict, d: dict, what: str) -> Refused:
     return Refused("executor-lost-binding",
                    f"{what} belongs to executor dispatch {d['id']} for {d['task_id']} in run {short(run['id'])}; "
@@ -204,15 +222,22 @@ def resolve(con, *, run_arg: str | None = None, state_dir: str | None = None,
         if run is None:
             raise NoRun("no-such-run", f"OFFICE_RUN_ID={env_run} names no run", next_step="office list")
         return Target(run=run, source="env")
-    # 3. session binding
-    run = bound_run(con, session_keys(harness, session))
+    # 3. an executor that lost its env: its open task worktree, or a session id
+    # recorded on its open dispatch, names run and dispatch. This wins over a
+    # session binding, which an older `office resume` may have wrongly made.
+    keys = session_keys(harness, session)
+    found = task_worktree(con, cwd)
+    source = "task-worktree"
+    if not found:
+        found, source = executor_session_dispatch(con, keys), "executor-session"
+    if found:
+        _end_stale_bindings(con, keys, found[0])
+        return Target(run=found[0], source=source, dispatch=found[1])
+    # 4. session binding
+    run = bound_run(con, keys)
     if run:
         return Target(run=run, source="session")
-    # 3b. an executor that lost its env: its task worktree names run and dispatch
-    found = task_worktree(con, cwd)
-    if found:
-        return Target(run=found[0], source="task-worktree", dispatch=found[1])
-    # 4. sole active run in this repository
+    # 5. sole active run in this repository
     ident = paths.repo_identity(cwd)
     if ident is None:
         raise NoRun("no-repository", "not inside a git repository and no run was named",

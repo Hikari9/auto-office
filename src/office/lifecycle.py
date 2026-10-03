@@ -46,6 +46,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                     next_step="cd into the repository, then office start")
     top, common = ident
     config, warnings = cfg.resolve(top, sets)
+    # The file-resolved blocks at start (no --set), so a later drift check
+    # compares files to files and a launch override never reads as an edit.
+    file_config, _ = cfg.resolve(top)
+    pinned = {**config, cfg.FILE_BLOCKS_KEY: {b: file_config.get(b) or {} for b in cfg.DRIFT_BLOCKS}}
     risk = cfg.resolve_risk(config, blast_radius, size_class, irreversible)
     gear = cfg.fit_gear(gear, risk, volume, interview, adversarial)
     if gear not in cfg.GEARS:
@@ -87,7 +91,7 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
                 (run_id, run_id, now, exact, hashes["policy_hash"], hashes["catalog_hash"], hashes["adapter_hash"],
                  sha256_obj(config), "planning", ver, str(top), str(common), goal.strip(), "planning", gear,
-                 playbook, base_sha, str(sdir), 1, 0, 1, dumps(config), dumps(risk), dumps(gates), dumps([]),
+                 playbook, base_sha, str(sdir), 1, 0, 1, dumps(pinned), dumps(risk), dumps(gates), dumps([]),
                  dumps(plan_review), planner_mode, now))
             landing = {**({"issue": issue} if issue else {}),
                        **({"prs": {"enabled": False, "reason": "--no-prs"}} if no_prs else {})}

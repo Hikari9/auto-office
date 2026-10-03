@@ -142,3 +142,54 @@ def test_status_warns_when_quota_config_drifted_since_run_start(env, where):
     assert "quota.reserve_percent pinned 7" in out and "live 3" in out, out
     code, out = env.office("doctor")
     assert "config edited since run start" in out, out
+
+
+# ------------------------------------------------------------------ review follow-ups
+
+@pytest.mark.approved
+def test_stale_orchestrator_binding_of_an_executor_session_is_repaired_not_rebound(env):
+    d, wt = _dispatch_external(env)
+    env.office("start", "second", "--planner", "inline", check=0)
+    # What an older `office resume` left behind: the executor's session bound as orchestrator.
+    con = env.con()
+    con.execute("DELETE FROM session_bindings")
+    con.execute("INSERT INTO session_bindings(harness, session_id, run_id, bound_at, bound_by) VALUES(?,?,?,?,?)",
+                ("claude", "sess-exec", d["run_id"], "2026-01-01T00:00:00Z", "resume"))
+    code, out = env.office("status", cwd=wt, env=SESSION)
+    assert code == 0 and out.startswith("T1 "), out
+    assert con.execute("SELECT COUNT(*) FROM session_bindings WHERE session_id='sess-exec' AND ended_at IS NULL").fetchone()[0] == 0
+    # A session id recorded on the open dispatch wins from any cwd, too.
+    con.execute("UPDATE dispatches SET session_id='sess-exec' WHERE id=?", (d["id"],))
+    con.execute("INSERT INTO session_bindings(harness, session_id, run_id, bound_at, bound_by) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(harness, session_id) DO UPDATE SET ended_at=NULL",
+                ("claude", "sess-exec", d["run_id"], "2026-01-01T00:00:00Z", "resume"))
+    code, out = env.office("status", env=SESSION)
+    assert code == 0 and out.startswith("T1 "), out
+    assert con.execute("SELECT COUNT(*) FROM session_bindings WHERE session_id='sess-exec' AND ended_at IS NULL").fetchone()[0] == 0
+
+
+def test_start_overrides_are_not_drift_but_file_edits_are(env):
+    user = env.tmp / "user-config.yaml"
+    _write_reserve(user, 15)
+    env.trust()
+    env.script()
+    env.office("start", "g", "--planner", "inline", "--set", "quota.reserve_percent=7", check=0)
+    code, out = env.office("status")
+    assert code == 0 and "config edited" not in out, out
+    code, out = env.office("doctor")
+    assert "config edited" not in out, out
+    _write_reserve(user, 20)
+    code, out = env.office("status")
+    assert "config edited since run start" in out, out
+
+
+def test_runs_without_recorded_file_blocks_never_warn(env):
+    _write_reserve(env.tmp / "user-config.yaml", 7)
+    approved_run(env)
+    con = env.con()
+    pol = json.loads(con.execute("SELECT policy_json FROM runs").fetchone()[0])
+    pol.pop("_file_blocks_at_start")
+    con.execute("UPDATE runs SET policy_json=?", (json.dumps(pol),))
+    _write_reserve(env.tmp / "user-config.yaml", 3)
+    code, out = env.office("status")
+    assert code == 0 and "config edited" not in out, out

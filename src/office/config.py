@@ -103,6 +103,7 @@ def resolve(repo_root: Path | None, sets: list[str] | None = None) -> tuple[dict
 
 
 DRIFT_BLOCKS = ("quota", "roles")
+FILE_BLOCKS_KEY = "_file_blocks_at_start"
 
 
 def config_drift(run: dict) -> str | None:
@@ -114,7 +115,10 @@ def config_drift(run: dict) -> str | None:
         live, _ = resolve(Path(root) if root and Path(root).is_dir() else None)
     except (OSError, ValueError):
         return None
-    differ = [b for b in DRIFT_BLOCKS if (live.get(b) or {}) != (pinned.get(b) or {})]
+    recorded = pinned.get(FILE_BLOCKS_KEY)
+    if recorded is None:
+        return None  # started before overrides were recorded: the comparison is not trustworthy
+    differ = [b for b in DRIFT_BLOCKS if (live.get(b) or {}) != (recorded.get(b) or {})]
     if not differ:
         return None
     detail = ""
