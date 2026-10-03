@@ -621,7 +621,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
             inter = (argv_cli[1:], Path(argv_cli[0]).name)
         else:
             inter = _interactive(dispatch, kind, cwd, include_dirs, output=output)
-        pane = _herdr_pane(run, cwd, label=f"office {dispatch.get('role') or kind} {dispatch['id']}") if inter else None
+        pane = _herdr_pane(run, cwd, label=pane_label(run, dispatch, kind)) if inter else None
         if inter and not pane:
             _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
         if pane:
@@ -1369,6 +1369,50 @@ def _herdr_pane(run: dict, cwd: Path, label: str | None = None) -> str | None:
     if pane and label:
         subprocess.run(["herdr", "pane", "rename", pane, label], capture_output=True, timeout=30)
     return pane
+
+
+def pane_label(run: dict, dispatch: dict, kind: str = "") -> str:
+    """What a human sees on a pane tab: `<task> <role> [PR#n] <short id>`, e.g.
+    `T3 executor PR#261 D4f2`. Integration and plan dispatches carry no task, so
+    they lead with `integration` or `plan` (plus the integration PR when known)."""
+    role = dispatch.get("role") or kind
+    short = str(dispatch["id"])[:5]
+    pr = None
+    scope = dispatch.get("task_id")
+    con = db.connect()
+    try:
+        if scope:
+            task = state.get_task(con, run["id"], scope)
+            pr = ((task or {}).get("pr") or {}).get("number")
+        else:
+            gate = con.execute("SELECT subject FROM gates WHERE id=?", (dispatch.get("gate_id"),)).fetchone() \
+                if dispatch.get("gate_id") else None
+            scope = "integration" if gate and gate["subject"] == "integration" else "plan"
+            if scope == "integration":
+                pr = (((state.get_run(con, run["id"]) or {}).get("landing") or {}).get("integration") or {}).get("pr")
+                pr = pr.get("number") if isinstance(pr, dict) else pr
+    except Exception:  # a label is cosmetic; never fail a launch over it
+        pass
+    finally:
+        con.close()
+    return " ".join(p for p in (scope, role, f"PR#{pr}" if pr else "", short) if p)
+
+
+def relabel_task_panes(run: dict, task_id: str) -> None:
+    """Best-effort: rename the task's live herdr panes once its PR number is known."""
+    try:
+        con = db.connect()
+        try:
+            rows = con.execute("SELECT * FROM dispatches WHERE run_id=? AND task_id=? AND launcher='herdr' "
+                               "AND pane_id IS NOT NULL AND status IN ('launching','running')",
+                               (run["id"], task_id)).fetchall()
+            labels = [(r["pane_id"], pane_label(run, dict(r), r["kind"] or "")) for r in rows]
+        finally:
+            con.close()
+        for pane, label in labels:
+            subprocess.run(["herdr", "pane", "rename", pane, label], capture_output=True, timeout=30)
+    except Exception:
+        pass
 
 
 def _busy_panes(run: dict) -> set:
