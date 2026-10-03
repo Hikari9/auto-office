@@ -255,7 +255,7 @@ def _idle_executors(con, run: dict) -> list[str]:
         if d.get("stall_kind"):
             with db.transaction(con):
                 con.execute("UPDATE dispatches SET stall_kind=NULL, resets_at=NULL, limit_label=NULL, "
-                            "limit_continued_at=NULL WHERE id=?", (d["id"],))
+                            "limit_continued_at=NULL, limit_continue_outcome=NULL WHERE id=?", (d["id"],))
         changed = act["hash"] is not None and d.get("idle_hash") not in (None, act["hash"])
         if act["busy"] or changed:
             idle_since = None
@@ -296,26 +296,27 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
     # The pane keeps showing the screen after the reset, and the parsed time
     # would then roll to tomorrow: the episode keeps its first resets_at.
     resets_at = parse_iso(d["resets_at"]) if same else limit["resets_at"]
+    # The marker and its outcome belong to one episode: a new episode starts clean.
     continued = d.get("limit_continued_at") if same else None
+    outcome_was = d.get("limit_continue_outcome") if same else None
     fields = {"stall_kind": "usage_limit", "resets_at": resets_at.isoformat() if resets_at else None,
-              "limit_label": limit["label"], "limit_continued_at": continued}
+              "limit_label": limit["label"], "limit_continued_at": continued,
+              "limit_continue_outcome": outcome_was}
     if any(d.get(k) != v for k, v in fields.items()):
         with db.transaction(con):
-            con.execute("UPDATE dispatches SET stall_kind=?, resets_at=?, limit_label=?, limit_continued_at=? WHERE id=?",
+            con.execute("UPDATE dispatches SET stall_kind=?, resets_at=?, limit_label=?, limit_continued_at=?, "
+                        "limit_continue_outcome=? WHERE id=?",
                         (*fields.values(), d["id"]))
     tail = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "pane-tail.txt"
     atomic_write_text(tail, "\n".join(act["text"].splitlines()[-40:]) + "\n")
     cfg = (run.get("policy") or {}).get("executor_usage_limit") or {}
     unconfirmed = ""
     if continued:
-        # Exactly one `continue` per episode, even when it was not confirmed:
-        # a second send could duplicate a prompt that did land.
-        last = con.execute("SELECT kind FROM events WHERE run_id=? AND dispatch_id=? AND kind LIKE 'usage_limit.continue%' "
-                           "ORDER BY seq DESC LIMIT 1", (run["id"], d["id"])).fetchone()
-        if last and last[0] != "usage_limit.continue":
-            unconfirmed = last[0].rsplit("_", 1)[-1]  # unknown | failed: report at once, never as sent
-        else:
-            # Confirmed: report again only if the pane then sat unchanged on the limit screen.
+        # Exactly one `continue` per episode, whatever came of it: a second send
+        # could duplicate a prompt that did land. Only a recorded `landed` is a
+        # confirmed send; `pending` is a crash between the marker and the send.
+        if outcome_was == "landed":
+            # Report again only if the pane then sat unchanged on the limit screen.
             if act["hash"] != d.get("idle_hash") or not d.get("idle_since"):
                 with db.transaction(con):
                     con.execute("UPDATE dispatches SET idle_since=?, idle_hash=? WHERE id=?",
@@ -323,12 +324,15 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
                 return None
             if (parse_iso(now_iso()) - parse_iso(d["idle_since"])).total_seconds() < LIMIT_SETTLE_S:
                 return None
+        else:
+            unconfirmed = outcome_was if outcome_was in ("unknown", "failed") else "unknown"
     elif (resets_at and cfg.get("auto_continue") is True and d.get("pane_id")
           and now >= resets_at + timedelta(seconds=float(cfg.get("continue_grace_seconds", 60)))):
-        # Mark first: a crash after the send must not send a second `continue`.
+        # Mark first, as pending: a crash after the send must not send a second
+        # `continue`, and a crash before it must not read as sent.
         with db.transaction(con):
-            con.execute("UPDATE dispatches SET limit_continued_at=?, idle_since=?, idle_hash=? WHERE id=?",
-                        (now_iso(), now_iso(), act["hash"], d["id"]))
+            con.execute("UPDATE dispatches SET limit_continued_at=?, limit_continue_outcome='pending', idle_since=?, "
+                        "idle_hash=? WHERE id=?", (now_iso(), now_iso(), act["hash"], d["id"]))
         try:
             got = dispatch.submit_prompt(d["pane_id"], "continue", pane=d["pane_id"])
         except Exception as e:  # herdr unreachable or the send failed
@@ -344,6 +348,7 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
                            + (" (typed, still unsubmitted)" if got == "held" else ""),
                 "failed": f"Office could not send continue ({err})"}[outcome]
         with db.transaction(con):
+            con.execute("UPDATE dispatches SET limit_continue_outcome=? WHERE id=?", (outcome, d["id"]))
             state.emit(con, run, kind, f"{who}: usage limit reset; {said}",
                        audience="runtime" if outcome == "landed" else "orchestrator",
                        task_id=d.get("task_id"), dispatch_id=d["id"],

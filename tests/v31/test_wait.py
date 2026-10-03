@@ -360,3 +360,35 @@ def test_an_unconfirmed_auto_continue_is_not_recorded_as_sent(env, monkeypatch, 
     assert len(kinds) == 1 and kinds[0] != "usage_limit.continue", kinds
     again = guide.stalls(con, run)  # still reported at once, and never re-sent
     assert len(again) == 1 and word in again[0] and len(sent) == 1, again
+
+
+def test_a_crash_between_the_marker_and_the_send_is_unknown_not_sent(env, monkeypatch):
+    con, run, d, sent, guide = _limit_run(env, monkeypatch, auto=True)
+    guide.stalls(con, run)
+    # The state a crash leaves: marker written, outcome pending, nothing sent, no event.
+    con.execute("UPDATE dispatches SET resets_at='2020-01-01T00:00:00+00:00', limit_continued_at='2020-01-01T00:00:01+00:00', "
+                "limit_continue_outcome='pending' WHERE id=?", (d["id"],))
+    con.commit()
+    for _ in range(2):
+        out = guide.stalls(con, run)
+        assert len(out) == 1 and "not confirmed" in out[0] and "already sent" not in out[0], out
+        assert f"office prompt {d['id']} -- continue" in out[0], out
+    assert sent == []  # never retried automatically
+
+
+def test_a_landed_outcome_from_an_earlier_episode_does_not_carry_over(env, monkeypatch):
+    con, run, d, sent, guide = _limit_run(env, monkeypatch, auto=True)
+    guide.stalls(con, run)
+    con.execute("UPDATE dispatches SET resets_at='2020-01-01T00:00:00+00:00', limit_continued_at='2020-01-01T00:00:01+00:00', "
+                "limit_continue_outcome='landed', limit_label='8am' WHERE id=?", (d["id"],))
+    con.commit()
+    # The pane now shows a different reset (a new episode): marker and outcome reset, then it sends once.
+    guide.stalls(con, run)
+    row = con.execute("SELECT limit_continued_at, limit_continue_outcome, limit_label FROM dispatches WHERE id=?",
+                      (d["id"],)).fetchone()
+    assert row[0] is None and row[1] is None and row[2] == "9:30pm", tuple(row)
+    assert sent == []  # its reset is in the future
+    con.execute("UPDATE dispatches SET resets_at='2020-01-01T00:00:00+00:00' WHERE id=?", (d["id"],))
+    con.commit()
+    assert guide.stalls(con, run) == [] and len(sent) == 1
+    assert con.execute("SELECT limit_continue_outcome FROM dispatches WHERE id=?", (d["id"],)).fetchone()[0] == "landed"
