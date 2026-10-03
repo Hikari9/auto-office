@@ -954,11 +954,11 @@ def owning_jobs(con, run: dict, gate) -> list[dict]:
     integrate job while it runs, so its owner is an integrate job claimed no
     later than the gate was created. Unrelated jobs in the run never count."""
     if gate["subject"] == "integration":
-        rows = con.execute("SELECT id, status, claimed_pid FROM outbox WHERE run_id=? AND kind='integrate' "
+        rows = con.execute("SELECT id, status, claimed_pid, claimed_by FROM outbox WHERE run_id=? AND kind='integrate' "
                            "AND status='claimed' AND (claimed_at IS NULL OR claimed_at<=?)",
                            (run["id"], gate["created_at"])).fetchall()
     else:
-        rows = con.execute("SELECT id, status, claimed_pid FROM outbox WHERE run_id=? AND status IN ('queued','claimed') "
+        rows = con.execute("SELECT id, status, claimed_pid, claimed_by FROM outbox WHERE run_id=? AND status IN ('queued','claimed') "
                            "AND payload_json LIKE ?", (run["id"], f'%"{gate["id"]}"%')).fetchall()
     return [dict(r) for r in rows]
 

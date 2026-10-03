@@ -50,7 +50,8 @@ def land(con, run: dict, *, mode: str | None = None, quote: str | None = None, r
          mark_deployed: bool = False) -> Result:
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-land", "a worker cannot land the run")
-    commit = integration.final_commit(con, run)
+    snap = _snapshot(con, run)
+    commit = snap["commit"]
     if not commit:
         blockers = gates.close_blockers(con, run)
         raise Refused("not-ready", "nothing verified to land: " + ("; ".join(blockers[:3]) or "integration not accepted"),
@@ -76,9 +77,34 @@ def land(con, run: dict, *, mode: str | None = None, quote: str | None = None, r
                       "command in the plan requirements", next_step='office amend requirements --quote "<words>" -- '
                       '"deploy_prod: <command>" (office land --detect proposes one)')
     with _land_lock(run):
+        _require_unchanged(con, run, snap, "before landing")  # it may have moved while this land waited
         if mode == "preview":
-            return _land_preview(con, run, commit, es["deploy"])
-        return _land_merge(con, run, mode, commit, es["deploy"], redeploy=redeploy, mark_deployed=mark_deployed)
+            return _land_preview(con, run, snap, es["deploy"])
+        return _land_merge(con, run, mode, snap, es["deploy"], redeploy=redeploy, mark_deployed=mark_deployed)
+
+
+def _snapshot(con, run: dict) -> dict:
+    """What a land merges and deploys: the accepted integration commit, the
+    accepted revision of every task, and the integration gate verdicts on it."""
+    commit = integration.final_commit(con, run)
+    tasks = integration.accepted_set(con, run)
+    gates_ = con.execute("SELECT id, kind, status, verdict FROM gates WHERE run_id=? AND subject='integration' "
+                         "AND input_key=? ORDER BY id", (run["id"], f"integration:{commit}")).fetchall()
+    return {"commit": commit,
+            "accepted": sorted((t["id"], t["accepted_revision_id"]) for t in tasks or []) if tasks is not None else None,
+            "gates": [tuple(g) for g in gates_]}
+
+
+def _require_unchanged(con, run: dict, snap: dict, when: str, preserved: str = "nothing was merged or deployed") -> None:
+    now = _snapshot(con, run)
+    if now == snap:
+        return
+    what = [k for k in ("commit", "accepted", "gates") if now[k] != snap[k]]
+    raise Refused("integration-changed", f"the integration this land read ({(snap['commit'] or '')[:12]}) changed {when}: "
+                  + ", ".join({"commit": f"integration is now {(now['commit'] or 'not accepted')[:12]}",
+                               "accepted": "the accepted tasks changed", "gates": "its gate verdicts changed"}[k]
+                              for k in what),
+                  preserved=preserved, next_step="office status, then office land again once integration is accepted")
 
 
 @contextlib.contextmanager
@@ -104,14 +130,17 @@ def _tree(repo: Path, commit: str) -> str:
     return paths.git(repo, "rev-parse", f"{commit}^{{tree}}")
 
 
-def _land_preview(con, run: dict, commit: str, deploy: dict) -> Result:
+def _land_preview(con, run: dict, snap: dict, deploy: dict) -> Result:
     res = Result()
+    commit = snap["commit"]
     tree = _tree(Path(run["repo_root"]), commit)
     if _deployed(con, run, "preview", tree):
         res.add(f"preview already deployed from this tree ({tree[:12]}); skipped")
     else:
         # A checkout of its own: a compose may remove `_integration`, and another land may run its own deploy.
         with _deploy_checkout(run, commit, "deploy-preview") as (checkout, head, head_tree):
+            _require_unchanged(con, run, snap, "before the preview deploy")
+            _require_tree(head_tree, tree, "the accepted integration")
             _deploy(con, run, "preview", deploy, checkout, res, commit=head, tree=head_tree)
         _record_deployed(con, run, "preview", head, head_tree)
     _record(con, run, delivered=f"preview deployed from {commit[:12]}; PRs left open for review")
@@ -119,8 +148,9 @@ def _land_preview(con, run: dict, commit: str, deploy: dict) -> Result:
     return res
 
 
-def _land_merge(con, run: dict, mode: str, commit: str, deploy: dict, *, redeploy: bool, mark_deployed: bool) -> Result:
+def _land_merge(con, run: dict, mode: str, snap: dict, deploy: dict, *, redeploy: bool, mark_deployed: bool) -> Result:
     res = Result()
+    commit = snap["commit"]
     repo = Path(run["repo_root"])
     landing = state.get_run(con, run["id"]).get("landing") or {}
     merged = landing.get("merged") or {}
@@ -148,6 +178,7 @@ def _land_merge(con, run: dict, mode: str, commit: str, deploy: dict, *, redeplo
     before = landing.get("rollback") or before  # a rerun's `before` already holds the merges
     _record(con, run, rollback=before)
     main = _verify_main(con, run, commit, res)
+    checked = _tree(repo, main)
     if mode == "e2e":
         tree = _tree(repo, main)
         if not redeploy and _deployed(con, run, "prod", tree):
@@ -159,12 +190,22 @@ def _land_merge(con, run: dict, mode: str, commit: str, deploy: dict, *, redeplo
             if not redeploy:
                 _require_deploy_proof(con, run, tree)
             with _deploy_checkout(run, main, "deploy-prod") as (checkout, head, head_tree):
+                _require_unchanged(con, run, snap, "before the prod deploy",
+                                   preserved=f"the merges; nothing was deployed; rollback target {before[:12]}")
+                # The tree _verify_main passed: the reviewed integration tree, or main's re-checked tree.
+                _require_tree(head_tree, checked, "the tree that passed the checks")
                 _deploy(con, run, "prod", deploy, checkout, res, rollback=before, commit=head, tree=head_tree)
             _record_deployed(con, run, "prod", head, head_tree, by="redeploy" if redeploy else None)
     _close_issue(con, run, main, res)
     _record(con, run, merged={"commit": main, "integration_commit": commit, "rollback": before, "at": now_iso()})
     res.next = "office close"
     return res
+
+
+def _require_tree(deployed: str, expected: str, what: str) -> None:
+    if deployed != expected:
+        raise Refused("deploy-tree-mismatch", f"the deploy checkout's tree {deployed[:12]} is not {what} ({expected[:12]})",
+                      preserved="nothing was deployed", next_step="office status, then office land again")
 
 
 def _landed_tree(repo: Path, merged: dict) -> str:

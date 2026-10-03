@@ -29,7 +29,7 @@ except ImportError:  # not POSIX: a pane's terminal mode cannot be read
 from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
-from office.util import atomic_write_json, dumps, now_iso, parse_iso, pid_alive, sha256_obj, short
+from office.util import atomic_write_json, claim_alive, claim_signalable, dumps, now_iso, parse_iso, pid_alive, sha256_obj, short
 
 LEASE_TTL_SECONDS = 4 * 3600
 IDENTITY_ENV = ("OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE_ROLE", "OFFICE_STATE_DIR",
@@ -421,14 +421,38 @@ def _end_dispatch(con, run: dict, d: dict, classification: str, why: str, *, sto
         return False
     if stop and d.get("launcher") not in (None, "external", "sync"):
         stop_dispatch(run, d)  # stops what is still alive and records the end itself
-    fresh = state.get_dispatch(con, d["id"])
-    if not fresh.get("ended_at"):
-        _finish(d["id"], None, None, classification, 0.0)
+    if d.get("kind") in ("planner", "executor") and not state.get_dispatch(con, d["id"]).get("ended_at"):
+        _finish(d["id"], None, None, classification, 0.0)  # a worker end has its own after-exit steps
     with db.transaction(con):
+        # The end and the gate close commit together: a crash between them would
+        # leave a running gate with nothing to finish it. `repair_orphaned_gates`
+        # covers an end recorded elsewhere (stop_dispatch, an older Office).
+        if not state.get_dispatch(con, d["id"]).get("ended_at"):
+            con.execute("UPDATE dispatches SET status=CASE WHEN status='cancelled' THEN status ELSE 'failed' END, "
+                        "terminal_classification=?, ended_at=?, wall_clock_seconds=COALESCE(wall_clock_seconds, 0) "
+                        "WHERE id=? AND ended_at IS NULL", (classification, now_iso(), d["id"]))
+            state.emit(con, run, "dispatch.ended", f"{d.get('task_id') or d['role']} {d['role']} ended: {classification}",
+                       audience="runtime", task_id=d.get("task_id"), dispatch_id=d["id"],
+                       payload={"exit_code": None, "signal": None, "classification": classification})
         state.emit(con, run, "dispatch.reaped", f"{d['id']} {d['role']} ended: {why}", task_id=d.get("task_id"),
                    dispatch_id=d["id"])
         _close_orphaned_gate(con, run, d.get("gate_id"), why)
     return True
+
+
+def repair_orphaned_gates(con, run: dict) -> list[str]:
+    """Close open review gates whose reviewers have all ended and whose own job
+    can no longer finish them. Caller holds the transaction."""
+    rows = con.execute("SELECT id FROM gates g WHERE run_id=? AND status='running' "
+                       "AND EXISTS (SELECT 1 FROM dispatches WHERE gate_id=g.id) "
+                       "AND NOT EXISTS (SELECT 1 FROM dispatches WHERE gate_id=g.id AND ended_at IS NULL)",
+                       (run["id"],)).fetchall()
+    closed = []
+    for r in rows:
+        _close_orphaned_gate(con, run, r["id"], "its reviewer ended and no job is left to finish it")
+        if con.execute("SELECT status FROM gates WHERE id=?", (r["id"],)).fetchone()[0] == "done":
+            closed.append(r["id"])
+    return closed
 
 
 def _close_orphaned_gate(con, run: dict, gate_id: str | None, why: str) -> None:
@@ -443,7 +467,7 @@ def _close_orphaned_gate(con, run: dict, gate_id: str | None, why: str) -> None:
     if gate is None:
         return
     for job in gates.owning_jobs(con, run, gate):
-        if job["status"] == "queued" or pid_alive(job["claimed_pid"]):
+        if job["status"] == "queued" or claim_alive(job["claimed_pid"], job["claimed_by"]):
             return  # the gate's own job may still run or retry the review
     gates.mark_unavailable(con, run, gate_id, why)
 
@@ -466,22 +490,28 @@ def _fence_integrate_jobs(con, run: dict, reason: str) -> list[str]:
     """Stop and cancel the integrate jobs that own the integration reviews, so
     ending a reviewer cannot make a live job start a fallback or retry."""
     with db.transaction(con):
-        jobs_ = [dict(r) for r in con.execute("SELECT id, status, claimed_pid FROM outbox WHERE run_id=? AND kind='integrate' "
-                                              "AND status IN ('queued','claimed')", (run["id"],)).fetchall()]
+        jobs_ = [dict(r) for r in con.execute("SELECT id, status, claimed_pid, claimed_by FROM outbox WHERE run_id=? "
+                                              "AND kind='integrate' AND status IN ('queued','claimed')",
+                                              (run["id"],)).fetchall()]
         for j in jobs_:
             con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL, max_attempts=attempts "
                         "WHERE id=?", (f"revoked: {reason}"[:200], now_iso(), j["id"]))
+    unstopped = []
     for j in jobs_:
-        if j["status"] == "claimed" and j["claimed_pid"] and pid_alive(j["claimed_pid"]):
-            _killpg(j["claimed_pid"])
-            deadline = time.time() + 5
-            while pid_alive(j["claimed_pid"]) and time.time() < deadline:
-                time.sleep(0.05)
-    return [j["id"] for j in jobs_]
+        if j["status"] != "claimed" or not claim_alive(j["claimed_pid"], j["claimed_by"]):
+            continue
+        if not claim_signalable(j["claimed_pid"], j["claimed_by"]):
+            unstopped.append(f"{j['id']} (pid {j['claimed_pid']})")  # no start time: the pid may be reused
+            continue
+        _killpg(j["claimed_pid"])
+        deadline = time.time() + 5
+        while claim_alive(j["claimed_pid"], j["claimed_by"]) and time.time() < deadline:
+            time.sleep(0.05)
+    return [j["id"] for j in jobs_], unstopped
 
 
 def revoke_integration(con, run: dict, reason: str) -> Result:
-    fenced = _fence_integrate_jobs(con, run, reason)
+    fenced, unstopped = _fence_integrate_jobs(con, run, reason)
     rows = [dict(r) for r in con.execute(
         "SELECT d.* FROM dispatches d JOIN gates g ON g.id=d.gate_id WHERE d.run_id=? AND g.subject='integration' "
         "AND d.ended_at IS NULL AND d.status IN ('launching','running')", (run["id"],)).fetchall()]
@@ -499,6 +529,9 @@ def revoke_integration(con, run: dict, reason: str) -> Result:
         state.emit(con, run, "integration.revoked", f"integration reviews revoked: {reason}")
     lines = [f"integration revoked | ended {', '.join(ended) if ended else 'no live dispatch'}"
              + (f" | cancelled job {', '.join(fenced)}" if fenced else "")]
+    if unstopped:
+        lines.append(f"not signalled (claimed by an older Office, so the pid may belong to another process now): "
+                     f"{', '.join(unstopped)}; stop it by hand if it is still the integrate job")
     return Result(lines=lines, next="office status (office resume re-runs a blocked integration)")
 
 
@@ -528,6 +561,8 @@ def reap_orphans(con, run: dict) -> list[str]:
             continue  # alive, or herdr could not say
         if _end_dispatch(con, run, d, "lost", "its process and herdr agent are gone (no reply)", stop=False):
             notes.append(f"{d['id']} reviewer is gone")
+    with db.transaction(con):
+        notes += [f"gate {g} closed: its reviewer had ended" for g in repair_orphaned_gates(con, run)]
     return notes
 
 

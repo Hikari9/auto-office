@@ -75,6 +75,45 @@ def pid_alive(pid: int | None) -> bool:
     return True
 
 
+def process_start(pid: int | None) -> str | None:
+    """The process's start time as `ps` reports it, or None. With the pid it
+    names one process: a pid reused by another process has another start."""
+    if not pid or pid <= 0:
+        return None
+    import subprocess
+    try:
+        proc = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return " ".join(proc.stdout.split()) or None
+
+
+def claim_identity(pid: int) -> str:
+    """`claimed_by` for a job claim: host, pid and the process start time."""
+    return f"{os.uname().nodename}:{pid}@{process_start(pid) or ''}"
+
+
+def _claim_start(claimed_by: str | None) -> str | None:
+    return (claimed_by or "").partition("@")[2] or None
+
+
+def claim_alive(pid: int | None, claimed_by: str | None) -> bool:
+    """Whether a job claimant may still be running. A claim with no recorded
+    start time (an older Office) counts as alive whenever the pid is, so
+    nothing is reaped on a guess; one with a start time must match it."""
+    if not pid_alive(pid):
+        return False
+    start = _claim_start(claimed_by)
+    return start is None or process_start(pid) == start
+
+
+def claim_signalable(pid: int | None, claimed_by: str | None) -> bool:
+    """Whether Office may signal a job claimant: only when the start time
+    proves the pid is still the process that claimed the job."""
+    start = _claim_start(claimed_by)
+    return start is not None and pid_alive(pid) and process_start(pid) == start
+
+
 def dumps(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, default=str)
 

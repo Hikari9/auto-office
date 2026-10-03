@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 
 from office import briefs, db, gates, paths, review_parse, state, worktree_setup
-from office.util import dumps, now_iso, pid_alive, sha256_obj
+from office.util import claim_alive, dumps, now_iso, sha256_obj
 
 
 def _topo(tasks: list[dict]) -> list[dict]:
@@ -183,9 +183,10 @@ def live_integrate_pids(con, run: dict, *, unfenced_only: bool = False) -> list[
     it; the job table can. `unfenced_only` drops processes that registered as
     flock holders (this code), which wait on the flock instead."""
     fenced = {p.name for p in _fenced_dir(run).glob("*")} if unfenced_only else set()
-    pids = [r["claimed_pid"] for r in con.execute("SELECT claimed_pid FROM outbox WHERE run_id=? AND kind='integrate' "
-                                                  "AND status='claimed'", (run["id"],)).fetchall()]
-    return [p for p in pids if p and p != os.getpid() and str(p) not in fenced and pid_alive(p)]
+    rows = con.execute("SELECT claimed_pid, claimed_by FROM outbox WHERE run_id=? AND kind='integrate' AND status='claimed'",
+                       (run["id"],)).fetchall()
+    return [r["claimed_pid"] for r in rows if r["claimed_pid"] and r["claimed_pid"] != os.getpid()
+            and str(r["claimed_pid"]) not in fenced and claim_alive(r["claimed_pid"], r["claimed_by"])]
 
 
 def refuse_if_integrating(con, run: dict) -> None:

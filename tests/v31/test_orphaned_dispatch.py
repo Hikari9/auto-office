@@ -12,7 +12,7 @@ import pytest
 from conftest import GOOD_ADD, approved_run
 from office import dispatch as dispatch_mod
 from office import gates, integration, state
-from office.util import now_iso
+from office.util import claim_alive, claim_identity, claim_signalable, now_iso
 from test_land import _plan, _run
 from test_task_prs import gh
 
@@ -180,8 +180,8 @@ def test_revoke_integration_cancels_and_stops_the_owning_job(env, monkeypatch):
     job = subprocess.Popen(["sleep", "60"], start_new_session=True)
     try:
         con.execute("INSERT INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, claimed_pid, "
-                    "attempts, created_at) VALUES('Jint', ?, 'integrate', 'k3', '{\"key\": \"x\"}', ?, 'claimed', ?, 1, "
-                    "'2026-01-01')", (run["id"], run["office_version"], job.pid))
+                    "claimed_by, attempts, created_at) VALUES('Jint', ?, 'integrate', 'k3', '{\"key\": \"x\"}', ?, 'claimed', "
+                    "?, ?, 1, '2026-01-01')", (run["id"], run["office_version"], job.pid, claim_identity(job.pid)))
         con.commit()
         code, out = env.office("revoke", "integration", env={"FAKE_HERDR_AGENT": "alive"})
         assert code == 0 and "cancelled job Jint" in out, out
@@ -483,3 +483,79 @@ def test_a_land_killed_mid_deploy_refuses_instead_of_deploying_again(env, monkey
     code, out = env.office("land", "--e2e", "--mark-deployed", "--quote", "it is live")
     assert code == 0 and "on the operator's word" in out, out
     assert marker.read_text() == "x"
+
+
+def test_a_task_accepted_while_land_waits_for_the_lock_refuses_before_any_merge(env, monkeypatch):
+    """Round-4 L2: land read the integration, then a task revision was accepted
+    before it took the lock. It refuses; nothing is merged or deployed."""
+    import contextlib
+    from office import land
+    marker = env.tmp / "deploys"
+    plan = _plan("e2e", prod=f"python3 -c \"open('{marker}','a').write('x')\"", verify=f"test -f {marker}")
+    _run(env, monkeypatch, plan)
+    con = env.con()
+    real_lock = land._land_lock
+
+    @contextlib.contextmanager
+    def lock_after_an_acceptance(run):
+        con.execute("UPDATE tasks SET accepted_revision_id='Rlater' WHERE id='T2'")  # accepted meanwhile
+        con.commit()
+        with real_lock(run):
+            yield
+
+    monkeypatch.setattr(land, "_land_lock", lock_after_an_acceptance)
+    with pytest.raises(state.Refused) as err:
+        land.land(con, _run_row(con))
+    assert err.value.category == "integration-changed", err.value
+    assert not any(c[:2] == ["pr", "merge"] for c in gh(env)["calls"])
+    assert not marker.exists()
+    landing = json.loads(env.con().execute("SELECT landing_json FROM runs").fetchone()[0])
+    assert "merged" not in landing and "deployed" not in landing
+
+
+def test_a_reused_pid_is_neither_alive_nor_signalled(env, monkeypatch):
+    """Round-4 L4: a claim names its process by pid and start time."""
+    import subprocess
+    con, run = _orphan(env, monkeypatch)
+    other = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        reused = f"host:{other.pid}@Thu Jan  1 00:00:00 1970"  # the claimant died; its pid now runs `sleep`
+        assert not claim_alive(other.pid, reused) and not claim_signalable(other.pid, reused)
+        assert claim_alive(other.pid, claim_identity(other.pid)) and claim_signalable(other.pid, claim_identity(other.pid))
+        assert claim_alive(other.pid, f"host:{other.pid}") and not claim_signalable(other.pid, f"host:{other.pid}")
+        con.execute("INSERT INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, claimed_pid, "
+                    "claimed_by, attempts, created_at) VALUES('Jreused', ?, 'integrate', 'k7', '{\"key\": \"x\"}', ?, "
+                    "'claimed', ?, ?, 1, '2026-01-01')", (run["id"], run["office_version"], other.pid, reused))
+        con.commit()
+        code, out = env.office("revoke", "integration", env={"FAKE_HERDR_AGENT": "gone"})
+        assert code == 0 and "cancelled job Jreused" in out, out
+        assert other.poll() is None  # never signalled
+        # An older claim (no start time) is alive for reaping but never signalled.
+        con = env.con()
+        con.execute("UPDATE outbox SET status='claimed', claimed_pid=?, claimed_by=? WHERE id='Jreused'",
+                    (other.pid, f"host:{other.pid}"))
+        con.commit()
+        code, out = env.office("revoke", "integration", env={"FAKE_HERDR_AGENT": "gone"})
+        assert code == 0 and "not signalled" in out and "Jreused" in out, out
+        assert other.poll() is None
+    finally:
+        other.kill()
+
+
+@pytest.mark.approved
+def test_a_crash_between_the_dispatch_end_and_the_gate_close_is_repaired(env, monkeypatch):
+    """Round-4 L5: the end and the gate close commit together, and a gate left
+    running behind an ended reviewer (a crash, or an end recorded elsewhere)
+    is closed by the reaper that status, wait and close run."""
+    con, run = _orphan(env, monkeypatch)
+    with monkeypatch.context() as m:
+        m.setattr(gates, "mark_unavailable", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("crash")))
+        with pytest.raises(RuntimeError):
+            dispatch_mod._end_dispatch(con, run, _dispatch(con), "revoked", "test", stop=False)
+    assert _dispatch(con)["ended_at"] is None  # rolled back with the gate close: no half state
+    con.execute("UPDATE dispatches SET ended_at='2026-01-02', status='failed' WHERE id='Dorph'")  # ended elsewhere
+    con.commit()
+    assert con.execute("SELECT status FROM gates WHERE id='Gorph'").fetchone()[0] == "running"
+    notes = dispatch_mod.reap_orphans(con, run)
+    assert any("Gorph" in n for n in notes), notes
+    assert tuple(con.execute("SELECT status, verdict FROM gates WHERE id='Gorph'").fetchone()) == ("done", "UNAVAILABLE")
