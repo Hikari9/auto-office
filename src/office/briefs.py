@@ -2,7 +2,20 @@
 plus the one command it runs when done; nothing about receipts or telemetry."""
 from __future__ import annotations
 
-from office import planpath, state
+from pathlib import Path
+
+from office import paths, planpath, state
+
+# A task with no file scope (a comment or issue edit) commits nothing. The
+# executor records what it did here, untracked in its worktree; submit copies
+# it into the dispatch dir and the code reviewer's brief carries it, because
+# the reviewer has no GitHub access.
+EVIDENCE_FILE = "OFFICE_EVIDENCE.md"
+EVIDENCE_MAX_CHARS = 40_000
+
+
+def evidence_path(run: dict, dispatch_id: str, revision_id: str) -> Path:
+    return paths.run_dir(run["id"]) / "dispatches" / dispatch_id / f"evidence-{revision_id}.md"
 
 PLAN_FORMAT = """\
 ## Requirements
@@ -118,8 +131,17 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
     out = [
         "ROLE executor",
         f"TASK {packet['task_id']} {packet['title']}",
-        f"SCOPE {', '.join(packet['scope'])}  (write only inside this; this worktree is yours)",
+        f"SCOPE {', '.join(packet['scope'])}  (write only inside this; this worktree is yours)"
+        if packet["scope"] else
+        "SCOPE none: no files change; the work is external (a comment or issue edit) and nothing is committed",
     ]
+    if not packet["scope"]:
+        out += [f"EVIDENCE the reviewer cannot see GitHub. Before office submit, write {EVIDENCE_FILE} in this worktree "
+                "root (leave it untracked) with: the URL and exact text of each comment you posted, a backup of any "
+                "body you edited, and a before/after diff of each edit. Office consumes (deletes) the file at each submit, "
+                "and moves any file left from an earlier dispatch out of this worktree before you start, so write it "
+                "fresh for every submission, including a retry or fix round; submit refuses a file whose content "
+                "matches evidence already submitted for this task."]
     if packet.get("depends"):
         out.append(f"BUILDS ON {', '.join(packet['depends'])} (already in this worktree's base)")
     out += _lines("ACCEPT", packet.get("accept"))
@@ -183,20 +205,23 @@ def worker_brief(con, run: dict, packet: dict, setup: dict | None = None) -> str
 
 
 def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_summary: str,
-                      carried: list[dict], checkout: str, integration: bool = False) -> str:
+                      carried: list[dict], checkout: str, integration: bool = False, evidence: str | None = None) -> str:
     out = [
         "ROLE independent " + ("integration" if integration else "code") + " reviewer. Change nothing except your reply file. You did not write this change.",
         f"TASK {task['id']} {task['title']}" if task else "COMPOSED RESULT of the run's accepted tasks",
     ]
     if task:
         out += _lines("ACCEPT", task.get("accept"))
-        out.append(f"SCOPE {', '.join(task.get('scope') or [])}")
+        out.append(f"SCOPE {', '.join(task.get('scope') or []) or 'none (external work: judge it from the evidence below)'}")
     out += [f"REVISION {revision['id']} commit {revision['commit_sha'][:12]}; a read-only checkout is at {checkout}",
             f"DETERMINISTIC CHECKS {checks_summary}"]
     if carried:
         out.append("OPEN FINDINGS from earlier rounds — confirm (repeat the FINDING line), RESOLVED, or RETRACT each:")
         for f in carried:
             out.append(f"- {f['code']} [{f['severity']}] {f['location'] or ''} {f['summary']}")
+    if task and not task.get("scope"):
+        out += ["", "EXECUTOR EVIDENCE (this task changes no files; the posted comment or edit is recorded here):",
+                evidence or "(none recorded: the executor left no evidence file; report that as a finding)"]
     out += ["", REVIEW_FORMAT, "", "DIFF (base -> revision):", diff]
     return "\n".join(out) + "\n"
 
