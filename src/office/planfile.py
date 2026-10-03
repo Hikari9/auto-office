@@ -124,6 +124,7 @@ def parse(text: str) -> ParsedPlan:
             list_key = key if (not value and key in LIST_KEYS) else None
             if key == "scope":
                 task["scope"] = _split_list(value)
+                task["scope_none"] = _is_no_check(value)  # `none`: no file scope (a comment or issue edit)
             elif key == "depends":
                 task["depends"] = _split_list(value)
             elif key == "interfaces":
@@ -210,7 +211,7 @@ def _validate(plan: ParsedPlan) -> None:
         plan.errors.append(f"{d}: duplicate task id")
     known = set(ids)
     for t in plan.tasks:
-        if not t["scope"]:
+        if not t["scope"] and not t.get("scope_none"):
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `scope:` (paths this task may write)")
         if not t["accept"]:
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `accept:` criteria")

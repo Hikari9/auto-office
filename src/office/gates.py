@@ -589,8 +589,12 @@ def job_review(con, run: dict, job: dict) -> dict:
         carried = [dict(r) for r in con.execute("SELECT code, severity, location, summary FROM findings WHERE run_id=? AND "
                                                 "task_id=? AND gate_kind='code_review' AND state='open'",
                                                 (run["id"], task["id"])).fetchall()]
+        evidence = None
+        if not task["scope"]:
+            ev = briefs.evidence_path(run, rev["dispatch_id"], rev["id"])
+            evidence = ev.read_text(encoding="utf-8", errors="replace") if ev.is_file() else None
         brief = briefs.code_review_brief(run, task, rev, diff, checks["summary"] if checks else "none declared",
-                                         carried, str(checkout))
+                                         carried, str(checkout), evidence=evidence)
         exclude = [job["payload"]["exclude_route"]] if job["payload"].get("exclude_route") else None
         outcome = run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
                                exclude=exclude)

@@ -148,6 +148,8 @@ def rebase(con, run: dict) -> Result:
 def _ask(con, run: dict) -> Result:
     lines = ["integration verified; the task PRs are ready:"]
     for t in integration._topo(integration.accepted_set(con, run) or []):
+        if not prs.has_pr(t):
+            continue
         pr = t.get("pr") or {}
         lines.append(f"  {t['id']} {pr.get('url') or '(no PR: ' + _pr_reason(run) + ')'}")
     return Result(lines=lines, next='ask the user (native question tool): merge | preview deploy | merge + prod | stop; '
@@ -196,6 +198,9 @@ def _merge_all(con, run: dict, res: Result) -> str:
     merged: list[str] = []
     for t in integration._topo(integration.accepted_set(con, run) or []):
         t = state.get_task(con, run["id"], t["id"])
+        if not prs.has_pr(t):
+            res.add(f"{t['id']} has no file scope and no PR; skipped")
+            continue
         pr = t.get("pr") or {}
         if not pr.get("number"):
             raise Refused("no-pr", f"{t['id']} has no PR", next_step="office status (a pr.error notice names why)")

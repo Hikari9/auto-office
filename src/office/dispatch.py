@@ -505,7 +505,7 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
 def _pr_packet(con, run: dict, task: dict, dispatch: dict) -> dict | None:
     """What the executor needs to push and open its draft PR (3.2), or None."""
     from office import prs
-    if not prs.enabled(run):
+    if not prs.enabled(run) or not prs.has_pr(task):
         return None
     ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch["id"]
     ddir.mkdir(parents=True, exist_ok=True)

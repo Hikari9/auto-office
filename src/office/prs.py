@@ -138,8 +138,13 @@ def create_command(con, run: dict, task: dict, dispatch: dict, body_path: Path) 
 
 # ------------------------------------------------------------------ queueing (caller holds the tx)
 
+def has_pr(task: dict | None) -> bool:
+    """A task with no file scope (a comment or issue edit) commits nothing, so it gets no PR."""
+    return bool(task and task["scope"])
+
+
 def queue(con, run: dict, task_id: str, event: str, ref: str) -> None:
-    if enabled(run):
+    if enabled(run) and has_pr(state.get_task(con, run["id"], task_id)):
         state.enqueue(con, run, "pr_sync", {"task_id": task_id, "event": event, "ref": ref},
                       dedup_key=f"pr_sync:{run['id'][:8]}:{task_id}:{event}:{ref}", max_attempts=2)
 
@@ -232,6 +237,8 @@ def job_pr_sync(con, run: dict, job: dict) -> dict:
     task = state.get_task(con, run["id"], p["task_id"])
     if not enabled(run) or task is None:
         return {"skipped": "prs disabled"}
+    if not has_pr(task):
+        return {"skipped": "no file scope, no PR"}
     try:
         return _sync(con, run, task, p["event"], p["ref"])
     except Exception as exc:  # GitHub trouble is a notice, never a lifecycle failure

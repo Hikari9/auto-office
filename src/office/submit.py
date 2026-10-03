@@ -13,7 +13,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from office import db, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, state, version
+from office import briefs, db, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, state, version
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_obj, short
@@ -318,6 +318,8 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                      base, run["requirements_version"], run["plan_version"], applied, env_fp, op_id, status,
                      prev, dumps(changed), now_iso()))
         paths.git(wt, "update-ref", f"refs/office/{run['id'][:8]}/{task['id']}/{rev_id}", commit)
+        if not task["scope"]:
+            _save_evidence(run, d, wt, rev_id)
         if prs.enabled(run):
             prs.advance_branch(run, d, commit)
             prs.queue(con, run, task["id"], "revision", rev_id)
@@ -337,6 +339,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     jobs.kick(con, run["id"])
     parts = [f"rev {rev_id} captured"] + ([f"supersedes {prev}"] if prev else []) + planned["summary"]
     res.add(" | ".join(parts))
+    left_out = [f for f in left_out if f != briefs.EVIDENCE_FILE]
     for label, names in (("untracked files outside", left_out), ("harness config edits outside", restored)):
         if names:
             shown = ", ".join(names[:4]) + (f" (+{len(names) - 4} more)" if len(names) > 4 else "")
@@ -344,6 +347,16 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     res.next = "you may stop; results will be delivered"
     res.data = {"revision": rev_id, "commit": commit, "gates": planned["gates"]}
     return res
+
+
+def _save_evidence(run: dict, d: dict, wt: Path, rev_id: str) -> None:
+    """Copy a scope-none task's evidence file where the code reviewer's brief reads it."""
+    src = wt / briefs.EVIDENCE_FILE
+    if not src.is_file():
+        return
+    dest = briefs.evidence_path(run, d["id"], rev_id)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(src.read_text(encoding="utf-8", errors="replace")[:briefs.EVIDENCE_MAX_CHARS], encoding="utf-8")
 
 
 def _duplicate(con, run: dict, rev: dict) -> Result:
