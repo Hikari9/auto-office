@@ -456,5 +456,10 @@ class TestReview(unittest.TestCase):
         self.assertEqual(receipt['family_id'], 'fam-1')
         self.assertEqual(receipt['selection_disclosure']['harness'], 'agy')
 
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.legacy  # tests the 3.0 scripts/ surface
+
+
 if __name__ == '__main__':
     unittest.main()

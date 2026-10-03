@@ -139,5 +139,10 @@ class PrReportCliDeterminismTests(unittest.TestCase):
         self.assertEqual(out_path.read_text(encoding="utf-8"), stdout_run.stdout)
 
 
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.legacy  # tests the 3.0 scripts/ surface
+
+
 if __name__ == "__main__":
     unittest.main()

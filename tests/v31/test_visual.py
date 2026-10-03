@@ -12,6 +12,11 @@ requires_playwright = pytest.mark.skipif(
 )
 
 
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.integration
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _shared_browser():
     """One Chromium per worker process, reused by every capture in this module (each capture still gets

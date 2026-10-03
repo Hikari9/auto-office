@@ -301,3 +301,8 @@ class WorktreeScriptTests(unittest.TestCase):
         ], cwd=str(self.repo), capture_output=True, text=True)
         self.assertEqual(res2.returncode, 0)
         self.assertFalse(wt_path.exists())
+
+
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.legacy  # tests the 3.0 scripts/ surface

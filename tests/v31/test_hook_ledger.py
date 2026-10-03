@@ -52,7 +52,7 @@ def _node():
 
 
 NODE = _node()
-pytestmark = pytest.mark.skipif(not NODE, reason="node not installed")
+pytestmark = [pytest.mark.skipif(not NODE, reason="node not installed"), pytest.mark.integration]
 
 
 @pytest.fixture
