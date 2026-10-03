@@ -114,7 +114,7 @@ def planner_brief(con, run: dict, packet: dict) -> str:
     return "\n".join(out) + "\n"
 
 
-def executor_brief(con, run: dict, packet: dict) -> str:
+def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> str:
     out = [
         "ROLE executor",
         f"TASK {packet['task_id']} {packet['title']}",
@@ -130,6 +130,13 @@ def executor_brief(con, run: dict, packet: dict) -> str:
         out.append(f"VISUAL the runtime will capture {vis.get('url')} at {vis.get('viewports') or 'desktop, mobile'}"
                    + (f" against reference {vis['reference']}" if vis.get("reference") else " (no reference: fidelity unmeasured)"))
     out.append(f"VERSIONS plan p{packet['plan_version']} / requirements r{packet['requirements_version']}")
+    if setup and setup.get("exit") != 0:
+        out.append(f"SETUP FAILED the repo's worktree setup (`{setup['command']}`) did not finish in this worktree; "
+                   f"read {setup['log']}, fix what it names or run the repo's own install here yourself")
+    elif setup:
+        out.append(f"SETUP Office ran the repo's worktree setup (`{setup['command']}`) in this worktree; dependencies are installed")
+    out.append("DEPENDENCIES never symlink or copy node_modules (or any dependency directory) from another checkout; "
+               "install inside this worktree with the repo's own command")
     restack = packet.get("restack") or {}
     if restack.get("merged"):
         out.append("RESTACKED Office merged " + ", ".join(f"{m['task']} {m['revision']}" for m in restack["merged"])
@@ -169,10 +176,10 @@ def executor_brief(con, run: dict, packet: dict) -> str:
     return "\n".join(out) + "\n"
 
 
-def worker_brief(con, run: dict, packet: dict) -> str:
+def worker_brief(con, run: dict, packet: dict, setup: dict | None = None) -> str:
     if packet["role"] == "planner":
         return planner_brief(con, run, packet)
-    return executor_brief(con, run, packet)
+    return executor_brief(con, run, packet, setup=setup)
 
 
 def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_summary: str,

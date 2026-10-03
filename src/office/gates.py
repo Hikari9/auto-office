@@ -19,7 +19,7 @@ import time
 import uuid
 from pathlib import Path
 
-from office import briefs, candidates, db, jobs, paths, planfile, review_parse, routing, state, version
+from office import briefs, candidates, db, jobs, paths, planfile, review_parse, routing, state, version, worktree_setup
 from office.util import dumps, now_iso, pid_alive, sha256_bytes, sha256_obj
 
 TASK_GATES = ("checks", "code_review", "visual")
@@ -579,7 +579,7 @@ def job_review(con, run: dict, job: dict) -> dict:
         return {"skipped": gate["status"]}
     task = state.get_task(con, run["id"], gate["task_id"])
     rev = dict(con.execute("SELECT * FROM revisions WHERE id=?", (gate["revision_id"],)).fetchone())
-    checkout = detached_checkout(run, rev["commit_sha"], f"review-{gate['id']}")
+    checkout = detached_checkout(run, rev["commit_sha"], f"review-{gate['id']}", purpose="review")
     try:
         diff = paths.git(Path(run["repo_root"]), "diff", rev["base_commit"], rev["commit_sha"])
         if len(diff) > MAX_DIFF_CHARS:
@@ -601,12 +601,16 @@ def job_review(con, run: dict, job: dict) -> dict:
     return {"verdict": outcome["verdict"]}
 
 
-def detached_checkout(run: dict, commit: str, name: str) -> Path:
+def detached_checkout(run: dict, commit: str, name: str, *, purpose: str) -> Path:
+    """A detached worktree at `commit`. `purpose` is required: only "check" runs worktree.setup;
+    review, deploy, rebase-trial, and other checkouts stay exactly at the commit."""
     path = paths.run_dir(run["id"]) / "checkouts" / name
     if path.exists():
         remove_checkout(run, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     paths.git(Path(run["repo_root"]), "worktree", "add", "--detach", str(path), commit)
+    if purpose == "check":
+        worktree_setup.prepare(run, path, "check", paths.run_dir(run["id"]) / "setup" / f"{name}.log", created=True)
     return path
 
 

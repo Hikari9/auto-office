@@ -79,7 +79,7 @@ def land(con, run: dict, *, mode: str | None = None, quote: str | None = None) -
     before = _merge_all(con, run, res)
     main = _verify_main(con, run, commit, res)
     if mode == "e2e":
-        checkout = gates.detached_checkout(run, main, "deploy-prod")
+        checkout = gates.detached_checkout(run, main, "deploy-prod", purpose="deploy")
         try:
             _deploy(con, run, "prod", es["deploy"], checkout, res, rollback=before)
         finally:
@@ -116,7 +116,7 @@ def rebase(con, run: dict) -> Result:
     if _git(repo, "merge-base", "--is-ancestor", old, new).returncode != 0:
         raise Refused("base-diverged", f"origin/{base} {new[:12]} does not contain the run base {old[:12]}",
                       next_step=COMPOSE_BY_HAND.format(base=base))
-    checkout = gates.detached_checkout(run, new, "rebase-trial")
+    checkout = gates.detached_checkout(run, new, "rebase-trial", purpose="rebase-trial")
     try:
         genv = dict(os.environ, **paths.commit_identity_env(repo))
         for t in tasks:
@@ -268,7 +268,7 @@ def _verify_main(con, run: dict, integrated: str, res: Result) -> str:
     res.add(f"{s['base_branch']} moved beyond the reviewed integration; "
             + ("re-running the run checks on it" if checks else "no run checks to re-run"))
     if checks:
-        checkout = gates.detached_checkout(run, main, "land-verify")
+        checkout = gates.detached_checkout(run, main, "land-verify", purpose="check")
         try:
             for cmd in checks:
                 proc = subprocess.run(cmd, shell=True, cwd=checkout, capture_output=True, text=True, timeout=1800)

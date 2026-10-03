@@ -10,6 +10,17 @@ paths:
   local_data: ~/.local/share/auto-office
   runs_db: ~/.local/share/auto-office/runs.db
   catalog_dir: ~/.local/share/auto-office/catalog
+worktree:
+  # A repo-declared command Office runs once in each new worktree (#255), e.g.
+  # "pnpm install --offline --frozen-lockfile || pnpm install --frozen-lockfile".
+  # Office never picks a package manager; empty means it runs nothing.
+  setup: ""
+  # Repo-relative globs of the files setup depends on. A reused worktree re-runs setup when their
+  # content (or the setup command) changes. Empty uses the known lockfiles (pnpm-lock.yaml,
+  # Pipfile.lock, composer.lock, ...) at the root and one directory deep.
+  setup_inputs: []
+  setup_timeout_s: 600
+  applies_to: [task, integration, check]
 quota:
   # Ratified v3.1 charter (12A): protect 5% of provider quota. The balanced
   # money band below is a different 20% and stays 20.
