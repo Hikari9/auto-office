@@ -178,6 +178,13 @@ verification:
   no_progress_repeats: 2
   job_timeout_seconds: 3600
   check_timeout_seconds: 1800
+# Executor panes that stop on a Claude usage limit are reported as a `usage_limit`
+# stall with the reset time (#253). With auto_continue on, Office also sends
+# `continue` itself, once per limit episode, `continue_grace_seconds` after the
+# reset. Off by default: the operator sends `office prompt <D> -- continue`.
+executor_usage_limit:
+  auto_continue: false
+  continue_grace_seconds: 60
 # Risk signals that escalate the default (unpinned) gear fit test past `direct`/`light`/
 # `quick`/`direct+review` into `express`, and that resolve any `risk_forced` gate to True
 # regardless of which gear ends up selected. `blast_radius` and `size_class` come from

@@ -912,6 +912,57 @@ def _pane_busy(text: str) -> bool:
     return any(m in low for m in BUSY_MARKERS) or bool(_SPINNER.search(text or ""))
 
 
+# Claude Code stops on its session limit and sits on a screen like
+# "You've hit your session limit · resets 9:30pm (Asia/Manila)". The weekly
+# "You've used 95% of your weekly limit" line is a warning, not a stop, and is
+# deliberately not matched (#253).
+_LIMIT_HIT = re.compile(r"usage limit reached|hit your session limit", re.I)
+_LIMIT_RESETS = re.compile(r"resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([^)]+)\))?", re.I)
+LIMIT_TAIL_LINES = 40
+
+
+def _usage_limit(text: str | None, now: datetime | None = None) -> dict | None:
+    """The session-limit stop shown in the last pane lines, or None.
+    {"resets_at": aware UTC datetime or None, "label": "9:30pm (Asia/Manila)",
+    "tz": zone name, "local": "21:30"}. A reset without a zone is in the local
+    zone; a reset time already past rolls to the next day."""
+    lines = (text or "").splitlines()[-LIMIT_TAIL_LINES:]
+    tail = "\n".join(lines)
+    hit = None
+    for hit in _LIMIT_HIT.finditer(tail):
+        pass
+    if hit is None:
+        return None
+    found = None
+    for found in _LIMIT_RESETS.finditer(tail, hit.start()):
+        pass
+    if found is None:
+        found = next(iter(_LIMIT_RESETS.finditer(tail)), None)
+    if found is None:
+        return {"resets_at": None, "label": None, "tz": None, "local": None}
+    hour, minute, meridiem, zone = int(found.group(1)), int(found.group(2) or 0), found.group(3).lower(), found.group(4)
+    if not 1 <= hour <= 12 or minute > 59:
+        return {"resets_at": None, "label": found.group(0)[len("resets"):].strip(), "tz": None, "local": None}
+    hour = hour % 12 + (12 if meridiem == "pm" else 0)
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    tz = None
+    if zone:
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(zone.strip())
+        except Exception:
+            tz = None
+    if tz is None:
+        tz = now.astimezone().tzinfo
+    local_now = now.astimezone(tz)
+    at = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if at <= local_now:
+        at += timedelta(days=1)
+    name = getattr(tz, "key", None) or at.tzname() or "local"
+    return {"resets_at": at.astimezone(timezone.utc), "label": found.group(0)[len("resets"):].strip(),
+            "tz": name, "local": at.strftime("%H:%M")}
+
+
 def herdr_agent_name(dispatch_id: str) -> str:
     """Herdr agent names must match [a-z][a-z0-9_-]{0,31}; dispatch ids start
     with an uppercase D, which herdr rejects."""

@@ -204,3 +204,136 @@ def test_the_idle_threshold_defaults_to_60_seconds(monkeypatch):
     assert guide.idle_stall_s() == 60
     monkeypatch.setenv("OFFICE_EXECUTOR_IDLE_STALL_S", "5")
     assert guide.idle_stall_s() == 5
+
+
+# ---- a Claude usage-limit stop (#253)
+
+SESSION_LIMIT = "esc to interrupt\n✽ Pondering… (1m 2s)\n⚠ Usage limit reached · limit resets 9:30pm\n"
+MANILA_LIMIT = "esc to interrupt\nYou've hit your session limit · resets 9:30pm (Asia/Manila)\n"
+
+
+def _utc(*a):
+    from datetime import datetime, timezone
+    return datetime(*a, tzinfo=timezone.utc)
+
+
+def test_usage_limit_parses_time_forms():
+    from office import dispatch
+    now = _utc(2026, 10, 2, 10, 0)
+    got = dispatch._usage_limit("hit your session limit · resets 9:30pm (Asia/Manila)", now)
+    assert got["resets_at"] == _utc(2026, 10, 2, 13, 30) and got["tz"] == "Asia/Manila" and got["local"] == "21:30"
+    got = dispatch._usage_limit("hit your session limit · resets 9pm (Asia/Manila)", now)
+    assert got["resets_at"] == _utc(2026, 10, 2, 13, 0)
+    got = dispatch._usage_limit("hit your session limit · resets 12am (UTC)", now)
+    assert got["resets_at"] == _utc(2026, 10, 3, 0, 0)
+
+
+def test_usage_limit_without_a_zone_uses_the_local_zone(monkeypatch):
+    import time
+    from office import dispatch
+    monkeypatch.setenv("TZ", "UTC")
+    time.tzset()
+    try:
+        now = _utc(2026, 10, 2, 10, 0)
+        assert dispatch._usage_limit("Usage limit reached · resets 9:30pm", now)["resets_at"] == _utc(2026, 10, 2, 21, 30)
+        assert dispatch._usage_limit("hit your session limit · resets 9pm", now)["resets_at"] == _utc(2026, 10, 2, 21, 0)
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
+def test_usage_limit_past_reset_rolls_to_the_next_day():
+    from office import dispatch
+    now = _utc(2026, 10, 2, 14, 0)  # 22:00 in Manila, after a 9:30pm reset
+    got = dispatch._usage_limit("hit your session limit · resets 9:30pm (Asia/Manila)", now)
+    assert got["resets_at"] == _utc(2026, 10, 3, 13, 30)
+
+
+def test_a_weekly_limit_warning_is_not_a_usage_limit():
+    from office import dispatch
+    assert dispatch._usage_limit("You've used 95% of your weekly limit · resets Oct 5") is None
+    assert dispatch._usage_limit("working…") is None and dispatch._usage_limit(None) is None
+
+
+def test_only_the_last_pane_lines_count():
+    from office import dispatch
+    old = "You've hit your session limit · resets 9pm\n" + "\n".join(f"line {i}" for i in range(60))
+    assert dispatch._usage_limit(old) is None
+
+
+def test_a_session_limit_is_a_usage_limit_stall_despite_busy_markers(env):
+    _go(env)
+    e = _herdr(env, status="working", pane=MANILA_LIMIT)
+    e["OFFICE_EXECUTOR_IDLE_STALL_S"] = "1800"
+    d = _as_herdr(env)
+    code, out = _wait(env, e, timeout="3")
+    assert code == 3 and "usage_limit" in out and f"office prompt {d['id']} -- continue" in out, out
+    assert "(Asia/Manila 21:30)" in out and "resets 20" in out, out
+    row = env.con().execute("SELECT stall_kind, resets_at FROM dispatches WHERE id=?", (d["id"],)).fetchone()
+    assert row[0] == "usage_limit" and row[1], tuple(row)
+    assert "session limit" in (Path(paths_run_dir(env)) / "dispatches" / d["id"] / "pane-tail.txt").read_text()
+
+
+def test_a_weekly_warning_pane_is_not_a_usage_limit_stall(env):
+    _go(env)
+    e = _herdr(env, status="working", pane="You've used 95% of your weekly limit")
+    _as_herdr(env)
+    code, out = _wait(env, e)
+    assert code == 124 and "stall" not in out, out
+
+
+def _limit_run(env, monkeypatch, *, auto):
+    """A limit pane under guide.stalls with `submit_prompt` recorded, not sent."""
+    import os
+    from office import dispatch, guide, state
+    _go(env)
+    e = _herdr(env, status="idle", pane=SESSION_LIMIT)
+    d = _as_herdr(env)
+    for k, v in e.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("PATH", f"{env.bin}:{os.environ['PATH']}")
+    sent = []
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda name, text, pane=None: sent.append((name, text)) or "landed")
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    if auto:
+        run["policy"] = {**(run.get("policy") or {}), "executor_usage_limit": {"auto_continue": True,
+                                                                             "continue_grace_seconds": 60}}
+    return con, run, d, sent, guide
+
+
+def _set_reset(con, d, at):
+    con.execute("UPDATE dispatches SET resets_at=? WHERE id=?", (at, d["id"]))
+    con.commit()
+
+
+def test_auto_continue_is_off_by_default(env, monkeypatch):
+    con, run, d, sent, guide = _limit_run(env, monkeypatch, auto=False)
+    assert len(guide.stalls(con, run)) == 1
+    _set_reset(con, d, "2020-01-01T00:00:00+00:00")
+    out = guide.stalls(con, run)
+    assert len(out) == 1 and "usage_limit" in out[0] and sent == []
+
+
+def test_auto_continue_sends_one_continue_after_the_reset(env, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from office import rerun
+    con, run, d, sent, guide = _limit_run(env, monkeypatch, auto=True)
+    first = guide.stalls(con, run)
+    assert len(first) == 1 and sent == []  # before the reset: a stall, nothing sent
+    _set_reset(con, d, (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat())
+    assert len(guide.stalls(con, run)) == 1 and sent == []  # inside the grace window
+    _set_reset(con, d, "2020-01-01T00:00:00+00:00")
+    assert guide.stalls(con, run) == [] and sent == [("w1:p1", "continue")]
+    events = con.execute("SELECT 1 FROM events WHERE kind='usage_limit.continue' AND dispatch_id=?", (d["id"],)).fetchall()
+    assert len(events) == 1
+    for _ in range(3):  # the limit screen still showing never triggers a second send
+        guide.stalls(con, run)
+    assert len(sent) == 1
+    # Pane unchanged on the limit screen past the settle time: reported again, not retried.
+    row = dict(con.execute("SELECT * FROM dispatches WHERE id=?", (d["id"],)).fetchone())
+    con.execute("UPDATE dispatches SET idle_since='2020-01-01T00:00:00+00:00', idle_hash=? WHERE id=?",
+                (rerun.agent_activity(row)["hash"], d["id"]))
+    con.commit()
+    again = guide.stalls(con, run)
+    assert len(again) == 1 and "already sent continue" in again[0] and len(sent) == 1, again
