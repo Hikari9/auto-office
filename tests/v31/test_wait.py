@@ -204,3 +204,271 @@ def test_the_idle_threshold_defaults_to_60_seconds(monkeypatch):
     assert guide.idle_stall_s() == 60
     monkeypatch.setenv("OFFICE_EXECUTOR_IDLE_STALL_S", "5")
     assert guide.idle_stall_s() == 5
+
+
+# ---- a Claude usage-limit stop (#253)
+
+SESSION_LIMIT = "esc to interrupt\n✽ Pondering… (1m 2s)\n⚠ Usage limit reached · limit resets 9:30pm\n"
+MANILA_LIMIT = "esc to interrupt\nYou've hit your session limit · resets 9:30pm (Asia/Manila)\n"
+
+
+def _utc(*a):
+    from datetime import datetime, timezone
+    return datetime(*a, tzinfo=timezone.utc)
+
+
+def test_usage_limit_parses_time_forms():
+    from office import dispatch
+    now = _utc(2026, 10, 2, 10, 0)
+    got = dispatch._usage_limit("hit your session limit · resets 9:30pm (Asia/Manila)", now)
+    assert got["resets_at"] == _utc(2026, 10, 2, 13, 30) and got["tz"] == "Asia/Manila" and got["local"] == "21:30"
+    got = dispatch._usage_limit("hit your session limit · resets 9pm (Asia/Manila)", now)
+    assert got["resets_at"] == _utc(2026, 10, 2, 13, 0)
+    got = dispatch._usage_limit("hit your session limit · resets 12am (UTC)", now)
+    assert got["resets_at"] == _utc(2026, 10, 3, 0, 0)
+
+
+def test_usage_limit_without_a_zone_uses_the_local_zone(monkeypatch):
+    import time
+    from office import dispatch
+    monkeypatch.setenv("TZ", "UTC")
+    time.tzset()
+    try:
+        now = _utc(2026, 10, 2, 10, 0)
+        assert dispatch._usage_limit("Usage limit reached · resets 9:30pm", now)["resets_at"] == _utc(2026, 10, 2, 21, 30)
+        assert dispatch._usage_limit("hit your session limit · resets 9pm", now)["resets_at"] == _utc(2026, 10, 2, 21, 0)
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
+def test_usage_limit_past_reset_rolls_to_the_next_day():
+    from office import dispatch
+    now = _utc(2026, 10, 2, 14, 0)  # 22:00 in Manila, after a 9:30pm reset
+    got = dispatch._usage_limit("hit your session limit · resets 9:30pm (Asia/Manila)", now)
+    assert got["resets_at"] == _utc(2026, 10, 3, 13, 30)
+
+
+def test_other_claude_limit_wordings_are_usage_limits():
+    from office import dispatch
+    now = _utc(2026, 10, 2, 10, 0)
+    got = dispatch._usage_limit("5-hour limit reached ∙ resets 9pm (Asia/Manila)", now)
+    assert got["resets_at"] == _utc(2026, 10, 2, 13, 0) and got["label"] == "9pm (Asia/Manila)", got
+    got = dispatch._usage_limit("Claude usage limit reached. Your limit will reset at 9pm (Asia/Manila).", now)
+    assert got["resets_at"] == _utc(2026, 10, 2, 13, 0) and got["label"] == "9pm (Asia/Manila)", got
+    assert dispatch._usage_limit("● The API said: rate limit reached, retrying") is None
+
+
+def test_a_weekly_limit_warning_is_not_a_usage_limit():
+    from office import dispatch
+    assert dispatch._usage_limit("You've used 95% of your weekly limit · resets Oct 5") is None
+    assert dispatch._usage_limit("working…") is None and dispatch._usage_limit(None) is None
+
+
+def test_only_the_last_pane_lines_count():
+    from office import dispatch
+    old = "You've hit your session limit · resets 9pm\n" + "\n".join(f"line {i}" for i in range(60))
+    assert dispatch._usage_limit(old) is None
+
+
+def test_a_session_limit_is_a_usage_limit_stall_despite_busy_markers(env):
+    _go(env)
+    e = _herdr(env, status="working", pane=MANILA_LIMIT)
+    e["OFFICE_EXECUTOR_IDLE_STALL_S"] = "1800"
+    d = _as_herdr(env)
+    code, out = _wait(env, e, timeout="3")
+    assert code == 3 and "usage_limit" in out and f"office prompt {d['id']} -- continue" in out, out
+    assert "(Asia/Manila 21:30)" in out and "resets 20" in out, out
+    row = env.con().execute("SELECT stall_kind, resets_at FROM dispatches WHERE id=?", (d["id"],)).fetchone()
+    assert row[0] == "usage_limit" and row[1], tuple(row)
+    assert "session limit" in (Path(paths_run_dir(env)) / "dispatches" / d["id"] / "pane-tail.txt").read_text()
+
+
+def test_a_weekly_warning_pane_is_not_a_usage_limit_stall(env):
+    _go(env)
+    e = _herdr(env, status="working", pane="You've used 95% of your weekly limit")
+    _as_herdr(env)
+    code, out = _wait(env, e)
+    assert code == 124 and "stall" not in out, out
+
+
+REAL_LIMIT = """\
+● Edited src/office/guide.py (+12 -3)
+
+⚠ Usage limit reached · limit resets 9:30pm
+  /upgrade to keep using Claude Code
+
+╭──────────────────────────────────────────────╮
+│ >                                            │
+╰──────────────────────────────────────────────╯
+  ? for shortcuts
+"""
+
+
+def test_a_limit_followed_by_a_continue_and_activity_is_resolved():
+    from office import dispatch
+    assert dispatch._usage_limit(REAL_LIMIT)["label"] == "9:30pm"  # limit only: a stall
+    for later in ("> continue\n", "> continue\n✽ Pondering… (3s)\n", "esc to interrupt\n",
+                  "> continue\n\n● Picking the task back up\n", "❯ continue\n"):
+        assert dispatch._usage_limit(REAL_LIMIT + later) is None, later
+    # The old limit stays in scrollback while the agent works: not a stall.
+    assert dispatch._usage_limit(REAL_LIMIT + "> continue\n● Reading files\n" + "  ⎿ Read 40 lines\n") is None
+
+
+def test_a_new_limit_after_a_continue_is_a_stall_with_the_new_reset():
+    from office import dispatch
+    again = "> continue\n● Working\n⚠ Usage limit reached · limit resets 2:15am\n"
+    got = dispatch._usage_limit(REAL_LIMIT + again)
+    assert got is not None and got["label"] == "2:15am"
+
+
+def test_the_empty_composer_and_a_weekly_warning_are_not_activity_or_limits():
+    from office import dispatch
+    # Placeholder text inside the composer box starts with a border, not a prompt echo.
+    boxed = REAL_LIMIT.replace("│ >                  ", "│ > Try \"fix the bug\"  ")
+    assert dispatch._usage_limit(boxed) is not None
+    assert dispatch._usage_limit("● Done\nYou've used 95% of your weekly limit\n> ") is None
+
+
+def test_an_unresolvable_explicit_zone_gives_no_guessed_time():
+    from office import dispatch
+    got = dispatch._usage_limit("hit your session limit · resets 9:30pm (Mars/Olympus)", _utc(2026, 10, 2, 10, 0))
+    assert got["resets_at"] is None and got["label"] == "9:30pm (Mars/Olympus)" and got["tz"] is None, got
+
+
+def test_a_limit_stall_with_an_unresolvable_zone_shows_the_raw_label(env):
+    _go(env)
+    e = _herdr(env, status="idle", pane="Usage limit reached · resets 9:30pm (Mars/Olympus)")
+    d = _as_herdr(env)
+    code, out = _wait(env, e, timeout="3")
+    assert code == 3 and "9:30pm (Mars/Olympus)" in out and "time not resolved" in out, out
+    assert f"office prompt {d['id']} -- continue" in out, out
+
+
+def test_a_stale_limit_line_with_later_activity_is_not_a_stall(env):
+    _go(env)
+    e = _herdr(env, status="idle", pane=REAL_LIMIT + "> continue\n● Picking the task back up\n")
+    e["OFFICE_EXECUTOR_IDLE_STALL_S"] = "1800"
+    _as_herdr(env)
+    code, out = _wait(env, e)
+    assert code == 124 and "usage_limit" not in out, out
+
+
+# ---- one limit episode is one fingerprint of the screen above the limit line
+
+def test_the_same_label_after_new_context_is_a_new_episode():
+    from office import dispatch
+    now = _utc(2026, 10, 2, 10, 0)
+    first = dispatch._usage_limit(MANILA_LIMIT, now)
+    again = dispatch._usage_limit("esc to interrupt\n> continue\n● Picked it back up\n"
+                                  "You've hit your session limit · resets 9:30pm (Asia/Manila)\n", now)
+    assert first["label"] == again["label"] and first["fingerprint"] != again["fingerprint"]
+
+
+def test_ticking_spinners_and_timers_keep_the_fingerprint():
+    from office import dispatch
+    a = dispatch._usage_limit("● Edited calc.py\n✽ Pondering… (1m 2s · ↓ 1.2k tokens)\n" + REAL_LIMIT)
+    b = dispatch._usage_limit("● Edited calc.py   \n\n✻ Pondering… (4m 40s · ↓ 3.4k tokens)\n" + REAL_LIMIT)
+    c = dispatch._usage_limit("● Edited other.py\n✻ Pondering… (4m 40s)\n" + REAL_LIMIT)
+    assert a["fingerprint"] == b["fingerprint"] != c["fingerprint"]
+
+
+def test_only_the_15_lines_above_the_limit_identify_it():
+    from office import dispatch
+    context = "\n".join(f"● step {i}" for i in range(15)) + "\n"
+    a = dispatch._usage_limit("● older output A\n" + context + REAL_LIMIT)
+    b = dispatch._usage_limit("● older output B\n" + context + REAL_LIMIT)
+    assert a["fingerprint"] == b["fingerprint"]
+
+
+def _limit_row(env, d):
+    return dict(env.con().execute("SELECT stall_kind, resets_at, limit_label, limit_fingerprint FROM dispatches "
+                                  "WHERE id=?", (d["id"],)).fetchone())
+
+
+def _store_episode(env, d, **cols):
+    con = env.con()
+    con.execute("UPDATE dispatches SET stall_kind='usage_limit', resets_at=?, limit_label=?, limit_fingerprint=? "
+                "WHERE id=?", (cols["resets_at"], cols["limit_label"], cols["limit_fingerprint"], d["id"]))
+    con.commit()
+
+
+def test_a_repeated_limit_screen_after_its_reset_shows_the_new_reset(env):
+    from office import dispatch
+    _go(env)
+    e = _herdr(env, status="idle", pane=MANILA_LIMIT)
+    d = _as_herdr(env)
+    code, out = _wait(env, e, timeout="3")
+    assert code == 3 and "usage_limit" in out and "now past" not in out, out
+    first = _limit_row(env, d)
+    assert first["limit_fingerprint"] == dispatch._usage_limit(MANILA_LIMIT)["fingerprint"], first
+    # A later `office wait` process sees the same screen and label after the
+    # stored reset passed: either the old limit is still shown or the same work
+    # hit the same limit again. The newly parsed reset is stored and shown, and
+    # the passed one is named as a possibility, never as the reset.
+    _store_episode(env, d, **{**first, "resets_at": "2026-01-01T13:30:00+00:00"})
+    code, out = _wait(env, e, timeout="3")
+    assert code == 3 and "resets 2026-01-01" not in out and "(Asia/Manila 21:30)" in out, out
+    assert "stored with reset 2026-01-01T13:30Z, now past" in out and "-- continue" in out, out
+    row = _limit_row(env, d)
+    assert row["resets_at"] != "2026-01-01T13:30:00+00:00" and row["resets_at"] > "2026-01-02", row
+
+
+def test_a_new_limit_with_the_same_label_stores_its_own_reset(env):
+    _go(env)
+    pane = REAL_LIMIT.replace("limit resets 9:30pm", "resets 9:30pm (Asia/Manila)")
+    e = _herdr(env, status="idle", pane=pane)
+    d = _as_herdr(env)
+    # An earlier wait stored the previous episode; the operator sent `continue`
+    # and the agent hit a new limit with the same displayed reset.
+    _store_episode(env, d, resets_at="2026-01-01T13:30:00+00:00", limit_label="9:30pm (Asia/Manila)",
+                   limit_fingerprint="0" * 64)
+    code, out = _wait(env, e, timeout="3")
+    assert code == 3 and "usage_limit" in out and "2026-01-01" not in out, out
+    row = _limit_row(env, d)
+    assert row["resets_at"] != "2026-01-01T13:30:00+00:00" and row["limit_fingerprint"] != "0" * 64, row
+
+
+def test_a_resolved_limit_clears_the_stored_episode(env):
+    _go(env)
+    e = _herdr(env, status="idle", pane=REAL_LIMIT + "> continue\n● Picking the task back up\n")
+    e["OFFICE_EXECUTOR_IDLE_STALL_S"] = "1800"
+    d = _as_herdr(env)
+    _store_episode(env, d, resets_at="2026-01-01T13:30:00+00:00", limit_label="9:30pm", limit_fingerprint="0" * 64)
+    code, out = _wait(env, e)
+    assert code == 124 and "usage_limit" not in out, out
+    assert _limit_row(env, d) == {"stall_kind": None, "resets_at": None, "limit_label": None, "limit_fingerprint": None}
+
+
+# ---- a reset rolled to tomorrow follows tomorrow's DST offset
+
+@pytest.fixture
+def new_york(monkeypatch):
+    import time
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def test_a_local_reset_rolled_across_spring_forward_uses_the_new_offset(new_york):
+    from office import dispatch
+    now = _utc(2026, 3, 8, 6, 0)  # 01:00 EST; 00:30 tomorrow is EDT
+    got = dispatch._usage_limit("hit your session limit · resets 12:30am", now)
+    assert got["resets_at"] == _utc(2026, 3, 9, 4, 30) and got["local"] == "00:30" and got["tz"] == "EDT", got
+    got = dispatch._usage_limit("hit your session limit · resets 12:30am (America/New_York)", now)
+    assert got["resets_at"] == _utc(2026, 3, 9, 4, 30) and got["local"] == "00:30", got
+
+
+def test_a_local_reset_rolled_across_fall_back_uses_the_new_offset(new_york):
+    from office import dispatch
+    now = _utc(2026, 11, 1, 5, 0)  # 01:00 EDT; 00:30 tomorrow is EST
+    got = dispatch._usage_limit("hit your session limit · resets 12:30am", now)
+    assert got["resets_at"] == _utc(2026, 11, 2, 5, 30) and got["tz"] == "EST", got
+
+
+def test_a_local_reset_later_today_is_today(new_york):
+    from office import dispatch
+    got = dispatch._usage_limit("Usage limit reached · resets 9:30pm", _utc(2026, 7, 1, 12, 0))
+    assert got["resets_at"] == _utc(2026, 7, 2, 1, 30) and got["local"] == "21:30" and got["tz"] == "EDT", got
