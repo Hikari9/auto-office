@@ -257,6 +257,40 @@ def test_stacked_dispatch_launches_the_next_task_after_acceptance(env):
     assert base_t2 == t1_commit  # T2 built on T1's accepted revision
 
 
+def test_dispatch_after_an_accepted_task_launches_instead_of_stacking_forever(env):
+    # `office dispatch T1 T2` after T1 was accepted used to stack T2 after T1;
+    # start_stacked had already fired, so T2 stayed queued forever.
+    approved_run(env, plan=PLAN_TWO,
+        executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": "def mul(a, b):\n    return a * b\n"}},
+                   "submit": True}],
+        code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    code, out = env.office("dispatch", "T1", "T2")
+    assert code == 0 and "T1 already accepted" in out and "stacked after" not in out, out
+    code, data = env.ojson("status")
+    assert data["data"]["tasks"] == {"T1": "accepted", "T2": "accepted"}, data
+    con = env.con()
+    base_t2 = con.execute("SELECT base_commit FROM dispatches WHERE task_id='T2' AND role='executor'").fetchone()[0]
+    t1_commit = con.execute("SELECT r.commit_sha FROM tasks t JOIN revisions r ON r.id=t.accepted_revision_id "
+                            "WHERE t.id='T1'").fetchone()[0]
+    assert base_t2 == t1_commit
+
+
+def test_dispatch_releases_a_task_already_stuck_behind_an_accepted_one(env):
+    approved_run(env, plan=PLAN_TWO,
+        executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": "def mul(a, b):\n    return a * b\n"}},
+                   "submit": True}],
+        code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    con = env.con()
+    con.execute("UPDATE tasks SET status='queued', stack_after='T1', pause_reason='stacked after T1' WHERE id='T2'")
+    con.commit()
+    code, out = env.office("dispatch", "T2")
+    assert code == 0 and "already accepted -> D" in out, out
+    code, data = env.ojson("status")
+    assert data["data"]["tasks"] == {"T1": "accepted", "T2": "accepted"}, data
+
+
 def test_integration_conflict_is_surfaced_not_landed(env):
     plan = PLAN_TWO.replace("scope: mul.py", "scope: mul.py, README.md").replace("scope: calc.py\n", "scope: calc.py, README.md\n")
     approved_run(env, plan=plan,
@@ -457,3 +491,27 @@ def test_dispatch_of_a_task_blocked_on_an_unavailable_review_reruns_only_the_rev
     rows = con.execute("SELECT verdict FROM gates WHERE kind='code_review' ORDER BY created_at").fetchall()
     assert [r[0] for r in rows] == ["UNAVAILABLE", "PASS"]
     assert json.loads(t["review_override_json"])["as"] == reviewer
+
+
+def test_waiver_cancels_an_in_flight_review_so_it_cannot_reopen_the_task(env):
+    # Run 2da6d648: an escalated visual review finished UNAVAILABLE after the
+    # user waived the gate, reopened the accepted task, and forced a second waiver.
+    from office import gates, state
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+                 code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    con = env.con()
+    run = dict(con.execute("SELECT * FROM runs").fetchone())
+    run = state.get_run(con, run["id"])
+    task = task_row(env, "T1")
+    gid = gates._new_gate(con, run, task, task["current_revision_id"], "code_review", "k:escalation", "queued",
+                          escalated=1, round_no=1)
+    con.commit()
+    code, out = env.office("approve", "waive", "T1:code", "--quote", "ship it without that review")
+    assert code == 0, out
+    con = env.con()
+    assert con.execute("SELECT status FROM gates WHERE id=?", (gid,)).fetchone()[0] == "cancelled"
+    run = state.get_run(con, run["id"])
+    gates.ingest_task_gate(con, run, gid, {"verdict": "UNAVAILABLE", "summary": "no qualifying route"})
+    con.commit()
+    assert task_row(env, "T1")["status"] == "accepted"

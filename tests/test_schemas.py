@@ -679,5 +679,10 @@ class TestRouteNoNetworkAccess(unittest.TestCase):
         self.assertEqual(result['selected'], 'agy@local/gemini-3.8-flash@medium')
 
 
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.legacy  # tests the 3.0 scripts/ surface
+
+
 if __name__ == '__main__':
     unittest.main()

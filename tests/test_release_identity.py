@@ -20,3 +20,8 @@ def test_skill_checks_for_the_cli_before_anything_else():
     assert '`office --version`' in section
     assert 'ask the user to approve installing it; never install' in section
     assert '`office install`' in section and '`VERSION`' in section
+
+
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.legacy  # tests the 3.0 scripts/ surface

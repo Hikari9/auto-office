@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from office import db, frontdoor, paths, state, version
-from office.util import dumps, now_iso, pid_alive
+from office.util import claim_alive, claim_identity, dumps, now_iso
 
 KICK_THROTTLE_SECONDS = 10
 
@@ -45,14 +45,14 @@ def mode() -> str:
 
 def reclaim(con, run_id: str | None = None) -> int:
     """Requeue claims whose process died. Caller holds the transaction."""
-    q = "SELECT id, claimed_pid, attempts, max_attempts FROM outbox WHERE status='claimed'"
+    q = "SELECT id, claimed_pid, claimed_by, attempts, max_attempts FROM outbox WHERE status='claimed'"
     args: tuple = ()
     if run_id:
         q += " AND run_id=?"
         args = (run_id,)
     n = 0
     for row in con.execute(q, args).fetchall():
-        if row["claimed_pid"] and pid_alive(row["claimed_pid"]):
+        if row["claimed_pid"] and claim_alive(row["claimed_pid"], row["claimed_by"]):
             continue
         if row["attempts"] >= row["max_attempts"]:
             con.execute("UPDATE outbox SET status='failed', error=COALESCE(error,'worker process died'), finished_at=? "
@@ -123,10 +123,11 @@ def run_pending(con, run_id: str | None = None, limit: int = 200) -> int:
 
 def execute(con, job_id: str) -> int:
     """Claim and run one job. Returns a process exit code."""
+    claimant = claim_identity(os.getpid())  # the start time tells this process from a later one with its pid
     with db.transaction(con):
         cur = con.execute("UPDATE outbox SET status='claimed', claimed_pid=?, claimed_by=?, claimed_at=?, "
                           "attempts=attempts+1 WHERE id=? AND status='queued'",
-                          (os.getpid(), f"{os.uname().nodename}:{os.getpid()}", now_iso(), job_id))
+                          (os.getpid(), claimant, now_iso(), job_id))
         if cur.rowcount == 0:
             return 0
     job = state.get_job(con, job_id)

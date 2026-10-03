@@ -380,35 +380,50 @@ _PROBE_JS = """
 """
 
 
-def _playwright_capture(url: str, spec: dict, evdir: Path, ref: Path | None) -> dict:
-    from playwright.sync_api import sync_playwright, Error as PWError
-    selectors = [s.strip() for s in (spec.get("selectors") or "").split(",") if s.strip()]
-    frames = []
+# Test hook: a browser a test session launched once and shares across captures. None in production,
+# so every real capture launches and closes its own browser.
+_shared_browser = None
+
+
+def launch_args() -> dict:
     chrome = os.environ.get("OFFICE_CHROME") or "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    args = {"headless": True}
+    if Path(chrome).exists():
+        args["executable_path"] = chrome
+    return args
+
+
+def _playwright_capture(url: str, spec: dict, evdir: Path, ref: Path | None) -> dict:
+    if _shared_browser is not None:
+        return _capture_frames(_shared_browser, url, spec, evdir, ref)
+    from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
-        launch_args = {"headless": True}
-        if Path(chrome).exists():
-            launch_args["executable_path"] = chrome
-        browser = pw.chromium.launch(**launch_args)
-        env = {"browser": browser.version, "engine": "chromium"}
+        browser = pw.chromium.launch(**launch_args())
         try:
-            for vname, w, h in viewports(spec):
-                for st in states(spec):
-                    frame = {"viewport": f"{vname} {w}x{h}", "state": st["name"], "failures": []}
-                    frame.update(_capture_one(browser, url, w, h, st, selectors, evdir, f"{vname}-{st['name']}", spec))
-                    if ref is not None and not frame.get("invalid"):
-                        if ref.suffix.lower() in (".html", ".htm"):
-                            r = _capture_one(browser, ref.as_uri(), w, h, st, selectors, evdir, f"ref-{vname}-{st['name']}", spec,
-                                             reference=True)
-                            frame["reference_screenshot"] = r.get("screenshot")
-                            frame["reference_probe"] = r.get("probe")
-                            frame["measurements"] = _measure(frame.get("probe"), r.get("probe"), selectors)
-                        else:
-                            frame["reference_screenshot"] = str(ref)
-                            frame["measurements"] = []
-                    frames.append(frame)
+            return _capture_frames(browser, url, spec, evdir, ref)
         finally:
             browser.close()
+
+
+def _capture_frames(browser, url: str, spec: dict, evdir: Path, ref: Path | None) -> dict:
+    selectors = [s.strip() for s in (spec.get("selectors") or "").split(",") if s.strip()]
+    frames = []
+    env = {"browser": browser.version, "engine": "chromium"}
+    for vname, w, h in viewports(spec):
+        for st in states(spec):
+            frame = {"viewport": f"{vname} {w}x{h}", "state": st["name"], "failures": []}
+            frame.update(_capture_one(browser, url, w, h, st, selectors, evdir, f"{vname}-{st['name']}", spec))
+            if ref is not None and not frame.get("invalid"):
+                if ref.suffix.lower() in (".html", ".htm"):
+                    r = _capture_one(browser, ref.as_uri(), w, h, st, selectors, evdir, f"ref-{vname}-{st['name']}", spec,
+                                     reference=True)
+                    frame["reference_screenshot"] = r.get("screenshot")
+                    frame["reference_probe"] = r.get("probe")
+                    frame["measurements"] = _measure(frame.get("probe"), r.get("probe"), selectors)
+                else:
+                    frame["reference_screenshot"] = str(ref)
+                    frame["measurements"] = []
+            frames.append(frame)
     return {"frames": frames, "environment": env}
 
 

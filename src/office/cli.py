@@ -54,6 +54,11 @@ Executor (inside your task worktree): captures the worktree exactly as it is,
 committed and uncommitted, and starts every applicable check and review.
 Submitting the same tree again is safe; it reports the existing submission.
 
+A submit refused for a file outside your scope blocks the task and the orchestrator sees it. To
+ask for more scope instead of reverting:
+  office submit --request-scope <path> [--request-scope <path> ...] -- "<reason>"
+It records a contract-amendment request with the diff and waits; you are told to resubmit once amended.
+
 Planner / orchestrator planning inline: submits .office/plans/<run>/PLAN.md (one draft per run). Format:
 
 {fmt}
@@ -160,6 +165,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("-h", "--help", action="store_true")
     s.add_argument("--plan", help=argparse.SUPPRESS)
     s.add_argument("--quote", help="the user's words (a defect redirect)")
+    s.add_argument("--request-scope", action="append", default=[], metavar="PATH",
+                   help="executor: ask the orchestrator to add PATH to this task's scope (reason after --)")
+    s.add_argument("reason", nargs="*", help=argparse.SUPPRESS)
     _redirect_args(s)
     s = sp.add_parser("amend", parents=[common])
     s.add_argument("scope")
@@ -181,6 +189,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--quote", help="the user's words choosing this end state (ask mode)")
     s.add_argument("--detect", action="store_true", help="propose deploy commands for intake")
     s.add_argument("--rebase", action="store_true", help="move the run onto the newer default branch first")
+    s.add_argument("--redeploy", action="store_true", help="with --e2e: deploy prod again from the merged tree")
+    s.add_argument("--mark-deployed", action="store_true",
+                   help="with --e2e: the operator confirms the merged tree is already live in prod")
     s = sp.add_parser("close", parents=[common])
     s.add_argument("--handoff", help="PR URL or branch handed to the user for merge")
     s.add_argument("--abandon", metavar="REASON", help="end the run without landing")
@@ -218,7 +229,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--by", help="approve visual: the reviewer route that wrote --report (harness/model[@effort])")
     s.add_argument("--report", help="approve visual: the review file to record as the visual gate result")
     s = sp.add_parser("revoke", parents=[common])
-    s.add_argument("task")
+    s.add_argument("task", help="a task id, a dispatch id, or `integration` (its reviews)")
     s.add_argument("--reason", default="orchestrator revoke")
     s = sp.add_parser("rerun", parents=[common])
     s.add_argument("task")
@@ -295,6 +306,9 @@ def main(argv: list[str] | None = None) -> int:
     args, unknown = parser.parse_known_args(argv)
     if unknown and args.cmd not in ("amend",):
         parser.parse_args(argv)  # raises the usage error
+    if args.cmd == "submit" and args.reason and not args.request_scope:
+        # The reason text belongs to --request-scope; a stray argument is still a usage error.
+        parser.error(f"unrecognized arguments: {' '.join(args.reason)}")
     if args.version:
         print(version.current())
         return 0
@@ -322,6 +336,11 @@ def _target(con, args, require_run=True):
                                state_dir=args.state_dir, harness=args.harness, session=args.session)
     if target.run is not None:
         frontdoor.ensure_runtime(target.run)
+    if target.dispatch is not None:
+        # An executor that lost its env: act as that dispatch (the lease still fences it).
+        for key, value in (("OFFICE_RUN_ID", target.run["id"]), ("OFFICE_TASK_ID", target.dispatch["task_id"] or ""),
+                           ("OFFICE_DISPATCH_ID", target.dispatch["id"]), ("OFFICE_ROLE", target.dispatch["role"])):
+            os.environ.setdefault(key, value)
     return target
 
 
@@ -420,10 +439,12 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     cmd = args.cmd
     if cmd == "resume":
         from office import lifecycle
-        return lifecycle.resume(con, target, harness=args.harness, session=args.session)
+        return lifecycle.resume(con, target, harness=args.harness, session=args.session, cwd=cwd)
     if cmd == "status":
         from office import guide, jobs, lifecycle, db, state
         if not state.is_terminal(run):
+            from office import dispatch
+            dispatch.reap_orphans(con, run)
             with db.transaction(con):
                 lifecycle.reconcile(con, run)
             jobs.kick(con, run["id"])
@@ -439,7 +460,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                                  review_external=args.review_external)
     if cmd == "submit":
         from office import submit
-        return submit.submit(con, run, cwd=cwd, plan_path=args.plan, redirect=_redirect(args))
+        return submit.submit(con, run, cwd=cwd, plan_path=args.plan, redirect=_redirect(args),
+                             request_scope=args.request_scope,
+                             reason=" ".join(args.reason or []).strip())
     if cmd == "amend":
         from office import amend
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()
@@ -454,7 +477,8 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return land.rebase(con, run)
     if cmd == "land":
         from office import land
-        return land.land(con, run, mode=args.land_mode, quote=args.quote)
+        return land.land(con, run, mode=args.land_mode, quote=args.quote, redeploy=args.redeploy,
+                         mark_deployed=args.mark_deployed)
     if cmd == "close":
         from office import lifecycle
         if args.abandon:
@@ -478,7 +502,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                                  by=args.by, report=args.report)
     if cmd == "revoke":
         from office import dispatch
-        return dispatch.revoke(con, run, args.task.upper(), args.reason)
+        return dispatch.revoke(con, run, args.task, args.reason)
     if cmd == "rerun":
         from office import rerun
         return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh)

@@ -836,3 +836,8 @@ class ApprovePlanCommandTests(unittest.TestCase):
         self.assertEqual(state['adapter_snapshot_hash'], before['adapter_snapshot_hash'])
         self.assertEqual(state['policy_hash'], before['policy_hash'])
         self.assertEqual(state['effective_config_hash'], before['effective_config_hash'])
+
+
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.legacy  # tests the 3.0 scripts/ surface

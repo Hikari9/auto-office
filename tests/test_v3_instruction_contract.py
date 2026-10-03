@@ -326,6 +326,11 @@ class TestReviewTierVocabularyMatchesT0Schema(unittest.TestCase):
             self.assertIn(token, text)
 
 
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.legacy  # tests the 3.0 scripts/ surface
+
+
 if __name__ == '__main__':
     unittest.main()
 

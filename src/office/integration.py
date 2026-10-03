@@ -8,13 +8,16 @@ or share a declared interface.
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
 from office import briefs, db, gates, paths, review_parse, state, worktree_setup
-from office.util import dumps, now_iso, sha256_obj
+from office.util import claim_alive, dumps, now_iso, sha256_obj
 
 
 def _topo(tasks: list[dict]) -> list[dict]:
@@ -71,6 +74,38 @@ def maybe_queue(con, run: dict) -> None:
         return
     key = _set_key(con, tasks)
     state.enqueue(con, run, "integrate", {"key": key}, dedup_key=f"integrate:{run['id']}:{key}", max_attempts=2)
+
+
+LOCK_WAIT_SECONDS = 7200.0  # a compose runs the run checks, which can take their whole timeout
+
+
+@contextlib.contextmanager
+def worktree_lock(run: dict, *, wait: float = 0.0):
+    """Exclusive ownership of the `_integration` worktree. Held by a compose for
+    its whole run and by `office land --rebase` while it queues the next one, so
+    no second compose can remove the worktree under a running check. A flock
+    dies with its process, so a crashed job never leaves it held."""
+    import fcntl
+    path = paths.worktrees_dir() / run["id"][:8] / "_integration.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(path, "a")
+    deadline = time.time() + wait
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.time() >= deadline:
+                fh.close()
+                raise state.Refused("integration-running", "another integration is composing or running checks in "
+                                    "_integration", preserved="the running checks",
+                                    next_step="office wait, then retry")
+            time.sleep(0.2)
+    try:
+        yield
+    finally:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        fh.close()
 
 
 def retrigger(con, run: dict) -> bool:
@@ -138,7 +173,50 @@ def _set_integration(con, run: dict, **fields) -> None:
     state.update_run(con, run["id"], landing=landing)
 
 
+def _fenced_dir(run: dict) -> Path:
+    return paths.worktrees_dir() / run["id"][:8] / "_integration.fenced"
+
+
+def live_integrate_pids(con, run: dict, *, unfenced_only: bool = False) -> list[int]:
+    """Processes running a claimed integrate job of this run. An integrate
+    process from an older patch holds no flock, so the flock alone cannot see
+    it; the job table can. `unfenced_only` drops processes that registered as
+    flock holders (this code), which wait on the flock instead."""
+    fenced = {p.name for p in _fenced_dir(run).glob("*")} if unfenced_only else set()
+    rows = con.execute("SELECT claimed_pid, claimed_by FROM outbox WHERE run_id=? AND kind='integrate' AND status='claimed'",
+                       (run["id"],)).fetchall()
+    return [r["claimed_pid"] for r in rows if r["claimed_pid"] and r["claimed_pid"] != os.getpid()
+            and str(r["claimed_pid"]) not in fenced and claim_alive(r["claimed_pid"], r["claimed_by"])]
+
+
+def refuse_if_integrating(con, run: dict) -> None:
+    """Refuse while any integrate job is live, flock or not."""
+    pids = live_integrate_pids(con, run)
+    if pids:
+        raise state.Refused("integration-running", f"an integrate job (pid {', '.join(map(str, pids))}) is composing or "
+                            "running checks in _integration", preserved="the running checks",
+                            next_step="office wait, then retry")
+
+
 def job_integrate(con, run: dict, job: dict) -> dict:
+    marker = _fenced_dir(run) / str(os.getpid())  # tells peers this process honors the flock
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    try:
+        with worktree_lock(run, wait=LOCK_WAIT_SECONDS):
+            # An integrate process from an older patch takes no flock: wait it out too.
+            deadline = time.time() + LOCK_WAIT_SECONDS
+            while live_integrate_pids(con, run, unfenced_only=True):
+                if time.time() >= deadline:
+                    raise state.Refused("integration-running", "an integrate job from an older Office patch is still "
+                                        "running in _integration", next_step="office wait, then office resume")
+                time.sleep(1.0)
+            return _integrate(con, run, job)
+    finally:
+        marker.unlink(missing_ok=True)
+
+
+def _integrate(con, run: dict, job: dict) -> dict:
     run = state.get_run(con, run["id"])  # a rebase may have moved the compose base since this job was queued
     base = compose_base(run)
     tasks = accepted_set(con, run)

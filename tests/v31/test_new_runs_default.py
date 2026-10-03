@@ -7,6 +7,7 @@ from office import runtime_default, version
 from office.state import OfficeError
 
 
+@pytest.mark.integration  # shells out to the repo tooling
 def test_default_is_the_installed_release(monkeypatch, tmp_path):
     monkeypatch.delenv("OFFICE_NEW_RUNS", raising=False)
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "none.yaml"))

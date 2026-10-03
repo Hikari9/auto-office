@@ -29,7 +29,8 @@ except ImportError:  # not POSIX: a pane's terminal mode cannot be read
 from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
-from office.util import atomic_write_json, dumps, now_iso, pid_alive, sha256_obj, short
+from office.util import (atomic_write_json, claim_alive, claim_signalable, dumps, now_iso, parse_iso, pid_alive,
+                         process_is, process_start, sha256_obj, short)
 
 LEASE_TTL_SECONDS = 4 * 3600
 IDENTITY_ENV = ("OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE_ROLE", "OFFICE_STATE_DIR",
@@ -130,6 +131,20 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                         "no executor launched")
                 previous = tid
                 continue
+            after = task.get("stack_after")
+            if (task["status"] == "queued" and after
+                    and (state.get_task(con, run["id"], after) or {}).get("status") == "accepted"):
+                # Stacked after a task that was accepted before the stack was
+                # recorded: start_stacked already fired, so launch it now.
+                state.update_task(con, run["id"], tid, stack_after=None, pause_reason=None)
+                decision = routes.get(tid) if (routes.get(tid) or {}).get("status") == "selected" else None
+                if decision:
+                    _record_routing(con, run, decision)
+                did = request_launch(con, run, tid, role="executor", decision=decision,
+                                     base=_base_for(con, run, task, graph, after))
+                res.add(f"{tid} was stacked after {after}, which is already accepted -> {did} launching")
+                previous = tid
+                continue
             if task["status"] in ("running", "launching", "submitted", "changes_required", "queued"):
                 res.add(f"{tid} already {task['status']}")
                 previous = tid
@@ -141,10 +156,14 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             plans.require_scope_clear(con, run, tid)
             stack_after = None if parallel or previous is None else previous
             base = _base_for(con, run, task, graph, stack_after)
+            if stack_after and (state.get_task(con, run["id"], stack_after) or {}).get("status") == "accepted":
+                # Nothing would release a stack on an accepted task: launch now,
+                # based on its accepted revision (base above).
+                stack_after = None
             decision = routes[tid]
             if decision.get("status") != "selected":
                 raise Refused("no-route", _route_failure(tid, decision), scope=tid,
-                              preserved="plan and other dispatches", next_step=_route_next(decision, tid))
+                              preserved="plan and other dispatches", next_step=_route_next(decision, tid, run))
             _record_routing(con, run, decision)
             if review_as:
                 state.update_task(con, run["id"], tid, review_override={
@@ -184,13 +203,15 @@ def _route_failure(tid: str, decision: dict) -> str:
     return f"{tid}: no qualifying executor route ({status}){': ' + top if top else ''}{' | ' + skipped if skipped else ''}"
 
 
-def _route_next(decision: dict, tid: str) -> str:
+def _route_next(decision: dict, tid: str, run: dict | None = None) -> str:
     for r in decision.get("rejected") or []:
         if r.get("stage") == 2:
             return (f"a user may promote a route: office approve trust {r['candidate']} --quote \"<user's words>\"; "
                     "or office inspect route for details")
     if decision.get("status") == "protected_quota_would_be_consumed":
-        return "wait for quota, choose a cheaper strategy, or obtain explicit user authority"
+        remedy = candidates.protected_quota_remedy(run, "executor", tid) if run else ""
+        return ("wait for quota, choose a cheaper strategy, or obtain explicit user authority"
+                + (f"; {remedy}" if remedy else ""))
     return f"office inspect route {tid}"
 
 
@@ -380,7 +401,23 @@ def renew_lease(con, lease_id: str) -> None:
                 ((now + timedelta(seconds=LEASE_TTL_SECONDS)).isoformat(), now.isoformat(), lease_id))
 
 
-def revoke(con, run: dict, task_id: str, reason: str) -> Result:
+def revoke(con, run: dict, target: str, reason: str) -> Result:
+    """Revoke a task's lease, or end one dispatch (`D...`), or the composed
+    result's reviews (`integration`)."""
+    task_id = target.upper()
+    if task_id == "INTEGRATION":
+        return revoke_integration(con, run, reason)
+    if state.get_task(con, run["id"], task_id) is None:
+        did = target[:1].upper() + target[1:]
+        d = state.get_dispatch(con, did)
+        if d is not None and d["run_id"] == run["id"]:
+            return revoke_dispatch(con, run, d, reason)
+        raise Usage("unknown-task", f"no task, dispatch, or scope {target}",
+                    next_step="office revoke <task id | dispatch id | integration>")
+    return _revoke_task(con, run, task_id, reason)
+
+
+def _revoke_task(con, run: dict, task_id: str, reason: str) -> Result:
     with db.transaction(con):
         task = state.get_task(con, run["id"], task_id)
         if task is None:
@@ -391,15 +428,195 @@ def revoke(con, run: dict, task_id: str, reason: str) -> Result:
         state.emit(con, run, "lease.revoked", f"{task_id} lease revoked", task_id=task_id)
     live = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE run_id=? AND task_id=? AND ended_at IS NULL "
                                          "AND status IN ('launching', 'running')", (run["id"], task_id)).fetchall()]
-    stopped = [d["id"] for d in live if stop_dispatch(run, d)]
+    notes: list[str] = []
+    stopped = [d["id"] for d in live if stop_dispatch(run, d, notes=notes)]
     lines = [f"{task_id} lease revoked | later submits from its holder are rejected"]
     if stopped:
         lines.append(f"stopped {', '.join(stopped)} (SIGTERM)")
+    lines += notes
     return Result(lines=lines, next=f"office dispatch {task_id} to relaunch")
+
+
+def _end_dispatch(con, run: dict, d: dict, classification: str, why: str, *, stop: bool = True,
+                  notes: list[str] | None = None) -> bool:
+    """Record the end of a dispatch Office can no longer wait on. Closes its
+    gate when nothing else can finish it. Returns False when it had ended."""
+    if d.get("ended_at") or d["status"] not in ("launching", "running"):
+        return False
+    if stop and d.get("launcher") not in (None, "external", "sync"):
+        stop_dispatch(run, d, notes=notes)  # stops what is still alive and records the end itself
+    if d.get("kind") in ("planner", "executor") and not state.get_dispatch(con, d["id"]).get("ended_at"):
+        _finish(d["id"], None, None, classification, 0.0)  # a worker end has its own after-exit steps
+    with db.transaction(con):
+        # The end and the gate close commit together: a crash between them would
+        # leave a running gate with nothing to finish it. `repair_orphaned_gates`
+        # covers an end recorded elsewhere (stop_dispatch, an older Office).
+        if not state.get_dispatch(con, d["id"]).get("ended_at"):
+            con.execute("UPDATE dispatches SET status=CASE WHEN status='cancelled' THEN status ELSE 'failed' END, "
+                        "terminal_classification=?, ended_at=?, wall_clock_seconds=COALESCE(wall_clock_seconds, 0) "
+                        "WHERE id=? AND ended_at IS NULL", (classification, now_iso(), d["id"]))
+            state.emit(con, run, "dispatch.ended", f"{d.get('task_id') or d['role']} {d['role']} ended: {classification}",
+                       audience="runtime", task_id=d.get("task_id"), dispatch_id=d["id"],
+                       payload={"exit_code": None, "signal": None, "classification": classification})
+        state.emit(con, run, "dispatch.reaped", f"{d['id']} {d['role']} ended: {why}", task_id=d.get("task_id"),
+                   dispatch_id=d["id"])
+        _close_orphaned_gate(con, run, d.get("gate_id"), why)
+    return True
+
+
+def repair_orphaned_gates(con, run: dict) -> list[str]:
+    """Close open review gates whose reviewers have all ended and whose own job
+    can no longer finish them. Caller holds the transaction."""
+    rows = con.execute("SELECT id FROM gates g WHERE run_id=? AND status='running' "
+                       "AND EXISTS (SELECT 1 FROM dispatches WHERE gate_id=g.id) "
+                       "AND NOT EXISTS (SELECT 1 FROM dispatches WHERE gate_id=g.id AND ended_at IS NULL)",
+                       (run["id"],)).fetchall()
+    closed = []
+    for r in rows:
+        _close_orphaned_gate(con, run, r["id"], "its reviewer ended and no job is left to finish it")
+        if con.execute("SELECT status FROM gates WHERE id=?", (r["id"],)).fetchone()[0] == "done":
+            closed.append(r["id"])
+    return closed
+
+
+def _close_orphaned_gate(con, run: dict, gate_id: str | None, why: str) -> None:
+    """A review gate whose reviewer ended and whose job is dead has nothing
+    left to finish it. Caller holds the transaction."""
+    if not gate_id:
+        return
+    from office import gates
+    if con.execute("SELECT 1 FROM dispatches WHERE gate_id=? AND ended_at IS NULL", (gate_id,)).fetchone():
+        return
+    gate = con.execute("SELECT * FROM gates WHERE id=?", (gate_id,)).fetchone()
+    if gate is None:
+        return
+    for job in gates.owning_jobs(con, run, gate):
+        if job["status"] == "queued" or claim_alive(job["claimed_pid"], job["claimed_by"]):
+            return  # the gate's own job may still run or retry the review
+    gates.mark_unavailable(con, run, gate_id, why)
+
+
+def revoke_dispatch(con, run: dict, d: dict, reason: str) -> Result:
+    if d.get("task_id") and d.get("role") in ("executor", "planner"):
+        task = state.get_task(con, run["id"], d["task_id"])
+        live = not d.get("ended_at") and d["status"] in ("launching", "running")
+        if task is None or task.get("current_dispatch_id") != d["id"] or not live:
+            why = "ended" if not live else f"not {d['task_id']}'s current dispatch ({task and task.get('current_dispatch_id')})"
+            return Result(lines=[f"{d['id']} is {why}; nothing revoked"],
+                          next=f"office revoke {d['task_id']} to revoke the task itself")
+        return _revoke_task(con, run, d["task_id"], reason)
+    notes: list[str] = []
+    ended = _end_dispatch(con, run, d, "revoked", f"revoked: {reason}", notes=notes)
+    line = f"{d['id']} {'ended' if ended else 'had already ended'} ({reason})"
+    return Result(lines=[line, *notes], next="office status")
+
+
+def _fence_integrate_jobs(con, run: dict, reason: str) -> list[str]:
+    """Stop and cancel the integrate jobs that own the integration reviews, so
+    ending a reviewer cannot make a live job start a fallback or retry."""
+    with db.transaction(con):
+        jobs_ = [dict(r) for r in con.execute("SELECT id, status, claimed_pid, claimed_by FROM outbox WHERE run_id=? "
+                                              "AND kind='integrate' AND status IN ('queued','claimed')",
+                                              (run["id"],)).fetchall()]
+        for j in jobs_:
+            con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL, max_attempts=attempts "
+                        "WHERE id=?", (f"revoked: {reason}"[:200], now_iso(), j["id"]))
+    unstopped = []
+    for j in jobs_:
+        if j["status"] != "claimed" or not claim_alive(j["claimed_pid"], j["claimed_by"]):
+            continue
+        if not claim_signalable(j["claimed_pid"], j["claimed_by"]):
+            unstopped.append(f"{j['id']} (pid {j['claimed_pid']})")  # no start time: the pid may be reused
+            continue
+        _killpg(j["claimed_pid"])
+        deadline = time.time() + 5
+        while claim_alive(j["claimed_pid"], j["claimed_by"]) and time.time() < deadline:
+            time.sleep(0.05)
+    return [j["id"] for j in jobs_], unstopped
+
+
+def revoke_integration(con, run: dict, reason: str) -> Result:
+    fenced, unstopped = _fence_integrate_jobs(con, run, reason)
+    rows = [dict(r) for r in con.execute(
+        "SELECT d.* FROM dispatches d JOIN gates g ON g.id=d.gate_id WHERE d.run_id=? AND g.subject='integration' "
+        "AND d.ended_at IS NULL AND d.status IN ('launching','running')", (run["id"],)).fetchall()]
+    notes: list[str] = []
+    ended = [d["id"] for d in rows if _end_dispatch(con, run, d, "revoked", f"integration revoked: {reason}", notes=notes)]
+    from office import gates
+    with db.transaction(con):
+        stale = [r["id"] for r in con.execute("SELECT id FROM gates WHERE run_id=? AND subject='integration' "
+                                              "AND status IN ('queued','running','waiting')", (run["id"],)).fetchall()]
+        for gid in stale:
+            _close_orphaned_gate(con, run, gid, f"integration revoked: {reason}")
+        if fenced:  # a compose was cut short; a finished integration keeps its verdict
+            from office import integration
+            integration._set_integration(con, state.get_run(con, run["id"]), status="blocked",
+                                         detail=f"integration revoked: {reason}; office resume re-runs it")
+        state.emit(con, run, "integration.revoked", f"integration reviews revoked: {reason}")
+    lines = [f"integration revoked | ended {', '.join(ended) if ended else 'no live dispatch'}"
+             + (f" | cancelled job {', '.join(fenced)}" if fenced else "")]
+    if unstopped:
+        lines.append(f"not signalled (claimed by an older Office, so the pid may belong to another process now): "
+                     f"{', '.join(unstopped)}; stop it by hand if it is still the integrate job")
+    lines += notes
+    return Result(lines=lines, next="office status (office resume re-runs a blocked integration)")
+
+
+# Reap only a reviewer that is certainly gone: its supervisor is dead, herdr
+# says its agent does not exist, and it left no reply. Unknown is never gone.
+REAP_GRACE_SECONDS = 60
+
+
+def reap_orphans(con, run: dict) -> list[str]:
+    """End review dispatches whose process and herdr agent are gone (a host
+    reboot leaves them `running` forever). Probes herdr, so call it outside a
+    transaction. Returns one note per dispatch reaped."""
+    from office import rerun
+    notes = []
+    for row in con.execute("SELECT * FROM dispatches WHERE run_id=? AND launcher='herdr' AND gate_id IS NOT NULL "
+                           "AND ended_at IS NULL AND status='running'", (run["id"],)).fetchall():
+        d = dict(row)
+        if pid_alive(d.get("pid")):
+            continue
+        started = parse_iso(d.get("launched_at") or d["started_at"])
+        if (datetime.now(timezone.utc) - started).total_seconds() < REAP_GRACE_SECONDS:
+            continue
+        reply = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "reply.txt"
+        if reply.is_file() and reply.stat().st_size > 0:
+            continue  # the review finished; its reader will record it
+        if rerun.agent_alive(d) is not False:
+            continue  # alive, or herdr could not say
+        if _end_dispatch(con, run, d, "lost", "its process and herdr agent are gone (no reply)", stop=False):
+            notes.append(f"{d['id']} reviewer is gone")
+    with db.transaction(con):
+        notes += [f"gate {g} closed: its reviewer had ended" for g in repair_orphaned_gates(con, run)]
+    return notes
 
 
 def _agent_pgid_file(run: dict, dispatch_id: str) -> Path:
     return paths.run_dir(run["id"]) / "dispatches" / dispatch_id / "agent.pgid"
+
+
+def _identity_file(run_id: str, dispatch_id: str, which: str) -> Path:
+    return paths.run_dir(run_id) / "dispatches" / dispatch_id / f"{which}.identity"
+
+
+def _record_identity(run_id: str, dispatch_id: str, which: str, pid: int) -> None:
+    """Record which process instance `pid` is (`supervisor` or `agent`), so a
+    later stop never signals another process that reused the pid."""
+    path = _identity_file(run_id, dispatch_id, which)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(path, {"pid": pid, "start": process_start(pid)})
+
+
+def _verified(run: dict, dispatch_id: str, which: str, pid: int | None) -> bool:
+    """Whether `pid` is provably the recorded `which` process of this dispatch.
+    No record (an older Office) or another start time means no."""
+    try:
+        rec = json.loads(_identity_file(run["id"], dispatch_id, which).read_text())
+    except (OSError, ValueError):
+        return False
+    return rec.get("pid") == pid and process_is(pid, rec.get("start"))
 
 
 def _killpg(pid, sig=signal.SIGTERM) -> bool:
@@ -415,9 +632,12 @@ def _killpg(pid, sig=signal.SIGTERM) -> bool:
     return True
 
 
-def stop_dispatch(run: dict, d: dict, *, wait: float = 5.0) -> bool:
+def stop_dispatch(run: dict, d: dict, *, wait: float = 5.0, notes: list[str] | None = None) -> bool:
     """SIGTERM a live dispatch's supervisor and agent process groups, close its
-    herdr pane, and make sure the end is recorded as `signal`."""
+    herdr pane, and make sure the end is recorded as `signal`. A saved pid is
+    signalled only when its recorded start time proves it is still that
+    process; otherwise nothing is sent and `notes` names the pid to recover
+    by hand."""
     if d.get("launcher") in (None, "external", "sync"):
         return False  # not under Office's process control
     sup = d.get("pid") if pid_alive(d.get("pid")) else None
@@ -428,6 +648,21 @@ def stop_dispatch(run: dict, d: dict, *, wait: float = 5.0) -> bool:
             agent = int(pgid_file.read_text().strip())
         except ValueError:
             agent = None
+    if agent is not None and not pid_alive(agent):
+        agent = None
+    unverified = []
+    if sup and not _verified(run, d["id"], "supervisor", sup):
+        unverified.append(f"supervisor pid {sup}")
+        sup = None
+    if agent and not _verified(run, d["id"], "agent", agent):
+        unverified.append(f"agent process group {agent}")
+        agent = None
+    if unverified:
+        text = (f"not signalled: {', '.join(unverified)} cannot be proven to still be this dispatch's process (no or "
+                "another recorded start time); manual recovery needed: check it with ps and stop it by hand")
+        _launch_notice(run, d, text)
+        if notes is not None:
+            notes.append(f"{d['id']} {text}")
     signalled = _killpg(sup)
     signalled = _killpg(agent) or signalled
     deadline = time.time() + wait
@@ -505,7 +740,7 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
 def _pr_packet(con, run: dict, task: dict, dispatch: dict) -> dict | None:
     """What the executor needs to push and open its draft PR (3.2), or None."""
     from office import prs
-    if not prs.enabled(run):
+    if not prs.enabled(run) or not prs.has_pr(task):
         return None
     ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch["id"]
     ddir.mkdir(parents=True, exist_ok=True)
@@ -514,6 +749,25 @@ def _pr_packet(con, run: dict, task: dict, dispatch: dict) -> dict | None:
     return {"push": f"git push -u origin HEAD:refs/heads/{dispatch['branch']}",
             "open": None if (task.get("pr") or {}).get("number") else prs.create_command(con, run, task, dispatch, body_path),
             "number": (task.get("pr") or {}).get("number")}
+
+
+def _set_aside_evidence(con, run: dict, dispatch: dict, wt: Path, ddir: Path) -> None:
+    """A scope-none task's worktree is reused across dispatches. Any evidence file
+    already there (left by a submitted round or a crashed one) is moved out before
+    the agent starts, so a file present at submit was written by this dispatch.
+    The file is renamed, never read: it may be a link to anything."""
+    task = state.get_task(con, run["id"], dispatch["task_id"])
+    src = wt / briefs.EVIDENCE_FILE
+    if task is None or task["scope"] or not (src.exists() or src.is_symlink()):
+        return
+    if paths.git(wt, "ls-files", "--", briefs.EVIDENCE_FILE).strip():
+        return  # a tracked file is repo content (submit never ingests it); moving it would delete it
+    dest = ddir / "stale-evidence.md"
+    n = 1
+    while dest.exists() or dest.is_symlink():  # a retried launch job keeps every copy it moved
+        n += 1
+        dest = ddir / f"stale-evidence-{n}.md"
+    os.rename(src, dest)
 
 
 def job_launch_agent(con, run: dict, job: dict) -> dict:
@@ -528,6 +782,7 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     ddir.mkdir(parents=True, exist_ok=True)
     setup = None
     if role == "executor":
+        _set_aside_evidence(con, run, dispatch, wt, ddir)
         # The repo's own install, before the agent's first prompt; a failure is surfaced, never fatal.
         setup = worktree_setup.prepare(run, wt, "task", ddir / "setup.log", created=created,
                                        task_id=dispatch["task_id"], dispatch_id=dispatch["id"])
@@ -910,6 +1165,91 @@ _SPINNER = re.compile(r"(?:…|\.\.\.)\s*\(\s*(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b")
 def _pane_busy(text: str) -> bool:
     low = (text or "").lower()
     return any(m in low for m in BUSY_MARKERS) or bool(_SPINNER.search(text or ""))
+
+
+# Claude Code stops on its session limit and sits on a screen like
+# "You've hit your session limit · resets 9:30pm (Asia/Manila)". The weekly
+# "You've used 95% of your weekly limit" line is a warning, not a stop, and is
+# deliberately not matched (#253).
+_LIMIT_HIT = re.compile(r"(?:usage|session|5-hour) limit reached|hit your (?:session|usage) limit", re.I)
+# "resets 9:30pm (Asia/Manila)" or the older "limit will reset at 9:30pm".
+_LIMIT_RESETS = re.compile(r"\breset(?:s|\s+at)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([^)]+)\))?", re.I)
+LIMIT_TAIL_LINES = 40
+# Lines that show the turn moved past the limit: an echoed prompt ("> continue",
+# not the composer box, which starts with a border) or new assistant output.
+_LIMIT_ACTIVITY = re.compile(r"^\s*(?:[>❯]\s+\S|[●⏺]\s+\S)")
+# How many non-blank lines above the limit line its fingerprint hashes, and what
+# is stripped from them first: spinner glyphs and running timers or token
+# counters, which tick on an otherwise unchanged screen.
+LIMIT_CONTEXT_LINES = 15
+_LIMIT_NOISE = re.compile(
+    r"[·✢✳✶✻✽*⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"
+    r"|\(\s*(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b[^)]*\)"
+    r"|\b\d+(?:\.\d+)?\s*(?:ms|h|m|s)\b"
+    r"|[↑↓]\s*[\d.,]+\s*k?\s*tokens")
+
+
+def _limit_fingerprint(lines: list[str]) -> str:
+    """sha256 of the up to LIMIT_CONTEXT_LINES non-blank lines just above the
+    limit line, normalized. A new limit after a `continue` has the echo and new
+    output above it, so it hashes differently from the screen it replaced."""
+    import hashlib
+    kept = [ln for ln in (_LIMIT_NOISE.sub("", ln).rstrip() for ln in lines) if ln.strip()]
+    return hashlib.sha256("\n".join(kept[-LIMIT_CONTEXT_LINES:]).encode()).hexdigest()
+
+
+def _wall_to_utc(day, hour: int, minute: int, tz) -> datetime:
+    """A wall-clock time on `day` in `tz` as UTC. `tz` None is the host's zone,
+    resolved for that date (time.mktime with tm_isdst=-1), so its DST applies."""
+    if tz is not None:
+        return datetime(day.year, day.month, day.day, hour, minute, tzinfo=tz).astimezone(timezone.utc)
+    naive = datetime(day.year, day.month, day.day, hour, minute)
+    return datetime.fromtimestamp(time.mktime((*naive.timetuple()[:8], -1)), timezone.utc)
+
+
+def _usage_limit(text: str | None, now: datetime | None = None) -> dict | None:
+    """The session-limit stop shown in the last pane lines, or None.
+    {"resets_at": aware UTC datetime or None, "label": "9:30pm (Asia/Manila)",
+    "tz": zone name, "local": "21:30", "fingerprint": hash of the screen above
+    the limit line}. A reset without a zone is in the host's zone; a reset time
+    already past rolls to the next day."""
+    all_lines = (text or "").splitlines()
+    offset = max(len(all_lines) - LIMIT_TAIL_LINES, 0)
+    lines = all_lines[offset:]
+    last = max((i for i, ln in enumerate(lines) if _LIMIT_HIT.search(ln)), default=None)
+    if last is None:
+        return None
+    # A limit counts only while it is the latest state on screen: a prompt echo,
+    # spinner, busy footer or new assistant output below it means the agent went on.
+    if any(_LIMIT_ACTIVITY.search(ln) or _pane_busy(ln) for ln in lines[last + 1:]):
+        return None
+    out = {"resets_at": None, "label": None, "tz": None, "local": None,
+           "fingerprint": _limit_fingerprint(all_lines[:offset + last])}
+    found = next((m for m in map(_LIMIT_RESETS.search, lines[last:last + 3]) if m), None)
+    if found is None:
+        return out
+    out["label"] = found.string[found.start(1):found.end()].strip()
+    hour, minute, meridiem, zone = int(found.group(1)), int(found.group(2) or 0), found.group(3).lower(), found.group(4)
+    if not 1 <= hour <= 12 or minute > 59:
+        return out
+    hour = hour % 12 + (12 if meridiem == "pm" else 0)
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    tz = None
+    if zone:
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(zone.strip())
+        except Exception:
+            # An explicit zone that cannot be resolved is not the host's: never guess a time.
+            return out
+    today = now.astimezone(tz).date() if tz is not None else datetime.fromtimestamp(now.timestamp()).date()
+    at = _wall_to_utc(today, hour, minute, tz)
+    if at <= now:
+        at = _wall_to_utc(today + timedelta(days=1), hour, minute, tz)
+    local = at.astimezone(tz) if tz is not None else datetime.fromtimestamp(at.timestamp()).astimezone()
+    out.update(resets_at=at, tz=getattr(tz, "key", None) or local.tzname() or "local",
+               local=local.strftime("%H:%M"))
+    return out
 
 
 def herdr_agent_name(dispatch_id: str) -> str:
@@ -1718,6 +2058,8 @@ def _record_launch(run: dict, dispatch_id: str, *, launcher: str, pid: int | Non
             con.execute("UPDATE dispatches SET launcher=?, pid=COALESCE(?, pid), pane_id=?, launched_at=?, "
                         "status=CASE WHEN status='launching' THEN 'running' ELSE status END WHERE id=?",
                         (launcher, pid, pane_id, now_iso(), dispatch_id))
+            if pid:
+                _record_identity(run["id"], dispatch_id, "supervisor", pid)
             if os.environ.get("OFFICE_KEEP_PANES") == "1":
                 # R10: this dispatch's pane stays open after it ends (snapshot still written).
                 con.execute("UPDATE dispatches SET keep_pane=1 WHERE id=?", (dispatch_id,))
@@ -1840,6 +2182,7 @@ def supervise(dispatch_id: str) -> int:
                                      env=env, start_new_session=True)
             _mark(dispatch_id, pid_child=child.pid)
             _agent_pgid_file(run, dispatch_id).write_text(str(child.pid))
+            _record_identity(run["id"], dispatch_id, "agent", child.pid)
             cap = _wall_cap_seconds(prof)
             if cap:
                 # A harness whose own timeout can fail to fire (agy stalled 3.5h
@@ -1911,8 +2254,10 @@ def _mark(dispatch_id: str, pid_child: int) -> None:
         with db.transaction(con):
             con.execute("UPDATE dispatches SET pid=?, status=CASE WHEN status='launching' THEN 'running' ELSE status END, "
                         "last_seen_at=? WHERE id=?", (os.getpid(), now_iso(), dispatch_id))
+            run_id = state.get_dispatch(con, dispatch_id)["run_id"]
     finally:
         con.close()
+    _record_identity(run_id, dispatch_id, "supervisor", os.getpid())
 
 
 def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> None:
@@ -2018,12 +2363,57 @@ def _quota_wall(run: dict, d: dict) -> str | None:
 def job_notify_worker(con, run: dict, job: dict) -> dict:
     """Best-effort native nudge to a live Herdr-hosted worker. Delivery truth
     stays in runs.db and rides on the worker's next office command."""
-    d = state.get_dispatch(con, job["payload"]["dispatch_id"])
-    if not d or d.get("launcher") != "herdr" or not d.get("pane_id") or d["status"] != "running":
+    from office import gates
+    payload = job["payload"]
+    d = state.get_dispatch(con, payload["dispatch_id"])
+    unblock = bool(payload.get("unblock"))
+    if not d or d.get("launcher") != "herdr" or not d.get("pane_id") or d["status"] != "running" \
+            or (unblock and not gates._agent_alive(herdr_agent_name(d["id"]))):
+        if unblock and d:
+            _amendment_undelivered(con, run, payload, d)
         return {"sent": False}
-    text = job["payload"].get("text", "office status has an update for you.")
+    text = payload.get("text", "office status has an update for you.")
     landed = submit_prompt(d["pane_id"], text, pane=d["pane_id"])
+    if unblock:
+        if landed == "landed":
+            from office import db, submit
+            with db.transaction(con):
+                task = state.get_task(con, run["id"], payload["task_id"])
+                # Still this dispatch's own block (a revoke or newer owner since keeps its blocker).
+                current = con.execute("SELECT amendment_id FROM deliveries WHERE run_id=? AND task_id=? AND dispatch_id=? "
+                                      "AND status IN ('queued','delivered') ORDER BY target_version DESC LIMIT 1",
+                                      (run["id"], payload["task_id"], d["id"])).fetchone()
+                # Only the current amendment for the current block lifts it; a stale notice leaves it.
+                fresh = bool(current and current["amendment_id"] == payload.get("amendment_id")
+                             and submit.block_id(con, d["id"]) == payload.get("block_id"))
+                if task and fresh and task["current_dispatch_id"] == d["id"] and submit.unblock_self(con, run, task):
+                    state.emit(con, run, "task.unblocked", f"{task['id']} unblocked: {payload.get('amendment_id')} "
+                               "delivered to the live worker, which resubmits", audience="runtime", task_id=task["id"],
+                               dispatch_id=d["id"])
+        else:
+            _amendment_undelivered(con, run, payload, d)
     return {"sent": True, "landed": landed}
+
+
+def _amendment_undelivered(con, run: dict, payload: dict, d: dict) -> None:
+    """The amendment could not be confirmed delivered to a live agent: the blocker
+    stays, and the orchestrator is told what to do instead."""
+    from office import db
+    from office import submit
+    tid = payload["task_id"]
+    with db.transaction(con):
+        task = state.get_task(con, run["id"], tid)
+        current = con.execute("SELECT amendment_id FROM deliveries WHERE run_id=? AND task_id=? AND dispatch_id=? "
+                              "AND status IN ('queued','delivered') ORDER BY target_version DESC LIMIT 1",
+                              (run["id"], tid, d["id"])).fetchone()
+        # Only while this dispatch still owns the task, blocked by this block, with this delivery
+        # current: otherwise the notice is stale and "revoke" would hit the current owner.
+        if not (task and task["current_dispatch_id"] == d["id"] and submit.self_blocked(task)
+                and submit.block_id(con, d["id"]) == payload.get("block_id")
+                and current and current["amendment_id"] == payload.get("amendment_id")):
+            return
+        state.emit(con, run, "task.amend_undelivered", f"{tid} {payload.get('amendment_id')} not confirmed delivered "
+                   f"to {d['id']}; its blocker stays: office revoke {tid}, then office rerun {tid} --resume|--fresh", task_id=tid, dispatch_id=d["id"])
 
 
 def start_stacked(con, run: dict, accepted_task: str) -> list[str]:

@@ -1,18 +1,20 @@
 """Ambiguity-safe run resolution.
 
 Order: explicit --run/--state-dir > OFFICE_STATE_DIR/OFFICE_RUN_ID > session
-binding > the sole active run in this repository > error. Latest modification
+binding > the task worktree of an open executor dispatch > the sole active run
+in this repository > error. Latest modification
 time never selects a run, and opening a session never creates or binds one.
 """
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from office import legacy, paths
-from office.state import NoRun, Usage, find_run, get_run, TERMINAL_PHASES
+from office.state import NoRun, Refused, Usage, find_run, get_dispatch, get_run, get_task, TERMINAL_PHASES
 from office.util import now_iso, short
 
 HARNESS_NAMES = ("claude", "codex", "gemini", "agy", "hermes")
@@ -23,6 +25,7 @@ class Target:
     run: dict | None = None
     legacy: legacy.LegacyRun | None = None
     source: str = ""
+    dispatch: dict | None = None  # the executor dispatch a task-worktree cwd names
 
 
 def session_keys(harness: str | None = None, session: str | None = None) -> list[tuple[str, str]]:
@@ -85,9 +88,97 @@ def bound_run(con, keys: list[tuple[str, str]]) -> dict | None:
     return None
 
 
+OPEN_DISPATCH = ("launching", "running")
+
+
+def recovery_command(run: dict, d: dict) -> str:
+    """The shell line that restores an executor's dispatch identity."""
+    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    return f". {shlex.quote(str(ddir / 'agent.env'))} && cd {shlex.quote(str(d.get('worktree') or ''))} && office submit"
+
+
+def open_executor_dispatches(con, run: dict) -> list[dict]:
+    rows = con.execute("SELECT id FROM dispatches WHERE run_id=? AND role='executor' AND status IN ('launching','running') "
+                       "ORDER BY started_at, id", (run["id"],)).fetchall()
+    return [get_dispatch(con, r[0]) for r in rows]
+
+
+def task_worktree(con, cwd: Path | str | None = None) -> tuple[dict, dict] | None:
+    """(run, dispatch) when cwd is inside an Office task worktree
+    (<worktrees>/<run>/<T>) whose task's current executor dispatch is open."""
+    try:
+        rel = Path(cwd or os.getcwd()).resolve().relative_to(paths.worktrees_dir().resolve())
+    except (ValueError, OSError):
+        return None
+    if len(rel.parts) < 2:
+        return None
+    try:
+        run = find_run(con, rel.parts[0])
+    except Usage:
+        return None
+    if run is None or not run.get("office_version"):
+        return None
+    task = get_task(con, run["id"], rel.parts[1])
+    d = get_dispatch(con, task["current_dispatch_id"]) if task and task.get("current_dispatch_id") else None
+    if d and d["role"] == "executor" and d.get("status") in OPEN_DISPATCH:
+        return run, d
+    return None
+
+
+def executor_session_dispatch(con, keys: list[tuple[str, str]]) -> tuple[dict, dict] | None:
+    """(run, dispatch) of an open executor dispatch whose recorded harness and
+    session id are one of `keys` (an id alone can collide across harnesses)."""
+    for harness, session in keys:
+        row = con.execute("SELECT id, run_id FROM dispatches WHERE harness=? AND session_id=? AND role='executor' "
+                          "AND status IN ('launching','running')", (harness, session)).fetchone()
+        if row:
+            return get_run(con, row["run_id"]), get_dispatch(con, row["id"])
+    return None
+
+
+def _end_stale_bindings(con, keys: list[tuple[str, str]], run: dict, d: dict) -> None:
+    """End the caller's binding to run `run` only when it is provably the
+    stale orchestrator binding of executor dispatch `d`: the caller's key is
+    the harness and session id recorded on `d`. Anything else, such as the
+    orchestrator running a command from an executor worktree, keeps its
+    binding; bindings to other runs always stay. Never rebinds."""
+    from office import db
+    if not d.get("session_id") or not d.get("harness"):
+        return
+    keys = [(h, s) for h, s in keys if (h, s) == (d["harness"], d["session_id"])]
+    live = [(h, s) for h, s in keys if con.execute(
+        "SELECT 1 FROM session_bindings WHERE harness=? AND session_id=? AND run_id=? AND ended_at IS NULL",
+        (h, s, run["id"])).fetchone()]
+    if live:
+        with db.transaction(con):
+            for h, s in live:
+                con.execute("UPDATE session_bindings SET ended_at=? WHERE harness=? AND session_id=? AND run_id=?",
+                            (now_iso(), h, s, run["id"]))
+        if run.get("git_common_dir"):
+            primary = paths.primary_checkout(Path(run["git_common_dir"]))
+            for h, s in live:
+                try:
+                    binding_file(primary, h, s).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+
+def refuse_executor_binding(run: dict, d: dict, what: str) -> Refused:
+    return Refused("executor-lost-binding",
+                   f"{what} belongs to executor dispatch {d['id']} for {d['task_id']} in run {short(run['id'])}; "
+                   "it must not be bound as the orchestrator",
+                   next_step=recovery_command(run, d))
+
+
 def bind(con, run: dict, keys: list[tuple[str, str]], bound_by: str) -> list[tuple[str, str]]:
-    """Record bindings (caller holds the transaction) and write fast-path stubs."""
+    """Record bindings (caller holds the transaction) and write fast-path stubs.
+    A session that belongs to an executor is never recorded as an orchestrator."""
     from office.util import atomic_write_json
+    if os.environ.get("OFFICE_DISPATCH_ID"):
+        return []
+    found = executor_session_dispatch(con, keys)
+    if found:
+        raise refuse_executor_binding(found[0], found[1], "this session")
     made = []
     primary = paths.primary_checkout(Path(run["git_common_dir"])) if run.get("git_common_dir") else None
     for harness, session in keys:
@@ -141,11 +232,23 @@ def resolve(con, *, run_arg: str | None = None, state_dir: str | None = None,
         if run is None:
             raise NoRun("no-such-run", f"OFFICE_RUN_ID={env_run} names no run", next_step="office list")
         return Target(run=run, source="env")
-    # 3. session binding
-    run = bound_run(con, session_keys(harness, session))
+    # 3. an executor that lost its env: its open task worktree, or a session id
+    # recorded on its open dispatch, names run and dispatch for this command.
+    # This wins over a session binding, which an older `office resume` may
+    # have wrongly made; only a binding proven to be that executor's ends.
+    keys = session_keys(harness, session)
+    found = task_worktree(con, cwd)
+    source = "task-worktree"
+    if not found:
+        found, source = executor_session_dispatch(con, keys), "executor-session"
+    if found:
+        _end_stale_bindings(con, keys, found[0], found[1])
+        return Target(run=found[0], source=source, dispatch=found[1])
+    # 4. session binding
+    run = bound_run(con, keys)
     if run:
         return Target(run=run, source="session")
-    # 4. sole active run in this repository
+    # 5. sole active run in this repository
     ident = paths.repo_identity(cwd)
     if ident is None:
         raise NoRun("no-repository", "not inside a git repository and no run was named",

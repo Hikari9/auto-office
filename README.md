@@ -5,8 +5,8 @@ decides strategy; routed specialist agents plan, implement, and independently re
 owns every mechanical step behind one transactional state store (`runs.db`).
 
 - **Distribution:** `auto-office` · **Python package:** `office` · **Executable:** `office`
-- **Version:** 3.2.1 (`office --version` prints the exact identity; source checkouts report a
-  PEP 440 local version such as `3.2.1+g1a2b3c4d5e6f`)
+- **Version:** 3.2.4 (`office --version` prints the exact identity; source checkouts report a
+  PEP 440 local version such as `3.2.4+g1a2b3c4d5e6f`)
 
 ## Install
 
@@ -136,9 +136,18 @@ Design and contracts: [`docs/v31-implementation.md`](docs/v31-implementation.md)
 
 ```bash
 uv venv && uv pip install -e '.[visual,test]'
-.venv/bin/python -m pytest tests            # 3.0 helper suite + tests/v31
+.venv/bin/python -m pytest -n 2              # default: unit smoke run
+.venv/bin/python -m pytest -n 2 --all        # everything: unit, integration, legacy, slow
+.venv/bin/python -m pytest -n 2 -m integration   # just the integration group
+.venv/bin/python -m pytest -n 2 -m legacy        # just the 3.0 legacy group
 python3 scripts/check_ecosystem.py
 ```
+
+Tests are tiered by marker. The default `pytest -n 2` is the unit smoke run (in-process, no repo, subprocess, browser
+or fake harness). Use it while iterating and on per-PR runs. `integration`, `legacy` (3.0 `scripts/` surface) and `slow`
+(dogfood, real `verify.sh` gates) tests stay in the repo and are deselected by default. Run everything once, at the final
+integration merge, with `pytest -n 2 --all`. `-m integration` and `-m legacy` run just those groups, and any explicit `-m`
+expression overrides the default deselection. Tests that use the `env` fixture are marked `integration` automatically.
 
 There is no remote CI. Validation runs locally as a pre-push hook; enable it once per clone:
 

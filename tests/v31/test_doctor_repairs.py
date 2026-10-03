@@ -9,6 +9,11 @@ import yaml
 from office import config_repairs, legacy
 
 
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.integration
+
+
 def test_packaged_install_restores_exact_legacy_commit(tmp_path, monkeypatch):
     source = tmp_path / "source"
     source.mkdir()
