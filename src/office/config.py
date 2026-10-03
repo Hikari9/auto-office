@@ -57,11 +57,17 @@ def read_files(repo_root: Path | None) -> dict[str, str | None]:
     once, or None when absent. Values derived together (a run's pinned policy
     and its drift baseline) must come from the same snapshot, or an edit
     between two reads pins one value and records another."""
+    return {tier: (path.read_text(encoding="utf-8") if path.is_file() else None)
+            for tier, path in config_paths(repo_root).items()}
+
+
+def config_paths(repo_root: Path | None) -> dict[str, Path]:
+    """The user and repo config file paths, by tier."""
     default = load_yaml(default_config_path()) or {}
     files = {"user": paths.user_config_path()}
     if repo_root is not None:
         files["repo"] = Path(repo_root) / (default.get("paths") or {}).get("repo", ".auto-office/config.yaml")
-    return {tier: (path.read_text(encoding="utf-8") if path.is_file() else None) for tier, path in files.items()}
+    return files
 
 
 def resolve(repo_root: Path | None, sets: list[str] | None = None,
@@ -149,6 +155,12 @@ def _describe(diffs: list[tuple[str, Any, Any]], limit: int = 3) -> str:
     return "; ".join(parts)
 
 
+def _unreadable(short: str, where: Any, err: Exception) -> str:
+    detail = " ".join(str(getattr(err, "strerror", None) or err).split())[:200]
+    return (f"live config could not be read or parsed ({where}: {type(err).__name__}: {detail}); drift is unknown, "
+            f"and run {short} stays on its pinned values")
+
+
 def config_drift(run: dict) -> str | None:
     """A notice when live config differs from what a running run pinned; the
     live values never reach that run.
@@ -163,7 +175,13 @@ def config_drift(run: dict) -> str | None:
     repo = Path(root) if root and Path(root).is_dir() else None
     short = run["id"][:8]
     try:
+        where = config_paths(repo)
         files = read_files(repo)
+        for tier, text in files.items():
+            try:
+                yaml.safe_load(text or "")
+            except yaml.YAMLError as e:
+                return _unreadable(short, where[tier], e)
         live, _ = resolve(repo, files=files)
         diffs = [d for b in DRIFT_BLOCKS for d in _leaf_diffs(pinned.get(b), live.get(b), b)]
         recorded = pinned.get(FILE_BLOCKS_KEY)
@@ -176,8 +194,10 @@ def config_drift(run: dict) -> str | None:
             diffs = [d for d in diffs if d[0].split(".", 1)[0] in differ]
             return (f"config edited since run start; not applied to running run {short} "
                     f"({', '.join(differ)} differ{': ' + _describe(diffs) if diffs else ''})")
-    except (OSError, ValueError, yaml.YAMLError):
-        return None
+    except OSError as e:
+        return _unreadable(short, e.filename or "the config files", e)
+    except (ValueError, yaml.YAMLError) as e:
+        return _unreadable(short, "the config files", e)
     if not diffs:
         return None
     return (f"config differs from run {short}'s pinned values (pinned before Office recorded a baseline, so the "

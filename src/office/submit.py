@@ -89,8 +89,12 @@ def _refuse_lost_executor(con, run: dict, cwd: Path) -> None:
     if open_:
         raise Refused("executor-lost-binding",
                       f"no plan draft to submit, and run {short(run['id'])} has open executor dispatches; if you are "
-                      "one of those executors your dispatch env was lost",
-                      next_step="; ".join(f"{d['task_id']}: {discovery.recovery_command(run, d)}" for d in open_))
+                      "one of those executors your dispatch env was lost; each executor's recovery command:",
+                      # One labelled line per dispatch and nothing chaining
+                      # them, so pasting the block cannot submit every task.
+                      data={"candidates": [f"{d['task_id']} ({d['id']}): {discovery.recovery_command(run, d)}"
+                                           for d in open_]},
+                      next_step="run only your own task's line above")
 
 
 def _worktree_dispatch(con, run: dict, cwd: Path) -> dict | None:

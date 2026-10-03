@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import GOOD_ADD, PLAN_ONE, approved_run, task_row
+from conftest import GOOD_ADD, PLAN_ONE, PLAN_TWO, approved_run, task_row
 from office import candidates, config as cfg, dispatch
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
@@ -71,14 +71,26 @@ def test_resume_by_a_session_recorded_on_an_open_executor_dispatch_is_refused(en
     assert _bindings(env) == 0
 
 
-@pytest.mark.approved
 def test_orchestrator_submit_without_a_draft_lists_each_open_executor_recovery(env):
-    d, _ = _dispatch_external(env)
+    approved_run(env, plan=PLAN_TWO, executor=[{}, {}])
+    env.office("dispatch", "T1", "T2", "--parallel", env=EXTERNAL, check=0)
+    con = env.con()
+    ds = [dict(con.execute("SELECT * FROM dispatches WHERE id=?", (task_row(env, t)["current_dispatch_id"],)).fetchone())
+          for t in ("T1", "T2")]
+    assert all(d["status"] in ("launching", "running") for d in ds), ds
+    con.execute("DELETE FROM session_bindings")
     for p in (env.repo / ".office").glob("plans/*/PLAN.md"):
         p.unlink()
     code, out = env.office("submit")
     assert code == 4 and "executor-lost-binding" in out, out
-    assert _agent_env_command(env, d) in out and "PLAN.md" not in out.split("next:")[0], out
+    assert "PLAN.md" not in out.split("next:")[0], out
+    lines = out.splitlines()
+    for d in ds:
+        # One labelled line per dispatch, holding exactly that dispatch's command.
+        mine = [ln for ln in lines if _agent_env_command(env, d) in ln]
+        assert len(mine) == 1 and mine[0].strip() == f"{d['task_id']} ({d['id']}): {_agent_env_command(env, d)}", out
+    # Nothing chains the commands: no `;` anywhere in the recovery block.
+    assert not any(";" in ln for ln in lines if "office submit" in ln), out
 
 
 @pytest.mark.approved
@@ -193,11 +205,17 @@ def test_stale_orchestrator_binding_of_an_executor_session_is_repaired_not_rebou
     con.execute("DELETE FROM session_bindings")
     con.execute("INSERT INTO session_bindings(harness, session_id, run_id, bound_at, bound_by) VALUES(?,?,?,?,?)",
                 ("claude", "sess-exec", d["run_id"], "2026-01-01T00:00:00Z", "resume"))
+    live = "SELECT COUNT(*) FROM session_bindings WHERE session_id='sess-exec' AND ended_at IS NULL"
     code, out = env.office("status", cwd=wt, env=SESSION)
     assert code == 0 and out.startswith("T1 "), out
-    assert con.execute("SELECT COUNT(*) FROM session_bindings WHERE session_id='sess-exec' AND ended_at IS NULL").fetchone()[0] == 0
-    # A session id recorded on the open dispatch wins from any cwd, too.
+    # Nothing proves this binding is the executor's (no session recorded on the dispatch): it stays.
+    assert con.execute(live).fetchone()[0] == 1
+    # The dispatch's recorded harness and session id prove it: the worktree command ends it.
     con.execute("UPDATE dispatches SET harness='claude', session_id='sess-exec' WHERE id=?", (d["id"],))
+    code, out = env.office("status", cwd=wt, env=SESSION)
+    assert code == 0 and out.startswith("T1 "), out
+    assert con.execute(live).fetchone()[0] == 0
+    # A session id recorded on the open dispatch wins from any cwd, too.
     con.execute("INSERT INTO session_bindings(harness, session_id, run_id, bound_at, bound_by) VALUES(?,?,?,?,?) "
                 "ON CONFLICT(harness, session_id) DO UPDATE SET ended_at=NULL",
                 ("claude", "sess-exec", d["run_id"], "2026-01-01T00:00:00Z", "resume"))
@@ -346,3 +364,33 @@ def test_start_reads_each_config_file_once_so_pin_and_baseline_agree(env, monkey
     pol = json.loads(env.con().execute("SELECT policy_json FROM runs").fetchone()[0])
     assert pol["quota"]["reserve_percent"] == 7
     assert pol[cfg.FILE_BLOCKS_KEY]["user"]["quota"]["reserve_percent"] == 7
+
+
+@pytest.mark.approved
+def test_orchestrator_keeps_its_binding_after_status_from_an_executor_worktree(env):
+    d, wt = _dispatch_external(env)
+    env.office("start", "second", "--planner", "inline", check=0)
+    con = env.con()
+    con.execute("UPDATE dispatches SET harness='claude', session_id='sess-exec' WHERE id=?", (d["id"],))
+    con.execute("DELETE FROM session_bindings")
+    orch = SESSION | {"OFFICE_SESSION": "sess-orch"}
+    code, out = env.office("resume", d["run_id"][:8], env=orch)
+    assert code == 0, out
+    code, out = env.office("status", cwd=wt, env=orch)
+    assert code == 0 and out.startswith("T1 "), out
+    row = con.execute("SELECT run_id, ended_at FROM session_bindings WHERE session_id='sess-orch'").fetchone()
+    assert row["run_id"] == d["run_id"] and row["ended_at"] is None, dict(row)
+    # Back in the main checkout, with two active runs, the binding still names the run.
+    code, out = env.office("status", env=orch)
+    assert code == 0 and not out.startswith("T1 "), out
+
+
+def test_unreadable_live_config_is_reported_not_treated_as_no_drift(env):
+    user = env.tmp / "user-config.yaml"
+    _write_reserve(user, 7)
+    approved_run(env)
+    user.write_text("quota: [unclosed\n")
+    code, out = env.office("status")
+    assert "live config could not be read or parsed" in out and str(user) in out, out
+    assert "Error" in out.split(str(user), 1)[1] and "stays on its pinned values" in out, out
+    assert "config edited" not in out and "config differs" not in out, out

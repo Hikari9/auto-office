@@ -136,11 +136,16 @@ def executor_session_dispatch(con, keys: list[tuple[str, str]]) -> tuple[dict, d
     return None
 
 
-def _end_stale_bindings(con, keys: list[tuple[str, str]], run: dict) -> None:
-    """End the caller's binding to the recovered executor's own run (the stale
-    orchestrator binding an executor made there); bindings to other runs stay.
-    Never rebinds."""
+def _end_stale_bindings(con, keys: list[tuple[str, str]], run: dict, d: dict) -> None:
+    """End the caller's binding to run `run` only when it is provably the
+    stale orchestrator binding of executor dispatch `d`: the caller's key is
+    the harness and session id recorded on `d`. Anything else, such as the
+    orchestrator running a command from an executor worktree, keeps its
+    binding; bindings to other runs always stay. Never rebinds."""
     from office import db
+    if not d.get("session_id") or not d.get("harness"):
+        return
+    keys = [(h, s) for h, s in keys if (h, s) == (d["harness"], d["session_id"])]
     live = [(h, s) for h, s in keys if con.execute(
         "SELECT 1 FROM session_bindings WHERE harness=? AND session_id=? AND run_id=? AND ended_at IS NULL",
         (h, s, run["id"])).fetchone()]
@@ -228,15 +233,16 @@ def resolve(con, *, run_arg: str | None = None, state_dir: str | None = None,
             raise NoRun("no-such-run", f"OFFICE_RUN_ID={env_run} names no run", next_step="office list")
         return Target(run=run, source="env")
     # 3. an executor that lost its env: its open task worktree, or a session id
-    # recorded on its open dispatch, names run and dispatch. This wins over a
-    # session binding, which an older `office resume` may have wrongly made.
+    # recorded on its open dispatch, names run and dispatch for this command.
+    # This wins over a session binding, which an older `office resume` may
+    # have wrongly made; only a binding proven to be that executor's ends.
     keys = session_keys(harness, session)
     found = task_worktree(con, cwd)
     source = "task-worktree"
     if not found:
         found, source = executor_session_dispatch(con, keys), "executor-session"
     if found:
-        _end_stale_bindings(con, keys, found[0])
+        _end_stale_bindings(con, keys, found[0], found[1])
         return Target(run=found[0], source=source, dispatch=found[1])
     # 4. session binding
     run = bound_run(con, keys)
