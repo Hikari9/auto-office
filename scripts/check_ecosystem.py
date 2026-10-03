@@ -15,7 +15,8 @@ INIT_MARKERS=('TODO:', 'example_asset.txt', 'scripts/example.py', 'references/ap
 # `wc -l` counts rounded up with roughly 10% headroom; adjust this table deliberately.
 # 3.1 plan-defect redirects took the hub to 142 lines and 3.2 (plan diagram, task PRs,
 # end state, office land) to 153; the budget is re-set here to that count plus ~10%.
-HUB_LINE_BUDGET = 168
+# 3.2.x run a9afacbf lessons (#267/#268 throughput lanes, #270 auto-takeover pointer): 168 -> 176.
+HUB_LINE_BUDGET = 176
 # 3.1: each 3.0 spoke carries a three-line banner pointing 3.1 runs at the office CLI;
 # the per-spoke budgets below grew by exactly those lines.
 SKILL_LINE_BUDGETS = {
