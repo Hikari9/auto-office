@@ -19,7 +19,7 @@ import time
 import uuid
 from pathlib import Path
 
-from office import briefs, candidates, db, jobs, paths, planfile, review_parse, routing, state, version
+from office import briefs, candidates, db, jobs, paths, planfile, review_parse, routing, state, version, worktree_setup
 from office.util import dumps, now_iso, pid_alive, sha256_bytes, sha256_obj
 
 TASK_GATES = ("checks", "code_review", "visual")
@@ -607,6 +607,7 @@ def detached_checkout(run: dict, commit: str, name: str) -> Path:
         remove_checkout(run, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     paths.git(Path(run["repo_root"]), "worktree", "add", "--detach", str(path), commit)
+    worktree_setup.prepare(run, path, "check", paths.run_dir(run["id"]) / "setup" / f"{name}.log", created=True)
     return path
 
 

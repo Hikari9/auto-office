@@ -165,9 +165,13 @@ runs an integration review only at a real boundary (a dependency on unmerged out
 file, or a declared shared interface). Conflicts and failures are surfaced; `office close` refuses
 until integration is accepted and a landing is recorded (`--handoff <pr>` or the commit reachable
 from the default branch). The integration worktree is recreated from git on every compose, so it
-holds no installed dependencies; run-level checks that need them install them in the command
-(`pnpm install --frozen-lockfile && pnpm lint`). A check that is not found reports UNAVAILABLE with
-that instruction; Office never runs a package manager itself. Checks must not mutate the tree: a
+holds no installed dependencies. The repo declares its install once as `worktree.setup` in
+`.auto-office/config.yaml` (pinned into the run policy at `office start`, with `setup_timeout_s` and
+`applies_to`, default task, integration, and check); Office runs that command once in each new task,
+integration, and check worktree and logs it to `setup.log`. Without it, run-level checks install in
+the command (`pnpm install --frozen-lockfile && pnpm lint`). A check that is not found reports
+UNAVAILABLE with that instruction. Office runs only the command the repo declares; it never chooses a
+package manager itself. Checks must not mutate the tree: a
 task check that does (`lint --fix`) makes the gate STALE.
 
 ### 6.1 User model overrides (#185)

@@ -13,7 +13,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from office import briefs, db, gates, paths, review_parse, state
+from office import briefs, db, gates, paths, review_parse, state, worktree_setup
 from office.util import dumps, now_iso, sha256_obj
 
 
@@ -201,6 +201,8 @@ def job_integrate(con, run: dict, job: dict) -> dict:
                          review=needs_review)
     results = {}
     if run_checks:
+        # The merged lockfile is in place; install before the checks that need it.
+        worktree_setup.prepare(run, wt, "integration", paths.run_dir(run["id"]) / "setup" / "integration.log", created=True)
         gid = _gate(con, run, integ_rev, "checks", commit)
         outcome = gates.run_commands(con, run, run_checks, wt, integ_rev, {"id": gid, "task_id": None}, check_tree=False)
         with db.transaction(con):
@@ -249,15 +251,16 @@ def job_integrate(con, run: dict, job: dict) -> dict:
 
 
 MISSING_DEPS_HINT = ("the composed worktree is a fresh checkout with no installed dependencies (anything not in git, "
-                     "such as node_modules or a virtualenv, is absent and is recreated on every compose); make the "
-                     "plan's run-level `checks:` install them first, e.g. `pnpm install --frozen-lockfile && pnpm lint`, "
-                     "then office amend plan")
+                     "such as node_modules or a virtualenv, is absent and is recreated on every compose); declare the "
+                     "repo's install once as `worktree.setup` in .auto-office/config.yaml (Office runs it in every new "
+                     "worktree), or make the plan's run-level `checks:` install them first, e.g. "
+                     "`pnpm install --frozen-lockfile && pnpm lint`, then office amend plan")
 
 
 def missing_deps_hint(outcome: dict) -> str | None:
     """When a run-level check could not find its command, say why that happens
-    on the composed tree and what the plan must do. Office never runs a package
-    manager on its own."""
+    on the composed tree and what the plan must do. Office runs only the command the
+    repo declares as `worktree.setup`; it never chooses a package manager."""
     if outcome.get("verdict") == "UNAVAILABLE" and "command not found" in (outcome.get("summary") or ""):
         return MISSING_DEPS_HINT
     return None

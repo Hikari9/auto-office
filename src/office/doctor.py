@@ -65,6 +65,13 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
             + ("ok" if retained else "not materialized (office doctor --fix)"))
     ident = paths.repo_identity()
     if ident:
+        from office import config as cfg
+        top = ident[0]
+        effective, _ = cfg.resolve(top)
+        if (top / "pnpm-lock.yaml").is_file() and not str((effective.get("worktree") or {}).get("setup") or "").strip():
+            res.add("worktree setup: pnpm-lock.yaml found but worktree.setup is not set; new worktrees start without "
+                    "node_modules. Add to .auto-office/config.yaml: worktree: {setup: \"pnpm install --offline "
+                    "--frozen-lockfile || pnpm install --frozen-lockfile\"}")
         for leg in legacy.legacy_runs(paths.primary_checkout(ident[1])):
             if leg.active:
                 have = legacy.retained_runtime(leg.plugin_commit, materialize=fix)

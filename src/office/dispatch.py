@@ -26,7 +26,7 @@ try:
 except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
-from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, state, version
+from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import atomic_write_json, dumps, now_iso, pid_alive, sha256_obj, short
@@ -521,14 +521,24 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     dispatch = state.get_dispatch(con, payload["dispatch_id"])
     if dispatch["status"] not in ("launching",):
         return {"skipped": dispatch["status"]}
+    created = not (Path(dispatch["worktree"]) / ".git").exists()
     wt = ensure_worktree(run, dispatch)
     role = payload["role"]
-    packet = build_packet(con, run, dispatch, role, payload)
-    state.check_packet(run, packet)
     ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch["id"]
     ddir.mkdir(parents=True, exist_ok=True)
+    setup = None
+    if role == "executor":
+        # The repo's own install, before the agent's first prompt; a failure is surfaced, never fatal.
+        setup = worktree_setup.prepare(run, wt, "task", ddir / "setup.log", created=created,
+                                       task_id=dispatch["task_id"], dispatch_id=dispatch["id"])
+        if setup:
+            atomic_write_json(ddir / "setup.json", setup)
+            if setup["exit"] != 0:
+                _launch_notice(run, dispatch, worktree_setup.failure_text(setup))
+    packet = build_packet(con, run, dispatch, role, payload)
+    state.check_packet(run, packet)
     atomic_write_json(ddir / "packet.json", packet)
-    brief = briefs.worker_brief(con, run, packet)
+    brief = briefs.worker_brief(con, run, packet, setup=setup)
     (ddir / "brief.md").write_text(brief, encoding="utf-8")
     with db.transaction(con):
         con.execute("UPDATE dispatches SET packet_hash=?, packet_path=?, log_path=? WHERE id=?",
