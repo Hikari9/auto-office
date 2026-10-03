@@ -41,7 +41,8 @@ def test_medium_findings_get_a_final_fix_round_then_a_verify_only_pass(env):
 def test_a_high_finding_in_the_verify_only_round_still_blocks(env):
     medium = "VERDICT: CHANGES_REQUIRED\nFINDING F{n} | medium | calc.py:2 | a rare race | fix every caller"
     high = "VERDICT: CHANGES_REQUIRED\nFINDING F9 | high | calc.py:2 | loses data | fix it"
-    replies = [{"reply": medium.format(n=i)} for i in range(1, 4)] + [{"reply": high}] * 4
+    # two mediums use the one final fix round; the high arrives in the verify-only review
+    replies = [{"reply": medium.format(n=i)} for i in range(1, 3)] + [{"reply": high}] * 4
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD + f"# try {i}\n"}, "submit": True} for i in range(8)],
                  code_reviewer=replies)
     env.office("dispatch", "T1", check=0)
