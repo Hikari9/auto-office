@@ -9,6 +9,7 @@ lost response never duplicates work.
 from __future__ import annotations
 
 import os
+from datetime import datetime
 import tempfile
 import uuid
 from pathlib import Path
@@ -358,6 +359,13 @@ def _save_evidence(run: dict, d: dict, wt: Path, rev_id: str) -> None:
         return
     if paths.git(wt, "ls-files", "--", briefs.EVIDENCE_FILE).strip():
         return
+    # The worktree is reused across dispatches: a file older than this dispatch is
+    # a leftover from an earlier submission, not evidence for this one.
+    try:
+        if d.get("started_at") and src.stat().st_mtime < datetime.fromisoformat(d["started_at"]).timestamp():
+            return
+    except (OSError, ValueError):
+        return
     try:
         fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(fd, "rb") as fh:
@@ -370,6 +378,7 @@ def _save_evidence(run: dict, d: dict, wt: Path, rev_id: str) -> None:
     dest = briefs.evidence_path(run, d["id"], rev_id)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(text, encoding="utf-8")
+    src.unlink(missing_ok=True)  # consumed: the next submission must write its own
 
 
 def _duplicate(con, run: dict, rev: dict) -> Result:

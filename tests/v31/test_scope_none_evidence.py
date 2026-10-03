@@ -9,7 +9,7 @@ from office import briefs, submit
 _n = itertools.count()
 
 
-def _save(env, monkeypatch, setup):
+def _save(env, monkeypatch, setup, started_at=None):
     """Run submit's evidence copy in a scratch repo; return the saved text or None."""
     wt = env.tmp / f"evwt{next(_n)}"
     wt.mkdir()
@@ -18,7 +18,8 @@ def _save(env, monkeypatch, setup):
     dest = env.tmp / "evidence-out.md"
     dest.unlink(missing_ok=True)
     monkeypatch.setattr(briefs, "evidence_path", lambda run, did, rid: dest)
-    submit._save_evidence({"id": "r"}, {"id": "d"}, wt, "R1")
+    submit._save_evidence({"id": "r"}, {"id": "d", "started_at": started_at}, wt, "R1")
+    _save.wt = wt
     return dest.read_text() if dest.exists() else None
 
 
@@ -44,3 +45,16 @@ def test_oversized_evidence_is_truncated_and_marked(env, monkeypatch):
     out = _save(env, monkeypatch, lambda wt: (wt / briefs.EVIDENCE_FILE).write_text(big))
     assert out.startswith("x" * briefs.EVIDENCE_MAX_CHARS) and "[evidence truncated" in out
     assert len(out) < briefs.EVIDENCE_MAX_CHARS + 100
+
+
+def test_evidence_is_consumed_at_submit(env, monkeypatch):
+    assert _save(env, monkeypatch, lambda wt: (wt / briefs.EVIDENCE_FILE).write_text("posted")) == "posted"
+    assert not (_save.wt / briefs.EVIDENCE_FILE).exists()
+
+
+def test_stale_evidence_from_an_earlier_dispatch_is_ignored(env, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    later = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    assert _save(env, monkeypatch, lambda wt: (wt / briefs.EVIDENCE_FILE).write_text("stale"), started_at=later) is None
+    earlier = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    assert _save(env, monkeypatch, lambda wt: (wt / briefs.EVIDENCE_FILE).write_text("fresh"), started_at=earlier) == "fresh"

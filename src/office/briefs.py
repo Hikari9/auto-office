@@ -138,7 +138,8 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
     if not packet["scope"]:
         out += [f"EVIDENCE the reviewer cannot see GitHub. Before office submit, write {EVIDENCE_FILE} in this worktree "
                 "root (leave it untracked) with: the URL and exact text of each comment you posted, a backup of any "
-                "body you edited, and a before/after diff of each edit."]
+                "body you edited, and a before/after diff of each edit. Office consumes (deletes) the file at each submit, "
+                "so rewrite it for every submission, including a retry or fix round; an older file is ignored."]
     if packet.get("depends"):
         out.append(f"BUILDS ON {', '.join(packet['depends'])} (already in this worktree's base)")
     out += _lines("ACCEPT", packet.get("accept"))
