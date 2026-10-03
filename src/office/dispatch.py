@@ -2016,12 +2016,57 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
 def job_notify_worker(con, run: dict, job: dict) -> dict:
     """Best-effort native nudge to a live Herdr-hosted worker. Delivery truth
     stays in runs.db and rides on the worker's next office command."""
-    d = state.get_dispatch(con, job["payload"]["dispatch_id"])
-    if not d or d.get("launcher") != "herdr" or not d.get("pane_id") or d["status"] != "running":
+    from office import gates
+    payload = job["payload"]
+    d = state.get_dispatch(con, payload["dispatch_id"])
+    unblock = bool(payload.get("unblock"))
+    if not d or d.get("launcher") != "herdr" or not d.get("pane_id") or d["status"] != "running" \
+            or (unblock and not gates._agent_alive(herdr_agent_name(d["id"]))):
+        if unblock and d:
+            _amendment_undelivered(con, run, payload, d)
         return {"sent": False}
-    text = job["payload"].get("text", "office status has an update for you.")
+    text = payload.get("text", "office status has an update for you.")
     landed = submit_prompt(d["pane_id"], text, pane=d["pane_id"])
+    if unblock:
+        if landed == "landed":
+            from office import db, submit
+            with db.transaction(con):
+                task = state.get_task(con, run["id"], payload["task_id"])
+                # Still this dispatch's own block (a revoke or newer owner since keeps its blocker).
+                current = con.execute("SELECT amendment_id FROM deliveries WHERE run_id=? AND task_id=? AND dispatch_id=? "
+                                      "AND status IN ('queued','delivered') ORDER BY target_version DESC LIMIT 1",
+                                      (run["id"], payload["task_id"], d["id"])).fetchone()
+                # Only the current amendment for the current block lifts it; a stale notice leaves it.
+                fresh = bool(current and current["amendment_id"] == payload.get("amendment_id")
+                             and submit.block_id(con, d["id"]) == payload.get("block_id"))
+                if task and fresh and task["current_dispatch_id"] == d["id"] and submit.unblock_self(con, run, task):
+                    state.emit(con, run, "task.unblocked", f"{task['id']} unblocked: {payload.get('amendment_id')} "
+                               "delivered to the live worker, which resubmits", audience="runtime", task_id=task["id"],
+                               dispatch_id=d["id"])
+        else:
+            _amendment_undelivered(con, run, payload, d)
     return {"sent": True, "landed": landed}
+
+
+def _amendment_undelivered(con, run: dict, payload: dict, d: dict) -> None:
+    """The amendment could not be confirmed delivered to a live agent: the blocker
+    stays, and the orchestrator is told what to do instead."""
+    from office import db
+    from office import submit
+    tid = payload["task_id"]
+    with db.transaction(con):
+        task = state.get_task(con, run["id"], tid)
+        current = con.execute("SELECT amendment_id FROM deliveries WHERE run_id=? AND task_id=? AND dispatch_id=? "
+                              "AND status IN ('queued','delivered') ORDER BY target_version DESC LIMIT 1",
+                              (run["id"], tid, d["id"])).fetchone()
+        # Only while this dispatch still owns the task, blocked by this block, with this delivery
+        # current: otherwise the notice is stale and "revoke" would hit the current owner.
+        if not (task and task["current_dispatch_id"] == d["id"] and submit.self_blocked(task)
+                and submit.block_id(con, d["id"]) == payload.get("block_id")
+                and current and current["amendment_id"] == payload.get("amendment_id")):
+            return
+        state.emit(con, run, "task.amend_undelivered", f"{tid} {payload.get('amendment_id')} not confirmed delivered "
+                   f"to {d['id']}; its blocker stays: office revoke {tid}, then office rerun {tid} --resume|--fresh", task_id=tid, dispatch_id=d["id"])
 
 
 def start_stacked(con, run: dict, accepted_task: str) -> list[str]:

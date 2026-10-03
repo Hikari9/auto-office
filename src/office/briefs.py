@@ -76,7 +76,11 @@ DEFECT <P-id> | <class> | <task or section> | <what is wrong> | <evidence: quote
 CLEARED <P-id>   (only for a defect named below that this plan revision fixes)
 A DEFECT is only one of these classes: requirement-contradiction, false-contract-assumption,
 unsafe-or-unauthorized-action, double-scope-ownership. It must cite evidence. Everything else is an
-ordinary FINDING. Do not ask for polish: an approvable plan gets PASS."""
+ordinary FINDING. Do not ask for polish: an approvable plan gets PASS.
+Scope registries: raise a FINDING (material) when a task adds a config key, route, or server action but its
+scope omits the repo's registries for that kind of change: exhaustive policy maps over config keys, auth or gate
+manifests that every new route must join, and existing tests that assert call counts the change alters. An
+executor that must touch them is refused at submit, so name them in scope now."""
 
 
 def _lines(title: str, items) -> list[str]:
