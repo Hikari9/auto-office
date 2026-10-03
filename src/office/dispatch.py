@@ -1367,8 +1367,16 @@ def _herdr_pane(run: dict, cwd: Path, label: str | None = None) -> str | None:
     else:
         pane = _herdr_split_pane(run, cwd, tab_file, layout, anchor)
     if pane and label:
-        subprocess.run(["herdr", "pane", "rename", pane, label], capture_output=True, timeout=30)
+        _herdr_rename(pane, label)
     return pane
+
+
+def _herdr_rename(pane: str, label: str) -> None:
+    """A label is cosmetic: a rename that fails or times out never fails a launch."""
+    try:
+        subprocess.run(["herdr", "pane", "rename", pane, label], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def pane_label(run: dict, dispatch: dict, kind: str = "") -> str:
@@ -1410,7 +1418,7 @@ def relabel_task_panes(run: dict, task_id: str) -> None:
         finally:
             con.close()
         for pane, label in labels:
-            subprocess.run(["herdr", "pane", "rename", pane, label], capture_output=True, timeout=30)
+            _herdr_rename(pane, label)
     except Exception:
         pass
 

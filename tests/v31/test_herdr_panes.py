@@ -194,3 +194,44 @@ def test_ensure_pr_relabels_when_pr_becomes_known(env, monkeypatch):
     calls.clear()
     prs.ensure_pr(None, run, {"id": "T3", "title": "t", "pr": {"number": 261}}, {"id": "D1", "branch": "b"})
     assert calls == []
+
+
+def test_rename_failure_never_fails_pane_setup(env, monkeypatch):
+    import subprocess
+    _fake(env, monkeypatch)
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
+    from office import dispatch
+    real = subprocess.run
+    for exc in (OSError("no herdr"), subprocess.TimeoutExpired("herdr", 30)):
+        def run(args, *a, _exc=exc, **k):
+            if args[:3] == ["herdr", "pane", "rename"]:
+                raise _exc
+            return real(args, *a, **k)
+        monkeypatch.setattr(dispatch.subprocess, "run", run)
+        run_ = _run(env)
+        first = dispatch._herdr_pane(run_, env.repo, label="T1 executor D1111")  # fresh pane
+        assert first
+        assert dispatch._herdr_pane(run_, env.repo, label="T2 executor D2222") == first  # reused pane
+
+
+def test_relabel_continues_past_one_failing_pane(env, monkeypatch):
+    import subprocess
+    from office import dispatch
+    rows = [{"id": f"D{i}0000000", "role": "executor", "task_id": "T3", "kind": "worker", "pane_id": f"w1:p{i}"}
+            for i in (1, 2, 3)]
+    class Con:
+        def execute(self, *a):
+            class R:
+                def fetchall(self_): return rows
+            return R()
+        def close(self): pass
+    monkeypatch.setattr(dispatch.db, "connect", lambda: Con())
+    monkeypatch.setattr(dispatch, "pane_label", lambda run, d, kind="": "L " + d["pane_id"])
+    done = []
+    def run(args, *a, **k):
+        if args[3] == "w1:p2":
+            raise subprocess.TimeoutExpired("herdr", 30)
+        done.append(args[3])
+    monkeypatch.setattr(dispatch.subprocess, "run", run)
+    dispatch.relabel_task_panes({"id": "r1"}, "T3")
+    assert done == ["w1:p1", "w1:p3"]
