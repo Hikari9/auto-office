@@ -21,6 +21,24 @@ def _worker(env, tid="T1"):
             "OFFICE_ROLE": "executor", "OFFICE_JOBS": "manual"}, Path(d["worktree"])
 
 
+MANUAL = {"OFFICE_JOBS": "manual"}
+
+
+def _notify(env, monkeypatch, *, alive: bool, landed: str):
+    """Run the queued notify_worker job as a herdr-hosted worker whose agent is `alive`
+    or not and whose prompt delivery reports `landed`."""
+    from office import dispatch, gates, state
+    con = env.con()
+    con.execute("UPDATE dispatches SET launcher='herdr', pane_id='p1', status='running' WHERE role='executor'")
+    con.commit()
+    monkeypatch.setattr(gates, "_agent_alive", lambda name: alive)
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **kw: landed)
+    row = con.execute("SELECT id FROM outbox WHERE kind='notify_worker' ORDER BY created_at DESC").fetchone()
+    job = state.get_job(con, row["id"])
+    run = state.get_run(con, job["run_id"])
+    return dispatch.job_notify_worker(con, run, job)
+
+
 def _live_refused(env):
     approved_run(env, executor=[{}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
@@ -71,15 +89,18 @@ def test_request_scope_needs_a_reason_and_an_executor(env):
 
 
 @pytest.mark.approved
-def test_amendment_tells_the_live_blocked_worker_to_resubmit(env):
+def test_amendment_tells_the_live_blocked_worker_to_resubmit(env, monkeypatch):
     wenv, wt = _live_refused(env)
     env.office("submit", "--request-scope", "README.md", "--", "docs need the new flag", cwd=wt, env=wenv)
     env.write_plan(WIDER)
-    code, out = env.office("amend", "T1", "--contract", "--", "add README.md", check=0)
-    assert task_row(env)["status"] == "running" and task_row(env)["pause_reason"] is None
+    code, out = env.office("amend", "T1", "--contract", "--", "add README.md", env=MANUAL, check=0)
+    # Not unblocked by the amend itself: only a confirmed prompt delivery unblocks.
+    assert task_row(env)["status"] == "blocked"
     texts = [json.loads(r[0]).get("text", "") for r in env.con().execute(
         "SELECT payload_json FROM outbox WHERE kind='notify_worker'")]
     assert any("office submit again" in t and "office ack" in t for t in texts), texts
+    _notify(env, monkeypatch, alive=True, landed="landed")
+    assert task_row(env)["status"] == "running" and task_row(env)["pause_reason"] is None
     code, out = env.office("ack", "A1", cwd=wt, env=wenv)
     assert code == 0, out
     code, out = env.office("submit", cwd=wt, env=wenv)
@@ -188,7 +209,7 @@ def _submitted_then_refused(env):
 
 
 @pytest.mark.approved
-def test_refusal_after_an_in_scope_submit_blocks_and_keeps_the_revision(env):
+def test_refusal_after_an_in_scope_submit_blocks_and_keeps_the_revision(env, monkeypatch):
     wenv, wt = _submitted_then_refused(env)
     con = env.con()
     rev_before = task_row(env)["current_revision_id"]
@@ -207,7 +228,9 @@ def test_refusal_after_an_in_scope_submit_blocks_and_keeps_the_revision(env):
     assert code == 0 and "blocker: T1 submit refused" in out, out
     # An amendment lifts it back to submitted, the status it was blocked from.
     env.write_plan(WIDER)
-    env.office("amend", "T1", "--contract", "--", "add README.md", check=0)
+    env.office("amend", "T1", "--contract", "--", "add README.md", env=MANUAL, check=0)
+    assert task_row(env)["status"] == "blocked"
+    _notify(env, monkeypatch, alive=True, landed="landed")
     assert task_row(env)["status"] == "submitted" and task_row(env)["pause_reason"] is None
 
 
@@ -230,6 +253,83 @@ def test_a_scope_request_after_an_in_scope_submit_blocks_too(env):
     assert code == 0, out
     assert task_row(env)["status"] == "blocked"
     assert task_row(env)["pause_reason"].startswith("scope requested")
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("alive,landed", [(False, "landed"), (True, "held"), (True, "")])
+def test_amendment_to_a_dead_or_unconfirmed_agent_keeps_the_blocker(env, monkeypatch, alive, landed):
+    wenv, wt = _live_refused(env)
+    env.office("submit", "--request-scope", "README.md", "--", "docs", cwd=wt, env=wenv)
+    env.write_plan(WIDER)
+    env.office("amend", "T1", "--contract", "--", "add README.md", env=MANUAL, check=0)
+    _notify(env, monkeypatch, alive=alive, landed=landed)
+    row = task_row(env)
+    assert row["status"] == "blocked" and row["pause_reason"].startswith("scope requested"), row
+    ev = env.con().execute("SELECT summary FROM events WHERE kind='task.amend_undelivered'").fetchone()
+    assert ev and "office rerun T1 --resume|--fresh" in ev[0], ev
+
+
+@pytest.mark.approved
+def test_unblock_leaves_a_block_a_revoke_replaced(env, monkeypatch):
+    wenv, wt = _live_refused(env)
+    env.office("submit", "--request-scope", "README.md", "--", "docs", cwd=wt, env=wenv)
+    env.write_plan(WIDER)
+    env.office("amend", "T1", "--contract", "--", "add README.md", env=MANUAL, check=0)
+    env.office("revoke", "T1", check=0)
+    before = task_row(env)["pause_reason"]
+    _notify(env, monkeypatch, alive=True, landed="landed")
+    assert task_row(env)["status"] == "paused" and task_row(env)["pause_reason"] == before
+
+
+@pytest.mark.approved
+def test_amend_command_quotes_hostile_paths_and_reason(env):
+    import shlex
+    wenv, wt = _live_refused(env)
+    nasty = "x$(touch pwned).md"
+    (wt / nasty).write_text("n\n")
+    code, out = env.office("submit", "--request-scope", nasty, "--", 'why "$(id)" `id` \'q\'', cwd=wt, env=wenv)
+    assert code == 0, out
+    nxt = json.loads(env.con().execute("SELECT payload_json FROM events WHERE kind='task.scope_requested'").fetchone()[0])["next"]
+    parts = shlex.split(nxt)
+    assert parts[:4] == ["office", "amend", "T1", "--contract"] and len(parts) == 6, parts
+    assert nasty in parts[5] and "$(id)" in parts[5] and "`id`" in parts[5], parts
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("bad", ["", "  ", "/etc/passwd", "../outside", "a/../../b", ":(top)x", "."])
+def test_request_scope_rejects_empty_absolute_and_outside_paths(env, bad):
+    wenv, wt = _live_refused(env)
+    code, out = env.office("submit", "--request-scope", bad, "--", "why", cwd=wt, env=wenv)
+    assert code == 2, out
+    assert task_row(env)["status"] == "running"
+    assert env.con().execute("SELECT COUNT(*) FROM events WHERE kind='task.scope_requested'").fetchone()[0] == 0
+
+
+@pytest.mark.approved
+def test_stray_positional_text_is_still_a_usage_error_on_a_plain_submit(env):
+    wenv, wt = _live_refused(env)
+    code, out = env.office("submit", "README.md", cwd=wt, env=wenv)
+    assert code == 2 and "unrecognized arguments" in out, out
+    assert task_row(env)["status"] == "running" and not env.con().execute("SELECT 1 FROM revisions").fetchone()
+
+
+@pytest.mark.approved
+def test_a_huge_new_file_is_read_only_up_to_the_cap(env):
+    approved_run(env, executor=[{}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    wenv, wt = _worker(env)
+    (wt / "BIG.md").write_text(("y" * 79 + "\n") * 100_000)
+    code, out = env.office("submit", "--request-scope", "BIG.md", "--", "big", cwd=wt, env=wenv)
+    assert code == 0, out
+    diff = json.loads(env.con().execute("SELECT payload_json FROM events WHERE kind='task.scope_requested'").fetchone()[0])["diff"]
+    assert diff.endswith("... (truncated)") and len(diff) < 6100
+
+
+def test_bounded_reader_stops_an_endless_process():
+    import sys
+    from office import submit as submit_mod
+    text, cut = submit_mod._bounded([sys.executable, "-c", "import sys\nwhile True: sys.stdout.write('z'*1000)"], Path("."), 5000)
+    assert cut and len(text) == 5000
 
 
 def test_plan_review_brief_asks_for_registries_in_scope():

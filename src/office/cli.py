@@ -303,6 +303,9 @@ def main(argv: list[str] | None = None) -> int:
     args, unknown = parser.parse_known_args(argv)
     if unknown and args.cmd not in ("amend",):
         parser.parse_args(argv)  # raises the usage error
+    if args.cmd == "submit" and args.reason and not args.request_scope:
+        # The reason text belongs to --request-scope; a stray argument is still a usage error.
+        parser.error(f"unrecognized arguments: {' '.join(args.reason)}")
     if args.version:
         print(version.current())
         return 0

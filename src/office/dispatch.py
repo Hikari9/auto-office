@@ -1994,12 +1994,40 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
 def job_notify_worker(con, run: dict, job: dict) -> dict:
     """Best-effort native nudge to a live Herdr-hosted worker. Delivery truth
     stays in runs.db and rides on the worker's next office command."""
-    d = state.get_dispatch(con, job["payload"]["dispatch_id"])
-    if not d or d.get("launcher") != "herdr" or not d.get("pane_id") or d["status"] != "running":
+    from office import gates
+    payload = job["payload"]
+    d = state.get_dispatch(con, payload["dispatch_id"])
+    unblock = bool(payload.get("unblock"))
+    if not d or d.get("launcher") != "herdr" or not d.get("pane_id") or d["status"] != "running" \
+            or (unblock and not gates._agent_alive(herdr_agent_name(d["id"]))):
+        if unblock and d:
+            _amendment_undelivered(con, run, payload, d)
         return {"sent": False}
-    text = job["payload"].get("text", "office status has an update for you.")
+    text = payload.get("text", "office status has an update for you.")
     landed = submit_prompt(d["pane_id"], text, pane=d["pane_id"])
+    if unblock:
+        if landed == "landed":
+            from office import db, submit
+            with db.transaction(con):
+                task = state.get_task(con, run["id"], payload["task_id"])
+                # Still this dispatch's own block (a revoke or newer owner since keeps its blocker).
+                if task and task["current_dispatch_id"] == d["id"] and submit.unblock_self(con, run, task):
+                    state.emit(con, run, "task.unblocked", f"{task['id']} unblocked: {payload.get('amendment_id')} "
+                               "delivered to the live worker, which resubmits", audience="runtime", task_id=task["id"],
+                               dispatch_id=d["id"])
+        else:
+            _amendment_undelivered(con, run, payload, d)
     return {"sent": True, "landed": landed}
+
+
+def _amendment_undelivered(con, run: dict, payload: dict, d: dict) -> None:
+    """The amendment could not be confirmed delivered to a live agent: the blocker
+    stays, and the orchestrator is told what to do instead."""
+    from office import db
+    tid = payload["task_id"]
+    with db.transaction(con):
+        state.emit(con, run, "task.amend_undelivered", f"{tid} {payload.get('amendment_id')} not confirmed delivered "
+                   f"to {d['id']}; its blocker stays: office rerun {tid} --resume|--fresh", task_id=tid, dispatch_id=d["id"])
 
 
 def start_stacked(con, run: dict, accepted_task: str) -> list[str]:

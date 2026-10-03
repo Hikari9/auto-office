@@ -9,6 +9,7 @@ lost response never duplicates work.
 from __future__ import annotations
 
 import os
+import shlex
 import tempfile
 import uuid
 from pathlib import Path
@@ -98,19 +99,59 @@ def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect:
         raise
 
 
-def _scope_hunk(wt: Path, files: list[str], limit: int = 6000) -> str:
-    """Tracked edits plus the contents of new (untracked) files, bounded."""
+def _bounded(argv: list[str], cwd: Path, limit: int) -> tuple[str, bool]:
+    """Run `argv`, reading at most `limit` bytes of stdout: past that the process is
+    killed, so a huge diff is never buffered. Returns (text, truncated)."""
     import subprocess
-    parts = [paths.git(wt, "diff", "HEAD", "--", *files)]
-    for f in paths.git(wt, "ls-files", "--others", "--exclude-standard", "-z", "--", *files).split("\0"):
-        if f and (wt / f).is_file():
-            proc = subprocess.run(["git", "-C", str(wt), "diff", "--no-index", "--", "/dev/null", f],
-                                  capture_output=True, text=True)
-            parts.append(proc.stdout)
-    text = "\n".join(p for p in parts if p.strip())
+    proc = subprocess.Popen(argv, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        data = proc.stdout.read(limit + 1)
+        cut = len(data) > limit
+        if cut:
+            proc.kill()
+    finally:
+        proc.stdout.close()
+        proc.wait()
+    return data[:limit].decode("utf-8", errors="replace"), cut
+
+
+def clean_request_paths(wt: Path, files: list[str]) -> list[str]:
+    """Normalized, repo-relative request paths; anything empty, absolute, pathspec magic,
+    or outside the worktree is refused before the worktree is read."""
+    out = []
+    for raw in files:
+        f = (raw or "").strip()
+        bad = (not f or os.path.isabs(f) or f.startswith(":") or "\0" in f
+               or os.path.normpath(f) in (".", "..") or os.path.normpath(f).startswith("../")
+               or not (wt / f).resolve().is_relative_to(wt))
+        if bad:
+            raise Usage("scope-path", f"cannot request scope for {raw!r}: give a path inside the task worktree",
+                        next_step='office submit --request-scope <repo-relative path> -- "<reason>"')
+        out.append(os.path.normpath(f))
+    if not out:
+        raise Usage("scope-path", "name at least one path to add to the scope",
+                    next_step='office submit --request-scope <repo-relative path> -- "<reason>"')
+    out = list(dict.fromkeys(out))
+    if len(out) > 50:
+        raise Usage("scope-path", f"{len(out)} paths is too many for one request; ask for a directory or split it",
+                    next_step='office submit --request-scope <dir>/ -- "<reason>"')
+    return out
+
+
+def _scope_hunk(wt: Path, files: list[str], limit: int = 6000) -> str:
+    """Tracked edits plus the contents of new (untracked) files, read up to `limit` bytes."""
+    text, cut = _bounded(["git", "--literal-pathspecs", "diff", "HEAD", "--", *files], wt, limit)
+    if not cut:
+        new = paths.git(wt, "--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "-z", "--", *files)
+        for f in [x for x in new.split("\0") if x and (wt / x).is_file()][:20]:
+            more, cut = _bounded(["git", "diff", "--no-index", "--", "/dev/null", f], wt, limit - len(text))
+            text += ("\n" if text else "") + more
+            if cut or len(text) >= limit:
+                cut = True
+                break
     if not text.strip():
         return "(no diff for these paths yet; they are unedited or do not exist)"
-    return text if len(text) <= limit else text[:limit] + "\n... (truncated)"
+    return text + "\n... (truncated)" if cut else text
 
 
 def request_scope_change(con, run: dict, *, cwd: Path, files: list[str], reason: str) -> Result:
@@ -126,12 +167,15 @@ def request_scope_change(con, run: dict, *, cwd: Path, files: list[str], reason:
     if not reason.strip():
         raise Usage("scope-reason", "say why the scope must grow",
                     next_step='office submit --request-scope <path> -- "<reason>"')
+    reason = reason.strip()[:2000]
     task = state.get_task(con, run["id"], d["task_id"])
     wt = Path(d["worktree"]).resolve()
     ident = paths.repo_identity(cwd)
     if ident is None or ident[0] != wt:
         raise Refused("wrong-worktree", f"run this from the task worktree ({task['id']}), not {cwd}",
-                      scope=task["id"], next_step=f'cd {wt} && office submit --request-scope {files[0]} -- "<reason>"')
+                      scope=task["id"], next_step=f'cd {shlex.quote(str(wt))} && office submit --request-scope '
+                                                  f'{shlex.quote(files[0] if files else "<path>")} -- "<reason>"')
+    files = clean_request_paths(wt, files)
     if task["current_dispatch_id"] != d["id"]:
         raise Refused("superseded-dispatch", f"{task['id']} now belongs to a newer dispatch; this session's request is rejected",
                       scope=task["id"], preserved="your worktree", next_step="stop; the current holder continues the task")
@@ -141,9 +185,10 @@ def request_scope_change(con, run: dict, *, cwd: Path, files: list[str], reason:
     if task["status"] in ("paused", "blocked", "cancelled") and not self_blocked(task):
         raise Refused("task-paused", f"{task['id']} is {task['status']}: {task.get('pause_reason') or ''}",
                       scope=task["id"], preserved="your worktree", next_step="stop and wait; the orchestrator is resolving it")
-    files = list(dict.fromkeys(f.strip() for f in files if f.strip()))
     hunk = _scope_hunk(wt, files)
-    amend_cmd = f'office amend {task["id"]} --contract -- "add {", ".join(files)} to {task["id"]} scope: {reason.strip()[:80]}"'
+    # Executor-controlled text reaches a command the orchestrator copies: one quoted argument.
+    amend_cmd = ("office amend " + shlex.quote(task["id"]) + " --contract -- "
+                 + shlex.quote(f'add {", ".join(files)} to {task["id"]} scope: {reason.strip()[:80]}'))
     summary = f"{task['id']} requests scope {', '.join(files)}: {reason.strip()}"
     with db.transaction(con):
         _record_block(con, run, task, d, f"scope requested: {', '.join(files)}: {reason.strip()}",
@@ -369,7 +414,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     wt = Path(d["worktree"]).resolve()
     if ident is None or ident[0] != wt:
         raise Refused("wrong-worktree", f"submit from the task worktree ({task['id']}), not {cwd}",
-                      scope=task["id"], next_step=f"cd {wt} && office submit")
+                      scope=task["id"], next_step=f"cd {shlex.quote(str(wt))} && office submit")
     left_out = untracked_outside(wt, task["scope"])
     restored = harness_edits_outside(wt, task["scope"])
     tree, head = capture_tree(wt, paths.run_dir(run["id"]) / "tmp", left_out, restored)
