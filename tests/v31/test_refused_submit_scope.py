@@ -132,6 +132,49 @@ def test_revoked_worker_cannot_replace_the_blocker_with_a_scope_request(env):
     assert task_row(env)["pause_reason"] == before["pause_reason"], out
 
 
+@pytest.mark.approved
+def test_revoke_between_the_check_and_the_write_changes_nothing(env, monkeypatch):
+    from office import submit as submit_mod
+    wenv, wt = _live_refused(env)
+    real = submit_mod._scope_hunk
+
+    def revoking(*a, **kw):
+        out = real(*a, **kw)
+        env.office("revoke", "T1", check=0)  # lands after the validation, before the write
+        return out
+
+    monkeypatch.setattr(submit_mod, "_scope_hunk", revoking)
+    code, out = env.office("submit", "--request-scope", "README.md", "--", "racy", cwd=wt, env=wenv)
+    assert code == 4, out
+    row = task_row(env)
+    assert "scope requested" not in (row["pause_reason"] or "")
+    con = env.con()
+    assert con.execute("SELECT COUNT(*) FROM events WHERE kind='task.scope_requested'").fetchone()[0] == 0
+    ov = con.execute("SELECT override_json FROM dispatches WHERE id=?", (wenv["OFFICE_DISPATCH_ID"],)).fetchone()[0]
+    assert "scope_request" not in (ov or "")
+
+
+@pytest.mark.approved
+def test_revoke_before_the_refusal_write_changes_nothing(env, monkeypatch):
+    from office import submit as submit_mod
+    wenv, wt = _live_refused(env)
+    real = submit_mod._dependency_bases
+
+    def revoking(*a, **kw):
+        out = real(*a, **kw)
+        env.office("revoke", "T1", check=0)  # after the status and lease checks, before the refusal write
+        return out
+
+    monkeypatch.setattr(submit_mod, "_dependency_bases", revoking)
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert code == 4, out
+    assert "submit refused" not in (task_row(env)["pause_reason"] or "")
+    con = env.con()
+    assert con.execute("SELECT COUNT(*) FROM events WHERE kind='submit.refused'").fetchone()[0] == 0
+    ov = con.execute("SELECT override_json FROM dispatches WHERE id=?", (wenv["OFFICE_DISPATCH_ID"],)).fetchone()[0]
+    assert "submit_refused" not in (ov or "")
+
+
 def test_plan_review_brief_asks_for_registries_in_scope():
     from office import briefs
     assert "Scope registries" in briefs.PLAN_REVIEW_FORMAT and "gate" in briefs.PLAN_REVIEW_FORMAT

@@ -34,9 +34,20 @@ def self_blocked(task: dict) -> bool:
 
 def _record_block(con, run: dict, task: dict, d: dict, reason: str, state_key: str, state_val: dict) -> None:
     """Durable: the task is a blocker the orchestrator sees at once, and the
-    dispatch keeps what it was blocked on. Caller holds the transaction."""
+    dispatch keeps what it was blocked on. Caller holds the transaction. Ownership is
+    re-read here: a revoke or takeover since the caller looked refuses and changes nothing."""
     import json
-    row = con.execute("SELECT override_json FROM dispatches WHERE id=?", (d["id"],)).fetchone()
+    task = state.get_task(con, run["id"], task["id"])
+    if task["current_dispatch_id"] != d["id"]:
+        raise Refused("superseded-dispatch", f"{task['id']} now belongs to a newer dispatch; this session's submit is rejected",
+                      scope=task["id"], preserved="your worktree", next_step="stop; the current holder continues the task")
+    if dispatch_mod.live_lease(con, run["id"], d["lease_id"]) is None:
+        raise Refused("lease-lost", f"{task['id']} lease is no longer held by this session (revoked or taken over)",
+                      scope=task["id"], preserved="your worktree", next_step="stop; the orchestrator decides what happens next")
+    if task["status"] in ("paused", "blocked", "cancelled") and not self_blocked(task):
+        raise Refused("task-paused", f"{task['id']} is {task['status']}: {task.get('pause_reason') or ''}",
+                      scope=task["id"], preserved="your worktree", next_step="stop and wait; the orchestrator is resolving it")
+    row =con.execute("SELECT override_json FROM dispatches WHERE id=?", (d["id"],)).fetchone()
     data = json.loads((row["override_json"] if row else None) or "{}")
     data[state_key] = state_val
     con.execute("UPDATE dispatches SET override_json=? WHERE id=?", (json.dumps(data), d["id"]))
@@ -371,10 +382,11 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
         with db.transaction(con):
             # A deterministic refusal: relaunching the same brief would repeat it.
             msg = f"{task['id']} changed files outside its scope: {', '.join(outside[:6])}"
+            # Recorded now, not at worker exit or idle stall: a live worker sits in its pane after a refusal.
+            # First, so a revoke or takeover since the checks above refuses before anything is written.
+            _record_block(con, run, task, d, f"submit refused: {msg}", "submit_refused", {"files": outside[:20]})
             state.emit(con, run, "submit.refused", msg,
                        audience="runtime", task_id=task["id"], dispatch_id=d["id"], payload={"code": "outside-scope"})
-            # Recorded now, not at worker exit or idle stall: a live worker sits in its pane after a refusal.
-            _record_block(con, run, task, d, f"submit refused: {msg}", "submit_refused", {"files": outside[:20]})
             state.emit(con, run, "task.blocked", f"{task['id']} submit refused ({msg}); amend the scope "
                        f"(office amend {task['id']} --contract -- ...) or tell the worker to revert; work is preserved "
                        "in its worktree", task_id=task["id"], dispatch_id=d["id"])
