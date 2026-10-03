@@ -923,7 +923,7 @@ LIMIT_TAIL_LINES = 40
 # Lines that show the turn moved past the limit: an echoed prompt ("> continue",
 # not the composer box, which starts with a border) or new assistant output.
 _LIMIT_ACTIVITY = re.compile(r"^\s*(?:[>❯]\s+\S|[●⏺]\s+\S)")
-# How many non-blank lines above the limit line identify its episode, and what
+# How many non-blank lines above the limit line its fingerprint hashes, and what
 # is stripped from them first: spinner glyphs and running timers or token
 # counters, which tick on an otherwise unchanged screen.
 LIMIT_CONTEXT_LINES = 15
@@ -955,10 +955,9 @@ def _wall_to_utc(day, hour: int, minute: int, tz) -> datetime:
 def _usage_limit(text: str | None, now: datetime | None = None) -> dict | None:
     """The session-limit stop shown in the last pane lines, or None.
     {"resets_at": aware UTC datetime or None, "label": "9:30pm (Asia/Manila)",
-    "tz": zone name, "local": "21:30", "zone": tzinfo or None for the host's
-    zone, "fingerprint": episode hash}. A reset
-    without a zone is in the host's zone; a reset time already past rolls to the
-    next day."""
+    "tz": zone name, "local": "21:30", "fingerprint": hash of the screen above
+    the limit line}. A reset without a zone is in the host's zone; a reset time
+    already past rolls to the next day."""
     all_lines = (text or "").splitlines()
     offset = max(len(all_lines) - LIMIT_TAIL_LINES, 0)
     lines = all_lines[offset:]
@@ -969,7 +968,7 @@ def _usage_limit(text: str | None, now: datetime | None = None) -> dict | None:
     # spinner, busy footer or new assistant output below it means the agent went on.
     if any(_LIMIT_ACTIVITY.search(ln) or _pane_busy(ln) for ln in lines[last + 1:]):
         return None
-    out = {"resets_at": None, "label": None, "tz": None, "local": None, "zone": None,
+    out = {"resets_at": None, "label": None, "tz": None, "local": None,
            "fingerprint": _limit_fingerprint(all_lines[:offset + last])}
     found = next((m for m in map(_LIMIT_RESETS.search, lines[last:last + 3]) if m), None)
     if found is None:
@@ -992,16 +991,10 @@ def _usage_limit(text: str | None, now: datetime | None = None) -> dict | None:
     at = _wall_to_utc(today, hour, minute, tz)
     if at <= now:
         at = _wall_to_utc(today + timedelta(days=1), hour, minute, tz)
-    out["zone"] = tz
-    out.update(resets_at=at, **limit_reset_view(at, tz))
-    return out
-
-
-def limit_reset_view(at: datetime, tz) -> dict:
-    """How a reset instant reads on the pane's clock: {"tz": zone or local
-    abbreviation for that date, "local": "21:30"}. `tz` None is the host's zone."""
     local = at.astimezone(tz) if tz is not None else datetime.fromtimestamp(at.timestamp()).astimezone()
-    return {"tz": getattr(tz, "key", None) or local.tzname() or "local", "local": local.strftime("%H:%M")}
+    out.update(resets_at=at, tz=getattr(tz, "key", None) or local.tzname() or "local",
+               local=local.strftime("%H:%M"))
+    return out
 
 
 def herdr_agent_name(dispatch_id: str) -> str:

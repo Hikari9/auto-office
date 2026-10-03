@@ -281,16 +281,17 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
     """A pane stopped on a Claude usage limit is a stall whatever its busy
     markers say (scrollback keeps a spinner line). Records the stop on the
     dispatch, writes pane-tail.txt, and names the manual `continue`."""
-    from office import db, dispatch
+    from datetime import datetime, timezone
+    from office import db
     from office.util import parse_iso
-    # One episode is one fingerprint of the screen above the limit line (and its
-    # label). The pane keeps showing that screen after the reset, and the parsed
-    # time would then roll to tomorrow: the episode keeps its first resets_at. A
-    # new fingerprint is a new limit, so its own reset is parsed and stored.
-    same = (d.get("limit_fingerprint") == limit["fingerprint"] and d.get("limit_label") == limit["label"]
-            and d.get("resets_at") and limit["resets_at"] is not None)
-    resets_at = parse_iso(d["resets_at"]) if same else limit["resets_at"]
-    view = dispatch.limit_reset_view(resets_at, limit["zone"]) if same else limit
+    # The pane cannot prove two limits with the same screen and label are one
+    # episode (the same work can hit the same limit again), so every poll stores
+    # and shows the reset parsed now. When a stored limit with the same screen
+    # has already reset, the output says so: the agent may only need `continue`.
+    resets_at = limit["resets_at"]
+    prior = parse_iso(d["resets_at"]) if d.get("resets_at") else None
+    passed = (prior is not None and prior <= datetime.now(timezone.utc) and prior != resets_at
+              and d.get("limit_fingerprint") == limit["fingerprint"] and d.get("limit_label") == limit["label"])
     fields = {"stall_kind": "usage_limit", "resets_at": resets_at.isoformat() if resets_at else None,
               "limit_label": limit["label"], "limit_fingerprint": limit["fingerprint"]}
     if any(d.get(k) != v for k, v in fields.items()):
@@ -299,8 +300,11 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
                         "WHERE id=?", (*fields.values(), d["id"]))
     tail = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "pane-tail.txt"
     atomic_write_text(tail, "\n".join(act["text"].splitlines()[-40:]) + "\n")
-    when = (f"resets {resets_at.strftime('%Y-%m-%dT%H:%MZ')}" + (f" ({view['tz']} {view['local']})" if view["tz"] else "")
+    when = (f"resets {resets_at.strftime('%Y-%m-%dT%H:%MZ')}" + (f" ({limit['tz']} {limit['local']})" if limit["tz"] else "")
             if resets_at else f"resets {limit['label'] or 'at an unknown time'} (time not resolved)")
+    if passed:
+        when += (f"; the same limit screen was stored with reset {prior.strftime('%Y-%m-%dT%H:%MZ')}, now past, "
+                 f"so if this is that limit `continue` may already work")
     return f"{who}: usage_limit, {when}; pane tail in {tail}; next: office prompt {d['id']} -- continue"
 
 

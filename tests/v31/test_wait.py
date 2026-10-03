@@ -393,21 +393,25 @@ def _store_episode(env, d, **cols):
     con.commit()
 
 
-def test_an_unchanged_limit_screen_past_its_reset_keeps_the_stored_time(env):
+def test_a_repeated_limit_screen_after_its_reset_shows_the_new_reset(env):
     from office import dispatch
     _go(env)
     e = _herdr(env, status="idle", pane=MANILA_LIMIT)
     d = _as_herdr(env)
     code, out = _wait(env, e, timeout="3")
-    assert code == 3 and "usage_limit" in out, out
+    assert code == 3 and "usage_limit" in out and "now past" not in out, out
     first = _limit_row(env, d)
     assert first["limit_fingerprint"] == dispatch._usage_limit(MANILA_LIMIT)["fingerprint"], first
-    # A later `office wait` process sees the same screen after its reset: the
-    # parsed time would roll to tomorrow, but the episode keeps its stored time.
+    # A later `office wait` process sees the same screen and label after the
+    # stored reset passed: either the old limit is still shown or the same work
+    # hit the same limit again. The newly parsed reset is stored and shown, and
+    # the passed one is named as a possibility, never as the reset.
     _store_episode(env, d, **{**first, "resets_at": "2026-01-01T13:30:00+00:00"})
     code, out = _wait(env, e, timeout="3")
-    assert code == 3 and "resets 2026-01-01T13:30Z (Asia/Manila 21:30)" in out, out
-    assert _limit_row(env, d)["resets_at"] == "2026-01-01T13:30:00+00:00"
+    assert code == 3 and "resets 2026-01-01" not in out and "(Asia/Manila 21:30)" in out, out
+    assert "stored with reset 2026-01-01T13:30Z, now past" in out and "-- continue" in out, out
+    row = _limit_row(env, d)
+    assert row["resets_at"] != "2026-01-01T13:30:00+00:00" and row["resets_at"] > "2026-01-02", row
 
 
 def test_a_new_limit_with_the_same_label_stores_its_own_reset(env):
