@@ -74,7 +74,7 @@ SHARED_COLUMNS = {
         "run_id TEXT", "task_id TEXT", "gate_id TEXT", "revision_id TEXT", "gate_kind TEXT",
         "code TEXT", "fingerprint TEXT", "location TEXT", "category TEXT", "action TEXT",
         "measurement_json TEXT", "state TEXT", "origin_gate_id TEXT", "updated_at TEXT",
-        "evidence TEXT",
+        "evidence TEXT", "level TEXT",
     ],
     "leases": [
         "task_id TEXT", "fencing INTEGER", "pid INTEGER", "dispatch_id TEXT", "renewed_at TEXT",

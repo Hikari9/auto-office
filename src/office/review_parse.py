@@ -12,6 +12,10 @@ VERDICTS = ("PASS", "CHANGES_REQUIRED", "PLAN_DEFECT", "BRIEF_DEFECT", "UNAVAILA
 DEFECT_CLASSES = ("requirement-contradiction", "false-contract-assumption",
                   "unsafe-or-unauthorized-action", "double-scope-ownership")
 EVIDENCE_STATUSES = ("COMPARABLE", "INVALID_COMPARISON", "NOT_APPLICABLE", "CAPTURE_BLOCKED")
+# Finding severity word -> (blocking severity, level). After the round budget,
+# only a `high` finding keeps a task from acceptance (gates._past_budget).
+LEVELS = {"high": ("material", "high"), "medium": ("material", "medium"), "low": ("minor", "low"),
+          "material": ("material", "high"), "minor": ("minor", "low")}
 _ALIASES = {"CHANGES REQUIRED": "CHANGES_REQUIRED", "PLAN DEFECT": "PLAN_DEFECT", "BRIEF DEFECT": "BRIEF_DEFECT",
             "APPROVED": "PASS", "ACCEPTED": "PASS", "IMPLEMENTATION_DEFECT": "CHANGES_REQUIRED",
             "IMPLEMENTATION DEFECT": "CHANGES_REQUIRED"}
@@ -84,11 +88,14 @@ def parse(text: str, *, plan_review: bool = False, visual: bool = False) -> Pars
         m = re.match(r"^FINDING\s+([A-Za-z]+\d+)\s*\|(.*)$", line, re.I)
         if m:
             parts = [p.strip() for p in m.group(2).split("|")]
-            severity = (parts[0].lower() if parts else "")
-            if severity not in ("material", "minor"):
-                out.errors.append(f"{m.group(1)}: severity must be material or minor")
-                severity = "material"
-            finding = {"code": m.group(1).upper(), "severity": severity,
+            word = (parts[0].lower() if parts else "")
+            if word not in LEVELS:
+                out.errors.append(f"{m.group(1)}: severity must be high, medium or low")
+                word = "material"
+            # `severity` keeps its blocking meaning (material|minor); `level` grades a
+            # blocking finding. An older reviewer's bare `material` grades as high.
+            severity, level = LEVELS[word]
+            finding = {"code": m.group(1).upper(), "severity": severity, "level": level,
                        "location": parts[1] if len(parts) > 1 else "",
                        "summary": parts[2] if len(parts) > 2 else (parts[1] if len(parts) > 1 else ""),
                        "action": parts[3] if len(parts) > 3 else ""}
@@ -116,7 +123,7 @@ def parse(text: str, *, plan_review: bool = False, visual: bool = False) -> Pars
                                 "location": parts[1] if len(parts) > 1 else "",
                                 "summary": parts[2] if len(parts) > 2 else "",
                                 "action": " | ".join(parts[3:ev_at]) if ev_at is not None else "",
-                                "evidence": evidence, "severity": "material"})
+                                "evidence": evidence, "severity": "material", "level": "high"})
             continue
         m = re.match(r"^(RESOLVED|CLEARED)\s+([A-Za-z]+\d+)", line, re.I)
         if m:
