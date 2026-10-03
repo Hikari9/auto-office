@@ -248,14 +248,12 @@ def _idle_executors(con, run: dict) -> list[str]:
             continue
         limit = dispatch._usage_limit(act["text"])
         if limit is not None:
-            line = _usage_limit_stall(con, run, d, act, limit, who)
-            if line:
-                out.append(line)
+            out.append(_usage_limit_stall(con, run, d, act, limit, who))
             continue
         if d.get("stall_kind"):
             with db.transaction(con):
-                con.execute("UPDATE dispatches SET stall_kind=NULL, resets_at=NULL, limit_label=NULL, "
-                            "limit_continued_at=NULL, limit_continue_outcome=NULL WHERE id=?", (d["id"],))
+                con.execute("UPDATE dispatches SET stall_kind=NULL, resets_at=NULL, limit_label=NULL "
+                            "WHERE id=?", (d["id"],))
         changed = act["hash"] is not None and d.get("idle_hash") not in (None, act["hash"])
         if act["busy"] or changed:
             idle_since = None
@@ -279,91 +277,27 @@ def _idle_executors(con, run: dict) -> list[str]:
     return out
 
 
-LIMIT_SETTLE_S = 30.0  # pane unchanged this long after `continue` and still on the limit screen: stalled again
-
-
-def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str) -> str | None:
+def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str) -> str:
     """A pane stopped on a Claude usage limit is a stall whatever its busy
-    markers say (scrollback keeps a spinner line). Records the episode on the
-    dispatch, writes pane-tail.txt, and, when `executor_usage_limit.auto_continue`
-    is on, sends `continue` once per episode after the reset. Returns the stall
-    line, or None while a just-sent `continue` is settling."""
-    from datetime import datetime, timedelta, timezone
-    from office import db, dispatch, state
-    from office.util import now_iso, parse_iso
-    now = datetime.now(timezone.utc)
+    markers say (scrollback keeps a spinner line). Records the stop on the
+    dispatch, writes pane-tail.txt, and names the manual `continue`."""
+    from office import db
+    from office.util import parse_iso
     same = limit["label"] is not None and d.get("limit_label") == limit["label"] and d.get("resets_at")
     # The pane keeps showing the screen after the reset, and the parsed time
-    # would then roll to tomorrow: the episode keeps its first resets_at.
+    # would then roll to tomorrow: the stop keeps its first resets_at.
     resets_at = parse_iso(d["resets_at"]) if same else limit["resets_at"]
-    # The marker and its outcome belong to one episode: a new episode starts clean.
-    continued = d.get("limit_continued_at") if same else None
-    outcome_was = d.get("limit_continue_outcome") if same else None
     fields = {"stall_kind": "usage_limit", "resets_at": resets_at.isoformat() if resets_at else None,
-              "limit_label": limit["label"], "limit_continued_at": continued,
-              "limit_continue_outcome": outcome_was}
+              "limit_label": limit["label"]}
     if any(d.get(k) != v for k, v in fields.items()):
         with db.transaction(con):
-            con.execute("UPDATE dispatches SET stall_kind=?, resets_at=?, limit_label=?, limit_continued_at=?, "
-                        "limit_continue_outcome=? WHERE id=?",
+            con.execute("UPDATE dispatches SET stall_kind=?, resets_at=?, limit_label=? WHERE id=?",
                         (*fields.values(), d["id"]))
     tail = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "pane-tail.txt"
     atomic_write_text(tail, "\n".join(act["text"].splitlines()[-40:]) + "\n")
-    cfg = (run.get("policy") or {}).get("executor_usage_limit") or {}
-    unconfirmed = ""
-    if continued:
-        # Exactly one `continue` per episode, whatever came of it: a second send
-        # could duplicate a prompt that did land. Only a recorded `landed` is a
-        # confirmed send; `pending` is a crash between the marker and the send.
-        if outcome_was == "landed":
-            # Report again only if the pane then sat unchanged on the limit screen.
-            if act["hash"] != d.get("idle_hash") or not d.get("idle_since"):
-                with db.transaction(con):
-                    con.execute("UPDATE dispatches SET idle_since=?, idle_hash=? WHERE id=?",
-                                (now_iso(), act["hash"], d["id"]))
-                return None
-            if (parse_iso(now_iso()) - parse_iso(d["idle_since"])).total_seconds() < LIMIT_SETTLE_S:
-                return None
-        else:
-            unconfirmed = outcome_was if outcome_was in ("unknown", "failed") else "unknown"
-    elif (resets_at and cfg.get("auto_continue") is True and d.get("pane_id")
-          and now >= resets_at + timedelta(seconds=float(cfg.get("continue_grace_seconds", 60)))):
-        # Mark first, as pending: a crash after the send must not send a second
-        # `continue`, and a crash before it must not read as sent.
-        with db.transaction(con):
-            con.execute("UPDATE dispatches SET limit_continued_at=?, limit_continue_outcome='pending', idle_since=?, "
-                        "idle_hash=? WHERE id=?", (now_iso(), now_iso(), act["hash"], d["id"]))
-        try:
-            got = dispatch.submit_prompt(dispatch.herdr_agent_name(d["id"]), "continue", pane=d["pane_id"])
-        except Exception as e:  # herdr unreachable or the send failed
-            got, err = None, f"{type(e).__name__}: {e}"[:200]
-        else:
-            err = None
-        # Only 'landed' is a confirmed send. '' (no landed signal), 'held' (typed,
-        # unsubmitted) and an error are reported as what they are.
-        outcome = "landed" if got == "landed" else "failed" if got is None else "unknown"
-        kind = "usage_limit.continue" if outcome == "landed" else f"usage_limit.continue_{outcome}"
-        said = {"landed": "Office sent continue and it landed",
-                "unknown": "Office sent continue but could not confirm it landed"
-                           + (" (typed, still unsubmitted)" if got == "held" else ""),
-                "failed": f"Office could not send continue ({err})"}[outcome]
-        with db.transaction(con):
-            con.execute("UPDATE dispatches SET limit_continue_outcome=? WHERE id=?", (outcome, d["id"]))
-            state.emit(con, run, kind, f"{who}: usage limit reset; {said}",
-                       audience="runtime" if outcome == "landed" else "orchestrator",
-                       task_id=d.get("task_id"), dispatch_id=d["id"],
-                       payload={"resets_at": resets_at.isoformat(), "outcome": got, "error": err})
-        if outcome == "landed":
-            return None
-        unconfirmed = outcome
     when = (f"resets {resets_at.strftime('%Y-%m-%dT%H:%MZ')}" + (f" ({limit['tz']} {limit['local']})" if limit["tz"] else "")
-            if resets_at else f"resets {limit['label'] or 'at an unknown time'}")
-    if unconfirmed:
-        again = ("; Office's continue was " + ("not delivered (send failed)" if unconfirmed == "failed" else "not confirmed")
-                 + " and is not retried, so check the pane first")
-    else:
-        again = "; Office already sent continue once and the limit screen is still up" if continued else ""
-    return f"{who}: usage_limit, {when}{again}; pane tail in {tail}; next: office prompt {d['id']} -- continue"
+            if resets_at else f"resets {limit['label'] or 'at an unknown time'} (time not resolved)")
+    return f"{who}: usage_limit, {when}; pane tail in {tail}; next: office prompt {d['id']} -- continue"
 
 
 def _needs_orchestrator(con, run: dict) -> bool:

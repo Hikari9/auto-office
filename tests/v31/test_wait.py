@@ -282,118 +282,6 @@ def test_a_weekly_warning_pane_is_not_a_usage_limit_stall(env):
     assert code == 124 and "stall" not in out, out
 
 
-def _limit_run(env, monkeypatch, *, auto):
-    """A limit pane under guide.stalls with `submit_prompt` recorded, not sent."""
-    import os
-    from office import dispatch, guide, state
-    _go(env)
-    e = _herdr(env, status="idle", pane=SESSION_LIMIT)
-    d = _as_herdr(env)
-    for k, v in e.items():
-        monkeypatch.setenv(k, v)
-    monkeypatch.setenv("PATH", f"{env.bin}:{os.environ['PATH']}")
-    sent = []
-    monkeypatch.setattr(dispatch, "submit_prompt", lambda name, text, pane=None: sent.append((name, text)) or "landed")
-    con = env.con()
-    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
-    if auto:
-        run["policy"] = {**(run.get("policy") or {}), "executor_usage_limit": {"auto_continue": True,
-                                                                             "continue_grace_seconds": 60}}
-    return con, run, d, sent, guide
-
-
-def _set_reset(con, d, at):
-    con.execute("UPDATE dispatches SET resets_at=? WHERE id=?", (at, d["id"]))
-    con.commit()
-
-
-def test_auto_continue_is_off_by_default(env, monkeypatch):
-    con, run, d, sent, guide = _limit_run(env, monkeypatch, auto=False)
-    assert len(guide.stalls(con, run)) == 1
-    _set_reset(con, d, "2020-01-01T00:00:00+00:00")
-    out = guide.stalls(con, run)
-    assert len(out) == 1 and "usage_limit" in out[0] and sent == []
-
-
-def test_auto_continue_sends_one_continue_after_the_reset(env, monkeypatch):
-    from datetime import datetime, timedelta, timezone
-    from office import dispatch, rerun
-    con, run, d, sent, guide = _limit_run(env, monkeypatch, auto=True)
-    first = guide.stalls(con, run)
-    assert len(first) == 1 and sent == []  # before the reset: a stall, nothing sent
-    _set_reset(con, d, (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat())
-    assert len(guide.stalls(con, run)) == 1 and sent == []  # inside the grace window
-    _set_reset(con, d, "2020-01-01T00:00:00+00:00")
-    assert guide.stalls(con, run) == [] and sent == [(dispatch.herdr_agent_name(d["id"]), "continue")]
-    events = con.execute("SELECT 1 FROM events WHERE kind='usage_limit.continue' AND dispatch_id=?", (d["id"],)).fetchall()
-    assert len(events) == 1
-    for _ in range(3):  # the limit screen still showing never triggers a second send
-        guide.stalls(con, run)
-    assert len(sent) == 1
-    # Pane unchanged on the limit screen past the settle time: reported again, not retried.
-    row = dict(con.execute("SELECT * FROM dispatches WHERE id=?", (d["id"],)).fetchone())
-    con.execute("UPDATE dispatches SET idle_since='2020-01-01T00:00:00+00:00', idle_hash=? WHERE id=?",
-                (rerun.agent_activity(row)["hash"], d["id"]))
-    con.commit()
-    again = guide.stalls(con, run)
-    assert len(again) == 1 and "already sent continue" in again[0] and len(sent) == 1, again
-
-
-@pytest.mark.parametrize("result,word", [("", "not confirmed"), ("held", "not confirmed"),
-                                         (RuntimeError("herdr down"), "send failed")])
-def test_an_unconfirmed_auto_continue_is_not_recorded_as_sent(env, monkeypatch, result, word):
-    from office import dispatch
-    con, run, d, sent, guide = _limit_run(env, monkeypatch, auto=True)
-    guide.stalls(con, run)  # the episode is recorded on first sight
-    _set_reset(con, d, "2020-01-01T00:00:00+00:00")
-
-    def fake(name, text, pane=None):
-        sent.append((name, text))
-        if isinstance(result, Exception):
-            raise result
-        return result
-    monkeypatch.setattr(dispatch, "submit_prompt", fake)
-    out = guide.stalls(con, run)
-    assert len(out) == 1 and word in out[0] and f"office prompt {d['id']} -- continue" in out[0], out
-    kinds = [r[0] for r in con.execute("SELECT kind FROM events WHERE dispatch_id=? AND kind LIKE 'usage_limit.continue%'",
-                                       (d["id"],))]
-    assert len(kinds) == 1 and kinds[0] != "usage_limit.continue", kinds
-    again = guide.stalls(con, run)  # still reported at once, and never re-sent
-    assert len(again) == 1 and word in again[0] and len(sent) == 1, again
-
-
-def test_a_crash_between_the_marker_and_the_send_is_unknown_not_sent(env, monkeypatch):
-    con, run, d, sent, guide = _limit_run(env, monkeypatch, auto=True)
-    guide.stalls(con, run)
-    # The state a crash leaves: marker written, outcome pending, nothing sent, no event.
-    con.execute("UPDATE dispatches SET resets_at='2020-01-01T00:00:00+00:00', limit_continued_at='2020-01-01T00:00:01+00:00', "
-                "limit_continue_outcome='pending' WHERE id=?", (d["id"],))
-    con.commit()
-    for _ in range(2):
-        out = guide.stalls(con, run)
-        assert len(out) == 1 and "not confirmed" in out[0] and "already sent" not in out[0], out
-        assert f"office prompt {d['id']} -- continue" in out[0], out
-    assert sent == []  # never retried automatically
-
-
-def test_a_landed_outcome_from_an_earlier_episode_does_not_carry_over(env, monkeypatch):
-    con, run, d, sent, guide = _limit_run(env, monkeypatch, auto=True)
-    guide.stalls(con, run)
-    con.execute("UPDATE dispatches SET resets_at='2020-01-01T00:00:00+00:00', limit_continued_at='2020-01-01T00:00:01+00:00', "
-                "limit_continue_outcome='landed', limit_label='8am' WHERE id=?", (d["id"],))
-    con.commit()
-    # The pane now shows a different reset (a new episode): marker and outcome reset, then it sends once.
-    guide.stalls(con, run)
-    row = con.execute("SELECT limit_continued_at, limit_continue_outcome, limit_label FROM dispatches WHERE id=?",
-                      (d["id"],)).fetchone()
-    assert row[0] is None and row[1] is None and row[2] == "9:30pm", tuple(row)
-    assert sent == []  # its reset is in the future
-    con.execute("UPDATE dispatches SET resets_at='2020-01-01T00:00:00+00:00' WHERE id=?", (d["id"],))
-    con.commit()
-    assert guide.stalls(con, run) == [] and len(sent) == 1
-    assert con.execute("SELECT limit_continue_outcome FROM dispatches WHERE id=?", (d["id"],)).fetchone()[0] == "landed"
-
-
 REAL_LIMIT = """\
 ● Edited src/office/guide.py (+12 -3)
 
@@ -430,3 +318,27 @@ def test_the_empty_composer_and_a_weekly_warning_are_not_activity_or_limits():
     boxed = REAL_LIMIT.replace("│ >                  ", "│ > Try \"fix the bug\"  ")
     assert dispatch._usage_limit(boxed) is not None
     assert dispatch._usage_limit("● Done\nYou've used 95% of your weekly limit\n> ") is None
+
+
+def test_an_unresolvable_explicit_zone_gives_no_guessed_time():
+    from office import dispatch
+    got = dispatch._usage_limit("hit your session limit · resets 9:30pm (Mars/Olympus)", _utc(2026, 10, 2, 10, 0))
+    assert got["resets_at"] is None and got["label"] == "9:30pm (Mars/Olympus)" and got["tz"] is None, got
+
+
+def test_a_limit_stall_with_an_unresolvable_zone_shows_the_raw_label(env):
+    _go(env)
+    e = _herdr(env, status="idle", pane="Usage limit reached · resets 9:30pm (Mars/Olympus)")
+    d = _as_herdr(env)
+    code, out = _wait(env, e, timeout="3")
+    assert code == 3 and "9:30pm (Mars/Olympus)" in out and "time not resolved" in out, out
+    assert f"office prompt {d['id']} -- continue" in out, out
+
+
+def test_a_stale_limit_line_with_later_activity_is_not_a_stall(env):
+    _go(env)
+    e = _herdr(env, status="idle", pane=REAL_LIMIT + "> continue\n● Picking the task back up\n")
+    e["OFFICE_EXECUTOR_IDLE_STALL_S"] = "1800"
+    _as_herdr(env)
+    code, out = _wait(env, e)
+    assert code == 124 and "usage_limit" not in out, out

@@ -66,9 +66,8 @@ SHARED_COLUMNS = {
         # across invocations.
         "idle_since TEXT", "idle_hash TEXT",
         # #253: a Claude usage-limit stop: kind, when it resets (UTC), the pane's
-        # own reset text (identifies the episode), and when Office sent `continue`.
-        "stall_kind TEXT", "resets_at TEXT", "limit_label TEXT", "limit_continued_at TEXT",
-        "limit_continue_outcome TEXT",
+        # own reset text.
+        "stall_kind TEXT", "resets_at TEXT", "limit_label TEXT",
     ],
     # v2 (#185): user-declared model overrides.
     "tasks": ["review_override_json TEXT", "pr_json TEXT"],

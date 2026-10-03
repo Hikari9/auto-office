@@ -945,21 +945,22 @@ def _usage_limit(text: str | None, now: datetime | None = None) -> dict | None:
         return {"resets_at": None, "label": found.group(0)[len("resets"):].strip(), "tz": None, "local": None}
     hour = hour % 12 + (12 if meridiem == "pm" else 0)
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    tz = None
+    label = found.group(0)[len("resets"):].strip()
     if zone:
         try:
             from zoneinfo import ZoneInfo
             tz = ZoneInfo(zone.strip())
         except Exception:
-            tz = None
-    if tz is None:
+            # An explicit zone that cannot be resolved is not the host's: never guess a time.
+            return {"resets_at": None, "label": label, "tz": None, "local": None}
+    else:
         tz = now.astimezone().tzinfo
     local_now = now.astimezone(tz)
     at = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if at <= local_now:
         at += timedelta(days=1)
     name = getattr(tz, "key", None) or at.tzname() or "local"
-    return {"resets_at": at.astimezone(timezone.utc), "label": found.group(0)[len("resets"):].strip(),
+    return {"resets_at": at.astimezone(timezone.utc), "label": label,
             "tz": name, "local": at.strftime("%H:%M")}
 
 
