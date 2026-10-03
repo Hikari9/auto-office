@@ -337,3 +337,26 @@ def test_auto_continue_sends_one_continue_after_the_reset(env, monkeypatch):
     con.commit()
     again = guide.stalls(con, run)
     assert len(again) == 1 and "already sent continue" in again[0] and len(sent) == 1, again
+
+
+@pytest.mark.parametrize("result,word", [("", "not confirmed"), ("held", "not confirmed"),
+                                         (RuntimeError("herdr down"), "send failed")])
+def test_an_unconfirmed_auto_continue_is_not_recorded_as_sent(env, monkeypatch, result, word):
+    from office import dispatch
+    con, run, d, sent, guide = _limit_run(env, monkeypatch, auto=True)
+    guide.stalls(con, run)  # the episode is recorded on first sight
+    _set_reset(con, d, "2020-01-01T00:00:00+00:00")
+
+    def fake(name, text, pane=None):
+        sent.append((name, text))
+        if isinstance(result, Exception):
+            raise result
+        return result
+    monkeypatch.setattr(dispatch, "submit_prompt", fake)
+    out = guide.stalls(con, run)
+    assert len(out) == 1 and word in out[0] and f"office prompt {d['id']} -- continue" in out[0], out
+    kinds = [r[0] for r in con.execute("SELECT kind FROM events WHERE dispatch_id=? AND kind LIKE 'usage_limit.continue%'",
+                                       (d["id"],))]
+    assert len(kinds) == 1 and kinds[0] != "usage_limit.continue", kinds
+    again = guide.stalls(con, run)  # still reported at once, and never re-sent
+    assert len(again) == 1 and word in again[0] and len(sent) == 1, again
