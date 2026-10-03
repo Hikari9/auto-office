@@ -559,3 +559,49 @@ def test_a_crash_between_the_dispatch_end_and_the_gate_close_is_repaired(env, mo
     notes = dispatch_mod.reap_orphans(con, run)
     assert any("Gorph" in n for n in notes), notes
     assert tuple(con.execute("SELECT status, verdict FROM gates WHERE id='Gorph'").fetchone()) == ("done", "UNAVAILABLE")
+
+
+def _stoppable(env, monkeypatch, identity):
+    """Dorph supervised by a live `sleep` with a live agent group, as an
+    Office process launch leaves it. `identity` is how its pids were recorded."""
+    import subprocess
+    con, run = _orphan(env, monkeypatch)
+    sup = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    agent = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    con.execute("UPDATE dispatches SET launcher='process', pane_id=NULL, pid=? WHERE id='Dorph'", (sup.pid,))
+    con.commit()
+    ddir = dispatch_mod.paths.run_dir(run["id"]) / "dispatches" / "Dorph"
+    ddir.mkdir(parents=True, exist_ok=True)
+    (ddir / "agent.pgid").write_text(str(agent.pid))
+    for which, p in (("supervisor", sup), ("agent", agent)):
+        if identity == "match":
+            dispatch_mod._record_identity(run["id"], "Dorph", which, p.pid)
+        elif identity == "mismatch":  # the pid was reused by a process that started at another time
+            (ddir / f"{which}.identity").write_text(json.dumps({"pid": p.pid, "start": "Thu Jan  1 00:00:00 1970"}))
+    return sup, agent
+
+
+def test_a_dispatch_with_a_matching_identity_is_signalled(env, monkeypatch):
+    sup, agent = _stoppable(env, monkeypatch, "match")
+    try:
+        code, out = env.office("revoke", "Dorph", env=EXTERNAL)
+        assert code == 0 and "Dorph ended" in out and "manual recovery" not in out, out
+        assert sup.wait(timeout=10) is not None and agent.wait(timeout=10) is not None
+    finally:
+        sup.kill()
+        agent.kill()
+
+
+@pytest.mark.parametrize("identity", ["mismatch", "missing"])
+def test_a_dispatch_pid_that_cannot_be_proven_is_never_signalled(env, monkeypatch, identity):
+    """Focused review finding 1: a reused or unrecorded pid gets no signal and
+    the revoke names it for manual recovery."""
+    sup, agent = _stoppable(env, monkeypatch, identity)
+    try:
+        code, out = env.office("revoke", "Dorph", env=EXTERNAL)
+        assert code == 0 and "manual recovery needed" in out, out
+        assert f"supervisor pid {sup.pid}" in out and f"agent process group {agent.pid}" in out, out
+        assert sup.poll() is None and agent.poll() is None  # no signal sent
+    finally:
+        sup.kill()
+        agent.kill()

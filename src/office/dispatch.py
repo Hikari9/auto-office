@@ -29,7 +29,8 @@ except ImportError:  # not POSIX: a pane's terminal mode cannot be read
 from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
-from office.util import atomic_write_json, claim_alive, claim_signalable, dumps, now_iso, parse_iso, pid_alive, sha256_obj, short
+from office.util import (atomic_write_json, claim_alive, claim_signalable, dumps, now_iso, parse_iso, pid_alive,
+                         process_is, process_start, sha256_obj, short)
 
 LEASE_TTL_SECONDS = 4 * 3600
 IDENTITY_ENV = ("OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE_ROLE", "OFFICE_STATE_DIR",
@@ -407,20 +408,23 @@ def _revoke_task(con, run: dict, task_id: str, reason: str) -> Result:
         state.emit(con, run, "lease.revoked", f"{task_id} lease revoked", task_id=task_id)
     live = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE run_id=? AND task_id=? AND ended_at IS NULL "
                                          "AND status IN ('launching', 'running')", (run["id"], task_id)).fetchall()]
-    stopped = [d["id"] for d in live if stop_dispatch(run, d)]
+    notes: list[str] = []
+    stopped = [d["id"] for d in live if stop_dispatch(run, d, notes=notes)]
     lines = [f"{task_id} lease revoked | later submits from its holder are rejected"]
     if stopped:
         lines.append(f"stopped {', '.join(stopped)} (SIGTERM)")
+    lines += notes
     return Result(lines=lines, next=f"office dispatch {task_id} to relaunch")
 
 
-def _end_dispatch(con, run: dict, d: dict, classification: str, why: str, *, stop: bool = True) -> bool:
+def _end_dispatch(con, run: dict, d: dict, classification: str, why: str, *, stop: bool = True,
+                  notes: list[str] | None = None) -> bool:
     """Record the end of a dispatch Office can no longer wait on. Closes its
     gate when nothing else can finish it. Returns False when it had ended."""
     if d.get("ended_at") or d["status"] not in ("launching", "running"):
         return False
     if stop and d.get("launcher") not in (None, "external", "sync"):
-        stop_dispatch(run, d)  # stops what is still alive and records the end itself
+        stop_dispatch(run, d, notes=notes)  # stops what is still alive and records the end itself
     if d.get("kind") in ("planner", "executor") and not state.get_dispatch(con, d["id"]).get("ended_at"):
         _finish(d["id"], None, None, classification, 0.0)  # a worker end has its own after-exit steps
     with db.transaction(con):
@@ -481,9 +485,10 @@ def revoke_dispatch(con, run: dict, d: dict, reason: str) -> Result:
             return Result(lines=[f"{d['id']} is {why}; nothing revoked"],
                           next=f"office revoke {d['task_id']} to revoke the task itself")
         return _revoke_task(con, run, d["task_id"], reason)
-    ended = _end_dispatch(con, run, d, "revoked", f"revoked: {reason}")
+    notes: list[str] = []
+    ended = _end_dispatch(con, run, d, "revoked", f"revoked: {reason}", notes=notes)
     line = f"{d['id']} {'ended' if ended else 'had already ended'} ({reason})"
-    return Result(lines=[line], next="office status")
+    return Result(lines=[line, *notes], next="office status")
 
 
 def _fence_integrate_jobs(con, run: dict, reason: str) -> list[str]:
@@ -515,7 +520,8 @@ def revoke_integration(con, run: dict, reason: str) -> Result:
     rows = [dict(r) for r in con.execute(
         "SELECT d.* FROM dispatches d JOIN gates g ON g.id=d.gate_id WHERE d.run_id=? AND g.subject='integration' "
         "AND d.ended_at IS NULL AND d.status IN ('launching','running')", (run["id"],)).fetchall()]
-    ended = [d["id"] for d in rows if _end_dispatch(con, run, d, "revoked", f"integration revoked: {reason}")]
+    notes: list[str] = []
+    ended = [d["id"] for d in rows if _end_dispatch(con, run, d, "revoked", f"integration revoked: {reason}", notes=notes)]
     from office import gates
     with db.transaction(con):
         stale = [r["id"] for r in con.execute("SELECT id FROM gates WHERE run_id=? AND subject='integration' "
@@ -532,6 +538,7 @@ def revoke_integration(con, run: dict, reason: str) -> Result:
     if unstopped:
         lines.append(f"not signalled (claimed by an older Office, so the pid may belong to another process now): "
                      f"{', '.join(unstopped)}; stop it by hand if it is still the integrate job")
+    lines += notes
     return Result(lines=lines, next="office status (office resume re-runs a blocked integration)")
 
 
@@ -570,6 +577,28 @@ def _agent_pgid_file(run: dict, dispatch_id: str) -> Path:
     return paths.run_dir(run["id"]) / "dispatches" / dispatch_id / "agent.pgid"
 
 
+def _identity_file(run_id: str, dispatch_id: str, which: str) -> Path:
+    return paths.run_dir(run_id) / "dispatches" / dispatch_id / f"{which}.identity"
+
+
+def _record_identity(run_id: str, dispatch_id: str, which: str, pid: int) -> None:
+    """Record which process instance `pid` is (`supervisor` or `agent`), so a
+    later stop never signals another process that reused the pid."""
+    path = _identity_file(run_id, dispatch_id, which)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(path, {"pid": pid, "start": process_start(pid)})
+
+
+def _verified(run: dict, dispatch_id: str, which: str, pid: int | None) -> bool:
+    """Whether `pid` is provably the recorded `which` process of this dispatch.
+    No record (an older Office) or another start time means no."""
+    try:
+        rec = json.loads(_identity_file(run["id"], dispatch_id, which).read_text())
+    except (OSError, ValueError):
+        return False
+    return rec.get("pid") == pid and process_is(pid, rec.get("start"))
+
+
 def _killpg(pid, sig=signal.SIGTERM) -> bool:
     if not pid or pid <= 0 or pid == os.getpid() or pid == os.getpgrp():
         return False
@@ -583,9 +612,12 @@ def _killpg(pid, sig=signal.SIGTERM) -> bool:
     return True
 
 
-def stop_dispatch(run: dict, d: dict, *, wait: float = 5.0) -> bool:
+def stop_dispatch(run: dict, d: dict, *, wait: float = 5.0, notes: list[str] | None = None) -> bool:
     """SIGTERM a live dispatch's supervisor and agent process groups, close its
-    herdr pane, and make sure the end is recorded as `signal`."""
+    herdr pane, and make sure the end is recorded as `signal`. A saved pid is
+    signalled only when its recorded start time proves it is still that
+    process; otherwise nothing is sent and `notes` names the pid to recover
+    by hand."""
     if d.get("launcher") in (None, "external", "sync"):
         return False  # not under Office's process control
     sup = d.get("pid") if pid_alive(d.get("pid")) else None
@@ -596,6 +628,21 @@ def stop_dispatch(run: dict, d: dict, *, wait: float = 5.0) -> bool:
             agent = int(pgid_file.read_text().strip())
         except ValueError:
             agent = None
+    if agent is not None and not pid_alive(agent):
+        agent = None
+    unverified = []
+    if sup and not _verified(run, d["id"], "supervisor", sup):
+        unverified.append(f"supervisor pid {sup}")
+        sup = None
+    if agent and not _verified(run, d["id"], "agent", agent):
+        unverified.append(f"agent process group {agent}")
+        agent = None
+    if unverified:
+        text = (f"not signalled: {', '.join(unverified)} cannot be proven to still be this dispatch's process (no or "
+                "another recorded start time); manual recovery needed: check it with ps and stop it by hand")
+        _launch_notice(run, d, text)
+        if notes is not None:
+            notes.append(f"{d['id']} {text}")
     signalled = _killpg(sup)
     signalled = _killpg(agent) or signalled
     deadline = time.time() + wait
@@ -1886,6 +1933,8 @@ def _record_launch(run: dict, dispatch_id: str, *, launcher: str, pid: int | Non
             con.execute("UPDATE dispatches SET launcher=?, pid=COALESCE(?, pid), pane_id=?, launched_at=?, "
                         "status=CASE WHEN status='launching' THEN 'running' ELSE status END WHERE id=?",
                         (launcher, pid, pane_id, now_iso(), dispatch_id))
+            if pid:
+                _record_identity(run["id"], dispatch_id, "supervisor", pid)
             if os.environ.get("OFFICE_KEEP_PANES") == "1":
                 # R10: this dispatch's pane stays open after it ends (snapshot still written).
                 con.execute("UPDATE dispatches SET keep_pane=1 WHERE id=?", (dispatch_id,))
@@ -2008,6 +2057,7 @@ def supervise(dispatch_id: str) -> int:
                                      env=env, start_new_session=True)
             _mark(dispatch_id, pid_child=child.pid)
             _agent_pgid_file(run, dispatch_id).write_text(str(child.pid))
+            _record_identity(run["id"], dispatch_id, "agent", child.pid)
             cap = _wall_cap_seconds(prof)
             if cap:
                 # A harness whose own timeout can fail to fire (agy stalled 3.5h
@@ -2079,8 +2129,10 @@ def _mark(dispatch_id: str, pid_child: int) -> None:
         with db.transaction(con):
             con.execute("UPDATE dispatches SET pid=?, status=CASE WHEN status='launching' THEN 'running' ELSE status END, "
                         "last_seen_at=? WHERE id=?", (os.getpid(), now_iso(), dispatch_id))
+            run_id = state.get_dispatch(con, dispatch_id)["run_id"]
     finally:
         con.close()
+    _record_identity(run_id, dispatch_id, "supervisor", os.getpid())
 
 
 def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> None:

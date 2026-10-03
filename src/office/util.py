@@ -107,11 +107,16 @@ def claim_alive(pid: int | None, claimed_by: str | None) -> bool:
     return start is None or process_start(pid) == start
 
 
+def process_is(pid: int | None, start: str | None) -> bool:
+    """Whether `pid` is still the process that had start time `start`. A
+    missing start time proves nothing, so it is never a match."""
+    return bool(start) and pid_alive(pid) and process_start(pid) == start
+
+
 def claim_signalable(pid: int | None, claimed_by: str | None) -> bool:
     """Whether Office may signal a job claimant: only when the start time
     proves the pid is still the process that claimed the job."""
-    start = _claim_start(claimed_by)
-    return start is not None and pid_alive(pid) and process_start(pid) == start
+    return process_is(pid, _claim_start(claimed_by))
 
 
 def dumps(obj: Any) -> str:
