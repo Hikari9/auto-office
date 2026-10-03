@@ -47,13 +47,35 @@ def _record_block(con, run: dict, task: dict, d: dict, reason: str, state_key: s
     if task["status"] in ("paused", "blocked", "cancelled") and not self_blocked(task):
         raise Refused("task-paused", f"{task['id']} is {task['status']}: {task.get('pause_reason') or ''}",
                       scope=task["id"], preserved="your worktree", next_step="stop and wait; the orchestrator is resolving it")
-    row =con.execute("SELECT override_json FROM dispatches WHERE id=?", (d["id"],)).fetchone()
+    row = con.execute("SELECT override_json FROM dispatches WHERE id=?", (d["id"],)).fetchone()
     data = json.loads((row["override_json"] if row else None) or "{}")
     data[state_key] = state_val
-    con.execute("UPDATE dispatches SET override_json=? WHERE id=?", (json.dumps(data), d["id"]))
-    # Never replace another blocker (revoke, orchestrator pause) with this one.
-    if task["status"] in ("running", "launching", "changes_required") or self_blocked(task):
+    # Never replace another blocker (revoke, orchestrator pause) with this one. A
+    # `submitted` task is blocked too: its revision and gates stay as they are (acceptance
+    # waits while the task is blocked) and the status it had is kept to restore on unblock.
+    if task["status"] in ("running", "launching", "changes_required", "submitted"):
+        data["blocked_from"] = task["status"]
         state.update_task(con, run["id"], task["id"], status="blocked", pause_reason=reason)
+    elif self_blocked(task):
+        state.update_task(con, run["id"], task["id"], pause_reason=reason)
+    con.execute("UPDATE dispatches SET override_json=? WHERE id=?", (json.dumps(data), d["id"]))
+
+
+def unblock_self(con, run: dict, task: dict) -> str | None:
+    """Lift a block this task's own worker caused, back to the status it was blocked from
+    (`running` for a block recorded before that was kept). Caller holds the transaction.
+    Returns the restored status, or None when the task is not self-blocked."""
+    import json
+    if not self_blocked(task):
+        return None
+    d = state.get_dispatch(con, task["current_dispatch_id"]) if task.get("current_dispatch_id") else None
+    prior = json.loads((d or {}).get("override_json") or "{}").get("blocked_from")
+    if prior not in ("running", "launching", "changes_required", "submitted"):
+        prior = "running"
+    if prior == "submitted" and not task.get("current_revision_id"):
+        prior = "running"
+    state.update_task(con, run["id"], task["id"], status=prior, pause_reason=None)
+    return prior
 
 
 def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect: dict | None = None,
@@ -357,6 +379,14 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     if existing:
         # A replay of a submission whose response was lost: same receipt,
         # regardless of what has happened to the lease or task since.
+        with db.transaction(con):
+            cur = state.get_task(con, run["id"], task["id"])
+            # A worker that reverted the refused file resubmits the tree already captured:
+            # that clears its own block (and lets a finished review accept the task).
+            if cur["current_dispatch_id"] == d["id"] and self_blocked(cur) \
+                    and dispatch_mod.live_lease(con, run["id"], d["lease_id"]) is not None:
+                if unblock_self(con, run, cur) == "submitted":
+                    gates.evaluate_acceptance(con, run, task["id"])
         return _duplicate(con, run, dict(existing))
     if dispatch_mod.live_lease(con, run["id"], d["lease_id"]) is None:
         raise Refused("lease-lost", f"{task['id']} lease is no longer held by this session (revoked or taken over)",

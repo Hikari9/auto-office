@@ -175,6 +175,63 @@ def test_revoke_before_the_refusal_write_changes_nothing(env, monkeypatch):
     assert "submit_refused" not in (ov or "")
 
 
+def _submitted_then_refused(env):
+    approved_run(env, executor=[{}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    wenv, wt = _worker(env)
+    (wt / "calc.py").write_text(GOOD_ADD)
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert code == 0 and "captured" in out, out
+    assert task_row(env)["status"] == "submitted"
+    (wt / "README.md").write_text("changed\n")
+    return wenv, wt
+
+
+@pytest.mark.approved
+def test_refusal_after_an_in_scope_submit_blocks_and_keeps_the_revision(env):
+    wenv, wt = _submitted_then_refused(env)
+    con = env.con()
+    rev_before = task_row(env)["current_revision_id"]
+    gates_before = con.execute("SELECT id, status FROM gates ORDER BY id").fetchall()
+    env.office("status", check=0)
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert code == 4 and "outside its scope" in out, out
+    row = task_row(env)
+    assert row["status"] == "blocked" and row["pause_reason"].startswith("submit refused"), row
+    assert row["current_revision_id"] == rev_before
+    # The refusal neither supersedes the revision nor adds, cancels or restarts gates
+    # (a dirty tree may mark a gate stale on its own; that is not this path's doing).
+    assert [g[0] for g in env.con().execute("SELECT id FROM gates ORDER BY id")] == [g[0] for g in gates_before]
+    assert env.con().execute("SELECT status FROM revisions WHERE id=?", (rev_before,)).fetchone()[0] == "current"
+    code, out = env.office("wait", "--timeout", "3", "--poll", "0.2", env=EXTERNAL)
+    assert code == 0 and "blocker: T1 submit refused" in out, out
+    # An amendment lifts it back to submitted, the status it was blocked from.
+    env.write_plan(WIDER)
+    env.office("amend", "T1", "--contract", "--", "add README.md", check=0)
+    assert task_row(env)["status"] == "submitted" and task_row(env)["pause_reason"] is None
+
+
+@pytest.mark.approved
+def test_reverting_after_a_refusal_unblocks_through_the_duplicate_submit(env):
+    wenv, wt = _submitted_then_refused(env)
+    env.office("submit", cwd=wt, env=wenv)
+    assert task_row(env)["status"] == "blocked"
+    env.git("checkout", "--", "README.md", cwd=wt)
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert code == 0 and "already submitted" in out, out
+    row = task_row(env)
+    assert row["status"] == "submitted" and row["pause_reason"] is None, row
+
+
+@pytest.mark.approved
+def test_a_scope_request_after_an_in_scope_submit_blocks_too(env):
+    wenv, wt = _submitted_then_refused(env)
+    code, out = env.office("submit", "--request-scope", "README.md", "--", "docs", cwd=wt, env=wenv)
+    assert code == 0, out
+    assert task_row(env)["status"] == "blocked"
+    assert task_row(env)["pause_reason"].startswith("scope requested")
+
+
 def test_plan_review_brief_asks_for_registries_in_scope():
     from office import briefs
     assert "Scope registries" in briefs.PLAN_REVIEW_FORMAT and "gate" in briefs.PLAN_REVIEW_FORMAT
