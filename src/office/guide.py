@@ -250,10 +250,10 @@ def _idle_executors(con, run: dict) -> list[str]:
         if limit is not None:
             out.append(_usage_limit_stall(con, run, d, act, limit, who))
             continue
-        if d.get("stall_kind"):
+        if any(d.get(k) for k in ("stall_kind", "resets_at", "limit_label", "limit_fingerprint")):
             with db.transaction(con):
-                con.execute("UPDATE dispatches SET stall_kind=NULL, resets_at=NULL, limit_label=NULL "
-                            "WHERE id=?", (d["id"],))
+                con.execute("UPDATE dispatches SET stall_kind=NULL, resets_at=NULL, limit_label=NULL, "
+                            "limit_fingerprint=NULL WHERE id=?", (d["id"],))
         changed = act["hash"] is not None and d.get("idle_hash") not in (None, act["hash"])
         if act["busy"] or changed:
             idle_since = None
@@ -281,21 +281,25 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
     """A pane stopped on a Claude usage limit is a stall whatever its busy
     markers say (scrollback keeps a spinner line). Records the stop on the
     dispatch, writes pane-tail.txt, and names the manual `continue`."""
-    from office import db
+    from office import db, dispatch
     from office.util import parse_iso
-    same = limit["label"] is not None and d.get("limit_label") == limit["label"] and d.get("resets_at")
-    # The pane keeps showing the screen after the reset, and the parsed time
-    # would then roll to tomorrow: the stop keeps its first resets_at.
+    # One episode is one fingerprint of the screen above the limit line (and its
+    # label). The pane keeps showing that screen after the reset, and the parsed
+    # time would then roll to tomorrow: the episode keeps its first resets_at. A
+    # new fingerprint is a new limit, so its own reset is parsed and stored.
+    same = (d.get("limit_fingerprint") == limit["fingerprint"] and d.get("limit_label") == limit["label"]
+            and d.get("resets_at") and limit["resets_at"] is not None)
     resets_at = parse_iso(d["resets_at"]) if same else limit["resets_at"]
+    view = dispatch.limit_reset_view(resets_at, limit["zone"]) if same else limit
     fields = {"stall_kind": "usage_limit", "resets_at": resets_at.isoformat() if resets_at else None,
-              "limit_label": limit["label"]}
+              "limit_label": limit["label"], "limit_fingerprint": limit["fingerprint"]}
     if any(d.get(k) != v for k, v in fields.items()):
         with db.transaction(con):
-            con.execute("UPDATE dispatches SET stall_kind=?, resets_at=?, limit_label=? WHERE id=?",
-                        (*fields.values(), d["id"]))
+            con.execute("UPDATE dispatches SET stall_kind=?, resets_at=?, limit_label=?, limit_fingerprint=? "
+                        "WHERE id=?", (*fields.values(), d["id"]))
     tail = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "pane-tail.txt"
     atomic_write_text(tail, "\n".join(act["text"].splitlines()[-40:]) + "\n")
-    when = (f"resets {resets_at.strftime('%Y-%m-%dT%H:%MZ')}" + (f" ({limit['tz']} {limit['local']})" if limit["tz"] else "")
+    when = (f"resets {resets_at.strftime('%Y-%m-%dT%H:%MZ')}" + (f" ({view['tz']} {view['local']})" if view["tz"] else "")
             if resets_at else f"resets {limit['label'] or 'at an unknown time'} (time not resolved)")
     return f"{who}: usage_limit, {when}; pane tail in {tail}; next: office prompt {d['id']} -- continue"
 

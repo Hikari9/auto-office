@@ -916,20 +916,52 @@ def _pane_busy(text: str) -> bool:
 # "You've hit your session limit · resets 9:30pm (Asia/Manila)". The weekly
 # "You've used 95% of your weekly limit" line is a warning, not a stop, and is
 # deliberately not matched (#253).
-_LIMIT_HIT = re.compile(r"usage limit reached|hit your session limit", re.I)
-_LIMIT_RESETS = re.compile(r"resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([^)]+)\))?", re.I)
+_LIMIT_HIT = re.compile(r"(?:usage|session|5-hour) limit reached|hit your (?:session|usage) limit", re.I)
+# "resets 9:30pm (Asia/Manila)" or the older "limit will reset at 9:30pm".
+_LIMIT_RESETS = re.compile(r"\breset(?:s|\s+at)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([^)]+)\))?", re.I)
 LIMIT_TAIL_LINES = 40
 # Lines that show the turn moved past the limit: an echoed prompt ("> continue",
 # not the composer box, which starts with a border) or new assistant output.
 _LIMIT_ACTIVITY = re.compile(r"^\s*(?:[>❯]\s+\S|[●⏺]\s+\S)")
+# How many non-blank lines above the limit line identify its episode, and what
+# is stripped from them first: spinner glyphs and running timers or token
+# counters, which tick on an otherwise unchanged screen.
+LIMIT_CONTEXT_LINES = 15
+_LIMIT_NOISE = re.compile(
+    r"[·✢✳✶✻✽*⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"
+    r"|\(\s*(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b[^)]*\)"
+    r"|\b\d+(?:\.\d+)?\s*(?:ms|h|m|s)\b"
+    r"|[↑↓]\s*[\d.,]+\s*k?\s*tokens")
+
+
+def _limit_fingerprint(lines: list[str]) -> str:
+    """sha256 of the up to LIMIT_CONTEXT_LINES non-blank lines just above the
+    limit line, normalized. A new limit after a `continue` has the echo and new
+    output above it, so it hashes differently from the screen it replaced."""
+    import hashlib
+    kept = [ln for ln in (_LIMIT_NOISE.sub("", ln).rstrip() for ln in lines) if ln.strip()]
+    return hashlib.sha256("\n".join(kept[-LIMIT_CONTEXT_LINES:]).encode()).hexdigest()
+
+
+def _wall_to_utc(day, hour: int, minute: int, tz) -> datetime:
+    """A wall-clock time on `day` in `tz` as UTC. `tz` None is the host's zone,
+    resolved for that date (time.mktime with tm_isdst=-1), so its DST applies."""
+    if tz is not None:
+        return datetime(day.year, day.month, day.day, hour, minute, tzinfo=tz).astimezone(timezone.utc)
+    naive = datetime(day.year, day.month, day.day, hour, minute)
+    return datetime.fromtimestamp(time.mktime((*naive.timetuple()[:8], -1)), timezone.utc)
 
 
 def _usage_limit(text: str | None, now: datetime | None = None) -> dict | None:
     """The session-limit stop shown in the last pane lines, or None.
     {"resets_at": aware UTC datetime or None, "label": "9:30pm (Asia/Manila)",
-    "tz": zone name, "local": "21:30"}. A reset without a zone is in the local
-    zone; a reset time already past rolls to the next day."""
-    lines = (text or "").splitlines()[-LIMIT_TAIL_LINES:]
+    "tz": zone name, "local": "21:30", "zone": tzinfo or None for the host's
+    zone, "fingerprint": episode hash}. A reset
+    without a zone is in the host's zone; a reset time already past rolls to the
+    next day."""
+    all_lines = (text or "").splitlines()
+    offset = max(len(all_lines) - LIMIT_TAIL_LINES, 0)
+    lines = all_lines[offset:]
     last = max((i for i, ln in enumerate(lines) if _LIMIT_HIT.search(ln)), default=None)
     if last is None:
         return None
@@ -937,31 +969,39 @@ def _usage_limit(text: str | None, now: datetime | None = None) -> dict | None:
     # spinner, busy footer or new assistant output below it means the agent went on.
     if any(_LIMIT_ACTIVITY.search(ln) or _pane_busy(ln) for ln in lines[last + 1:]):
         return None
+    out = {"resets_at": None, "label": None, "tz": None, "local": None, "zone": None,
+           "fingerprint": _limit_fingerprint(all_lines[:offset + last])}
     found = next((m for m in map(_LIMIT_RESETS.search, lines[last:last + 3]) if m), None)
     if found is None:
-        return {"resets_at": None, "label": None, "tz": None, "local": None}
+        return out
+    out["label"] = found.string[found.start(1):found.end()].strip()
     hour, minute, meridiem, zone = int(found.group(1)), int(found.group(2) or 0), found.group(3).lower(), found.group(4)
     if not 1 <= hour <= 12 or minute > 59:
-        return {"resets_at": None, "label": found.group(0)[len("resets"):].strip(), "tz": None, "local": None}
+        return out
     hour = hour % 12 + (12 if meridiem == "pm" else 0)
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    label = found.group(0)[len("resets"):].strip()
+    tz = None
     if zone:
         try:
             from zoneinfo import ZoneInfo
             tz = ZoneInfo(zone.strip())
         except Exception:
             # An explicit zone that cannot be resolved is not the host's: never guess a time.
-            return {"resets_at": None, "label": label, "tz": None, "local": None}
-    else:
-        tz = now.astimezone().tzinfo
-    local_now = now.astimezone(tz)
-    at = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if at <= local_now:
-        at += timedelta(days=1)
-    name = getattr(tz, "key", None) or at.tzname() or "local"
-    return {"resets_at": at.astimezone(timezone.utc), "label": label,
-            "tz": name, "local": at.strftime("%H:%M")}
+            return out
+    today = now.astimezone(tz).date() if tz is not None else datetime.fromtimestamp(now.timestamp()).date()
+    at = _wall_to_utc(today, hour, minute, tz)
+    if at <= now:
+        at = _wall_to_utc(today + timedelta(days=1), hour, minute, tz)
+    out["zone"] = tz
+    out.update(resets_at=at, **limit_reset_view(at, tz))
+    return out
+
+
+def limit_reset_view(at: datetime, tz) -> dict:
+    """How a reset instant reads on the pane's clock: {"tz": zone or local
+    abbreviation for that date, "local": "21:30"}. `tz` None is the host's zone."""
+    local = at.astimezone(tz) if tz is not None else datetime.fromtimestamp(at.timestamp()).astimezone()
+    return {"tz": getattr(tz, "key", None) or local.tzname() or "local", "local": local.strftime("%H:%M")}
 
 
 def herdr_agent_name(dispatch_id: str) -> str:
