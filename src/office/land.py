@@ -205,7 +205,7 @@ def _merge_all(con, run: dict, res: Result) -> str:
     for t in integration._topo(integration.accepted_set(con, run) or []):
         t = state.get_task(con, run["id"], t["id"])
         if not prs.has_pr(t):
-            res.add(f"{t['id']} has no file scope and no PR; skipped")
+            res.add(f"{t['id']} has no file scope and no open PR; skipped")
             continue
         pr = t.get("pr") or {}
         if not pr.get("number"):

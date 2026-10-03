@@ -19,7 +19,7 @@ from pathlib import Path
 from office import briefs, db, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, state, version
 from office.result import Result
 from office.state import Refused, Usage
-from office.util import dumps, now_iso, sha256_obj, short
+from office.util import dumps, now_iso, sha256_bytes, sha256_file, sha256_obj, short
 def _draft(con, root: Path, run: dict) -> Path:
     planpath.relocate_legacy(con, root)
     return planpath.draft(root, run)
@@ -297,6 +297,12 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                       next_step="revert those files, or stop and report that the scope must grow (the orchestrator amends it)")
     pending = con.execute("SELECT id, target_version FROM deliveries WHERE run_id=? AND task_id=? AND status IN "
                           "('queued','delivered') ORDER BY target_version DESC LIMIT 1", (run["id"], task["id"])).fetchone()
+    evidence = None if task["scope"] else _read_evidence(d, wt)
+    if evidence and evidence[2] in _ingested_digests(con, run, task["id"]):
+        with db.transaction(con):
+            state.emit(con, run, "submit.refused", f"{task['id']} {briefs.EVIDENCE_FILE} repeats evidence already submitted",
+                       audience="runtime", task_id=task["id"], dispatch_id=d["id"], payload={"code": "stale-evidence"})
+        raise _stale_evidence(task)
     res = Result()
     with _evidence_commit() as staged, db.transaction(con):
         again = con.execute("SELECT * FROM revisions WHERE operation_id=?", (op_id,)).fetchone()
@@ -304,6 +310,8 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
             return _duplicate(con, run, dict(again))
         if dispatch_mod.live_lease(con, run["id"], d["lease_id"]) is None:
             raise Refused("lease-lost", f"{task['id']} lease was revoked during submit", scope=task["id"])
+        if evidence and evidence[2] in _ingested_digests(con, run, task["id"]):
+            raise _stale_evidence(task)  # a concurrent submit ingested the same file first
         seq = con.execute("SELECT COUNT(*) FROM revisions WHERE run_id=?", (run["id"],)).fetchone()[0] + 1
         # revisions.id is a GLOBAL primary key shared by every run in runs.db; a bare
         # per-run "R{seq}" collides with the first revision of any earlier run.
@@ -321,8 +329,11 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                      base, run["requirements_version"], run["plan_version"], applied, env_fp, op_id, status,
                      prev, dumps(changed), now_iso()))
         paths.git(wt, "update-ref", f"refs/office/{run['id'][:8]}/{task['id']}/{rev_id}", commit)
-        if not task["scope"]:
-            _stage_evidence(run, d, wt, rev_id, staged)
+        if evidence:
+            dest = _stage_evidence(run, d, rev_id, evidence, staged)
+            # The digest is the duplicate guard for every later submit of this task.
+            state.record_evidence(con, run["id"], EVIDENCE_KIND, dest, task_id=task["id"], revision_id=rev_id,
+                                  digest=evidence[2])
         if prs.enabled(run):
             prs.advance_branch(run, d, commit)
             prs.queue(con, run, task["id"], "revision", rev_id)
@@ -368,36 +379,71 @@ def _evidence_commit():
         src.unlink(missing_ok=True)  # consumed: the next submission must write its own
 
 
-def _stage_evidence(run: dict, d: dict, wt: Path, rev_id: str, staged: list) -> None:
-    """Copy a scope-none task's evidence file where the code reviewer's brief reads it."""
+EVIDENCE_KIND = "executor_evidence"
+
+
+def _read_evidence(d: dict, wt: Path) -> tuple[Path, str, str] | None:
+    """A scope-none task's evidence file as (path, reviewer text, sha256 of that text), or None."""
     src = wt / briefs.EVIDENCE_FILE
     # Only a regular, untracked file the executor wrote: a symlink could point at
     # a credential file and a tracked file is not evidence of this submission.
     if src.is_symlink() or not src.is_file():
-        return
+        return None
     if paths.git(wt, "ls-files", "--", briefs.EVIDENCE_FILE).strip():
-        return
+        return None
     # The worktree is reused across dispatches: a file older than this dispatch is
-    # a leftover from an earlier submission, not evidence for this one.
+    # a leftover from an earlier submission. mtime is only a cheap first filter
+    # (`touch` defeats it); the content digest checked at submit is the real guard.
     try:
         if d.get("started_at") and src.stat().st_mtime < datetime.fromisoformat(d["started_at"]).timestamp():
-            return
+            return None
         fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(fd, "rb") as fh:
             st = os.fstat(fh.fileno())
             # A hard link to another file (a credential) shares its inode: ordinary evidence has one link.
             if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
-                return
+                return None
             raw = fh.read(briefs.EVIDENCE_MAX_CHARS * 4 + 1)
     except (OSError, ValueError):
-        return
+        return None
     text = raw.decode("utf-8", errors="replace")
     if len(text) > briefs.EVIDENCE_MAX_CHARS:
         text = text[:briefs.EVIDENCE_MAX_CHARS] + f"\n[evidence truncated at {briefs.EVIDENCE_MAX_CHARS} characters]\n"
+    return src, text, sha256_bytes(text.encode("utf-8"))
+
+
+def _ingested_digests(con, run: dict, task_id: str) -> set[str]:
+    """sha256 of every evidence text already ingested for this task, across all its dispatches."""
+    digests = {r[0] for r in con.execute("SELECT sha256 FROM evidence WHERE run_id=? AND task_id=? AND kind=?",
+                                         (run["id"], task_id, EVIDENCE_KIND)).fetchall() if r[0]}
+    # Copies saved before digests were recorded have no evidence row: hash the saved file.
+    for rev in con.execute("SELECT id, dispatch_id FROM revisions WHERE run_id=? AND task_id=? AND dispatch_id IS NOT NULL",
+                           (run["id"], task_id)).fetchall():
+        saved = briefs.evidence_path(run, rev["dispatch_id"], rev["id"])
+        try:
+            if saved.is_file() and not saved.is_symlink():
+                digests.add(sha256_file(saved))
+        except OSError:
+            pass  # an unreadable old copy cannot be compared; its evidence row, if any, still is
+    return digests
+
+
+def _stale_evidence(task: dict) -> Refused:
+    return Refused("stale-evidence", f"{briefs.EVIDENCE_FILE} has the same content as evidence already submitted for "
+                   f"{task['id']}; it does not show work done for this submission",
+                   scope=task["id"], preserved="your worktree (nothing was submitted)",
+                   next_step=f"redo or reconfirm the external action (comment, issue edit), rewrite {briefs.EVIDENCE_FILE} "
+                             "with what you found or did now (URLs, text, current state), then office submit")
+
+
+def _stage_evidence(run: dict, d: dict, rev_id: str, evidence: tuple[Path, str, str], staged: list) -> Path:
+    """Copy a scope-none task's evidence where the code reviewer's brief reads it."""
+    src, text, _ = evidence
     dest = briefs.evidence_path(run, d["id"], rev_id)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(text, encoding="utf-8")
-    staged.append((src, dest))
+    staged.append((src, dest))  # before the write, so a failed write still discards a partial copy
+    dest.write_bytes(text.encode("utf-8"))
+    return dest
 
 
 def _duplicate(con, run: dict, rev: dict) -> Result:

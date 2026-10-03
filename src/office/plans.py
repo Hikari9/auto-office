@@ -215,6 +215,11 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int) -> dict:
                 changes["acceptance"].append(p["id"])
         if cur["status"] == "cancelled":
             fields["status"] = "planned"
+        if not p["scope"] and cur.get("pr"):
+            from office import prs
+            released = prs.release_for_scope_none(run, cur)  # refuses while the task's PR is open
+            if released is not None:
+                fields["pr"] = released
         state.update_task(con, run["id"], p["id"], **fields)
     for tid, cur in existing.items():
         if tid not in seen and cur["status"] != "cancelled":
