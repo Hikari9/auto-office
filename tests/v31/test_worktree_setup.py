@@ -52,7 +52,7 @@ def _run_dict(setup=None, **kw):
 
 def test_settings_default_to_no_setup_all_three_kinds():
     cfg = worktree_setup.settings({"policy": {}})
-    assert cfg == {"setup": "", "timeout": 600, "applies_to": ["task", "integration", "check"]}
+    assert cfg == {"setup": "", "timeout": 600, "applies_to": ["task", "integration", "check"], "inputs": []}
 
 
 def test_applies_to_limits_kinds_and_unset_runs_nothing(tmp_path):
@@ -180,3 +180,42 @@ def test_only_check_checkouts_run_setup(env):
         seen[purpose] = (path / "setup-ran").exists()
         gates.remove_checkout(run, path)
     assert seen == {"review": False, "deploy": False, "rebase-trial": False, "check": True}
+
+
+def _done(run, tmp_path):
+    assert worktree_setup.execute(run, tmp_path, tmp_path / "setup.log", marker=True)["exit"] == 0
+    return worktree_setup.should_run(run, tmp_path, "task", created=False)
+
+
+def test_custom_setup_inputs_decide_staleness(tmp_path):
+    run = _run_dict("true", setup_inputs=["config/deps.txt"])
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "deps.txt").write_text("a\n")
+    (tmp_path / "pnpm-lock.yaml").write_text("x\n")
+    assert not _done(run, tmp_path)
+    (tmp_path / "pnpm-lock.yaml").write_text("y\n")  # not an input when setup_inputs is set
+    assert not worktree_setup.should_run(run, tmp_path, "task", created=False)
+    (tmp_path / "config" / "deps.txt").write_text("b\n")
+    assert worktree_setup.should_run(run, tmp_path, "task", created=False)
+
+
+def test_nested_and_extra_lockfiles_count_but_node_modules_does_not(tmp_path):
+    run = _run_dict("true")
+    (tmp_path / "web").mkdir()
+    (tmp_path / "node_modules" / "pkg").mkdir(parents=True)
+    (tmp_path / "web" / "pnpm-lock.yaml").write_text("a\n")
+    (tmp_path / "composer.lock").write_text("a\n")
+    (tmp_path / "node_modules" / "pkg" / "yarn.lock").write_text("a\n")
+    assert not _done(run, tmp_path)
+    (tmp_path / "node_modules" / "pkg" / "yarn.lock").write_text("b\n")
+    assert not worktree_setup.should_run(run, tmp_path, "task", created=False)
+    (tmp_path / "web" / "pnpm-lock.yaml").write_text("b\n")
+    assert worktree_setup.should_run(run, tmp_path, "task", created=False)
+    assert not _done(run, tmp_path)
+    (tmp_path / "composer.lock").write_text("b\n")
+    assert worktree_setup.should_run(run, tmp_path, "task", created=False)
+
+
+def test_editing_the_setup_command_reruns_it(tmp_path):
+    assert not _done(_run_dict("true"), tmp_path)
+    assert worktree_setup.should_run(_run_dict("true && true"), tmp_path, "task", created=False)

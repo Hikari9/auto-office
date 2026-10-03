@@ -19,7 +19,9 @@ from office.util import sha256_bytes
 KINDS = ("task", "integration", "check")
 DEFAULT_TIMEOUT_S = 600
 LOCKFILES = ("pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lock", "bun.lockb", "uv.lock", "poetry.lock",
-             "Cargo.lock", "Gemfile.lock", "go.sum")
+             "Cargo.lock", "Gemfile.lock", "go.sum", "Pipfile.lock", "composer.lock", "mix.lock", "pubspec.lock",
+             "packages.lock.json")
+SKIP_DIRS = {"node_modules", ".git", ".office"}
 MARKER = Path(".office") / "setup.json"
 
 
@@ -32,17 +34,36 @@ def settings(run: dict) -> dict:
         timeout = int(raw.get("setup_timeout_s") or DEFAULT_TIMEOUT_S)
     except (TypeError, ValueError):
         timeout = DEFAULT_TIMEOUT_S
-    return {"setup": str(raw.get("setup") or "").strip(), "timeout": timeout, "applies_to": applies}
+    inputs = raw.get("setup_inputs")
+    inputs = [str(i) for i in inputs if str(i).strip()] if isinstance(inputs, list) else []
+    return {"setup": str(raw.get("setup") or "").strip(), "timeout": timeout, "applies_to": applies,
+            "inputs": inputs}
 
 
-def lock_hash(wt: Path) -> str:
-    """A hash of every lockfile the worktree has, so a changed dependency set re-runs setup."""
-    parts = []
-    for name in LOCKFILES:
-        f = Path(wt) / name
-        if f.is_file():
-            parts.append(name.encode() + b"\0" + f.read_bytes())
-    return sha256_bytes(b"\0\0".join(parts)) if parts else ""
+def _input_files(wt: Path, patterns: list[str]) -> list[Path]:
+    """The files whose content decides whether setup is stale: exactly `setup_inputs` when set,
+    else the known lockfiles at the root and one directory deep. Never walks node_modules or .git."""
+    wt = Path(wt)
+    if patterns:
+        found = {p for pat in patterns if not Path(pat).is_absolute() for p in wt.glob(pat)}
+    else:
+        found = {p for name in LOCKFILES for p in (wt / name, *wt.glob(f"*/{name}"))}
+    keep = []
+    for p in found:
+        rel = p.relative_to(wt) if p.is_relative_to(wt) else None
+        if rel is not None and not SKIP_DIRS.intersection(rel.parts) and p.is_file():
+            keep.append(p)
+    return sorted(keep)
+
+
+def lock_hash(run: dict, wt: Path) -> str:
+    """A hash of the setup command and its input files, so a changed dependency set or an edited
+    `setup` re-runs setup."""
+    cfg = settings(run)
+    parts = [b"setup\0" + cfg["setup"].encode()]
+    for f in _input_files(wt, cfg["inputs"]):
+        parts.append(str(f.relative_to(wt)).encode() + b"\0" + f.read_bytes())
+    return sha256_bytes(b"\0\0".join(parts))
 
 
 def _marker(wt: Path) -> dict:
@@ -62,7 +83,7 @@ def should_run(run: dict, wt: Path, kind: str, *, created: bool) -> bool:
     # interrupted launch, or a failed run) and it runs before the agent starts. A completed
     # marker suppresses reruns until a lockfile changes.
     marker = _marker(wt)
-    return not marker.get("ok") or marker.get("lock_hash") != lock_hash(wt)
+    return not marker.get("ok") or marker.get("lock_hash") != lock_hash(run, wt)
 
 
 def tail(log: Path, lines: int = 5) -> str:
@@ -95,7 +116,7 @@ def execute(run: dict, wt: Path, log: Path, *, marker: bool = False) -> dict:
             fh.write(f"\nsetup timed out after {cfg['timeout']}s\n")
     os.chmod(log, 0o600)
     result = {"command": cfg["setup"], "exit": code, "seconds": round(time.time() - started, 2),
-              "timed_out": timed_out, "lock_hash": lock_hash(wt), "log": str(log)}
+              "timed_out": timed_out, "lock_hash": lock_hash(run, wt), "log": str(log)}
     if not marker or code != 0:  # only task worktrees outlive one run (and ignore .office/); only success marks done
         return result
     try:

@@ -15,6 +15,10 @@ worktree:
   # "pnpm install --offline --frozen-lockfile || pnpm install --frozen-lockfile".
   # Office never picks a package manager; empty means it runs nothing.
   setup: ""
+  # Repo-relative globs of the files setup depends on. A reused worktree re-runs setup when their
+  # content (or the setup command) changes. Empty uses the known lockfiles (pnpm-lock.yaml,
+  # Pipfile.lock, composer.lock, ...) at the root and one directory deep.
+  setup_inputs: []
   setup_timeout_s: 600
   applies_to: [task, integration, check]
 quota:
