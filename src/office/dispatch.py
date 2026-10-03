@@ -621,11 +621,12 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
             inter = (argv_cli[1:], Path(argv_cli[0]).name)
         else:
             inter = _interactive(dispatch, kind, cwd, include_dirs, output=output)
-        pane = _herdr_pane(run, cwd, label=pane_label(run, dispatch, kind)) if inter else None
+        label = pane_label(run, dispatch, kind)
+        pane = _herdr_pane(run, cwd, label=label) if inter else None
         if inter and not pane:
             _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
         if pane:
-            started = _herdr_agent_start(run, dispatch, spec, env, inter, pane, cwd, ddir)
+            started = _herdr_agent_start(run, dispatch, spec, env, inter, pane, cwd, ddir, label=label)
             if started:
                 if wait:
                     return _wait_terminal(dispatch["id"])
@@ -757,7 +758,7 @@ def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = Tru
 
 
 def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
-                       cwd: Path, ddir: Path, *, retried: bool = False) -> dict | None:
+                       cwd: Path, ddir: Path, *, retried: bool = False, label: str | None = None) -> dict | None:
     """Start the real harness in the pane with `herdr agent start`, hand it a
     one-line brief pointer, and leave a detached watcher to record the end.
     The pane runs the agent itself, never a shell wrapper around it."""
@@ -785,12 +786,16 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
             # split a fresh one and try once more before going headless (#200 B7).
             fresh = _herdr_fresh_pane(run, cwd, pane)
             if fresh:
-                return _herdr_agent_start(run, dispatch, spec, env, inter, fresh, cwd, ddir, retried=True)
+                return _herdr_agent_start(run, dispatch, spec, env, inter, fresh, cwd, ddir, retried=True, label=label)
         _launch_notice(run, dispatch, f"herdr agent start failed ({why}); running headless instead")
         return None
     spec.update({"herdr_agent": name, "pane": pane})
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
     _record_launch(run, dispatch["id"], launcher="herdr", pane_id=pane)
+    # A PR recorded between the first label and the pane id landing is missed by relabel_task_panes.
+    fresh_label = pane_label(run, dispatch, dispatch.get("kind") or "")
+    if fresh_label != label or retried:
+        _herdr_rename(pane, fresh_label)
     session = _started_session(proc.stdout) or _capture_session(name)
     if session:
         _set_dispatch(dispatch["id"], session_id=session)

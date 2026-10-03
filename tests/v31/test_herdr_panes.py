@@ -259,3 +259,37 @@ def test_prs_relabel_hook_failure_is_swallowed(env, monkeypatch):
     monkeypatch.setattr(prs.db, "transaction", lambda con: __import__("contextlib").nullcontext())
     pr = prs.ensure_pr(None, {"id": "r1", "repo_root": str(env.repo)}, {"id": "T3", "title": "t"}, {"id": "D1", "branch": "b"})
     assert pr["number"] == 5
+
+
+def test_label_refreshed_when_pr_lands_before_pane_id_is_recorded(env, monkeypatch):
+    import types
+    import pytest
+    from office import dispatch
+    calls = []
+    monkeypatch.setattr(dispatch, "write_agent_env", lambda *a, **k: Path("/dev/null"))
+    monkeypatch.setattr(dispatch, "_shell_run", lambda *a, **k: True)
+    monkeypatch.setattr(dispatch, "_record_launch", lambda *a, **k: None)
+    monkeypatch.setattr(dispatch, "_started_session", lambda out: "sess")
+    monkeypatch.setattr(dispatch, "_set_dispatch", lambda *a, **k: None)
+    monkeypatch.setattr(dispatch, "atomic_write_json", lambda *a, **k: None)
+    monkeypatch.setattr(dispatch, "pane_label", lambda run, d, kind="": "T3 executor PR#261 D4f2a")
+
+    class Stop(Exception):
+        pass
+
+    def stop(*a, **k):
+        raise Stop
+    monkeypatch.setattr(dispatch, "_pane_ledger", stop)
+    monkeypatch.setattr(dispatch.subprocess, "run", lambda args, **k: calls.append(args) or
+                        types.SimpleNamespace(returncode=0, stdout="", stderr=""))
+    run = _run(env)
+    d = {"id": "D4f2a0000", "role": "executor", "task_id": "T3", "kind": "worker"}
+    with pytest.raises(Stop):
+        dispatch._herdr_agent_start(run, d, {"kind": "worker"}, {}, (["x"], "claude"), "w1:p101", env.repo,
+                                    env.tmp, label="T3 executor D4f2a")
+    assert ["herdr", "pane", "rename", "w1:p101", "T3 executor PR#261 D4f2a"] in calls
+    calls.clear()
+    with pytest.raises(Stop):  # label unchanged: no extra rename
+        dispatch._herdr_agent_start(run, d, {"kind": "worker"}, {}, (["x"], "claude"), "w1:p101", env.repo,
+                                    env.tmp, label="T3 executor PR#261 D4f2a")
+    assert not any(c[:3] == ["herdr", "pane", "rename"] for c in calls)
