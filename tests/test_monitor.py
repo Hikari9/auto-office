@@ -602,5 +602,10 @@ class OfficeLivenessTestCase(unittest.TestCase):
         self.assertEqual(status["source"], "process_exit")
 
 
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.legacy  # tests the 3.0 scripts/ surface
+
+
 if __name__ == "__main__":
     unittest.main()

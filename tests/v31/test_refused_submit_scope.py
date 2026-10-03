@@ -13,6 +13,11 @@ EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 WIDER = PLAN_ONE.replace("scope: calc.py", "scope: calc.py, README.md")
 
 
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.integration
+
+
 def _worker(env, tid="T1"):
     con = env.con()
     t = task_row(env, tid)

@@ -99,3 +99,8 @@ def test_file_delivery_without_a_path_is_rejected_by_the_schema():
                                  allowed_mutations=["/srv/repo/"]))
     assert rc == 2
     assert any(e.startswith("output") for e in _errors(out))
+
+
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.legacy  # tests the 3.0 scripts/ surface

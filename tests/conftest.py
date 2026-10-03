@@ -44,3 +44,27 @@ def _clean_office_identity(request, monkeypatch):
     if "v31" not in Path(str(request.fspath)).parts:
         monkeypatch.setenv("OFFICE_PINNED_LEGACY", "1")
     yield
+
+
+# Tiers: the default run is unit-only. integration, legacy and slow are
+# deselected unless --all is given or the user passes their own -m expression.
+_NON_UNIT = ("integration", "legacy", "slow")
+
+
+def pytest_addoption(parser):
+    parser.addoption("--all", action="store_true", default=False,
+                     help="run every test: disable the default deselection of integration, legacy and slow")
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if "env" in item.fixturenames:
+            item.add_marker(pytest.mark.integration)
+    if config.getoption("--all") or config.getoption("markexpr"):
+        return
+    kept, deselected = [], []
+    for item in items:
+        (deselected if any(item.get_closest_marker(m) for m in _NON_UNIT) else kept).append(item)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = kept

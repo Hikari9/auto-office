@@ -5,6 +5,11 @@ import shutil
 from office import version
 
 
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.integration
+
+
 def _source(tmp_path):
     src = tmp_path / "src-checkout"
     (src / "src" / "office").mkdir(parents=True)

@@ -120,5 +120,10 @@ class TestAdapterConformance(unittest.TestCase):
         self.assertEqual(res.returncode, 2)
         self.assertIn('Token file not found', res.stderr)
 
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.legacy  # tests the 3.0 scripts/ surface
+
+
 if __name__ == '__main__':
     unittest.main()

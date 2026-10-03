@@ -114,3 +114,8 @@ def test_legacy_string_rows_still_read_as_loaded(state_dir):
     rc, out = run("check-spoke", "--state-dir", state_dir, "--spoke", SPOKE)
     assert rc == 0
     assert json.loads(out)["verified"] is False
+
+
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.legacy  # tests the 3.0 scripts/ surface

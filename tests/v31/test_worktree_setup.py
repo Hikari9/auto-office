@@ -14,6 +14,11 @@ PLAN_RC = PLAN_ONE.replace("blast_radius: repo\n", "blast_radius: repo\nchecks: 
 EXECUTOR = [{"write": {"calc.py": GOOD_ADD}, "submit": True}]
 
 
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.integration
+
+
 def _config(env, setup, **extra):
     """Commit a .gitignore (so installed deps never reach a revision) and write the repo config."""
     (env.repo / ".gitignore").write_text("node_modules/\n.office/\n")

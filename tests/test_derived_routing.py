@@ -363,5 +363,10 @@ class DerivedRoutingTests(unittest.TestCase):
         self.assertIsNone(result.get('selected'))
 
 
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.legacy  # tests the 3.0 scripts/ surface
+
+
 if __name__ == '__main__':
     unittest.main()

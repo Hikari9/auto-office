@@ -521,5 +521,10 @@ class TestHooks(unittest.TestCase):
         r = subprocess.run([str(close_panes)], cwd=self.repo, env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0)
 
+import pytest as _pytest  # noqa: E402
+
+pytestmark = _pytest.mark.legacy  # tests the 3.0 scripts/ surface
+
+
 if __name__ == '__main__':
     unittest.main()
