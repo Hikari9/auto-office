@@ -31,6 +31,8 @@ SKILL_LINE_BUDGETS = {
     'skills/auto-review/SKILL.md': 36,
     'skills/auto-routing/SKILL.md': 54,
     'skills/auto-self-improve/SKILL.md': 29,
+    # #270: when-entry-strategy-invariants-exit plus the worker and review brief templates.
+    'skills/auto-takeover/SKILL.md': 72,
     'skills/auto-verification/SKILL.md': 53,
     'skills/claude-cli/SKILL.md': 43,
     # Raised from 61 for the env -i / HERDR_ENV invisibility section: a recorded

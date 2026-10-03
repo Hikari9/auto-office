@@ -159,6 +159,11 @@ with `Closes #<issue>`, and `office close --handoff <pr-url>`. Stop early with
 through a PR Office did not open, `office close --landed-externally <merged-pr-url>` closes it as landed;
 if that merge does not contain every accepted revision, ask the user and add `--quote "<words>"`.
 
+## Takeover
+
+When the runtime itself is the bottleneck, suggest `auto-takeover` with the evidence. Only the user starts
+it. It composes one integration branch, runs file-disjoint Herdr lanes and exits with `close --landed-externally`.
+
 ## Resume
 
 After a restart or compaction: `office resume` (or `office resume <id>` when several runs exist).
