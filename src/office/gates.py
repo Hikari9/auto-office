@@ -588,15 +588,16 @@ def job_review(con, run: dict, job: dict) -> dict:
             diff = diff[:MAX_DIFF_CHARS] + "\n[diff truncated; inspect the checkout for the rest]"
         checks = con.execute("SELECT summary, verdict FROM gates WHERE revision_id=? AND kind='checks' AND status='done'",
                              (rev["id"],)).fetchone()
-        carried = [dict(r) for r in con.execute("SELECT code, severity, location, summary FROM findings WHERE run_id=? AND "
-                                                "task_id=? AND gate_kind='code_review' AND state='open'",
+        carried = [dict(r) for r in con.execute("SELECT code, severity, level, location, summary FROM findings WHERE run_id=? "
+                                                "AND task_id=? AND gate_kind='code_review' AND state='open'",
                                                 (run["id"], task["id"])).fetchall()]
         evidence = None
         if not task["scope"]:
             ev = briefs.evidence_path(run, rev["dispatch_id"], rev["id"])
             evidence = ev.read_text(encoding="utf-8", errors="replace") if ev.is_file() else None
         brief = briefs.code_review_brief(run, task, rev, diff, checks["summary"] if checks else "none declared",
-                                         carried, str(checkout), evidence=evidence)
+                                         carried, str(checkout), evidence=evidence,
+                                         verify_only=_verify_only(con, run, gate))
         exclude = [job["payload"]["exclude_route"]] if job["payload"].get("exclude_route") else None
         outcome = run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
                                exclude=exclude)
@@ -671,6 +672,9 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
         for f in parsed.findings:
             seen.add(f["code"])
             _upsert_finding(con, run, task, gate, f, outcome)
+        if verdict == "CHANGES_REQUIRED" and _verify_only(con, run, gate) and not _open_high(con, run, task, gate["kind"]):
+            _defer_findings(con, run, task, gate)
+            verdict = "PASS"
         if verdict == "PASS":
             # A PASS on the current revision resolves every earlier open
             # finding of this gate kind that it did not restate.
@@ -719,21 +723,23 @@ def _upsert_finding(con, run, task, gate, f, outcome, carried: bool = False) -> 
     new_state = "open" if f["severity"] == "material" else "minor"
     if existing:
         con.execute("UPDATE findings SET summary=?, location=?, action=?, fingerprint=?, gate_id=?, revision_id=?, "
-                    "measurement_json=?, updated_at=?, state=? WHERE id=?",
+                    "measurement_json=?, updated_at=?, state=?, level=? WHERE id=?",
                     (f["summary"], f.get("location"), f.get("action"), fp, gate["id"], gate["revision_id"],
-                     dumps(f.get("measurement")) if f.get("measurement") else None, now_iso(), new_state, existing["id"]))
+                     dumps(f.get("measurement")) if f.get("measurement") else None, now_iso(), new_state,
+                     f.get("level") or "high", existing["id"]))
         return
     fid = "F" + uuid.uuid4().hex[:10]
     reviewer = outcome.get("dispatch_id")
     producer = con.execute("SELECT dispatch_id FROM revisions WHERE id=?", (gate["revision_id"],)).fetchone()
     con.execute("INSERT INTO findings(id, dispatch_id, reviewer_dispatch_id, status, severity, summary, evidence_hash, created_at, "
                 "run_id, task_id, gate_id, revision_id, gate_kind, code, fingerprint, location, category, action, "
-                "measurement_json, state, origin_gate_id, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "measurement_json, state, origin_gate_id, updated_at, level) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (fid, producer["dispatch_id"] if producer else None, reviewer,
                  "accepted-material" if f["severity"] == "material" else "minor", f["severity"], f["summary"],
                  sha256_obj(f), now_iso(), run["id"], task["id"], gate["id"], gate["revision_id"], gate["kind"], f["code"], fp,
                  f.get("location"), "carried" if carried else gate["kind"], f.get("action"),
-                 dumps(f.get("measurement")) if f.get("measurement") else None, new_state, gate["id"], now_iso()))
+                 dumps(f.get("measurement")) if f.get("measurement") else None, new_state, gate["id"], now_iso(),
+                 f.get("level") or "high"))
 
 
 def _set_state(con, run, task, kind, code, new_state):
@@ -741,15 +747,63 @@ def _set_state(con, run, task, kind, code, new_state):
                 (new_state, now_iso(), run["id"], task["id"], kind, code))
 
 
+def _max_rounds(run: dict, kind: str) -> int:
+    g = run.get("gates") or {}
+    return int({"code_review": g.get("code_review_max_rounds"), "visual": g.get("visual_review_max_rounds"),
+                "checks": g.get("code_review_max_rounds")}.get(kind) or 2)
+
+
+def _open_high(con, run: dict, task: dict, kind: str) -> bool:
+    """Is an open blocking finding graded high? A finding recorded before
+    levels existed has none and counts as high."""
+    return con.execute("SELECT 1 FROM findings WHERE run_id=? AND task_id=? AND gate_kind=? AND state='open' "
+                       "AND COALESCE(level, 'high')='high' LIMIT 1", (run["id"], task["id"], kind)).fetchone() is not None
+
+
+def _final_fix_used(con, run: dict, task_id: str) -> bool:
+    return con.execute("SELECT 1 FROM events WHERE run_id=? AND task_id=? AND kind='gate.final_fix_round' LIMIT 1",
+                       (run["id"], task_id)).fetchone() is not None
+
+
+def _verify_only(con, run: dict, gate: dict) -> bool:
+    """A code review after the final fix round, or past the round budget, is
+    verify-only: only a high finding blocks. Visual review keeps its own
+    material|minor format and its escalation path."""
+    if gate["kind"] != "code_review":
+        return False
+    return int(gate["round"] or 0) > _max_rounds(run, "code_review") or _final_fix_used(con, run, gate["task_id"])
+
+
+def _defer_findings(con, run: dict, task: dict, gate: dict) -> None:
+    """Verify-only review with no high finding: the open medium findings become
+    follow-ups and the gate passes. The reviewer's own verdict stays in the summary."""
+    rows = con.execute("SELECT code, level, location, summary FROM findings WHERE run_id=? AND task_id=? AND gate_kind=? "
+                       "AND state='open'", (run["id"], task["id"], gate["kind"])).fetchall()
+    con.execute("UPDATE findings SET state='deferred', updated_at=? WHERE run_id=? AND task_id=? AND gate_kind=? "
+                "AND state='open'", (now_iso(), run["id"], task["id"], gate["kind"]))
+    text = "; ".join(f"{r['code']} [{r['level'] or 'medium'}] {r['location'] or ''} {r['summary'][:100]}" for r in rows)
+    con.execute("UPDATE gates SET verdict='PASS', summary=? WHERE id=?",
+                (f"verify-only: CHANGES_REQUIRED with no high finding; {len(rows)} deferred as follow-ups", gate["id"]))
+    state.emit(con, run, "gate.followups", f"{task['id']} {gate['kind']} passed its verify-only round; follow-ups to file: "
+               f"{text or 'none'}", task_id=task["id"], payload={"findings": [dict(r) for r in rows]})
+
+
 def _converge(con, run: dict, task: dict, gate: dict, outcome: dict) -> None:
     """Bounded convergence: fix round, or no-progress / budget -> one
-    escalation -> pause with work preserved."""
-    g = run.get("gates") or {}
-    maximum = {"code_review": g.get("code_review_max_rounds"), "visual": g.get("visual_review_max_rounds"),
-               "checks": g.get("code_review_max_rounds")}.get(gate["kind"]) or 2
+    escalation -> pause with work preserved. With no high finding open, the
+    budget buys one final fix round and a verify-only review instead."""
+    maximum = _max_rounds(run, gate["kind"])
     repeats = int((state.pinned_config(run).get("verification") or {}).get("no_progress_repeats", 2))
     no_progress = _no_progress(con, run, task, gate, repeats)
     budget_spent = gate["round"] >= int(maximum)
+    if (no_progress or budget_spent) and gate["kind"] == "code_review" \
+            and not _open_high(con, run, task, gate["kind"]) and not _final_fix_used(con, run, task["id"]):
+        why = "no progress on a repeated finding" if no_progress else "round budget spent"
+        state.emit(con, run, "gate.final_fix_round", f"{task['id']} {gate['kind']}: {why} and every open "
+                   "finding is medium or low; one final fix round, then a verify-only review where only a high "
+                   "finding blocks", task_id=task["id"])
+        deliver_findings(con, run, task, gate)
+        return
     if gate["escalated"]:
         _pause(con, run, task, f"{gate['kind']} still CHANGES_REQUIRED after escalation")
         return
