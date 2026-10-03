@@ -136,9 +136,14 @@ Design and contracts: [`docs/v31-implementation.md`](docs/v31-implementation.md)
 
 ```bash
 uv venv && uv pip install -e '.[visual,test]'
-.venv/bin/python -m pytest tests            # 3.0 helper suite + tests/v31
+.venv/bin/python -m pytest tests            # 3.0 helper suite + tests/v31 (skips `slow`)
+.venv/bin/python -m pytest -m slow          # only the slow tests (dogfood runs the real verify.sh gates)
 python3 scripts/check_ecosystem.py
 ```
+
+Slow tests (dogfood) carry `@pytest.mark.slow` and are deselected by default. Skip them while iterating and on
+per-PR runs. Run them once at the final integration merge, together with the full suite:
+`pytest -n 2 -m 'slow or not slow'`.
 
 There is no remote CI. Validation runs locally as a pre-push hook; enable it once per clone:
 

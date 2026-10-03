@@ -8,6 +8,10 @@ import time
 import unittest
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.slow
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "scripts" / "office_runtime.py"
