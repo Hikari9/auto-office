@@ -208,8 +208,11 @@ def ensure_pr(con, run: dict, task: dict, dispatch: dict) -> dict:
     with db.transaction(con):
         state.update_task(con, run["id"], task["id"], pr=pr)
     if pr["number"] != (task.get("pr") or {}).get("number"):
-        from office import dispatch
-        dispatch.relabel_task_panes(run, task["id"])
+        try:
+            from office import dispatch
+            dispatch.relabel_task_panes(run, task["id"])
+        except Exception:  # a pane label is cosmetic
+            pass
     return pr
 
 

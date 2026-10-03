@@ -1387,22 +1387,23 @@ def pane_label(run: dict, dispatch: dict, kind: str = "") -> str:
     short = str(dispatch["id"])[:5]
     pr = None
     scope = dispatch.get("task_id")
-    con = db.connect()
     try:
-        if scope:
-            task = state.get_task(con, run["id"], scope)
-            pr = ((task or {}).get("pr") or {}).get("number")
-        else:
-            gate = con.execute("SELECT subject FROM gates WHERE id=?", (dispatch.get("gate_id"),)).fetchone() \
-                if dispatch.get("gate_id") else None
-            scope = "integration" if gate and gate["subject"] == "integration" else "plan"
-            if scope == "integration":
-                pr = (((state.get_run(con, run["id"]) or {}).get("landing") or {}).get("integration") or {}).get("pr")
-                pr = pr.get("number") if isinstance(pr, dict) else pr
-    except Exception:  # a label is cosmetic; never fail a launch over it
-        pass
-    finally:
-        con.close()
+        con = db.connect()
+        try:
+            if scope:
+                task = state.get_task(con, run["id"], scope)
+                pr = ((task or {}).get("pr") or {}).get("number")
+            else:
+                gate = con.execute("SELECT subject FROM gates WHERE id=?", (dispatch.get("gate_id"),)).fetchone() \
+                    if dispatch.get("gate_id") else None
+                scope = "integration" if gate and gate["subject"] == "integration" else "plan"
+                if scope == "integration":
+                    pr = (((state.get_run(con, run["id"]) or {}).get("landing") or {}).get("integration") or {}).get("pr")
+                    pr = pr.get("number") if isinstance(pr, dict) else pr
+        finally:
+            con.close()
+    except Exception:  # a label is cosmetic; fall back to the fields known without the DB
+        pr = None
     return " ".join(p for p in (scope, role, f"PR#{pr}" if pr else "", short) if p)
 
 

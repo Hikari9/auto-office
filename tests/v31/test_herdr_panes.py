@@ -235,3 +235,27 @@ def test_relabel_continues_past_one_failing_pane(env, monkeypatch):
     monkeypatch.setattr(dispatch.subprocess, "run", run)
     dispatch.relabel_task_panes({"id": "r1"}, "T3")
     assert done == ["w1:p1", "w1:p3"]
+
+
+def test_pane_label_survives_db_connect_failure_during_launch(env, monkeypatch):
+    from office import dispatch
+    def boom(*a, **k):
+        raise RuntimeError("db locked")
+    monkeypatch.setattr(dispatch.db, "connect", boom)
+    d = {"id": "D4f2a0000", "role": "executor", "task_id": "T3"}
+    assert dispatch.pane_label({"id": "r1"}, d) == "T3 executor D4f2a"
+    assert dispatch.pane_label({"id": "r1"}, {"id": "D9c1b0000", "role": "code_reviewer"}) == "code_reviewer D9c1b"
+    dispatch.relabel_task_panes({"id": "r1"}, "T3")  # must not raise either
+
+
+def test_prs_relabel_hook_failure_is_swallowed(env, monkeypatch):
+    from office import dispatch, prs
+    monkeypatch.setattr(dispatch, "relabel_task_panes", lambda run, tid: (_ for _ in ()).throw(RuntimeError("x")))
+    monkeypatch.setattr(prs, "body", lambda *a: "b")
+    monkeypatch.setattr(prs, "pr_base", lambda *a: "main")
+    monkeypatch.setattr(prs, "_find", lambda repo, branch: {"number": 5, "url": "u", "baseRefName": "main"})
+    monkeypatch.setattr(prs, "_gh", lambda *a, **k: type("P", (), {"returncode": 1, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(prs.state, "update_task", lambda *a, **k: None)
+    monkeypatch.setattr(prs.db, "transaction", lambda con: __import__("contextlib").nullcontext())
+    pr = prs.ensure_pr(None, {"id": "r1", "repo_root": str(env.repo)}, {"id": "T3", "title": "t"}, {"id": "D1", "branch": "b"})
+    assert pr["number"] == 5
