@@ -316,7 +316,9 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
                                              exclude=excluded)
         if decision.get("status") != "selected":
-            failures.append(f"no qualifying {role} route ({decision.get('status')})")
+            failures.append(f"no qualifying {role} route ({decision.get('status')})"
+                            + (f"; {candidates.protected_quota_remedy(run, role, gate.get('task_id'))}"
+                               if decision.get("status") == "protected_quota_would_be_consumed" else ""))
             break
         cand = decision["candidate"]
         triple = routing.candidate_id(cand)
@@ -688,13 +690,13 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
                           pause_reason=f"{kind_label} review needs attention: {outcome.get('summary', '')[:200]}")
         return
     elif verdict == "UNAVAILABLE":
-        state.emit(con, run, "gate.unavailable", f"{task['id']} {kind_label} UNAVAILABLE: {outcome.get('summary', '')[:160]}; "
+        state.emit(con, run, "gate.unavailable", f"{task['id']} {kind_label} UNAVAILABLE: {outcome.get('summary', '')[:400]}; "
                    "valid unrelated results are preserved", task_id=task["id"])
         if gate["kind"] == "checks":
             con.execute("UPDATE gates SET status='cancelled', stale_reason='checks unavailable' WHERE revision_id=? "
                         "AND status='waiting'", (gate["revision_id"],))
         state.update_task(con, run["id"], task["id"], status="blocked",
-                          pause_reason=f"{kind_label} gate unavailable: {outcome.get('summary', '')[:160]}")
+                          pause_reason=f"{kind_label} gate unavailable: {outcome.get('summary', '')[:400]}")
         return
     elif verdict == "BRIEF_DEFECT":
         state.update_task(con, run["id"], task["id"], status="paused", pause_reason=f"brief defect from {kind_label} review")
