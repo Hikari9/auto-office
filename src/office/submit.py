@@ -40,7 +40,8 @@ def _record_block(con, run: dict, task: dict, d: dict, reason: str, state_key: s
     data = json.loads((row["override_json"] if row else None) or "{}")
     data[state_key] = state_val
     con.execute("UPDATE dispatches SET override_json=? WHERE id=?", (json.dumps(data), d["id"]))
-    if task["status"] in ("running", "launching", "changes_required", "blocked"):
+    # Never replace another blocker (revoke, orchestrator pause) with this one.
+    if task["status"] in ("running", "launching", "changes_required") or self_blocked(task):
         state.update_task(con, run["id"], task["id"], status="blocked", pause_reason=reason)
 
 
@@ -64,6 +65,21 @@ def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect:
         raise
 
 
+def _scope_hunk(wt: Path, files: list[str], limit: int = 6000) -> str:
+    """Tracked edits plus the contents of new (untracked) files, bounded."""
+    import subprocess
+    parts = [paths.git(wt, "diff", "HEAD", "--", *files)]
+    for f in paths.git(wt, "ls-files", "--others", "--exclude-standard", "-z", "--", *files).split("\0"):
+        if f and (wt / f).is_file():
+            proc = subprocess.run(["git", "-C", str(wt), "diff", "--no-index", "--", "/dev/null", f],
+                                  capture_output=True, text=True)
+            parts.append(proc.stdout)
+    text = "\n".join(p for p in parts if p.strip())
+    if not text.strip():
+        return "(no diff for these paths yet; they are unedited or do not exist)"
+    return text if len(text) <= limit else text[:limit] + "\n... (truncated)"
+
+
 def request_scope_change(con, run: dict, *, cwd: Path, files: list[str], reason: str) -> Result:
     """Executor: ask the orchestrator to widen this task's scope. Blocks the
     task and wakes `office wait`/`status` with the files, reason and diff hunk."""
@@ -83,10 +99,17 @@ def request_scope_change(con, run: dict, *, cwd: Path, files: list[str], reason:
     if ident is None or ident[0] != wt:
         raise Refused("wrong-worktree", f"run this from the task worktree ({task['id']}), not {cwd}",
                       scope=task["id"], next_step=f'cd {wt} && office submit --request-scope {files[0]} -- "<reason>"')
+    if task["current_dispatch_id"] != d["id"]:
+        raise Refused("superseded-dispatch", f"{task['id']} now belongs to a newer dispatch; this session's request is rejected",
+                      scope=task["id"], preserved="your worktree", next_step="stop; the current holder continues the task")
+    if dispatch_mod.live_lease(con, run["id"], d["lease_id"]) is None:
+        raise Refused("lease-lost", f"{task['id']} lease is no longer held by this session (revoked or taken over)",
+                      scope=task["id"], preserved="your worktree", next_step="stop; the orchestrator decides what happens next")
+    if task["status"] in ("paused", "blocked", "cancelled") and not self_blocked(task):
+        raise Refused("task-paused", f"{task['id']} is {task['status']}: {task.get('pause_reason') or ''}",
+                      scope=task["id"], preserved="your worktree", next_step="stop and wait; the orchestrator is resolving it")
     files = list(dict.fromkeys(f.strip() for f in files if f.strip()))
-    hunk = paths.git(wt, "diff", "HEAD", "--", *files)[:6000]
-    if not hunk.strip():
-        hunk = "(no tracked diff for these paths yet; they are new or still unedited)"
+    hunk = _scope_hunk(wt, files)
     amend_cmd = f'office amend {task["id"]} --contract -- "add {", ".join(files)} to {task["id"]} scope: {reason.strip()[:80]}"'
     summary = f"{task['id']} requests scope {', '.join(files)}: {reason.strip()}"
     with db.transaction(con):

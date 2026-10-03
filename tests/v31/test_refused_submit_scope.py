@@ -106,6 +106,32 @@ def test_rerun_on_a_live_worker_does_not_point_at_itself(env):
     assert "office prompt T1" in out and "office revoke T1" in out, out
 
 
+@pytest.mark.approved
+def test_request_scope_includes_an_unstaged_new_file(env):
+    approved_run(env, executor=[{}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    wenv, wt = _worker(env)
+    (wt / "NEWDOC.md").write_text("brand new doc line\n" * 2000)
+    code, out = env.office("submit", "--request-scope", "NEWDOC.md", "--", "new doc", cwd=wt, env=wenv)
+    assert code == 0, out
+    payload = json.loads(env.con().execute("SELECT payload_json FROM events WHERE kind='task.scope_requested'").fetchone()[0])
+    assert "brand new doc line" in payload["diff"] and len(payload["diff"]) < 7000, payload["diff"][:200]
+
+
+@pytest.mark.approved
+def test_revoked_worker_cannot_replace_the_blocker_with_a_scope_request(env):
+    wenv, wt = _live_refused(env)
+    env.office("revoke", "T1", check=0)
+    before = task_row(env)
+    code, out = env.office("submit", "--request-scope", "README.md", "--", "late request", cwd=wt, env=wenv)
+    assert code == 4, out
+    assert task_row(env)["pause_reason"] == before["pause_reason"]
+    assert "scope requested" not in (task_row(env)["pause_reason"] or "")
+    assert env.con().execute("SELECT COUNT(*) FROM events WHERE kind='task.scope_requested'").fetchone()[0] == 0
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert task_row(env)["pause_reason"] == before["pause_reason"], out
+
+
 def test_plan_review_brief_asks_for_registries_in_scope():
     from office import briefs
     assert "Scope registries" in briefs.PLAN_REVIEW_FORMAT and "gate" in briefs.PLAN_REVIEW_FORMAT
