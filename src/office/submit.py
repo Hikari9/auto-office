@@ -352,11 +352,24 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
 def _save_evidence(run: dict, d: dict, wt: Path, rev_id: str) -> None:
     """Copy a scope-none task's evidence file where the code reviewer's brief reads it."""
     src = wt / briefs.EVIDENCE_FILE
-    if not src.is_file():
+    # Only a regular, untracked file the executor wrote: a symlink could point at
+    # a credential file and a tracked file is not evidence of this submission.
+    if src.is_symlink() or not src.is_file():
         return
+    if paths.git(wt, "ls-files", "--", briefs.EVIDENCE_FILE).strip():
+        return
+    try:
+        fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as fh:
+            raw = fh.read(briefs.EVIDENCE_MAX_CHARS * 4 + 1)
+    except OSError:
+        return
+    text = raw.decode("utf-8", errors="replace")
+    if len(text) > briefs.EVIDENCE_MAX_CHARS:
+        text = text[:briefs.EVIDENCE_MAX_CHARS] + f"\n[evidence truncated at {briefs.EVIDENCE_MAX_CHARS} characters]\n"
     dest = briefs.evidence_path(run, d["id"], rev_id)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(src.read_text(encoding="utf-8", errors="replace")[:briefs.EVIDENCE_MAX_CHARS], encoding="utf-8")
+    dest.write_text(text, encoding="utf-8")
 
 
 def _duplicate(con, run: dict, rev: dict) -> Result:
