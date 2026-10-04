@@ -32,6 +32,9 @@ UNVERIFIED = {
     "hermes": "Hermes hook schema is list-of-dicts and profile-scoped; not written by 3.1.0",
 }
 WRITE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|write_file|replace"
+# Opt-in (office install --shell-guard): one more PreToolUse entry, on Bash only,
+# that makes `sed -i` portable on macOS. Claude only: its updatedInput contract is verified.
+SHELL_GUARD = {"claude": ("shell.pre", "PreToolUse", "Bash")}
 
 
 def office_command() -> str:
@@ -61,11 +64,18 @@ def _entry(harness: str, portable: str, command: str) -> dict:
     hook = {"type": "command", "command": f"{command} hook {portable} --harness {harness} {MARKER}", "timeout": 5}
     if portable == "tool.pre":
         return {"matcher": WRITE_MATCHER, "hooks": [hook]}
+    if portable == "shell.pre":
+        return {"matcher": SHELL_GUARD[harness][2], "hooks": [hook]}
     return {"hooks": [hook]}
 
 
-def _is_managed(entry: dict) -> bool:
-    return any(MARKER in (h.get("command") or "") for h in (entry.get("hooks") or []))
+def _is_managed(entry: dict, portable: str | None = None) -> bool:
+    """Office-managed; with `portable`, only the entry for that portable event."""
+    for h in entry.get("hooks") or []:
+        cmd = h.get("command") or ""
+        if MARKER in cmd and (portable is None or f" hook {portable} " in cmd):
+            return True
+    return False
 
 
 def _is_legacy(entry: dict) -> bool:
@@ -81,7 +91,10 @@ def _backup(path: Path) -> Path | None:
     return dest
 
 
-def install(only: list[str] | None = None, dry_run: bool = False, migrate_legacy: bool = False) -> Result:
+def install(only: list[str] | None = None, dry_run: bool = False, migrate_legacy: bool = False,
+            shell_guard: bool | None = None) -> Result:
+    """`shell_guard` True adds the Bash guard, False removes it, None keeps
+    whatever is installed (refreshing its command)."""
     res = Result()
     if not dry_run:
         entry = frontdoor.register_current()
@@ -115,11 +128,22 @@ def install(only: list[str] | None = None, dry_run: bool = False, migrate_legacy
                     entries[:] = kept
                     changed = True
             want = _entry(harness, portable, command)
-            managed = [e for e in entries if _is_managed(e)]
+            managed = [e for e in entries if _is_managed(e, portable)]
             if managed == [want]:
                 continue
-            entries[:] = [e for e in entries if not _is_managed(e)] + [want]
+            entries[:] = [e for e in entries if not _is_managed(e, portable)] + [want]
             changed = True
+        guard_line = None
+        if harness in SHELL_GUARD:
+            portable, native, _ = SHELL_GUARD[harness]
+            entries = hooks.setdefault(native, [])
+            present = [e for e in entries if _is_managed(e, portable)]
+            keep = bool(present) if shell_guard is None else shell_guard
+            want = [_entry(harness, portable, command)] if keep else []
+            if present != want:
+                entries[:] = [e for e in entries if not _is_managed(e, portable)] + want
+                changed = True
+            guard_line = f"{harness}: shell guard (sed -i on macOS) " + ("on" if keep else "off (office install --shell-guard)")
         rules_added = rules_removed = 0
         owned: list[str] = []
         if harness == "claude":
@@ -134,6 +158,8 @@ def install(only: list[str] | None = None, dry_run: bool = False, migrate_legacy
             res.add(f"{harness}: hooks installed ({', '.join(events.values())})" + (f"; backup {backup.name}" if backup else ""))
         else:
             res.add(f"{harness}: " + ("would install hooks" if changed else "hooks already current"))
+        if guard_line:
+            res.add(guard_line)
         if harness == "claude":
             res.add(f"{harness}: reviewer read rules "
                     + (f"{'would add' if dry_run else 'added'} {rules_added}, removed {rules_removed}"

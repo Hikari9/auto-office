@@ -208,12 +208,47 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
         out += ["",
                 "RULES do not merge, push, deploy, publish, or send anything external. Committed and uncommitted",
                 "edits are both captured at submit. Do not write JSON or receipts for Office."]
-    out += ["If an office command prints AMENDMENT <id>: apply it at a safe boundary, then run office ack <id>.",
-            "WHEN DONE run: office submit   (from this worktree). Then stop; results are delivered.",
-            "FINAL REPORT in your last message: commit sha; each check you ran with its pass/fail counts; the "
-            "mutation you made to prove a new test fails without the fix (and that it failed); any file outside "
-            "SCOPE you needed, with the reason. A refused submit is part of the report, quoted."]
+    out += ["If an office command prints AMENDMENT <id>: apply it at a safe boundary, then run office ack <id>."]
+    out += self_review_lines(packet.get("base_commit") or "HEAD")
+    out += ["WHEN DONE run: office preflight   (from this worktree; read-only). It prints one verdict:",
+            "    ready: run the submit line it prints (with `. <agent.env> &&` when shown: env does not persist",
+            "           between shell calls, so source and submit in one command). Then stop; results are delivered.",
+            "    fix:   apply each repair it lists, then office preflight again.",
+            "    wait:  the task is paused while you still hold it; rerun office preflight every 60s (up to 30 min)",
+            "           until ready, then submit once. Key on its exit code (0 ready, 1 fix, 75 wait, 4 stop).",
+            "    stop:  terminal for you. Do not submit, retry, or investigate.",
+            "A submit refused as lease-lost, superseded-dispatch, or task-paused is terminal too: never retry it.",
+            "FINAL REPORT in your last message: each self-review finding and what you did with it; each check you "
+            "ran with its pass/fail counts; the mutation you made to prove a new test fails without the fix (and "
+            "that it failed); any file outside SCOPE you needed, with the reason. A refused submit is quoted. End "
+            "with exactly one status line:",
+            "    " + STATUS_LINE]
     return "\n".join(out) + "\n"
+
+
+STATUS_LINE = ("TASK=<id> COMMIT=<sha> PUSHED=<yes|no> CHECKS=<pass|fail + counts> "
+               "SUBMIT=<accepted Rn | refused: exact reason | not attempted> NEXT=<what the orchestrator must do>")
+
+
+def self_review_lines(base: str) -> list[str]:
+    """The adversarial pass a producer runs on its own diff before it submits.
+    It is a pass, never an approval: independent review still decides."""
+    return [
+        f"SELF-REVIEW before submitting, review your whole change adversarially: `git diff {base}` (committed and",
+        "    uncommitted). Start four parallel subagents if your harness has them, each given only the diff and one",
+        "    lens; otherwise make one fresh pass per lens yourself:",
+        "    (a) security: secrets, token exposure in workflows or logs, auth bypass, missing server-side",
+        "        revalidation, path or symlink escapes",
+        "    (b) edge cases: parser and lexer ambiguity, empty or null input, keyboard and interaction paths that",
+        "        bypass an explicit confirmation, offline and restart states",
+        "    (c) platform and build: macOS vs Linux (BSD sed, process groups), signing and notarization, CI",
+        "        manifest names, stale build artifacts",
+        "    (d) test strength: weak assertions, tests that still pass with the fix reverted",
+        '    Each returns JSON: [{"severity": "high|medium|low", "location": "file:line", "repro": "...", "fix": "..."}].',
+        "    Fix every medium or higher finding inside SCOPE. For each fix, write or strengthen a test and prove it:",
+        "    revert the fix, confirm the test fails, restore it. Re-review only after a high fix, at most 3 rounds.",
+        "    A finding outside SCOPE goes in your report, unfixed.",
+    ]
 
 
 def worker_brief(con, run: dict, packet: dict, setup: dict | None = None) -> str:
