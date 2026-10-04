@@ -157,7 +157,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--external", action="store_true",
                    help="prepare the dispatch and print how to start it; launch nothing")
     s.add_argument("--review-as", metavar="HARNESS/MODEL[@EFFORT]",
-                   help="pin the code reviewer (must be a different model family than the executor)")
+                   help="pin the code reviewer; it always runs as a fresh session, never the executor's")
     s.add_argument("--review-cli", metavar="ARGV", help="with --review-as: start exactly this reviewer argv in herdr")
     s.add_argument("--review-external", action="store_true",
                    help="with --review-as: you start the reviewer; Office reads its review file")

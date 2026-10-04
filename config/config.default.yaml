@@ -56,6 +56,7 @@ roles:
   plan_reviewer:
     preferred_seed:
       - {model_id: luna, effort: xhigh}
+      - {model_id: sonnet, harness: claude, effort: high}
       - {model_id: opus, harness: claude, effort: low}
     required_capabilities: [review]
     floor:
@@ -80,6 +81,7 @@ roles:
   code_reviewer:
     preferred_seed:
       - {model_id: luna, effort: xhigh}
+      - {model_id: sonnet, harness: claude, effort: high}
       - {model_id: opus, harness: claude, effort: low}
     required_capabilities: [review]
     floor:
@@ -96,12 +98,13 @@ roles:
   # Visual judgment is a separate specialist from code review (charter 8B).
   # Preference order Gemini -> Sonnet -> Luna; a route qualifies only after an
   # image-sensitive conformance probe of its exact harness/model/effort path.
+  # Reviewer independence is per agent, not per model family: a reviewer is
+  # always a fresh dispatch, so it may share the producer's model.
   visual_reviewer:
     preferred_seed:
-      # Latest Gemini Flash through agy (Gemini slugs embed effort); low is the default.
-      - {model_id: gemini-3.8-flash, harness: agy, effort: low}
+      # Latest Gemini Flash through agy (Gemini slugs embed effort); medium is the default.
       - {model_id: gemini-3.8-flash, harness: agy, effort: medium}
-      - {model_id: sonnet, harness: claude}
+      - {model_id: sonnet, harness: claude, effort: high}
       - {model_id: luna}
     required_capabilities: [review, vision]
     floor:
