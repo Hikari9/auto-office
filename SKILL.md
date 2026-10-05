@@ -50,14 +50,10 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 2. Ask how far to go after the task PRs: stop and ask after (`ask`), preview deploy only (`preview`),
    merge only (`merge`), or merge + prod deploy (`e2e`, which is merge and deploy authority). For a
    deploy, show `office land --detect`'s proposed commands and have the user confirm them.
-   In the same question, offer an opt-in benchmark refresh (default off): if the catalog lacks
-   scores for a model or effort, one low-cost background subagent fetches them during the run.
 3. `office start "<goal>" --issue <n> --end-state <answer>` (`--deploy-preview|prod|verify "<cmd>"`
-   as confirmed; `--benchmark-refresh` only if the user opted in; `--blast-radius`, `--size-class`,
-   `--irreversible` from your provisional read; unset is unknown, never low risk).
-   With the opt-in, run `office benchmarks brief`; if it prints a brief, start one background
-   subagent on the smallest capable model at low effort with it and keep working. It submits its
-   result with `office benchmarks submit`; a rejected delta changes nothing and blocks nothing.
+   as confirmed; `--blast-radius`, `--size-class`, `--irreversible` from your provisional read;
+   unset is unknown, never low risk). Never ask about benchmark refreshes; that is the
+   `auto-update-benchmarks` skill, run only when the user explicitly calls it.
 4. If the output says a planner was queued, wait (`office wait`). Otherwise you plan inline:
    interview the user directly for anything you would otherwise guess, write `.office/plans/<run>/PLAN.md` (the path `office start` prints)
    (format: `office submit --help`), then `office submit`.
