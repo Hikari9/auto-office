@@ -10,6 +10,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -85,13 +86,22 @@ class _Pipe:
         pass
 
 
+class _Interrupted(BaseException):
+    """A signal reached the supervisor while an in-process agent was running."""
+
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
+
+
 class InProcessAgent:
     """A Popen-like fake harness child that runs `fake_agent.run` in this process.
 
     The agent runs when its output is first read, after the supervisor has
-    written the prompt. Nothing here can be signalled: it shares the
-    supervisor's process, so `poll()` never reports it as still running (the
-    supervisor's signal handler would otherwise forward to its own group).
+    written the prompt. It cannot be signalled as a process, so `poll()` never
+    reports it as running (the supervisor's handler would otherwise forward to
+    its own group). A SIGTERM/SIGHUP/SIGINT that arrives meanwhile stops the
+    agent where it is, and it ends as a killed child does: return code -signum.
     """
 
     def __init__(self, argv, cwd, env, stdin):
@@ -103,10 +113,23 @@ class InProcessAgent:
         self._output = None
 
     def _run(self):
-        if self._output is None:
-            prompt = self.stdin.data.decode() if self.stdin else ""
+        if self._output is not None:
+            return
+
+        def interrupt(signum, _frame):
+            raise _Interrupted(signum)
+
+        signals = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+        previous = {s: signal.signal(s, interrupt) for s in signals}
+        prompt = self.stdin.data.decode() if self.stdin else ""
+        try:
             self.returncode, output = fake_agent.run(self.argv, prompt, self.env, self.cwd)
-            self._output = io.BytesIO(output)
+        except _Interrupted as stop:
+            self.returncode, output = -stop.signum, b""
+        finally:
+            for s, handler in previous.items():
+                signal.signal(s, handler)
+        self._output = io.BytesIO(output)
 
     def read1(self, size=-1) -> bytes:
         self._run()

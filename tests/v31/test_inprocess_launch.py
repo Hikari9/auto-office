@@ -226,3 +226,25 @@ def test_the_seam_only_replaces_the_unmodified_fake_harness(env):
     (env.bin / "codex").write_text(f"#!{sys.executable}\nraise SystemExit(5)\n")
     assert spawn(["codex"]) == "real child"  # a test's own stand-in runs as itself
     assert started == [["git", "--version"], ["codex"]]
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_a_signal_during_an_in_process_agent_stops_it_like_a_killed_child(env, monkeypatch, signum):
+    after = []
+
+    def agent(argv, prompt, child_env, cwd):
+        os.kill(os.getpid(), signum)
+        after.append("kept running")  # a killed child never gets here
+        return 0, b""
+
+    monkeypatch.setattr(fake_agent, "run", agent)
+    handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    approved_run(env, executor=[{}])
+    env.office("dispatch", "T1", check=0)
+    con = env.con()
+    rows = {tuple(r) for r in con.execute(
+        "SELECT terminal_classification, exit_code, signal FROM dispatches WHERE role='executor'")}
+    assert rows == {("signal", -int(signum), int(signum))}, rows
+    assert not after
+    assert handlers == {s: signal.getsignal(s) for s in handlers}

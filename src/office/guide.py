@@ -426,30 +426,54 @@ def piggyback(con, run: dict, res: Result) -> None:
         if block:
             res.notices.extend(block)
         return
-    shown, through = _notice_batch(state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=20),
-                                   limit=4)
+    from office import db
+    unread = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=200)
+    held = _held_seqs(con, run["id"])
+    shown = _notice_batch([e for e in unread if e["seq"] not in held], limit=4)
     if shown:
         res.notices.extend(f"· {e['summary']}" for e in shown)
-        from office import db
         with db.transaction(con):
-            state.advance_cursor(con, run["id"], "orchestrator", through)
+            _consume(con, run["id"], unread, held | {e["seq"] for e in shown})
 
 
-# Event kinds that mean something went wrong or waits on the orchestrator.
-_URGENT_WORDS = ("fail", "block", "refus", "reject", "unavailable", "conflict", "error", "escalat", "attention",
-                 "defect", "changes_required", "undelivered", "restack_needed", "findings_queued",
-                 "scope_requested", "questions")
+# Kinds that mean something failed or waits on the orchestrator. Everything else is informational.
+_URGENT_KINDS = frozenset({
+    "task.blocked", "task.paused", "task.findings_queued", "task.scope_requested", "task.restack_needed",
+    "task.amend_undelivered", "submit.refused", "submit.rejected", "integration.conflict", "integration.failed",
+    "gate.unavailable", "gate.changes_required", "gate.attention", "gate.escalated", "gate.brief_defect",
+    "plan.unavailable", "plan.changes_required", "plan.attention", "plan.escalated", "plan.defect",
+    "plan.questions", "plan.contract_requested", "pr.error", "lease.revoked"})
+_SEEN = "orchestrator:seen:"
 
 
 def _urgent(event: dict) -> bool:
-    return any(word in event["kind"] for word in _URGENT_WORDS)
+    return event["kind"] in _URGENT_KINDS or event["kind"].endswith(".failed")
 
 
-def _notice_batch(unread: list[dict], *, limit: int) -> tuple[list[dict], int]:
-    """(events to show, seq the cursor moves to). Failures and blockers come first, then the
-    informational notices, `limit` in all. An informational notice older than the last one shown
-    that did not fit is dropped from the news; it stays in the event log."""
-    urgent = [e for e in unread if _urgent(e)]
-    shown = urgent[:limit]
-    shown += [e for e in unread if not _urgent(e)][:limit - len(shown)]
-    return shown, max((e["seq"] for e in shown), default=0)
+def _notice_batch(pending: list[dict], *, limit: int) -> list[dict]:
+    """The events to show: failures and blockers first, then informational notices in order,
+    `limit` in all. What does not fit stays unread for the next command."""
+    return ([e for e in pending if _urgent(e)] + [e for e in pending if not _urgent(e)])[:limit]
+
+
+def _held_seqs(con, run_id: str) -> set[int]:
+    """Events shown while an older one was still waiting: the cursor is one number, so each is
+    remembered on its own until the cursor passes it."""
+    return {int(r[0][len(_SEEN):]) for r in con.execute(
+        "SELECT consumer FROM cursors WHERE run_id=? AND consumer LIKE ?", (run_id, _SEEN + "%"))}
+
+
+def _consume(con, run_id: str, unread: list[dict], consumed: set[int]) -> None:
+    """Move the orchestrator cursor over the leading run of consumed events; remember the rest by seq."""
+    through = 0
+    for e in unread:
+        if e["seq"] not in consumed:
+            break
+        through = e["seq"]
+    if through:
+        state.advance_cursor(con, run_id, "orchestrator", through)
+        con.execute("DELETE FROM cursors WHERE run_id=? AND consumer LIKE ? AND CAST(substr(consumer, ?) AS INTEGER)<=?",
+                    (run_id, _SEEN + "%", len(_SEEN) + 1, through))
+    for seq in consumed:
+        if seq > through:
+            state.advance_cursor(con, run_id, _SEEN + str(seq), seq)

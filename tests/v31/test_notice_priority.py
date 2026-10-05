@@ -50,14 +50,34 @@ def test_informational_notices_keep_their_order_when_nothing_is_urgent(con):
     assert _news(con) == []
 
 
-def test_no_unshown_failure_is_ever_passed_by_the_cursor(con):
+def test_an_older_informational_notice_is_not_lost_behind_newer_urgent_ones(con):
     _emit(con, "dispatch", "dispatched T1")
     for i in range(6):
         _emit(con, "integration.failed", f"failure {i}")
     assert _news(con) == [f"failure {i}" for i in range(4)]
-    # The informational notice that did not fit is dropped from the news; the failures wait their turn.
-    assert _news(con) == ["failure 4", "failure 5"]
+    assert _news(con) == ["failure 4", "failure 5", "dispatched T1"]
     assert _news(con) == []
+
+
+def test_an_event_already_shown_is_not_shown_again_while_an_older_one_waits(con):
+    _emit(con, "dispatch", "old 0")
+    _emit(con, "dispatch", "old 1")
+    for i in range(4):
+        _emit(con, "task.blocked", f"blocked {i}")
+    assert _news(con) == [f"blocked {i}" for i in range(4)]
+    _emit(con, "task.blocked", "blocked 4")
+    assert _news(con) == ["blocked 4", "old 0", "old 1"]
+    assert _news(con) == []
+    assert con.execute("SELECT COUNT(*) FROM cursors WHERE consumer LIKE 'orchestrator:seen:%'").fetchone()[0] == 0
+
+
+def test_a_pause_leads_and_an_unblock_is_only_news(con):
+    for i in range(4):
+        _emit(con, "dispatch", f"note {i}")
+    _emit(con, "task.unblocked", "T1 unblocked")
+    _emit(con, "task.paused", "T1 paused")
+    assert _news(con) == ["T1 paused", "note 0", "note 1", "note 2"]
+    assert _news(con) == ["note 3", "T1 unblocked"]
 
 
 def test_a_notice_that_was_not_shown_stays_unread_when_it_is_newer(con):
