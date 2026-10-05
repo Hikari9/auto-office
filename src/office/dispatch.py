@@ -2202,10 +2202,8 @@ def supervise(dispatch_id: str) -> int:
             except OSError:
                 pass
 
-    # Only the main thread can install handlers. Whoever called an in-process
-    # supervisor gets its own handlers back when the dispatch ends.
-    previous = ({s: signal.signal(s, forward) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
-                if threading.current_thread() is threading.main_thread() else {})
+    # An in-process supervisor hands its caller's handlers back when the dispatch ends.
+    previous = {s: signal.signal(s, forward) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
     timer = None
     log_path = None
     try:
