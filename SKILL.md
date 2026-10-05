@@ -116,12 +116,12 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
   `office approve waive T2:<gate> --quote "<words>"`. When a visual gate is UNAVAILABLE and the user has a
   reviewer run it by hand, record that review file as the gate result:
   `office approve visual T2 --by <harness>/<model>[@effort] --report <file> --quote "<words>"` (never the
-  producer's model family).
+  producer's own session; a fresh session of the same model is fine).
 - If a command reports a missing route or trust, show the user the route notice; only they can
   promote trust (`office approve trust <route> --quote "<words>"`).
 - When the user names a model, dispatch with `--as <harness>/<model>[@effort]` (add `--cli "<argv>"` for an
   exact agent command, or `--external` to only print how to start it) and `--review-as` to pin the code
-  reviewer, which must be a different model family. Every dispatch prints its brief, env, and herdr commands.
+  reviewer. A reviewer is always a fresh session, never the executor's, but it may share the executor's model. Every dispatch prints its brief, env, and herdr commands.
 
 ## Herdr agents
 

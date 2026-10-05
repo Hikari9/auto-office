@@ -73,7 +73,8 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
     if (review_cli or review_external) and not review_as:
         raise Usage("invalid-override", "--review-cli/--review-external need --review-as <harness>/<model>[@effort]")
     launch_prefs = {k: v for k, v in (("cli", cli), ("external", external)) if v}
-    review_decision = candidates.declared_decision(review_as, flag="--review-as") if review_as else None
+    if review_as:
+        candidates.declared_decision(review_as, flag="--review-as")  # validates the route's shape
     if state.is_terminal(run):
         raise Refused("run-terminal", f"run is {run['phase']}")
     from office import guide, plan_view, plans, prs
@@ -90,14 +91,6 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             from office import gates
             block = gates.unavailable_review_block(con, run, task)
             if block:
-                # Only its review re-runs (below), so a pinned reviewer is
-                # checked against the revision's real producer.
-                if review_decision:
-                    producer, _declared = gates._producer_model(con, block)
-                    row = con.execute("SELECT d.harness FROM revisions r JOIN dispatches d ON d.id=r.dispatch_id "
-                                      "WHERE r.id=?", (block["revision_id"],)).fetchone()
-                    _require_independent(tid, {"harness": row["harness"] if row else "?", "model_id": producer},
-                                         review_decision["candidate"])
                 continue
         if as_model:
             routes[tid] = candidates.declared_decision(as_model)
@@ -106,8 +99,6 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                                                 task_id=tid, override=route)
         if launch_prefs and routes[tid].get("status") == "selected":
             routes[tid]["launch"] = launch_prefs
-        if review_decision and routes[tid].get("status") == "selected":
-            _require_independent(tid, routes[tid]["candidate"], review_decision["candidate"])
     res = Result()
     with db.transaction(con):
         run = state.get_run(con, run["id"])
@@ -235,17 +226,6 @@ def _route_payload(decision: dict) -> dict:
         if decision.get(key):
             out[key] = decision[key]
     return out
-
-
-def _require_independent(tid: str, executor: dict, reviewer: dict) -> None:
-    """No self-approval by family: a user-pinned reviewer must come from a
-    different model family than the executor it reviews."""
-    ef, rf = candidates.model_family(executor.get("model_id")), candidates.model_family(reviewer.get("model_id"))
-    if ef and ef == rf:
-        raise Refused("review-not-independent",
-                      f"{tid}: --review-as {reviewer['harness']}/{reviewer['model_id']} is the same model family "
-                      f"({rf}) as the executor {executor['harness']}/{executor['model_id']}", scope=tid,
-                      next_step="pin a reviewer from a different family, or drop --review-as to route one")
 
 
 def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> list[str]:

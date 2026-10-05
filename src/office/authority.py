@@ -155,9 +155,11 @@ VISUAL_USAGE = ('office approve visual T2 --by <harness>/<model>[@effort] --repo
 
 def _visual_verdict(con, run, tid: str, by: str, report: Path, quote: str) -> Result:
     """#211: record a visual review the user had run outside Office as the
-    task's visual gate result. The report must parse in the visual format and
-    the reviewer must not share the producer's model family; acceptance is
-    still evaluated by the runtime against every other gate."""
+    task's visual gate result. The report must parse in the visual format;
+    acceptance is still evaluated by the runtime against every other gate.
+    Independence is per agent: the user attests (the quote) that the report
+    came from a session other than the producer's. The producer's model or
+    family is not a bar, so a fresh session of the same model may review."""
     from office import candidates, gates, review_parse
     if not report.is_file():
         raise Usage("no-report", f"no review file at {report}", next_step=VISUAL_USAGE)
@@ -186,12 +188,6 @@ def _visual_verdict(con, run, tid: str, by: str, report: Path, quote: str) -> Re
                           "running it", next_step="office wait, then retry if it ends UNAVAILABLE")
         if prior["verdict"] == "PASS":
             return Result(lines=[f"{tid} visual gate already PASS on {rev_id}"], next="office status")
-        producer_model, _ = gates._producer_model(con, prior)
-        family = candidates.model_family(producer_model)
-        if family and candidates.model_family(reviewer["model_id"]) == family:
-            raise Refused("not-independent", f"{by} is the same model family ({family}) as the producer "
-                          f"{producer_model}; a producer cannot approve its own work",
-                          next_step="use a reviewer from a different model family")
         gid = gates._new_gate(con, run, task, rev_id, "visual", prior["input_key"] + ":external", "running",
                               round_no=prior["round"])
         con.execute("INSERT INTO authorizations(id, run_id, kind, target, requirements_version, authorized_by, quote, created_at) "

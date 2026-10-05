@@ -68,9 +68,9 @@ def route_label(disclosure: dict | None) -> str:
     return f"{disclosure.get('harness')}/{disclosure.get('model_id')}@{disclosure.get('effort')}"
 
 
-def _preview_one(con, config: dict, run: dict, role: str, tid: str, exclude: set[str] | None = None) -> dict:
+def _preview_one(con, config: dict, run: dict, role: str, tid: str) -> dict:
     try:
-        decision = candidates.route_role(con, config, run, role, task_id=tid, exclude=exclude)
+        decision = candidates.route_role(con, config, run, role, task_id=tid)
     except Exception as exc:  # a preview never blocks submit
         return {"route": None, "why": f"preview failed: {exc}"[:160]}
     if decision.get("status") != "selected":
@@ -78,8 +78,7 @@ def _preview_one(con, config: dict, run: dict, role: str, tid: str, exclude: set
         why = f"{decision.get('status')}" + (f": {top.get('reason')}" if top.get("reason") else "")
         return {"route": None, "why": why[:160]}
     d = decision["selection_disclosure"]
-    return {"route": route_label(d), "triple": decision.get("selected"), "why": short_why(d),
-            "family": candidates.model_family(d.get("model_id"))}
+    return {"route": route_label(d), "triple": decision.get("selected"), "why": short_why(d)}
 
 
 def preview(con, run: dict, tasks: list[dict]) -> dict:
@@ -92,8 +91,7 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
         ex = _preview_one(con, config, run, "executor", t["id"])
         rv = {}
         if code_review:
-            exclude = {ex["triple"], f"family:{ex['family']}"} if ex.get("triple") and ex.get("family") else None
-            rv = _preview_one(con, config, run, "code_reviewer", t["id"], exclude=exclude)
+            rv = _preview_one(con, config, run, "code_reviewer", t["id"])
         visual = t.get("visual") or {}
         task_gates = (["checks"] if t.get("checks") else []) + (["code review"] if code_review else []) \
             + (["ui review"] if visual and not visual.get("none") else [])
