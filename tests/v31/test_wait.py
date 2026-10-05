@@ -162,6 +162,51 @@ def test_a_signal_behind_a_full_window_of_other_events_still_wakes_wait(env, fir
 
 
 @pytest.mark.approved
+def test_a_signal_already_shown_by_status_is_not_a_stall_again(env):
+    _go(env)
+    wenv, wt, d = _executor(env)
+    env.office("revoke", "T1", check=0)
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    assert _signals(env)
+    env.office("status", check=0)  # the signal is within its first six unread events: shown, so seen
+    code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
+    assert "stall: T1" not in out and code != 3, out
+
+
+@pytest.mark.approved
+def test_a_flood_of_signals_prints_the_newest_few_with_a_count(env):
+    from office import state
+    _go(env)
+    wenv, wt, d = _executor(env)
+    con = env.con()
+    run = state.get_run(con, d["run_id"])
+    for i in range(40):
+        with con:
+            state.signal_orchestrator(con, run, source="preflight stop", task_id="T1", dispatch_id=d["id"],
+                                      reason=f"varied reason {i}", next_step="office status")
+    code, out = env.office("wait", "--timeout", "5", "--poll", "0.2", env=EXTERNAL)
+    lines = [l for l in out.splitlines() if l.startswith("stall: T1")]
+    assert code == 3 and len(lines) == 10 and "varied reason 39" in lines[-1], out
+    assert "30 earlier worker signals not shown" in out, out
+
+
+@pytest.mark.approved
+def test_signals_an_older_run_already_read_are_not_news(env):
+    from office import state
+    _go(env)
+    wenv, wt, d = _executor(env)
+    con = env.con()
+    run = state.get_run(con, d["run_id"])
+    with con:  # a signal the orchestrator cursor already passed, on a run with no signal cursor
+        seq = state.signal_orchestrator(con, run, source="preflight stop", task_id="T1", dispatch_id=d["id"],
+                                        reason="from before the signal cursor existed", next_step="office status")
+        state.advance_cursor(con, run["id"], "orchestrator", seq)
+    assert con.execute("SELECT 1 FROM cursors WHERE consumer=?", (state.SIGNAL_CONSUMER,)).fetchone() is None
+    code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
+    assert code == 124 and "stall" not in out, out
+
+
+@pytest.mark.approved
 def test_signal_text_is_one_printable_line_and_bounded(env):
     from office import state
     _go(env)

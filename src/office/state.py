@@ -180,12 +180,12 @@ def signal_orchestrator(con: sqlite3.Connection, run: dict, *, source: str, task
     reason = " ".join("".join(c if c.isprintable() else " " for c in reason).split())[:300]
     summary = f"{task_id or 'run'} {dispatch_id or ''} {source}: {reason}".replace("  ", " ")
     rows = con.execute("SELECT seq, summary, created_at FROM events WHERE run_id=? AND kind=? AND dispatch_id IS ? "
-                       "ORDER BY seq", (run["id"], SIGNAL_KIND, dispatch_id)).fetchall()
+                       "AND summary=?", (run["id"], SIGNAL_KIND, dispatch_id, summary)).fetchall()
     cur = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer='orchestrator'", (run["id"],)).fetchone()
     read = cur[0] if cur else 0
     now = parse_iso(now_iso())
     for r in rows:
-        if r["summary"] == summary and (r["seq"] > read or (now - parse_iso(r["created_at"])).total_seconds() < SIGNAL_REPEAT_S):
+        if r["seq"] > read or (now - parse_iso(r["created_at"])).total_seconds() < SIGNAL_REPEAT_S:
             return None
     return emit(con, run, SIGNAL_KIND, summary, task_id=task_id, dispatch_id=dispatch_id,
                 payload={"source": source, "reason": reason, "next": next_step})
@@ -193,8 +193,11 @@ def signal_orchestrator(con: sqlite3.Connection, run: dict, *, source: str, task
 
 def unread_signals(con: sqlite3.Connection, run_id: str) -> list[dict]:
     """Every orchestrator-audience worker signal not yet reported by `office wait` or shown by `status`,
-    wherever it sits among the other unread events."""
+    wherever it sits among the other unread events. A run that never had a signal cursor starts from
+    the orchestrator cursor, so signals it already read are not news."""
     row = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer=?", (run_id, SIGNAL_CONSUMER)).fetchone()
+    if row is None:
+        row = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer='orchestrator'", (run_id,)).fetchone()
     return [dict(r) for r in con.execute("SELECT * FROM events WHERE run_id=? AND seq>? AND kind=? AND audience='orchestrator' "
                                          "ORDER BY seq", (run_id, row[0] if row else 0, SIGNAL_KIND)).fetchall()]
 

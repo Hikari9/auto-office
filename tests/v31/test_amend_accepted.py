@@ -180,3 +180,26 @@ def test_an_amendment_relaunch_with_no_prior_revision_still_gates_preflight_on_t
     env.office("ack", "A1", cwd=wt, env=wenv, check=0)
     code, out = env.office("preflight", cwd=wt, env=wenv)
     assert code == 0 and "PREFLIGHT ready" in out, out
+
+
+@pytest.mark.parametrize("state_", ["queued", "delivered", "applied", "other-session"])
+def test_preflight_gates_only_this_sessions_unacknowledged_amendments(env, state_):
+    approved_run(env, executor=[{}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    first = task_row(env)["current_dispatch_id"]
+    con = env.con()
+    con.execute("UPDATE dispatches SET status='cancelled', ended_at=started_at WHERE id=?", (first,))
+    con.commit()
+    env.office("amend", "T1", "--", DELTA, env=EXTERNAL, check=0)
+    second = task_row(env)["current_dispatch_id"]
+    wenv, wt, d = _worker(env, second)
+    if state_ == "other-session":
+        con.execute("UPDATE deliveries SET dispatch_id='Dstale'")
+    else:
+        con.execute("UPDATE deliveries SET status=?", (state_,))
+    con.commit()
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    if state_ in ("queued", "delivered"):
+        assert code == 1 and "office ack A1" in out, out
+    else:
+        assert code == 0 and ("amendment: A1 applied" in out) == (state_ == "applied"), out

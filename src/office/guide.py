@@ -315,17 +315,24 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
     return f"{who}: usage_limit, {when}; pane tail in {tail}; next: office prompt {d['id']} -- continue"
 
 
+SIGNAL_LINES = 10
+
+
 def worker_signals(con, run: dict) -> tuple[list[str], int]:
     """(stall lines, last seq) for workers that stopped on something only the orchestrator resolves (a
     preflight stop, a refused submit). Every unread signal counts, however many other events are
     unread before it; the caller advances the signal cursor to `last seq` once it has reported them."""
     import json
     out, last = [], 0
-    for e in state.unread_signals(con, run["id"]):
+    signals = state.unread_signals(con, run["id"])
+    for e in signals[-SIGNAL_LINES:]:  # the newest; a worker that varies its text cannot flood the orchestrator
         p = json.loads(e["payload_json"] or "{}")
         who = " ".join(x for x in (e["task_id"], e["dispatch_id"]) if x)
         out.append(f"{who} {p.get('source', 'worker')}: {p.get('reason', e['summary'])}; next: {p.get('next', 'office status')}")
-        last = e["seq"]
+    if len(signals) > SIGNAL_LINES:
+        out.insert(0, f"{len(signals) - SIGNAL_LINES} earlier worker signals not shown (office inspect events)")
+    if signals:
+        last = signals[-1]["seq"]
     return out, last
 
 
