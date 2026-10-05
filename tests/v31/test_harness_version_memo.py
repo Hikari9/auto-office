@@ -173,7 +173,7 @@ def test_harness_version_cross_process_cache(tmp_path, monkeypatch):
 
 
 def test_harness_version_probe_failure_returns_none(tmp_path, monkeypatch):
-    """When the probe command fails, harness_version returns None."""
+    """When the probe command fails, harness_version returns None and repeated calls do not re-run."""
     monkeypatch.setattr(adapters.paths, "data_home", lambda: tmp_path)
     bin_dir = tmp_path / "bin"
     _make_executable(bin_dir / "crash", "#!/bin/sh\nexit 1\n")
@@ -181,11 +181,18 @@ def test_harness_version_probe_failure_returns_none(tmp_path, monkeypatch):
 
     adapter = {"id": "crash", "invocation": {"executable": "crash"}}
 
+    call_count = 0
+
     def fail_run(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
         raise subprocess.SubprocessError("crashed")
 
     monkeypatch.setattr(subprocess, "run", fail_run)
     assert adapters.harness_version(adapter) is None
+    assert adapters.harness_version(adapter) is None
+    assert adapters.harness_version(adapter) is None
+    assert call_count == 1, f"Expected 1 probe failure call, got {call_count}"
 
 
 def test_harness_version_ttl_expiration(tmp_path, monkeypatch):
@@ -202,23 +209,99 @@ def test_harness_version_ttl_expiration(tmp_path, monkeypatch):
 
     probe_count = 0
     orig_run = subprocess.run
+    orig_read_text = Path.read_text
+    read_text_count = 0
 
     def counting_run(*args, **kwargs):
         nonlocal probe_count
         probe_count += 1
         return orig_run(*args, **kwargs)
 
+    def counting_read_text(self, *args, **kwargs):
+        nonlocal read_text_count
+        if self.name == "harness-versions.json":
+            read_text_count += 1
+        return orig_read_text(self, *args, **kwargs)
+
     monkeypatch.setattr(subprocess, "run", counting_run)
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
 
     assert adapters.harness_version(adapter) == "1.0"
     assert probe_count == 1
+    assert read_text_count == 1
 
-    # Within TTL: memo hit
+    # Within TTL: in-process memo hit (no probe, no file read)
     current_time += 100
     assert adapters.harness_version(adapter) == "1.0"
     assert probe_count == 1
+    assert read_text_count == 1, "In-process memo hit should not read harness-versions.json"
 
-    # Past TTL: re-probe
+    # Past TTL: re-probe and re-checks disk cache
     current_time += adapters._VERSION_TTL_SECONDS + 1
     assert adapters.harness_version(adapter) == "1.0"
     assert probe_count == 2
+    assert read_text_count == 2
+
+
+def test_harness_version_disk_cache_corrupt_or_non_dict(tmp_path, monkeypatch):
+    """Corrupt or non-dict harness-versions.json (e.g. null, []) does not crash harness_version."""
+    monkeypatch.setattr(adapters.paths, "data_home", lambda: tmp_path)
+    bin_dir = tmp_path / "bin"
+    exe = _make_executable(bin_dir / "safe", "#!/bin/sh\necho 'safe 1.0'\n")
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+
+    adapter = {"id": "safe", "invocation": {"executable": "safe"}}
+    cache_path = tmp_path / "harness-versions.json"
+
+    # null in cache file
+    cache_path.write_text("null", encoding="utf-8")
+    assert adapters.harness_version(adapter) == "1.0"
+
+    # [] in cache file
+    adapters._RESOLVED_EXE.clear()
+    adapters._VERSION_MEMO.clear()
+    cache_path.write_text("[]", encoding="utf-8")
+    assert adapters.harness_version(adapter) == "1.0"
+
+
+def test_harness_version_different_command_same_exe(tmp_path, monkeypatch):
+    """Adapters with different version commands for the same executable probe separately."""
+    monkeypatch.setattr(adapters.paths, "data_home", lambda: tmp_path)
+    bin_dir = tmp_path / "bin"
+    script = (
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"--v1\" ]; then echo '1.0.0'; else echo '2.0.0'; fi\n"
+    )
+    _make_executable(bin_dir / "multicmd", script)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+
+    adapter_a = {
+        "id": "multicmd_a",
+        "invocation": {"executable": "multicmd"},
+        "version_fingerprint": {"command": ["multicmd", "--v1"]},
+    }
+    adapter_b = {
+        "id": "multicmd_b",
+        "invocation": {"executable": "multicmd"},
+        "version_fingerprint": {"command": ["multicmd", "--v2"]},
+    }
+
+    assert adapters.harness_version(adapter_a) == "1.0.0"
+    assert adapters.harness_version(adapter_b) == "2.0.0"
+
+    # Even across simulated process restart:
+    adapters._RESOLVED_EXE.clear()
+    adapters._VERSION_MEMO.clear()
+    assert adapters.harness_version(adapter_a) == "1.0.0"
+    assert adapters.harness_version(adapter_b) == "2.0.0"
+
+
+def test_harness_version_nonzero_exit_code_returns_none(tmp_path, monkeypatch):
+    """Probe returning non-zero exit code returns None and does not cache output as version."""
+    monkeypatch.setattr(adapters.paths, "data_home", lambda: tmp_path)
+    bin_dir = tmp_path / "bin"
+    _make_executable(bin_dir / "errprobe", "#!/bin/sh\necho 'error 503.1: offline' >&2\nexit 1\n")
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+
+    adapter = {"id": "errprobe", "invocation": {"executable": "errprobe"}}
+    assert adapters.harness_version(adapter) is None
