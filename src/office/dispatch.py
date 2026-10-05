@@ -2065,6 +2065,68 @@ def record_session(con, run: dict, dispatch_id: str, session: str, *, harness: s
         return "mismatch"
 
 
+class _SessionSniffer:
+    """Reads a headless agent's stream for the session id its harness prints in
+    the header block before the prompt (adapter `session.output_pattern`), and
+    records it. Only a line inside that block counts: the block is the text
+    between two rule lines, the first within a few lines of the start. A stream
+    with no such block, a prompt echoed after it, or an agent reply that happens
+    to contain the pattern is never taken for an id. Best effort: a recording
+    failure is noted in the log and retried, and never disturbs the run."""
+
+    HEADER_BYTES = 16384
+    BANNER_LINES = 3  # lines allowed before the opening rule
+    ATTEMPTS = 2
+    _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+    def __init__(self, run: dict, dispatch: dict, adapter: dict | None, log_path=None):
+        self.run, self.dispatch, self.log_path = run, dispatch, log_path
+        self.pattern = adapters.session_output_pattern(adapter)
+        self.buffer, self.seen, self.rules, self.lead = b"", 0, 0, 0
+        if not self.pattern and adapters.session_spec(adapter).get("output_pattern"):
+            _note(log_path, "office: the adapter's session.output_pattern is unusable; the session id is not captured")
+
+    def _stop(self, why: str | None = None) -> None:
+        """Stop reading. `why` is logged when no id was recorded, so a harness
+        that stops printing one is visible instead of silently unresumable."""
+        self.pattern, self.buffer = None, b""
+        if why:
+            _note(self.log_path, f"office: no session id captured: {why}")
+
+    def feed(self, chunk: bytes) -> None:
+        if not self.pattern:
+            return
+        self.seen += len(chunk)
+        self.buffer += chunk
+        *lines, self.buffer = self.buffer.split(b"\n")
+        for raw in lines:
+            line = self._ANSI.sub("", raw.decode("utf-8", "replace")).strip()
+            if re.fullmatch(r"-{8,}", line):
+                self.rules += 1
+                if self.rules >= 2:  # the header block is closed: the prompt follows
+                    return self._stop("the header block closed without a session id line")
+            elif self.rules == 0:
+                self.lead += 1 if line else 0
+                if self.lead > self.BANNER_LINES:  # no header block opens this stream
+                    return self._stop("no header block opened the stream")
+            else:
+                found = self.pattern.match(line)
+                if found:
+                    self._record(found.group(1))
+                    return self._stop()
+        if self.seen > self.HEADER_BYTES or len(self.buffer) > self.HEADER_BYTES:
+            self._stop("the header block did not finish within the first bytes")
+
+    def _record(self, session: str) -> None:
+        """Record the id, retrying a failed write once; a final failure is noted in the log."""
+        for attempt in range(self.ATTEMPTS):
+            try:
+                return _record_session(self.run, self.dispatch, session, source="output")
+            except Exception as exc:
+                if attempt + 1 == self.ATTEMPTS:
+                    _note(self.log_path, f"office: could not record session id {session}: {exc!r}")
+
+
 def _record_session(run: dict, dispatch: dict, session: str, *, source: str) -> None:
     con = db.connect()
     try:
@@ -2340,9 +2402,12 @@ def supervise(dispatch_id: str) -> int:
                     child.stdin.close()
                 except BrokenPipeError:
                     pass
+            sniffer = None if d.get("resumed_from") else _SessionSniffer(run, d, adapter, log_path)
             for chunk in iter(lambda: child.stdout.read1(65536), b""):
                 log.write(chunk)
                 log.flush()
+                if sniffer:
+                    sniffer.feed(chunk)
                 if sys.stdout.isatty():
                     sys.stdout.buffer.write(chunk)
                     sys.stdout.flush()

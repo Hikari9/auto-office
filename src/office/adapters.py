@@ -65,6 +65,20 @@ def assigns_session(adapter: dict | None) -> bool:
     return spec["id"] == "assigned" and bool(spec.get("assign_arg"))
 
 
+def session_output_pattern(adapter: dict | None) -> "re.Pattern[str] | None":
+    """The adapter's `session.output_pattern` (one capture group, matched per
+    line) when `output` is among its session sources: how a headless run's
+    stream names its session id. A pattern that does not compile reads as none."""
+    spec = session_spec(adapter)
+    if spec["id"] != "detected" or "output" not in (spec.get("sources") or []) or not spec.get("output_pattern"):
+        return None
+    try:
+        pattern = re.compile(str(spec["output_pattern"]))
+    except re.error:
+        return None
+    return pattern if pattern.groups == 1 else None
+
+
 def executable(adapter: dict) -> str | None:
     return (adapter.get("invocation") or {}).get("executable")
 
