@@ -19,9 +19,17 @@ goes to step 2. Skip for an empty or tiny mechanical diff. Fix rounds repeat ste
 
 ## 2. Adversarial self-review
 
-Find the base in the brief's `SELF-REVIEW` line (`git diff <base>`). Start four `Agent` subagents in one
-message, in parallel. Give each the diff command, the brief path, and one lens, and tell it to
-read only (no edits):
+Find the base and the tier in the brief's `SELF-REVIEW` line (`git diff <base>`, `(tier: <tier>)`). Office sets
+the tier from the run's gear and risk. You cannot lower it. Do the review as the tier says:
+
+- **`inline`:** no subagents. Make one fresh pass per lens yourself, fix medium+ findings, and do not re-review.
+  You may skip a lens that clearly does not apply, with a one-line reason in your report.
+- **`single`:** start exactly one `Agent` subagent, given the diff command, the brief path, all four lenses, and
+  a read-only instruction (no edits). Re-review only after a `high` fix, at most 2 rounds.
+- **`deep`:** start four `Agent` subagents in one message, in parallel. Give each the diff command, the brief
+  path, and one lens, and tell it to read only (no edits). Re-review only after a `high` fix, at most 3 rounds.
+
+If the tier is missing from the line, treat it as `deep`. The lenses are the same in every tier:
 
 - **(a) Security:** secrets, token exposure in workflows or logs (`workflow_dispatch` inputs echoed),
   auth bypass, missing server-side revalidation, path or symlink escapes.
@@ -32,7 +40,7 @@ read only (no edits):
   signing and notarization order, CI manifest and artifact names, stale build artifacts.
 - **(d) Test strength:** weak assertions, and tests that would still pass with the fix reverted.
 
-Each subagent returns only a JSON array:
+Each reviewer (subagent or your own pass) returns only a JSON array:
 
 ```json
 [{"severity": "high|medium|low", "location": "file:line", "repro": "concrete input or steps", "fix": "smallest correct change"}]
@@ -41,7 +49,7 @@ Each subagent returns only a JSON array:
 Fix every `medium` or `high` finding inside SCOPE. For each fix, write or strengthen a test, then prove it.
 Revert the fix, run the test, and confirm it fails. Then restore the fix and confirm the test passes.
 Record that mutation for the report. A `low` finding is optional. A finding outside SCOPE goes in the
-report unfixed. Re-run the reviewers only after a `high` fix, at most 3 rounds.
+report unfixed.
 
 ## 3. Checks
 

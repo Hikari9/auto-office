@@ -2,6 +2,7 @@
 plus the one command it runs when done; nothing about receipts or telemetry."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from office import paths, planfile, planpath, state
@@ -210,7 +211,7 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
                 "edits are both captured at submit. Do not write JSON or receipts for Office."]
     out += ["If an office command prints AMENDMENT <id>: apply it at a safe boundary, then run office ack <id>."]
     base = packet.get("base_commit") or "HEAD"
-    out += simplify_lines(base) + self_review_lines(base)
+    out += simplify_lines(base) + self_review_lines(base, self_review_tier(run.get("gear"), run.get("risk_json")))
     out += ["WHEN DONE run: office preflight   (from this worktree; read-only). It prints one verdict:",
             "    ready: run the submit line it prints (with `. <agent.env> &&` when shown: env does not persist",
             "           between shell calls, so source and submit in one command). Then stop; results are delivered.",
@@ -252,13 +253,40 @@ def simplify_lines(base: str) -> list[str]:
     ]
 
 
-def self_review_lines(base: str) -> list[str]:
-    """The adversarial pass a producer runs on its own diff before it submits.
-    It is a pass, never an approval: independent review still decides."""
-    return [
-        f"SELF-REVIEW before submitting, review your whole change adversarially: `git diff {base}` (committed and",
-        "    uncommitted). Start four parallel subagents if your harness has them, each given only the diff and one",
-        "    lens; otherwise make one fresh pass per lens yourself:",
+SELF_REVIEW_TIERS = ("inline", "single", "deep")
+_LOW_RISK_GEARS = ("direct", "direct+review", "light")
+_INLINE_BLAST = ("local", "repo")
+_HIGH_SIZES = ("L", "XL")
+
+
+def self_review_tier(gear, risk_json) -> str:
+    """How much self-review an executor does, from the run's stored gear and risk record only.
+    Nothing in a packet or executor input reaches this. Every doubt resolves to more review:
+    an unknown gear, an unparsable or missing risk record, or an unset blast radius is never `inline`."""
+    if gear == "full":
+        return "deep"
+    try:
+        risk = json.loads(risk_json) if isinstance(risk_json, (str, bytes)) else risk_json
+    except (ValueError, RecursionError):
+        risk = None
+    if not isinstance(risk, dict):
+        return "single"
+    blast = risk.get("blast_radius")
+    if (risk.get("high") or risk.get("irreversible") or blast in ("production", "production-data")
+            or risk.get("size_class") in _HIGH_SIZES):
+        return "deep"
+    if gear in _LOW_RISK_GEARS and blast in _INLINE_BLAST:
+        return "inline"
+    return "single"
+
+
+def self_review_lines(base: str, tier: str = "deep") -> list[str]:
+    """The adversarial pass a producer runs on its own diff before it submits. The tier sets how much
+    review that is. It is a pass, never an approval: independent review still decides."""
+    if tier not in SELF_REVIEW_TIERS:
+        tier = "deep"
+    head = f"SELF-REVIEW before submitting (tier: {tier}), review your whole change adversarially: `git diff {base}` (committed and"
+    lenses = [
         "    (a) security: secrets, token exposure in workflows or logs, auth bypass, missing server-side",
         "        revalidation, path or symlink escapes",
         "    (b) edge cases: parser and lexer ambiguity, empty or null input, keyboard and interaction paths that",
@@ -266,11 +294,24 @@ def self_review_lines(base: str) -> list[str]:
         "    (c) platform and build: macOS vs Linux (BSD sed, process groups), signing and notarization, CI",
         "        manifest names, stale build artifacts",
         "    (d) test strength: weak assertions, tests that still pass with the fix reverted",
-        '    Each returns JSON: [{"severity": "high|medium|low", "location": "file:line", "repro": "...", "fix": "..."}].',
+        '    Each lens returns JSON: [{"severity": "high|medium|low", "location": "file:line", "repro": "...", "fix": "..."}].',
         "    Fix every medium or higher finding inside SCOPE. For each fix, write or strengthen a test and prove it:",
-        "    revert the fix, confirm the test fails, restore it. Re-review only after a high fix, at most 3 rounds.",
-        "    A finding outside SCOPE goes in your report, unfixed.",
+        "    revert the fix, confirm the test fails, restore it.",
     ]
+    tail = "    A finding outside SCOPE goes in your report, unfixed."
+    if tier == "inline":
+        intro = ["    uncommitted). Make one fresh pass per lens yourself, with no delegation, one lens at a time:"]
+        rounds = ["    One pass only: a fix does not start another review. You may skip a lens that clearly does not",
+                  "    apply, with a one-line reason in your report."]
+    elif tier == "single":
+        intro = ["    uncommitted). Start exactly one subagent if your harness has one, given only the diff and all four",
+                 "    lenses below; otherwise make one fresh pass per lens yourself:"]
+        rounds = ["    Re-review only after a high fix, at most 2 rounds."]
+    else:
+        intro = ["    uncommitted). Start four parallel subagents if your harness has them, each given only the diff and one",
+                 "    lens; otherwise make one fresh pass per lens yourself:"]
+        rounds = ["    Re-review only after a high fix, at most 3 rounds."]
+    return [head] + intro + lenses + rounds + [tail]
 
 
 def worker_brief(con, run: dict, packet: dict, setup: dict | None = None) -> str:
