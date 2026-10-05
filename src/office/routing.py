@@ -382,7 +382,8 @@ def route(request: dict) -> dict:
         if not stage:
             return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
 
-        # 6 quota safety (unchanged: not one of the four values in this task's scope).
+        # 6 quota safety: unknown quota is scored conservatively downstream, not
+        # excluded when a known-safe route is also available.
         safe = []; unknown = []; unsafe = []
         for c in stage:
             q = c.get("quota", {}); status = q.get("status", "unknown")
@@ -393,12 +394,7 @@ def route(request: dict) -> dict:
         if safe:
             for c in unsafe:
                 rejected.append({"candidate": candidate_id(c), "stage": 6, "reason": "projected quota crosses reserve while safe alternative exists"})
-            if not request.get("allow_unknown_quota_with_safe_alternative", False):
-                for c in unknown:
-                    rejected.append({"candidate": candidate_id(c), "stage": 6, "reason": "quota unknown while known-safe alternative exists"})
-                stage = safe
-            else:
-                stage = safe + unknown
+            stage = safe + unknown
         elif unknown:
             for c in unsafe:
                 rejected.append({"candidate": candidate_id(c), "stage": 6, "reason": "known quota crosses reserve; only unknown candidates remain"})
@@ -522,6 +518,7 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
     if not rec["slate"]:
         return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected, "slate": []}
     audit = rec["audit"]
+    audit["rejected"] = rejected
     for row in audit["candidates"]:
         row["eligibility"] = eligibility.get(row["route"]) or {"source": "factual gates"}
     by_id = rec["by_id"]
