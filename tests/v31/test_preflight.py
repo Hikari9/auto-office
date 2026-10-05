@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from conftest import GOOD_ADD, approved_run, task_row
+from test_self_review_ledger import write_ledger
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
@@ -25,6 +26,9 @@ def _dispatched(env):
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt, d = _worker(env)
     (wt / "calc.py").write_text(GOOD_ADD)
+    env.git("add", "calc.py", cwd=wt)
+    env.git("-c", "user.email=t@e.test", "-c", "user.name=t", "commit", "-qm", "calc", cwd=wt)  # the ledger names HEAD
+    write_ledger(wt)  # the self-review ledger an executor with a non-empty diff owes
     return wenv, wt, d
 
 
@@ -331,10 +335,10 @@ def test_every_tier_keeps_lenses_json_shape_fix_rule_and_mutation_proof(tier):
     assert "A finding outside SCOPE goes in your report, unfixed" in block
 
 
-def test_inline_tier_has_no_subagent_instruction_and_no_rereview_rounds():
+def test_inline_tier_has_no_subagent_instruction_and_the_shared_round_rules():
     block = _tier_brief("inline")
     assert "subagent" not in block.lower()
-    assert "Re-review" not in block and "rounds" not in block
+    assert "fix-diff re-review" in block and "3-round cap" in block
     assert "one fresh pass per lens yourself" in block
     assert "You may skip a lens that clearly does not\n    apply, with a one-line reason in your report" in block
 
@@ -352,15 +356,15 @@ def test_inline_tier_applies_to_repo_blast_but_not_to_quick_gear():
 def test_single_tier_names_exactly_one_subagent_covering_all_four_lenses():
     block = _tier_brief("single")
     assert "Start exactly one subagent" in block and "all four" in block
-    assert "four parallel subagents" not in block and "at most 3 rounds" not in block
+    assert "four parallel subagents" not in block
     assert block.lower().count("subagent") == 1
-    assert "at most 2 rounds" in block and "skip a lens" not in block
+    assert "3-round cap" in block and "skip a lens" not in block
 
 
 def test_deep_tier_keeps_four_parallel_subagents_and_three_rounds():
     block = _tier_brief("deep")
     assert "Start four parallel subagents" in block
-    assert "each given only the diff and one\n    lens" in block and "at most 3 rounds" in block
+    assert "each given only the diff and one\n    lens" in block and "3-round cap" in block
     assert "exactly one subagent" not in block
 
 
@@ -498,7 +502,7 @@ def test_office_submit_skill_reads_the_tier_and_no_longer_requires_four_subagent
     assert "no subagents" in inline and "Agent" not in inline
     assert "skip a lens that clearly does not apply" in inline and "one-line reason" in inline
     assert "exactly one `Agent` subagent" in single and "all four lenses" in single
-    assert "at most 2 rounds" in single
-    assert "four `Agent` subagents" in deep and "at most 3 rounds" in deep
+    assert "four `Agent` subagents" in deep
+    assert "3-round cap" in step and "fix-diff re-review" in step
     assert "four `Agent` subagents" not in step.replace(deep.split("\n\n")[0], "")
     assert "You cannot lower it" in step
