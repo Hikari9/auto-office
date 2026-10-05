@@ -437,7 +437,7 @@ def preflight(con, run: dict, cwd: Path) -> Result:
                              "AND status IN ('queued','delivered','applied') ORDER BY target_version",
                              (run["id"], task["id"], d["id"])).fetchall()
     for a in amendments:
-        if a["status"] != "queued":
+        if a["status"] == "applied":
             res.lines.append(f"amendment: {a['amendment_id']} applied")
         else:
             fix.append(f"amendment: {a['amendment_id']} is delivered to you but not acknowledged: apply it, then "
