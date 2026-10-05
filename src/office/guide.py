@@ -179,7 +179,7 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     if events:
         from office import db
         with db.transaction(con):
-            state.advance_cursor(con, run["id"], "orchestrator", events[-1]["seq"])
+            state.consume_events(con, run["id"], events)
     res.next = next_action(con, run)
     res.data = {"run_id": run["id"], "phase": run["phase"], "office_version": run["office_version"],
                 "requirements_version": run["requirements_version"], "plan_version": run["plan_version"],
@@ -315,19 +315,25 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
     return f"{who}: usage_limit, {when}; pane tail in {tail}; next: office prompt {d['id']} -- continue"
 
 
-def worker_signals(con, run: dict) -> list[str]:
-    """Stall lines for workers that stopped on something only the orchestrator resolves (a preflight
-    stop, a refused submit). Read from the same unread window `status` shows and then consumes, so
-    each signal is reported by exactly one wait."""
+SIGNAL_LINES = 10
+
+
+def worker_signals(con, run: dict) -> tuple[list[str], int]:
+    """(stall lines, last seq) for workers that stopped on something only the orchestrator resolves (a
+    preflight stop, a refused submit). Every unread signal counts, however many other events are
+    unread before it; the caller advances the signal cursor to `last seq` once it has reported them."""
     import json
-    out = []
-    for e in state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=6):
-        if e["kind"] != state.SIGNAL_KIND:
-            continue
+    out, last = [], 0
+    signals = state.unread_signals(con, run["id"])
+    for e in signals[-SIGNAL_LINES:]:  # the newest; a worker that varies its text cannot flood the orchestrator
         p = json.loads(e["payload_json"] or "{}")
         who = " ".join(x for x in (e["task_id"], e["dispatch_id"]) if x)
         out.append(f"{who} {p.get('source', 'worker')}: {p.get('reason', e['summary'])}; next: {p.get('next', 'office status')}")
-    return out
+    if len(signals) > SIGNAL_LINES:
+        out.insert(0, f"{len(signals) - SIGNAL_LINES} earlier worker signals not shown (office inspect events)")
+    if signals:
+        last = signals[-1]["seq"]
+    return out, last
 
 
 def _needs_orchestrator(con, run: dict) -> bool:
@@ -356,7 +362,8 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
             jobs.reclaim(con, run["id"])
         jobs.kick(con, run["id"])
         amend.confirm_launch_deliveries(con, run)
-        stuck = stalls(con, run, since=started_at) + worker_signals(con, run)
+        signals, signals_seq = worker_signals(con, run)
+        stuck = stalls(con, run, since=started_at) + signals
         changed = _snapshot(con, run) != start
         news = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=1)
         # Something already waiting on the orchestrator ends the wait at once;
@@ -366,6 +373,9 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         if stuck or changed or news or pending or state.is_terminal(state.get_run(con, run["id"])) \
                 or time.time() >= deadline:
             res = status(con, run)
+            if signals:
+                with db.transaction(con):
+                    state.advance_cursor(con, run["id"], state.SIGNAL_CONSUMER, signals_seq)
             if stuck:
                 res.lines[1:1] = [f"stall: {s}" for s in stuck]
                 res.exit_code = 3
@@ -448,4 +458,4 @@ def piggyback(con, run: dict, res: Result) -> None:
         res.notices.extend(f"· {e['summary']}" for e in events)
         from office import db
         with db.transaction(con):
-            state.advance_cursor(con, run["id"], "orchestrator", events[-1]["seq"])
+            state.consume_events(con, run["id"], events)
