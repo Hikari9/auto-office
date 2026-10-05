@@ -186,6 +186,60 @@ def test_executor_brief_carries_self_review_preflight_and_status_line(env):
     assert last.startswith("TASK=<id> COMMIT=<sha> PUSHED=") and "SUBMIT=<accepted Rn | refused: exact reason" in last
 
 
+
+def _tail_order(brief: str) -> tuple[int, int, int]:
+    return (brief.index("SIMPLIFY after targeted checks"), brief.index("SELF-REVIEW before submitting"),
+            brief.index("WHEN DONE run: office preflight"))
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+def test_executor_brief_simplifies_before_self_review_and_preflight(env):
+    _, _, d = _dispatched(env)
+    from office import paths
+    brief = (paths.run_dir(d["run_id"]) / "dispatches" / d["id"] / "brief.md").read_text()
+    s, r, w = _tail_order(brief)
+    assert s < r < w
+    simplify = brief[s:r]
+    assert f"git diff {d['base_commit']}" in simplify
+    for lens in ("(a) reuse", "(b) simplification", "(c) efficiency", "(d) altitude"):
+        assert lens in simplify, lens
+    for rule in ("Behavior-preserving only", "auth, validation, migrations, SQL", "data semantics",
+                 "only if it is inside SCOPE", "outside it goes in your report, unedited",
+                 "tiny mechanical diff", "rerun it after any non-trivial repair", "no other writer"):
+        assert rule in simplify, rule
+    assert "SIMPLIFY" not in brief[w:].split("FINAL REPORT")[0]
+    assert "SIMPLIFY opportunity outside SCOPE" in brief[brief.index("FINAL REPORT"):]
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+def test_fix_round_brief_repeats_simplify_self_review_preflight_tail(env):
+    _, _, d = _dispatched(env)
+    from office import briefs, paths
+    con = env.con()
+    con.execute("INSERT INTO findings (id, run_id, task_id, code, severity, location, summary, state, created_at) "
+                "VALUES ('f1', ?, 'T1', 'F1', 'medium', 'calc.py:1', 'add() drops negatives', 'open', '2026-01-01')",
+                (d["run_id"],))
+    con.commit()
+    data = json.loads((paths.run_dir(d["run_id"]) / "dispatches" / d["id"] / "packet.json").read_text())
+    data["fix_of"] = "R1"
+    run = dict(con.execute("SELECT * FROM runs WHERE id=?", (d["run_id"],)).fetchone())
+    brief = briefs.executor_brief(con, run, data)
+    s, r, w = _tail_order(brief)
+    assert brief.index("FIX ROUND for revision R1") < s < r < w
+
+
+def test_office_submit_skill_simplifies_before_self_review():
+    text = (Path(__file__).resolve().parents[2] / "skills/office-submit/SKILL.md").read_text()
+    order = [text.index(h) for h in ("## 1. Simplify", "## 2. Adversarial self-review", "## 3. Checks",
+                                     "## 5. Preflight", "## 6. Submit", "## 7. Report")]
+    assert order == sorted(order)
+    simplify = text[order[0]:order[1]]
+    for rule in ("Behavior-preserving only", "outside SCOPE goes in the report, unedited", "tiny mechanical diff",
+                 "yourself", "Fix rounds repeat"):
+        assert rule in simplify, rule
+
 # ------------------------------------------------------------------ shell guard
 
 @pytest.mark.parametrize("cmd, want", [

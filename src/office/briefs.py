@@ -209,7 +209,8 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
                 "RULES do not merge, push, deploy, publish, or send anything external. Committed and uncommitted",
                 "edits are both captured at submit. Do not write JSON or receipts for Office."]
     out += ["If an office command prints AMENDMENT <id>: apply it at a safe boundary, then run office ack <id>."]
-    out += self_review_lines(packet.get("base_commit") or "HEAD")
+    base = packet.get("base_commit") or "HEAD"
+    out += simplify_lines(base) + self_review_lines(base)
     out += ["WHEN DONE run: office preflight   (from this worktree; read-only). It prints one verdict:",
             "    ready: run the submit line it prints (with `. <agent.env> &&` when shown: env does not persist",
             "           between shell calls, so source and submit in one command). Then stop; results are delivered.",
@@ -218,7 +219,8 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
             "           until ready, then submit once. Key on its exit code (0 ready, 1 fix, 75 wait, 4 stop).",
             "    stop:  terminal for you. Do not submit, retry, or investigate.",
             "A submit refused as lease-lost, superseded-dispatch, or task-paused is terminal too: never retry it.",
-            "FINAL REPORT in your last message: each self-review finding and what you did with it; each check you "
+            "FINAL REPORT in your last message: any SIMPLIFY opportunity outside SCOPE, unedited; each self-review "
+            "finding and what you did with it; each check you "
             "ran with its pass/fail counts; the mutation you made to prove a new test fails without the fix (and "
             "that it failed); any file outside SCOPE you needed, with the reason. A refused submit is quoted. End "
             "with exactly one status line:",
@@ -228,6 +230,26 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
 
 STATUS_LINE = ("TASK=<id> COMMIT=<sha> PUSHED=<yes|no> CHECKS=<pass|fail + counts> "
                "SUBMIT=<accepted Rn | refused: exact reason | not attempted> NEXT=<what the orchestrator must do>")
+
+
+def simplify_lines(base: str) -> list[str]:
+    """The behavior-preserving refinement pass an executor runs on its own diff after targeted checks
+    pass and before SELF-REVIEW. Rerun on every non-trivial repair; skip empty or tiny mechanical diffs."""
+    return [
+        f"SIMPLIFY after targeted checks pass and before SELF-REVIEW, refine your change: `git diff {base}` plus the",
+        "    helpers it touches. Skip this for an empty or tiny mechanical diff; rerun it after any non-trivial repair.",
+        "    (a) reuse: an existing helper, type, stdlib or platform facility over a parallel reimplementation;",
+        "        extend the module that already owns the concept rather than adding a lookalike",
+        "    (b) simplification: drop needless state, duplication, deep nesting, dead code, redundant branches,",
+        "        and comments that narrate obvious code",
+        "    (c) efficiency: drop clearly repeated computation or IO, needless serial work, large captured scopes;",
+        "        keep it proportional, no speculative optimization",
+        "    (d) altitude: fix the shared owner when sibling callers share the problem, only if it is inside SCOPE",
+        "    Behavior-preserving only: no change to public contracts, interfaces, auth, validation, migrations, SQL,",
+        "    data semantics, requirements, or ownership boundaries. You make these edits yourself (no other writer).",
+        "    Stay inside SCOPE: a higher-level owner outside it goes in your report, unedited. A real defect this",
+        "    exposes is not cleanup: handle it in SELF-REVIEW or report it.",
+    ]
 
 
 def self_review_lines(base: str) -> list[str]:
