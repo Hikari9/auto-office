@@ -16,7 +16,8 @@ INIT_MARKERS=('TODO:', 'example_asset.txt', 'scripts/example.py', 'references/ap
 # 3.1 plan-defect redirects took the hub to 142 lines and 3.2 (plan diagram, task PRs,
 # end state, office land) to 153; the budget is re-set here to that count plus ~10%.
 # 3.2.x run a9afacbf lessons (#267/#268 throughput lanes, #270 auto-takeover pointer): 168 -> 176.
-HUB_LINE_BUDGET = 176
+# Executor self-review, office preflight and the worker status line: 177 -> 182 lines, ~5% headroom.
+HUB_LINE_BUDGET = 190
 # 3.1: each 3.0 spoke carries a three-line banner pointing 3.1 runs at the office CLI;
 # the per-spoke budgets below grew by exactly those lines.
 SKILL_LINE_BUDGETS = {
@@ -44,6 +45,7 @@ SKILL_LINE_BUDGETS = {
     # Budgeted at their actual size so the gate registers rather than ignores them.
     'skills/herdr/SKILL.md': 240,
     'skills/herdr-close-panes/SKILL.md': 115,
+    'skills/office-submit/SKILL.md': 96,
 }
 
 def frontmatter(path):

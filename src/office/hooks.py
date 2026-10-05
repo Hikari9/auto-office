@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -116,6 +117,8 @@ def main(argv: list[str]) -> int:
     if os.environ.get("OFFICE_HOOKS", "").lower() in ("off", "0", "false"):
         return 0
     payload = _read_stdin()
+    if event == "shell.pre":
+        return _shell_guard(harness, payload)
     session = payload.get("session_id") or payload.get("conversationId") or payload.get("sessionId")
     cwd = Path(payload.get("cwd") or os.getcwd())
     primary = _primary_checkout(cwd)
@@ -208,6 +211,73 @@ def _guard_write(harness: str, payload: dict, run: dict, con) -> int:
         sys.stderr.write(reason + "\n")
         return 2
     sys.stderr.write("warning: " + reason + "\n")
+    return 0
+
+
+_SED_I = re.compile(r"(?<![\w./-])sed((?:[ \t]+-[A-Za-z]+)*?)[ \t]+(-[A-Za-z]*i)(?=[ \t])(?![ \t]+(?:''|\"\"))")
+
+
+def _quoted_at(command: str, pos: int) -> bool:
+    """Whether `pos` falls inside a single- or double-quoted string, or at or
+    after an unquoted heredoc operator, whose body is data, not commands."""
+    quote = None
+    i = 0
+    while i < pos:
+        c = command[i]
+        if quote is None and c in "'\"":
+            quote = c
+        elif c == quote:
+            quote = None
+        elif c == "\\" and quote != "'":
+            i += 1
+        elif quote is None and command.startswith("<<", i):
+            return True
+        i += 1
+    return quote is not None
+
+
+def portable_sed(command: str) -> str | None:
+    """`sed -i <script>` rewritten to BSD's `sed -i '' <script>`, or None when
+    nothing changes. BSD sed takes the word after -i as a backup suffix, so the
+    GNU form either errors or, with `-i -e`, edits and leaves a `<file>-e` copy.
+    The script is left byte-identical: translating it to another regex dialect
+    (perl -pi) would change what BRE escapes such as \\( and \\{ mean."""
+    out, last, changed = [], 0, False
+    for m in _SED_I.finditer(command):
+        if _quoted_at(command, m.start()):
+            continue
+        out.append(command[last:m.end()] + " ''")
+        last = m.end()
+        changed = True
+    return "".join(out) + command[last:] if changed else None
+
+
+def _gnu_sed() -> bool:
+    import subprocess
+    try:
+        return subprocess.run(["sed", "--version"], capture_output=True, timeout=2).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _shell_guard(harness: str, payload: dict) -> int:
+    """PreToolUse(Bash): make a GNU-style in-place sed portable on macOS. The
+    rewritten command still goes through the harness's permission flow (no
+    permissionDecision is returned), and anything unexpected fails open."""
+    if harness != "claude" or sys.platform != "darwin":
+        return 0
+    tool_input = payload.get("tool_input") or {}
+    command = tool_input.get("command")
+    if not isinstance(command, str) or "sed" not in command:
+        return 0
+    fixed = portable_sed(command)
+    if fixed is None or _gnu_sed():
+        return 0
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "updatedInput": {**tool_input, "command": fixed},
+        "additionalContext": "Office rewrote `sed -i` to `sed -i ''` (BSD sed on macOS). Check git diff that the edit landed.",
+    }}))
     return 0
 
 

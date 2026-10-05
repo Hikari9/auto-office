@@ -1,0 +1,3 @@
+interface:
+  display_name: "Office Submit"
+  short_description: "Executor self-review, preflight, submit"

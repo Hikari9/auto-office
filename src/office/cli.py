@@ -25,6 +25,7 @@ Auto Office {ver}
   office wait [--timeout S]         block until something needs you (exit 0), a stall (3), or timeout (124)
   office dispatch <task>... [--parallel]
                                     launch tasks (routing, worktrees, leases are automatic)
+  office preflight                  executor: read-only checks before submit (ready|fix|wait|stop)
   office submit                     planner/executor: submit your plan or your work
   office amend <scope> -- "<delta>" change the plan (scope: plan, T2, or T2,T3)
   office ack <amendment-id>         worker: record that you applied a delivered amendment
@@ -161,6 +162,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--review-cli", metavar="ARGV", help="with --review-as: start exactly this reviewer argv in herdr")
     s.add_argument("--review-external", action="store_true",
                    help="with --review-as: you start the reviewer; Office reads its review file")
+    sp.add_parser("preflight", parents=[common])
     s = sp.add_parser("submit", parents=[common], add_help=False)
     s.add_argument("-h", "--help", action="store_true")
     s.add_argument("--plan", help=argparse.SUPPRESS)
@@ -218,6 +220,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--only", dest="only", action="append", help="limit to one harness")
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--migrate-legacy-hooks", action="store_true")
+    s.add_argument("--shell-guard", dest="shell_guard", action="store_true", default=None,
+                   help="Claude: add a Bash hook that rewrites `sed -i` to `sed -i ''` on macOS")
+    s.add_argument("--no-shell-guard", dest="shell_guard", action="store_false", help="remove that hook")
     s = sp.add_parser("uninstall", parents=[common])
     s.add_argument("--purge", action="store_true")
     # Authority and compatibility: discoverable, never in role briefs.
@@ -408,7 +413,8 @@ def _run(args, unknown) -> int:
         return emit(doctor.doctor(fix=args.fix, probe_vision=args.probe_vision), args)
     if cmd == "install":
         from office import install
-        return emit(install.install(only=args.only, dry_run=args.dry_run, migrate_legacy=args.migrate_legacy_hooks), args)
+        return emit(install.install(only=args.only, dry_run=args.dry_run, migrate_legacy=args.migrate_legacy_hooks,
+                                    shell_guard=args.shell_guard), args)
     if cmd == "uninstall":
         from office import install
         return emit(install.uninstall(purge=args.purge), args)
@@ -427,7 +433,7 @@ def _run(args, unknown) -> int:
             return emit(_legacy_result(target), args)
         run = target.run
         res = _dispatch_command(con, run, args, unknown, cwd, target)
-        if cmd not in ("status", "resume"):
+        if cmd not in ("status", "resume", "preflight"):
             from office import guide, state
             guide.piggyback(con, state.get_run(con, run["id"]), res)
         return emit(res, args)
@@ -458,6 +464,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                                  as_model=args.as_model, cli=args.cli, external=args.external,
                                  review_as=args.review_as, review_cli=args.review_cli,
                                  review_external=args.review_external)
+    if cmd == "preflight":
+        from office import preflight
+        return preflight.preflight(con, run, cwd)
     if cmd == "submit":
         from office import submit
         return submit.submit(con, run, cwd=cwd, plan_path=args.plan, redirect=_redirect(args),
