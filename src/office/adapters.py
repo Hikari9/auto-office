@@ -13,6 +13,7 @@ path passes (office.conformance).
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -26,6 +27,8 @@ from office.util import atomic_write_json, sha256_obj
 
 PROFILE_KINDS = ("worker", "reviewer", "vision")
 _VERSION_TTL_SECONDS = 6 * 3600
+_RESOLVED_EXE: dict[tuple[str, str], tuple[str | None, float]] = {}
+_VERSION_MEMO: dict[tuple, tuple[str | None, float]] = {}
 
 
 class AdapterError(RuntimeError):
@@ -64,31 +67,74 @@ def installed(adapter: dict) -> bool:
 def harness_version(adapter: dict) -> str | None:
     """`<harness> --version`, cached briefly so routing does not fork per call."""
     exe = executable(adapter)
-    if not exe or not shutil.which(exe):
+    if not exe:
         return None
+    path_env = os.environ.get("PATH", "")
+    now = time.time()
+
+    cached_res = _RESOLVED_EXE.get((exe, path_env))
+    if cached_res and now - cached_res[1] < _VERSION_TTL_SECONDS:
+        raw_path = cached_res[0]
+    else:
+        raw_path = shutil.which(exe)
+        _RESOLVED_EXE[(exe, path_env)] = (raw_path, now)
+
+    if not raw_path:
+        return None
+
+    try:
+        resolved_path = Path(raw_path).resolve()
+        st = resolved_path.stat()
+        mtime = st.st_mtime_ns
+    except OSError:
+        _RESOLVED_EXE.pop((exe, path_env), None)
+        return None
+
+    cmd_list = (adapter.get("version_fingerprint") or {}).get("command") or [exe, "--version"]
+    cmd_key = tuple(cmd_list)
+    memo_key = (str(resolved_path), mtime, cmd_key)
+
+    cached_entry = _VERSION_MEMO.get(memo_key)
+    if cached_entry and now - cached_entry[1] < _VERSION_TTL_SECONDS:
+        return cached_entry[0]
+
     cache_path = paths.data_home() / "harness-versions.json"
     try:
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         cache = {}
+
     entry = cache.get(exe)
-    now = time.time()
-    if entry and now - entry.get("at", 0) < _VERSION_TTL_SECONDS:
-        return entry.get("version")
-    cmd = (adapter.get("version_fingerprint") or {}).get("command") or [exe, "--version"]
+    if (entry
+            and now - entry.get("at", 0) < _VERSION_TTL_SECONDS
+            and entry.get("mtime_ns") == mtime
+            and entry.get("path") == str(resolved_path)):
+        version = entry.get("version")
+        _VERSION_MEMO[memo_key] = (version, entry.get("at", now))
+        return version
+
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        proc = subprocess.run(cmd_list, capture_output=True, text=True, timeout=20)
         text = (proc.stdout or proc.stderr).strip().splitlines()
         raw = text[0] if text else ""
     except (OSError, subprocess.SubprocessError):
+        _VERSION_MEMO[memo_key] = (None, now)
         return None
+
     match = re.search(r"\d+\.\d+(\.\d+)?", raw)
     version = match.group(0) if match else (raw or None)
-    cache[exe] = {"version": version, "at": now}
+    cache[exe] = {
+        "version": version,
+        "at": now,
+        "mtime_ns": mtime,
+        "path": str(resolved_path),
+    }
     try:
         atomic_write_json(cache_path, cache)
     except OSError:
         pass
+
+    _VERSION_MEMO[memo_key] = (version, now)
     return version
 
 
