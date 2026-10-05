@@ -7,6 +7,11 @@ description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use t
 
 > **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
 > role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
+>
+> **Executor and worker routing (#300) supersedes the cost and preferred-seed stages below** in the `office`
+> runtime: qualifying routes are scored by expected cost to success, speed, quota, learned effectiveness and
+> weighted preference, the planner records a primary and two fallbacks, and dispatch falls back in that order only
+> on fresh evidence. See `../../protocol/routing.md`. Planner and reviewer routing still follows this page.
 
 Route `harness@major × model_id × effort`, not model brand alone.
 
@@ -48,4 +53,4 @@ Use `python3 ../../scripts/office_runtime.py route <request.yaml>` for determini
 
 Treat the route result's `selection_disclosure` as required handoff data. Before any executor, plan-reviewer, or code-reviewer invocation, show the user one concise notice containing role, exact invocation model identifier (or canonical `model_id` fallback), effort, harness/version, and `reason`. Carry that same object into the dispatch envelope/readback. The reason must identify the actual decisive filters or tie-breaks; “best model” is not sufficient.
 
-When the resolved config sets `roles.<role>.preferred_seed`, pass it through in the request as `preferred_seed` (same ordered list of `{model_id, effort, harness?}`). `route` uses it at the advisory-anchor stage: candidates matching an entry pass; if none match, the anchor imposes no restriction. Among passing candidates it then ranks by chain position first (first entry wins if it clears every earlier stage) and cost only as a tie-break within the same rank — so an explicit preference chain overrides `cost_policy`'s money-band elimination for its own entries.
+When the resolved config sets `roles.<role>.preferred_seed`, pass it through in the request as `preferred_seed` (same ordered list of `{model_id, effort, harness?}`). For planner and reviewer roles `route` uses it at the advisory-anchor stage: candidates matching an entry pass; if none match, the anchor imposes no restriction. Among passing candidates it then ranks by chain position first (first entry wins if it clears every earlier stage) and cost only as a tie-break within the same rank. For executor and worker roles (#300) the same chain is weighted preference evidence: it raises a matching route's utility by at most the configured preference weight and never decides the route alone.

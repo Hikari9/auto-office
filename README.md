@@ -326,13 +326,13 @@ flowchart TD
     G --> H{"4 · role floor<br/>benchmark · effort · provenance"}
     H --> I{"5 · task-shape support"}
     I --> J{"6 · protected quota reserve"}
-    J --> K["7 · preferred seed / advisory anchor"]
-    K --> L["8–9 · cost policy + local evidence tie-break"]
-    L --> M["Selected harness/model@effort"]
-    M --> N["Record route, reason, catalog/benchmark snapshot"]
+    J --> K["7 · learned eligibility (executor/worker)<br/>or preferred seed anchor (planner/reviewers)"]
+    K --> L["8 · executor/worker: score cost to success, speed,<br/>quota, learned success, preference → slate of 3<br/>planner/reviewers: cost policy + local tie-break"]
+    L --> M["Primary + fallbacks (planner may reorder with a reason)"]
+    M --> N["Record slate, scores, seed, planner choice, dispatched route"]
 ```
 
-**Figure 3 — Routing and benchmarks.** Cost is deliberately late. A cheap route cannot undercut hard exclusions, derived trust, required capabilities, the role/benchmark floor, task-shape compatibility, or the protected quota reserve.
+**Figure 3 — Routing and benchmarks.** Cost is deliberately late. A cheap route cannot undercut hard exclusions, derived trust, required capabilities, the role/benchmark floor, task-shape compatibility, or the protected quota reserve. For executors and workers (#300), cost is one weighted term, measured as expected cost to a successful task rather than token price, so a cheap route that needs many retries does not win by default.
 
 ### Default role policy examples
 
@@ -355,14 +355,26 @@ These are policy defaults, not promises that a particular route will always be s
 office dispatch T2
 ```
 
-The runtime builds candidates from the pinned catalog and installed adapters, probes quota, applies the role policy, and records the winning route and why it won. Inspect it with:
+At plan submit, the runtime builds candidates from the pinned catalog and installed adapters, applies the role gates, and ranks each task's qualifying executor routes into an Inline Slate in the plan diagram:
 
-```bash
-office inspect route
-office inspect task T2
+```text
+T2  Implement mul                off base
+    ROUTING
+    PRIMARY     claude/claude-sonnet-5-5@high  best success/cost/speed fit
+                + strong local evidence (86% success, n=90)   - quota unknown
+    FALLBACK 1  codex/gpt-6-luna@high          cheaper to success than the primary (0.019 behind)
+                + lowest expected cost to success   - little local evidence (n=7)
+    FALLBACK 2  agy/gemini-3.8-flash@medium    faster than the primary (0.040 behind)
+                + fastest expected completion   - quota unknown
 ```
 
-A typical reason is intentionally human-readable—for example, that a route cleared trust/capability/floor/task-shape gates, matched a preferred seed, and stayed inside the provider quota reserve.
+`office dispatch T2` probes quota again and runs the primary, or the first fallback that still qualifies, saying why. When none does, it stops and `office dispatch T2 --reroute` routes from current evidence. The full evidence matrix and the audit record:
+
+```bash
+office inspect route T2          # slate, scores, seed, fallbacks taken
+office inspect route T2 --json   # the complete audit record
+office inspect learner           # what the router has learned from past runs
+```
 
 ### Example: force a producer and reviewer
 
@@ -394,7 +406,7 @@ prompt / CLI > repo config > user config > plugin defaults
 
 The repo layer lives at `.auto-office/config.yaml`; user defaults live at `~/.config/auto-office/config.yaml`.
 
-The shipped cost policies are `money_saver`, `quota_saver`, and `balanced`. The default is `balanced`, with a protected provider quota reserve. Cost only influences candidates that have already cleared the required gates.
+The shipped cost policies are `money_saver`, `quota_saver`, and `balanced`. The default is `balanced`, with a protected provider quota reserve. Cost only influences candidates that have already cleared the required gates. For executors and workers each policy is a weight set under `routing.adaptive.weights`, and `routing.adaptive.budget_ceiling_usd` is the one cost-based cut-off; `cost_policy.balanced_money_band_percent` now applies only to planner and reviewer routing.
 
 ---
 
