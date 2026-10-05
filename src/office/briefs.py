@@ -20,7 +20,7 @@ LEDGER_FILE = "OFFICE_SELF_REVIEW.md"
 LEDGER_MAX_CHARS = 20_000
 LEDGER_LENSES = ("security", "edge-cases", "platform", "test-strength")
 LEDGER_SEVERITIES = ("high", "medium", "low")
-LEDGER_DISPOSITIONS = ("fixed", "out-of-scope", "rejected", "contract-conflict", "open")
+LEDGER_DISPOSITIONS = ("fixed", "out-of-scope", "dismissed", "contract-conflict", "open")
 MAX_REVIEW_ROUNDS = 3
 
 
@@ -342,12 +342,14 @@ def ledger_lines() -> list[str]:
         f"        ROUND <1-{MAX_REVIEW_ROUNDS}>",
         f"        LENS <{lenses}> reviewed        (one line per lens)",
         "        LENS <lens> skipped <reason>      (inline tier only; a skipped lens needs a reason)",
-        f"        FINDING <{sev}> <file:line> | <summary> | <disposition>",
-        "    Dispositions: `fixed <test path>` (a medium or high fix names the test that proves it; a low fix may omit it),",
-        "    `out-of-scope`, `rejected <reason>`, `contract-conflict accept=<n>` (the fix would break ACCEPT line n; Office",
-        "    stops you with that ACCEPT line quoted), `open`. Record severity as found: a fix never lowers it. Low findings",
-        "    are fixed but do not trigger a re-review. A medium or high fix that changes behavior gets one fix-diff re-review",
-        "    (the same lenses over the fix diff, as the next ROUND, with the findings kept).",
+        f"        FINDING <{sev}> <{lenses}> <file:line> | <summary> | <disposition>        (the lens that found it)",
+        "    Dispositions: `fixed <test path> mutation=failed` (a medium or high fix names the test file that proves it and",
+        "    mutation=failed, meaning you reverted the fix and that test failed; a low fix may omit both), `out-of-scope` (a",
+        "    medium or high finding only when its file is outside SCOPE), `dismissed <reason>`, `contract-conflict accept=<n>`",
+        "    (the fix would break ACCEPT line n; Office stops you with that ACCEPT line quoted), `open`.",
+        "    Record severity as found: a fix never lowers it. Low findings are fixed but do not trigger a re-review. A medium",
+        "    or high fix that changes behavior gets one fix-diff re-review (the same lenses over the fix diff, as the next",
+        "    ROUND, with the findings kept).",
         f"    The {MAX_REVIEW_ROUNDS}-round cap: a medium or high finding still open in round {MAX_REVIEW_ROUNDS} stops you.",
         "    Preflight reports a missing, stale, or malformed ledger, a lens with no line, and any open finding as a fix;",
         "    it never skips a bad line.",

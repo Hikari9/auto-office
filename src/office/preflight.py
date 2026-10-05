@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from office import briefs, discovery, paths, planfile, state, submit
 from office.result import Result
@@ -42,9 +43,18 @@ def _packet(run: dict, d: dict) -> dict:
         return {}
 
 
-_SHA = re.compile(r"[0-9a-fA-F]{7,40}")
+_SHA = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")  # the whole sha: a prefix cannot vouch for HEAD
 _ACCEPT_REF = re.compile(r"accept=([1-9][0-9]{0,5})")
+_LOCATION = re.compile(r"(.+):[0-9]+(?:-[0-9]+)?")
+_MUTATION = "mutation=failed"
 _BLOCKERS = ("high", "medium")
+_TEST_DIRS = ("test", "tests", "__tests__", "spec", "specs", "e2e")
+_TEST_DIR_SUFFIX = re.compile(r"[._-]tests?$")  # Calc.Tests/
+_TEST_NAME = re.compile(r"(^tests?\.|^test[_-]|[_-]tests?\.|\.tests?\.|[_.-]spec\.|\.cy\.)")
+_TEST_STEM = re.compile(r"[a-z0-9]Tests?\.")  # CalcTests.cs, CalcTest.java
+_NOT_TESTS = ("__init__.py", "conftest.py")
+_NOT_CODE = (".md", ".markdown", ".txt", ".rst", ".json", ".yml", ".yaml", ".toml", ".lock", ".csv", ".snap", ".bin", ".xml",
+             ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".pdf", ".html", ".log", ".ini", ".cfg", ".pyc", ".jsonl", ".tsv", ".sql", ".golden")
 
 
 def _one_line(text: str, limit: int = 160) -> str:
@@ -54,20 +64,29 @@ def _one_line(text: str, limit: int = 160) -> str:
 
 
 def _parse_disposition(raw: str) -> tuple[dict | None, str]:
-    """(disposition, "") or (None, why it is malformed). `fixed` takes an optional test path,
-    `rejected` a reason, `contract-conflict` the ACCEPT line it would break; the rest take nothing."""
+    """(disposition, "") or (None, why it is malformed). `fixed` takes an optional test path, then
+    `mutation=failed` (the test failed with the fix reverted), `dismissed` a reason, `contract-conflict`
+    the ACCEPT line it would break; the rest take nothing."""
     kind, _, arg = raw.strip().partition(" ")
     arg = arg.strip()
     if kind not in briefs.LEDGER_DISPOSITIONS:
         return None, f"disposition must be one of {', '.join(briefs.LEDGER_DISPOSITIONS)}"
-    if kind == "fixed" and len(arg.split()) > 1:
-        return None, "`fixed` takes one test path"
+    if kind == "fixed":
+        words = arg.split()
+        if len(words) > 2:
+            return None, f"`fixed` takes `<test path> {_MUTATION}`"
+        if words and words[0].startswith("mutation="):
+            return None, f"`fixed` names the test path before {_MUTATION}"
+        if len(words) == 2 and words[1] != _MUTATION:
+            return None, f"the mutation result must be `{_MUTATION}`: revert the fix, the test must fail, restore it"
     if kind in ("open", "out-of-scope") and arg:
         return None, f"`{kind}` takes no argument"
-    if kind == "rejected" and not arg:
-        return None, "`rejected` needs a reason"
+    if kind == "dismissed" and not arg:
+        return None, "`dismissed` needs a reason"
     if kind == "contract-conflict" and not _ACCEPT_REF.fullmatch(arg):
         return None, "`contract-conflict` needs accept=<n>, the ACCEPT line it would break"
+    if kind == "fixed":
+        arg = " ".join(arg.split())  # one space between the words, as the checks read them
     return {"kind": kind, "arg": arg}, ""
 
 
@@ -91,7 +110,7 @@ def parse_ledger(text: str) -> tuple[dict, list[str]]:
             if led["commit"] is not None:
                 bad("second COMMIT line")
             elif not _SHA.fullmatch(rest):
-                bad("COMMIT needs the sha of HEAD (7-40 hex digits)")
+                bad("COMMIT needs the full sha of HEAD (40 hex digits)")
             else:
                 led["commit"] = rest.lower()
         elif word == "ROUND":
@@ -117,22 +136,25 @@ def parse_ledger(text: str) -> tuple[dict, list[str]]:
         elif word == "FINDING":
             left, sep, disp_raw = rest.rpartition(" | ")
             head, sep2, summary = left.partition(" | ")
-            sev, _, location = head.strip().partition(" ")
+            sev, _, tail = head.strip().partition(" ")
+            lens, _, location = tail.strip().partition(" ")
             location = location.strip()
             disp, why = _parse_disposition(disp_raw) if sep and sep2 else (None, "")
             if not (sep and sep2):
-                bad("FINDING needs `<severity> <file:line> | <summary> | <disposition>`")
+                bad("FINDING needs `<severity> <lens> <file:line> | <summary> | <disposition>`")
             elif sev not in briefs.LEDGER_SEVERITIES:
                 bad(f"severity must be one of {', '.join(briefs.LEDGER_SEVERITIES)}")
-            elif not location or " " in location:
+            elif lens not in briefs.LEDGER_LENSES:
+                bad(f"the finding's lens must be one of {', '.join(briefs.LEDGER_LENSES)}")
+            elif not _LOCATION.fullmatch(location) or " " in location:
                 bad("location must be one word, file:line")
             elif not summary.strip():
                 bad("FINDING needs a summary")
             elif disp is None:
                 bad(why)
             else:
-                led["findings"].append({"severity": sev, "location": location, "summary": summary.strip(),
-                                        "line": n, **disp})
+                led["findings"].append({"severity": sev, "lens": lens, "location": location,
+                                        "summary": summary.strip(), "line": n, **disp})
         else:
             bad("unknown line (expected COMMIT, ROUND, LENS or FINDING)")
     return led, errors
@@ -145,20 +167,88 @@ def _test_file_exists(wt: Path, rel: str) -> bool:
     try:
         target = (wt / rel).resolve()
         target.relative_to(wt.resolve())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):  # RuntimeError: a symlink loop, before Python 3.13
         return False
     return target.is_file()
 
 
-def check_ledger(text: str, head: str, accept: list[str], wt: Path, tier: str = "deep") -> tuple[list[str], list[str]]:
+def _is_test_path(rel: str) -> bool:
+    """A file that can hold a test: named like one or under a test directory, and not a doc, data or
+    package-marker file. A Rust source file counts only through a `::tests::<name>` id (inline tests)."""
+    file, _, node = rel.replace("\\", "/").partition("::")
+    path = PurePosixPath(file)
+    if path.suffix.lower() in _NOT_CODE or path.name in _NOT_TESTS:
+        return False
+    if path.suffix == ".rs" and node.split("::")[0] in ("test", "tests"):
+        return True
+    return bool(_TEST_NAME.search(path.name.lower()) or _TEST_STEM.search(path.name)
+                or any(d.lower() in _TEST_DIRS or _TEST_DIR_SUFFIX.search(d.lower()) for d in path.parent.parts))
+
+
+def _finding_file(wt: Path, location: str) -> str | None:
+    """The worktree-relative file a `file:line` location names; None when it lies outside the worktree."""
+    file = _LOCATION.fullmatch(location).group(1)
+    if os.path.isabs(file):
+        try:
+            file = str(Path(file).resolve().relative_to(wt.resolve()))
+        except (OSError, ValueError, RuntimeError):
+            return None
+    file = posixpath.normpath(file.replace("\\", "/"))
+    return None if file == ".." or file.startswith("../") else file
+
+
+def _names_a_test(wt: Path, rel: str) -> bool:
+    """The name looks like a test's and so does what it resolves to (a test-named symlink to calc.py is
+    not one), and a `file::name` id names something the file contains."""
+    file, sep, node = rel.partition("::")
+    try:
+        target = (wt / file).resolve().relative_to(wt.resolve())
+        if not (_is_test_path(rel) and _is_test_path(target.as_posix() + sep + node)):
+            return False
+        if not sep:
+            return True
+        name = node.split("::")[-1].split("[")[0]
+        return bool(name) and name in (wt / target).read_text(encoding="utf-8", errors="replace")[:2_000_000]
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def _committed(wt: Path, rel: str) -> bool:
+    """HEAD holds the file: a staged or untracked copy is not committed, and a name with glob characters
+    is read literally (ls-files would treat `test_a[1].py` as a pattern)."""
+    return bool(paths.git(wt, "rev-parse", "--verify", "-q", f"HEAD:{posixpath.normpath(rel.split('::', 1)[0])}", check=False).strip())
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """One file under two names: true on a case-insensitive checkout, false for a distinct file on a case-sensitive one."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _in_scope(wt: Path, rel: str, scope: list[str]) -> bool:
+    """On a case-insensitive checkout `CALC.PY` opens the tracked, in-scope `calc.py`: judge the name git
+    tracks. On a case-sensitive one it is a different file, and the name as written decides."""
+    if planfile.path_in_scope(rel, scope):
+        return True
+    if not (wt / rel).exists() or paths.git(wt, "ls-files", "-z", "--", f":(literal){rel}", check=False):
+        return False  # no such file, or git tracks exactly this name: it is not another casing of one
+    real = [f for f in paths.git(wt, "ls-files", "-z", check=False).split("\0") if f.lower() == rel.lower()]
+    return any(planfile.path_in_scope(f, scope) and _same_file(wt / rel, wt / f) for f in real)
+
+
+def check_ledger(text: str, head: str, accept: list[str], scope: list[str], wt: Path,
+                 tier: str = "deep") -> tuple[list[str], list[str]]:
     """(stop, fix) lines for a ledger's text. Every line of `fix` names its repair. Only the inline
-    tier may skip a lens (the brief's other tiers cover all four)."""
+    tier may skip a lens (the brief's other tiers cover all four). `head` is the full sha, `scope` the
+    task's SCOPE: a medium or high finding is out-of-scope only when its file is outside it."""
     led, errors = parse_ledger(text)
     stop: list[str] = []
     fix = [f"ledger {e}" for e in errors]
     if led["commit"] is None:
         fix.append("ledger: no COMMIT line; name HEAD " + head[:12])
-    elif not head.startswith(led["commit"]):
+    elif led["commit"] != head.lower():
         fix.append(f"ledger: names commit {led['commit'][:12]} but HEAD is {head[:12]}; the review is stale: re-review "
                    "what changed, then update COMMIT")
     if led["round"] is None:
@@ -183,14 +273,28 @@ def check_ledger(text: str, head: str, accept: list[str], wt: Path, tier: str = 
             stop.append(f"self-review: round {briefs.MAX_REVIEW_ROUNDS} ended with a finding still open ({what}); "
                         "the round cap is spent: report it")
         elif f["kind"] == "open":
-            fix.append(f"ledger {what} is open: fix it and mark it `fixed <test path>`, or mark it "
-                       "`rejected <reason>` or `out-of-scope`")
+            fix.append(f"ledger {what} is open: fix it and mark it `fixed <test path> {_MUTATION}`, or mark it "
+                       "`dismissed <reason>` or `out-of-scope`")
+        elif f["kind"] == "out-of-scope" and f["severity"] in _BLOCKERS:
+            file = _finding_file(wt, f["location"])
+            if file is not None and _in_scope(wt, file, scope):
+                fix.append(f"ledger {what} is marked out-of-scope, but {_one_line(file, 80)} is inside SCOPE: fix it and "
+                           f"mark it `fixed <test path> {_MUTATION}`, or `dismissed <reason>`")
         elif f["kind"] == "fixed" and f["severity"] in _BLOCKERS:
-            if not f["arg"]:
+            test, _, proof = f["arg"].partition(" ")
+            if not test:
                 fix.append(f"ledger {what} is marked fixed without a test path: write the test, prove it fails "
-                           "without the fix, then `fixed <test path>`")
-            elif not _test_file_exists(wt, f["arg"]):
-                fix.append(f"ledger {what} names test {_one_line(f['arg'], 80)}, which is not a file in this worktree")
+                           f"without the fix, then `fixed <test path> {_MUTATION}`")
+            elif not _test_file_exists(wt, test):
+                fix.append(f"ledger {what} names test {_one_line(test, 80)}, which is not a file in this worktree")
+            elif not _committed(wt, test):
+                fix.append(f"ledger {what} names test {_one_line(test, 80)}, which HEAD does not contain: commit it")
+            elif not _names_a_test(wt, test):
+                fix.append(f"ledger {what} names {_one_line(test, 80)}, which is not a test file: name the test that "
+                           "proves the fix")
+            elif proof != _MUTATION:
+                fix.append(f"ledger {what} has no mutation proof: revert the fix, run {_one_line(test, 80)}, confirm it "
+                           f"fails, restore the fix, then `fixed {_one_line(test, 80)} {_MUTATION}`")
     return stop, fix
 
 
@@ -227,7 +331,7 @@ def ledger_verdict(wt: Path, task: dict, changed: list[str], head: str, tier: st
     if len(text) > briefs.LEDGER_MAX_CHARS:
         return [], uncommitted + [f"ledger: {name} is over {briefs.LEDGER_MAX_CHARS} characters; keep one short line "
                                   "per finding"]
-    stop, fix = check_ledger(text, head, task["accept"] or [], wt, tier)
+    stop, fix = check_ledger(text, head, task["accept"] or [], task["scope"] or [], wt, tier)
     return stop, uncommitted + fix
 
 

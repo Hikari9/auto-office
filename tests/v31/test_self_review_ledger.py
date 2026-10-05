@@ -146,11 +146,11 @@ def test_the_ledger_alone_is_not_a_change(tmp_path):
 
 def test_all_dispositions_resolved_is_ready(repo):
     findings = [
-        "FINDING high calc.py:3 | add overflows | fixed tests/test_calc.py",
-        "FINDING medium calc.py:4 | add drops negatives | fixed tests/test_calc.py",
-        "FINDING low calc.py:5 | naming | fixed",
-        "FINDING medium README.md:1 | doc drift | out-of-scope",
-        "FINDING low calc.py:6 | false positive | rejected the call never happens",
+        "FINDING high security calc.py:3 | add overflows | fixed tests/test_calc.py mutation=failed",
+        "FINDING medium security calc.py:4 | add drops negatives | fixed tests/test_calc.py mutation=failed",
+        "FINDING low security calc.py:5 | naming | fixed",
+        "FINDING medium security README.md:1 | doc drift | out-of-scope",
+        "FINDING low security calc.py:6 | false positive | dismissed the call never happens",
     ]
     write_ledger(repo, ledger_text(_git(repo, "rev-parse", "HEAD"), findings=findings, skip={"platform": "pure python"}))
     assert verdict(repo, tier="inline") == ([], [])
@@ -179,11 +179,38 @@ def test_ledger_naming_a_stale_commit_is_a_fix(repo):
     assert f"names commit {stale[:12]} but HEAD is {head[:12]}" in fix[0] and "stale" in fix[0], fix
 
 
-@pytest.mark.parametrize("fmt", ["short", "upper"])
-def test_commit_may_be_an_abbreviation_in_either_case(repo, fmt):
-    head = _git(repo, "rev-parse", "HEAD")
-    write_ledger(repo, ledger_text(head[:7] if fmt == "short" else head.upper()))
+def test_commit_in_upper_case_is_the_same_sha(repo):
+    write_ledger(repo, ledger_text(_git(repo, "rev-parse", "HEAD").upper()))
     assert verdict(repo) == ([], [])
+
+
+@pytest.mark.parametrize("length", [7, 12, 39])
+def test_a_commit_prefix_of_head_is_malformed_not_current(repo, length):
+    head = _git(repo, "rev-parse", "HEAD")
+    write_ledger(repo, ledger_text(head[:length]))
+    stop, fix = verdict(repo)
+    assert stop == [], stop
+    assert any(f.startswith("ledger line 1:") and "COMMIT needs the full sha of HEAD" in f for f in fix), fix
+    assert any("no COMMIT line" in f for f in fix), "a prefix must not count as naming HEAD"
+
+
+@pytest.mark.parametrize("length", [41, 63, 65])
+def test_a_commit_that_is_no_sha_length_is_malformed(repo, length):
+    write_ledger(repo, ledger_text("a" * length))
+    stop, fix = verdict(repo)
+    assert any(f.startswith("ledger line 1:") and "COMMIT needs the full sha of HEAD" in f for f in fix), fix
+
+
+def test_a_sha256_commit_is_read_and_compared_in_full(repo):
+    from office import preflight
+    head = "ab" * 32
+    ok = ledger_text(head)
+    assert preflight.parse_ledger(ok)[1] == []
+    assert preflight.check_ledger(ok, head, [], ["calc.py"], repo) == ([], [])
+    stop, fix = preflight.check_ledger(ok, head[:-1] + "c", [], ["calc.py"], repo)
+    assert stop == [] and len(fix) == 1 and "but HEAD is" in fix[0], fix
+    stop, fix = preflight.check_ledger(ledger_text(head[:40]), head, [], ["calc.py"], repo)
+    assert stop == [] and len(fix) == 1 and "but HEAD is" in fix[0], "a 40-hex prefix of a sha256 head is stale, not current"
 
 
 def test_a_wrong_sha_that_looks_valid_is_stale(repo):
@@ -211,14 +238,15 @@ def test_a_skipped_lens_needs_its_reason(repo):
 @pytest.mark.parametrize("severity", ["high", "medium", "low"])
 def test_an_open_finding_is_a_fix_naming_it(repo, severity):
     head = _git(repo, "rev-parse", "HEAD")
-    fix = fixes(repo, ledger_text(head, findings=[f"FINDING {severity} calc.py:9 | add skips zero | open"]))
+    fix = fixes(repo, ledger_text(head, findings=[f"FINDING {severity} security calc.py:9 | add skips zero | open"]))
     assert len(fix) == 1 and f"{severity} calc.py:9 add skips zero is open" in fix[0], fix
+    assert "`fixed <test path> mutation=failed`" in fix[0] and "`dismissed <reason>`" in fix[0], fix
 
 
 def test_a_medium_fixed_without_a_test_path_is_a_fix(repo):
     head = _git(repo, "rev-parse", "HEAD")
     for sev in ("medium", "high"):
-        fix = fixes(repo, ledger_text(head, findings=[f"FINDING {sev} calc.py:9 | add skips zero | fixed"]))
+        fix = fixes(repo, ledger_text(head, findings=[f"FINDING {sev} security calc.py:9 | add skips zero | fixed"]))
         assert len(fix) == 1 and "without a test path" in fix[0] and "calc.py:9" in fix[0], fix
 
 
@@ -226,20 +254,214 @@ def test_a_medium_fixed_without_a_test_path_is_a_fix(repo):
 def test_a_fixed_medium_must_name_a_real_test_file_inside_the_worktree(repo, path, tmp_path):
     (tmp_path / "outside.py").write_text("x\n")
     head = _git(repo, "rev-parse", "HEAD")
-    fix = fixes(repo, ledger_text(head, findings=[f"FINDING medium calc.py:9 | add skips zero | fixed {path}"]))
+    fix = fixes(repo, ledger_text(head, findings=[f"FINDING medium security calc.py:9 | add skips zero | fixed {path}"]))
     assert len(fix) == 1 and "is not a file in this worktree" in fix[0], fix
 
 
 def test_a_low_fix_may_omit_its_test(repo):
     head = _git(repo, "rev-parse", "HEAD")
-    assert fixes(repo, ledger_text(head, findings=["FINDING low calc.py:9 | nit | fixed"])) == []
+    assert fixes(repo, ledger_text(head, findings=["FINDING low security calc.py:9 | nit | fixed"])) == []
+
+
+def test_a_fixed_medium_or_high_needs_the_mutation_result(repo):
+    head = _git(repo, "rev-parse", "HEAD")
+    for sev in ("medium", "high"):
+        fix = fixes(repo, ledger_text(head, findings=[f"FINDING {sev} security calc.py:9 | add skips zero | fixed tests/test_calc.py"]))
+        assert len(fix) == 1 and "no mutation proof" in fix[0] and "mutation=failed" in fix[0] and "calc.py:9" in fix[0], fix
+    ok = ledger_text(head, findings=["FINDING high security calc.py:9 | add skips zero | fixed tests/test_calc.py mutation=failed"])
+    assert fixes(repo, ok) == []
+
+
+@pytest.mark.parametrize("gap", ["  ", "\t", " \t ", "   "])
+def test_extra_whitespace_between_the_test_and_the_mutation_result_is_the_same_proof(repo, gap):
+    head = _git(repo, "rev-parse", "HEAD")
+    line = f"FINDING high security calc.py:9 | add skips zero | fixed tests/test_calc.py{gap}mutation=failed"
+    assert fixes(repo, ledger_text(head, findings=[line])) == []
+
+
+def test_a_fixed_medium_or_high_test_must_be_tracked_by_git(repo):
+    (repo / "tests" / "test_new.py").write_text("def test_n():\n    pass\n")  # out of nothing: untracked
+    head = _git(repo, "rev-parse", "HEAD")
+    fix = fixes(repo, ledger_text(head, findings=["FINDING high security calc.py:9 | x | fixed tests/test_new.py mutation=failed"]))
+    assert any("HEAD does not contain" in f and "test_new.py" in f for f in fix), fix
+
+
+def test_a_staged_but_uncommitted_test_is_not_committed(repo):
+    (repo / "tests" / "test_new.py").write_text("def test_n():\n    pass\n")
+    _git(repo, "add", "tests/test_new.py")
+    head = _git(repo, "rev-parse", "HEAD")
+    fix = fixes(repo, ledger_text(head, findings=["FINDING high security calc.py:9 | x | fixed tests/test_new.py mutation=failed"]))
+    assert any("HEAD does not contain" in f for f in fix), fix
+
+
+def test_a_glob_named_untracked_file_is_not_the_tracked_file_it_matches(repo):
+    (repo / "tests" / "test_a1.py").write_text("def test_a():\n    pass\n")
+    commit_all(repo, "a1")
+    (repo / "tests" / "test_a[1].py").write_text("def test_a():\n    pass\n")
+    head = _git(repo, "rev-parse", "HEAD")
+    fix = fixes(repo, ledger_text(head, findings=["FINDING high security calc.py:9 | x | fixed tests/test_a[1].py mutation=failed"]))
+    assert any("HEAD does not contain" in f for f in fix), fix
+
+
+def test_a_symlink_loop_as_the_test_is_a_fix_not_a_crash(repo, monkeypatch):
+    """Path.resolve() raises RuntimeError on a loop before Python 3.13; force it on every version."""
+    from office import preflight
+    os.symlink("test_loop.py", repo / "tests" / "test_loop.py")
+    commit_all(repo, "loop")
+
+    def boom(self, *a, **k):
+        raise RuntimeError("Symlink loop")
+
+    monkeypatch.setattr(Path, "resolve", boom)
+    assert preflight._test_file_exists(repo, "tests/test_loop.py") is False
+    assert preflight._names_a_test(repo, "tests/test_loop.py") is False
+    assert preflight._finding_file(repo, str(repo / "tests" / "test_loop.py") + ":3") is None
+
+
+def test_a_node_id_must_name_something_in_the_file(repo):
+    (repo / "tests" / "test_x.py").write_text("def test_real():\n    pass\n")
+    commit_all(repo, "x")
+    head = _git(repo, "rev-parse", "HEAD")
+    good = "FINDING high security calc.py:9 | x | fixed tests/test_x.py::test_real mutation=failed"
+    param = "FINDING high security calc.py:9 | x | fixed tests/test_x.py::test_real[a-b] mutation=failed"
+    nope = "FINDING high security calc.py:9 | x | fixed tests/test_x.py::test_missing mutation=failed"
+    assert fixes(repo, ledger_text(head, findings=[good, param])) == []
+    fix = fixes(repo, ledger_text(head, findings=[nope]))
+    assert len(fix) == 1 and "not a test file" in fix[0], fix
+
+
+def test_a_path_with_dot_segments_is_the_same_committed_file(repo):
+    head = _git(repo, "rev-parse", "HEAD")
+    line = "FINDING high security calc.py:9 | x | fixed tests/../tests/test_calc.py mutation=failed"
+    assert fixes(repo, ledger_text(head, findings=[line])) == []
+
+
+def test_a_test_named_link_to_a_non_test_file_is_not_a_test(repo):
+    os.symlink("../calc.py", repo / "tests" / "test_link.py")
+    commit_all(repo, "link")
+    head = _git(repo, "rev-parse", "HEAD")
+    fix = fixes(repo, ledger_text(head, findings=["FINDING high security calc.py:9 | x | fixed tests/test_link.py mutation=failed"]))
+    assert len(fix) == 1 and "not a test file" in fix[0], fix
+
+
+@pytest.mark.parametrize("path", ["README.md", "calc.py", "tests/notes.md", "tests/data.json", "docs/test_plan.md"])
+def test_a_fixed_medium_or_high_must_name_a_test_file_not_any_file(repo, path):
+    (repo / "docs").mkdir(exist_ok=True)
+    (repo / "tests" / "notes.md").write_text("n\n")
+    (repo / "tests" / "data.json").write_text("{}\n")
+    (repo / "docs" / "test_plan.md").write_text("p\n")
+    commit_all(repo, "files")
+    head = _git(repo, "rev-parse", "HEAD")
+    for sev in ("medium", "high"):
+        fix = fixes(repo, ledger_text(head, findings=[f"FINDING {sev} security calc.py:9 | add skips zero | fixed {path} mutation=failed"]))
+        assert len(fix) == 1 and "not a test file" in fix[0] and path in fix[0], fix
+
+
+def test_a_low_fix_needs_neither_test_nor_mutation_but_a_given_mutation_must_be_well_formed(repo):
+    head = _git(repo, "rev-parse", "HEAD")
+    assert fixes(repo, ledger_text(head, findings=["FINDING low security calc.py:9 | nit | fixed README.md"])) == []
+    fix = fixes(repo, ledger_text(head, findings=["FINDING low security calc.py:9 | nit | fixed tests/test_calc.py mutation=passed"]))
+    assert len(fix) == 1 and fix[0].startswith("ledger line 7:") and "mutation=failed" in fix[0], fix
+
+
+@pytest.mark.parametrize("name, ok", [
+    ("tests/test_calc.py", True), ("test_calc.py", True), ("tests/test_calc.py::test_x", True), ("pkg/calc_test.go", True),
+    ("src/calc.test.ts", True), ("web/calc.spec.js", True), ("__tests__/calc.js", True), ("spec/calc_spec.rb", True),
+    ("tests/helpers/util.py", True), ("test.py", True), ("src/calc-test.js", True), ("src/test-calc.js", True),
+    ("lib/calc_spec.rb", True), ("web/calc-spec.ts", True), ("Calc.Tests/CalcTests.cs", True), ("Calc.Tests/Helpers.cs", True), ("calc-tests/util.go", True), ("src/CalcTest.java", True),
+    ("cypress/e2e/calc.cy.ts", True), ("e2e/calc.ts", True), ("src/calc.rs::tests::adds", True), ("src/calc.tests.ts", True),
+    ("README.md", False), ("calc.py", False), ("tests/NOTES.md", False), ("tests/data.json", False), ("docs/test_plan.md", False),
+    ("tests/__init__.py", False), ("tests/conftest.py", False), ("tests/a.svg", False), ("tests/a.jpeg", False),
+    ("tests/report.html", False), ("src/calc.rs", False), ("src/calc.rs::adds", False), ("src/Contest.java", False),
+    ("tests/data.csv", False), ("tests/data.jsonl", False), ("tests/q.sql", False), ("tests/fixtures/x.bin", False), ("tests/__snapshots__/a.snap", False), ("src/spec.py", False),
+    ("src/contest.py", False), ("latest/calc.py", False), ("tests", False), ("", False),
+])
+def test_which_paths_count_as_a_test_file(name, ok):
+    from office import preflight
+    assert preflight._is_test_path(name) is ok
+
+
+@pytest.mark.parametrize("lens", LENSES)
+def test_every_lens_may_name_a_finding(repo, lens):
+    head = _git(repo, "rev-parse", "HEAD")
+    assert fixes(repo, ledger_text(head, findings=[f"FINDING low {lens} calc.py:9 | nit | fixed"])) == []
+
+
+@pytest.mark.parametrize("sev", ["high", "medium"])
+@pytest.mark.parametrize("location", ["calc.py:3", "./calc.py:3", "tests/../calc.py:3", "tests/test_calc.py:2",
+                                      "calc.py:3-9", "@ABS@/calc.py:3"])
+def test_a_blocker_marked_out_of_scope_must_be_outside_scope(repo, sev, location):
+    head = _git(repo, "rev-parse", "HEAD")
+    location = location.replace("@ABS@", str(repo.resolve()))
+    fix = fixes(repo, ledger_text(head, findings=[f"FINDING {sev} security {location} | add skips zero | out-of-scope"]))
+    assert len(fix) == 1 and "marked out-of-scope, but" in fix[0] and "is inside SCOPE" in fix[0], fix
+    assert "dismissed <reason>" in fix[0] and "mutation=failed" in fix[0], fix
+
+
+def _case_insensitive(wt: Path) -> bool:
+    return (wt / "CALC.PY").exists()
+
+
+@pytest.mark.parametrize("sev", ["high", "medium"])
+def test_on_a_case_insensitive_checkout_another_casing_of_an_in_scope_file_is_in_scope(repo, sev):
+    if not _case_insensitive(repo):
+        pytest.skip("case-sensitive filesystem")
+    head = _git(repo, "rev-parse", "HEAD")
+    fix = fixes(repo, ledger_text(head, findings=[f"FINDING {sev} security CALC.PY:3 | x | out-of-scope"]))
+    assert len(fix) == 1 and "is inside SCOPE" in fix[0], fix
+
+
+def test_in_scope_fallback_judges_the_name_git_tracks(repo, monkeypatch):
+    """Platform independent: the filesystem and git answers are forced."""
+    from office import preflight
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    monkeypatch.setattr(preflight.os.path, "samefile", lambda a, b: True)
+    tracked = {"calc.py": "calc.py\0README.md\0", ":(literal)Calc.PY": ""}
+
+    def fake(wt, *args, **kw):
+        return tracked.get(args[-1], "") if "--" in args else tracked["calc.py"]
+
+    monkeypatch.setattr(preflight.paths, "git", fake)
+    assert preflight._in_scope(repo, "Calc.PY", ["calc.py"]) is True      # another casing of the in-scope file
+    assert preflight._in_scope(repo, "README.MD", ["calc.py"]) is False   # another casing of an out-of-scope file
+    tracked[":(literal)Calc.py"] = "Calc.py\0"                             # git tracks this exact name: its own file
+    assert preflight._in_scope(repo, "Calc.py", ["calc.py"]) is False
+    monkeypatch.setattr(Path, "exists", lambda self: False)               # no such file on this filesystem
+    assert preflight._in_scope(repo, "Calc.PY", ["calc.py"]) is False
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    monkeypatch.setattr(preflight.os.path, "samefile", lambda a, b: False)  # a different file that differs by case
+    assert preflight._in_scope(repo, "Calc.PY", ["calc.py"]) is False
+
+
+def test_on_a_case_sensitive_checkout_another_casing_is_another_file(repo):
+    if _case_insensitive(repo):
+        pytest.skip("case-insensitive filesystem")
+    head = _git(repo, "rev-parse", "HEAD")
+    assert fixes(repo, ledger_text(head, findings=["FINDING high security CALC.PY:3 | x | out-of-scope"])) == []
+
+
+@pytest.mark.parametrize("location", ["README.md:1", "docs/guide.md:4", "../sibling/calc.py:3", "/etc/hosts:1", "src/calc.py:3"])
+def test_a_blocker_whose_file_is_outside_scope_may_be_out_of_scope(repo, location):
+    head = _git(repo, "rev-parse", "HEAD")
+    for sev in ("high", "medium"):
+        assert fixes(repo, ledger_text(head, findings=[f"FINDING {sev} security {location} | doc drift | out-of-scope"])) == []
+
+
+def test_a_low_finding_may_be_out_of_scope_whatever_its_file(repo):
+    head = _git(repo, "rev-parse", "HEAD")
+    assert fixes(repo, ledger_text(head, findings=["FINDING low security calc.py:3 | nit | out-of-scope"])) == []
+
+
+def test_a_blocker_may_be_dismissed_with_a_reason(repo):
+    head = _git(repo, "rev-parse", "HEAD")
+    assert fixes(repo, ledger_text(head, findings=["FINDING high security calc.py:3 | maybe | dismissed the call never happens"])) == []
 
 
 # ------------------------------------------------------------------ stops
 
 def test_contract_conflict_stops_with_the_accept_line_quoted(repo):
     head = _git(repo, "rev-parse", "HEAD")
-    write_ledger(repo, ledger_text(head, findings=["FINDING high calc.py:2 | add must reject ints | contract-conflict accept=2"]))
+    write_ledger(repo, ledger_text(head, findings=["FINDING high security calc.py:2 | add must reject ints | contract-conflict accept=2"]))
     stop, fix = verdict(repo)
     assert fix == [] and len(stop) == 1, (stop, fix)
     assert 'would break ACCEPT 2: "no CLI"' in stop[0] and "calc.py:2" in stop[0], stop
@@ -247,14 +469,14 @@ def test_contract_conflict_stops_with_the_accept_line_quoted(repo):
 
 def test_contract_conflict_naming_no_accept_line_is_a_fix(repo):
     head = _git(repo, "rev-parse", "HEAD")
-    fix = fixes(repo, ledger_text(head, findings=["FINDING high calc.py:2 | x | contract-conflict accept=3"]))
+    fix = fixes(repo, ledger_text(head, findings=["FINDING high security calc.py:2 | x | contract-conflict accept=3"]))
     assert len(fix) == 1 and "accept=3" in fix[0] and "2 ACCEPT lines" in fix[0], fix
 
 
 @pytest.mark.parametrize("sev, kind", [("medium", "stop"), ("high", "stop"), ("low", "fix")])
 def test_round_three_with_an_open_finding(repo, sev, kind):
     head = _git(repo, "rev-parse", "HEAD")
-    write_ledger(repo, ledger_text(head, rnd=3, findings=[f"FINDING {sev} calc.py:9 | add skips zero | open"]))
+    write_ledger(repo, ledger_text(head, rnd=3, findings=[f"FINDING {sev} security calc.py:9 | add skips zero | open"]))
     stop, fix = verdict(repo)
     if kind == "stop":
         assert fix == [] and len(stop) == 1 and "round 3 ended with a finding still open" in stop[0], (stop, fix)
@@ -266,14 +488,14 @@ def test_round_three_with_an_open_finding(repo, sev, kind):
 @pytest.mark.parametrize("rnd", [1, 2])
 def test_an_open_blocker_before_round_three_is_a_fix_not_a_stop(repo, rnd):
     head = _git(repo, "rev-parse", "HEAD")
-    write_ledger(repo, ledger_text(head, rnd=rnd, findings=["FINDING medium calc.py:9 | x | open"]))
+    write_ledger(repo, ledger_text(head, rnd=rnd, findings=["FINDING medium security calc.py:9 | x | open"]))
     stop, fix = verdict(repo)
     assert stop == [] and len(fix) == 1, (stop, fix)
 
 
 def test_round_three_with_everything_resolved_is_ready(repo):
     head = _git(repo, "rev-parse", "HEAD")
-    write_ledger(repo, ledger_text(head, rnd=3, findings=["FINDING high calc.py:9 | x | fixed tests/test_calc.py"]))
+    write_ledger(repo, ledger_text(head, rnd=3, findings=["FINDING high security calc.py:9 | x | fixed tests/test_calc.py mutation=failed"]))
     assert verdict(repo) == ([], [])
 
 
@@ -283,23 +505,33 @@ MALFORMED = [
     "# a comment",
     "NOTE all fine",
     "FINDING",
-    "FINDING medium calc.py:1",
-    "FINDING medium calc.py:1 | no disposition",
-    "FINDING critical calc.py:1 | s | open",
-    "FINDING Medium calc.py:1 | s | open",
-    "FINDING medium calc.py:1 and more | s | open",
-    "FINDING medium  | s | open",
-    "FINDING medium calc.py:1 |  | open",
-    "FINDING medium calc.py:1 | s | maybe",
-    "FINDING medium calc.py:1 | s | open now",
-    "FINDING medium calc.py:1 | s | fixed a.py b.py",
-    "FINDING medium calc.py:1 | s | rejected",
-    "FINDING medium calc.py:1 | s | contract-conflict",
-    "FINDING medium calc.py:1 | s | contract-conflict accept=0",
-    "FINDING medium calc.py:1 | s | contract-conflict accept=x",
+    "FINDING medium security calc.py:1",
+    "FINDING medium security calc.py:1 | no disposition",
+    "FINDING critical security calc.py:1 | s | open",
+    "FINDING Medium security calc.py:1 | s | open",
+    "FINDING medium security calc.py:1 and more | s | open",
+    "FINDING medium security  | s | open",
+    "FINDING medium security calc.py:1 |  | open",
+    "FINDING medium security calc.py:1 | s | maybe",
+    "FINDING medium security calc.py:1 | s | open now",
+    "FINDING medium security calc.py:1 | s | fixed a.py b.py",
+    "FINDING medium security calc.py:1 | s | fixed tests/test_calc.py mutation=passed",
+    "FINDING medium security calc.py:1 | s | fixed tests/test_calc.py mutation=failed extra",
+    "FINDING medium security calc.py:1 | s | fixed mutation=failed",
+    "FINDING medium security calc.py:1 | s | rejected nope",
+    "FINDING medium calc.py:1 | s | open",
+    "FINDING medium crypto calc.py:1 | s | open",
+    "FINDING medium security calc.py | s | open",
+    "FINDING medium security calc.py:x | s | open",
+    "FINDING medium security :3 | s | open",
+    "FINDING medium security calc.py:1 | s | dismissed",
+    "FINDING medium security calc.py:1 | s | contract-conflict",
+    "FINDING medium security calc.py:1 | s | contract-conflict accept=0",
+    "FINDING medium security calc.py:1 | s | contract-conflict accept=x",
     "COMMIT",
     "COMMIT nothex1",
     "COMMIT abc",
+    "COMMIT abcdef1",
     "ROUND 0",
     "ROUND 4",
     "ROUND two",
@@ -322,6 +554,23 @@ def test_a_malformed_line_is_a_fix_with_its_line_number_and_never_ready(repo, ba
     assert any(f.startswith(f"ledger line {n}:") for f in fix), (bad, fix)
 
 
+@pytest.mark.parametrize("line, why", [
+    ("FINDING low calc.py:9 | nit | fixed", "lens must be one of"),
+    ("FINDING low crypto calc.py:9 | nit | fixed", "lens must be one of"),
+    ("FINDING low Security calc.py:9 | nit | fixed", "lens must be one of"),
+    ("FINDING low security calc.py | nit | fixed", "location must be one word, file:line"),
+    ("FINDING low security calc.py:x | nit | fixed", "location must be one word, file:line"),
+    ("FINDING low security calc.py:9 | nit | rejected because", "disposition must be one of"),
+    ("FINDING low security calc.py:9 | nit | dismissed", "`dismissed` needs a reason"),
+    ("FINDING low security calc.py:9 | nit | fixed tests/test_calc.py mutation=passed", "mutation result must be"),
+    ("FINDING low security calc.py:9 | nit | fixed mutation=failed", "names the test path before"),
+])
+def test_a_finding_line_is_rejected_for_its_own_reason_not_just_flagged_as_something(repo, line, why):
+    head = _git(repo, "rev-parse", "HEAD")
+    fix = fixes(repo, ledger_text(head) + line + "\n")
+    assert len(fix) == 1 and fix[0].startswith("ledger line 7:") and why in fix[0], fix
+
+
 @pytest.mark.parametrize("dup", ["COMMIT {head}", "ROUND 2", "LENS security reviewed", "LENS security skipped why"])
 def test_a_repeated_header_or_lens_line_is_malformed(repo, dup):
     head = _git(repo, "rev-parse", "HEAD")
@@ -332,7 +581,7 @@ def test_a_repeated_header_or_lens_line_is_malformed(repo, dup):
 
 def test_malformed_lines_do_not_hide_a_stop(repo):
     head = _git(repo, "rev-parse", "HEAD")
-    text = ledger_text(head, findings=["junk", "FINDING high calc.py:2 | s | contract-conflict accept=1"])
+    text = ledger_text(head, findings=["junk", "FINDING high security calc.py:2 | s | contract-conflict accept=1"])
     write_ledger(repo, text)
     stop, fix = verdict(repo)
     assert len(stop) == 1 and any("line 7" in f for f in fix), (stop, fix)
@@ -352,7 +601,7 @@ def test_an_empty_ledger_is_never_ready(repo, text):
 
 
 def test_a_ledger_with_findings_but_no_header_is_never_ready(repo):
-    fix = fixes(repo, "FINDING low calc.py:1 | s | fixed\n")
+    fix = fixes(repo, "FINDING low security calc.py:1 | s | fixed\n")
     assert fix, "a header-less ledger must not be ready"
 
 
@@ -388,7 +637,7 @@ def test_a_committed_ledger_is_refused(repo):
 def test_an_oversized_ledger_is_refused_not_truncated(repo):
     from office import briefs
     head = _git(repo, "rev-parse", "HEAD")
-    pad = "FINDING low calc.py:1 | " + "x" * 200 + " | fixed\n"
+    pad = "FINDING low security calc.py:1 | " + "x" * 200 + " | fixed\n"
     write_ledger(repo, ledger_text(head) + pad * (briefs.LEDGER_MAX_CHARS // len(pad) + 5))
     stop, fix = verdict(repo)
     assert len(fix) == 1 and "over" in fix[0] and "characters" in fix[0], fix
@@ -397,7 +646,7 @@ def test_an_oversized_ledger_is_refused_not_truncated(repo):
 # ------------------------------------------------------------------ brief, skill, SKILL.md agree
 
 RULES = ("OFFICE_SELF_REVIEW.md", "severity as found", "do not trigger a re-review", "fix-diff re-review",
-         "3-round cap", "contract-conflict", "consumes", "ACCEPT line")
+         "3-round cap", "contract-conflict", "consumes", "ACCEPT line", "mutation=failed")
 
 
 def _brief(tier: str) -> str:
@@ -417,7 +666,7 @@ def test_brief_self_review_block_states_the_ledger_and_the_round_rules(tier):
     for rule in RULES:
         assert rule in block, (tier, rule)
     for needle in ("COMMIT <full sha of HEAD>", "ROUND <1-3>", "LENS <security|edge-cases|platform|test-strength> reviewed",
-                   "LENS <lens> skipped <reason>", "FINDING <high|medium|low> <file:line> | <summary> | <disposition>",
+                   "LENS <lens> skipped <reason>", "FINDING <high|medium|low> <security|edge-cases|platform|test-strength> <file:line> | <summary> | <disposition>",
                    "write it fresh every round", "after your last commit"):
         assert needle in block, (tier, needle)
     for disposition in briefs.LEDGER_DISPOSITIONS:
@@ -453,8 +702,10 @@ def test_office_submit_step_2_and_the_hub_state_the_same_rules_as_the_brief():
         for rule in RULES:
             assert rule.lower() in flat, (name, rule)
         assert "preflight" in flat, name
-    for disposition in ("fixed <test path>", "out-of-scope", "rejected <reason>", "contract-conflict accept=<n>", "open"):
+    for disposition in ("fixed <test path> mutation=failed", "out-of-scope", "dismissed <reason>", "contract-conflict accept=<n>", "open"):
         assert disposition in step, disposition
+    assert "FINDING <severity> <lens> <file:line> | <summary> | <disposition>" in " ".join(step.split())
+    assert "outside SCOPE" in step
 
 
 # ------------------------------------------------------------------ through the real preflight and submit
@@ -478,18 +729,23 @@ def _dispatch(env, plan=None):
 @pytest.mark.integration
 @pytest.mark.approved
 def test_preflight_walks_missing_stale_open_then_ready_and_submit_consumes_the_ledger(env):
+    from conftest import PLAN_ONE
     from office import briefs
-    wenv, wt, d = _dispatch(env)
+    wenv, wt, d = _dispatch(env, plan=PLAN_ONE.replace("scope: calc.py", "scope: calc.py, tests/**"))
+    (wt / "tests").mkdir()
+    (wt / "tests" / "test_calc.py").write_text("def test_add():\n    pass\n")
+    _git(wt, "add", "tests")
+    _git(wt, "-c", "user.email=t@e.test", "-c", "user.name=t", "commit", "-qm", "test")
     code, out = env.office("preflight", cwd=wt, env=wenv)
     assert code == 1 and f"fix: ledger: no {briefs.LEDGER_FILE}" in out, out
     head = _git(wt, "rev-parse", "HEAD")
     write_ledger(wt, ledger_text("0" * 40))
     code, out = env.office("preflight", cwd=wt, env=wenv)
     assert code == 1 and "ledger: names commit" in out, out
-    write_ledger(wt, ledger_text(head, findings=["FINDING medium calc.py:1 | add drops negatives | open"]))
+    write_ledger(wt, ledger_text(head, findings=["FINDING medium security calc.py:1 | add drops negatives | open"]))
     code, out = env.office("preflight", cwd=wt, env=wenv)
     assert code == 1 and "medium calc.py:1 add drops negatives is open" in out, out
-    write_ledger(wt, ledger_text(head, findings=["FINDING medium calc.py:1 | add drops negatives | fixed calc.py"]))
+    write_ledger(wt, ledger_text(head, findings=["FINDING medium security calc.py:1 | add drops negatives | fixed tests/test_calc.py mutation=failed"]))
     code, out = env.office("preflight", cwd=wt, env=wenv)
     assert code == 0 and out.startswith("PREFLIGHT ready"), out
     code, out = env.office("submit", cwd=wt, env=wenv)
@@ -505,7 +761,7 @@ def test_preflight_walks_missing_stale_open_then_ready_and_submit_consumes_the_l
 def test_preflight_contract_conflict_is_a_stop_quoting_the_accept_line(env):
     wenv, wt, d = _dispatch(env)
     write_ledger(wt, ledger_text(_git(wt, "rev-parse", "HEAD"),
-                                 findings=["FINDING high calc.py:1 | add must be float | contract-conflict accept=1"]))
+                                 findings=["FINDING high security calc.py:1 | add must be float | contract-conflict accept=1"]))
     code, out = env.office("preflight", cwd=wt, env=wenv)
     assert code == 4 and out.startswith("PREFLIGHT stop") and 'ACCEPT 1: "calc.add(2, 3) == 5"' in out, out
 
@@ -532,7 +788,7 @@ def test_a_ledger_inside_a_wide_scope_still_stays_out_of_the_revision(env):
 def test_a_bad_commit_as_the_only_commit_line_is_malformed_not_a_wildcard(repo, bad):
     text = "\n".join([bad, "ROUND 1"] + [f"LENS {x} reviewed" for x in LENSES]) + "\n"
     fix = fixes(repo, text)
-    assert any(f.startswith("ledger line 1:") and "COMMIT needs the sha of HEAD" in f for f in fix), fix
+    assert any(f.startswith("ledger line 1:") and "COMMIT needs the full sha of HEAD" in f for f in fix), fix
     assert any("no COMMIT line" in f for f in fix), fix
 
 
@@ -540,7 +796,7 @@ def test_a_bad_commit_as_the_only_commit_line_is_malformed_not_a_wildcard(repo, 
 def test_a_bad_round_as_the_only_round_line_is_malformed(repo, bad):
     head = _git(repo, "rev-parse", "HEAD")
     text = "\n".join([f"COMMIT {head}", bad] + [f"LENS {x} reviewed" for x in LENSES]
-                     + ["FINDING medium calc.py:1 | x | open"]) + "\n"
+                     + ["FINDING medium security calc.py:1 | x | open"]) + "\n"
     write_ledger(repo, text)
     stop, fix = verdict(repo)
     assert stop == [], "an invalid round must not be read as the round-3 cap"
@@ -558,7 +814,7 @@ def test_a_bad_lens_line_on_its_own_is_malformed(repo, bad, why):
 
 
 def test_a_header_less_ledger_names_each_missing_part(repo):
-    fix = fixes(repo, "FINDING low calc.py:1 | s | fixed\n")
+    fix = fixes(repo, "FINDING low security calc.py:1 | s | fixed\n")
     assert any("no COMMIT line" in f for f in fix) and any("no ROUND line" in f for f in fix), fix
     assert not any("line 1:" in f for f in fix), "the FINDING itself is well formed"
 
@@ -574,15 +830,15 @@ def test_only_the_inline_tier_may_skip_a_lens(repo):
 
 def test_a_huge_accept_number_is_malformed_not_a_crash(repo):
     head = _git(repo, "rev-parse", "HEAD")
-    fix = fixes(repo, ledger_text(head, findings=["FINDING low calc.py:1 | s | contract-conflict accept=" + "9" * 5000]))
+    fix = fixes(repo, ledger_text(head, findings=["FINDING low security calc.py:1 | s | contract-conflict accept=" + "9" * 5000]))
     assert any(f.startswith("ledger line 7:") for f in fix), fix
 
 
 def test_control_characters_and_length_never_reach_the_output_raw(repo):
     head = _git(repo, "rev-parse", "HEAD")
     nasty = "\x1b[2J\x1b]0;pwned\x07" + "A" * 5000
-    fix = fixes(repo, ledger_text(head, findings=[f"FINDING high {nasty} | s | open",
-                                                  f"FINDING high calc.py:2 | s | fixed {nasty}"]))
+    fix = fixes(repo, ledger_text(head, findings=[f"FINDING high security {nasty} | s | open",
+                                                  f"FINDING high security calc.py:2 | s | fixed {nasty}"]))
     assert len(fix) == 2
     for line in fix:
         assert "\x1b" not in line and "\x07" not in line and len(line) < 600, line
@@ -590,14 +846,14 @@ def test_control_characters_and_length_never_reach_the_output_raw(repo):
 
 def test_bom_and_crlf_ledgers_parse(repo):
     head = _git(repo, "rev-parse", "HEAD")
-    text = ledger_text(head, findings=["FINDING low calc.py:1 | s | fixed"]).replace("\n", "\r\n")
+    text = ledger_text(head, findings=["FINDING low security calc.py:1 | s | fixed"]).replace("\n", "\r\n")
     write_ledger(repo, "\ufeff" + text)
     assert verdict(repo) == ([], [])
 
 
 def test_a_pytest_node_id_names_its_file(repo):
     head = _git(repo, "rev-parse", "HEAD")
-    findings = ["FINDING high calc.py:3 | race | fixed tests/test_calc.py::test_x"]
+    findings = ["FINDING high security calc.py:3 | race | fixed tests/test_calc.py::test_x mutation=failed"]
     assert fixes(repo, ledger_text(head, findings=findings)) == []
 
 
@@ -607,7 +863,7 @@ def test_a_test_path_that_is_a_symlink_out_of_the_worktree_is_refused(repo, tmp_
     os.symlink(outside, repo / "tests" / "link.py")
     commit_all(repo, "link")
     head = _git(repo, "rev-parse", "HEAD")
-    fix = fixes(repo, ledger_text(head, findings=["FINDING high calc.py:3 | race | fixed tests/link.py"]))
+    fix = fixes(repo, ledger_text(head, findings=["FINDING high security calc.py:3 | race | fixed tests/link.py mutation=failed"]))
     assert len(fix) == 1 and "is not a file in this worktree" in fix[0], fix
 
 
@@ -615,14 +871,14 @@ def test_the_size_cap_is_exact(repo):
     from office import briefs
     head = _git(repo, "rev-parse", "HEAD")
     base = ledger_text(head)
-    at_cap = base + "FINDING low calc.py:1 | " + "x" * (briefs.LEDGER_MAX_CHARS - len(base) - len("FINDING low calc.py:1 |  | fixed\n")) + " | fixed\n"
+    at_cap = base + "FINDING low security calc.py:1 | " + "x" * (briefs.LEDGER_MAX_CHARS - len(base) - len("FINDING low security calc.py:1 |  | fixed\n")) + " | fixed\n"
     assert len(at_cap) == briefs.LEDGER_MAX_CHARS
     write_ledger(repo, at_cap)
     assert verdict(repo) == ([], [])
     write_ledger(repo, at_cap + "\n#")
     stop, fix = verdict(repo)
     assert len(fix) == 1 and "over" in fix[0], fix
-    write_ledger(repo, base + "FINDING low calc.py:1 | " + "\u00e9" * 6000 + " | fixed\n")  # multibyte, under the cap in characters
+    write_ledger(repo, base + "FINDING low security calc.py:1 | " + "\u00e9" * 6000 + " | fixed\n")  # multibyte, under the cap in characters
     assert verdict(repo) == ([], [])
 
 
