@@ -66,7 +66,27 @@ def test_refused_submit_from_a_live_worker_blocks_and_wakes_wait(env):
     d = con.execute("SELECT status, override_json FROM dispatches WHERE id=?", (wenv["OFFICE_DISPATCH_ID"],)).fetchone()
     assert d["status"] in ("running", "launching") and "README.md" in json.loads(d["override_json"])["submit_refused"]["files"]
     code, out = env.office("wait", "--timeout", "3", "--poll", "0.2", env=EXTERNAL)
-    assert code == 0 and "blocker: T1 submit refused" in out and "README.md" in out, out
+    # A stall (exit 3) naming the task, dispatch, reason and the command to run, not the 60s idle stall.
+    assert code == 3 and "blocker: T1 submit refused" in out and "README.md" in out, out
+    line = next(l for l in out.splitlines() if l.startswith("stall:"))
+    assert "T1" in line and wenv["OFFICE_DISPATCH_ID"] in line and "outside-scope" in line and "next: office amend T1" in line, line
+
+
+@pytest.mark.approved
+def test_a_refused_submit_signals_once_per_reason_and_every_refusal_kind(env):
+    wenv, wt = _live_refused(env)
+    for _ in range(3):
+        env.office("submit", cwd=wt, env=wenv, check=4)
+    con = env.con()
+    signals = [dict(r) for r in con.execute("SELECT * FROM events WHERE kind='worker.signal'")]
+    assert len(signals) == 1 and signals[0]["audience"] == "orchestrator", signals
+    assert signals[0]["task_id"] == "T1" and signals[0]["dispatch_id"] == wenv["OFFICE_DISPATCH_ID"], signals
+    # Other refusals (here: the lease was revoked) are signalled too, as their own reason.
+    env.office("revoke", "T1", check=0)
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert code == 4, out
+    summaries = [r[0] for r in con.execute("SELECT summary FROM events WHERE kind='worker.signal' ORDER BY seq")]
+    assert len(summaries) == 2 and "lease-lost" in summaries[1], summaries
 
 
 @pytest.mark.approved
@@ -230,7 +250,7 @@ def test_refusal_after_an_in_scope_submit_blocks_and_keeps_the_revision(env, mon
     assert [g[0] for g in env.con().execute("SELECT id FROM gates ORDER BY id")] == [g[0] for g in gates_before]
     assert env.con().execute("SELECT status FROM revisions WHERE id=?", (rev_before,)).fetchone()[0] == "current"
     code, out = env.office("wait", "--timeout", "3", "--poll", "0.2", env=EXTERNAL)
-    assert code == 0 and "blocker: T1 submit refused" in out, out
+    assert code == 3 and "blocker: T1 submit refused" in out and "stall: T1" in out, out
     # An amendment lifts it back to submitted, the status it was blocked from.
     env.write_plan(WIDER)
     env.office("amend", "T1", "--contract", "--", "add README.md", env=MANUAL, check=0)
