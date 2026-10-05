@@ -167,8 +167,15 @@ def test_a_signal_already_shown_by_status_is_not_a_stall_again(env):
     wenv, wt, d = _executor(env)
     env.office("revoke", "T1", check=0)
     env.office("preflight", cwd=wt, env=wenv, check=4)
-    assert _signals(env)
-    env.office("status", check=0)  # the signal is within its first six unread events: shown, so seen
+    code, out = env.office("wait", "--timeout", "5", "--poll", "0.2", env=EXTERNAL)
+    assert code == 3, out  # reported: the signal cursor now exists
+    n = len(_signals(env))
+    con = env.con()
+    con.execute("UPDATE tasks SET status='blocked', pause_reason='worker ended (crash) without submitting' WHERE id='T1'")
+    con.commit()
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    assert len(_signals(env)) > n
+    env.office("status", check=0)  # the new signal is within its first six unread events: shown, so seen
     code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
     assert "stall: T1" not in out and code != 3, out
 
