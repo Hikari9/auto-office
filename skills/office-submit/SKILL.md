@@ -22,12 +22,12 @@ goes to step 2. Skip for an empty or tiny mechanical diff. Fix rounds repeat ste
 Find the base and the tier in the brief's `SELF-REVIEW` line (`git diff <base>`, `(tier: <tier>)`). Office sets
 the tier from the run's gear and risk. You cannot lower it. Do the review as the tier says:
 
-- **`inline`:** no subagents. Make one fresh pass per lens yourself, fix medium+ findings, and do not re-review.
+- **`inline`:** no subagents. Make one fresh pass per lens yourself and fix medium+ findings.
   You may skip a lens that clearly does not apply, with a one-line reason in your report.
 - **`single`:** start exactly one `Agent` subagent, given the diff command, the brief path, all four lenses, and
-  a read-only instruction (no edits). Re-review only after a `high` fix, at most 2 rounds.
+  a read-only instruction (no edits).
 - **`deep`:** start four `Agent` subagents in one message, in parallel. Give each the diff command, the brief
-  path, and one lens, and tell it to read only (no edits). Re-review only after a `high` fix, at most 3 rounds.
+  path, and one lens, and tell it to read only (no edits).
 
 If the tier is missing from the line, treat it as `deep`. The lenses are the same in every tier:
 
@@ -48,8 +48,17 @@ Each reviewer (subagent or your own pass) returns only a JSON array:
 
 Fix every `medium` or `high` finding inside SCOPE. For each fix, write or strengthen a test, then prove it.
 Revert the fix, run the test, and confirm it fails. Then restore the fix and confirm the test passes.
-Record that mutation for the report. A `low` finding is optional. A finding outside SCOPE goes in the
-report unfixed.
+Record that mutation for the report. A finding outside SCOPE goes in the report unfixed.
+
+Then write the findings ledger `OFFICE_SELF_REVIEW.md` (worktree root, untracked) after your last commit.
+The brief's `LEDGER` line gives the format: `COMMIT <sha of HEAD>`, `ROUND <1-3>`, one `LENS <lens> reviewed` or
+`LENS <lens> skipped <reason>` per lens, and `FINDING <severity> <file:line> | <summary> | <disposition>`.
+Dispositions are `fixed <test path>`, `out-of-scope`, `rejected <reason>`, `contract-conflict accept=<n>`, `open`.
+Record severity as found: a fix never lowers it. Low findings are fixed but do not trigger a re-review. A
+medium or high fix that changes behavior gets one fix-diff re-review, as the next round. The cap is a 3-round cap: a
+medium or high finding open in round 3 stops you, and `contract-conflict` stops you with the ACCEPT line quoted.
+Any later commit makes the ledger stale: update `COMMIT`. Preflight reports a missing, stale, or malformed ledger
+and any open finding as a fix. Submit consumes the ledger, so write it fresh each round.
 
 ## 3. Checks
 

@@ -450,6 +450,9 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                       scope=task["id"], next_step=f"cd {shlex.quote(str(wt))} && office submit")
     seen_block = block_id(con, d["id"]) if self_blocked(task) else None  # the block this submit may resolve
     left_out = untracked_outside(wt, task["scope"])
+    ledger = wt / briefs.LEDGER_FILE if _untracked(wt, briefs.LEDGER_FILE) else None
+    if ledger and briefs.LEDGER_FILE not in left_out:
+        left_out.append(briefs.LEDGER_FILE)  # never part of a revision, whatever the scope covers
     restored = harness_edits_outside(wt, task["scope"])
     tree, head = capture_tree(wt, paths.run_dir(run["id"]) / "tmp", left_out, restored)
     applied = d["applied_plan_version"] or 0
@@ -512,7 +515,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                        audience="runtime", task_id=task["id"], dispatch_id=d["id"], payload={"code": "stale-evidence"})
         raise _stale_evidence(task)
     res = Result()
-    with _evidence_commit() as staged, db.transaction(con):
+    with _evidence_commit(ledger) as staged, db.transaction(con):
         again = con.execute("SELECT * FROM revisions WHERE operation_id=?", (op_id,)).fetchone()
         if again:
             return _duplicate(con, run, dict(again))
@@ -570,7 +573,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     jobs.kick(con, run["id"])
     parts = [f"rev {rev_id} captured"] + ([f"supersedes {prev}"] if prev else []) + planned["summary"]
     res.add(" | ".join(parts))
-    left_out = [f for f in left_out if f != briefs.EVIDENCE_FILE]
+    left_out = [f for f in left_out if f not in (briefs.EVIDENCE_FILE, briefs.LEDGER_FILE)]
     for label, names in (("untracked files outside", left_out), ("harness config edits outside", restored)):
         if names:
             shown = ", ".join(names[:4]) + (f" (+{len(names) - 4} more)" if len(names) > 4 else "")
@@ -580,11 +583,15 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     return res
 
 
+def _untracked(wt: Path, name: str) -> bool:
+    return bool(paths.git(wt, "ls-files", "--others", "--exclude-standard", "--", name).strip())
+
+
 @contextmanager
-def _evidence_commit():
-    """Yields a list that `_stage_evidence` fills. The worktree file is consumed
-    only after the surrounding transaction commits; on any failure the staged
-    copy is discarded and the worktree file is kept."""
+def _evidence_commit(ledger: Path | None = None):
+    """Yields a list that `_stage_evidence` fills. The worktree file (and the executor's
+    self-review `ledger`) is consumed only after the surrounding transaction commits;
+    on any failure the staged copy is discarded and the worktree files are kept."""
     staged: list[tuple[Path, Path]] = []
     try:
         yield staged
@@ -594,36 +601,45 @@ def _evidence_commit():
         raise
     for src, _ in staged:
         src.unlink(missing_ok=True)  # consumed: the next submission must write its own
+    if ledger:
+        ledger.unlink(missing_ok=True)
 
 
 EVIDENCE_KIND = "executor_evidence"
+
+
+def _read_untracked_text(wt: Path, name: str, limit: int) -> str | None:
+    """Text of the file `name` an executor wrote at its worktree root, or None unless it is a regular,
+    untracked, singly linked file. A symlink could point at a credential file, a hard link shares its
+    inode, and a tracked file is repo content. At most `limit` + 1 characters come back."""
+    src = wt / name
+    if src.is_symlink() or not src.is_file():
+        return None
+    if paths.git(wt, "ls-files", "--", name).strip():
+        return None
+    try:
+        fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            # A hard link to another file (a credential) shares its inode: ordinary files have one link.
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+                return None
+            raw = fh.read(limit * 4 + 1)
+    except (OSError, ValueError):
+        return None
+    return raw.decode("utf-8", errors="replace")[:limit + 1]
 
 
 def _read_evidence(wt: Path) -> tuple[Path, str, str] | None:
     """A scope-none task's evidence file as (path, reviewer text, sha256 of that text), or None.
     Freshness is not judged here: the launch moves any earlier file out of the
     worktree (dispatch._set_aside_evidence), and submit refuses content already ingested."""
-    src = wt / briefs.EVIDENCE_FILE
-    # Only a regular, untracked file the executor wrote: a symlink could point at
-    # a credential file and a tracked file is not evidence of this submission.
-    if src.is_symlink() or not src.is_file():
+    text = _read_untracked_text(wt, briefs.EVIDENCE_FILE, briefs.EVIDENCE_MAX_CHARS)
+    if text is None:
         return None
-    if paths.git(wt, "ls-files", "--", briefs.EVIDENCE_FILE).strip():
-        return None
-    try:
-        fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        with os.fdopen(fd, "rb") as fh:
-            st = os.fstat(fh.fileno())
-            # A hard link to another file (a credential) shares its inode: ordinary evidence has one link.
-            if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
-                return None
-            raw = fh.read(briefs.EVIDENCE_MAX_CHARS * 4 + 1)
-    except (OSError, ValueError):
-        return None
-    text = raw.decode("utf-8", errors="replace")
     if len(text) > briefs.EVIDENCE_MAX_CHARS:
         text = text[:briefs.EVIDENCE_MAX_CHARS] + f"\n[evidence truncated at {briefs.EVIDENCE_MAX_CHARS} characters]\n"
-    return src, text, sha256_bytes(text.encode("utf-8"))
+    return wt / briefs.EVIDENCE_FILE, text, sha256_bytes(text.encode("utf-8"))
 
 
 def _ingested_digests(con, run: dict, task_id: str) -> set[str]:

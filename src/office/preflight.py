@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
-from office import discovery, paths, planfile, state
+from office import briefs, discovery, paths, planfile, state, submit
 from office.result import Result
 
 EXIT = {"ready": 0, "fix": 1, "stop": 4, "wait": 75}
@@ -41,6 +42,179 @@ def _packet(run: dict, d: dict) -> dict:
         return {}
 
 
+_SHA = re.compile(r"[0-9a-fA-F]{7,40}")
+_ACCEPT_REF = re.compile(r"accept=([1-9][0-9]*)")
+_BLOCKERS = ("high", "medium")
+
+
+def _one_line(text: str, limit: int = 160) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def _parse_disposition(raw: str) -> tuple[dict | None, str]:
+    """(disposition, "") or (None, why it is malformed). `fixed` takes an optional test path,
+    `rejected` a reason, `contract-conflict` the ACCEPT line it would break; the rest take nothing."""
+    kind, _, arg = raw.strip().partition(" ")
+    arg = arg.strip()
+    if kind not in briefs.LEDGER_DISPOSITIONS:
+        return None, f"disposition must be one of {', '.join(briefs.LEDGER_DISPOSITIONS)}"
+    if kind == "fixed" and len(arg.split()) > 1:
+        return None, "`fixed` takes one test path"
+    if kind in ("open", "out-of-scope") and arg:
+        return None, f"`{kind}` takes no argument"
+    if kind == "rejected" and not arg:
+        return None, "`rejected` needs a reason"
+    if kind == "contract-conflict" and not _ACCEPT_REF.fullmatch(arg):
+        return None, "`contract-conflict` needs accept=<n>, the ACCEPT line it would break"
+    return {"kind": kind, "arg": arg}, ""
+
+
+def parse_ledger(text: str) -> tuple[dict, list[str]]:
+    """The ledger as {commit, round, lenses, findings} plus one error per line that is not in the
+    format briefs.ledger_lines() states. A bad line is an error, never skipped; blank lines are the only
+    lines that carry nothing."""
+    led: dict = {"commit": None, "round": None, "lenses": {}, "findings": []}
+    errors: list[str] = []
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line:
+            continue
+
+        def bad(why: str) -> None:
+            errors.append(f"line {n}: {why}: {_one_line(line, 80)}")
+
+        word, _, rest = line.partition(" ")
+        rest = rest.strip()
+        if word == "COMMIT":
+            if led["commit"] is not None:
+                bad("second COMMIT line")
+            elif not _SHA.fullmatch(rest):
+                bad("COMMIT needs the sha of HEAD (7-40 hex digits)")
+            else:
+                led["commit"] = rest.lower()
+        elif word == "ROUND":
+            if led["round"] is not None:
+                bad("second ROUND line")
+            elif not re.fullmatch(r"[0-9]+", rest) or not 1 <= int(rest) <= briefs.MAX_REVIEW_ROUNDS:
+                bad(f"ROUND must be 1-{briefs.MAX_REVIEW_ROUNDS}")
+            else:
+                led["round"] = int(rest)
+        elif word == "LENS":
+            name, _, status = rest.partition(" ")
+            verb, _, reason = status.strip().partition(" ")
+            if name not in briefs.LEDGER_LENSES:
+                bad(f"LENS must be one of {', '.join(briefs.LEDGER_LENSES)}")
+            elif name in led["lenses"]:
+                bad(f"second LENS line for {name}")
+            elif verb == "reviewed" and not reason.strip():
+                led["lenses"][name] = None
+            elif verb == "skipped" and reason.strip():
+                led["lenses"][name] = reason.strip()
+            else:
+                bad("LENS needs `reviewed` or `skipped <reason>`")
+        elif word == "FINDING":
+            left, sep, disp_raw = rest.rpartition(" | ")
+            head, sep2, summary = left.partition(" | ")
+            sev, _, location = head.strip().partition(" ")
+            location = location.strip()
+            disp, why = _parse_disposition(disp_raw) if sep and sep2 else (None, "")
+            if not (sep and sep2):
+                bad("FINDING needs `<severity> <file:line> | <summary> | <disposition>`")
+            elif sev not in briefs.LEDGER_SEVERITIES:
+                bad(f"severity must be one of {', '.join(briefs.LEDGER_SEVERITIES)}")
+            elif not location or " " in location:
+                bad("location must be one word, file:line")
+            elif not summary.strip():
+                bad("FINDING needs a summary")
+            elif disp is None:
+                bad(why)
+            else:
+                led["findings"].append({"severity": sev, "location": location, "summary": summary.strip(),
+                                        "line": n, **disp})
+        else:
+            bad("unknown line (expected COMMIT, ROUND, LENS or FINDING)")
+    return led, errors
+
+
+def _test_file_exists(wt: Path, rel: str) -> bool:
+    if os.path.isabs(rel):
+        return False
+    try:
+        target = (wt / rel).resolve()
+        target.relative_to(wt.resolve())
+    except (OSError, ValueError):
+        return False
+    return target.is_file()
+
+
+def check_ledger(text: str, head: str, accept: list[str], wt: Path) -> tuple[list[str], list[str]]:
+    """(stop, fix) lines for a ledger's text. Every line of `fix` names its repair."""
+    led, errors = parse_ledger(text)
+    stop: list[str] = []
+    fix = [f"ledger {e}" for e in errors]
+    if led["commit"] is None:
+        fix.append("ledger: no COMMIT line; name HEAD " + head[:12])
+    elif not head.startswith(led["commit"]):
+        fix.append(f"ledger: names commit {led['commit'][:12]} but HEAD is {head[:12]}; the review is stale: re-review "
+                   "what changed, then update COMMIT")
+    if led["round"] is None:
+        fix.append("ledger: no ROUND line")
+    for lens in briefs.LEDGER_LENSES:
+        if lens not in led["lenses"]:
+            fix.append(f"ledger: lens {lens} has no line: add `LENS {lens} reviewed` or `LENS {lens} skipped <reason>`")
+    last_round = (led["round"] or 1) >= briefs.MAX_REVIEW_ROUNDS
+    for f in led["findings"]:
+        what = f"line {f['line']}: {f['severity']} {f['location']} {_one_line(f['summary'])}"
+        if f["kind"] == "contract-conflict":
+            n = int(_ACCEPT_REF.fullmatch(f["arg"]).group(1))
+            if n > len(accept):
+                fix.append(f"ledger {what}: accept={n} but the brief has {len(accept)} ACCEPT lines")
+            else:
+                stop.append(f"contract-conflict: {what} would break ACCEPT {n}: \"{_one_line(accept[n - 1])}\"; "
+                            "do not change the contract yourself: report it")
+        elif f["kind"] == "open" and f["severity"] in _BLOCKERS and last_round:
+            stop.append(f"self-review: round {briefs.MAX_REVIEW_ROUNDS} ended with a finding still open ({what}); "
+                        "the round cap is spent: report it")
+        elif f["kind"] == "open":
+            fix.append(f"ledger {what} is open: fix it and mark it `fixed <test path>`, or mark it "
+                       "`rejected <reason>` or `out-of-scope`")
+        elif f["kind"] == "fixed" and f["severity"] in _BLOCKERS:
+            if not f["arg"]:
+                fix.append(f"ledger {what} is marked fixed without a test path: write the test, prove it fails "
+                           "without the fix, then `fixed <test path>`")
+            elif not _test_file_exists(wt, f["arg"]):
+                fix.append(f"ledger {what} names test {f['arg']}, which is not a file in this worktree")
+    return stop, fix
+
+
+def _ledger_needed(wt: Path, task: dict, changed: list[str]) -> bool:
+    """A task with a file scope and any in-scope change (committed, uncommitted, or new) owes a ledger."""
+    if not task["scope"]:
+        return False
+    pending = _git(wt, "diff", "--name-only", "-z", "HEAD").split("\0") \
+        + _git(wt, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
+    return any(f and f != briefs.LEDGER_FILE and not submit._harness_path(f) and planfile.path_in_scope(f, task["scope"])
+               for f in [*changed, *pending])
+
+
+def ledger_verdict(wt: Path, task: dict, changed: list[str], head: str) -> tuple[list[str], list[str]]:
+    """(stop, fix) for the task's self-review ledger; both empty when none is owed."""
+    if not _ledger_needed(wt, task, changed):
+        return [], []
+    name = briefs.LEDGER_FILE
+    text = submit._read_untracked_text(wt, name, briefs.LEDGER_MAX_CHARS)
+    if text is None and os.path.lexists(wt / name):
+        return [], [f"ledger: {name} must be a regular untracked file (not a symlink, hard link, or committed: "
+                    "git rm --cached it)"]
+    if text is None:
+        return [], [f"ledger: no {name}; run the SELF-REVIEW and write it in this worktree root in the format "
+                    "the brief gives"]
+    if len(text) > briefs.LEDGER_MAX_CHARS:
+        return [], [f"ledger: {name} is over {briefs.LEDGER_MAX_CHARS} characters; keep one short line per finding"]
+    return check_ledger(text, head, task["accept"] or [], wt)
+
+
 def _sed_backups(wt: Path) -> list[str]:
     """Untracked `<file>-e` next to a tracked `<file>`: BSD sed took `-e` as the
     -i backup suffix, so a GNU-style `sed -i -e` edit was not what it looked like."""
@@ -50,7 +224,6 @@ def _sed_backups(wt: Path) -> list[str]:
 
 
 def preflight(con, run: dict, cwd: Path) -> Result:
-    from office import submit
     res = Result()
     stop: list[str] = []
     fix: list[str] = []
@@ -119,7 +292,8 @@ def preflight(con, run: dict, cwd: Path) -> Result:
     for b in dep_bases:
         also = set(_git(wt, "diff", "--name-only", "-z", b, head).split("\0"))
         changed = [f for f in changed if f in also]
-    outside = [f for f in changed if not planfile.path_in_scope(f, task["scope"]) and not submit._harness_path(f)]
+    outside = [f for f in changed if f != briefs.LEDGER_FILE and not planfile.path_in_scope(f, task["scope"])
+               and not submit._harness_path(f)]
     if outside:
         listed = " ".join(outside[:10])
         fix.append(f"scope: tracked edits outside SCOPE: {listed}; revert tool-stamped ones with "
@@ -128,7 +302,6 @@ def preflight(con, run: dict, cwd: Path) -> Result:
 
     # 5b. Scope-none evidence: submit refuses a file it already ingested.
     if not task["scope"]:
-        from office import briefs
         ev = submit._read_evidence(wt)
         if ev and ev[2] in submit._ingested_digests(con, run, task["id"]):
             fix.append(f"evidence: {briefs.EVIDENCE_FILE} repeats evidence already submitted for {task['id']}; "
@@ -142,7 +315,12 @@ def preflight(con, run: dict, cwd: Path) -> Result:
                    "generated from those files")
     res.data["sed_backups"] = backups
 
-    res.data["head"] = _git(wt, "rev-parse", "HEAD")
+    # 7. Self-review ledger: the brief's SELF-REVIEW block says what it holds.
+    ledger_stop, ledger_fix = ledger_verdict(wt, task, changed, head)
+    stop += ledger_stop
+    fix += ledger_fix
+
+    res.data["head"] = head
     verdict = "stop" if stop else "fix" if fix else "wait" if wait else "ready"
     res.lines = [f"PREFLIGHT {verdict}"] + [f"stop: {s}" for s in stop] + [f"fix: {f}" for f in fix] \
         + [f"wait: {w}" for w in wait] + res.lines
