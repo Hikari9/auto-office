@@ -12,11 +12,12 @@ import re
 import sqlite3
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import yaml
 
-from office import adapters, paths, routing
+from office import adapters, paths, routing, state
 
 KIND_FOR_ROLE = {
     "planner": "worker",
@@ -93,37 +94,56 @@ def role_policy(config: dict, role: str) -> dict:
 
 
 def probe_quota(adapter: dict) -> dict:
-    """Tightest remaining quota percent, or unknown. Never stores account data."""
+    """Tightest remaining quota percent, or unknown with a safe cause."""
     harness = adapter.get("id")
-    cached = _QUOTA_CACHE.get(harness)
-    if cached and time.time() - cached[0] < _QUOTA_TTL:
-        return cached[1]
-    command = (adapter.get("quota_probe") or {}).get("command")
-    result = {"status": "unknown", "tightest_remaining_percent": None}
-    shared = _shared_cache_get(harness)
-    if shared is not None and not os.environ.get("OFFICE_QUOTA_FIXTURE") and os.environ.get("OFFICE_QUOTA_PROBE") != "off":
+    fixed = os.environ.get("OFFICE_QUOTA_FIXTURE")
+    disabled = os.environ.get("OFFICE_QUOTA_PROBE") == "off"
+    shared = _shared_cache_get(harness) if not fixed and not disabled else None
+    if shared is not None:
         _QUOTA_CACHE[harness] = (time.time(), shared)
         return shared
-    fixed = os.environ.get("OFFICE_QUOTA_FIXTURE")
+    cached = _QUOTA_CACHE.get(harness)
+    if not fixed and not disabled and cached and time.time() - cached[0] < _QUOTA_TTL:
+        return cached[1]
+
+    def unknown(cause: str) -> dict:
+        return {"status": "unknown", "tightest_remaining_percent": None, "cause": cause}
+
+    command = (adapter.get("quota_probe") or {}).get("command")
+    result = unknown("no command configured")
     if fixed:
         # Test/eval fixture: {"codex": 40, "claude": null} — never a live probe.
         value = json.loads(fixed).get(harness)
-        result = {"status": "ok", "tightest_remaining_percent": float(value)} if value is not None else result
+        result = ({"status": "ok", "tightest_remaining_percent": float(value)} if value is not None
+                  else unknown("fixture returned null"))
         _QUOTA_CACHE[harness] = (time.time(), result)
         return result
-    if os.environ.get("OFFICE_QUOTA_PROBE") == "off":
-        command = None
+    if disabled:
+        result = unknown("probe disabled")
+        _QUOTA_CACHE[harness] = (time.time(), result)
+        return result
     if command:
         argv = [str(paths.resources_root() / c) if c.startswith("scripts/") else c for c in command]
         try:
             proc = subprocess.run(argv, capture_output=True, text=True, timeout=20)
-            if proc.returncode == 0:
-                data = json.loads(proc.stdout)
-                remaining = data.get("tightest_remaining_percent")
-                if remaining is not None:
-                    result = {"status": "ok", "tightest_remaining_percent": float(remaining)}
-        except (OSError, subprocess.SubprocessError, ValueError):
-            pass
+            if proc.returncode != 0:
+                result = unknown(f"command exited with code {proc.returncode}")
+            else:
+                try:
+                    data = json.loads(proc.stdout)
+                except ValueError:
+                    result = unknown("command returned invalid JSON")
+                else:
+                    if not isinstance(data, dict) or "tightest_remaining_percent" not in data:
+                        result = unknown("command response missing tightest_remaining_percent")
+                    elif data["tightest_remaining_percent"] is None:
+                        result = unknown("command returned null tightest_remaining_percent")
+                    else:
+                        result = {"status": "ok", "tightest_remaining_percent": float(data["tightest_remaining_percent"])}
+        except subprocess.TimeoutExpired:
+            result = unknown("command timed out after 20 seconds")
+        except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+            result = unknown("command could not be run or parsed")
         if result["status"] == "ok":
             _shared_cache_put(harness, result)
     _QUOTA_CACHE[harness] = (time.time(), result)
@@ -199,7 +219,8 @@ def below_family_floor(model_id: str | None, floors: dict | None) -> str | None:
 
 
 def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
-                     family_floors: dict | None = None) -> tuple[list[dict], list[dict]]:
+                     family_floors: dict | None = None,
+                     quota_snapshot: dict[str, dict] | None = None) -> tuple[list[dict], list[dict]]:
     """Return (candidates, skipped). `skipped` explains unavailable harnesses
     and rows under a model_family_floors entry."""
     kind = KIND_FOR_ROLE.get(role, "worker")
@@ -241,15 +262,31 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
             cand["capabilities"] = sorted(set(cand["capabilities"]) | {"vision"})
         cand["quota"] = {"status": "unknown", "tightest_remaining_percent": None}
         candidates.append(cand)
-    if probe and candidates:
+    if quota_snapshot is not None:
+        for c in candidates:
+            c["quota"] = quota_snapshot.get(c["adapter_id"], c["quota"])
+    elif probe and candidates:
         # One probe per harness that has a candidate, all at once.
-        from concurrent.futures import ThreadPoolExecutor
         needed = sorted({c["adapter_id"] for c in candidates})
         with ThreadPoolExecutor(max_workers=len(needed)) as pool:
             quotas = dict(zip(needed, pool.map(lambda h: probe_quota(all_adapters[h]), needed)))
         for c in candidates:
             c["quota"] = quotas[c["adapter_id"]]
     return candidates, skipped
+
+
+def probe_quota_snapshot(con: sqlite3.Connection, roles: list[str], *, family_floors: dict | None = None) -> dict[str, dict]:
+    """Probe each adapter represented in the plan's routing roles once."""
+    needed = set()
+    for role in roles:
+        built, _ = build_candidates(con, role, probe=False, family_floors=family_floors)
+        needed.update(c["adapter_id"] for c in built)
+    all_adapters = adapters.load_all()
+    needed = sorted(needed)
+    if not needed:
+        return {}
+    with ThreadPoolExecutor(max_workers=len(needed)) as pool:
+        return dict(zip(needed, pool.map(lambda h: probe_quota(all_adapters[h]), needed)))
 
 
 def _cost(row: dict) -> dict:
@@ -394,7 +431,9 @@ def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str,
 def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                task_id: str | None = None, override: str | None = None,
                exclude: set[str] | None = None, probe: bool = True, exact: str | None = None,
-               dispatch_kind: str = "fresh", wave_load: dict | None = None, pending_explorations: int = 0) -> dict:
+               dispatch_kind: str = "fresh", wave_load: dict | None = None, pending_explorations: int = 0,
+               quota_snapshot: dict[str, dict] | None = None,
+               quota_event_seen: set[str] | None = None) -> dict:
     """Build the request and route. Returns the routing result plus request.
     `exact` keeps only the candidate with that route identity (harness@major/model@effort).
     Executor and worker requests carry the adaptive inputs (#300); `wave_load`
@@ -402,7 +441,18 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     policy_cfg = role_policy(config, role)
     # An explicit --route names its model, so it is not held to the family floor.
     floors = None if override else config.get("model_family_floors")
-    candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors)
+    candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors,
+                                           quota_snapshot=quota_snapshot)
+    if probe:
+        seen = quota_event_seen if quota_event_seen is not None else set()
+        for c in candidates:
+            quota = c.get("quota") or {}
+            harness = c.get("adapter_id")
+            cause = quota.get("cause")
+            if quota.get("status") == "unknown" and cause and harness not in seen and run.get("id"):
+                state.emit(con, run, "quota-probe-unknown", f"Quota probe unknown for {harness}: {cause}",
+                           task_id=task_id, payload={"harness": harness, "cause": cause})
+                seen.add(harness)
     from office import benchmarks
     snapshot = benchmarks.apply(run, candidates)
     if exclude:
