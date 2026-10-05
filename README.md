@@ -416,17 +416,13 @@ Routing itself stays offline. `catalog/seed.yaml` contains the known model/harne
 
 ### Optional one-shot refresh
 
-At intake the user can opt in to filling **missing** benchmark scores for the current run:
+Intake does not ask about this. The user opts in to filling **missing** benchmark scores for the current run by explicitly invoking the `auto-update-benchmarks` skill, which runs:
 
 ```bash
-office start "<goal>" \
-  --issue 412 \
-  --end-state ask \
-  --benchmark-refresh
-
-# If dispatchable rows are missing the current index score:
 office benchmarks brief
 ```
+
+Calling `brief` is the opt-in. `office start --benchmark-refresh` still records it up front.
 
 `office benchmarks brief` writes a bounded brief for **one** low-cost background subagent. Office itself does not perform the web fetch; the refresher agent does, so route selection remains offline. That subagent fetches Artificial Analysis data and submits a delta:
 
