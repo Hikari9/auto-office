@@ -1,7 +1,8 @@
 """Opt-in, in-session benchmark refresh for one run (#229).
 
-The user opts in at intake (`office start --benchmark-refresh`); the choice is
-recorded on the run either way. Office never fetches anything itself, so route
+The user opts in by explicitly invoking the auto-update-benchmarks skill, which
+runs `office benchmarks brief`; intake no longer asks. `office start
+--benchmark-refresh` still records the opt-in up front. Office never fetches anything itself, so route
 selection stays offline. When the catalog has rows without a score under its
 benchmark index, `office benchmarks brief` hands the orchestrator a bounded
 brief for one low-cost background subagent, which fetches Artificial Analysis
@@ -67,8 +68,10 @@ def _require_enabled(run: dict) -> dict:
 
 
 def brief(con, run: dict) -> Result:
-    """Start the run's one bounded refresh: write the subagent brief and count it."""
-    c = _require_enabled(run)
+    """Start the run's one bounded refresh: write the subagent brief and count it.
+
+    Calling brief is the user's explicit opt-in, so it enables the refresh if intake did not."""
+    c = {"max": MAX_REFRESHES, "used": 0, **choice(run), "enabled": True}
     rows = missing()
     if not rows:
         return Result(lines=["every dispatchable catalog row has a score; no refresh needed"], next="no action")
