@@ -447,9 +447,16 @@ def test_a_blocker_whose_file_is_outside_scope_may_be_out_of_scope(repo, locatio
         assert fixes(repo, ledger_text(head, findings=[f"FINDING {sev} security {location} | doc drift | out-of-scope"])) == []
 
 
-def test_a_low_finding_may_be_out_of_scope_whatever_its_file(repo):
+@pytest.mark.parametrize("location", ["calc.py:3", "./calc.py:3", "tests/test_calc.py:2"])
+def test_a_low_finding_marked_out_of_scope_must_be_outside_scope_too(repo, location):
     head = _git(repo, "rev-parse", "HEAD")
-    assert fixes(repo, ledger_text(head, findings=["FINDING low security calc.py:3 | nit | out-of-scope"])) == []
+    fix = fixes(repo, ledger_text(head, findings=[f"FINDING low security {location} | nit | out-of-scope"]))
+    assert len(fix) == 1 and "is inside SCOPE" in fix[0] and "`fixed`" in fix[0] and "mutation=failed" not in fix[0], fix
+
+
+def test_a_low_finding_whose_file_is_outside_scope_may_be_out_of_scope(repo):
+    head = _git(repo, "rev-parse", "HEAD")
+    assert fixes(repo, ledger_text(head, findings=["FINDING low security README.md:3 | nit | out-of-scope"])) == []
 
 
 def test_a_blocker_may_be_dismissed_with_a_reason(repo):

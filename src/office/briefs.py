@@ -356,7 +356,7 @@ def ledger_lines() -> list[str]:
         f"        FINDING <{sev}> <{lenses}> <file:line> | <summary> | <disposition>        (the lens that found it)",
         "    Dispositions: `fixed <test path> mutation=failed` (a medium or high fix names the test file that proves it and",
         "    mutation=failed, meaning you reverted the fix and that test failed; a low fix may omit both), `out-of-scope` (a",
-        "    medium or high finding only when its file is outside SCOPE), `dismissed <reason>`, `contract-conflict accept=<n>`",
+        "    finding only when its file is outside SCOPE, whatever its severity), `dismissed <reason>`, `contract-conflict accept=<n>`",
         "    (the fix would break ACCEPT line n; Office stops you with that ACCEPT line quoted), `open`.",
         "    Record severity as found: a fix never lowers it. Low findings are fixed but do not trigger a re-review. A medium",
         "    or high fix that changes behavior gets one fix-diff re-review (the same lenses over the fix diff, as the next",
