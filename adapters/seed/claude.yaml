@@ -52,6 +52,11 @@ conformance:
   deterministic: pending
   live: pending
 source_notes: Current office-skills Claude mechanics seeded for migration; tool allowlists remain dispatch-specific and must be generated from the packet/environment.
+# How Office learns this harness's session id (resume needs it). `assigned`: Office
+# picks the id and passes it at launch, so it is recorded before the agent starts.
+session:
+  id: assigned
+  assign_arg: [--session-id, "{session_id}"]
 capabilities: [planning, builder, review]
 office_profiles:
   worker:
@@ -70,6 +75,7 @@ office_profiles:
     herdr_kind: claude
     interactive:
       argv: [--model, "{model}", --effort, "{effort}", --permission-mode, dontAsk, --restricted, --allowedTools, "Read,Grep,Glob{write_allow}", --disallowedTools, "Edit,Bash,NotebookEdit{write_deny}", --add-dir, "{output_dir}", "{include_dirs}"]
+      resume_argv: [--resume, "{session_id}"]
   vision:
     argv: [-p, --model, "{model}", --effort, "{effort}", --permission-mode, dontAsk, --restricted, --allowedTools, "Read,Grep,Glob{write_allow}", --disallowedTools, "Edit,Bash,NotebookEdit{write_deny}", --add-dir, "{output_dir}", --output-format, text, "{include_dirs}"]
     include_arg: [--add-dir, "{dir}"]
@@ -79,3 +85,4 @@ office_profiles:
     herdr_kind: claude
     interactive:
       argv: [--model, "{model}", --effort, "{effort}", --permission-mode, dontAsk, --restricted, --allowedTools, "Read,Grep,Glob{write_allow}", --disallowedTools, "Edit,Bash,NotebookEdit{write_deny}", --add-dir, "{output_dir}", "{include_dirs}"]
+      resume_argv: [--resume, "{session_id}"]

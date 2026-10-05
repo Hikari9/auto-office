@@ -95,6 +95,10 @@ def _disabled(primary: Path) -> bool:
     return (Path.home() / ".office" / "hooks.off").exists()
 
 
+def _payload_session(payload: dict) -> str | None:
+    return payload.get("session_id") or payload.get("conversationId") or payload.get("sessionId")
+
+
 def _read_stdin() -> dict:
     if sys.stdin is None or sys.stdin.isatty():
         return {}
@@ -119,7 +123,7 @@ def main(argv: list[str]) -> int:
     payload = _read_stdin()
     if event == "shell.pre":
         return _shell_guard(harness, payload)
-    session = payload.get("session_id") or payload.get("conversationId") or payload.get("sessionId")
+    session = _payload_session(payload)
     cwd = Path(payload.get("cwd") or os.getcwd())
     primary = _primary_checkout(cwd)
     if primary is None:
@@ -160,6 +164,15 @@ def _bound(event: str, harness: str, payload: dict, bound_files: list[Path], wor
         from office import version
         if not version.same_line(run["office_version"], version.current()):
             return 0  # a run is served only by a runtime on its release line
+        dispatch_id, session = os.environ.get("OFFICE_DISPATCH_ID"), _payload_session(payload)
+        if dispatch_id and session:
+            # Resume needs the harness session id: take it from the first event that carries one.
+            # A failure here must not skip the write guard below.
+            try:
+                from office import dispatch
+                dispatch.record_session(con, run, dispatch_id, str(session), harness=harness, source="hook")
+            except Exception as exc:
+                _log_error(None, event, harness, exc)
         if event == "session.start":
             source = payload.get("source", "startup")
             if source in ("resume", "compact", "startup"):
@@ -306,7 +319,7 @@ def _say(harness: str, event: str, text: str) -> None:
         sys.stderr.write(text + "\n")
 
 
-def _log_error(primary: Path, event: str, harness: str, exc: Exception) -> None:
+def _log_error(primary: Path | None, event: str, harness: str, exc: Exception) -> None:
     try:
         from office import paths
         log = paths.state_home() / "hook-errors.jsonl"
