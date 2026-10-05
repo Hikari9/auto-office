@@ -49,11 +49,14 @@ conformance:
   live: pending
 source_notes: Current office-skills Codex mechanics seeded for migration; must be re-conformed locally before promotion.
 # How Office learns this harness's session id (resume needs it). `detected`: codex
-# takes no id at launch; it arrives in the SessionStart/hook payload and from herdr's
-# agent_session, and Office records the first one it sees.
+# takes no id at launch; it arrives in the SessionStart/hook payload, from herdr's
+# agent_session, and (headless `codex exec`, which has no hooks or herdr) in the
+# `session id:` line of the header block the CLI prints before the prompt. Office
+# records the first one it sees.
 session:
   id: detected
-  sources: [hook, herdr]
+  sources: [hook, herdr, output]
+  output_pattern: '^session id:\s*([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})$'
 capabilities: [planning, builder, review]
 office_profiles:
   worker:

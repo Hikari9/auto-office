@@ -100,7 +100,9 @@ def test_seed_adapters_declare_how_each_harness_yields_a_session_id():
     seeds = adapters.load_all()
     claude, codex, agy = (adapters.session_spec(seeds[h]) for h in ("claude", "codex", "agy"))
     assert claude["id"] == "assigned" and claude["assign_arg"] == ["--session-id", "{session_id}"]
-    assert codex["id"] == "detected" and set(codex["sources"]) == {"hook", "herdr"}
+    assert codex["id"] == "detected" and set(codex["sources"]) == {"hook", "herdr", "output"}
+    assert adapters.session_output_pattern(seeds["codex"]).match("session id: 019ff3a4-fbe0-73c0-bf5f-727665d09f20")
+    assert adapters.session_output_pattern(seeds["claude"]) is None and adapters.session_output_pattern(seeds["agy"]) is None
     assert agy["id"] == "none"
     assert adapters.assigns_session(seeds["claude"]) and not adapters.assigns_session(seeds["codex"])
     assert not adapters.assigns_session(seeds["agy"]) and adapters.session_spec({})["id"] == "none"
@@ -199,6 +201,152 @@ def test_headless_supervisor_starts_claude_with_the_recorded_id(ledger, monkeypa
     assert dispatch_mod.supervise(did) == 0
     argv = json.loads((ledger.tmp / "argv.json").read_text())
     assert UUID.match(ledger.session(did) or "") and argv[argv.index("--session-id") + 1] == ledger.session(did)
+
+
+CODEX_HEADER = ("OpenAI Codex v0.160.0 (research preview)\n--------\nworkdir: /w\nmodel: m\nprovider: openai\n"
+                "session id: {sid}\n--------\nuser\n")
+
+
+def _fake_codex(ledger, monkeypatch, stderr: str, stdout: str = "done\n") -> None:
+    """A `codex` on PATH that prints `stderr` (where `codex exec` puts its header) and `stdout`."""
+    bindir = ledger.tmp / "bin"
+    bindir.mkdir(exist_ok=True)
+    fake = bindir / "codex"
+    fake.write_text(f"#!{sys.executable}\nimport sys\nsys.stdin.read()\n"
+                    f"sys.stderr.write({stderr!r}); sys.stderr.flush()\nsys.stdout.write({stdout!r})\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
+
+
+def _supervise_codex(ledger, monkeypatch, role, kind, **cols) -> str:
+    from office import dispatch as dispatch_mod
+    did = ledger.dispatch(role=role, kind=role, harness="codex", adapter_id="codex", worktree=str(ledger.tmp), **cols)
+    ddir = dispatch_mod.paths.run_dir("R1") / "dispatches" / did
+    ddir.mkdir(parents=True)
+    (ddir / "brief.md").write_text("do it\n")
+    _sync_launch(ledger, monkeypatch)
+    dispatch_mod.launch(ledger.run, _row(ledger, did), kind, ddir, cwd=ledger.tmp,
+                        output=ddir / "reply.txt" if kind == "reviewer" else None)
+    monkeypatch.setattr(dispatch_mod.jobs, "kick", lambda *a, **k: None)
+    assert dispatch_mod.supervise(did) == 0
+    return did
+
+
+@pytest.mark.parametrize("role,kind", [("executor", "worker"), ("code_reviewer", "reviewer")])
+def test_headless_codex_session_id_is_recorded_from_the_cli_header(ledger, monkeypatch, role, kind):
+    """A process-launched codex has no hook and no herdr: the id comes from the stream."""
+    _fake_codex(ledger, monkeypatch, CODEX_HEADER.format(sid="019ff3a4-fbe0-73c0-bf5f-727665d09f20"))
+    did = _supervise_codex(ledger, monkeypatch, role, kind)
+    assert ledger.session(did) == "019ff3a4-fbe0-73c0-bf5f-727665d09f20"
+
+
+SID = "019ff3a4-fbe0-73c0-bf5f-727665d09f20"
+SPOOF = "session id: 00000000-0000-0000-0000-000000000bad\n"
+
+
+def test_a_session_line_after_the_header_is_not_taken_for_an_id(ledger, monkeypatch):
+    """The header's own id wins; a prompt echo and an agent reply that repeat the pattern are ignored."""
+    _fake_codex(ledger, monkeypatch, CODEX_HEADER.format(sid=SID) + SPOOF, stdout=SPOOF)
+    did = _supervise_codex(ledger, monkeypatch, "executor", "worker")
+    assert ledger.session(did) == SID and not ledger.events("session.mismatch")
+
+
+def test_a_stream_with_no_header_block_records_nothing(ledger, monkeypatch):
+    """The stream never opens a header block, so a line that looks like the header id is never an id."""
+    _fake_codex(ledger, monkeypatch, "warning one\nwarning two\nwarning three\nwarning four\n--------\n" + SPOOF, stdout=SPOOF)
+    did = _supervise_codex(ledger, monkeypatch, "executor", "worker")
+    assert ledger.session(did) is None
+
+
+def test_a_spoof_before_the_header_block_opens_is_not_an_id(ledger, monkeypatch):
+    _fake_codex(ledger, monkeypatch, SPOOF + CODEX_HEADER.format(sid=SID))
+    did = _supervise_codex(ledger, monkeypatch, "executor", "worker")
+    assert ledger.session(did) == SID
+
+
+def test_a_header_id_never_overwrites_a_recorded_one(ledger, monkeypatch):
+    _fake_codex(ledger, monkeypatch, CODEX_HEADER.format(sid=SID))
+    did = _supervise_codex(ledger, monkeypatch, "executor", "worker", session_id="recorded-sess")
+    assert ledger.session(did) == "recorded-sess"
+    (event,) = ledger.events("session.mismatch")
+    assert json.loads(event["payload_json"]) == {"recorded": "recorded-sess", "seen": SID, "source": "output"}
+
+
+def test_a_resumed_dispatch_does_not_read_the_header(ledger, monkeypatch):
+    _fake_codex(ledger, monkeypatch, CODEX_HEADER.format(sid=SID))
+    did = _supervise_codex(ledger, monkeypatch, "executor", "worker", session_id="parent-sess", resumed_from="D0")
+    assert ledger.session(did) == "parent-sess" and not ledger.events("session.mismatch")
+
+
+def _sniff(monkeypatch, pieces, adapter=None, record=None, log=None):
+    from office import adapters, dispatch as dispatch_mod
+    seen = []
+    monkeypatch.setattr(dispatch_mod, "_record_session",
+                        record or (lambda run, dispatch, session, *, source: seen.append((session, source))))
+    sniffer = dispatch_mod._SessionSniffer({}, {"id": "D1"}, adapter or adapters.load_all()["codex"], log)
+    for piece in pieces:
+        sniffer.feed(piece)
+    return seen
+
+
+def test_the_header_is_found_when_it_arrives_in_pieces(monkeypatch):
+    seen = _sniff(monkeypatch, [b"--------\nsession", b" id: " + SID[:10].encode(), SID[10:].encode() + b"\r\n--------\n"])
+    assert seen == [(SID, "output")]
+
+
+def test_a_coloured_header_line_is_still_read(monkeypatch):
+    assert _sniff(monkeypatch, [b"\x1b[1mCodex\x1b[0m\n--------\n\x1b[2msession id: " + SID.encode() + b"\x1b[0m\n"]) == [(SID, "output")]
+
+
+@pytest.mark.parametrize("line", ["session id: --dangerously-bypass", "session id: $(touch x)", "session id: abc-123",
+                                  "session id: " + "a" * 5000])
+def test_a_malformed_header_id_is_not_recorded(monkeypatch, line):
+    assert _sniff(monkeypatch, [b"--------\n" + line.encode() + b"\n--------\n"]) == []
+
+
+@pytest.mark.parametrize("lead,found", [(3, True), (4, False)])
+def test_the_banner_before_the_opening_rule_is_limited_to_three_lines(monkeypatch, lead, found):
+    stream = b"".join(b"line %d\n" % i for i in range(lead)) + b"--------\nsession id: " + SID.encode() + b"\n"
+    assert _sniff(monkeypatch, [stream]) == ([(SID, "output")] if found else [])
+
+
+@pytest.mark.parametrize("pattern", ["^session id:\\s*\\S+$", "^session id:\\s*(\\S+)(\\S*)$"])
+def test_an_output_pattern_without_exactly_one_group_is_unusable(pattern):
+    from office import adapters
+    adapter = {"session": {"id": "detected", "sources": ["output"], "output_pattern": pattern}}
+    assert adapters.session_output_pattern(adapter) is None
+
+
+@pytest.mark.parametrize("stream,why", [(b"--------\nmodel: m\n--------\n", "closed without a session id"),
+                                        (b"a\nb\nc\nd\n", "no header block opened")])
+def test_a_stream_that_yields_no_id_says_why_in_the_log(monkeypatch, tmp_path, stream, why):
+    log = tmp_path / "output.log"
+    assert _sniff(monkeypatch, [stream], log=log) == [] and why in log.read_text()
+
+
+def test_output_that_never_closes_a_line_stops_being_read(monkeypatch):
+    sniffer_seen = _sniff(monkeypatch, [b"--------\n" + b"x" * 20000, b"\nsession id: " + SID.encode() + b"\n"])
+    assert sniffer_seen == []
+
+
+def test_a_failing_record_is_retried_then_noted_in_the_log(monkeypatch, tmp_path):
+    calls = []
+
+    def boom(run, dispatch, session, *, source):
+        calls.append(session)
+        raise RuntimeError("database is locked")
+
+    log = tmp_path / "output.log"
+    _sniff(monkeypatch, [b"--------\nsession id: " + SID.encode() + b"\n--------\n"], record=boom, log=log)
+    assert calls == [SID] * 2 and "could not record session id" in log.read_text()
+
+
+def test_an_unusable_output_pattern_is_noted_in_the_log(monkeypatch, tmp_path):
+    from office import adapters
+    bad = {"session": {"id": "detected", "sources": ["output"], "output_pattern": "(unclosed"}}
+    log = tmp_path / "output.log"
+    assert _sniff(monkeypatch, [b"--------\nsession id: x\n"], adapter=bad, log=log) == []
+    assert adapters.session_output_pattern(bad) is None and "unusable" in log.read_text()
 
 
 def test_pane_argv_carries_the_assigned_id(ledger):
