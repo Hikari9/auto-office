@@ -139,7 +139,7 @@ def history(db_path: str) -> None:
         before = [o for o in outcomes if (o.get("ended_at") or "") < (e.get("ended_at") or "")]
         c = next(x for x in cands if route_learning.candidate_key(x) == e["route"])
         st = route_learning.evidence_for(before, [c], {"playbook": e.get("playbook"), "size_class": e.get("size_class")},
-                                         as_of=e["ended_at"])["routes"][e["route"]]
+                                         as_of=e.get("ended_at"))["routes"][e["route"]]
         p0 = prior[e["route"]]
         p, _, _ = route_learning.beta_bounds(st["successes"], st["failures"], p0, 8.0)
         y = 1.0 if e["success"] else 0.0
@@ -164,13 +164,16 @@ def history(db_path: str) -> None:
     legacy, adaptive_picks = Counter(), Counter()
     for e in eps[::5]:
         before = [o for o in outcomes if (o.get("ended_at") or "") < (e.get("ended_at") or "")]
-        ev = route_learning.evidence_for(before, cands, {"playbook": e.get("playbook")}, as_of=e["ended_at"])
+        ev = route_learning.evidence_for(before, cands, {"playbook": e.get("playbook")}, as_of=e.get("ended_at"))
         req = {"role": "worker", "playbook": e.get("playbook"), "candidates": cands, "policy": {"cost_policy": "balanced"},
                "evidence": ev, "routing_seed": f"{e['run_id']}:{e['task_id']}",
                "adaptive_config": cfg.get("routing", {}).get("adaptive", {})}
         legacy[routing.route({**req, "adaptive": False}).get("selected")] += 1
         adaptive_picks[routing.route(req).get("selected")] += 1
     total = sum(legacy.values())
+    if not total:
+        print("  no settled episodes to replay as decision points")
+        return
     print(f"  {total} decision points: legacy band picked {len(legacy)} distinct primaries "
           f"(top share {max(legacy.values()) / total:.0%}); adaptive picked {len(adaptive_picks)} "
           f"(top share {max(adaptive_picks.values()) / total:.0%})")
