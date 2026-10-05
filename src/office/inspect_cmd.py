@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from office import candidates, plans, state
+from office import adaptive, candidates, plans, state
 from office.result import Result
 from office.state import Usage
 from office.util import loads, short
@@ -34,8 +34,10 @@ def inspect(con, run: dict, what: str | None, ident: str | None) -> Result:
         return _route(con, run, ident)
     if what == "plan":
         return _plan(con, run, ident)
+    if what == "learner":
+        return _learner(con, run)
     raise Usage("unknown-view", f"cannot inspect {what!r}",
-                next_step="office inspect run|plan|task|gate|evidence|events|route [id]")
+                next_step="office inspect run|plan|task|gate|evidence|events|route|learner [id]")
 
 
 def _plan(con, run, ident) -> Result:
@@ -135,15 +137,121 @@ def _events(con, run, ident) -> Result:
 
 
 def _route(con, run, role_or_task) -> Result:
-    role = "executor"
-    if role_or_task and not role_or_task.upper().startswith("T"):
-        role = role_or_task
+    """`route T1`: the recorded decisions for a task (plan slate, each dispatch).
+    `route [role]`: a live decision now (no quota probe), with its evidence matrix."""
+    if role_or_task and role_or_task.upper().startswith("T") and role_or_task[1:].isdigit():
+        return _route_task(con, run, role_or_task.upper())
+    role = role_or_task or "executor"
     decision = candidates.route_role(con, state.pinned_config(run), run, role, probe=False)
-    lines = [f"{role}: {decision.get('status')} -> {decision.get('selected')}"]
-    if decision.get("selection_disclosure"):
+    lines = [f"{role}: {decision.get('status')} -> {decision.get('selected')} (live, quota not probed)"]
+    if decision.get("routing"):
+        lines += adaptive.render_slate(decision.get("slate") or [], indent="")
+        lines += _matrix(decision["routing"])
+    elif decision.get("selection_disclosure"):
         lines.append(f"reason: {decision['selection_disclosure'].get('reason')}")
-    for r in (decision.get("rejected") or [])[:12]:
-        lines.append(f"rejected {r['candidate']} stage {r['stage']}: {r['reason']}")
-    for s in (decision.get("skipped") or [])[:8]:
-        lines.append(f"skipped {s['candidate']}: {s['reason']}")
-    return Result(lines=lines, data={k: v for k, v in decision.items() if k != "request"})
+    lines += _rejections(decision)
+    data = {k: v for k, v in decision.items() if k not in ("request", "qualifying_candidates")}
+    return Result(lines=lines, data=data)
+
+
+def _rejections(decision: dict) -> list[str]:
+    lines = [f"rejected {r['candidate']} stage {r['stage']}: {r['reason']}" for r in (decision.get("rejected") or [])[:12]]
+    lines += [f"skipped {s['candidate']}: {s['reason']}" for s in (decision.get("skipped") or [])[:8]]
+    return lines
+
+
+def _matrix(audit: dict) -> list[str]:
+    """Every qualifying candidate's score components, best first."""
+    rows = sorted(audit.get("candidates") or [], key=lambda r: r.get("rank") or 99)
+    lines = ["", f"evidence ({audit.get('policy_version')}, {audit.get('learner_version')}, "
+                 f"{audit.get('cost_policy')}, as of {(audit.get('evidence_as_of') or '')[:16]})",
+             f"{'#':>2} {'route':<38} {'p(ok)':>6} {'local n':>7} {'bench':>5} {'$/task':>7} {'min':>6} "
+             f"{'quota':>9} {'pref':>4} {'util':>6}  band"]
+    for r in rows:
+        cost = f"{r['cost_to_success']:.2f}" if r.get("cost_to_success") is not None else "?"
+        mins = f"{r['time_to_success_seconds'] / 60:.0f}" if r.get("time_to_success_seconds") is not None else "?"
+        pref = "" if r["preference"]["seed_rank"] is None else f"#{r['preference']['seed_rank'] + 1}"
+        lines.append(f"{r.get('rank', '?'):>2} {r['label']:<38} {r['p_success']:>6.2f} {r['local']['n_effective']:>7.1f} "
+                     f"{r['benchmark']['authority']:>5.2f} {cost:>7} {mins:>6} {r['quota']['state'][:9]:>9} {pref:>4} "
+                     f"{r['utility']:>6.3f}  {'yes' if r.get('in_competitive_band') else ''}")
+    c, x = audit.get("clincher") or {}, audit.get("exploration") or {}
+    lines.append(f"close call: {'drew ' + str(c.get('draw')) + ' -> ' + str(c.get('picked')) if c.get('used') else 'no'}"
+                 f" | exploration: {('picked ' + x['picked']) if x.get('picked') else x.get('blocked') or 'not drawn'}"
+                 f" | seed {str(c.get('seed'))[:19]}")
+    if (audit.get("spread") or {}).get("applied"):
+        lines.append(f"spread: {audit['spread']['wave_load']}")
+    lines.append("bench = benchmark prior authority (1 = no local evidence yet); $/task = expected cost to success")
+    return lines
+
+
+def _route_task(con, run, tid) -> Result:
+    from office import route_learning
+    route_learning.ensure_schema(con)
+    rows = [dict(r) for r in con.execute("SELECT * FROM route_audit WHERE run_id=? AND task_id=? ORDER BY created_at, rowid",
+                                         (run["id"], tid)).fetchall()]
+    lines, audits = [], []
+    for row in rows:
+        audit = loads(row["disclosure_json"], {})
+        audits.append({**{k: v for k, v in row.items() if k != "disclosure_json"}, "disclosure": audit})
+    plan_rows = [a for a in audits if a["phase"] == "plan"]
+    if plan_rows:
+        a = plan_rows[-1]
+        planner = a["disclosure"].get("planner") or {}
+        lines.append(f"{tid} plan p{a['plan_version']} route ({planner.get('chooser', 'router')} chose; "
+                     f"decision {str(a['decision_hash'])[:19]})")
+        lines += adaptive.render_slate(adaptive.slate_for(a["disclosure"], planner), indent="")
+        if planner.get("why"):
+            lines.append(f"planner reason: {planner['why']}")
+        if planner.get("planner_error"):
+            lines.append(f"planner route ignored: {planner['planner_error']}")
+        lines += _matrix(a["disclosure"])
+    for a in (x for x in audits if x["phase"] != "plan"):
+        d = a["disclosure"].get("dispatch") or {}
+        taken = "; ".join(f"{t['route']}: {t['reason']}" for t in d.get("fallbacks_taken") or [])
+        lines.append(f"{a['phase']} {a['created_at'][:16]} -> {a['dispatched_route']} ({d.get('source')})"
+                     + (f" after fallback: {taken}" if taken else ""))
+    legacy = []
+    for d in con.execute("SELECT id, triple, route_json FROM dispatches WHERE run_id=? AND task_id=? ORDER BY started_at",
+                         (run["id"], tid)).fetchall():
+        route = loads(d["route_json"], {}) or {}
+        if not route.get("audit_id") and not route.get("route_source"):
+            reason = (route.get("selection_disclosure") or {}).get("reason") or ""
+            legacy.append(f"dispatch {d['id']} {d['triple']} (single-route record): {reason[:160]}")
+    lines += legacy
+    if not lines:
+        lines = [f"no routing recorded for {tid}; office inspect route shows a live decision"]
+    return Result(lines=lines, data={"task": tid, "audits": audits, "legacy": legacy})
+
+
+def _learner(con, run) -> Result:
+    """The route learner's state: outcomes by route and attribution, learned
+    eligibility, and the changes the evidence would make at the next run close."""
+    from office import route_learning
+    route_learning.ensure_schema(con)
+    outcomes = route_learning.derive_outcomes(con)
+    eps = route_learning.episodes(outcomes)
+    by_route: dict[str, dict] = {}
+    for e in eps:
+        b = by_route.setdefault(e["route"], {"episodes": 0, "landed": 0, "failed": {}})
+        b["episodes"] += 1
+        if e["success"]:
+            b["landed"] += 1
+        else:
+            b["failed"][e["attribution"]] = b["failed"].get(e["attribution"], 0) + 1
+    lines = [f"learner {route_learning.LEARNER_VERSION}: {len(outcomes)} dispatch outcomes, {len(eps)} task-route episodes"]
+    for route, b in sorted(by_route.items(), key=lambda kv: -kv[1]["episodes"])[:15]:
+        failed = ", ".join(f"{k} {v}" for k, v in sorted(b["failed"].items()))
+        lines.append(f"  {route:<44} {b['landed']}/{b['episodes']} landed" + (f" | failed: {failed}" if failed else ""))
+    priors = candidates.learner_priors(con, state.pinned_config(run))
+    pending, current = [], {}
+    for role in route_learning.ADAPTIVE_ROLES:
+        current[role] = route_learning.current_eligibility(con, role)
+        for route, ev in current[role].items():
+            lines.append(f"{role} {route}: {ev['state']} ({ev['event_id']}, {ev['at'][:10]})")
+        role_eps = [e for e in eps if e["role"] == role]
+        for tr in route_learning.eligibility_transitions(role_eps, priors.get(role) or {},
+                                                         route_learning.current_eligibility_all(con, role)):
+            pending.append({"role": role, **tr})
+            lines.append(f"pending at next close: {role} {tr['route']} {tr['previous_state']} -> {tr['state']} "
+                         f"(n={tr['evidence']['samples']}, replay: {tr['replay']['reason']})")
+    return Result(lines=lines, data={"routes": by_route, "eligibility": current, "pending": pending})

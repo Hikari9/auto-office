@@ -29,7 +29,7 @@ Auto Office {ver}
   office submit                     planner/executor: submit your plan or your work
   office amend <scope> -- "<delta>" change the plan (scope: plan, T2, or T2,T3)
   office ack <amendment-id>         worker: record that you applied a delivered amendment
-  office rerun <task> --resume|--fresh
+  office rerun <task> --resume|--fresh [--reroute]
                                     after a worker ends: continue its session, or start a new one with the findings
   office prompt <task|dispatch> -- "<message>"
                                     message a live pane agent and confirm it was submitted (never herdr pane run)
@@ -40,7 +40,7 @@ Auto Office {ver}
   office benchmarks brief|submit <f> opted-in runs: one background refresh of missing benchmark scores
 
   office list                       runs in this repository (--all for every run)
-  office inspect [run|task|gate|evidence|events|route] [id]
+  office inspect [run|task|gate|evidence|events|route|learner] [id]
   office doctor                     check the installation, hooks, and runtimes
   office upgrade [run] [--to X.Y]   move a run to a newer release line (dry run; --apply)
   office prune [--run <id>]         show finished runs that office prune -f would remove
@@ -152,6 +152,8 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("tasks", nargs="*")
     s.add_argument("--parallel", action="store_true")
     s.add_argument("--route", help="advanced: override the route (harness/model@effort)")
+    s.add_argument("--reroute", action="store_true",
+                   help="ignore the plan's route slate and route from current evidence")
     s.add_argument("--as", dest="as_model", metavar="HARNESS/MODEL[@EFFORT]",
                    help="run the executor on this model, bypassing registry, trust and floors (a user override)")
     s.add_argument("--cli", metavar="ARGV", help="with --as: start exactly this agent argv in a herdr pane")
@@ -240,6 +242,8 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("task")
     s.add_argument("--resume", action="store_true", help="continue the ended session (native harness resume)")
     s.add_argument("--fresh", action="store_true", help="start a new session with the open findings in its brief")
+    s.add_argument("--reroute", action="store_true",
+                   help="with --fresh: route from current evidence instead of keeping the original route")
     s = sp.add_parser("prompt", parents=[common])
     s.add_argument("target", nargs="?")
     s.add_argument("message", nargs="*")
@@ -463,7 +467,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return dispatch.dispatch(con, run, args.tasks, parallel=args.parallel, route=args.route,
                                  as_model=args.as_model, cli=args.cli, external=args.external,
                                  review_as=args.review_as, review_cli=args.review_cli,
-                                 review_external=args.review_external)
+                                 review_external=args.review_external, reroute=args.reroute)
     if cmd == "preflight":
         from office import preflight
         return preflight.preflight(con, run, cwd)
@@ -514,7 +518,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return dispatch.revoke(con, run, args.task, args.reason)
     if cmd == "rerun":
         from office import rerun
-        return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh)
+        return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh, reroute=args.reroute)
     if cmd == "dismiss":
         from office import rerun
         return rerun.dismiss(con, run, args.target, all_=args.dismiss_all)

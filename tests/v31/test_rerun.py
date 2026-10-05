@@ -153,3 +153,21 @@ def test_dismiss_closes_ended_panes_and_refuses_live_ones(env, monkeypatch):
     with pytest.raises(rerun.Refused):
         rerun.dismiss(con, _run(con), parent)
     assert rerun.dismiss(con, _run(con), None, all_=True).lines[-1].startswith("left running")
+
+
+@pytest.mark.approved
+def test_rerun_keeps_its_route_unless_rerouted_and_refuses_on_live_quota(env, monkeypatch):
+    """#300: replay is sticky; fresh quota can refuse it; --reroute routes from current evidence."""
+    parent = _setup(env, monkeypatch)
+    con = env.con()
+    triple = con.execute("SELECT triple FROM dispatches WHERE id=?", (parent,)).fetchone()[0]
+    harness = triple.split("@", 1)[0]
+    from office import candidates
+    candidates._QUOTA_CACHE.clear()
+    code, out = env.office("rerun", "T1", "--fresh", env={**EXTERNAL, "OFFICE_QUOTA_FIXTURE": json.dumps({harness: 1})})
+    assert code != 0 and "cannot run now" in out and "--reroute" in out, out
+    code, out = env.office("rerun", "T1", "--resume", "--reroute", env=EXTERNAL)
+    assert code != 0 and "--fresh --reroute" in out, out
+    candidates._QUOTA_CACHE.clear()
+    code, out = env.office("rerun", "T1", "--fresh", env={**EXTERNAL, "OFFICE_QUOTA_FIXTURE": json.dumps({harness: 90})})
+    assert code == 0 and f"on {triple} (original route)" in out, out

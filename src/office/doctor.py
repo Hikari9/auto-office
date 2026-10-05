@@ -72,7 +72,11 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
     if ident:
         from office import config as cfg
         top = ident[0]
-        effective, _ = cfg.resolve(top)
+        try:
+            effective, _ = cfg.resolve(top)
+        except ValueError as exc:
+            res.add(f"config: invalid: {exc}")
+            effective = {}
         if (top / "pnpm-lock.yaml").is_file() and not str((effective.get("worktree") or {}).get("setup") or "").strip():
             res.add("worktree setup: pnpm-lock.yaml found but worktree.setup is not set; new worktrees start without "
                     "node_modules. Add to .auto-office/config.yaml: worktree: {setup: \"pnpm install --offline "

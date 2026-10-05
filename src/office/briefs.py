@@ -54,6 +54,8 @@ visual:
   viewports: desktop, mobile
   states: default; menu-open = click [data-test=menu]
   selectors: header, nav                   (elements to measure)
+route: <harness/model@effort>, <fallback>, <fallback>   (optional; omit to accept Office's ranked slate)
+route_why: <concrete reason>   (required when the primary is outside the close-call band of the best route)
 """
 
 REVIEW_FORMAT = """\
@@ -134,6 +136,11 @@ def planner_brief(con, run: dict, packet: dict) -> str:
             "List append-only registries several tasks must touch (auth/gate manifests, endpoint or grant lists, "
             "exhaustive policy maps, shared mock tables) under `shared:` rather than serializing those tasks. "
             "Include in scope the existing tests a change predictably breaks (e.g. ones asserting call counts).",
+            "Routes: Office ranks each task's qualifying executor routes (model x effort) by expected cost to "
+            "success and speed, and shows the top three after submit (office inspect route T<n> for the evidence). "
+            "Keep its ranking unless the task's nature or the run's context says otherwise: a precise plan lets a "
+            "cheaper builder succeed, and parallel tasks may spread across close routes. Name a different route "
+            "with `route:` and say why with `route_why:`.",
             "Write each check for the tool versions the repo pins. Vitest 1.x rejects `--maxWorkers=N` on its "
             "own (\"minThreads and maxThreads must not conflict\"): cap workers with `--maxWorkers=N --minWorkers=1`.",
             "WHEN DONE run: office submit", "Then stop. Review findings, if any, come back through the orchestrator."]

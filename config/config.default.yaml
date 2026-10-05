@@ -22,13 +22,44 @@ worktree:
   setup_timeout_s: 600
   applies_to: [task, integration, check]
 quota:
-  # Ratified v3.1 charter (12A): protect 5% of provider quota. The balanced
-  # money band below is a different 20% and stays 20.
+  # Ratified v3.1 charter (12A): protect 5% of provider quota.
   reserve_percent: 5
 cost_policy:
   default: balanced
+  # Legacy: planner and reviewer routing only. Executor and worker routing (#300)
+  # never applies a money band; its cost safety valve is
+  # routing.adaptive.budget_ceiling_usd.
   balanced_money_band_percent: 20
   available: [money_saver, quota_saver, balanced]
+# Adaptive executor/worker routing (#300). Values are calibration defaults,
+# replayable and inspectable (office inspect route / learner); omit a key to
+# keep its default. Preference is weighted evidence, capped at 0.25.
+routing:
+  adaptive:
+    competitive_band: 0.05
+    budget_ceiling_usd: 25
+    cost_scale_usd: 25
+    spread_penalty: 0.03
+    weights:
+      balanced: {effectiveness: 0.40, cost: 0.25, speed: 0.15, quota: 0.10, preference: 0.10}
+      money_saver: {effectiveness: 0.30, cost: 0.40, speed: 0.10, quota: 0.10, preference: 0.10}
+      quota_saver: {effectiveness: 0.30, cost: 0.15, speed: 0.15, quota: 0.30, preference: 0.10}
+    exploration:
+      rate: 0.08
+      margin: 0.10
+      min_samples_mature: 6
+      max_percent_rolling_20: 10
+      max_per_run: 1
+      max_cost_vs_primary_percent: 125
+    learning:
+      prior_strength: 8
+      half_life_days: 120
+      other_playbook_weight: 0.5
+      size_mismatch_weight: 0.75
+      fix_kind_weight: 0.75
+      stale_harness_major_weight: 0.25
+# Legacy 3.0 exploration policy (scripts/). Executor/worker exploration (#300)
+# reads routing.adaptive.exploration.
 exploration:
   max_per_run: 1
   max_percent_rolling_20: 10

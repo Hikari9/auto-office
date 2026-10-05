@@ -234,6 +234,8 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
             "adapter_id": adapter.get("id"),
             "adapter_hash": adapters.adapter_hash(adapter),
             "cost": _cost(row),
+            "price_fields": row.get("price_fields") or {},
+            "speed_fields": row.get("speed_fields") or {},
         }
         if kind == "vision" and vision_proven(con, cand, adapter):
             cand["capabilities"] = sorted(set(cand["capabilities"]) | {"vision"})
@@ -307,6 +309,8 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
         "adapter_id": adapter.get("id"),
         "adapter_hash": adapters.adapter_hash(adapter),
         "cost": _cost(row or {}),
+        "price_fields": (row or {}).get("price_fields") or {},
+        "speed_fields": (row or {}).get("speed_fields") or {},
         "quota": {"status": "unknown", "tightest_remaining_percent": None},
         "override": True,
     }
@@ -355,11 +359,46 @@ def protected_quota_remedy(run: dict, role: str, task_id: str | None = None) -> 
     return f"fix: {fix}; {pinned}"
 
 
+def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str, candidates: list[dict], *,
+                    task_id: str | None, dispatch_kind: str, plan_version: int | None,
+                    wave_load: dict | None = None, as_of: str | None = None, pending_explorations: int = 0) -> dict:
+    """Learner evidence and reproducibility inputs for an executor/worker request (#300).
+
+    Everything the adaptive scorer reads is computed here, so `routing.route`
+    stays offline and a recorded request replays to the same decision."""
+    from datetime import datetime, timezone
+    from office import route_learning
+    from office.util import sha256_obj
+    s = config.get("routing") or {}
+    adaptive_cfg = s.get("adaptive") or {}
+    context = {"role": role, "playbook": run.get("playbook"), "size_class": (run.get("risk") or {}).get("size_class"),
+               "gear": run.get("gear"), "dispatch_kind": dispatch_kind}
+    as_of = as_of or datetime.now(timezone.utc).isoformat()
+    route_learning.ensure_schema(con)
+    # Executor and worker dispatches are the same kind of work; they pool.
+    outcomes = route_learning.derive_outcomes(con)
+    evidence = route_learning.evidence_for(outcomes, candidates, context, as_of=as_of,
+                                           config=adaptive_cfg.get("learning"))
+    explored = con.execute("SELECT COUNT(*) FROM route_audit WHERE run_id=? AND role=? AND explored=1",
+                           (run.get("id"), role)).fetchone()[0]
+    return {
+        "context": context, "evidence": evidence, "adaptive_config": adaptive_cfg,
+        "learned_eligibility": route_learning.current_eligibility(con, role),
+        "exploration_history": route_learning.recent_exploration(con, role),
+        "run_explorations": explored + pending_explorations, "wave_load": dict(wave_load or {}),
+        "routing_seed": sha256_obj({"run": run.get("id"), "task": task_id, "role": role,
+                                    "plan_version": plan_version, "kind": dispatch_kind}),
+    }
+
+
 def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                task_id: str | None = None, override: str | None = None,
-               exclude: set[str] | None = None, probe: bool = True, exact: str | None = None) -> dict:
+               exclude: set[str] | None = None, probe: bool = True, exact: str | None = None,
+               dispatch_kind: str = "fresh", wave_load: dict | None = None, pending_explorations: int = 0) -> dict:
     """Build the request and route. Returns the routing result plus request.
-    `exact` keeps only the candidate with that route identity (harness@major/model@effort)."""
+    `exact` keeps only the candidate with that route identity (harness@major/model@effort).
+    Executor and worker requests carry the adaptive inputs (#300); `wave_load`
+    counts routes already planned for other tasks of the same wave."""
     policy_cfg = role_policy(config, role)
     # An explicit --route names its model, so it is not held to the family floor.
     floors = None if override else config.get("model_family_floors")
@@ -405,11 +444,27 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "benchmark_snapshot": snapshot,
         "candidates": candidates,
     }
+    if role in routing.ADAPTIVE_ROLES:
+        request.update(adaptive_inputs(con, config, run, role, candidates, task_id=task_id,
+                                       dispatch_kind=dispatch_kind, plan_version=run.get("plan_version"),
+                                       wave_load=wave_load, pending_explorations=pending_explorations))
     result = routing.route(request)
     result["benchmark_snapshot"] = snapshot
     result["skipped"] = skipped
     result["request"] = request
     return result
+
+
+def learner_priors(con: sqlite3.Connection, config: dict) -> dict[str, dict[str, dict]]:
+    """role -> evidence key -> {"prior_p"}: each installed route's benchmark prior,
+    the base the learner's eligibility posterior starts from."""
+    from office import adaptive, route_learning
+    s = adaptive.settings(config)
+    out = {}
+    for role in route_learning.ADAPTIVE_ROLES:
+        cands, _ = build_candidates(con, role, probe=False)
+        out[role] = {route_learning.candidate_key(c): {"prior_p": adaptive.benchmark_prior(c, s)[0]} for c in cands}
+    return out
 
 
 def trust_report(con: sqlite3.Connection) -> list[str]:

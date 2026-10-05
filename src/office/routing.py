@@ -2,8 +2,13 @@
 
 Ported from the v3 `scripts/office_routing.py`. Trust, floors and local reward
 are derived from runs.db evidence and the pinned role floor; a candidate's own
-claims about them are read nowhere. The quota reserve and the balanced money
-band come from the pinned policy (5% and 20% by default), never literals.
+claims about them are read nowhere. The quota reserve comes from the pinned
+policy (5% by default), never a literal.
+
+Executor and worker routes (#300) keep stages 1-6 as qualification, then
+`office.adaptive` compares the qualifying set and returns a slate of up to
+three. Planner and reviewer routes keep the legacy stages 7-9, including the
+balanced money band, until their own routing is redesigned.
 """
 from __future__ import annotations
 
@@ -13,14 +18,17 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
-from office import scoring
+from office import adaptive, route_learning, scoring
 from office.util import sha256_obj
 
 # Roles whose selection confers mutable or gate authority; they need derived trust.
 MUTABLE_TRUST_ROLES = {"executor", "code_reviewer", "browser_verifier", "closeout_verifier", "visual_reviewer",
                        "integration_reviewer"}
 DEFAULT_RESERVE_PERCENT = 5.0
+# Legacy planner/reviewer routing only. Executor and worker routing (#300) has no
+# money band; its cost safety valve is routing.adaptive.budget_ceiling_multiple.
 DEFAULT_MONEY_BAND_PERCENT = 20.0
+ADAPTIVE_ROLES = set(route_learning.ADAPTIVE_ROLES)
 
 _REQUIRED_OVERRIDE_FIELDS = (
     "override_id", "run_id", "family_id", "task_id", "role", "candidate_id",
@@ -300,14 +308,26 @@ def route(request: dict) -> dict:
 
         # 2 adapter validity/trust -- derived (§7.1). A caller-supplied `adapter_state`
         # is read nowhere below; only `evaluate_trust_state` against `runs_db` decides.
+        adaptive_role = role in ADAPTIVE_ROLES and request.get("adaptive", True) is not False
+        learned = request.get("learned_eligibility") or {}
+        eligibility: dict[str, dict] = {}
         nxt = []
         for c in stage:
             cid = candidate_id(c)
+            eligibility[cid] = {"trust": None, "source": "factual gates"}
             if role in MUTABLE_TRUST_ROLES:
                 if con is not None:
                     _, trust_state = scoring.evaluate_trust_state(con, cid)
                 else:
                     trust_state = "valid-unverified"
+                eligibility[cid]["trust"] = trust_state
+                event = learned.get(route_learning.candidate_key(c)) or {}
+                if (adaptive_role and trust_state == "valid-unverified" and event.get("state") == "learned-eligible"):
+                    # Mature, replay-validated local evidence promotes an unverified
+                    # route (#300). Quarantine is never lifted this way.
+                    eligibility[cid].update(source="learned", event_id=event.get("event_id"))
+                    nxt.append(c)
+                    continue
                 if trust_state != "proven" and not override_applies(cid, 2):
                     rejected.append({
                         "candidate": cid,
@@ -389,6 +409,10 @@ def route(request: dict) -> dict:
                 "action": "choose a smaller/cheaper valid strategy, propose another route, or obtain explicit user authority",
             }
 
+        if adaptive_role:
+            return _adaptive(request, role, playbook, policy, stage, rejected, eligibility, learned,
+                             preferred_seed, allow_advisory_undercut, override_applies, override_record)
+
         # 7 advisory quality anchor. A caller-supplied per-candidate `advisory_pass` is
         # read nowhere below: retention is derived purely from `preferred_seed` match,
         # which is itself config/request data, never a candidate's self-assertion.
@@ -467,3 +491,69 @@ def route(request: dict) -> dict:
     finally:
         if con is not None:
             con.close()
+
+
+def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, learned, preferred_seed,
+              allow_advisory_undercut, override_applies, override_record) -> dict:
+    """Stages 7-8 for executor/worker routes: learned eligibility, then the
+    adaptive comparison (`office.adaptive`). Preference is weighted evidence; a
+    gear that forbids advisory undercut still holds routes to its seed chain."""
+    if preferred_seed and not allow_advisory_undercut:
+        matched = [c for c in stage if preferred_rank(c, preferred_seed) is not None]
+        if matched:
+            for c in stage:
+                if c not in matched and not override_applies(candidate_id(c), 7):
+                    rejected.append({"candidate": candidate_id(c), "stage": 7,
+                                     "reason": "advisory anchor retained by gear/policy"})
+            stage = [c for c in stage if c in matched or override_applies(candidate_id(c), 7)]
+    nxt = []
+    for c in stage:
+        cid = candidate_id(c)
+        event = learned.get(route_learning.candidate_key(c)) or {}
+        if event.get("state") == "learned-ineligible" and not override_applies(cid, 7):
+            rejected.append({"candidate": cid, "stage": 7,
+                             "reason": f"learned ineligible from mature local evidence ({event.get('event_id')})"})
+            continue
+        nxt.append(c)
+    if not nxt:
+        return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected, "slate": []}
+    rec = adaptive.recommend(nxt, request, config={"routing": {"adaptive": request.get("adaptive_config") or {}}})
+    rejected.extend(rec["rejected"])
+    if not rec["slate"]:
+        return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected, "slate": []}
+    audit = rec["audit"]
+    for row in audit["candidates"]:
+        row["eligibility"] = eligibility.get(row["route"]) or {"source": "factual gates"}
+    by_id = rec["by_id"]
+    chosen = by_id[rec["slate"][0]["route"]]
+    cid = candidate_id(chosen)
+    disclosure = selection_disclosure(role, chosen, preferred_seed, policy.get("cost_policy", "balanced"))
+    head = rec["slate"][0]
+    disclosure["reason"] = "; ".join(
+        [disclosure["reason"].split("; ")[0], head["reason"], f"+ {head['strength']}", f"- {head['weakness']}"]
+        + [p for p in disclosure["reason"].split("; ")[1:] if "slug" in p])
+    disclosure["adaptive"] = True
+    disclosure["slate"] = [{k: e[k] for k in ("rank", "route", "label", "reason", "strength", "weakness")}
+                           for e in rec["slate"]]
+    for stage_no in (2, 4, 7):
+        if override_applies(cid, stage_no):
+            disclosure["override"] = {
+                "override_id": override_record["override_id"], "bypass_stage": stage_no,
+                "authorized_by": override_record["authorized_by"], "rationale": override_record["rationale"],
+            }
+            break
+    decision_hash = sha256_obj({"role": role, "playbook": playbook, "policy": policy, "selected": cid,
+                                "slate": [e["route"] for e in rec["slate"]],
+                                "inputs": [{k: r[k] for k in ("route", "p_success", "cost_to_success",
+                                                              "time_to_success_seconds", "quota", "preference",
+                                                              "utility")} for r in audit["candidates"]],
+                                "clincher": audit["clincher"], "exploration": audit["exploration"],
+                                "policy_version": audit["policy_version"], "evidence_digest": audit["evidence_digest"]})
+    audit["decision_hash"] = decision_hash
+    return {
+        "selected": cid, "status": "selected", "candidate": chosen, "rejected": rejected,
+        "selection_disclosure": disclosure, "decision_hash": decision_hash,
+        "slate": rec["slate"], "qualifying": [r["route"] for r in audit["candidates"]],
+        "qualifying_candidates": by_id,
+        "routing": audit,
+    }

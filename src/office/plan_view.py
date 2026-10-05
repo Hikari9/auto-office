@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from office import candidates, planfile, state
+from office import adaptive, candidates, planfile, state
 from office.util import dumps, loads
 
 # ------------------------------------------------------------------ layout
@@ -68,9 +68,11 @@ def route_label(disclosure: dict | None) -> str:
     return f"{disclosure.get('harness')}/{disclosure.get('model_id')}@{disclosure.get('effort')}"
 
 
-def _preview_one(con, config: dict, run: dict, role: str, tid: str) -> dict:
+def _preview_one(con, config: dict, run: dict, role: str, tid: str, *,
+                 task: dict | None = None, wave_load: dict | None = None, pending_explorations: int = 0) -> dict:
     try:
-        decision = candidates.route_role(con, config, run, role, task_id=tid)
+        decision = candidates.route_role(con, config, run, role, task_id=tid, wave_load=wave_load,
+                                         pending_explorations=pending_explorations)
     except Exception as exc:  # a preview never blocks submit
         return {"route": None, "why": f"preview failed: {exc}"[:160]}
     if decision.get("status") != "selected":
@@ -78,7 +80,19 @@ def _preview_one(con, config: dict, run: dict, role: str, tid: str) -> dict:
         why = f"{decision.get('status')}" + (f": {top.get('reason')}" if top.get("reason") else "")
         return {"route": None, "why": why[:160]}
     d = decision["selection_disclosure"]
-    return {"route": route_label(d), "triple": decision.get("selected"), "why": short_why(d)}
+    out = {"route": route_label(d), "triple": decision.get("selected"), "why": short_why(d)}
+    audit = decision.get("routing")
+    if audit:
+        # #300: the planner's primary + fallbacks over the router's slate.
+        choice = {"routes": (task or {}).get("route"), "why": (task or {}).get("route_why")}
+        plan = adaptive.apply_planner_choice(audit, choice)
+        slate = adaptive.slate_for(audit, plan)
+        primary = decision["qualifying_candidates"][plan["primary"]]
+        out.update({"route": adaptive.label(primary), "triple": plan["primary"],
+                    "why": slate[0]["reason"] if slate else out["why"],
+                    "slate": slate, "route_plan": plan, "decision_hash": decision.get("decision_hash"),
+                    "_audit": {**audit, "planner": plan, "phase": "plan", "task_id": tid, "role": role}})
+    return out
 
 
 def preview(con, run: dict, tasks: list[dict]) -> dict:
@@ -87,8 +101,18 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
     code_review = bool((run.get("gates") or {}).get("code_review"))
     lay = layout(tasks)
     out = {}
+    audits = []
+    loads: dict[int, dict[str, int]] = {}
     for t in tasks:
-        ex = _preview_one(con, config, run, "executor", t["id"])
+        # Soft spread: routes already planned in this wave weigh a little less.
+        wave_load = loads.setdefault(lay[t["id"]]["wave"], {})
+        explored = sum(1 for a in audits if (a.get("exploration") or {}).get("picked") == (a.get("planner") or {}).get("primary"))
+        ex = _preview_one(con, config, run, "executor", t["id"], task=t, wave_load=wave_load,
+                          pending_explorations=explored)
+        if ex.get("triple"):
+            wave_load[ex["triple"]] = wave_load.get(ex["triple"], 0) + 1
+        if ex.get("_audit"):
+            audits.append(ex.pop("_audit"))
         rv = {}
         if code_review:
             rv = _preview_one(con, config, run, "code_reviewer", t["id"])
@@ -97,16 +121,46 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
             + (["ui review"] if visual and not visual.get("none") else [])
         out[t["id"]] = {"title": t["title"], "depends": list(t.get("depends") or []), **lay[t["id"]],
                         "route": ex.get("route"), "why": ex.get("why"), "gates": task_gates,
-                        "review": rv.get("route"), "review_why": rv.get("why")}
+                        "review": rv.get("route"), "review_why": rv.get("why"),
+                        **{k: ex[k] for k in ("slate", "route_plan", "decision_hash") if k in ex}}
     from office import prs
     frozen = state.current_requirements(con, run["id"])["frozen"]
     s = prs.settings(con, run)
     return {"tasks": out, "end_state": frozen.get("end_state") or "ask", "deploy": frozen.get("deploy") or {},
-            "prs": {k: s.get(k) for k in ("enabled", "reason", "base_branch", "merge_method")}}
+            "prs": {k: s.get(k) for k in ("enabled", "reason", "base_branch", "merge_method")}, "_audits": audits}
 
 
 def store(con, run: dict, version: int, pv: dict) -> None:
+    """Store the diagram and, for each adaptive route plan, its full audit record. Caller holds the tx."""
+    for audit in pv.pop("_audits", None) or []:
+        audit_id = record_audit(con, run, audit, plan_version=version)
+        task = (pv.get("tasks") or {}).get(audit["task_id"])
+        if task is not None:
+            task["audit_id"] = audit_id
     con.execute("UPDATE plans SET preview_json=? WHERE run_id=? AND version=?", (dumps(pv), run["id"], version))
+
+
+def record_audit(con, run: dict, audit: dict, *, plan_version: int | None, dispatched: str | None = None,
+                 explored: bool | None = None) -> str:
+    """Append one routing audit row (`route_audit`): the complete decision, for inspect and replay."""
+    import uuid
+
+    from office import route_learning
+    from office.util import now_iso
+    route_learning.ensure_schema(con)
+    audit_id = "RA" + uuid.uuid4().hex[:12]
+    plan = audit.get("planner") or {}
+    primary = plan.get("primary") or ((audit.get("slate") or [{}])[0]).get("route")
+    con.execute("INSERT INTO route_audit(id, run_id, task_id, role, phase, plan_version, decision_hash, policy_version, "
+                "learner_version, seed, primary_route, dispatched_route, explored, disclosure_json, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (audit_id, run["id"], audit.get("task_id"), audit.get("role"), audit.get("phase", "plan"), plan_version,
+                 audit.get("decision_hash"), audit.get("policy_version"), audit.get("learner_version"),
+                 (audit.get("clincher") or {}).get("seed"), primary, dispatched,
+                 int(explored if explored is not None
+                     else bool((audit.get("exploration") or {}).get("picked")) and primary == audit["exploration"]["picked"]),
+                 dumps(audit), now_iso()))
+    return audit_id
 
 
 def load(con, run_id: str, version: int) -> dict | None:
@@ -158,15 +212,29 @@ def render(run: dict, version: int, pv: dict) -> list[str]:
             e = tasks[tid]
             head = f"{tid}  {e['title']}"
             head = head if len(head) <= width else head[: width - 1] + "~"
-            lines.append(f"  {head:<{width}}  {(e['route'] or 'no route'):<{route_w}}  {_where(e)}")
-            if e.get("why"):
-                lines.append(f"  {'':<{width}}  why: {e['why']}")
+            if e.get("slate") is not None:
+                lines.append(f"  {head:<{width}}  {_where(e)}")
+                lines.extend(adaptive.render_slate(e["slate"], indent="      ", notes=_slate_notes(e)))
+            else:
+                lines.append(f"  {head:<{width}}  {(e['route'] or 'no route'):<{route_w}}  {_where(e)}")
+                if e.get("why"):
+                    lines.append(f"  {'':<{width}}  why: {e['why']}")
             if e.get("review"):
                 lines.append(f"  {'':<{width}}  review: {e['review']}" + (f" ({e['review_why']})" if e.get("review_why") else ""))
         lines.append("")
     lines.append(f"checkpoints: {checkpoints(run, pv)}")
     lines.append(f"end state: {pv.get('end_state') or 'ask'}")
     return lines
+
+
+def _slate_notes(entry: dict) -> list[str]:
+    plan = entry.get("route_plan") or {}
+    notes = []
+    if plan.get("chooser") == "planner":
+        notes.append("planner choice" + (", departs from ranking" if plan.get("departs_from_ranking") else ""))
+    if plan.get("planner_error"):
+        notes.append(f"planner route ignored: {plan['planner_error']}")
+    return notes
 
 
 def diff(prev: dict | None, cur: dict, prev_version: int) -> list[str]:

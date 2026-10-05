@@ -124,6 +124,10 @@ def show_diagram(con, run: dict, version: int, tasks: list[dict], plan_path: Pat
     pv = plan_view.preview(con, run, tasks)
     with db.transaction(con):
         plan_view.store(con, run, version, pv)
+    for tid, entry in pv["tasks"].items():
+        problem = (entry.get("route_plan") or {}).get("planner_error")
+        if problem:
+            res.notices.append(f"{tid} route: {problem}; the ranked slate stands")
     full = plan_view.render(run, version, pv)
     if plan_path is not None:
         plan_view.write_into(plan_path, version, full)

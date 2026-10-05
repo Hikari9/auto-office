@@ -61,11 +61,14 @@ def create_planner_task(con, run: dict, *, contract_request: str | None = None, 
 
 def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, route: str | None = None,
              as_model: str | None = None, cli: str | None = None, external: bool = False,
-             review_as: str | None = None, review_cli: str | None = None, review_external: bool = False) -> Result:
+             review_as: str | None = None, review_cli: str | None = None, review_external: bool = False,
+             reroute: bool = False) -> Result:
     if not task_ids:
         raise Usage("no-task", "name at least one task", next_step="office dispatch T1 [T2 ...] [--parallel]")
     if as_model and route:
         raise Usage("invalid-override", "use --as or --route, not both")
+    if reroute and (as_model or route):
+        raise Usage("invalid-override", "--reroute routes from evidence; --as/--route name the route yourself")
     if cli and external or review_cli and review_external:
         raise Usage("invalid-override", "a CLI launch and an external launch are mutually exclusive")
     if cli and not as_model:
@@ -95,8 +98,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
         if as_model:
             routes[tid] = candidates.declared_decision(as_model)
         else:
-            routes[tid] = candidates.route_role(con, state.pinned_config(run), run, "executor",
-                                                task_id=tid, override=route)
+            routes[tid] = planned_route(con, run, task, override=route, reroute=reroute)
         if launch_prefs and routes[tid].get("status") == "selected":
             routes[tid]["launch"] = launch_prefs
     res = Result()
@@ -168,13 +170,15 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 _stash_route(con, run, tid, decision)
                 res.add(f"{tid} stacked after {stack_after}")
             else:
-                drift = plan_view.drift(con, run, tid, decision)
+                # A planned slate reports its own fallback; drift is for legacy previews.
+                drift = None if decision.get("route_source") == "plan" else plan_view.drift(con, run, tid, decision)
                 if drift:
                     res.add(drift)
                 did = request_launch(con, run, tid, role="executor", decision=decision, base=base)
                 verb = "prepared for you to start (external; nothing launched)" if external else "launching"
                 res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} {verb}"
-                        + (" (user override)" if decision.get("override") else ""))
+                        + (" (user override)" if decision.get("override") else "")
+                        + (f" ({decision['route_note']})" if decision.get("route_note") else ""))
                 res.lines.extend(f"  {line}" for line in launch_instructions(run, state.get_dispatch(con, did)))
             previous = tid
         if run["phase"] == "planning":
@@ -186,8 +190,69 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
     return res
 
 
+def _planned_slate(con, run: dict, tid: str) -> dict | None:
+    """The approved plan's route plan for `tid` (#300), or None for a legacy preview."""
+    from office import plan_view
+    pv = plan_view.load(con, run["id"], run["plan_version"]) if run.get("plan_version") else None
+    entry = ((pv or {}).get("tasks") or {}).get(tid) or {}
+    plan = entry.get("route_plan")
+    return {**plan, "audit_id": entry.get("audit_id"), "decision_hash": entry.get("decision_hash")} \
+        if plan and plan.get("primary") else None
+
+
+def planned_route(con, run: dict, task: dict, *, override: str | None = None, reroute: bool = False) -> dict:
+    """Route an executor dispatch: the planner's primary, else its fallbacks in order.
+
+    Live evidence (quota, availability, trust, learned eligibility) is refreshed
+    by routing again now; the planned routes are then tried in their recorded
+    order and the first one that still qualifies runs. A route is never swapped
+    for an unplanned one: when every planned route fails, the result is
+    `slate_exhausted` and the orchestrator reroutes (`--reroute`). Without a
+    planned slate (`--route`, `--reroute`, a pre-#300 plan) the fresh decision stands."""
+    tid = task["id"]
+    kind = "fix" if task.get("current_dispatch_id") else "fresh"
+    fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
+                                  dispatch_kind=kind)
+    planned = None if (override or reroute) else _planned_slate(con, run, tid)
+    if reroute and fresh.get("status") == "selected":
+        fresh["route_source"], fresh["route_note"] = "reroute", "rerouted from current evidence"
+    if not planned:
+        fresh.setdefault("route_source", "override" if override else "router")
+        return fresh
+    qualifying = fresh.get("qualifying_candidates") or {}
+    reasons = {r["candidate"]: r["reason"] for r in fresh.get("rejected") or []}
+    order = [planned["primary"], *(planned.get("fallbacks") or [])]
+    taken = []
+    for i, rid in enumerate(order):
+        if rid in qualifying:
+            break
+        taken.append({"route": rid, "reason": reasons.get(rid) or "no longer a candidate (harness unavailable, "
+                                                                 "excluded, or removed from the catalog)"})
+    else:
+        return {"status": "slate_exhausted", "selected": None, "rejected": fresh.get("rejected") or [],
+                "skipped": fresh.get("skipped") or [], "fallbacks_taken": taken, "fresh_status": fresh.get("status"),
+                "request": fresh.get("request"), "routing": fresh.get("routing")}
+    cand = qualifying[rid]
+    req = fresh.get("request") or {}
+    disclosure = routing.selection_disclosure("executor", cand, req.get("preferred_seed"),
+                                              (req.get("policy") or {}).get("cost_policy", "balanced"))
+    label = "planned primary" if i == 0 else f"planned fallback {i}"
+    note = label if i == 0 else f"{label}; " + "; ".join(f"{t['route']}: {t['reason']}" for t in taken)
+    disclosure["reason"] = f"{disclosure['reason'].split('; ')[0]}; {note}"
+    disclosure["adaptive"] = True
+    disclosure["route_plan"] = {k: planned.get(k) for k in ("primary", "fallbacks", "chooser", "audit_id")}
+    return {**fresh, "status": "selected", "selected": rid, "candidate": cand, "selection_disclosure": disclosure,
+            "route_source": "plan", "route_note": None if i == 0 else note, "fallbacks_taken": taken,
+            "planned": planned,
+            "decision_hash": sha256_obj({"planned": planned.get("decision_hash"), "fresh": fresh.get("decision_hash"),
+                                         "dispatched": rid, "fallbacks_taken": taken})}
+
+
 def _route_failure(tid: str, decision: dict) -> str:
     status = decision.get("status")
+    if status == "slate_exhausted":
+        tried = "; ".join(f"{t['route']}: {t['reason']}" for t in decision.get("fallbacks_taken") or [])
+        return f"{tid}: every planned route is unavailable now ({tried})"
     rejected = decision.get("rejected") or []
     top = "; ".join(f"{r['candidate']}: {r['reason']}" for r in rejected[:3])
     skipped = "; ".join(f"{s['candidate']}: {s['reason']}" for s in (decision.get("skipped") or [])[:2])
@@ -195,6 +260,9 @@ def _route_failure(tid: str, decision: dict) -> str:
 
 
 def _route_next(decision: dict, tid: str, run: dict | None = None) -> str:
+    if decision.get("status") == "slate_exhausted":
+        return (f"office dispatch {tid} --reroute routes from current evidence; office inspect route {tid} shows "
+                "the planned slate")
     for r in decision.get("rejected") or []:
         if r.get("stage") == 2:
             return (f"a user may promote a route: office approve trust {r['candidate']} --quote \"<user's words>\"; "
@@ -212,6 +280,19 @@ def _record_routing(con, run: dict, decision: dict) -> None:
                 "VALUES(?,?,?,?,?,?,?)",
                 (uuid.uuid4().hex, run["id"], req.get("role"), sha256_obj({k: v for k, v in req.items() if k != "candidates"}),
                  decision.get("selected"), decision.get("decision_hash"), now_iso()))
+    if decision.get("routing"):
+        from office import plan_view
+        planned = decision.get("planned") or {}
+        source = decision.get("route_source") or "router"
+        audit = {**decision["routing"], "phase": "reroute" if source == "reroute" else "dispatch",
+                 "task_id": req.get("task_id"), "role": req.get("role"), "decision_hash": decision.get("decision_hash"),
+                 "planner": planned or {"chooser": "router", "primary": decision.get("selected")},
+                 "dispatch": {"source": source, "dispatched": decision.get("selected"),
+                              "fallbacks_taken": decision.get("fallbacks_taken") or [],
+                              "planned_audit_id": planned.get("audit_id")}}
+        explored = source != "plan" and (audit.get("exploration") or {}).get("picked") == decision.get("selected")
+        decision["audit_id"] = plan_view.record_audit(con, run, audit, plan_version=run.get("plan_version"),
+                                                      dispatched=decision.get("selected"), explored=explored)
 
 
 def _stash_route(con, run, tid, decision):
@@ -222,7 +303,7 @@ def _route_payload(decision: dict) -> dict:
     """What a dispatch keeps of its decision, so a stacked start or a relaunch
     reproduces the same route, override, and launch form."""
     out = {"candidate": decision.get("candidate"), "selection_disclosure": decision.get("selection_disclosure")}
-    for key in ("override", "launch", "benchmark_snapshot"):
+    for key in ("override", "launch", "benchmark_snapshot", "route_source", "fallbacks_taken", "audit_id"):
         if decision.get(key):
             out[key] = decision[key]
     return out
