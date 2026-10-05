@@ -98,14 +98,28 @@ def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect:
         return _submit(con, run, cwd=cwd, plan_path=plan_path, redirect=redirect)
     except Refused as exc:
         dispatch_id = os.environ.get("OFFICE_DISPATCH_ID")
-        # outside-scope records its own event, which also blocks the task on exit.
+        # outside-scope records its own events, which also block the task on exit.
         if dispatch_id and exc.category != "outside-scope":
             d = state.get_dispatch(con, dispatch_id)
             if d is not None and d["run_id"] == run["id"]:
                 with db.transaction(con):
                     state.emit(con, run, "submit.rejected", f"{exc.category}: {exc.message}", audience="runtime",
                                task_id=d.get("task_id"), dispatch_id=dispatch_id, payload={"code": exc.category})
+                    signal_refused(con, run, d, f"{exc.category}: {exc.message}")
         raise
+
+
+def signal_refused(con, run: dict, d: dict, reason: str) -> None:
+    """A refused submit is a worker stopped on something only the orchestrator resolves: `office
+    wait` returns for it at once. Caller holds the transaction."""
+    tid = d.get("task_id") or "run"
+    if reason.startswith("superseded-dispatch"):  # a stale session ended itself; the current holder continues
+        nxt = f"none: {tid} has a newer session; office status shows it"
+    else:
+        nxt = (f"office status; then office rerun {tid} --resume|--fresh, office revoke {tid}, "
+               f"or office amend {tid} -- \"<change>\"")
+    state.signal_orchestrator(con, run, source="submit refused", task_id=d.get("task_id"), dispatch_id=d["id"],
+                              reason=reason, next_step=nxt)
 
 
 def _bounded(argv: list[str], cwd: Path, limit: int) -> tuple[str, bool]:
@@ -450,6 +464,10 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                       scope=task["id"], next_step=f"cd {shlex.quote(str(wt))} && office submit")
     seen_block = block_id(con, d["id"]) if self_blocked(task) else None  # the block this submit may resolve
     left_out = untracked_outside(wt, task["scope"])
+    ledger = _executor_ledger(wt)
+    if ledger and briefs.LEDGER_FILE not in left_out and paths.git(
+            wt, "ls-files", "--others", "--cached", "--exclude-standard", "--", briefs.LEDGER_FILE).strip():
+        left_out.append(briefs.LEDGER_FILE)  # never part of a revision, whatever the scope covers or staged
     restored = harness_edits_outside(wt, task["scope"])
     tree, head = capture_tree(wt, paths.run_dir(run["id"]) / "tmp", left_out, restored)
     applied = d["applied_plan_version"] or 0
@@ -477,12 +495,12 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                          f"{paths.office_trailer(run['id'])}")
     from office import planfile, prs
     base = d["base_commit"]
-    touched = paths.git(wt, "diff", "--name-only", base, commit).split()
+    touched = paths.git(wt, "diff", "--no-renames", "--name-only", base, commit).split()
     dep_bases = [b for b in _dependency_bases(con, run, task, commit) if b != base]
     for b in dep_bases:
         # A file counts only if it differs from every base the task builds on,
         # so a dependency's own later files are not this task's changes.
-        also = set(paths.git(wt, "diff", "--name-only", b, commit).split())
+        also = set(paths.git(wt, "diff", "--no-renames", "--name-only", b, commit).split())
         touched = [f for f in touched if f in also]
     if len(dep_bases) == 1 and gates._is_ancestor(run, base, dep_bases[0]):
         base = dep_bases[0]  # reviewers diff against the dependency revision it now contains
@@ -499,6 +517,9 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
             state.emit(con, run, "task.blocked", f"{task['id']} submit refused ({msg}); amend the scope "
                        f"(office amend {task['id']} --contract -- ...) or tell the worker to revert; work is preserved "
                        "in its worktree", task_id=task["id"], dispatch_id=d["id"])
+            state.signal_orchestrator(con, run, source="submit refused", task_id=task["id"], dispatch_id=d["id"],
+                                      reason=f"outside-scope: {msg}", next_step=f'office amend {task["id"]} --contract -- '
+                                      f'"<add the file to SCOPE>", or office prompt {d["id"]} -- "revert <file>"')
         raise Refused("outside-scope", f"{task['id']} changed files outside its scope: {', '.join(outside[:6])}",
                       scope=task["id"], preserved="your worktree (nothing was submitted)",
                       next_step='revert those files, or run office submit --request-scope <path> -- "<reason>" '
@@ -512,7 +533,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                        audience="runtime", task_id=task["id"], dispatch_id=d["id"], payload={"code": "stale-evidence"})
         raise _stale_evidence(task)
     res = Result()
-    with _evidence_commit() as staged, db.transaction(con):
+    with _evidence_commit(ledger) as staged, db.transaction(con):
         again = con.execute("SELECT * FROM revisions WHERE operation_id=?", (op_id,)).fetchone()
         if again:
             return _duplicate(con, run, dict(again))
@@ -558,7 +579,8 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
             state.emit(con, run, "submit.amendment_pending", f"{task['id']} {rev_id} submitted under p{applied}; "
                        "amendment pending", audience=f"dispatch:{d['id']}", task_id=task["id"])
             res.add(f"rev {rev_id} captured | amendment pending: apply it, then office ack; not a failure")
-            res.next = "apply the delivered amendment, office ack <id>, then office submit"
+            res.next = ("apply the delivered amendment, office ack <id>, rewrite the self-review ledger after your last "
+                        "commit, then office submit")
             return res
         if prev:
             con.execute("UPDATE revisions SET status='superseded' WHERE id=? AND status='current'", (prev,))
@@ -570,7 +592,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     jobs.kick(con, run["id"])
     parts = [f"rev {rev_id} captured"] + ([f"supersedes {prev}"] if prev else []) + planned["summary"]
     res.add(" | ".join(parts))
-    left_out = [f for f in left_out if f != briefs.EVIDENCE_FILE]
+    left_out = [f for f in left_out if f not in (briefs.EVIDENCE_FILE, briefs.LEDGER_FILE)]
     for label, names in (("untracked files outside", left_out), ("harness config edits outside", restored)):
         if names:
             shown = ", ".join(names[:4]) + (f" (+{len(names) - 4} more)" if len(names) > 4 else "")
@@ -580,11 +602,19 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     return res
 
 
+def _executor_ledger(wt: Path) -> Path | None:
+    """The executor's self-review ledger when it is a file (or link) that HEAD does not track."""
+    path = wt / briefs.LEDGER_FILE
+    if (path.is_file() or path.is_symlink()) and not paths.git(wt, "ls-tree", "HEAD", "--", briefs.LEDGER_FILE).strip():
+        return path
+    return None
+
+
 @contextmanager
-def _evidence_commit():
-    """Yields a list that `_stage_evidence` fills. The worktree file is consumed
-    only after the surrounding transaction commits; on any failure the staged
-    copy is discarded and the worktree file is kept."""
+def _evidence_commit(ledger: Path | None = None):
+    """Yields a list that `_stage_evidence` fills. The worktree file (and the executor's
+    self-review `ledger`) is consumed only after the surrounding transaction commits;
+    on any failure the staged copy is discarded and the worktree files are kept."""
     staged: list[tuple[Path, Path]] = []
     try:
         yield staged
@@ -594,36 +624,48 @@ def _evidence_commit():
         raise
     for src, _ in staged:
         src.unlink(missing_ok=True)  # consumed: the next submission must write its own
+    if ledger:
+        try:
+            ledger.unlink(missing_ok=True)
+        except OSError:
+            pass  # the revision is recorded; a ledger that cannot be removed is overwritten by the next one
 
 
 EVIDENCE_KIND = "executor_evidence"
+
+
+def _read_untracked_text(wt: Path, name: str, limit: int) -> str | None:
+    """Text of the file `name` an executor wrote at its worktree root, or None unless it is a regular,
+    untracked, singly linked file. A symlink could point at a credential file, a hard link shares its
+    inode, and a tracked file is repo content. At most `limit` + 1 characters come back."""
+    src = wt / name
+    if src.is_symlink() or not src.is_file():
+        return None
+    if paths.git(wt, "ls-files", "--", name).strip():
+        return None
+    try:
+        fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            # A hard link to another file (a credential) shares its inode: ordinary files have one link.
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+                return None
+            raw = fh.read(limit * 4 + 1)
+    except (OSError, ValueError):
+        return None
+    return raw.decode("utf-8", errors="replace")[:limit + 1]
 
 
 def _read_evidence(wt: Path) -> tuple[Path, str, str] | None:
     """A scope-none task's evidence file as (path, reviewer text, sha256 of that text), or None.
     Freshness is not judged here: the launch moves any earlier file out of the
     worktree (dispatch._set_aside_evidence), and submit refuses content already ingested."""
-    src = wt / briefs.EVIDENCE_FILE
-    # Only a regular, untracked file the executor wrote: a symlink could point at
-    # a credential file and a tracked file is not evidence of this submission.
-    if src.is_symlink() or not src.is_file():
+    text = _read_untracked_text(wt, briefs.EVIDENCE_FILE, briefs.EVIDENCE_MAX_CHARS)
+    if text is None:
         return None
-    if paths.git(wt, "ls-files", "--", briefs.EVIDENCE_FILE).strip():
-        return None
-    try:
-        fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        with os.fdopen(fd, "rb") as fh:
-            st = os.fstat(fh.fileno())
-            # A hard link to another file (a credential) shares its inode: ordinary evidence has one link.
-            if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
-                return None
-            raw = fh.read(briefs.EVIDENCE_MAX_CHARS * 4 + 1)
-    except (OSError, ValueError):
-        return None
-    text = raw.decode("utf-8", errors="replace")
     if len(text) > briefs.EVIDENCE_MAX_CHARS:
         text = text[:briefs.EVIDENCE_MAX_CHARS] + f"\n[evidence truncated at {briefs.EVIDENCE_MAX_CHARS} characters]\n"
-    return src, text, sha256_bytes(text.encode("utf-8"))
+    return wt / briefs.EVIDENCE_FILE, text, sha256_bytes(text.encode("utf-8"))
 
 
 def _ingested_digests(con, run: dict, task_id: str) -> set[str]:

@@ -163,6 +163,56 @@ def emit(con: sqlite3.Connection, run: dict, kind: str, summary: str, *, audienc
     return cur.lastrowid
 
 
+SIGNAL_KIND = "worker.signal"
+SIGNAL_REPEAT_S = 600  # the same reason from the same dispatch is news again after this long
+SIGNAL_CONSUMER = "orchestrator-signal"  # its own cursor: a signal is a stall whatever else is unread
+
+
+def signal_orchestrator(con: sqlite3.Connection, run: dict, *, source: str, task_id: str | None,
+                        dispatch_id: str | None, reason: str, next_step: str) -> int | None:
+    """Tell the orchestrator a worker is stopped for a reason only it can resolve (a preflight
+    stop, a refused submit). `office wait` returns for it as a stall instead of after the idle
+    threshold. One event per distinct (dispatch, source, reason): repeating the same command does
+    not repeat the signal while the orchestrator has yet to read it or for SIGNAL_REPEAT_S after it
+    was recorded, A new distinct reason is
+    always recorded. Caller holds the transaction; returns the event seq, or None when it repeats one."""
+    from office.util import parse_iso
+    reason = " ".join("".join(c if c.isprintable() else " " for c in reason).split())[:300]
+    summary = f"{task_id or 'run'} {dispatch_id or ''} {source}: {reason}".replace("  ", " ")
+    rows = con.execute("SELECT seq, summary, created_at FROM events WHERE run_id=? AND kind=? AND dispatch_id IS ? "
+                       "AND summary=?", (run["id"], SIGNAL_KIND, dispatch_id, summary)).fetchall()
+    cur = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer='orchestrator'", (run["id"],)).fetchone()
+    read = cur[0] if cur else 0
+    now = parse_iso(now_iso())
+    for r in rows:
+        if r["seq"] > read or (now - parse_iso(r["created_at"])).total_seconds() < SIGNAL_REPEAT_S:
+            return None
+    return emit(con, run, SIGNAL_KIND, summary, task_id=task_id, dispatch_id=dispatch_id,
+                payload={"source": source, "reason": reason, "next": next_step})
+
+
+def unread_signals(con: sqlite3.Connection, run_id: str) -> list[dict]:
+    """Every orchestrator-audience worker signal not yet reported by `office wait` or shown by `status`,
+    wherever it sits among the other unread events. A run that never had a signal cursor starts from
+    the orchestrator cursor, so signals it already read are not news."""
+    row = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer=?", (run_id, SIGNAL_CONSUMER)).fetchone()
+    if row is None:
+        row = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer='orchestrator'", (run_id,)).fetchone()
+    return [dict(r) for r in con.execute("SELECT * FROM events WHERE run_id=? AND seq>? AND kind=? AND audience='orchestrator' "
+                                         "ORDER BY seq", (run_id, row[0] if row else 0, SIGNAL_KIND)).fetchall()]
+
+
+def consume_events(con: sqlite3.Connection, run_id: str, events: list[dict]) -> None:
+    """Mark shown events read: the orchestrator cursor, and the signal cursor for any signal among them.
+    Caller holds the transaction."""
+    if not events:
+        return
+    advance_cursor(con, run_id, "orchestrator", events[-1]["seq"])
+    signals = [e["seq"] for e in events if e["kind"] == SIGNAL_KIND]
+    if signals:
+        advance_cursor(con, run_id, SIGNAL_CONSUMER, max(signals))
+
+
 def unread_events(con: sqlite3.Connection, run_id: str, consumer: str, audiences: tuple[str, ...],
                   limit: int = 20) -> list[dict]:
     row = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer=?", (run_id, consumer)).fetchone()

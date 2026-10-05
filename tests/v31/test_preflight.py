@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from conftest import GOOD_ADD, approved_run, task_row
+from test_self_review_ledger import write_ledger
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
@@ -25,6 +26,9 @@ def _dispatched(env):
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt, d = _worker(env)
     (wt / "calc.py").write_text(GOOD_ADD)
+    env.git("add", "calc.py", cwd=wt)
+    env.git("-c", "user.email=t@e.test", "-c", "user.name=t", "commit", "-qm", "calc", cwd=wt)  # the ledger names HEAD
+    write_ledger(wt)  # the self-review ledger an executor with a non-empty diff owes
     return wenv, wt, d
 
 
@@ -112,7 +116,9 @@ def test_fix_round_without_findings_stops_and_names_the_escalation(env, tmp_path
     data["fix_of"] = "R1"
     pkt.write_text(json.dumps(data))
     code, out = env.office("preflight", cwd=wt, env=wenv)
-    assert code == 4 and "no open findings" in out and "office prompt" in out, out
+    assert code == 4 and "no open findings or amendments" in out, out
+    # The command it names is one that resolves the stop; `office prompt` records no findings.
+    assert "office amend T1 --" in out and "office rerun T1 --fresh" in out and "office prompt" not in out, out
     con.execute("INSERT INTO findings (id, run_id, task_id, code, severity, location, summary, state, created_at) "
                 "VALUES ('f1', ?, 'T1', 'F1', 'medium', 'calc.py:1', 'add() drops negatives', 'open', '2026-01-01')",
                 (run_id,))
@@ -121,7 +127,107 @@ def test_fix_round_without_findings_stops_and_names_the_escalation(env, tmp_path
     assert code == 0 and "finding: F1 [medium] calc.py:1 add() drops negatives" in out, out
 
 
+def _signals(env):
+    return [dict(r) for r in env.con().execute("SELECT * FROM events WHERE kind='worker.signal' ORDER BY seq")]
+
+
+@pytest.mark.approved
+def test_contract_conflict_and_round_cap_stops_signal_the_orchestrator(env):
+    from test_self_review_ledger import ledger_text
+    wenv, wt, d = _dispatched(env)
+    head = env.git("rev-parse", "HEAD", cwd=wt).strip()
+    write_ledger(wt, ledger_text(head, findings=["FINDING high edge-cases calc.py:2 | add must reject ints | contract-conflict accept=1"]))
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert code == 4 and "contract-conflict" in out, out
+    write_ledger(wt, ledger_text(head, rnd=3, findings=["FINDING medium edge-cases calc.py:9 | add skips zero | open"]))
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert code == 4 and "round 3 ended with a finding still open" in out, out
+    events = _signals(env)
+    assert len(events) == 2 and all(e["audience"] == "orchestrator" and e["dispatch_id"] == d["id"] for e in events), events
+    assert "contract-conflict" in events[0]["summary"] and "round 3" in events[1]["summary"], events
+    assert "office amend T1 --contract" in json.loads(events[0]["payload_json"])["next"]
+    assert "office rerun T1 --fresh" in json.loads(events[1]["payload_json"])["next"]
+
+
+@pytest.mark.approved
+def test_a_fix_signals_only_after_the_round_cap(env):
+    from test_self_review_ledger import ledger_text
+    wenv, wt, d = _dispatched(env)
+    head = env.git("rev-parse", "HEAD", cwd=wt).strip()
+    write_ledger(wt, ledger_text(head, rnd=2, findings=["FINDING low edge-cases calc.py:9 | nit | open"]))
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert code == 1 and _signals(env) == [], out
+    write_ledger(wt, ledger_text(head, rnd=3, findings=["FINDING low edge-cases calc.py:9 | nit | open"]))
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert code == 1 and len(_signals(env)) == 1 and "round cap spent" in _signals(env)[0]["summary"], out
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("path", ["stop", "fix-after-cap"])
+def test_preflight_changes_nothing_in_the_worktree_and_only_adds_the_event(env, path):
+    from test_self_review_ledger import ledger_text
+    wenv, wt, d = _dispatched(env)
+    if path == "stop":
+        env.office("revoke", "T1", env=EXTERNAL, check=0)
+    else:
+        head = env.git("rev-parse", "HEAD", cwd=wt).strip()
+        write_ledger(wt, ledger_text(head, rnd=3, findings=["FINDING low edge-cases calc.py:9 | nit | open"]))
+
+    def snapshot():
+        files = {str(p.relative_to(wt)): p.read_bytes() for p in sorted(wt.rglob("*"))
+                 if p.is_file() and ".git" not in p.relative_to(wt).parts}
+        return files, env.git("status", "--porcelain", "--ignored", cwd=wt), env.git("rev-parse", "HEAD", cwd=wt)
+
+    def tables():
+        con = env.con()
+        return {t: [tuple(r) for r in con.execute(f"SELECT * FROM {t} ORDER BY 1")]
+                for t in ("tasks", "dispatches", "leases", "revisions", "deliveries", "findings", "gates")}
+
+    before_fs, before_db = snapshot(), tables()
+    count = len(env.con().execute("SELECT 1 FROM events").fetchall())
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert code == (4 if path == "stop" else 1), out
+    assert snapshot() == before_fs and tables() == before_db
+    added = env.con().execute("SELECT kind FROM events ORDER BY seq").fetchall()[count:]
+    assert [r[0] for r in added] and set(r[0] for r in added) == {"worker.signal"}, added
+
+
 @pytest.mark.integration
+@pytest.mark.approved
+def test_a_dispatch_of_another_run_is_not_this_worker_and_signals_nothing(env):
+    wenv, wt, d = _dispatched(env)
+    con = env.con()
+    con.execute("UPDATE dispatches SET run_id='some-other-run' WHERE id=?", (d["id"],))
+    con.commit()
+    code, out = env.office("preflight", cwd=env.repo, env={**wenv, "OFFICE_RUN_ID": d["run_id"]})
+    assert code == 4 and "no executor dispatch owns this directory" in out, out
+    assert _signals(env) == []
+
+
+@pytest.mark.approved
+def test_a_superseded_session_is_signalled_without_a_command_that_would_hit_the_holder(env):
+    wenv, wt, d = _dispatched(env)
+    _set_task(env, current_dispatch_id="Dnewer")
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert code == 4 and "stop: superseded" in out, out
+    nxt = json.loads(_signals(env)[0]["payload_json"])["next"]
+    assert "revoke" not in nxt and "rerun" not in nxt, nxt
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert code == 4, out
+    nxt = json.loads(_signals(env)[-1]["payload_json"])["next"]
+    assert "revoke" not in nxt and "rerun" not in nxt, nxt
+
+
+@pytest.mark.approved
+def test_a_renamed_out_of_scope_file_is_still_outside_scope(env):
+    wenv, wt, d = _dispatched(env)
+    env.git("mv", "README.md", "calc_notes.md", cwd=wt)  # destination is outside SCOPE too, source was tracked
+    env.git("-c", "user.email=t@e.test", "-c", "user.name=t", "commit", "-qam", "rename", cwd=wt)
+    write_ledger(wt)
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert "README.md" in out and "calc_notes.md" in out and "tracked edits outside SCOPE" in out, out
+
+
 @pytest.mark.approved
 def test_out_of_scope_edit_and_bsd_sed_backup_are_fixes(env):
     wenv, wt, d = _dispatched(env)
@@ -331,10 +437,10 @@ def test_every_tier_keeps_lenses_json_shape_fix_rule_and_mutation_proof(tier):
     assert "A finding outside SCOPE goes in your report, unfixed" in block
 
 
-def test_inline_tier_has_no_subagent_instruction_and_no_rereview_rounds():
+def test_inline_tier_has_no_subagent_instruction_and_the_shared_round_rules():
     block = _tier_brief("inline")
     assert "subagent" not in block.lower()
-    assert "Re-review" not in block and "rounds" not in block
+    assert "fix-diff re-review" in block and "3-round cap" in block
     assert "one fresh pass per lens yourself" in block
     assert "You may skip a lens that clearly does not\n    apply, with a one-line reason in your report" in block
 
@@ -352,15 +458,15 @@ def test_inline_tier_applies_to_repo_blast_but_not_to_quick_gear():
 def test_single_tier_names_exactly_one_subagent_covering_all_four_lenses():
     block = _tier_brief("single")
     assert "Start exactly one subagent" in block and "all four" in block
-    assert "four parallel subagents" not in block and "at most 3 rounds" not in block
+    assert "four parallel subagents" not in block
     assert block.lower().count("subagent") == 1
-    assert "at most 2 rounds" in block and "skip a lens" not in block
+    assert "3-round cap" in block and "skip a lens" not in block
 
 
 def test_deep_tier_keeps_four_parallel_subagents_and_three_rounds():
     block = _tier_brief("deep")
     assert "Start four parallel subagents" in block
-    assert "each given only the diff and one\n    lens" in block and "at most 3 rounds" in block
+    assert "each given only the diff and one\n    lens" in block and "3-round cap" in block
     assert "exactly one subagent" not in block
 
 
@@ -498,7 +604,7 @@ def test_office_submit_skill_reads_the_tier_and_no_longer_requires_four_subagent
     assert "no subagents" in inline and "Agent" not in inline
     assert "skip a lens that clearly does not apply" in inline and "one-line reason" in inline
     assert "exactly one `Agent` subagent" in single and "all four lenses" in single
-    assert "at most 2 rounds" in single
-    assert "four `Agent` subagents" in deep and "at most 3 rounds" in deep
+    assert "four `Agent` subagents" in deep
+    assert "3-round cap" in step and "fix-diff re-review" in step
     assert "four `Agent` subagents" not in step.replace(deep.split("\n\n")[0], "")
     assert "You cannot lower it" in step

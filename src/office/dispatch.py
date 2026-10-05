@@ -30,9 +30,11 @@ from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, pla
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (atomic_write_json, claim_alive, claim_signalable, dumps, now_iso, parse_iso, pid_alive,
-                         process_is, process_start, sha256_obj, short)
+                         process_is, process_start, sha256_obj, short, loads)
 
 LEASE_TTL_SECONDS = 4 * 3600
+# A harness session id lands in a resume argv: plain id characters only, never a leading dash.
+_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 IDENTITY_ENV = ("OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE_ROLE", "OFFICE_STATE_DIR",
                 "OFFICE_SESSION", "OFFICE_HARNESS", "OFFICE_VERSION", "OFFICE_FRONT_DOOR_HOPS")
 PLANNER_TASK = "P1"
@@ -324,7 +326,8 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
         adapter = adapters.load_all().get(d.get("adapter_id") or "")
         inter = adapters.interactive_argv(adapter, "worker" if output is None else "reviewer", model=d.get("model") or "",
                                           effort=d.get("effort") or "none", cwd=Path(wt),
-                                          output=Path(output) if output else None) if adapter and d.get("model") else None
+                                          output=Path(output) if output else None,
+                                          session_id=_assigned_session(d)) if adapter and d.get("model") else None
         kind, args = (inter[1], inter[0]) if inter else (d.get("harness") or "<kind>", [])
     if output is None:
         pointer = (f"Read and carry out the brief at {ddir / 'brief.md'} exactly. "
@@ -908,6 +911,8 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
             con.execute("UPDATE dispatches SET log_path=COALESCE(log_path, ?) WHERE id=?", (spec["log_path"], dispatch["id"]))
     finally:
         con.close()
+    if not (cli or resume):
+        _assign_session(dispatch)
     argv, extra = frontdoor.current_argv()
     sup = argv + ["_supervise", dispatch["id"]]
     env = dict(os.environ)
@@ -918,6 +923,8 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
     if cli and not use_herdr:
         _launch_notice(run, dispatch, f"--cli needs a herdr session; left external instead. Start it by hand: {cli}")
         external = True
+    if resume and output:
+        resume = _resume_with_reply_access(dispatch, kind, resume, cwd, include_dirs, output)
     if resume and not use_herdr:
         # A native resume reopens the session in a pane; never fall back to a
         # fresh headless session under the resume's name (R7).
@@ -1065,7 +1072,8 @@ def _interactive(dispatch: dict, kind: str, cwd: Path, include_dirs: list[Path] 
     if not adapter or not dispatch.get("model"):
         return None
     return adapters.interactive_argv(adapter, kind, model=dispatch["model"], effort=dispatch.get("effort") or "none",
-                                     cwd=cwd, include_dirs=include_dirs, output=output)
+                                     cwd=cwd, include_dirs=include_dirs, output=output,
+                                     session_id=_assigned_session(dispatch))
 
 
 def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = True) -> Path:
@@ -1122,10 +1130,14 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     fresh_label = pane_label(run, dispatch, dispatch.get("kind") or "")
     if fresh_label != label or retried:
         _herdr_rename(pane, fresh_label)
-    session = _started_session(proc.stdout) or _capture_session(name)
-    if session:
-        _set_dispatch(dispatch["id"], session_id=session)
-    else:
+    # An id Office assigned at launch is already recorded; only a harness that
+    # takes none needs herdr to report the one it started.
+    session = dispatch.get("session_id")
+    if not session:
+        session = _started_session(proc.stdout) or _capture_session(name)
+        if session:
+            _record_session(run, dispatch, session, source="herdr")
+    if not session:
         # Not a launch failure: the agent runs. Recorded where `office inspect` shows it.
         con = db.connect()
         try:
@@ -1997,6 +2009,132 @@ def _capture_session(name: str) -> str | None:
         time.sleep(0.5)
 
 
+def _resume_with_reply_access(dispatch: dict, kind: str, resume: dict, cwd: Path, include_dirs: list[Path] | None,
+                              output: Path) -> dict:
+    """A resumed reviewer still writes its reply file: rebuild the resume argv
+    with the directory that file lives in, which the caller's form lacked."""
+    adapter = adapters.load_all().get(dispatch.get("adapter_id") or "")
+    form = adapters.resume_argv(adapter, kind, session_id=resume["session_id"], model=dispatch.get("model") or "",
+                                effort=dispatch.get("effort") or "none", cwd=cwd, include_dirs=include_dirs,
+                                output=output) if adapter and resume.get("session_id") else None
+    return {**resume, "argv": form[0], "herdr_kind": form[1]} if form else resume
+
+
+def _assigned_session(d: dict) -> str | None:
+    """The id to pass a harness that takes one at launch. A resumed dispatch
+    continues its parent's session and passes none."""
+    return None if d.get("resumed_from") else d.get("session_id")
+
+
+def _assign_session(dispatch: dict) -> None:
+    """Where the harness accepts an assigned session id (claude --session-id),
+    pick it and record it before the agent starts, whatever the role. A
+    dispatch relaunched after a failed start keeps the id it already has."""
+    if dispatch.get("session_id") or not adapters.assigns_session(adapters.load_all().get(dispatch.get("adapter_id") or "")):
+        return
+    session = str(uuid.uuid4())
+    _set_dispatch(dispatch["id"], session_id=session)
+    dispatch["session_id"] = session
+
+
+def record_session(con, run: dict, dispatch_id: str, session: str, *, harness: str | None = None, source: str) -> str:
+    """Record the harness session id seen for a dispatch: "set" when it was
+    empty, "same" when it already matches, "mismatch" when a different id is
+    recorded (kept, and noted once as an event), "ignored" for another run's
+    dispatch, another harness's id, or a malformed one."""
+    d = state.get_dispatch(con, dispatch_id)
+    if (not d or d["run_id"] != run["id"] or (harness and d.get("harness") != harness)
+            or not _SESSION_ID.fullmatch(session)):
+        return "ignored"
+    if d.get("session_id") == session:
+        return "same"
+    with db.transaction(con):
+        recorded = state.get_dispatch(con, dispatch_id).get("session_id")  # re-read under the write lock
+        if not recorded:
+            con.execute("UPDATE dispatches SET session_id=? WHERE id=?", (session, dispatch_id))
+            return "set"
+        if recorded == session:
+            return "same"
+        seen = {loads(r[0], {}).get("seen") for r in con.execute(
+            "SELECT payload_json FROM events WHERE dispatch_id=? AND kind='session.mismatch'", (dispatch_id,))}
+        if session not in seen:
+            state.emit(con, run, "session.mismatch", f"{d.get('task_id') or dispatch_id}: {source} saw session {session} but "
+                       f"{recorded} is recorded for {dispatch_id}; the recorded id is kept", audience="runtime",
+                       task_id=d.get("task_id"), dispatch_id=dispatch_id,
+                       payload={"recorded": recorded, "seen": session, "source": source})
+        return "mismatch"
+
+
+class _SessionSniffer:
+    """Reads a headless agent's stream for the session id its harness prints in
+    the header block before the prompt (adapter `session.output_pattern`), and
+    records it. Only a line inside that block counts: the block is the text
+    between two rule lines, the first within a few lines of the start. A stream
+    with no such block, a prompt echoed after it, or an agent reply that happens
+    to contain the pattern is never taken for an id. Best effort: a recording
+    failure is noted in the log and retried, and never disturbs the run."""
+
+    HEADER_BYTES = 16384
+    BANNER_LINES = 3  # lines allowed before the opening rule
+    ATTEMPTS = 2
+    _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+    def __init__(self, run: dict, dispatch: dict, adapter: dict | None, log_path=None):
+        self.run, self.dispatch, self.log_path = run, dispatch, log_path
+        self.pattern = adapters.session_output_pattern(adapter)
+        self.buffer, self.seen, self.rules, self.lead = b"", 0, 0, 0
+        if not self.pattern and adapters.session_spec(adapter).get("output_pattern"):
+            _note(log_path, "office: the adapter's session.output_pattern is unusable; the session id is not captured")
+
+    def _stop(self, why: str | None = None) -> None:
+        """Stop reading. `why` is logged when no id was recorded, so a harness
+        that stops printing one is visible instead of silently unresumable."""
+        self.pattern, self.buffer = None, b""
+        if why:
+            _note(self.log_path, f"office: no session id captured: {why}")
+
+    def feed(self, chunk: bytes) -> None:
+        if not self.pattern:
+            return
+        self.seen += len(chunk)
+        self.buffer += chunk
+        *lines, self.buffer = self.buffer.split(b"\n")
+        for raw in lines:
+            line = self._ANSI.sub("", raw.decode("utf-8", "replace")).strip()
+            if re.fullmatch(r"-{8,}", line):
+                self.rules += 1
+                if self.rules >= 2:  # the header block is closed: the prompt follows
+                    return self._stop("the header block closed without a session id line")
+            elif self.rules == 0:
+                self.lead += 1 if line else 0
+                if self.lead > self.BANNER_LINES:  # no header block opens this stream
+                    return self._stop("no header block opened the stream")
+            else:
+                found = self.pattern.match(line)
+                if found:
+                    self._record(found.group(1))
+                    return self._stop()
+        if self.seen > self.HEADER_BYTES or len(self.buffer) > self.HEADER_BYTES:
+            self._stop("the header block did not finish within the first bytes")
+
+    def _record(self, session: str) -> None:
+        """Record the id, retrying a failed write once; a final failure is noted in the log."""
+        for attempt in range(self.ATTEMPTS):
+            try:
+                return _record_session(self.run, self.dispatch, session, source="output")
+            except Exception as exc:
+                if attempt + 1 == self.ATTEMPTS:
+                    _note(self.log_path, f"office: could not record session id {session}: {exc!r}")
+
+
+def _record_session(run: dict, dispatch: dict, session: str, *, source: str) -> None:
+    con = db.connect()
+    try:
+        record_session(con, run, dispatch["id"], session, harness=dispatch.get("harness"), source=source)
+    finally:
+        con.close()
+
+
 def _set_dispatch(dispatch_id: str, **cols) -> None:
     con = db.connect()
     try:
@@ -2221,7 +2359,8 @@ def supervise(dispatch_id: str) -> int:
         argv, prof = adapters.build_argv(adapter, spec["kind"], model=d["model"], effort=d["effort"] or "none",
                                          cwd=Path(spec["cwd"]), output=output,
                                          images=[Path(i) for i in spec.get("images") or []],
-                                         include_dirs=[Path(i) for i in spec.get("include_dirs") or []])
+                                         include_dirs=[Path(i) for i in spec.get("include_dirs") or []],
+                                         session_id=_assigned_session(d))
         prompt = Path(spec["prompt_file"]).read_text(encoding="utf-8")
         if prof.get("image_transport") in ("prompt-at", "prompt-path") and spec.get("images"):
             prefix = "@" if prof["image_transport"] == "prompt-at" else ""
@@ -2263,9 +2402,12 @@ def supervise(dispatch_id: str) -> int:
                     child.stdin.close()
                 except BrokenPipeError:
                     pass
+            sniffer = None if d.get("resumed_from") else _SessionSniffer(run, d, adapter, log_path)
             for chunk in iter(lambda: child.stdout.read1(65536), b""):
                 log.write(chunk)
                 log.flush()
+                if sniffer:
+                    sniffer.feed(chunk)
                 if sys.stdout.isatty():
                     sys.stdout.buffer.write(chunk)
                     sys.stdout.flush()

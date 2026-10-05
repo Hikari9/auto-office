@@ -47,6 +47,185 @@ def test_wait_returns_0_at_once_when_a_task_already_needs_the_orchestrator(env):
     assert code == 0 and "blocker:" in out, out
 
 
+# ---- a worker stopped on something only the orchestrator resolves
+
+def _executor(env):
+    from conftest import task_row
+    d = dict(env.con().execute("SELECT * FROM dispatches WHERE id=?", (task_row(env)["current_dispatch_id"],)).fetchone())
+    return {"OFFICE_RUN_ID": d["run_id"], "OFFICE_DISPATCH_ID": d["id"], "OFFICE_TASK_ID": "T1",
+            "OFFICE_ROLE": "executor", "OFFICE_JOBS": "manual"}, Path(d["worktree"]), d
+
+
+def _signals(env):
+    return [dict(r) for r in env.con().execute("SELECT * FROM events WHERE kind='worker.signal' ORDER BY seq")]
+
+
+@pytest.mark.approved
+def test_a_preflight_stop_wakes_wait_as_a_stall_at_once(env):
+    import time
+    _go(env)
+    wenv, wt, d = _executor(env)
+    env.office("revoke", "T1", check=0)
+    env.office("status", check=0)  # consume the revoke events: only the worker's own signal is left
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert code == 4 and "stop: lease-lost" in out, out
+    started = time.time()
+    code, out = env.office("wait", "--timeout", "30", "--poll", "0.2", env=EXTERNAL)
+    assert time.time() - started < 10, "wait must not sit out the 60s idle stall"
+    assert code == 3 and "stall:" in out, out
+    line = next(l for l in out.splitlines() if l.startswith("stall:"))
+    assert "T1" in line and d["id"] in line and "lease-lost" in line and "next: office status; then office rerun T1" in line, line
+    # Reported once: the revoked task still needs the orchestrator (exit 0), but the signal is not a stall again.
+    code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
+    assert code != 3 and "stall:" not in out, out
+
+
+@pytest.mark.approved
+def test_repeating_the_same_preflight_stop_records_one_event(env):
+    _go(env)
+    wenv, wt, d = _executor(env)
+    env.office("revoke", "T1", check=0)
+    for _ in range(3):
+        env.office("preflight", cwd=wt, env=wenv, check=4)
+    events = _signals(env)
+    assert events and all(e["audience"] == "orchestrator" and e["task_id"] == "T1" and e["dispatch_id"] == d["id"]
+                          for e in events), events
+    assert len({e["summary"] for e in events}) == len(events), "one event per distinct reason"
+    assert any("lease-lost" in e["summary"] for e in events), events
+    # A different reason is a different signal, recorded once however often it repeats.
+    con = env.con()
+    con.execute("UPDATE tasks SET status='blocked', pause_reason='worker ended (crash) without submitting' WHERE id='T1'")
+    con.commit()
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    after = _signals(env)
+    assert len(after) == len(events) + 1 and "worker ended (crash)" in after[-1]["summary"], [e["summary"] for e in after]
+
+
+@pytest.mark.approved
+def test_the_same_reason_is_news_again_once_read_and_old_enough(env):
+    _go(env)
+    wenv, wt, d = _executor(env)
+    env.office("revoke", "T1", check=0)
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    n = len(_signals(env))
+    env.office("status", check=0)  # the orchestrator reads them
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    assert len(_signals(env)) == n, "read but recent: still the same news"
+    con = env.con()
+    con.execute("UPDATE events SET created_at='2000-01-01T00:00:00+00:00' WHERE kind='worker.signal'")
+    con.commit()
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    assert len(_signals(env)) == 2 * n, [e["summary"] for e in _signals(env)]
+
+
+@pytest.mark.approved
+def test_a_new_distinct_reason_is_recorded_however_many_came_before(env):
+    from office import state
+    _go(env)
+    wenv, wt, d = _executor(env)
+    con = env.con()
+    run = state.get_run(con, d["run_id"])
+    for i in range(30):
+        with con:
+            state.signal_orchestrator(con, run, source="preflight stop", task_id="T1", dispatch_id=d["id"],
+                                      reason=f"reason {i}", next_step="office status")
+    with con:
+        state.signal_orchestrator(con, run, source="preflight stop", task_id="T1", dispatch_id=d["id"],
+                                  reason="reason 0", next_step="office status")  # a repeat: not recorded
+    assert len(_signals(env)) == 30 and "reason 29" in _signals(env)[-1]["summary"]
+    with con:
+        state.signal_orchestrator(con, run, source="submit refused", task_id="T1", dispatch_id=d["id"],
+                                  reason="a later, different refusal", next_step="office status")
+    assert len(_signals(env)) == 31 and "a later, different refusal" in _signals(env)[-1]["summary"]
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("first", ["status", "wait"])
+def test_a_signal_behind_a_full_window_of_other_events_still_wakes_wait(env, first):
+    from office import state
+    _go(env)
+    wenv, wt, d = _executor(env)
+    con = env.con()
+    run = state.get_run(con, d["run_id"])
+    with con:
+        for i in range(20):  # far more than the 4 a command and the 6 a status show
+            state.emit(con, run, "note", f"earlier orchestrator event {i}", task_id="T1")
+    env.office("revoke", "T1", check=0)
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    if first == "status":
+        env.office("status", check=0)  # consumes the first six unread events only
+    code, out = env.office("wait", "--timeout", "30", "--poll", "0.2", env=EXTERNAL)
+    assert code == 3 and "stall: T1" in out and "preflight stop:" in out and "next: office status; then office rerun T1" in out, out
+    code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
+    assert "stall: T1" not in out, out  # reported once
+
+
+@pytest.mark.approved
+def test_a_signal_already_shown_by_status_is_not_a_stall_again(env):
+    _go(env)
+    wenv, wt, d = _executor(env)
+    env.office("revoke", "T1", check=0)
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    code, out = env.office("wait", "--timeout", "5", "--poll", "0.2", env=EXTERNAL)
+    assert code == 3, out  # reported: the signal cursor now exists
+    n = len(_signals(env))
+    con = env.con()
+    con.execute("UPDATE tasks SET status='blocked', pause_reason='worker ended (crash) without submitting' WHERE id='T1'")
+    con.commit()
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    assert len(_signals(env)) > n
+    env.office("status", check=0)  # the new signal is within its first six unread events: shown, so seen
+    code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
+    assert "stall: T1" not in out and code != 3, out
+
+
+@pytest.mark.approved
+def test_a_flood_of_signals_prints_the_newest_few_with_a_count(env):
+    from office import state
+    _go(env)
+    wenv, wt, d = _executor(env)
+    con = env.con()
+    run = state.get_run(con, d["run_id"])
+    for i in range(40):
+        with con:
+            state.signal_orchestrator(con, run, source="preflight stop", task_id="T1", dispatch_id=d["id"],
+                                      reason=f"varied reason {i}", next_step="office status")
+    code, out = env.office("wait", "--timeout", "5", "--poll", "0.2", env=EXTERNAL)
+    lines = [l for l in out.splitlines() if l.startswith("stall: T1")]
+    assert code == 3 and len(lines) == 10 and "varied reason 39" in lines[-1], out
+    assert "30 earlier worker signals not shown" in out, out
+
+
+@pytest.mark.approved
+def test_signals_an_older_run_already_read_are_not_news(env):
+    from office import state
+    _go(env)
+    wenv, wt, d = _executor(env)
+    con = env.con()
+    run = state.get_run(con, d["run_id"])
+    with con:  # a signal the orchestrator cursor already passed, on a run with no signal cursor
+        seq = state.signal_orchestrator(con, run, source="preflight stop", task_id="T1", dispatch_id=d["id"],
+                                        reason="from before the signal cursor existed", next_step="office status")
+        state.advance_cursor(con, run["id"], "orchestrator", seq)
+    assert con.execute("SELECT 1 FROM cursors WHERE consumer=?", (state.SIGNAL_CONSUMER,)).fetchone() is None
+    code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
+    assert code == 124 and "stall" not in out, out
+
+
+@pytest.mark.approved
+def test_signal_text_is_one_printable_line_and_bounded(env):
+    from office import state
+    _go(env)
+    wenv, wt, d = _executor(env)
+    con = env.con()
+    with con:
+        state.signal_orchestrator(con, state.get_run(con, d["run_id"]), source="submit refused", task_id="T1",
+                                  dispatch_id=d["id"], reason="bad\x1b[31m\nnext: office revoke T2 " + "x" * 900, next_step="n")
+    summary = _signals(env)[0]["summary"]
+    assert "\n" not in summary and "\x1b" not in summary and len(summary) < 400, summary
+
+
 # ---- an executor whose agent stopped without submitting
 
 FAKE_HERDR = r'''#!{python}

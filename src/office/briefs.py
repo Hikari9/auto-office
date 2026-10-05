@@ -14,6 +14,16 @@ from office import paths, planfile, planpath, state
 EVIDENCE_FILE = "OFFICE_EVIDENCE.md"
 EVIDENCE_MAX_CHARS = 40_000
 
+# The executor's self-review ledger: untracked in its worktree, read by `office preflight`, consumed
+# (deleted, never part of a revision) at submit. Preflight parses these lines, so they are the format.
+LEDGER_FILE = "OFFICE_SELF_REVIEW.md"
+LEDGER_MAX_CHARS = 20_000
+LEDGER_LENSES = ("security", "edge-cases", "platform", "test-strength")
+LEDGER_SEVERITIES = ("high", "medium", "low")
+LEDGER_DISPOSITIONS = ("fixed", "out-of-scope", "dismissed", "contract-conflict", "open")
+MAX_REVIEW_ROUNDS = 3
+AMENDMENT_BRIEF_CHARS = 6000
+
 
 def evidence_path(run: dict, dispatch_id: str, revision_id: str) -> Path:
     return paths.run_dir(run["id"]) / "dispatches" / dispatch_id / f"evidence-{revision_id}.md"
@@ -195,10 +205,20 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
     if fix:
         findings = con.execute("SELECT code, severity, location, summary, action FROM findings WHERE run_id=? AND task_id=? "
                                "AND state='open' ORDER BY created_at", (run["id"], packet["task_id"])).fetchall()
-        out += ["", f"FIX ROUND for revision {fix}. Fix these findings, then resubmit:"]
+        out += ["", f"FIX ROUND for revision {fix}. Fix these findings, then resubmit:"
+                if findings else f"FIX ROUND for revision {fix}. There are no review findings: the amendment below is the work."]
         for f in findings:
             out.append(f"- {f['code']} [{f['severity']}] {f['location'] or ''} {f['summary']}"
                        + (f" -> {f['action']}" if f["action"] else ""))
+    amendments = con.execute("SELECT amendment_id, target_version, content FROM deliveries WHERE run_id=? AND task_id=? "
+                             "AND dispatch_id=? AND status IN ('queued','delivered') ORDER BY target_version",
+                             (run["id"], packet["task_id"], packet["dispatch_id"])).fetchall() \
+        if con is not None and packet.get("dispatch_id") else []
+    for a in amendments:
+        out += ["", f"AMENDMENT {a['amendment_id']} (plan -> p{a['target_version']}): apply it, then run office ack {a['amendment_id']}"]
+        out += [f"    {line}" for line in a["content"][:AMENDMENT_BRIEF_CHARS].splitlines()]
+        if len(a["content"]) > AMENDMENT_BRIEF_CHARS:
+            out.append(f"    [cut at {AMENDMENT_BRIEF_CHARS} characters: ask the orchestrator for the rest]")
     pr = packet.get("pr")
     if pr:
         out += ["", f"GIT commit and push your work to this branch as you go: {pr['push']}",
@@ -308,17 +328,43 @@ def self_review_lines(base: str, tier: str = "deep") -> list[str]:
     tail = "    A finding outside SCOPE goes in your report, unfixed."
     if tier == "inline":
         intro = ["    uncommitted). Make one fresh pass per lens yourself, with no delegation, one lens at a time:"]
-        rounds = ["    One pass only: a fix does not start another review. You may skip a lens that clearly does not",
-                  "    apply, with a one-line reason in your report."]
+        skip = ["    You may skip a lens that clearly does not",
+                "    apply, with a one-line reason in your report."]
     elif tier == "single":
         intro = ["    uncommitted). Start exactly one subagent if your harness has one, given only the diff and all four",
                  "    lenses below; otherwise make one fresh pass per lens yourself:"]
-        rounds = ["    Re-review only after a high fix, at most 2 rounds."]
+        skip = []
     else:
         intro = ["    uncommitted). Start four parallel subagents if your harness has them, each given only the diff and one",
                  "    lens; otherwise make one fresh pass per lens yourself:"]
-        rounds = ["    Re-review only after a high fix, at most 3 rounds."]
-    return [head] + intro + lenses + rounds + [tail]
+        skip = []
+    return [head] + intro + lenses + skip + [tail] + ledger_lines()
+
+
+def ledger_lines() -> list[str]:
+    """The findings ledger every tier writes, initial and fix rounds. `office preflight` refuses to call
+    the task ready until it is current, well formed, and has no open finding."""
+    lenses, sev = "|".join(LEDGER_LENSES), "|".join(LEDGER_SEVERITIES)
+    return [
+        f"    LEDGER write {LEDGER_FILE} in this worktree root, untracked. Write it after your last commit: it names HEAD,",
+        "    so any later commit makes it stale. Office consumes (deletes) it at each submit: write it fresh every round.",
+        "    One line each, nothing else (blank lines only):",
+        "        COMMIT <full sha of HEAD>",
+        f"        ROUND <1-{MAX_REVIEW_ROUNDS}>",
+        f"        LENS <{lenses}> reviewed        (one line per lens)",
+        "        LENS <lens> skipped <reason>      (inline tier only; a skipped lens needs a reason)",
+        f"        FINDING <{sev}> <{lenses}> <file:line> | <summary> | <disposition>        (the lens that found it)",
+        "    Dispositions: `fixed <test path> mutation=failed` (a medium or high fix names the test file that proves it and",
+        "    mutation=failed, meaning you reverted the fix and that test failed; a low fix may omit both), `out-of-scope` (a",
+        "    finding only when its file is outside SCOPE, whatever its severity), `dismissed <reason>`, `contract-conflict accept=<n>`",
+        "    (the fix would break ACCEPT line n; Office stops you with that ACCEPT line quoted), `open`.",
+        "    Record severity as found: a fix never lowers it. Low findings are fixed but do not trigger a re-review. A medium",
+        "    or high fix that changes behavior gets one fix-diff re-review (the same lenses over the fix diff, as the next",
+        "    ROUND, with the findings kept).",
+        f"    The {MAX_REVIEW_ROUNDS}-round cap: a medium or high finding still open in round {MAX_REVIEW_ROUNDS} stops you.",
+        "    Preflight reports a missing, stale, or malformed ledger, a lens with no line, and any open finding as a fix;",
+        "    it never skips a bad line.",
+    ]
 
 
 def worker_brief(con, run: dict, packet: dict, setup: dict | None = None) -> str:
