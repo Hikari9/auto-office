@@ -51,7 +51,8 @@ def agent_alive(d: dict) -> bool | None:
 
 def agent_activity(d: dict) -> dict | None:
     """What a running agent is doing now, or None when that cannot be known
-    (herdr unreachable or its pane unreadable): {"alive", "busy", "hash", "text"}.
+    (herdr unreachable or its pane unreadable): {"alive", "busy", "hash", "text", "status"}
+    (`status` is herdr's agent status; `blocked` means it sees an approval or question UI).
     A headless process has no idle state: it is busy while its pid lives.
     A pane-hosted agent is busy when herdr reports `working` or the pane shows a
     turn in progress (agy reports idle mid-turn, so its pane decides); `hash`
@@ -72,7 +73,7 @@ def agent_activity(d: dict) -> dict | None:
         return None
     status = agent.get("status") or agent.get("agent_status")
     return {"alive": True, "busy": status == "working" or dispatch._pane_busy(text), "hash": sha256_obj(text),
-            "text": text}
+            "text": text, "status": status}
 
 
 def _set_resumed_from(con, dispatch_id: str, parent: str) -> None:
