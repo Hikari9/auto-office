@@ -69,10 +69,13 @@ def route_label(disclosure: dict | None) -> str:
 
 
 def _preview_one(con, config: dict, run: dict, role: str, tid: str, *,
-                 task: dict | None = None, wave_load: dict | None = None, pending_explorations: int = 0) -> dict:
+                 task: dict | None = None, wave_load: dict | None = None, pending_explorations: int = 0,
+                 quota_snapshot: dict[str, dict] | None = None,
+                 quota_event_seen: set[str] | None = None) -> dict:
     try:
         decision = candidates.route_role(con, config, run, role, task_id=tid, wave_load=wave_load,
-                                         pending_explorations=pending_explorations)
+                                         pending_explorations=pending_explorations,
+                                         quota_snapshot=quota_snapshot, quota_event_seen=quota_event_seen)
     except Exception as exc:  # a preview never blocks submit
         return {"route": None, "why": f"preview failed: {exc}"[:160]}
     if decision.get("status") != "selected":
@@ -100,6 +103,10 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
     config = state.pinned_config(run)
     code_review = bool((run.get("gates") or {}).get("code_review"))
     lay = layout(tasks)
+    roles = ["executor"] + (["code_reviewer"] if code_review else [])
+    quota_snapshot = candidates.probe_quota_snapshot(
+        con, roles, family_floors=config.get("model_family_floors")) if tasks else {}
+    quota_event_seen: set[str] = set()
     out = {}
     audits = []
     loads: dict[int, dict[str, int]] = {}
@@ -108,14 +115,16 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
         wave_load = loads.setdefault(lay[t["id"]]["wave"], {})
         explored = sum(1 for a in audits if (a.get("exploration") or {}).get("picked") == (a.get("planner") or {}).get("primary"))
         ex = _preview_one(con, config, run, "executor", t["id"], task=t, wave_load=wave_load,
-                          pending_explorations=explored)
+                          pending_explorations=explored, quota_snapshot=quota_snapshot,
+                          quota_event_seen=quota_event_seen)
         if ex.get("triple"):
             wave_load[ex["triple"]] = wave_load.get(ex["triple"], 0) + 1
         if ex.get("_audit"):
             audits.append(ex.pop("_audit"))
         rv = {}
         if code_review:
-            rv = _preview_one(con, config, run, "code_reviewer", t["id"])
+            rv = _preview_one(con, config, run, "code_reviewer", t["id"], quota_snapshot=quota_snapshot,
+                              quota_event_seen=quota_event_seen)
         visual = t.get("visual") or {}
         task_gates = (["checks"] if t.get("checks") else []) + (["code review"] if code_review else []) \
             + (["ui review"] if visual and not visual.get("none") else [])

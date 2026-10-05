@@ -216,7 +216,11 @@ def test_planner_choice_within_band_and_override_with_reason():
     entry = adaptive.slate_for(audit, ok)[0]
     assert entry["label"] == "c/weak@medium" and entry["reason"].startswith("planner choice:")
     unknown = adaptive.apply_planner_choice(audit, {"routes": ["z/none@low"]})
-    assert "not a qualifying route" in unknown["planner_error"]
+    assert "not a candidate" in unknown["planner_error"]
+    staged_out = {**audit, "rejected": [{"candidate": "z@2/none@medium", "stage": 6,
+                                          "reason": "quota unknown while known-safe alternative exists"}]}
+    blocked = adaptive.apply_planner_choice(staged_out, {"routes": ["z/none@medium"]})
+    assert "stage 6" in blocked["planner_error"] and "quota unknown" in blocked["planner_error"]
 
 
 # ------------------------------------------------------------------ inline slate rendering

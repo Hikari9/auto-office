@@ -230,8 +230,8 @@ def test_matching_capture_passes_with_measured_dom(env):
     route = g["route"]  # the route that judged the capture
     judge = con.execute("SELECT harness, model FROM dispatches WHERE role='visual_reviewer' AND kind='reviewer'").fetchone()
     assert proofs[(judge["harness"], judge["model"])][0] == "pass", proofs
-    # First preference (latest Gemini Flash via agy at low effort), qualified by its own probe.
-    assert (judge["harness"], judge["model"]) == ("agy", "gemini-3.8-flash-low"), dict(judge)
+    # First preference (latest Gemini Flash via agy at medium effort), qualified by its own probe.
+    assert (judge["harness"], judge["model"]) == ("agy", "gemini-3.8-flash-medium"), dict(judge)
     receipt = con.execute("SELECT path FROM evidence WHERE kind='capture_receipt'").fetchone()[0]
     import json
     data = json.loads(open(receipt).read())

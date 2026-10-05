@@ -465,6 +465,17 @@ def resolve_route_ref(ref: str, rows: list[dict]) -> dict | None:
     return None
 
 
+def _rejected_route_ref(ref: str, rejected: list[dict]) -> dict | None:
+    """Find a staged-out route by full identity or its planner-facing label."""
+    for entry in rejected:
+        candidate = str(entry.get("candidate") or "")
+        parts = candidate.split("/", 1)
+        label = f"{parts[0].split('@', 1)[0]}/{parts[1]}" if len(parts) == 2 else candidate
+        if ref in (candidate, label):
+            return entry
+    return None
+
+
 def apply_planner_choice(audit: dict, choice: dict | None) -> dict:
     """The planner's primary + fallbacks over the router's slate.
 
@@ -478,15 +489,23 @@ def apply_planner_choice(audit: dict, choice: dict | None) -> dict:
     out = {"chooser": "router", "primary": router[0] if router else None, "fallbacks": router[1:SLATE_SIZE]}
     if not choice or not choice.get("routes"):
         return out
-    picked, unknown = [], []
+    picked, rejected, unknown = [], [], []
     for ref in choice["routes"][:SLATE_SIZE]:
         r = resolve_route_ref(ref, rows)
         if r is None:
-            unknown.append(ref)
+            reason = _rejected_route_ref(ref, audit.get("rejected") or [])
+            if reason:
+                rejected.append((ref, reason))
+            else:
+                unknown.append(ref)
         elif r["route"] not in picked:
             picked.append(r["route"])
+    if rejected:
+        details = "; ".join(f"{ref} rejected at stage {entry['stage']}: {entry['reason']}"
+                             for ref, entry in rejected)
+        return {**out, "planner_error": details}
     if unknown:
-        return {**out, "planner_error": f"not a qualifying route now: {', '.join(unknown)}"}
+        return {**out, "planner_error": f"not a candidate: {', '.join(unknown)}"}
     if not picked:
         return out
     top_u = max((r["utility"] for r in rows), default=0.0)
