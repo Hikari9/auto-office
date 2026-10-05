@@ -52,6 +52,10 @@ source_notes: Current office-skills Agy mechanics seeded for migration; exact mo
 # code reviewer; visual judgment runs in the run's private evidence directory.
 # Executor (builder) since 2026-09-28 (#183): the worker profile runs in the
 # dispatch worktree, where write access is the point.
+# How Office learns this harness's session id (resume needs it). agy takes no id at
+# launch, sends no hook payload and declares no resume form: `office inspect` says so.
+session:
+  id: none
 capabilities: [builder, review]
 office_profiles:
   worker:

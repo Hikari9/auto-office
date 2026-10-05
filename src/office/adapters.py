@@ -52,6 +52,19 @@ def profile(adapter: dict, kind: str) -> dict | None:
     return (adapter.get("office_profiles") or {}).get(kind)
 
 
+def session_spec(adapter: dict | None) -> dict:
+    """How the adapter's harness yields a session id: `assigned` (Office passes
+    one at launch via `assign_arg`), `detected` (read from hook payloads and
+    herdr), or `none` (the harness exposes nothing). Undeclared reads as none."""
+    spec = (adapter or {}).get("session") or {}
+    return {**spec, "id": spec.get("id") or "none"}
+
+
+def assigns_session(adapter: dict | None) -> bool:
+    spec = session_spec(adapter)
+    return spec["id"] == "assigned" and bool(spec.get("assign_arg"))
+
+
 def executable(adapter: dict) -> str | None:
     return (adapter.get("invocation") or {}).get("executable")
 
@@ -110,9 +123,10 @@ def toml_path(path: Path) -> str:
 
 def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
                output: Path | None = None, images: list[Path] | None = None,
-               include_dirs: list[Path] | None = None) -> tuple[list[str], dict]:
+               include_dirs: list[Path] | None = None, session_id: str | None = None) -> tuple[list[str], dict]:
     """Return (argv, profile). Placeholders are substituted element-wise; the
-    prompt never passes through a shell."""
+    prompt never passes through a shell. `session_id` is appended through the
+    adapter's `session.assign_arg` when the harness accepts an assigned id."""
     prof = profile(adapter, kind)
     if not prof:
         raise AdapterError(f"adapter {adapter.get('id')} has no {kind} profile")
@@ -158,11 +172,13 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
                .replace("{cwd}", str(cwd)).replace("{output_dir}", str(Path(output).parent) if output else "")
                .replace("{output}", str(output or "")))
         argv.append(arg)
+    if session_id and assigns_session(adapter):
+        argv.extend(str(a).replace("{session_id}", session_id) for a in session_spec(adapter)["assign_arg"])
     return argv, prof
 
 
 def resume_argv(adapter: dict, kind: str, *, session_id: str, model: str, effort: str, cwd: Path,
-                include_dirs: list[Path] | None = None) -> tuple[list[str], str] | None:
+                include_dirs: list[Path] | None = None, output: Path | None = None) -> tuple[list[str], str] | None:
     """(agent args, herdr kind) that reopen `session_id` in a pane, or None when
     the profile declares no `interactive.resume_argv` (the harness cannot resume).
     The resume args follow the profile's interactive args, `{session_id}` filled in."""
@@ -170,7 +186,7 @@ def resume_argv(adapter: dict, kind: str, *, session_id: str, model: str, effort
     form = (prof.get("interactive") or {}).get("resume_argv")
     if not form or not session_id:
         return None
-    base = interactive_argv(adapter, kind, model=model, effort=effort, cwd=cwd, include_dirs=include_dirs)
+    base = interactive_argv(adapter, kind, model=model, effort=effort, cwd=cwd, include_dirs=include_dirs, output=output)
     if base is None:
         return None
     args, herdr_kind = base
@@ -178,7 +194,8 @@ def resume_argv(adapter: dict, kind: str, *, session_id: str, model: str, effort
 
 
 def interactive_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
-                     include_dirs: list[Path] | None = None, output: Path | None = None) -> tuple[list[str], str] | None:
+                     include_dirs: list[Path] | None = None, output: Path | None = None,
+                     session_id: str | None = None) -> tuple[list[str], str] | None:
     """(agent args, herdr kind) for a pane-hosted interactive session, or None
     when the profile has no interactive form. The args follow `herdr agent
     start ... --`, so the executable itself is not included."""
@@ -188,5 +205,6 @@ def interactive_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: 
         return None
     form = {"argv": inter["argv"], "include_arg": prof.get("include_arg")}
     argv, _ = build_argv({**adapter, "office_profiles": {kind: form}}, kind,
-                         model=model, effort=effort, cwd=cwd, include_dirs=include_dirs, output=output)
+                         model=model, effort=effort, cwd=cwd, include_dirs=include_dirs, output=output,
+                         session_id=session_id)
     return argv[1:], prof["herdr_kind"]

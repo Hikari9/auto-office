@@ -11,9 +11,9 @@ from office.util import loads, short
 
 
 def _optional_cols(con) -> str:
-    """session_id / resumed_from, or NULL stand-ins on a schema that predates them."""
+    """session_id / resumed_from / harness, or NULL stand-ins on a schema that predates them."""
     have = {r[1] for r in con.execute("PRAGMA table_info(dispatches)")}
-    return ", ".join(c if c in have else f"NULL AS {c}" for c in ("session_id", "resumed_from"))
+    return ", ".join(c if c in have else f"NULL AS {c}" for c in ("session_id", "resumed_from", "harness"))
 
 
 def inspect(con, run: dict, what: str | None, ident: str | None) -> Result:
@@ -93,7 +93,8 @@ def _task(con, run, tid) -> Result:
                      + (" | user override" + (f" --cli {ov['cli']}" if ov.get("cli") else "") if ov.get("by") else "")
                      + (f" | resumed from {d['resumed_from'] or ov.get('resumed_from')}"
                         if (d["resumed_from"] or ov.get("resumed_from")) else "")
-                     + (f" | session {d['session_id']}" if d["session_id"] else ""))
+                     + (f" | session {d['session_id']}" if d["session_id"]
+                        else f" | session unavailable: {d['harness'] or 'harness'} exposes none"))
     for r in con.execute("SELECT id, commit_sha, status, applied_version, created_at FROM revisions WHERE run_id=? AND task_id=? "
                          "ORDER BY seq", (run["id"], tid)).fetchall():
         lines.append(f"revision {r['id']} {r['commit_sha'][:12]} {r['status']} applied p{r['applied_version']}")
