@@ -113,7 +113,12 @@ def preflight(con, run: dict, cwd: Path) -> Result:
 
     # 5. Scope: tracked edits outside the contract are refused at submit.
     base = d["base_commit"]
-    changed = [f for f in _git(wt, "diff", "--name-only", "-z", base).split("\0") if f]
+    head = _git(wt, "rev-parse", "HEAD")
+    changed = [f for f in _git(wt, "diff", "--name-only", "-z", base, head).split("\0") if f]
+    dep_bases = [b for b in submit._dependency_bases(con, run, task, head) if b != base]
+    for b in dep_bases:
+        also = set(_git(wt, "diff", "--name-only", "-z", b, head).split("\0"))
+        changed = [f for f in changed if f in also]
     outside = [f for f in changed if not planfile.path_in_scope(f, task["scope"]) and not submit._harness_path(f)]
     if outside:
         listed = " ".join(outside[:10])

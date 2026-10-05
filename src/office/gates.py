@@ -683,6 +683,15 @@ def detached_checkout(run: dict, commit: str, name: str, *, purpose: str) -> Pat
     paths.git(Path(run["repo_root"]), "worktree", "add", "--detach", str(path), commit)
     if purpose == "check":
         worktree_setup.prepare(run, path, "check", paths.run_dir(run["id"]) / "setup" / f"{name}.log", created=True)
+    plans = Path(run["repo_root"]) / ".office" / "plans"
+    if plans.is_dir():
+        dest = path / ".office" / "plans"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not dest.exists():
+            try:
+                dest.symlink_to(plans, target_is_directory=True)
+            except OSError:
+                shutil.copytree(plans, dest)
     return path
 
 
