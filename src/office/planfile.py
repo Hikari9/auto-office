@@ -25,6 +25,8 @@ lines per task so a planner never writes JSON:
     accept:
     - POST /reset returns 202 for a known email
     visual: none
+    route: codex/gpt-6-luna@high, agy/gemini-3.8-flash@medium
+    route_why: mechanical rename; the plan pins every edit
 """
 from __future__ import annotations
 
@@ -154,6 +156,11 @@ def parse(text: str) -> ParsedPlan:
                 else:
                     task["visual"] = {"url": value} if value else {}
                     in_visual = True
+            elif key == "route":
+                # The planner's executor route: primary, then fallbacks (#300).
+                task["route"] = _split_list(value)
+            elif key == "route_why":
+                task["route_why"] = value
             elif key == "notes":
                 if value:
                     task["notes"].append(value)

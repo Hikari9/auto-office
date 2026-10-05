@@ -114,6 +114,10 @@ def resolve(repo_root: Path | None, sets: list[str] | None = None,
             else:
                 kept[k] = v
         effective = deep_merge(effective, kept, tier, warnings)
+    from office import adaptive
+    problems = adaptive.validate(effective)
+    if problems:
+        raise ValueError("; ".join(problems))
     return effective, warnings
 
 

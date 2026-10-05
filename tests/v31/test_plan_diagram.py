@@ -28,7 +28,8 @@ def test_submit_shows_parallel_lanes_routes_and_checkpoints(env):
     assert "plan p1 diagram" in out, out
     assert "wave 1  (T1 | T2 in parallel)" in out, out
     assert out.count("off base") == 2, out
-    assert "why: " in out and "review: " in out, out
+    # #300: each executor task shows the Inline Slate (primary + fallbacks, + and - each).
+    assert "ROUTING" in out and "PRIMARY" in out and "FALLBACK 1" in out and "review: " in out, out
     assert ("checkpoints: T1 accepted [checks, code review] -> T2 accepted [checks, code review] "
             "-> integration review -> handoff PR (task PRs off: no origin remote)") in out, out
     assert "end state: ask" in out, out

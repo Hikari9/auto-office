@@ -51,7 +51,11 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
     # check compares files to files, and neither a launch override nor a
     # changed shipped default reads as an edit.
     files = cfg.read_files(top)
-    config, warnings = cfg.resolve(top, sets, files=files)
+    try:
+        config, warnings = cfg.resolve(top, sets, files=files)
+    except ValueError as exc:
+        raise Usage("bad-config", f"config is invalid: {exc}",
+                    next_step="fix ~/.config/auto-office/config.yaml or .auto-office/config.yaml, then retry")
     pinned = {**config, cfg.FILE_BLOCKS_KEY: cfg.file_blocks(top, files)}
     risk = cfg.resolve_risk(config, blast_radius, size_class, irreversible)
     gear = cfg.fit_gear(gear, risk, volume, interview, adversarial)
@@ -227,6 +231,7 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
         scoring.label_run_outcomes(con, run["id"], "closed")
         state.update_run(con, run["id"], phase="closed", terminal_at=now_iso(), terminal_reason="closed",
                          archive_digest=receipt["digest"], landing={**landing, "handoff": handoff})
+        _learn(con, current)
         state.emit(con, current, "run.closed", f"run closed, archive {receipt['digest'][7:19]}")
         _release_all(con, run["id"], "closed")
         _end_bindings(con, run["id"])
@@ -312,6 +317,7 @@ def close_landed_externally(con, run: dict, ref: str, quote: str | None = None) 
         state.update_run(con, run["id"], phase="closed", terminal_at=now_iso(),
                          terminal_reason=f"landed externally via {pr['url']}", archive_digest=receipt["digest"],
                          landing={**landing, "handoff": pr["url"]})
+        _learn(con, current)
         state.emit(con, current, "run.closed", f"run closed: landed externally via {pr['url']}, archive "
                    f"{receipt['digest'][7:19]}")
         _release_all(con, run["id"], "closed")
@@ -362,6 +368,7 @@ def abandon(con, run: dict, reason: str) -> Result:
         scoring.label_run_outcomes(con, run["id"], "abandoned")
         state.update_run(con, run["id"], phase="abandoned", terminal_at=now_iso(),
                          terminal_reason=reason.strip()[:500], archive_digest=receipt["digest"])
+        _learn(con, current)
         state.emit(con, current, "run.abandoned", f"run abandoned: {reason.strip()[:80]}")
         _release_all(con, run["id"], "abandoned")
         _end_bindings(con, run["id"])
@@ -425,3 +432,22 @@ def list_runs(con, *, all_runs: bool = False, cwd: Path | None = None) -> Result
                                   "office_version": r["office_version"], "pruned_at": r.get("pruned_at")} for r in runs],
                         "legacy": [{"id": l.run_id, "phase": l.phase, "office_version": l.office_version}
                                    for l in legacy_rows]})
+
+
+def _learn(con, run: dict) -> None:
+    """Route learning at run end (#300): persist outcome attributions and apply
+    replay-validated learned-eligibility changes. Caller holds the tx; a learner
+    failure rolls back its own writes and never blocks closing the run."""
+    from office import candidates, route_learning
+    con.execute("SAVEPOINT route_learning")
+    try:
+        written = route_learning.refresh(con, candidates.learner_priors(con, state.pinned_config(run)))
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        con.execute("ROLLBACK TO route_learning")
+        con.execute("RELEASE route_learning")
+        state.emit(con, run, "learner.refresh_failed", f"route learner refresh failed: {exc}"[:200])
+        return
+    con.execute("RELEASE route_learning")
+    for w in written:
+        state.emit(con, run, "learner.eligibility", f"{w['role']} {w['route']}: {w['previous_state']} -> {w['state']}",
+                   payload={k: w[k] for k in ("id", "role", "route", "state", "previous_state", "evidence", "replay")})
