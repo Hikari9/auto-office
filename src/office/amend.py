@@ -409,14 +409,38 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
                           "text": f"AMENDMENT {amendment_id}: run office status, apply it, office ack {amendment_id}, "
                                   "then office submit again."},
                           dedup_key=f"notify:{did}", max_attempts=1)
-        else:
-            # The worker is gone: a fresh session starts from the current
-            # contract, so the delta is carried in its brief, not acked.
+        elif task["status"] in ("planned",):
+            # Nothing has run: the first session starts from the current contract.
             con.execute("UPDATE deliveries SET status='superseded', superseded_by='relaunch' WHERE id=?", (did,))
-            if task["status"] not in ("planned",):
-                dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"))
+        else:
+            # The worker is gone. The relaunched session starts from the current contract, but an ordinary
+            # delta is not in the contract and a reopened task has no findings: hand the delivery to the new
+            # session so its brief carries the delta, and it is delivered once that prompt is confirmed.
+            new_did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"))
+            con.execute("UPDATE deliveries SET dispatch_id=?, status='queued', superseded_by=NULL WHERE id=?",
+                        (new_did, did))
         targets.append(tid)
     return targets
+
+
+def confirm_launch_deliveries(con, run: dict) -> int:
+    """Mark delivered the amendments a relaunched session carries in its brief once that brief's
+    prompt landed in its running agent (launch.json records it). Only deliveries recorded before the
+    session started are in its brief; a later one reaches it by its own prompt. Returns how many changed."""
+    import json
+    n = 0
+    for r in con.execute("SELECT dl.id, dl.dispatch_id FROM deliveries dl JOIN dispatches d ON d.id=dl.dispatch_id "
+                         "WHERE dl.run_id=? AND dl.status='queued' AND d.status='running' AND d.ended_at IS NULL "
+                         "AND dl.created_at<=d.started_at", (run["id"],)).fetchall():
+        try:
+            spec = json.loads((paths.run_dir(run["id"]) / "dispatches" / r["dispatch_id"] / "launch.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(spec, dict) and spec.get("prompt_landed"):
+            with db.transaction(con):
+                n += con.execute("UPDATE deliveries SET status='delivered', delivered_at=COALESCE(delivered_at, ?) "
+                                 "WHERE id=? AND status='queued'", (now_iso(), r["id"])).rowcount
+    return n
 
 
 def pending_block(con, run: dict, dispatch_id: str) -> list[str]:

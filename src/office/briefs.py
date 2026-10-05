@@ -22,6 +22,7 @@ LEDGER_LENSES = ("security", "edge-cases", "platform", "test-strength")
 LEDGER_SEVERITIES = ("high", "medium", "low")
 LEDGER_DISPOSITIONS = ("fixed", "out-of-scope", "rejected", "contract-conflict", "open")
 MAX_REVIEW_ROUNDS = 3
+AMENDMENT_BRIEF_CHARS = 6000
 
 
 def evidence_path(run: dict, dispatch_id: str, revision_id: str) -> Path:
@@ -204,10 +205,18 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
     if fix:
         findings = con.execute("SELECT code, severity, location, summary, action FROM findings WHERE run_id=? AND task_id=? "
                                "AND state='open' ORDER BY created_at", (run["id"], packet["task_id"])).fetchall()
-        out += ["", f"FIX ROUND for revision {fix}. Fix these findings, then resubmit:"]
+        out += ["", f"FIX ROUND for revision {fix}. Fix these findings, then resubmit:"
+                if findings else f"FIX ROUND for revision {fix}. There are no review findings: the amendment below is the work."]
         for f in findings:
             out.append(f"- {f['code']} [{f['severity']}] {f['location'] or ''} {f['summary']}"
                        + (f" -> {f['action']}" if f["action"] else ""))
+    amendments = con.execute("SELECT amendment_id, target_version, content FROM deliveries WHERE run_id=? AND task_id=? "
+                             "AND dispatch_id=? AND status IN ('queued','delivered') ORDER BY target_version",
+                             (run["id"], packet["task_id"], packet["dispatch_id"])).fetchall() \
+        if con is not None and packet.get("dispatch_id") else []
+    for a in amendments:
+        out += ["", f"AMENDMENT {a['amendment_id']} (plan -> p{a['target_version']}): apply it, then run office ack {a['amendment_id']}"]
+        out += [f"    {line}" for line in a["content"][:AMENDMENT_BRIEF_CHARS].splitlines()]
     pr = packet.get("pr")
     if pr:
         out += ["", f"GIT commit and push your work to this branch as you go: {pr['push']}",

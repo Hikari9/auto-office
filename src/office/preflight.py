@@ -9,7 +9,9 @@ nothing. The verdict line and exit code say what the caller does next:
                             poll preflight until it is ready, then submit
   PREFLIGHT stop   exit 4   terminal for this session (lease lost, superseded,
                             cancelled, blocked on the orchestrator): emit the
-                            status block and stop; never retry
+                            status block and stop; never retry. Each distinct stop
+                            (and a fix after the self-review round cap) is also an
+                            orchestrator event, so `office wait` returns for it
 
 A lost lease is never reacquired here. Only the orchestrator moves a task to a
 new holder (office revoke / rerun); a worker that reclaims its own lease would
@@ -22,7 +24,7 @@ import os
 import re
 from pathlib import Path
 
-from office import briefs, discovery, paths, planfile, state, submit
+from office import briefs, db, discovery, paths, planfile, state, submit
 from office.result import Result
 
 EXIT = {"ready": 0, "fix": 1, "stop": 4, "wait": 75}
@@ -239,6 +241,31 @@ def _sed_backups(wt: Path) -> list[str]:
     return sorted(f for f in others if f.endswith("-e") and f[:-2] in tracked)
 
 
+def ledger_round(wt: Path) -> int | None:
+    """The round the worktree's self-review ledger names, or None without a readable one."""
+    text = submit._read_untracked_text(wt, briefs.LEDGER_FILE, briefs.LEDGER_MAX_CHARS)
+    return parse_ledger(text)[0]["round"] if text else None
+
+
+def _signal_next(task_id: str, dispatch_id: str, reason: str) -> str:
+    """The command the orchestrator runs for a stopped worker, by what stopped it."""
+    if reason.startswith("contract-conflict"):
+        return (f'office amend {task_id} --contract -- "<change the ACCEPT line>", or office prompt {dispatch_id} -- '
+                '"<decision>" if the finding is wrong')
+    if reason.startswith(("self-review", "findings:")) or "round cap" in reason:
+        return f'office prompt {dispatch_id} -- "<decision>", or office revoke {task_id} then office rerun {task_id} --fresh'
+    return f"office status; then office rerun {task_id} --resume|--fresh or office revoke {task_id}"
+
+
+def _signal(con, run: dict, task_id: str | None, d: dict, verdict: str, reasons: list[str]) -> None:
+    """Preflight's one side effect: an orchestrator event per distinct reason it stopped for. The
+    worktree is never touched."""
+    with db.transaction(con):
+        for reason in reasons:
+            state.signal_orchestrator(con, run, source=f"preflight {verdict}", task_id=task_id, dispatch_id=d["id"],
+                                      reason=reason, next_step=_signal_next(task_id or "<task>", d["id"], reason))
+
+
 def preflight(con, run: dict, cwd: Path) -> Result:
     res = Result()
     stop: list[str] = []
@@ -255,6 +282,8 @@ def preflight(con, run: dict, cwd: Path) -> Result:
         res.next = (f"cd {found[1]['worktree']} and run office preflight there" if found
                     else "run office preflight from your task worktree; if you are not an executor, do not submit")
         res.exit_code = EXIT["stop"]
+        if d is not None:
+            _signal(con, run, d.get("task_id"), d, "stop", [res.lines[1]])
         return res
     task = state.get_task(con, run["id"], d["task_id"])
     ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
@@ -289,16 +318,26 @@ def preflight(con, run: dict, cwd: Path) -> Result:
         else:
             stop.append(f"{status}: {task['id']} {reason}".rstrip())
 
-    # 4. A fix round must have findings to fix.
+    # 4. A fix round must have work: open findings, or an amendment delivered to this session.
     packet = _packet(run, d)
     if packet.get("fix_of"):
         rows = con.execute("SELECT code, severity, location, summary FROM findings WHERE run_id=? AND task_id=? "
                            "AND state='open' ORDER BY created_at", (run["id"], task["id"])).fetchall()
-        if rows:
-            res.lines += [f"finding: {r['code']} [{r['severity']}] {r['location'] or ''} {r['summary']}" for r in rows]
-        else:
-            stop.append(f"findings: fix round for {packet['fix_of']} but no open findings are recorded; "
-                        "the orchestrator must name them (office prompt) or rerun --fresh")
+        amendments = con.execute("SELECT amendment_id, status FROM deliveries WHERE run_id=? AND task_id=? AND dispatch_id=? "
+                                 "AND status IN ('queued','delivered','applied') ORDER BY target_version",
+                                 (run["id"], task["id"], d["id"])).fetchall()
+        res.lines += [f"finding: {r['code']} [{r['severity']}] {r['location'] or ''} {r['summary']}" for r in rows]
+        for a in amendments:
+            if a["status"] == "applied":
+                res.lines.append(f"amendment: {a['amendment_id']} applied")
+            else:
+                fix.append(f"amendment: {a['amendment_id']} is in your brief but not acknowledged: apply it, then "
+                           f"office ack {a['amendment_id']}")
+        if not rows and not amendments:
+            stop.append(f"findings: fix round for {packet['fix_of']} but no open findings or amendments are recorded; "
+                        f"the orchestrator resolves it with: office amend {task['id']} -- \"<what to fix>\" (delivered "
+                        f"to this session), or office revoke {task['id']} then office rerun {task['id']} --fresh once "
+                        "findings are recorded")
 
     # 5. Scope: tracked edits outside the contract are refused at submit.
     base = d["base_commit"]
@@ -308,7 +347,12 @@ def preflight(con, run: dict, cwd: Path) -> Result:
     for b in dep_bases:
         also = set(_git(wt, "diff", "--name-only", "-z", b, head).split("\0"))
         changed = [f for f in changed if f in also]
-    outside = [f for f in changed if not planfile.path_in_scope(f, task["scope"]) and not submit._harness_path(f)]
+    # Submit captures uncommitted edits too, so scope is judged on the worktree as it is now.
+    touched = [f for f in _git(wt, "diff", "--name-only", "-z", base).split("\0") if f]
+    for b in dep_bases:
+        also = set(_git(wt, "diff", "--name-only", "-z", b).split("\0"))
+        touched = [f for f in touched if f in also]
+    outside = [f for f in touched if not planfile.path_in_scope(f, task["scope"]) and not submit._harness_path(f)]
     if outside:
         listed = " ".join(outside[:10])
         fix.append(f"scope: tracked edits outside SCOPE: {listed}; revert tool-stamped ones with "
@@ -338,6 +382,8 @@ def preflight(con, run: dict, cwd: Path) -> Result:
 
     res.data["head"] = head
     verdict = "stop" if stop else "fix" if fix else "wait" if wait else "ready"
+    if verdict == "stop" or (verdict == "fix" and (ledger_round(wt) or 0) >= briefs.MAX_REVIEW_ROUNDS):
+        _signal(con, run, task["id"], d, verdict, stop or [f"self-review round cap spent with repairs outstanding: {f}" for f in fix])
     res.lines = [f"PREFLIGHT {verdict}"] + [f"stop: {s}" for s in stop] + [f"fix: {f}" for f in fix] \
         + [f"wait: {w}" for w in wait] + res.lines
     res.data["verdict"] = verdict

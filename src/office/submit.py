@@ -98,14 +98,24 @@ def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect:
         return _submit(con, run, cwd=cwd, plan_path=plan_path, redirect=redirect)
     except Refused as exc:
         dispatch_id = os.environ.get("OFFICE_DISPATCH_ID")
-        # outside-scope records its own event, which also blocks the task on exit.
+        # outside-scope records its own events, which also block the task on exit.
         if dispatch_id and exc.category != "outside-scope":
             d = state.get_dispatch(con, dispatch_id)
             if d is not None and d["run_id"] == run["id"]:
                 with db.transaction(con):
                     state.emit(con, run, "submit.rejected", f"{exc.category}: {exc.message}", audience="runtime",
                                task_id=d.get("task_id"), dispatch_id=dispatch_id, payload={"code": exc.category})
+                    signal_refused(con, run, d, f"{exc.category}: {exc.message}")
         raise
+
+
+def signal_refused(con, run: dict, d: dict, reason: str) -> None:
+    """A refused submit is a worker stopped on something only the orchestrator resolves: `office
+    wait` returns for it at once. Caller holds the transaction."""
+    tid = d.get("task_id") or "run"
+    state.signal_orchestrator(con, run, source="submit refused", task_id=d.get("task_id"), dispatch_id=d["id"],
+                              reason=reason, next_step=f"office status; then office rerun {tid} --resume|--fresh, "
+                                                       f"office revoke {tid}, or office amend {tid} -- \"<change>\"")
 
 
 def _bounded(argv: list[str], cwd: Path, limit: int) -> tuple[str, bool]:
@@ -503,6 +513,9 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
             state.emit(con, run, "task.blocked", f"{task['id']} submit refused ({msg}); amend the scope "
                        f"(office amend {task['id']} --contract -- ...) or tell the worker to revert; work is preserved "
                        "in its worktree", task_id=task["id"], dispatch_id=d["id"])
+            state.signal_orchestrator(con, run, source="submit refused", task_id=task["id"], dispatch_id=d["id"],
+                                      reason=f"outside-scope: {msg}", next_step=f'office amend {task["id"]} --contract -- '
+                                      f'"<add the file to SCOPE>", or office prompt {d["id"]} -- "revert <file>"')
         raise Refused("outside-scope", f"{task['id']} changed files outside its scope: {', '.join(outside[:6])}",
                       scope=task["id"], preserved="your worktree (nothing was submitted)",
                       next_step='revert those files, or run office submit --request-scope <path> -- "<reason>" '

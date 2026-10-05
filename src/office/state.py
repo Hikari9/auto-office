@@ -163,6 +163,25 @@ def emit(con: sqlite3.Connection, run: dict, kind: str, summary: str, *, audienc
     return cur.lastrowid
 
 
+SIGNAL_KIND = "worker.signal"
+
+
+def signal_orchestrator(con: sqlite3.Connection, run: dict, *, source: str, task_id: str | None,
+                        dispatch_id: str | None, reason: str, next_step: str) -> int | None:
+    """Tell the orchestrator a worker is stopped for a reason only it can resolve (a preflight
+    stop, a refused submit). `office wait` returns for it as a stall instead of after the idle
+    threshold. One event per distinct (dispatch, source, reason): a worker that repeats the same
+    command does not repeat the signal. Caller holds the transaction; returns the event seq, or
+    None when this reason was already signalled."""
+    reason = " ".join(reason.split())[:300]
+    summary = f"{task_id or 'run'} {dispatch_id or ''} {source}: {reason}".replace("  ", " ")
+    if con.execute("SELECT 1 FROM events WHERE run_id=? AND kind=? AND dispatch_id IS ? AND summary=?",
+                   (run["id"], SIGNAL_KIND, dispatch_id, summary)).fetchone():
+        return None
+    return emit(con, run, SIGNAL_KIND, summary, task_id=task_id, dispatch_id=dispatch_id,
+                payload={"source": source, "reason": reason, "next": next_step})
+
+
 def unread_events(con: sqlite3.Connection, run_id: str, consumer: str, audiences: tuple[str, ...],
                   limit: int = 20) -> list[dict]:
     row = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer=?", (run_id, consumer)).fetchone()

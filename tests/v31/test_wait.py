@@ -47,6 +47,61 @@ def test_wait_returns_0_at_once_when_a_task_already_needs_the_orchestrator(env):
     assert code == 0 and "blocker:" in out, out
 
 
+# ---- a worker stopped on something only the orchestrator resolves
+
+def _executor(env):
+    from conftest import task_row
+    d = dict(env.con().execute("SELECT * FROM dispatches WHERE id=?", (task_row(env)["current_dispatch_id"],)).fetchone())
+    return {"OFFICE_RUN_ID": d["run_id"], "OFFICE_DISPATCH_ID": d["id"], "OFFICE_TASK_ID": "T1",
+            "OFFICE_ROLE": "executor", "OFFICE_JOBS": "manual"}, Path(d["worktree"]), d
+
+
+def _signals(env):
+    return [dict(r) for r in env.con().execute("SELECT * FROM events WHERE kind='worker.signal' ORDER BY seq")]
+
+
+@pytest.mark.approved
+def test_a_preflight_stop_wakes_wait_as_a_stall_at_once(env):
+    import time
+    _go(env)
+    wenv, wt, d = _executor(env)
+    env.office("revoke", "T1", check=0)
+    env.office("status", check=0)  # consume the revoke events: only the worker's own signal is left
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert code == 4 and "stop: lease-lost" in out, out
+    started = time.time()
+    code, out = env.office("wait", "--timeout", "30", "--poll", "0.2", env=EXTERNAL)
+    assert time.time() - started < 10, "wait must not sit out the 60s idle stall"
+    assert code == 3 and "stall:" in out, out
+    line = next(l for l in out.splitlines() if l.startswith("stall:"))
+    assert "T1" in line and d["id"] in line and "lease-lost" in line and "next: office status; then office rerun T1" in line, line
+    # Reported once: the revoked task still needs the orchestrator (exit 0), but the signal is not a stall again.
+    code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
+    assert code != 3 and "stall:" not in out, out
+
+
+@pytest.mark.approved
+def test_repeating_the_same_preflight_stop_records_one_event(env):
+    _go(env)
+    wenv, wt, d = _executor(env)
+    env.office("revoke", "T1", check=0)
+    for _ in range(3):
+        env.office("preflight", cwd=wt, env=wenv, check=4)
+    events = _signals(env)
+    assert events and all(e["audience"] == "orchestrator" and e["task_id"] == "T1" and e["dispatch_id"] == d["id"]
+                          for e in events), events
+    assert len({e["summary"] for e in events}) == len(events), "one event per distinct reason"
+    assert any("lease-lost" in e["summary"] for e in events), events
+    # A different reason is a different signal, recorded once however often it repeats.
+    con = env.con()
+    con.execute("UPDATE tasks SET status='blocked', pause_reason='worker ended (crash) without submitting' WHERE id='T1'")
+    con.commit()
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    after = _signals(env)
+    assert len(after) == len(events) + 1 and "worker ended (crash)" in after[-1]["summary"], [e["summary"] for e in after]
+
+
 # ---- an executor whose agent stopped without submitting
 
 FAKE_HERDR = r'''#!{python}

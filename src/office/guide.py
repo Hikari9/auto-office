@@ -138,6 +138,7 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     worker = os.environ.get("OFFICE_DISPATCH_ID")
     if worker:
         return worker_status(con, run, worker)
+    amend.confirm_launch_deliveries(con, run)
     run = state.get_run(con, run["id"])
     tasks = state.tasks(con, run["id"])
     c = _counts(tasks)
@@ -314,6 +315,21 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
     return f"{who}: usage_limit, {when}; pane tail in {tail}; next: office prompt {d['id']} -- continue"
 
 
+def worker_signals(con, run: dict) -> list[str]:
+    """Stall lines for workers that stopped on something only the orchestrator resolves (a preflight
+    stop, a refused submit). Read from the same unread window `status` shows and then consumes, so
+    each signal is reported by exactly one wait."""
+    import json
+    out = []
+    for e in state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=6):
+        if e["kind"] != state.SIGNAL_KIND:
+            continue
+        p = json.loads(e["payload_json"] or "{}")
+        who = " ".join(x for x in (e["task_id"], e["dispatch_id"]) if x)
+        out.append(f"{who} {p.get('source', 'worker')}: {p.get('reason', e['summary'])}; next: {p.get('next', 'office status')}")
+    return out
+
+
 def _needs_orchestrator(con, run: dict) -> bool:
     if any(t["status"] in ("paused", "blocked", "changes_required") for t in state.tasks(con, run["id"])):
         return True
@@ -339,7 +355,8 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
             lifecycle.reconcile(con, run)
             jobs.reclaim(con, run["id"])
         jobs.kick(con, run["id"])
-        stuck = stalls(con, run, since=started_at)
+        amend.confirm_launch_deliveries(con, run)
+        stuck = stalls(con, run, since=started_at) + worker_signals(con, run)
         changed = _snapshot(con, run) != start
         news = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=1)
         # Something already waiting on the orchestrator ends the wait at once;
