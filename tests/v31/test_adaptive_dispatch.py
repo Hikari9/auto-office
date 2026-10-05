@@ -77,6 +77,8 @@ def test_inspect_route_json_carries_the_complete_audit(env):
     Draft202012Validator(schema).validate(audit)
     assert audit["planner"]["chooser"] == "planner" and len(audit["slate"]) == 3
     assert {"clincher", "exploration", "evidence_digest", "numeric_order", "weights"} <= set(audit)
+    assert audit["rejected"]
+    assert all({"candidate", "stage", "reason"} <= set(item) for item in audit["rejected"])
     code, out = env.office("inspect", "route", "T1")
     assert out.count("PRIMARY") == 1 and "evidence (adaptive-1" in out, out
 
