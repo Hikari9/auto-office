@@ -57,7 +57,7 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 4. If the output says a planner was queued, wait (`office wait`). Otherwise you plan inline:
    interview the user directly for anything you would otherwise guess, write `.office/plans/<run>/PLAN.md` (the path `office start` prints)
    (format: `office submit --help`), then `office submit`.
-5. `office submit` prints the plan diagram (waves, stacking, route preview and why, checkpoints;
+5. `office submit` prints the plan diagram (waves, stacking, each task's route slate, checkpoints;
    `office inspect plan` reprints it). When `next:` asks for authorization, show the requirements
    and the diagram verbatim, ask (see Asking the user), then `office approve plan --quote "<words>"`.
    After an amendment show only the printed delta.
@@ -65,7 +65,8 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 ## Execute
 
 - Dispatch as the approved diagram shows: a wave's roots with `office dispatch T1 T2 --parallel`,
-  dependents stacked (`office dispatch T1 T3`). A `route differs from the plan preview` line names why.
+  dependents stacked (`office dispatch T1 T3`). Dispatch runs each task's planned primary route or names the
+  fallback it took and why; when every planned route is out, it stops: `office dispatch <task> --reroute`.
 - Lanes come from file disjointness, not plan waves. List append-only registries several tasks touch
   (gate manifests, endpoint/grant lists, policy maps, shared mocks) under each task's `shared:`; they
   never serialize tasks or count as double-scope ownership. Scope tests a change predictably breaks.
@@ -173,7 +174,7 @@ It reconstructs pending work from runs.db; never start a new run to continue an 
 
 ## Diagnostics
 
-`office inspect run|plan|task|gate|evidence|events|route [id]` and `--verbose`/`--json` show the detail default output hides.
+`office inspect run|plan|task|gate|evidence|events|route|learner [id]` and `--verbose`/`--json` show the detail default output hides.
 `office doctor` checks the install, hooks, pinned runtimes, and known harness defects. `office list` and `office prune` (dry run; `-f` to delete) maintain runs.
 
 The detailed design lives in `docs/v31-implementation.md`; you do not need it to run the lifecycle.
