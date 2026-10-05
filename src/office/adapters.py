@@ -56,6 +56,8 @@ def profile(adapter: dict, kind: str) -> dict | None:
 
 
 def executable(adapter: dict) -> str | None:
+    if not isinstance(adapter, dict):
+        return None
     return (adapter.get("invocation") or {}).get("executable")
 
 
@@ -66,6 +68,8 @@ def installed(adapter: dict) -> bool:
 
 def harness_version(adapter: dict) -> str | None:
     """`<harness> --version`, cached briefly so routing does not fork per call."""
+    if not isinstance(adapter, dict):
+        return None
     exe = executable(adapter)
     if not exe:
         return None
@@ -106,21 +110,22 @@ def harness_version(adapter: dict) -> str | None:
         cache = {}
 
     entry = cache.get(exe) if isinstance(cache, dict) else None
+    entry_at = entry.get("at") if isinstance(entry, dict) else None
     if (isinstance(entry, dict)
-            and now - entry.get("at", 0) < _VERSION_TTL_SECONDS
+            and isinstance(entry_at, (int, float))
+            and now - entry_at < _VERSION_TTL_SECONDS
             and entry.get("mtime_ns") == mtime
             and entry.get("path") == str(resolved_path)
             and entry.get("command") == cmd_list):
         version = entry.get("version")
-        _VERSION_MEMO[memo_key] = (version, entry.get("at", now))
+        _VERSION_MEMO[memo_key] = (version, entry_at)
         return version
 
     try:
         proc = subprocess.run(cmd_list, capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
-        if proc.returncode != 0:
-            _VERSION_MEMO[memo_key] = (None, now)
-            return None
-        text = (proc.stdout or proc.stderr).strip().splitlines()
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        text = (out or err).splitlines()
         raw = text[0] if text else ""
     except (OSError, subprocess.SubprocessError):
         _VERSION_MEMO[memo_key] = (None, now)
