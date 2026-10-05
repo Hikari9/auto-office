@@ -230,6 +230,167 @@ def test_fix_round_brief_repeats_simplify_self_review_preflight_tail(env):
     assert brief.index("FIX ROUND for revision R1") < s < r < w
 
 
+# ------------------------------------------------------------------ self-review tier
+
+GEARS = ("direct", "direct+review", "light", "quick", "express", "full")
+LOW_GEARS = ("direct", "direct+review", "light", "quick")
+
+
+def _risk(blast, irreversible=False, size=None, high=False):
+    return json.dumps({"blast_radius": blast, "size_class": size, "irreversible": irreversible, "high": high})
+
+
+def _expected_tier(gear, blast):
+    if gear == "full" or blast in ("production", "production-data"):
+        return "deep"
+    if gear in LOW_GEARS and blast == "local":
+        return "inline"
+    return "single"
+
+
+@pytest.mark.parametrize("gear", GEARS)
+@pytest.mark.parametrize("blast", ["local", "repo", "production", "production-data", None])
+def test_tier_table_by_gear_and_blast_radius(gear, blast):
+    from office import briefs
+    from office.config import resolve_risk
+    risk = json.dumps(resolve_risk({}, blast, None, False))
+    tier = briefs.self_review_tier(gear, risk)
+    assert tier == _expected_tier(gear, blast), (gear, blast, tier)
+    if blast is None:
+        assert tier != "inline"
+
+
+@pytest.mark.parametrize("gear", GEARS)
+@pytest.mark.parametrize("blast", ["local", "repo", None])
+def test_irreversible_size_l_and_high_are_deep_in_every_gear(gear, blast):
+    from office import briefs
+    assert briefs.self_review_tier(gear, _risk(blast, irreversible=True)) == "deep"
+    assert briefs.self_review_tier(gear, _risk(blast, size="L")) == "deep"
+    assert briefs.self_review_tier(gear, _risk(blast, size="XL")) == "deep"
+    assert briefs.self_review_tier(gear, _risk(blast, high=True)) == "deep"
+
+
+@pytest.mark.parametrize("blast", ["local", "repo", "production", None])
+def test_gear_full_is_deep_even_without_a_usable_risk_record(blast):
+    from office import briefs
+    assert briefs.self_review_tier("full", _risk(blast)) == "deep"
+    assert briefs.self_review_tier("full", None) == "deep"
+    assert briefs.self_review_tier("full", "{not json") == "deep"
+
+
+@pytest.mark.parametrize("risk_json", [None, "", "{not json", "null", "[]", "42", '"local"', b"\xff", {}])
+@pytest.mark.parametrize("gear", [*GEARS, None, "", "turbo"])
+def test_missing_or_unparsable_risk_never_yields_inline(gear, risk_json):
+    from office import briefs
+    tier = briefs.self_review_tier(gear, risk_json)
+    assert tier == ("deep" if gear == "full" else "single"), (gear, risk_json, tier)
+
+
+def test_pathologically_nested_risk_record_fails_toward_review():
+    from office import briefs
+    assert briefs.self_review_tier("direct", "[" * 500_000) == "single"
+    assert briefs.self_review_tier("full", "[" * 500_000) == "deep"
+
+
+@pytest.mark.parametrize("gear", [None, "", "turbo", "Direct", 7])
+def test_unknown_gear_is_never_inline_even_for_a_local_risk(gear):
+    from office import briefs
+    assert briefs.self_review_tier(gear, _risk("local")) == "single"
+
+
+@pytest.mark.parametrize("blast", ["", "LOCAL", "weird", ["local"], 3])
+def test_unrecognized_blast_radius_is_not_inline(blast):
+    from office import briefs
+    assert briefs.self_review_tier("direct", _risk(blast)) == "single"
+
+
+def _self_review_block(brief: str) -> str:
+    return brief[brief.index("SELF-REVIEW before submitting"):brief.index("WHEN DONE run: office preflight")]
+
+
+def _tier_brief(tier: str) -> str:
+    from office import briefs
+    gear, risk = {"inline": ("direct", _risk("local")), "single": ("direct", _risk("repo")),
+                  "deep": ("full", _risk("production"))}[tier]
+    packet = {"task_id": "T1", "title": "x", "scope": ["a.py"], "plan_version": 1, "requirements_version": 1,
+              "base_commit": "abc123"}
+    brief = briefs.executor_brief(None, {"gear": gear, "risk_json": risk}, packet)
+    assert f"(tier: {tier})" in brief
+    return _self_review_block(brief)
+
+
+@pytest.mark.parametrize("tier", ["inline", "single", "deep"])
+def test_every_tier_keeps_lenses_json_shape_fix_rule_and_mutation_proof(tier):
+    block = _tier_brief(tier)
+    for lens in ("(a) security", "(b) edge cases", "(c) platform and build", "(d) test strength"):
+        assert lens in block, lens
+    assert '[{"severity": "high|medium|low", "location": "file:line", "repro": "...", "fix": "..."}]' in block
+    assert "Fix every medium or higher finding inside SCOPE" in block
+    assert "revert the fix, confirm the test fails, restore it" in block
+    assert "git diff abc123" in block
+    assert "A finding outside SCOPE goes in your report, unfixed" in block
+
+
+def test_inline_tier_has_no_subagent_instruction_and_no_rereview_rounds():
+    block = _tier_brief("inline")
+    assert "subagent" not in block.lower()
+    assert "Re-review" not in block and "rounds" not in block
+    assert "one fresh pass per lens yourself" in block
+
+
+def test_single_tier_names_exactly_one_subagent_covering_all_four_lenses():
+    block = _tier_brief("single")
+    assert "Start exactly one subagent" in block and "all four" in block
+    assert "four parallel subagents" not in block and "at most 3 rounds" not in block
+    assert block.lower().count("subagent") == 1
+
+
+def test_deep_tier_keeps_four_parallel_subagents_and_three_rounds():
+    block = _tier_brief("deep")
+    assert "Start four parallel subagents" in block
+    assert "each given only the diff and one\n    lens" in block and "at most 3 rounds" in block
+    assert "exactly one subagent" not in block
+
+
+@pytest.mark.parametrize("injected", ["inline", "single", "deep", "none", True])
+def test_packet_cannot_lower_the_tier(injected):
+    from office import briefs
+    packet = {"task_id": "T1", "title": "x", "scope": ["a.py"], "plan_version": 1, "requirements_version": 1,
+              "self_review_tier": injected, "tier": injected, "gear": "direct", "risk": {"blast_radius": "local"},
+              "risk_json": _risk("local"), "blast_radius": "local"}
+    deep = briefs.executor_brief(None, {"gear": "full", "risk_json": _risk("production")}, packet)
+    assert "(tier: deep)" in deep
+    unset = briefs.executor_brief(None, {"gear": "direct", "risk_json": _risk(None)}, packet)
+    assert "(tier: single)" in unset
+    assert "(tier: single)" in briefs.executor_brief(None, {}, packet)
+
+
+def _tier_of(brief: str) -> str:
+    import re
+    return re.search(r"SELF-REVIEW before submitting \(tier: (\w+)\)", brief).group(1)
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+@pytest.mark.parametrize("gear, blast, tier", [("direct", "local", "inline"), ("express", "repo", "single"),
+                                               ("full", "production", "deep")])
+def test_fix_round_brief_prints_the_same_tier_as_the_initial_brief(env, gear, blast, tier):
+    _, _, d = _dispatched(env)
+    from office import briefs, paths
+    con = env.con()
+    con.execute("UPDATE runs SET gear=?, risk_json=? WHERE id=?", (gear, _risk(blast), d["run_id"]))
+    con.execute("INSERT INTO findings (id, run_id, task_id, code, severity, location, summary, state, created_at) "
+                "VALUES ('f1', ?, 'T1', 'F1', 'medium', 'calc.py:1', 'add() drops negatives', 'open', '2026-01-01')",
+                (d["run_id"],))
+    con.commit()
+    data = json.loads((paths.run_dir(d["run_id"]) / "dispatches" / d["id"] / "packet.json").read_text())
+    run = dict(con.execute("SELECT * FROM runs WHERE id=?", (d["run_id"],)).fetchone())
+    initial = briefs.executor_brief(con, run, {**data, "fix_of": None})
+    fix = briefs.executor_brief(con, run, {**data, "fix_of": "R1"})
+    assert "FIX ROUND for revision R1" in fix and "FIX ROUND" not in initial
+    assert _tier_of(initial) == _tier_of(fix) == tier
+
+
 def test_office_submit_skill_simplifies_before_self_review():
     text = (Path(__file__).resolve().parents[2] / "skills/office-submit/SKILL.md").read_text()
     order = [text.index(h) for h in ("## 1. Simplify", "## 2. Adversarial self-review", "## 3. Checks",
@@ -310,3 +471,19 @@ def test_install_shell_guard_is_opt_in_kept_and_removable(env, tmp_path, monkeyp
     assert len(guards()[0]) == 1 and any("hooks already current" in l for l in res.lines), res.lines
     install.install(only=["claude"], shell_guard=False)
     assert guards()[0] == [] and len(guards()[1]) == 1
+
+
+def test_office_submit_skill_reads_the_tier_and_no_longer_requires_four_subagents_unconditionally():
+    text = (Path(__file__).resolve().parents[2] / "skills/office-submit/SKILL.md").read_text()
+    step = text[text.index("## 2. Adversarial self-review"):text.index("## 3. Checks")]
+    assert "`SELF-REVIEW` line" in step and "(tier: <tier>)" in step
+    for tier in ("`inline`", "`single`", "`deep`"):
+        assert tier in step, tier
+    inline = step[step.index("**`inline`:**"):step.index("**`single`:**")]
+    single = step[step.index("**`single`:**"):step.index("**`deep`:**")]
+    deep = step[step.index("**`deep`:**"):]
+    assert "no subagents" in inline and "Agent" not in inline
+    assert "exactly one `Agent` subagent" in single and "all four lenses" in single
+    assert "four `Agent` subagents" in deep and "at most 3 rounds" in deep
+    assert "four `Agent` subagents" not in step.replace(deep.split("\n\n")[0], "")
+    assert "You cannot lower it" in step

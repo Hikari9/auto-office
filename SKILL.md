@@ -88,7 +88,8 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 - An executor idle 60s without submitting (or whose process died) is a stall: `office wait` exits 3 and
   the stall line names the dispatch, any refused-submit reason, its `pane-tail.txt`, and the next command.
   Fix the blocker, then re-prompt with `office prompt T2 -- "<message>"` or follow that command.
-- Executors simplify (behavior-preserving, in SCOPE), self-review on four lenses, then `office preflight`. Each ends
+- Executors simplify (behavior-preserving, in SCOPE), self-review on four lenses at a depth Office sets from the run's
+  gear and risk (`inline`, `single`, or `deep`; an unset blast radius is never `inline`), then `office preflight`. Each ends
   with one `TASK=... SUBMIT=... NEXT=...` line (saved in `pane-final.txt`); act on its `NEXT=`. A worker
   refused as lease-lost, superseded-dispatch, or task-paused is done: never prompt it to retry.
 - Before submitting a plan inline, run the same lenses (security, edge cases, platform and build, test
