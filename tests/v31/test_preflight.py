@@ -233,7 +233,7 @@ def test_fix_round_brief_repeats_simplify_self_review_preflight_tail(env):
 # ------------------------------------------------------------------ self-review tier
 
 GEARS = ("direct", "direct+review", "light", "quick", "express", "full")
-LOW_GEARS = ("direct", "direct+review", "light", "quick")
+LOW_GEARS = ("direct", "direct+review", "light")
 
 
 def _risk(blast, irreversible=False, size=None, high=False):
@@ -243,7 +243,7 @@ def _risk(blast, irreversible=False, size=None, high=False):
 def _expected_tier(gear, blast):
     if gear == "full" or blast in ("production", "production-data"):
         return "deep"
-    if gear in LOW_GEARS and blast == "local":
+    if gear in LOW_GEARS and blast in ("local", "repo"):
         return "inline"
     return "single"
 
@@ -310,7 +310,7 @@ def _self_review_block(brief: str) -> str:
 
 def _tier_brief(tier: str) -> str:
     from office import briefs
-    gear, risk = {"inline": ("direct", _risk("local")), "single": ("direct", _risk("repo")),
+    gear, risk = {"inline": ("direct", _risk("local")), "single": ("quick", _risk("local")),
                   "deep": ("full", _risk("production"))}[tier]
     packet = {"task_id": "T1", "title": "x", "scope": ["a.py"], "plan_version": 1, "requirements_version": 1,
               "base_commit": "abc123"}
@@ -336,6 +336,17 @@ def test_inline_tier_has_no_subagent_instruction_and_no_rereview_rounds():
     assert "subagent" not in block.lower()
     assert "Re-review" not in block and "rounds" not in block
     assert "one fresh pass per lens yourself" in block
+    assert "You may skip a lens that clearly does not\n    apply, with a one-line reason in your report" in block
+
+
+def test_inline_tier_applies_to_repo_blast_but_not_to_quick_gear():
+    from office import briefs
+    assert briefs.self_review_tier("direct", _risk("repo")) == "inline"
+    assert briefs.self_review_tier("light", _risk("repo")) == "inline"
+    assert briefs.self_review_tier("quick", _risk("local")) == "single"
+    assert briefs.self_review_tier("quick", _risk("repo")) == "single"
+    assert briefs.self_review_tier("direct", _risk("repo", high=True)) == "deep"
+    assert briefs.self_review_tier("direct", _risk(None)) == "single"
 
 
 def test_single_tier_names_exactly_one_subagent_covering_all_four_lenses():
@@ -343,6 +354,7 @@ def test_single_tier_names_exactly_one_subagent_covering_all_four_lenses():
     assert "Start exactly one subagent" in block and "all four" in block
     assert "four parallel subagents" not in block and "at most 3 rounds" not in block
     assert block.lower().count("subagent") == 1
+    assert "at most 2 rounds" in block and "skip a lens" not in block
 
 
 def test_deep_tier_keeps_four_parallel_subagents_and_three_rounds():
@@ -372,7 +384,8 @@ def _tier_of(brief: str) -> str:
 
 @pytest.mark.integration
 @pytest.mark.approved
-@pytest.mark.parametrize("gear, blast, tier", [("direct", "local", "inline"), ("express", "repo", "single"),
+@pytest.mark.parametrize("gear, blast, tier", [("direct", "local", "inline"), ("direct", "repo", "inline"),
+                                               ("quick", "local", "single"), ("express", "repo", "single"),
                                                ("full", "production", "deep")])
 def test_fix_round_brief_prints_the_same_tier_as_the_initial_brief(env, gear, blast, tier):
     _, _, d = _dispatched(env)
@@ -483,7 +496,9 @@ def test_office_submit_skill_reads_the_tier_and_no_longer_requires_four_subagent
     single = step[step.index("**`single`:**"):step.index("**`deep`:**")]
     deep = step[step.index("**`deep`:**"):]
     assert "no subagents" in inline and "Agent" not in inline
+    assert "skip a lens that clearly does not apply" in inline and "one-line reason" in inline
     assert "exactly one `Agent` subagent" in single and "all four lenses" in single
+    assert "at most 2 rounds" in single
     assert "four `Agent` subagents" in deep and "at most 3 rounds" in deep
     assert "four `Agent` subagents" not in step.replace(deep.split("\n\n")[0], "")
     assert "You cannot lower it" in step

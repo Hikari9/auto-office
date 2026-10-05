@@ -254,7 +254,8 @@ def simplify_lines(base: str) -> list[str]:
 
 
 SELF_REVIEW_TIERS = ("inline", "single", "deep")
-_LOW_RISK_GEARS = ("direct", "direct+review", "light", "quick")
+_LOW_RISK_GEARS = ("direct", "direct+review", "light")
+_INLINE_BLAST = ("local", "repo")
 _HIGH_SIZES = ("L", "XL")
 
 
@@ -274,7 +275,7 @@ def self_review_tier(gear, risk_json) -> str:
     if (risk.get("high") or risk.get("irreversible") or blast in ("production", "production-data")
             or risk.get("size_class") in _HIGH_SIZES):
         return "deep"
-    if gear in _LOW_RISK_GEARS and blast == "local":
+    if gear in _LOW_RISK_GEARS and blast in _INLINE_BLAST:
         return "inline"
     return "single"
 
@@ -300,11 +301,12 @@ def self_review_lines(base: str, tier: str = "deep") -> list[str]:
     tail = "    A finding outside SCOPE goes in your report, unfixed."
     if tier == "inline":
         intro = ["    uncommitted). Make one fresh pass per lens yourself, with no delegation, one lens at a time:"]
-        rounds = ["    One pass only: a fix does not start another review."]
+        rounds = ["    One pass only: a fix does not start another review. You may skip a lens that clearly does not",
+                  "    apply, with a one-line reason in your report."]
     elif tier == "single":
         intro = ["    uncommitted). Start exactly one subagent if your harness has one, given only the diff and all four",
                  "    lenses below; otherwise make one fresh pass per lens yourself:"]
-        rounds = ["    Re-review only after a high fix, at most 1 round."]
+        rounds = ["    Re-review only after a high fix, at most 2 rounds."]
     else:
         intro = ["    uncommitted). Start four parallel subagents if your harness has them, each given only the diff and one",
                  "    lens; otherwise make one fresh pass per lens yourself:"]

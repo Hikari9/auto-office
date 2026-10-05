@@ -23,8 +23,9 @@ Find the base and the tier in the brief's `SELF-REVIEW` line (`git diff <base>`,
 the tier from the run's gear and risk. You cannot lower it. Do the review as the tier says:
 
 - **`inline`:** no subagents. Make one fresh pass per lens yourself, fix medium+ findings, and do not re-review.
+  You may skip a lens that clearly does not apply, with a one-line reason in your report.
 - **`single`:** start exactly one `Agent` subagent, given the diff command, the brief path, all four lenses, and
-  a read-only instruction (no edits). Re-review only after a `high` fix, at most 1 round.
+  a read-only instruction (no edits). Re-review only after a `high` fix, at most 2 rounds.
 - **`deep`:** start four `Agent` subagents in one message, in parallel. Give each the diff command, the brief
   path, and one lens, and tell it to read only (no edits). Re-review only after a `high` fix, at most 3 rounds.
 
