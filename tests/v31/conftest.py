@@ -17,6 +17,8 @@ from unittest import mock
 
 import pytest
 
+import fake_agent
+
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
 FAKE = Path(__file__).resolve().parent / "fake_agent.py"
@@ -70,6 +72,54 @@ BAD_ADD = "def add(a, b):\n    return a - b\n"
 GOOD_MUL = "def mul(a, b):\n    return a * b\n"
 
 
+class _Pipe:
+    """The write end of an in-process agent's stdin: it only keeps the prompt."""
+
+    def __init__(self):
+        self.data = b""
+
+    def write(self, chunk: bytes) -> None:
+        self.data += chunk
+
+    def close(self) -> None:
+        pass
+
+
+class InProcessAgent:
+    """A Popen-like fake harness child that runs `fake_agent.run` in this process.
+
+    The agent runs when its output is first read, after the supervisor has
+    written the prompt. Nothing here can be signalled: it shares the
+    supervisor's process, so `poll()` never reports it as still running (the
+    supervisor's signal handler would otherwise forward to its own group).
+    """
+
+    def __init__(self, argv, cwd, env, stdin):
+        self.argv, self.cwd, self.env = argv, cwd, env
+        self.pid = os.getpid()
+        self.returncode = None
+        self.stdin = _Pipe() if stdin == subprocess.PIPE else None
+        self.stdout = self
+        self._output = None
+
+    def _run(self):
+        if self._output is None:
+            prompt = self.stdin.data.decode() if self.stdin else ""
+            self.returncode, output = fake_agent.run(self.argv, prompt, self.env, self.cwd)
+            self._output = io.BytesIO(output)
+
+    def read1(self, size=-1) -> bytes:
+        self._run()
+        return self._output.read1(size)
+
+    def poll(self):
+        return 0 if self.returncode is None else self.returncode
+
+    def wait(self):
+        self._run()
+        return self.returncode
+
+
 class Env:
     def __init__(self, tmp: Path, monkeypatch, *, restored: bool = False):
         """`restored`: tmp already holds a repository copied from a snapshot."""
@@ -83,9 +133,11 @@ class Env:
         self.scenario = tmp / "scenario.json"
         for d in (self.home, self.data, self.state, self.bin):
             d.mkdir(parents=True, exist_ok=True)
+        self.fakes = {}
         for name in ("codex", "claude", "gemini", "agy"):
-            (self.bin / name).write_text(f"#!{sys.executable}\nimport os, runpy\nos.environ['FAKE_HARNESS'] = '{name}'\n"
-                                         f"runpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
+            self.fakes[self.bin / name] = (f"#!{sys.executable}\nimport os, runpy\nos.environ['FAKE_HARNESS'] = '{name}'\n"
+                                           f"runpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
+            (self.bin / name).write_text(self.fakes[self.bin / name])
             (self.bin / name).chmod(0o755)
         env_drop = [k for k in os.environ if k.startswith(("OFFICE_", "HERDR_", "AUTO_OFFICE_"))]
         for k in env_drop:
@@ -119,6 +171,22 @@ class Env:
         self.scenario.write_text("{}")
         if not restored:
             self._init_repo()
+        sys.path.insert(0, str(SRC))
+        from office import dispatch
+        spawn_process = dispatch._spawn_agent
+        monkeypatch.setattr(dispatch, "_spawn_agent", lambda argv, cwd, env, stdin: self._spawn_agent(
+            spawn_process, argv, cwd, env, stdin))
+
+    def _spawn_agent(self, spawn_process, argv, cwd, env, stdin):
+        """The agent seam: an unmodified fake harness runs in this process; anything
+        that needs a real process (a real binary, a sleep, a wall cap, a signal
+        the scenario cannot emulate) is started as one."""
+        exe = shutil.which(argv[0], path=env.get("PATH"))
+        fake = exe and Path(exe) in self.fakes and Path(exe).read_text() == self.fakes[Path(exe)]
+        if not fake or env.get("OFFICE_WORKER_MAX_MINUTES") or not fake_agent.scenario_runs_in_process(env):
+            return spawn_process(argv, cwd, env, stdin)
+        env = {**env, "FAKE_HARNESS": Path(exe).name}
+        return InProcessAgent(argv, cwd, env, stdin)
 
     def _init_repo(self):
         self.repo.mkdir()

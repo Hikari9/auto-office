@@ -7,6 +7,7 @@ injects the environment, and launches through a durable outbox job.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -934,7 +935,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
     if launcher == "sync":
         # Deterministic mode for tests and fixtures: supervise in the foreground.
         _record_launch(run, dispatch["id"], launcher="sync", pid=os.getpid())
-        subprocess.run(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, env=env)
+        _supervise_in_process(dispatch["id"], cwd, extra)
         return _wait_terminal(dispatch["id"], timeout=5) if wait else {"launcher": "sync"}
     headless = "process"
     if use_herdr:
@@ -975,6 +976,22 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         proc.wait()
         return _wait_terminal(dispatch["id"])
     return {"launcher": headless, "pid": proc.pid}
+
+
+def _supervise_in_process(dispatch_id: str, cwd: Path, extra: dict) -> None:
+    """Run the supervisor here, under the environment and directory the
+    `office _supervise` child would have had, and put both back afterwards."""
+    from unittest import mock
+    with mock.patch.dict(os.environ, extra), contextlib.chdir(cwd):
+        os.environ.pop(frontdoor.HOP_ENV, None)
+        supervise(dispatch_id)
+
+
+def _spawn_agent(argv: list[str], cwd: str, env: dict, stdin: int) -> subprocess.Popen:
+    """Start the harness process in its own session, its output piped back.
+    The one place a harness child is created, so tests can replace it."""
+    return subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            env=env, start_new_session=True)
 
 
 def _launch_external(run: dict, dispatch: dict, kind: str, spec: dict, ddir: Path, sup: list[str], env: dict,
@@ -2185,8 +2202,11 @@ def supervise(dispatch_id: str) -> int:
             except OSError:
                 pass
 
-    for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-        signal.signal(s, forward)
+    # Only the main thread can install handlers. Whoever called an in-process
+    # supervisor gets its own handlers back when the dispatch ends.
+    previous = ({s: signal.signal(s, forward) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+                if threading.current_thread() is threading.main_thread() else {})
+    timer = None
     log_path = None
     try:
         con = db.connect()
@@ -2239,8 +2259,7 @@ def supervise(dispatch_id: str) -> int:
                 argv = argv + [prompt]
             elif prof.get("prompt") == "argv-bound":
                 argv = argv + [prof.get("prompt_flag", "--prompt=") + prompt]
-            child = subprocess.Popen(argv, cwd=spec["cwd"], stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                     env=env, start_new_session=True)
+            child = _spawn_agent(argv, spec["cwd"], env, stdin)
             _mark(dispatch_id, pid_child=child.pid)
             _agent_pgid_file(run, dispatch_id).write_text(str(child.pid))
             _record_identity(run["id"], dispatch_id, "agent", child.pid)
@@ -2288,8 +2307,14 @@ def supervise(dispatch_id: str) -> int:
         classification = "supervisor_error"
         _note(log_path, f"supervisor error: {exc!r}")
     finally:
-        if classification != "duplicate_ignored":
-            _finish(dispatch_id, code, sig, classification or "unknown", time.time() - started)
+        try:
+            if classification != "duplicate_ignored":
+                _finish(dispatch_id, code, sig, classification or "unknown", time.time() - started)
+        finally:
+            if timer:
+                timer.cancel()
+            for s, handler in previous.items():
+                signal.signal(s, handler if handler is not None else signal.SIG_DFL)
     return 0 if classification == "success" else 1
 
 
