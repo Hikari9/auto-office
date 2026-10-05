@@ -1,56 +1,54 @@
 ---
 name: auto-routing
-description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use the office CLI). Internal Auto Office v3 router. Use when selecting or explaining a role route across harness, model, and effort; evaluating adapter trust/capabilities/absolute floors/task shape/quota/advisory quality/cost/local evidence; deciding exploration eligibility; or recording a routing decision. Route-time must remain offline and reproducible from pinned snapshots.
+description: Auto Office routing reference. Use when selecting or explaining a role route across harness, model, and effort; reading an executor route slate (primary + fallbacks); evaluating trust, capabilities, floors, quota, expected cost to success, speed, learned evidence, preference or exploration; or explaining a routing decision. The office runtime routes; this skill explains the scheme it applies (protocol/routing.md).
 ---
 
 # Auto Routing
 
-> **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
-> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
->
-> **Executor and worker routing (#300) supersedes the cost and preferred-seed stages below** in the `office`
-> runtime: qualifying routes are scored by expected cost to success, speed, quota, learned effectiveness and
-> weighted preference, the planner records a primary and two fallbacks, and dispatch falls back in that order only
-> on fresh evidence. See `../../protocol/routing.md`. Planner and reviewer routing still follows this page.
+The `office` runtime routes every role. Do not route by hand; read the decision it records. The normative
+scheme is `../../protocol/routing.md` (learning: `../../protocol/telemetry-learning.md`). Route
+`harness@major × model_id × effort`, not model brand alone.
 
-Route `harness@major × model_id × effort`, not model brand alone.
+## The scheme
 
-Read `../../protocol/routing.md`, `../../config/config.default.yaml`, the pinned catalog snapshot, pinned adapter snapshot, effective config, and comparable local evidence.
+**Qualification (every role):** hard exclusions → derived adapter trust → required capabilities → absolute
+role floor → task shape → quota reserve. Unknown quota is not unlimited. Never lower a floor to save money or
+quota. Only a valid, unexpired user `RecordedOverride` passes a derived gate; `--as`/`--route` are explicit user
+authority.
 
-Apply the exact filter order: hard exclusions → adapter trust → capabilities → absolute floor → task shape → quota safety → advisory anchor → cost → local tie-break.
+**Executor and worker recommendation (#300):** after qualification, learned eligibility (stage 7) and an
+absolute budget ceiling on expected cost to success (stage 8) apply. Every remaining model × effort route is
+scored on success probability (benchmark prior, overtaken by comparable local evidence), expected cost to
+success, expected time to success, quota headroom and weighted user preference. The result is a slate: a primary
+and up to two fallbacks, each with a reason, one strength and one weakness.
+- Close calls (within 5% utility) are settled by a seeded, reproducible draw; a clearly weaker route never wins it.
+- Exploration of under-tested qualifying routes is small and capped.
+- No harness or family diversity is forced; parallel tasks in one wave spread softly when routes are close.
+- `preferred_seed` is weighted evidence for these roles, never the winner by itself.
 
-Adapter trust, the absolute floor, and local tie-break evidence are derived from recorded dispatch/outcome evidence and the pinned catalog row — never from a caller-supplied `adapter_state`/`absolute_floor_pass`/`local_reward`, which `route()` ignores. Trust only ever falls automatically from evidence; only an explicit, attributed `adapter_trust_acts` record ever raises it. An override of a derived gate is honoured only with a valid, unexpired `RecordedOverride` carrying user attribution; otherwise it is a hard stop (`status: "override_not_authorized"`).
+**Planner and reviewer routes** still use the advisory `preferred_seed` anchor and the `cost_policy` order
+(including `balanced_money_band_percent`) after qualification, until their routing is redesigned.
 
-Never lower an absolute floor to save money/quota. Unknown quota is not unlimited. If every qualifying candidate crosses protected reserve, return control to the orchestrator instead of quietly spending it.
+## Who decides what
 
-Probe CLI headroom before it feeds routing — quota reads are network calls and must happen outside `office_runtime.py route`, which stays offline. Each adapter's `quota_probe.command` names the live probe (`scripts/agy-usage.py`, `scripts/claude-usage.py`, `scripts/codex-usage.py`); run the brand's probe at fit-test and again immediately before that brand's dispatch, never reuse a fit-test reading for a later dispatch. Exit `2` means unknown, not low — treat it as no known-safe alternative. Full contract in `../../references/quota-probe.md`.
+- **Planner:** accepts the slate by default; may set `route: <primary>, <fallback>, <fallback>` and `route_why:`
+  on a task in PLAN.md. A primary outside the close-call band needs a concrete `route_why`, or the ranked slate
+  stands.
+- **Dispatch:** re-checks live quota, trust and learned eligibility, runs the planned primary, and falls back in
+  the recorded order only when fresh evidence rules a route out, naming why. It never runs an unplanned route: an
+  exhausted slate stops, and `office dispatch <task> --reroute` routes from current evidence.
+- **Rerun:** keeps the original route; `office rerun <task> --fresh --reroute` routes again.
+- **Learner:** attributes failures (route, plan, environment, reviewer, mixed, unknown) before learning, decays
+  stale evidence, and changes learned eligibility only after maturity plus a held-out replay. It cannot change
+  success definitions, attribution rules, factual gates or trust acts.
 
-Public benchmark data is cold-start evidence. Enough comparable local evidence for the exact routable triple outranks generic priors. Keep runtime reliability evidence harness-specific even when two harnesses expose the same underlying model.
+## Reading a decision
 
-## Routing defects: a wrong slug is a defect, not a retry
+- The plan diagram shows each task's Inline Slate. Show it to the user as printed.
+- `office inspect route <task>` adds the evidence matrix and what dispatch did; `--json` is the full audit
+  record (`../../schemas/routing-decision.schema.json`). `office inspect learner` shows what was learned.
+- Publish `selection_disclosure` before any executor or reviewer launch and keep it in the dispatch record. The
+  reason must name the deciding evidence; "best model" is not a reason.
 
-The canonical `model_id` and the harness invocation slug are different values. The spec seed name
-`luna` is not what codex accepts on the command line (`gpt-5.6-luna`), and `route` falls back to
-`model_id` whenever the catalog row has no `invocation_model_id`. Read
-`selection_disclosure.invocation_model_id_source` before dispatch: `fallback:model_id` means the
-slug is unverified, not confirmed.
-
-When a dispatch fails because the harness rejected the model, effort, or adapter identity:
-
-1. Record it before retrying — `python3 ../../scripts/office_runtime.py route-defect --state-dir
-   <run-state-dir> --kind invalid-invocation-slug --attempted <slug> --observed "<harness error>"
-   --correction <working-slug> --harness <harness>`.
-2. Re-dispatch with the corrected identity so the run continues.
-3. Dispatch a subagent running `auto-self-improve` to amend the catalog row in an isolated
-   worktree/branch, then close the defect with `resolve-route-defect --id <id> --proposal-ref
-   <branch-or-PR>`.
-
-Step 3 is not optional cleanup. `auto-closeout` runs `check-route-defects` and will not report
-complete while an unresolved row remains, because a slug fixed only in this run's transcript is a
-slug the next run gets wrong again.
-
-Use `python3 ../../scripts/office_runtime.py route <request.yaml>` for deterministic selection. Record the request/decision hashes with the run.
-
-Treat the route result's `selection_disclosure` as required handoff data. Before any executor, plan-reviewer, or code-reviewer invocation, show the user one concise notice containing role, exact invocation model identifier (or canonical `model_id` fallback), effort, harness/version, and `reason`. Carry that same object into the dispatch envelope/readback. The reason must identify the actual decisive filters or tie-breaks; “best model” is not sufficient.
-
-When the resolved config sets `roles.<role>.preferred_seed`, pass it through in the request as `preferred_seed` (same ordered list of `{model_id, effort, harness?}`). For planner and reviewer roles `route` uses it at the advisory-anchor stage: candidates matching an entry pass; if none match, the anchor imposes no restriction. Among passing candidates it then ranks by chain position first (first entry wins if it clears every earlier stage) and cost only as a tie-break within the same rank. For executor and worker roles (#300) the same chain is weighted preference evidence: it raises a matching route's utility by at most the configured preference weight and never decides the route alone.
+**Legacy:** runs pinned to Auto Office 3.0 use the `scripts/office_runtime.py` router
+(`references/legacy-3.0-router.md`); never use it for a 3.1+ run.

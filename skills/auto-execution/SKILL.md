@@ -8,7 +8,7 @@ description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use t
 > **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
 > role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
 
-Before dispatch, validate both the run envelope and execution packet. Reject missing/contradictory mandatory fields. Require the router's `selection_disclosure`, publish it to the user before launching the executor/worker, and preserve it in the dispatch record and readback.
+Before dispatch, validate both the run envelope and execution packet. Reject missing/contradictory mandatory fields. Require the router's `selection_disclosure`, publish it to the user before launching the executor/worker, and preserve it in the dispatch record and readback. Executor routes follow `protocol/routing.md` (#300): dispatch runs the plan's primary route, or the first recorded fallback that still qualifies on fresh quota, trust and learned eligibility, and says why. An exhausted slate stops; reroute only with `office dispatch <task> --reroute`, never by picking an unplanned route yourself.
 
 A packet must include base SHA, task scope, observable outcome, blast radius, allowed mutations, protected paths, validation commands, known-bad behavior to exclude, self-review, and rollback/restore notes.
 
