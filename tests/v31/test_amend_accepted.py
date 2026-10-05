@@ -158,3 +158,25 @@ def test_a_long_amendment_is_cut_in_the_brief_with_a_marker(env):
     run_id = env.con().execute("SELECT id FROM runs").fetchone()[0]
     brief = (paths.run_dir(run_id) / "dispatches" / task_row(env)["current_dispatch_id"] / "brief.md").read_text()
     assert "AMENDMENT A1" in brief and "[cut at 6000 characters" in brief, brief[-600:]
+
+
+def test_an_amendment_relaunch_with_no_prior_revision_still_gates_preflight_on_the_ack(env):
+    approved_run(env, executor=[{}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    first = task_row(env)["current_dispatch_id"]
+    con = env.con()
+    con.execute("UPDATE dispatches SET status='cancelled', ended_at=started_at WHERE id=?", (first,))  # the worker died
+    con.commit()
+    code, out = env.office("amend", "T1", "--", DELTA, env=EXTERNAL)
+    assert code == 0, out
+    second = task_row(env)["current_dispatch_id"]
+    assert second != first
+    wenv, wt, d = _worker(env, second)
+    from office import paths
+    pkt = json.loads((paths.run_dir(d["run_id"]) / "dispatches" / second / "packet.json").read_text())
+    assert not pkt["fix_of"], pkt  # no revision to fix: not a fix round
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert code == 1 and "fix: amendment: A1" in out and "office ack A1" in out, out
+    env.office("ack", "A1", cwd=wt, env=wenv, check=0)
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert code == 0 and "PREFLIGHT ready" in out, out

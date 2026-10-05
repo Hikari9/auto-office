@@ -429,21 +429,23 @@ def preflight(con, run: dict, cwd: Path) -> Result:
         else:
             stop.append(f"{status}: {task['id']} {reason}".rstrip())
 
-    # 4. A fix round must have work: open findings, or an amendment delivered to this session.
+    # 4. An amendment delivered to this session is work to apply and acknowledge, and a fix round must
+    # have work: open findings, or an amendment. A relaunch of a task that never submitted has no
+    # fix round (no prior revision) but still carries its amendment.
     packet = _packet(run, d)
+    amendments = con.execute("SELECT amendment_id, status FROM deliveries WHERE run_id=? AND task_id=? AND dispatch_id=? "
+                             "AND status IN ('queued','delivered','applied') ORDER BY target_version",
+                             (run["id"], task["id"], d["id"])).fetchall()
+    for a in amendments:
+        if a["status"] == "applied":
+            res.lines.append(f"amendment: {a['amendment_id']} applied")
+        else:
+            fix.append(f"amendment: {a['amendment_id']} is delivered to you but not acknowledged: apply it, then "
+                       f"office ack {a['amendment_id']}")
     if packet.get("fix_of"):
         rows = con.execute("SELECT code, severity, location, summary FROM findings WHERE run_id=? AND task_id=? "
                            "AND state='open' ORDER BY created_at", (run["id"], task["id"])).fetchall()
-        amendments = con.execute("SELECT amendment_id, status FROM deliveries WHERE run_id=? AND task_id=? AND dispatch_id=? "
-                                 "AND status IN ('queued','delivered','applied') ORDER BY target_version",
-                                 (run["id"], task["id"], d["id"])).fetchall()
         res.lines += [f"finding: {r['code']} [{r['severity']}] {r['location'] or ''} {r['summary']}" for r in rows]
-        for a in amendments:
-            if a["status"] == "applied":
-                res.lines.append(f"amendment: {a['amendment_id']} applied")
-            else:
-                fix.append(f"amendment: {a['amendment_id']} is delivered to you but not acknowledged: apply it, then "
-                           f"office ack {a['amendment_id']}")
         if not rows and not amendments:
             stop.append(f"findings: fix round for {packet['fix_of']} but no open findings or amendments are recorded; "
                         f"the orchestrator resolves it with: office amend {task['id']} -- \"<what to fix>\" (delivered "

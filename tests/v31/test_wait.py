@@ -120,17 +120,45 @@ def test_the_same_reason_is_news_again_once_read_and_old_enough(env):
 
 
 @pytest.mark.approved
-def test_one_dispatch_records_a_bounded_number_of_signals(env):
+def test_a_new_distinct_reason_is_recorded_however_many_came_before(env):
     from office import state
     _go(env)
     wenv, wt, d = _executor(env)
     con = env.con()
     run = state.get_run(con, d["run_id"])
-    for i in range(state.SIGNAL_MAX_PER_DISPATCH + 5):
+    for i in range(30):
         with con:
             state.signal_orchestrator(con, run, source="preflight stop", task_id="T1", dispatch_id=d["id"],
-                                      reason=f"ledger line {i}: varied by the worker", next_step="office status")
-    assert len(_signals(env)) == state.SIGNAL_MAX_PER_DISPATCH
+                                      reason=f"reason {i}", next_step="office status")
+    with con:
+        state.signal_orchestrator(con, run, source="preflight stop", task_id="T1", dispatch_id=d["id"],
+                                  reason="reason 0", next_step="office status")  # a repeat: not recorded
+    assert len(_signals(env)) == 30 and "reason 29" in _signals(env)[-1]["summary"]
+    with con:
+        state.signal_orchestrator(con, run, source="submit refused", task_id="T1", dispatch_id=d["id"],
+                                  reason="a later, different refusal", next_step="office status")
+    assert len(_signals(env)) == 31 and "a later, different refusal" in _signals(env)[-1]["summary"]
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("first", ["status", "wait"])
+def test_a_signal_behind_a_full_window_of_other_events_still_wakes_wait(env, first):
+    from office import state
+    _go(env)
+    wenv, wt, d = _executor(env)
+    con = env.con()
+    run = state.get_run(con, d["run_id"])
+    with con:
+        for i in range(20):  # far more than the 4 a command and the 6 a status show
+            state.emit(con, run, "note", f"earlier orchestrator event {i}", task_id="T1")
+    env.office("revoke", "T1", check=0)
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    if first == "status":
+        env.office("status", check=0)  # consumes the first six unread events only
+    code, out = env.office("wait", "--timeout", "30", "--poll", "0.2", env=EXTERNAL)
+    assert code == 3 and "stall: T1" in out and "preflight stop:" in out and "next: office status; then office rerun T1" in out, out
+    code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
+    assert "stall: T1" not in out, out  # reported once
 
 
 @pytest.mark.approved
