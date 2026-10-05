@@ -43,11 +43,12 @@ def _packet(run: dict, d: dict) -> dict:
 
 
 _SHA = re.compile(r"[0-9a-fA-F]{7,40}")
-_ACCEPT_REF = re.compile(r"accept=([1-9][0-9]*)")
+_ACCEPT_REF = re.compile(r"accept=([1-9][0-9]{0,5})")
 _BLOCKERS = ("high", "medium")
 
 
 def _one_line(text: str, limit: int = 160) -> str:
+    text = "".join(c if c.isprintable() else " " for c in text)
     text = " ".join(text.split())
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
@@ -76,7 +77,7 @@ def parse_ledger(text: str) -> tuple[dict, list[str]]:
     lines that carry nothing."""
     led: dict = {"commit": None, "round": None, "lenses": {}, "findings": []}
     errors: list[str] = []
-    for n, raw in enumerate(text.splitlines(), 1):
+    for n, raw in enumerate(text.lstrip("\ufeff").split("\n"), 1):
         line = raw.strip()
         if not line:
             continue
@@ -96,7 +97,7 @@ def parse_ledger(text: str) -> tuple[dict, list[str]]:
         elif word == "ROUND":
             if led["round"] is not None:
                 bad("second ROUND line")
-            elif not re.fullmatch(r"[0-9]+", rest) or not 1 <= int(rest) <= briefs.MAX_REVIEW_ROUNDS:
+            elif not re.fullmatch(r"[0-9]{1,2}", rest) or not 1 <= int(rest) <= briefs.MAX_REVIEW_ROUNDS:
                 bad(f"ROUND must be 1-{briefs.MAX_REVIEW_ROUNDS}")
             else:
                 led["round"] = int(rest)
@@ -138,6 +139,7 @@ def parse_ledger(text: str) -> tuple[dict, list[str]]:
 
 
 def _test_file_exists(wt: Path, rel: str) -> bool:
+    rel = rel.split("::", 1)[0]  # a pytest node id names its file first
     if os.path.isabs(rel):
         return False
     try:
@@ -148,8 +150,9 @@ def _test_file_exists(wt: Path, rel: str) -> bool:
     return target.is_file()
 
 
-def check_ledger(text: str, head: str, accept: list[str], wt: Path) -> tuple[list[str], list[str]]:
-    """(stop, fix) lines for a ledger's text. Every line of `fix` names its repair."""
+def check_ledger(text: str, head: str, accept: list[str], wt: Path, tier: str = "deep") -> tuple[list[str], list[str]]:
+    """(stop, fix) lines for a ledger's text. Every line of `fix` names its repair. Only the inline
+    tier may skip a lens (the brief's other tiers cover all four)."""
     led, errors = parse_ledger(text)
     stop: list[str] = []
     fix = [f"ledger {e}" for e in errors]
@@ -163,9 +166,12 @@ def check_ledger(text: str, head: str, accept: list[str], wt: Path) -> tuple[lis
     for lens in briefs.LEDGER_LENSES:
         if lens not in led["lenses"]:
             fix.append(f"ledger: lens {lens} has no line: add `LENS {lens} reviewed` or `LENS {lens} skipped <reason>`")
+        elif led["lenses"][lens] is not None and tier != "inline":
+            fix.append(f"ledger: lens {lens} is skipped, but the {tier} tier reviews all four lenses: review it and "
+                       f"write `LENS {lens} reviewed`")
     last_round = (led["round"] or 1) >= briefs.MAX_REVIEW_ROUNDS
     for f in led["findings"]:
-        what = f"line {f['line']}: {f['severity']} {f['location']} {_one_line(f['summary'])}"
+        what = f"line {f['line']}: {f['severity']} {_one_line(f['location'], 80)} {_one_line(f['summary'])}"
         if f["kind"] == "contract-conflict":
             n = int(_ACCEPT_REF.fullmatch(f["arg"]).group(1))
             if n > len(accept):
@@ -184,35 +190,45 @@ def check_ledger(text: str, head: str, accept: list[str], wt: Path) -> tuple[lis
                 fix.append(f"ledger {what} is marked fixed without a test path: write the test, prove it fails "
                            "without the fix, then `fixed <test path>`")
             elif not _test_file_exists(wt, f["arg"]):
-                fix.append(f"ledger {what} names test {f['arg']}, which is not a file in this worktree")
+                fix.append(f"ledger {what} names test {_one_line(f['arg'], 80)}, which is not a file in this worktree")
     return stop, fix
 
 
-def _ledger_needed(wt: Path, task: dict, changed: list[str]) -> bool:
-    """A task with a file scope and any in-scope change (committed, uncommitted, or new) owes a ledger."""
+def _in_scope_changes(wt: Path, task: dict, changed: list[str]) -> tuple[list[str], list[str]]:
+    """(committed, pending) in-scope files: `changed` is the committed diff, pending is every uncommitted
+    edit or new file. Neither lists the ledger. A task with no file scope has none."""
     if not task["scope"]:
-        return False
+        return [], []
     pending = _git(wt, "diff", "--name-only", "-z", "HEAD").split("\0") \
         + _git(wt, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
-    return any(f and f != briefs.LEDGER_FILE and not submit._harness_path(f) and planfile.path_in_scope(f, task["scope"])
-               for f in [*changed, *pending])
+    def mine(files):
+        return sorted({f for f in files if f and f != briefs.LEDGER_FILE and planfile.path_in_scope(f, task["scope"])})
+    return mine(changed), mine(pending)
 
 
-def ledger_verdict(wt: Path, task: dict, changed: list[str], head: str) -> tuple[list[str], list[str]]:
-    """(stop, fix) for the task's self-review ledger; both empty when none is owed."""
-    if not _ledger_needed(wt, task, changed):
-        return [], []
+def ledger_verdict(wt: Path, task: dict, changed: list[str], head: str, tier: str = "deep") -> tuple[list[str], list[str]]:
+    """(stop, fix) for the task's self-review ledger; both empty when none is owed. The ledger names
+    HEAD, so uncommitted in-scope work is a fix: it would ship without the review the ledger vouches for."""
     name = briefs.LEDGER_FILE
+    if paths.git(wt, "ls-files", "--", name, check=False).strip() or paths.git(wt, "ls-tree", "HEAD", "--", name, check=False).strip():
+        return [], [f"ledger: {name} is committed or staged; leave it untracked: git rm --cached {name} (commit "
+                    "that removal), then update the ledger's COMMIT"]
+    committed, pending = _in_scope_changes(wt, task, changed)
+    if not committed and not pending:
+        return [], []
+    uncommitted = [f"ledger: uncommitted in-scope changes ({', '.join(pending[:6])}): commit them first, the "
+                   "ledger names HEAD"] if pending else []
     text = submit._read_untracked_text(wt, name, briefs.LEDGER_MAX_CHARS)
     if text is None and os.path.lexists(wt / name):
-        return [], [f"ledger: {name} must be a regular untracked file (not a symlink, hard link, or committed: "
-                    "git rm --cached it)"]
+        return [], uncommitted + [f"ledger: {name} must be a regular untracked file (not a symlink or hard link)"]
     if text is None:
-        return [], [f"ledger: no {name}; run the SELF-REVIEW and write it in this worktree root in the format "
-                    "the brief gives"]
+        return [], uncommitted + [f"ledger: no {name}; run the SELF-REVIEW and write it in this worktree root in "
+                                  "the format the brief gives"]
     if len(text) > briefs.LEDGER_MAX_CHARS:
-        return [], [f"ledger: {name} is over {briefs.LEDGER_MAX_CHARS} characters; keep one short line per finding"]
-    return check_ledger(text, head, task["accept"] or [], wt)
+        return [], uncommitted + [f"ledger: {name} is over {briefs.LEDGER_MAX_CHARS} characters; keep one short line "
+                                  "per finding"]
+    stop, fix = check_ledger(text, head, task["accept"] or [], wt, tier)
+    return stop, uncommitted + fix
 
 
 def _sed_backups(wt: Path) -> list[str]:
@@ -292,8 +308,7 @@ def preflight(con, run: dict, cwd: Path) -> Result:
     for b in dep_bases:
         also = set(_git(wt, "diff", "--name-only", "-z", b, head).split("\0"))
         changed = [f for f in changed if f in also]
-    outside = [f for f in changed if f != briefs.LEDGER_FILE and not planfile.path_in_scope(f, task["scope"])
-               and not submit._harness_path(f)]
+    outside = [f for f in changed if not planfile.path_in_scope(f, task["scope"]) and not submit._harness_path(f)]
     if outside:
         listed = " ".join(outside[:10])
         fix.append(f"scope: tracked edits outside SCOPE: {listed}; revert tool-stamped ones with "
@@ -316,7 +331,8 @@ def preflight(con, run: dict, cwd: Path) -> Result:
     res.data["sed_backups"] = backups
 
     # 7. Self-review ledger: the brief's SELF-REVIEW block says what it holds.
-    ledger_stop, ledger_fix = ledger_verdict(wt, task, changed, head)
+    ledger_stop, ledger_fix = ledger_verdict(wt, task, changed, head,
+                                             briefs.self_review_tier(run.get("gear"), run.get("risk_json")))
     stop += ledger_stop
     fix += ledger_fix
 

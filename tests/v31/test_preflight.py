@@ -26,6 +26,8 @@ def _dispatched(env):
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt, d = _worker(env)
     (wt / "calc.py").write_text(GOOD_ADD)
+    env.git("add", "calc.py", cwd=wt)
+    env.git("-c", "user.email=t@e.test", "-c", "user.name=t", "commit", "-qm", "calc", cwd=wt)  # the ledger names HEAD
     write_ledger(wt)  # the self-review ledger an executor with a non-empty diff owes
     return wenv, wt, d
 

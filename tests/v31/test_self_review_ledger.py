@@ -39,6 +39,7 @@ def write_ledger(wt: Path, text: str | None = None, **kw) -> Path:
 
 @pytest.fixture
 def repo(tmp_path):
+    """A worktree whose base commit holds README.md and whose HEAD adds in-scope calc.py and a test."""
     wt = tmp_path / "wt"
     wt.mkdir()
     _git(wt, "init", "-q")
@@ -47,15 +48,24 @@ def repo(tmp_path):
     (wt / "README.md").write_text("x\n")
     _git(wt, "add", "-A")
     _git(wt, "commit", "-qm", "base")
-    (wt / "calc.py").write_text(GOOD_ADD)  # an in-scope change, so a ledger is owed
+    (wt / "calc.py").write_text(GOOD_ADD)
     (wt / "tests").mkdir()
     (wt / "tests" / "test_calc.py").write_text("def test_x():\n    pass\n")
+    commit_all(wt, "work")
     return wt
 
 
-def verdict(wt: Path, task=TASK, changed=()):
+def commit_all(wt: Path, msg: str = "more") -> None:
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-qm", msg)
+
+
+def verdict(wt: Path, task=TASK, tier="deep"):
+    """What `office preflight` computes: the committed diff since the first commit, then the ledger verdict."""
     from office import preflight
-    return preflight.ledger_verdict(wt, task, list(changed), _git(wt, "rev-parse", "HEAD"))
+    base = _git(wt, "rev-list", "--max-parents=0", "HEAD")
+    changed = [f for f in _git(wt, "diff", "--name-only", "-z", base, "HEAD").split("\0") if f]
+    return preflight.ledger_verdict(wt, task, changed, _git(wt, "rev-parse", "HEAD"), tier)
 
 
 def fixes(wt: Path, text: str, **kw) -> list[str]:
@@ -72,53 +82,64 @@ def test_no_ledger_with_a_nonempty_diff_is_a_fix(repo):
     assert stop == [] and len(fix) == 1 and "no OFFICE_SELF_REVIEW.md" in fix[0], fix
 
 
-@pytest.mark.parametrize("how", ["committed", "tracked-edit", "untracked"])
-def test_every_kind_of_in_scope_change_owes_a_ledger(repo, how):
-    (repo / "calc.py").unlink()
-    (repo / "tests" / "test_calc.py").unlink()
-    (repo / "tests").rmdir()
-    assert verdict(repo) == ([], [])
-    if how == "committed":
-        (repo / "calc.py").write_text(GOOD_ADD)
-        _git(repo, "add", "calc.py")
-        _git(repo, "commit", "-qm", "calc")
-        stop, fix = verdict(repo, changed=["calc.py"])
-    elif how == "tracked-edit":
-        (repo / "calc.py").write_text(GOOD_ADD)
-        _git(repo, "add", "calc.py")
-        _git(repo, "commit", "-qm", "calc")
-        (repo / "calc.py").write_text(GOOD_ADD + "\n")
-        stop, fix = verdict(repo)
-    else:
-        (repo / "calc.py").write_text(GOOD_ADD)
-        stop, fix = verdict(repo)
-    assert stop == [] and any("no OFFICE_SELF_REVIEW.md" in f for f in fix), (how, fix)
-
-
-def test_empty_diff_needs_no_ledger(repo):
-    (repo / "calc.py").unlink()
-    (repo / "tests" / "test_calc.py").unlink()
-    assert verdict(repo) == ([], [])
+def test_empty_diff_needs_no_ledger(tmp_path):
+    wt = tmp_path / "empty"
+    wt.mkdir()
+    _git(wt, "init", "-q")
+    _git(wt, "-c", "user.email=t@e.test", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base")
+    assert verdict(wt) == ([], [])
+    (wt / "stray.txt").write_text("x\n")  # out of scope: still nothing to review
+    assert verdict(wt) == ([], [])
 
 
 def test_scope_none_needs_no_ledger_even_with_changes(repo):
     assert verdict(repo, task={"scope": [], "accept": []}) == ([], [])
 
 
-def test_only_out_of_scope_or_harness_changes_need_no_ledger(repo):
-    (repo / "calc.py").unlink()
-    (repo / "tests" / "test_calc.py").unlink()
+def test_only_out_of_scope_changes_need_no_ledger(repo):
+    assert verdict(repo, task={"scope": ["docs/**"], "accept": []}) == ([], [])
+
+
+def test_an_in_scope_harness_file_edit_still_owes_a_ledger(tmp_path):
+    wt = tmp_path / "h"
+    wt.mkdir()
+    _git(wt, "init", "-q")
+    _git(wt, "-c", "user.email=t@e.test", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base")
+    (wt / ".claude").mkdir()
+    (wt / ".claude" / "settings.json").write_text("{}")
+    stop, fix = verdict(wt, task={"scope": [".claude/**"], "accept": []})
+    assert any("uncommitted in-scope changes (.claude/settings.json)" in f for f in fix) and any("no OFFICE_SELF" in f for f in fix)
+    commit_all(wt)
+    stop, fix = verdict(wt, task={"scope": [".claude/**"], "accept": []})
+    assert fix == ["ledger: no OFFICE_SELF_REVIEW.md; run the SELF-REVIEW and write it in this worktree root in the format "
+                   "the brief gives"], fix
+
+
+@pytest.mark.parametrize("how", ["edit", "new-file"])
+def test_uncommitted_in_scope_work_is_a_fix_even_with_a_current_ledger(repo, how):
+    write_ledger(repo)
+    assert verdict(repo) == ([], [])
+    if how == "edit":
+        (repo / "calc.py").write_text(GOOD_ADD + "\n")
+    else:
+        (repo / "tests" / "test_new.py").write_text("x\n")
+    stop, fix = verdict(repo)
+    assert stop == [] and len(fix) == 1 and "uncommitted in-scope changes" in fix[0] and "commit them first" in fix[0], fix
+
+
+def test_uncommitted_out_of_scope_files_are_not_a_fix(repo):
+    write_ledger(repo)
     (repo / "notes.txt").write_text("x\n")
-    (repo / ".claude").mkdir()
-    (repo / ".claude" / "settings.json").write_text("{}")
-    assert verdict(repo, task={"scope": ["calc.py", ".claude/**"], "accept": []}) == ([], [])
+    assert verdict(repo) == ([], [])
 
 
-def test_the_ledger_alone_is_not_a_change(repo):
-    (repo / "calc.py").unlink()
-    (repo / "tests" / "test_calc.py").unlink()
-    write_ledger(repo, "garbage\n")
-    assert verdict(repo, task={"scope": ["**"], "accept": []}) == ([], [])
+def test_the_ledger_alone_is_not_a_change(tmp_path):
+    wt = tmp_path / "l"
+    wt.mkdir()
+    _git(wt, "init", "-q")
+    _git(wt, "-c", "user.email=t@e.test", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base")
+    write_ledger(wt, "garbage\n")
+    assert verdict(wt, task={"scope": ["**"], "accept": []}) == ([], [])
 
 
 # ------------------------------------------------------------------ ready, stale, lenses
@@ -132,7 +153,7 @@ def test_all_dispositions_resolved_is_ready(repo):
         "FINDING low calc.py:6 | false positive | rejected the call never happens",
     ]
     write_ledger(repo, ledger_text(_git(repo, "rev-parse", "HEAD"), findings=findings, skip={"platform": "pure python"}))
-    assert verdict(repo) == ([], [])
+    assert verdict(repo, tier="inline") == ([], [])
 
 
 def test_a_ledger_with_no_findings_is_ready(repo):
@@ -149,7 +170,7 @@ def test_blank_lines_and_indentation_are_fine(repo):
 def test_ledger_naming_a_stale_commit_is_a_fix(repo):
     stale = _git(repo, "rev-parse", "HEAD")
     write_ledger(repo)
-    (repo / "calc.py").write_text(GOOD_ADD)
+    (repo / "calc.py").write_text(GOOD_ADD + "\n")
     _git(repo, "add", "calc.py")
     _git(repo, "commit", "-qm", "later")
     stop, fix = verdict(repo)
@@ -449,6 +470,8 @@ def _dispatch(env, plan=None):
             "OFFICE_ROLE": "executor", "OFFICE_JOBS": "manual"}
     wt = Path(d["worktree"])
     (wt / "calc.py").write_text(GOOD_ADD)
+    _git(wt, "add", "calc.py")
+    _git(wt, "-c", "user.email=t@e.test", "-c", "user.name=t", "commit", "-qm", "calc")  # the ledger names HEAD
     return wenv, wt, d
 
 
@@ -501,3 +524,169 @@ def test_a_ledger_inside_a_wide_scope_still_stays_out_of_the_revision(env):
     assert _git(wt, "ls-tree", "-r", "--name-only", rev["commit_sha"]).split().count("calc.py") == 1
     assert briefs.LEDGER_FILE not in _git(wt, "ls-tree", "-r", "--name-only", rev["commit_sha"])
     assert not (wt / briefs.LEDGER_FILE).exists()
+
+
+# ------------------------------------------------------------------ strengthened: lone header lines, tiers, bounds
+
+@pytest.mark.parametrize("bad", ["COMMIT", "COMMIT zzzzzzz", "COMMIT abc", "COMMIT " + "a" * 41])
+def test_a_bad_commit_as_the_only_commit_line_is_malformed_not_a_wildcard(repo, bad):
+    text = "\n".join([bad, "ROUND 1"] + [f"LENS {x} reviewed" for x in LENSES]) + "\n"
+    fix = fixes(repo, text)
+    assert any(f.startswith("ledger line 1:") and "COMMIT needs the sha of HEAD" in f for f in fix), fix
+    assert any("no COMMIT line" in f for f in fix), fix
+
+
+@pytest.mark.parametrize("bad", ["ROUND", "ROUND 0", "ROUND 4", "ROUND 99", "ROUND two", "ROUND \u00b2", "ROUND " + "9" * 5000])
+def test_a_bad_round_as_the_only_round_line_is_malformed(repo, bad):
+    head = _git(repo, "rev-parse", "HEAD")
+    text = "\n".join([f"COMMIT {head}", bad] + [f"LENS {x} reviewed" for x in LENSES]
+                     + ["FINDING medium calc.py:1 | x | open"]) + "\n"
+    write_ledger(repo, text)
+    stop, fix = verdict(repo)
+    assert stop == [], "an invalid round must not be read as the round-3 cap"
+    assert any(f.startswith("ledger line 2:") and "ROUND must be 1-3" in f for f in fix), fix
+    assert any("no ROUND line" in f for f in fix), fix
+
+
+@pytest.mark.parametrize("bad, why", [("LENS security reviewed extra", "LENS needs"), ("LENS security done", "LENS needs"),
+                                      ("LENS security skipped", "LENS needs"), ("LENS crypto reviewed", "LENS must be one of")])
+def test_a_bad_lens_line_on_its_own_is_malformed(repo, bad, why):
+    head = _git(repo, "rev-parse", "HEAD")
+    text = f"COMMIT {head}\nROUND 1\n{bad}\n" + "".join(f"LENS {x} reviewed\n" for x in LENSES if x != "security")
+    fix = fixes(repo, text)
+    assert any(f.startswith("ledger line 3:") and why in f for f in fix), fix
+
+
+def test_a_header_less_ledger_names_each_missing_part(repo):
+    fix = fixes(repo, "FINDING low calc.py:1 | s | fixed\n")
+    assert any("no COMMIT line" in f for f in fix) and any("no ROUND line" in f for f in fix), fix
+    assert not any("line 1:" in f for f in fix), "the FINDING itself is well formed"
+
+
+def test_only_the_inline_tier_may_skip_a_lens(repo):
+    head = _git(repo, "rev-parse", "HEAD")
+    write_ledger(repo, ledger_text(head, skip={"platform": "pure python"}))
+    assert verdict(repo, tier="inline") == ([], [])
+    for tier in ("single", "deep"):
+        stop, fix = verdict(repo, tier=tier)
+        assert stop == [] and len(fix) == 1 and f"lens platform is skipped, but the {tier} tier" in fix[0], (tier, fix)
+
+
+def test_a_huge_accept_number_is_malformed_not_a_crash(repo):
+    head = _git(repo, "rev-parse", "HEAD")
+    fix = fixes(repo, ledger_text(head, findings=["FINDING low calc.py:1 | s | contract-conflict accept=" + "9" * 5000]))
+    assert any(f.startswith("ledger line 7:") for f in fix), fix
+
+
+def test_control_characters_and_length_never_reach_the_output_raw(repo):
+    head = _git(repo, "rev-parse", "HEAD")
+    nasty = "\x1b[2J\x1b]0;pwned\x07" + "A" * 5000
+    fix = fixes(repo, ledger_text(head, findings=[f"FINDING high {nasty} | s | open",
+                                                  f"FINDING high calc.py:2 | s | fixed {nasty}"]))
+    assert len(fix) == 2
+    for line in fix:
+        assert "\x1b" not in line and "\x07" not in line and len(line) < 600, line
+
+
+def test_bom_and_crlf_ledgers_parse(repo):
+    head = _git(repo, "rev-parse", "HEAD")
+    text = ledger_text(head, findings=["FINDING low calc.py:1 | s | fixed"]).replace("\n", "\r\n")
+    write_ledger(repo, "\ufeff" + text)
+    assert verdict(repo) == ([], [])
+
+
+def test_a_pytest_node_id_names_its_file(repo):
+    head = _git(repo, "rev-parse", "HEAD")
+    findings = ["FINDING high calc.py:3 | race | fixed tests/test_calc.py::test_x"]
+    assert fixes(repo, ledger_text(head, findings=findings)) == []
+
+
+def test_a_test_path_that_is_a_symlink_out_of_the_worktree_is_refused(repo, tmp_path):
+    outside = tmp_path / "outside_test.py"
+    outside.write_text("x\n")
+    os.symlink(outside, repo / "tests" / "link.py")
+    commit_all(repo, "link")
+    head = _git(repo, "rev-parse", "HEAD")
+    fix = fixes(repo, ledger_text(head, findings=["FINDING high calc.py:3 | race | fixed tests/link.py"]))
+    assert len(fix) == 1 and "is not a file in this worktree" in fix[0], fix
+
+
+def test_the_size_cap_is_exact(repo):
+    from office import briefs
+    head = _git(repo, "rev-parse", "HEAD")
+    base = ledger_text(head)
+    at_cap = base + "FINDING low calc.py:1 | " + "x" * (briefs.LEDGER_MAX_CHARS - len(base) - len("FINDING low calc.py:1 |  | fixed\n")) + " | fixed\n"
+    assert len(at_cap) == briefs.LEDGER_MAX_CHARS
+    write_ledger(repo, at_cap)
+    assert verdict(repo) == ([], [])
+    write_ledger(repo, at_cap + "\n#")
+    stop, fix = verdict(repo)
+    assert len(fix) == 1 and "over" in fix[0], fix
+    write_ledger(repo, base + "FINDING low calc.py:1 | " + "\u00e9" * 6000 + " | fixed\n")  # multibyte, under the cap in characters
+    assert verdict(repo) == ([], [])
+
+
+def test_a_ledger_in_a_staged_or_committed_state_is_a_fix_even_when_nothing_else_is_owed(tmp_path):
+    from office import briefs
+    wt = tmp_path / "t"
+    wt.mkdir()
+    _git(wt, "init", "-q")
+    _git(wt, "-c", "user.email=t@e.test", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base")
+    write_ledger(wt, "x\n")
+    _git(wt, "add", briefs.LEDGER_FILE)
+    stop, fix = verdict(wt, task={"scope": [], "accept": []})
+    assert len(fix) == 1 and "committed or staged" in fix[0], fix
+    commit_all(wt)
+    stop, fix = verdict(wt, task={"scope": [], "accept": []})
+    assert len(fix) == 1 and "committed or staged" in fix[0], fix
+
+
+# ------------------------------------------------------------------ submit side
+
+def test_evidence_commit_consumes_the_ledger_only_when_the_transaction_succeeded(tmp_path):
+    from office import submit
+    ledger = tmp_path / "OFFICE_SELF_REVIEW.md"
+    ledger.write_text("keep me\n")
+    with pytest.raises(RuntimeError):
+        with submit._evidence_commit(ledger):
+            raise RuntimeError("submit failed")
+    assert ledger.read_text() == "keep me\n", "a failed submit keeps the ledger for the retry"
+    with submit._evidence_commit(ledger):
+        pass
+    assert not ledger.exists()
+
+
+def test_a_directory_named_like_the_ledger_is_not_taken_for_it(repo):
+    from office import submit
+    d = repo / "OFFICE_SELF_REVIEW.md"
+    d.mkdir()
+    (d / "x").write_text("x\n")
+    assert submit._executor_ledger(repo) is None
+
+
+def test_executor_ledger_is_found_untracked_staged_or_ignored_but_not_when_head_tracks_it(repo):
+    from office import briefs, submit
+    path = write_ledger(repo)
+    assert submit._executor_ledger(repo) == path
+    _git(repo, "add", briefs.LEDGER_FILE)
+    assert submit._executor_ledger(repo) == path
+    _git(repo, "reset", "-q", briefs.LEDGER_FILE)
+    (repo / ".gitignore").write_text("*.md\n")
+    assert submit._executor_ledger(repo) == path
+    _git(repo, "add", "-f", briefs.LEDGER_FILE)
+    commit_all(repo)
+    assert submit._executor_ledger(repo) is None
+
+
+@pytest.mark.integration
+def test_a_staged_ledger_under_a_wide_scope_stays_out_of_the_revision(env):
+    from conftest import PLAN_ONE
+    from office import briefs
+    wenv, wt, d = _dispatch(env, plan=PLAN_ONE.replace("scope: calc.py", "scope: *"))
+    path = write_ledger(wt)
+    _git(wt, "add", "-f", briefs.LEDGER_FILE)  # staged but not committed
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert code == 0, out
+    rev = dict(env.con().execute("SELECT * FROM revisions WHERE task_id='T1'").fetchone())
+    assert briefs.LEDGER_FILE not in _git(wt, "ls-tree", "-r", "--name-only", rev["commit_sha"])
+    assert not path.exists()

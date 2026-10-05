@@ -334,7 +334,7 @@ def ledger_lines() -> list[str]:
         "        COMMIT <full sha of HEAD>",
         f"        ROUND <1-{MAX_REVIEW_ROUNDS}>",
         f"        LENS <{lenses}> reviewed        (one line per lens)",
-        "        LENS <lens> skipped <reason>      (a skipped lens needs a reason)",
+        "        LENS <lens> skipped <reason>      (inline tier only; a skipped lens needs a reason)",
         f"        FINDING <{sev}> <file:line> | <summary> | <disposition>",
         "    Dispositions: `fixed <test path>` (a medium or high fix names the test that proves it; a low fix may omit it),",
         "    `out-of-scope`, `rejected <reason>`, `contract-conflict accept=<n>` (the fix would break ACCEPT line n; Office",

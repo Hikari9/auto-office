@@ -450,9 +450,10 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                       scope=task["id"], next_step=f"cd {shlex.quote(str(wt))} && office submit")
     seen_block = block_id(con, d["id"]) if self_blocked(task) else None  # the block this submit may resolve
     left_out = untracked_outside(wt, task["scope"])
-    ledger = wt / briefs.LEDGER_FILE if _untracked(wt, briefs.LEDGER_FILE) else None
-    if ledger and briefs.LEDGER_FILE not in left_out:
-        left_out.append(briefs.LEDGER_FILE)  # never part of a revision, whatever the scope covers
+    ledger = _executor_ledger(wt)
+    if ledger and briefs.LEDGER_FILE not in left_out and paths.git(
+            wt, "ls-files", "--others", "--cached", "--exclude-standard", "--", briefs.LEDGER_FILE).strip():
+        left_out.append(briefs.LEDGER_FILE)  # never part of a revision, whatever the scope covers or staged
     restored = harness_edits_outside(wt, task["scope"])
     tree, head = capture_tree(wt, paths.run_dir(run["id"]) / "tmp", left_out, restored)
     applied = d["applied_plan_version"] or 0
@@ -561,7 +562,8 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
             state.emit(con, run, "submit.amendment_pending", f"{task['id']} {rev_id} submitted under p{applied}; "
                        "amendment pending", audience=f"dispatch:{d['id']}", task_id=task["id"])
             res.add(f"rev {rev_id} captured | amendment pending: apply it, then office ack; not a failure")
-            res.next = "apply the delivered amendment, office ack <id>, then office submit"
+            res.next = ("apply the delivered amendment, office ack <id>, rewrite the self-review ledger after your last "
+                        "commit, then office submit")
             return res
         if prev:
             con.execute("UPDATE revisions SET status='superseded' WHERE id=? AND status='current'", (prev,))
@@ -583,8 +585,12 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     return res
 
 
-def _untracked(wt: Path, name: str) -> bool:
-    return bool(paths.git(wt, "ls-files", "--others", "--exclude-standard", "--", name).strip())
+def _executor_ledger(wt: Path) -> Path | None:
+    """The executor's self-review ledger when it is a file (or link) that HEAD does not track."""
+    path = wt / briefs.LEDGER_FILE
+    if (path.is_file() or path.is_symlink()) and not paths.git(wt, "ls-tree", "HEAD", "--", briefs.LEDGER_FILE).strip():
+        return path
+    return None
 
 
 @contextmanager
@@ -602,7 +608,10 @@ def _evidence_commit(ledger: Path | None = None):
     for src, _ in staged:
         src.unlink(missing_ok=True)  # consumed: the next submission must write its own
     if ledger:
-        ledger.unlink(missing_ok=True)
+        try:
+            ledger.unlink(missing_ok=True)
+        except OSError:
+            pass  # the revision is recorded; a ledger that cannot be removed is overwritten by the next one
 
 
 EVIDENCE_KIND = "executor_evidence"
@@ -618,7 +627,7 @@ def _read_untracked_text(wt: Path, name: str, limit: int) -> str | None:
     if paths.git(wt, "ls-files", "--", name).strip():
         return None
     try:
-        fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
         with os.fdopen(fd, "rb") as fh:
             st = os.fstat(fh.fileno())
             # A hard link to another file (a credential) shares its inode: ordinary files have one link.

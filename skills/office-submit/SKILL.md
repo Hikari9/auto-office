@@ -50,15 +50,13 @@ Fix every `medium` or `high` finding inside SCOPE. For each fix, write or streng
 Revert the fix, run the test, and confirm it fails. Then restore the fix and confirm the test passes.
 Record that mutation for the report. A finding outside SCOPE goes in the report unfixed.
 
-Then write the findings ledger `OFFICE_SELF_REVIEW.md` (worktree root, untracked) after your last commit.
-The brief's `LEDGER` line gives the format: `COMMIT <sha of HEAD>`, `ROUND <1-3>`, one `LENS <lens> reviewed` or
-`LENS <lens> skipped <reason>` per lens, and `FINDING <severity> <file:line> | <summary> | <disposition>`.
-Dispositions are `fixed <test path>`, `out-of-scope`, `rejected <reason>`, `contract-conflict accept=<n>`, `open`.
-Record severity as found: a fix never lowers it. Low findings are fixed but do not trigger a re-review. A
-medium or high fix that changes behavior gets one fix-diff re-review, as the next round. The cap is a 3-round cap: a
-medium or high finding open in round 3 stops you, and `contract-conflict` stops you with the ACCEPT line quoted.
-Any later commit makes the ledger stale: update `COMMIT`. Preflight reports a missing, stale, or malformed ledger
-and any open finding as a fix. Submit consumes the ledger, so write it fresh each round.
+Record every finding in the ledger `OFFICE_SELF_REVIEW.md` (worktree root, untracked; format in the brief's `LEDGER`
+line: `COMMIT`, `ROUND <1-3>`, a `LENS` line per lens, `FINDING <severity> <file:line> | <summary> | <disposition>`).
+Dispositions: `fixed <test path>`, `out-of-scope`, `rejected <reason>`, `contract-conflict accept=<n>`, `open`.
+Record severity as found: a fix never lowers it. Low findings are fixed but do not trigger a re-review. A medium or
+high fix that changes behavior gets one fix-diff re-review, as the next round. The 3-round cap: a medium or high
+finding open in round 3 stops you, and `contract-conflict` stops you with the ACCEPT line quoted. Preflight reports
+a missing, stale, or malformed ledger and any open finding as a fix. Submit consumes the ledger.
 
 ## 3. Checks
 
@@ -69,6 +67,7 @@ long timeouts (900s or more), never 270-290s caps. Record pass/fail counts.
 
 Commit in-scope files only. When the brief has a `GIT` line, push to that branch, and never force-push.
 Never touch files another tool stamped outside SCOPE (`git checkout <base> -- <file>` restores them).
+Write or update the step 2 ledger after the final commit: its `COMMIT` must be HEAD, and each round needs a fresh file.
 
 ## 5. Preflight
 
