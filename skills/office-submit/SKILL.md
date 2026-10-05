@@ -51,8 +51,11 @@ Revert the fix, run the test, and confirm it fails. Then restore the fix and con
 Record that mutation for the report. A finding outside SCOPE goes in the report unfixed.
 
 Record every finding in the ledger `OFFICE_SELF_REVIEW.md` (worktree root, untracked; format in the brief's `LEDGER`
-line: `COMMIT`, `ROUND <1-3>`, a `LENS` line per lens, `FINDING <severity> <file:line> | <summary> | <disposition>`).
-Dispositions: `fixed <test path>`, `out-of-scope`, `rejected <reason>`, `contract-conflict accept=<n>`, `open`.
+line: `COMMIT <full sha of HEAD>`, `ROUND <1-3>`, a `LENS` line per lens,
+`FINDING <severity> <lens> <file:line> | <summary> | <disposition>`).
+Dispositions: `fixed <test path> mutation=failed`, `out-of-scope`, `dismissed <reason>`, `contract-conflict accept=<n>`, `open`.
+A medium or high fix names the test file that proves it and `mutation=failed` (you reverted the fix and the test failed);
+a medium or high finding is `out-of-scope` only when its file is outside SCOPE.
 Record severity as found: a fix never lowers it. Low findings are fixed but do not trigger a re-review. A medium or
 high fix that changes behavior gets one fix-diff re-review, as the next round. The 3-round cap: a medium or high
 finding open in round 3 stops you, and `contract-conflict` stops you with the ACCEPT line quoted. Preflight reports

@@ -88,9 +88,9 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 - Executors simplify (behavior-preserving, in SCOPE), self-review on four lenses at a depth Office sets from the run's
   gear and risk (`inline`, `single`, or `deep`; an unset blast radius is never `inline`), record every finding in
   `OFFICE_SELF_REVIEW.md` (severity as found; low findings are fixed but do not trigger a re-review; a medium or high fix
-  that changes behavior gets one fix-diff re-review; 3-round cap; `contract-conflict` stops with the ACCEPT line quoted;
-  submit consumes the file), then `office preflight`, which refuses a missing, stale, or open ledger. Each ends
-  with one `TASK=... SUBMIT=... NEXT=...` line (saved in `pane-final.txt`); act on its `NEXT=`. A worker
+  that changes behavior gets one fix-diff re-review and names its test plus `mutation=failed`; 3-round cap;
+  `contract-conflict` stops with the ACCEPT line quoted; submit consumes the file), then `office preflight`, which
+  refuses a missing, stale, or open ledger. Each ends with one `TASK=... SUBMIT=... NEXT=...` line (saved in `pane-final.txt`); act on its `NEXT=`. A worker
   refused as lease-lost, superseded-dispatch, or task-paused is done: never prompt it to retry.
 - Before submitting a plan inline, run the same lenses (security, edge cases, platform and build, test
   strength; `skills/office-submit`) over it and write what they surface into tasks' `accept:` criteria.
