@@ -244,7 +244,7 @@ def check_ledger(text: str, head: str, accept: list[str], scope: list[str], wt: 
                  tier: str = "deep") -> tuple[list[str], list[str]]:
     """(stop, fix) lines for a ledger's text. Every line of `fix` names its repair. Only the inline
     tier may skip a lens (the brief's other tiers cover all four). `head` is the full sha, `scope` the
-    task's SCOPE: a medium or high finding is out-of-scope only when its file is outside it."""
+    task's SCOPE: a finding of any severity is out-of-scope only when its file is outside it."""
     led, errors = parse_ledger(text)
     stop: list[str] = []
     fix = [f"ledger {e}" for e in errors]
@@ -277,11 +277,12 @@ def check_ledger(text: str, head: str, accept: list[str], scope: list[str], wt: 
         elif f["kind"] == "open":
             fix.append(f"ledger {what} is open: fix it and mark it `fixed <test path> {_MUTATION}`, or mark it "
                        "`dismissed <reason>` or `out-of-scope`")
-        elif f["kind"] == "out-of-scope" and f["severity"] in _BLOCKERS:
+        elif f["kind"] == "out-of-scope":
             file = _finding_file(wt, f["location"])
             if file is not None and _in_scope(wt, file, scope):
+                proof = f"fixed <test path> {_MUTATION}" if f["severity"] in _BLOCKERS else "fixed"
                 fix.append(f"ledger {what} is marked out-of-scope, but {_one_line(file, 80)} is inside SCOPE: fix it and "
-                           f"mark it `fixed <test path> {_MUTATION}`, or `dismissed <reason>`")
+                           f"mark it `{proof}`, or `dismissed <reason>`")
         elif f["kind"] == "fixed" and f["severity"] in _BLOCKERS:
             test, _, proof = f["arg"].partition(" ")
             if not test:
