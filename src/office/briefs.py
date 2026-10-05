@@ -236,7 +236,11 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
         out += ["",
                 "RULES do not merge, push, deploy, publish, or send anything external. Committed and uncommitted",
                 "edits are both captured at submit. Do not write JSON or receipts for Office."]
-    out += ["If an office command prints AMENDMENT <id>: apply it at a safe boundary, then run office ack <id>."]
+    out += ["If an office command prints AMENDMENT <id>: apply it at a safe boundary, then run office ack <id>.",
+            "QUESTIONS if you need a decision, ask once with your question tool or end your turn on the question; "
+            "the orchestrator is notified by office wait and answers. Planning, scope, ordering, and test-detail "
+            "questions it decides; requirement, authority, and irreversible or external ones it takes to the user. "
+            "Do not guess past a scope or requirement doubt, and do not poll for the answer."]
     base = packet.get("base_commit") or "HEAD"
     out += simplify_lines(base) + self_review_lines(base, self_review_tier(run.get("gear"), run.get("risk_json")))
     out += ["WHEN DONE run: office preflight   (from this worktree; read-only). It prints one verdict:",

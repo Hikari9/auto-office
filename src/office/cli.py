@@ -22,7 +22,8 @@ Auto Office {ver}
   office start "<goal>"             create a run; queues the planner when policy requires one
   office resume [run]               bind this session to a run and show where it stands
   office status                     what matters now, ending with the next legal action
-  office wait [--timeout S]         block until something needs you (exit 0), a stall (3), or timeout (124)
+  office wait [--timeout S]         block until something needs you (exit 0), a stall (3), an agent's
+                                    question (5), or timeout (124)
   office dispatch <task>... [--parallel]
                                     launch tasks (routing, worktrees, leases are automatic)
   office preflight                  executor: read-only checks before submit (ready|fix|wait|stop)
@@ -33,6 +34,8 @@ Auto Office {ver}
                                     after a worker ends: continue its session, or start a new one with the findings
   office prompt <task|dispatch> -- "<message>"
                                     message a live pane agent and confirm it was submitted (never herdr pane run)
+  office answer <task|dispatch> <n> | -- "<text>"
+                                    answer the question a pane agent is waiting on (a number presses that option)
   office dismiss <task|dispatch|--all>
                                     close the kept panes of ended dispatches (final text is saved first)
   office close                      finish the run after acceptance and landing
@@ -245,6 +248,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--reroute", action="store_true",
                    help="with --fresh: route from current evidence instead of keeping the original route")
     s = sp.add_parser("prompt", parents=[common])
+    s.add_argument("target", nargs="?")
+    s.add_argument("message", nargs="*")
+    s = sp.add_parser("answer", parents=[common])
     s.add_argument("target", nargs="?")
     s.add_argument("message", nargs="*")
     s = sp.add_parser("dismiss", parents=[common])
@@ -526,6 +532,10 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         from office import prompting
         text = " ".join([*(args.message or []), *[u for u in unknown if u != "--"]]).strip()
         return prompting.prompt(con, run, args.target, text)
+    if cmd == "answer":
+        from office import questions
+        text = " ".join([*(args.message or []), *[u for u in unknown if u != "--"]]).strip()
+        return questions.answer(con, run, args.target, text)
     from office.state import OfficeError
     raise OfficeError("usage", f"unknown command {cmd}", exit_code=2)
 

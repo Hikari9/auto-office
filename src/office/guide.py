@@ -173,6 +173,9 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
             waiting = _waiting_on(con, run, t)
             if waiting:
                 res.add(f"{t['id']} waiting: {waiting}")
+    from office import questions
+    for q in questions.recorded(con, run):
+        res.add(f"question: {q}")
     events = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=6)
     for e in events:
         res.add(f"· {e['summary']}")
@@ -206,8 +209,9 @@ def _snapshot(con, run: dict) -> tuple:
     return run["phase"], run["requirements_version"], run["plan_version"], tasks
 
 
-def stalls(con, run: dict, since: str = "") -> list[str]:
-    """Work Office believes is in progress with nothing left to advance it."""
+def stalls(con, run: dict, since: str = "", acts: dict | None = None) -> list[str]:
+    """Work Office believes is in progress with nothing left to advance it. `acts` is the pane
+    activity `questions.scan` already read, by dispatch id, so no pane is read twice."""
     out = []
     from office import gates as gates_mod
     for g in con.execute("SELECT * FROM gates WHERE run_id=? AND status IN ('queued','running')", (run["id"],)).fetchall():
@@ -221,11 +225,11 @@ def stalls(con, run: dict, since: str = "") -> list[str]:
     for j in con.execute("SELECT kind, error FROM outbox WHERE run_id=? AND status='failed' AND finished_at > ?",
                          (run["id"], since)).fetchall():
         out.append(f"job {j['kind']} failed: {(j['error'] or '')[:120]}")
-    out.extend(_idle_executors(con, run))
+    out.extend(_idle_executors(con, run, acts))
     return out
 
 
-def _idle_executors(con, run: dict) -> list[str]:
+def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:
     """Executors whose agent stopped without submitting. Nothing else ends that
     wait: the session is alive, so no exit is recorded and no job is pending.
     Liveness unknown (herdr unreachable) is never a stall."""
@@ -239,8 +243,9 @@ def _idle_executors(con, run: dict) -> list[str]:
                            "AND d.launcher IN ('herdr','process','process-fallback') "
                            "AND t.status IN ('launching','running','changes_required')", (run["id"],)).fetchall():
         d = dict(row)
-        act = rerun.agent_activity(d)
-        if act is None:
+        act = acts[d["id"]] if acts is not None and d["id"] in acts else rerun.agent_activity(d)
+        if act is None or act.get("question"):
+            # An agent waiting on a question is reported as a `question:` line, not a stall.
             continue
         who = f"{d['task_id']} executor {d['id']}"
         tid = d["task_id"]
@@ -346,10 +351,11 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
     """Block until something needs the orchestrator, then print status.
     Exit 0: a task, phase, plan or requirements change, or a new orchestrator
     event. Exit 3: a stall (work marked in progress that nothing can advance).
-    Exit 124: timeout with nothing new. A watcher keys on the exit code, never
-    on matching status text."""
+    Exit 5: an agent is waiting on a question (a `question:` line names it and
+    the `office answer` command). Exit 124: timeout with nothing new. A watcher
+    keys on the exit code, never on matching status text."""
     import time
-    from office import db, dispatch, jobs, lifecycle
+    from office import db, dispatch, jobs, lifecycle, questions
     from office.util import now_iso
     start = _snapshot(con, run)
     started_at = now_iso()  # only a job that fails while waiting is news
@@ -363,14 +369,15 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         jobs.kick(con, run["id"])
         amend.confirm_launch_deliveries(con, run)
         signals, signals_seq = worker_signals(con, run)
-        stuck = stalls(con, run, since=started_at) + signals
+        asked, _, acts = questions.scan(con, run)
+        stuck = stalls(con, run, since=started_at, acts=acts) + signals
         changed = _snapshot(con, run) != start
         news = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=1)
         # Something already waiting on the orchestrator ends the wait at once;
         # otherwise a blocker present at the start would sit until the timeout.
         pending = first and _needs_orchestrator(con, run)
         first = False
-        if stuck or changed or news or pending or state.is_terminal(state.get_run(con, run["id"])) \
+        if asked or stuck or changed or news or pending or state.is_terminal(state.get_run(con, run["id"])) \
                 or time.time() >= deadline:
             res = status(con, run)
             if signals:
@@ -379,7 +386,12 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
             if stuck:
                 res.lines[1:1] = [f"stall: {s}" for s in stuck]
                 res.exit_code = 3
-            elif not (changed or news or pending):
+            if asked:
+                # status() already printed every recorded question; the new ones lead and set the exit.
+                res.lines = [res.lines[0], *[f"question: {q}" for q in asked],
+                             *[ln for ln in res.lines[1:] if ln.removeprefix("question: ") not in asked]]
+                res.exit_code = questions.EXIT
+            elif not (stuck or changed or news or pending):
                 res.lines.insert(1, f"wait: nothing new in {int(timeout)}s")
                 res.exit_code = 124
             return res

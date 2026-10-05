@@ -520,6 +520,7 @@ office resume [run]                   bind this session to a run and show where 
 office status                         what matters now, ending with the next legal action
 office wait                           wait until the run has something actionable
 office dispatch <task>... [--parallel]
+office answer <task|dispatch> <n> | -- "<text>"   answer the question a pane agent is waiting on (wait exits 5)
 office prompt <task|dispatch> -- "<message>"
 office submit                         planner/executor: submit a plan or work
 office rerun <task> --resume|--fresh  continue after review findings

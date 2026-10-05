@@ -72,8 +72,14 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
   never serialize tasks or count as double-scope ownership. Scope tests a change predictably breaks.
 - Check suites share a host-wide cap (`verification.check_concurrency`). A quota wall blocks the worker
   without a relaunch; rerun after the reset or with `--as`.
-- To wait on the run, use `office wait`: exit 0 means act, 3 means a stall to resolve, 124 means nothing
-  new. Key on the exit code, never on matching status text.
+- To wait on the run, use `office wait`: exit 0 means act, 3 means a stall to resolve, 5 means an agent
+  asked a question, 124 means nothing new. Key on the exit code, never on matching status text.
+- Exit 5 prints a `question:` line: dispatch, pane, question, options, and the answer command. Decide it
+  yourself when it is planning, scope, ordering, or test detail: amend the contract first if the answer
+  changes it, then `office answer <task|dispatch> <n>` (a number presses that option in a selection
+  widget; `office prompt` types text, which a widget ignores) or `office answer <task|dispatch> -- "<text>"`.
+  Take it to the user (native question tool) only when it hints at a user decision: requirements,
+  authority, or an irreversible or external action. Never answer those on your own.
 - Executors push their task branch as they work and submit; the runtime pushes the reviewed revision
   to the task's draft PR (stacked on its parent's), posts verdicts, and marks it ready on acceptance.
 - Reviewers are dispatched and read by the runtime, only from their reply files, never pane text.
