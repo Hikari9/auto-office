@@ -1,14 +1,23 @@
 ---
 name: office-submit
-description: "Finish an Auto Office executor task: adversarial self-review of the diff, fix and mutation-prove medium+ findings, run the brief's checks, commit and push, `office preflight`, `office submit`, and end with one status line. Use when you are an Office executor (inside a task worktree with an Office brief) and your work is ready to submit, or when asked to submit, resubmit, or finish an Office task."
+description: "Finish an Auto Office executor task: behavior-preserving simplify pass, adversarial self-review of the diff, fix and mutation-prove medium+ findings, run the brief's checks, commit and push, `office preflight`, `office submit`, and end with one status line. Use when you are an Office executor (inside a task worktree with an Office brief) and your work is ready to submit, or when asked to submit, resubmit, or finish an Office task."
 ---
 
 # Office Submit
 
-The executor's tail sequence, in order. The brief's `SELF-REVIEW`, `WHEN DONE`, and `FINAL REPORT` lines
+The executor's tail sequence, in order. The brief's `SIMPLIFY`, `SELF-REVIEW`, `WHEN DONE`, and `FINAL REPORT` lines
 are the contract; this skill is how to run them in Claude Code. Every step runs from the task worktree.
 
-## 1. Adversarial self-review
+## 1. Simplify
+
+After targeted checks pass, refine your own `git diff <base>` (from the brief's `SIMPLIFY` line) yourself:
+(a) reuse existing helpers and the module that owns the concept, (b) simplify away needless state,
+duplication, nesting, and dead code, (c) drop clearly repeated work, (d) altitude: fix the shared owner
+when it is inside SCOPE. Behavior-preserving only: no contract, auth, validation, migration, SQL, or
+data-semantic change. A higher-level owner outside SCOPE goes in the report, unedited. A real defect
+goes to step 2. Skip for an empty or tiny mechanical diff. Fix rounds repeat steps 1-6.
+
+## 2. Adversarial self-review
 
 Find the base in the brief's `SELF-REVIEW` line (`git diff <base>`). Start four `Agent` subagents in one
 message, in parallel. Give each the diff command, the brief path, and one lens, and tell it to
@@ -34,17 +43,17 @@ Revert the fix, run the test, and confirm it fails. Then restore the fix and con
 Record that mutation for the report. A `low` finding is optional. A finding outside SCOPE goes in the
 report unfixed. Re-run the reviewers only after a `high` fix, at most 3 rounds.
 
-## 2. Checks
+## 3. Checks
 
 Run the brief's `CHECKS` lines. Check `uptime` first. When the load average is above twice the CPU count, use
 long timeouts (900s or more), never 270-290s caps. Record pass/fail counts.
 
-## 3. Commit and push
+## 4. Commit and push
 
 Commit in-scope files only. When the brief has a `GIT` line, push to that branch, and never force-push.
 Never touch files another tool stamped outside SCOPE (`git checkout <base> -- <file>` restores them).
 
-## 4. Preflight
+## 5. Preflight
 
 ```bash
 office preflight; echo "rc=$?"
@@ -55,7 +64,7 @@ office preflight; echo "rc=$?"
 | `ready` | 0 | Run the `next:` line exactly as printed (`. <agent.env> && office submit`). |
 | `fix` | 1 | Apply each `fix:` line, then preflight again. |
 | `wait` | 75 | The task is paused for a plan defect or amendment, and you still hold the lease. Poll as shown below. |
-| `stop` | 4 | Terminal for you. Go to step 6 with `SUBMIT=refused: <stop line>`. |
+| `stop` | 4 | Terminal for you. Go to step 7 with `SUBMIT=refused: <stop line>`. |
 
 To wait, start this with `Bash` `run_in_background` (or the Monitor tool), and keep the session open:
 
@@ -69,14 +78,14 @@ while you wait, apply it, run `office ack <id>`, and go back to step 1.
 
 Preflight never reacquires a lost lease. Only the orchestrator moves a task to a new holder.
 
-## 5. Submit
+## 6. Submit
 
 Use the exact line from `next:`. Shell env does not persist between `Bash` calls, so source
 `agent.env` and run `office submit` in the same command. If submit refuses with `lease-lost`,
 `superseded-dispatch`, or `task-paused`, that is terminal. Do not retry and do not investigate. For an
 `outside-scope` refusal, revert the file or run `office submit --request-scope <file> -- "<reason>"`.
 
-## 6. Report
+## 7. Report
 
 The brief's `FINAL REPORT` items come first. Then end the message with exactly one line:
 
