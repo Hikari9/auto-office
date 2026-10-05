@@ -414,7 +414,8 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
             # contract, so the delta is carried in its brief, not acked.
             con.execute("UPDATE deliveries SET status='superseded', superseded_by='relaunch' WHERE id=?", (did,))
             if task["status"] not in ("planned",):
-                dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"))
+                dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
+                                        extra={"amendment_id": amendment_id})
         targets.append(tid)
     return targets
 

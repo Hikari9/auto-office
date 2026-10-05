@@ -96,6 +96,10 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 - Findings never relaunch anything on their own. When `next:` says a task's findings wait for you, run
   `office rerun T2 --resume` (the same harness session, in a fresh pane) or `office rerun T2 --fresh`;
   resume refuses with the reason and the `--fresh` command when the session cannot be reopened.
+- An integration finding has no task. Carry it into the leaf task with `office amend <T> --contract`;
+  the relaunched fix round takes the amendment as its work. An executor whose fix round names nothing
+  keeps its work and waits, and `office wait` exits 3 naming it: answer with
+  `office prompt <dispatch> -- "<the findings>"`.
 - After a first plan review of CHANGES_REQUIRED: edit the run's `PLAN.md`, run
   `office amend plan -- "<what changed>"`, then dispatch eligible work immediately; the re-review
   runs concurrently. A PLAN_DEFECT blocks its scope until an independent reviewer clears it.
@@ -154,7 +158,9 @@ required checks, confirm the default branch matches the reviewed tree, close the
 deploy prod and verify; a failure names what merged and the rollback target. Then `office close`.
 If the default branch moved after `office start`, run `office land --rebase` first. It re-composes the
 accepted work onto the new head and re-runs the run checks and an integration review. A conflict refuses
-and prints the steps to compose by hand. Office rewrites only the block above the PR body's
+and prints the steps to compose by hand. When run checks fail and the default branch has moved past the
+compose base, Office does this rebase itself once per new head before reporting the integration blocked.
+Office rewrites only the block above the PR body's
 `<!-- office:pr ... -->` line, so put criteria that report data in the PR body below that line. A
 check or test-runner timeout while host load exceeds twice the CPU count is UNAVAILABLE, not a
 failure. Rerun it with `office resume`.

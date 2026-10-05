@@ -731,6 +731,7 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
         "pr": _pr_packet(con, run, task, dispatch) if role == "executor" else None,
         "requirements": req["frozen"],
         "fix_of": extra.get("fix_of"),
+        "amendment_id": extra.get("amendment_id"),
         "contract_request": extra.get("contract_request"),
         "restack": extra.get("restack"),
     }

@@ -340,6 +340,43 @@ def rebase(con, run: dict) -> Result:
     return res
 
 
+def job_auto_rebase(con, run: dict, job: dict) -> dict:
+    """Integration checks failed on a base the default branch has moved past:
+    rebase onto the new head and re-check, as `office land --rebase` would. The
+    integrate job that queued this may still hold its claim, so wait it out. A
+    refusal (conflict, divergence) leaves the integration blocked with the
+    reason and every accepted revision kept."""
+    import time
+    deadline = time.time() + integration.LOCK_WAIT_SECONDS
+    while integration.live_integrate_pids(con, run) and time.time() < deadline:
+        time.sleep(1.0)
+    run = state.get_run(con, run["id"])
+    try:
+        tasks = integration.accepted_set(con, run)
+        if tasks is None:
+            raise Refused("not-ready", "a task was reopened after integration ran; nothing to rebase yet")
+        # Not rebase(): a job spawned from a worker's command inherits its
+        # OFFICE_DISPATCH_ID, and this is the runtime's own step, not the worker's.
+        with _land_lock(run), integration.worktree_lock(run, wait=60.0):
+            res = _rebase_locked(con, run, tasks)
+    except Refused as exc:
+        with db.transaction(con):
+            integration._set_integration(con, run, status="blocked",
+                                         detail=f"automatic rebase refused ({exc.category}): {exc.message[:160]}")
+            state.emit(con, run, "integration.failed", f"INTEGRATION automatic rebase refused: {exc.message[:140]}"
+                       + (f"; next: {exc.next_step}" if exc.next_step else ""))
+        return {"refused": exc.category}
+    if integration.compose_base(state.get_run(con, run["id"])) == integration.compose_base(run):
+        # Nothing moved after all (a reset or a racing land): the failure stands.
+        with db.transaction(con):
+            integration._set_integration(con, run, status="blocked", detail=f"run checks failed; {res.lines[0]}")
+            state.emit(con, run, "integration.failed", "INTEGRATION checks failed and there was nothing to rebase onto")
+        return {"rebased": False, "lines": res.lines}
+    from office import jobs
+    jobs.kick(con, run["id"])
+    return {"rebased": True, "lines": res.lines}
+
+
 def _rebase_locked(con, run: dict, tasks: list[dict]) -> Result:
     integration.refuse_if_integrating(con, run)  # an older patch's integrate job holds no flock
     base = prs.settings(con, run).get("base_branch") or "main"

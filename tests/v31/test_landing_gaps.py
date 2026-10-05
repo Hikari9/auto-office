@@ -133,3 +133,30 @@ def test_task_check_timeout_under_load_blocks_then_resume_reruns_it(env, monkeyp
     env.office("resume", check=0)
     code, data = env.ojson("status")
     assert data["data"]["tasks"]["T1"] == "accepted", data
+
+
+# ------------------------------------------------------------------ automatic rebase
+
+def test_run_checks_failing_on_a_moved_base_rebase_and_continue(env, monkeypatch):
+    """Run checks that fail only because the base is stale do not discard the
+    accepted work: integration rebases onto the moved main and re-checks there."""
+    plan = PLAN_STACKED.replace("blast_radius: repo\n", "blast_radius: repo\nchecks: test -f MAIN_FIX\n", 1)
+    bare, _, _ = _run(env, monkeypatch, plan)
+    con = env.con()
+    try:
+        landing = json.loads(con.execute("SELECT landing_json FROM runs").fetchone()[0])
+    finally:
+        con.close()
+    assert landing["integration"]["status"] == "blocked", landing  # main has not moved: the failure stands
+    _advance_main(env, bare, "MAIN_FIX", "fixed on main\n")
+    env.script(integration_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("resume", check=0)
+    con = env.con()
+    try:
+        landing = json.loads(con.execute("SELECT landing_json FROM runs").fetchone()[0])
+        kinds = [r[0] for r in con.execute("SELECT kind FROM events ORDER BY seq")]
+    finally:
+        con.close()
+    assert "integration.auto_rebase" in kinds, kinds
+    assert landing["rebase"]["onto"] == env.git("--git-dir", str(bare), "rev-parse", "main").strip(), landing
+    assert landing["integration"]["status"] == "accepted", landing

@@ -11,6 +11,10 @@ nothing. The verdict line and exit code say what the caller does next:
                             cancelled, blocked on the orchestrator): emit the
                             status block and stop; never retry
 
+Preflight changes nothing in the worktree or the task. Its one write is a
+`preflight.waiting` event when only the orchestrator can end a wait, so
+`office wait` surfaces it at once.
+
 A lost lease is never reacquired here. Only the orchestrator moves a task to a
 new holder (office revoke / rerun); a worker that reclaims its own lease would
 undo the takeover that revoked it.
@@ -47,6 +51,32 @@ def _sed_backups(wt: Path) -> list[str]:
     tracked = set(_git(wt, "ls-files", "-z").split("\0"))
     others = _git(wt, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
     return sorted(f for f in others if f.endswith("-e") and f[:-2] in tracked)
+
+
+def _named_by_prompt(con, run: dict, d: dict) -> str | None:
+    """The latest landed `office prompt` to this dispatch: how the orchestrator
+    names the work of a fix round that has no recorded findings."""
+    row = con.execute("SELECT payload_json FROM events WHERE run_id=? AND dispatch_id=? AND kind='prompt' "
+                      "ORDER BY seq DESC LIMIT 1", (run["id"], d["id"])).fetchone()
+    if row is None:
+        return None
+    payload = json.loads(row["payload_json"] or "{}")
+    if payload.get("outcome") != "landed":
+        return None
+    return " ".join((payload.get("text") or "").split())[:300]
+
+
+def _signal_orchestrator(con, run: dict, d: dict, reason: str) -> None:
+    """Record, once per dispatch and reason, a wait only the orchestrator can
+    end. A polling worker is never idle, so without this event the idle-stall
+    check would never surface it and `office wait` would sit on it."""
+    from office import db
+    seen = con.execute("SELECT 1 FROM events WHERE run_id=? AND dispatch_id=? AND kind='preflight.waiting' "
+                       "AND summary=?", (run["id"], d["id"], reason)).fetchone()
+    if seen:
+        return
+    with db.transaction(con):
+        state.emit(con, run, "preflight.waiting", reason, task_id=d["task_id"], dispatch_id=d["id"])
 
 
 def preflight(con, run: dict, cwd: Path) -> Result:
@@ -100,16 +130,26 @@ def preflight(con, run: dict, cwd: Path) -> Result:
         else:
             stop.append(f"{status}: {task['id']} {reason}".rstrip())
 
-    # 4. A fix round must have findings to fix.
+    # 4. A fix round must have something to fix: open findings, or the
+    # amendment that relaunched it (an integration finding has no task, so
+    # the orchestrator carries it into the task as a contract amendment).
     packet = _packet(run, d)
     if packet.get("fix_of"):
         rows = con.execute("SELECT code, severity, location, summary FROM findings WHERE run_id=? AND task_id=? "
                            "AND state='open' ORDER BY created_at", (run["id"], task["id"])).fetchall()
         if rows:
             res.lines += [f"finding: {r['code']} [{r['severity']}] {r['location'] or ''} {r['summary']}" for r in rows]
+        elif packet.get("amendment_id"):
+            res.lines.append(f"amendment: {packet['amendment_id']} is this fix round's work; it is in your brief")
+        elif (named := _named_by_prompt(con, run, d)) is not None:
+            res.lines.append(f"named by the orchestrator: {named}")
         else:
-            stop.append(f"findings: fix round for {packet['fix_of']} but no open findings are recorded; "
-                        "the orchestrator must name them (office prompt) or rerun --fresh")
+            # The orchestrator can resolve this, so the session keeps its lease
+            # and its work and polls; it is never told to stop and discard it.
+            reason = (f"findings: fix round for {packet['fix_of']} but no open findings are recorded yet; "
+                      "the orchestrator names them (office prompt) or reruns --fresh")
+            wait.append(reason)
+            _signal_orchestrator(con, run, d, reason)
 
     # 5. Scope: tracked edits outside the contract are refused at submit.
     base = d["base_commit"]

@@ -25,7 +25,7 @@ KICK_THROTTLE_SECONDS = 10
 
 
 def _handlers():
-    from office import dispatch, gates, plans, prs, visual, integration
+    from office import dispatch, gates, plans, prs, visual, integration, land
     return {
         "pr_sync": prs.job_pr_sync,
         "launch_agent": dispatch.job_launch_agent,
@@ -36,6 +36,7 @@ def _handlers():
         "visual_capture": visual.job_capture,
         "visual_review": visual.job_visual_review,
         "integrate": integration.job_integrate,
+        "auto_rebase": land.job_auto_rebase,
     }
 
 

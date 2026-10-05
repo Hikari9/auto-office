@@ -220,7 +220,23 @@ def stalls(con, run: dict, since: str = "") -> list[str]:
     for j in con.execute("SELECT kind, error FROM outbox WHERE run_id=? AND status='failed' AND finished_at > ?",
                          (run["id"], since)).fetchall():
         out.append(f"job {j['kind']} failed: {(j['error'] or '')[:120]}")
+    out.extend(_preflight_waits(con, run))
     out.extend(_idle_executors(con, run))
+    return out
+
+
+def _preflight_waits(con, run: dict) -> list[str]:
+    """Executors polling preflight on a wait only the orchestrator can end. They
+    are busy, never idle, so the idle-stall check alone would never name them.
+    A later orchestrator prompt to the same dispatch answers the wait."""
+    out = []
+    for row in con.execute("SELECT e.task_id, e.dispatch_id, e.summary FROM events e JOIN tasks t ON t.run_id=e.run_id "
+                           "AND t.id=e.task_id AND t.current_dispatch_id=e.dispatch_id JOIN dispatches d "
+                           "ON d.id=e.dispatch_id AND d.ended_at IS NULL WHERE e.run_id=? AND e.kind='preflight.waiting' "
+                           "AND NOT EXISTS (SELECT 1 FROM events p WHERE p.run_id=e.run_id AND p.dispatch_id=e.dispatch_id "
+                           "AND p.kind='prompt' AND p.seq > e.seq) ORDER BY e.seq", (run["id"],)).fetchall():
+        out.append(f"{row['task_id']} executor {row['dispatch_id']} is waiting on you, its work kept: {row['summary'][:200]}; "
+                   f"next: office prompt {row['dispatch_id']} -- \"<the findings to fix>\" or office rerun {row['task_id']} --fresh")
     return out
 
 

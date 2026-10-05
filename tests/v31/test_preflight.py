@@ -100,19 +100,31 @@ def test_other_pauses_and_blocks_stop(env):
     assert code == 4 and "stop: blocked" in out, out
 
 
+def _fix_round(env, d, **fields):
+    from office import paths
+    pkt = paths.run_dir(d["run_id"]) / "dispatches" / d["id"] / "packet.json"
+    data = json.loads(pkt.read_text())
+    data.update(fix_of="R1", **fields)
+    pkt.write_text(json.dumps(data))
+
+
 @pytest.mark.integration
 @pytest.mark.approved
-def test_fix_round_without_findings_stops_and_names_the_escalation(env, tmp_path):
+def test_fix_round_without_findings_waits_keeps_its_work_and_tells_the_orchestrator(env, tmp_path):
     wenv, wt, d = _dispatched(env)
     con = env.con()
     run_id = d["run_id"]
-    from office import paths
-    pkt = paths.run_dir(run_id) / "dispatches" / d["id"] / "packet.json"
-    data = json.loads(pkt.read_text())
-    data["fix_of"] = "R1"
-    pkt.write_text(json.dumps(data))
+    _fix_round(env, d)
     code, out = env.office("preflight", cwd=wt, env=wenv)
-    assert code == 4 and "no open findings" in out and "office prompt" in out, out
+    assert code == 75 and out.startswith("PREFLIGHT wait") and "no open findings" in out, out
+    assert "office prompt" in out and "do not retry" not in out, out
+    env.office("preflight", cwd=wt, env=wenv)
+    events = con.execute("SELECT summary FROM events WHERE kind='preflight.waiting' AND dispatch_id=?",
+                         (d["id"],)).fetchall()
+    assert len(events) == 1, "the orchestrator is told once per dispatch and reason"
+    from office import guide, state
+    stalls = guide.stalls(con, state.get_run(con, run_id))
+    assert any("is waiting on you, its work kept" in s and f"office prompt {d['id']}" in s for s in stalls), stalls
     con.execute("INSERT INTO findings (id, run_id, task_id, code, severity, location, summary, state, created_at) "
                 "VALUES ('f1', ?, 'T1', 'F1', 'medium', 'calc.py:1', 'add() drops negatives', 'open', '2026-01-01')",
                 (run_id,))
@@ -256,3 +268,29 @@ def test_install_shell_guard_is_opt_in_kept_and_removable(env, tmp_path, monkeyp
     assert len(guards()[0]) == 1 and any("hooks already current" in l for l in res.lines), res.lines
     install.install(only=["claude"], shell_guard=False)
     assert guards()[0] == [] and len(guards()[1]) == 1
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+def test_amendment_relaunch_is_its_own_fix_round_work(env):
+    wenv, wt, d = _dispatched(env)
+    _fix_round(env, d, amendment_id="A1")
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert code == 0 and out.startswith("PREFLIGHT ready") and "amendment: A1" in out, out
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+def test_a_landed_orchestrator_prompt_names_the_fix_round_and_ends_the_wait(env):
+    wenv, wt, d = _dispatched(env)
+    con = env.con()
+    _fix_round(env, d)
+    env.office("preflight", cwd=wt, env=wenv)
+    from office import db, guide, state
+    run = state.get_run(con, d["run_id"])
+    with db.transaction(con):
+        state.emit(con, run, "prompt", "T1: orchestrator prompt landed", audience="runtime", task_id="T1",
+                   dispatch_id=d["id"], payload={"text": "F1: show the invite only once saved", "outcome": "landed"})
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert code == 0 and "named by the orchestrator: F1: show the invite only once saved" in out, out
+    assert not any("is waiting on you" in s for s in guide.stalls(con, run))
