@@ -29,7 +29,7 @@ def _accepted_then_amended(env):
     code, out = env.office("amend", "T1", "--", DELTA, env=EXTERNAL)
     assert code == 0, out
     row = task_row(env)
-    assert row["status"] in ("launching", "changes_required", "running") and row["current_dispatch_id"] != first, row
+    assert row["status"] == "running" and row["current_dispatch_id"] != first, row
     return first, row["current_dispatch_id"]
 
 
@@ -113,3 +113,48 @@ def test_a_fix_round_with_neither_findings_nor_an_amendment_still_stops(env):
     code, out = env.office("preflight", cwd=wt, env=wenv)
     assert code == 4 and "no open findings or amendments" in out, out
     assert "office amend T1 --" in out and "office prompt" not in out, out
+
+
+def test_the_no_findings_stop_event_names_a_command_that_resolves_it(env):
+    first, second = _accepted_then_amended(env)
+    wenv, wt, d = _worker(env, second)
+    con = env.con()
+    con.execute("UPDATE deliveries SET status='superseded', superseded_by='test'")
+    con.commit()
+    (wt / "calc.py").write_text(GOOD_ADD)
+    _commit_work(env, wt)
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    ev = env.con().execute("SELECT payload_json FROM events WHERE kind='worker.signal'").fetchone()
+    nxt = json.loads(ev[0])["next"]
+    assert "office amend T1 --" in nxt and "office rerun T1 --fresh" in nxt and "office prompt" not in nxt, nxt
+
+
+def test_only_a_delivery_in_the_brief_is_confirmed_by_the_launch_prompt(env):
+    first, second = _accepted_then_amended(env)
+    from office import paths
+    run_id = env.con().execute("SELECT id FROM runs").fetchone()[0]
+    ddir = paths.run_dir(run_id) / "dispatches" / second
+    con = env.con()
+    con.execute("UPDATE dispatches SET launcher='herdr', pane_id='p1', status='running' WHERE id=?", (second,))
+    con.execute("UPDATE deliveries SET created_at='2999-01-01T00:00:00+00:00'")  # recorded after the brief was written
+    con.commit()
+    spec = json.loads((ddir / "launch.json").read_text())
+    spec["prompt_landed"] = True
+    (ddir / "launch.json").write_text(json.dumps(spec))
+    env.office("status", check=0, env=EXTERNAL)
+    assert [r["status"] for r in _deliveries(env)] == ["queued"]
+    (ddir / "launch.json").unlink()  # no record of the prompt: nothing is confirmed, and nothing crashes
+    con.execute("UPDATE deliveries SET created_at='2000-01-01T00:00:00+00:00'")
+    con.commit()
+    env.office("status", check=0, env=EXTERNAL)
+    assert [r["status"] for r in _deliveries(env)] == ["queued"]
+
+
+def test_a_long_amendment_is_cut_in_the_brief_with_a_marker(env):
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    env.office("amend", "T1", "--", "also handle edge cases " + "of integers " * 700, env=EXTERNAL, check=0)
+    from office import paths
+    run_id = env.con().execute("SELECT id FROM runs").fetchone()[0]
+    brief = (paths.run_dir(run_id) / "dispatches" / task_row(env)["current_dispatch_id"] / "brief.md").read_text()
+    assert "AMENDMENT A1" in brief and "[cut at 6000 characters" in brief, brief[-600:]

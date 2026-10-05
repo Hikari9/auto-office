@@ -217,6 +217,8 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
     for a in amendments:
         out += ["", f"AMENDMENT {a['amendment_id']} (plan -> p{a['target_version']}): apply it, then run office ack {a['amendment_id']}"]
         out += [f"    {line}" for line in a["content"][:AMENDMENT_BRIEF_CHARS].splitlines()]
+        if len(a["content"]) > AMENDMENT_BRIEF_CHARS:
+            out.append(f"    [cut at {AMENDMENT_BRIEF_CHARS} characters: ask the orchestrator for the rest]")
     pr = packet.get("pr")
     if pr:
         out += ["", f"GIT commit and push your work to this branch as you go: {pr['push']}",

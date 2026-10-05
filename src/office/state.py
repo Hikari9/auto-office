@@ -164,20 +164,31 @@ def emit(con: sqlite3.Connection, run: dict, kind: str, summary: str, *, audienc
 
 
 SIGNAL_KIND = "worker.signal"
+SIGNAL_REPEAT_S = 600  # the same reason from the same dispatch is news again after this long
+SIGNAL_MAX_PER_DISPATCH = 20
 
 
 def signal_orchestrator(con: sqlite3.Connection, run: dict, *, source: str, task_id: str | None,
                         dispatch_id: str | None, reason: str, next_step: str) -> int | None:
     """Tell the orchestrator a worker is stopped for a reason only it can resolve (a preflight
     stop, a refused submit). `office wait` returns for it as a stall instead of after the idle
-    threshold. One event per distinct (dispatch, source, reason): a worker that repeats the same
-    command does not repeat the signal. Caller holds the transaction; returns the event seq, or
-    None when this reason was already signalled."""
-    reason = " ".join(reason.split())[:300]
+    threshold. One event per distinct (dispatch, source, reason): repeating the same command does
+    not repeat the signal while the orchestrator has yet to read it or for SIGNAL_REPEAT_S after it
+    was recorded, and one dispatch records at most SIGNAL_MAX_PER_DISPATCH. Caller holds the
+    transaction; returns the event seq, or None when nothing was recorded."""
+    from office.util import parse_iso
+    reason = " ".join("".join(c if c.isprintable() else " " for c in reason).split())[:300]
     summary = f"{task_id or 'run'} {dispatch_id or ''} {source}: {reason}".replace("  ", " ")
-    if con.execute("SELECT 1 FROM events WHERE run_id=? AND kind=? AND dispatch_id IS ? AND summary=?",
-                   (run["id"], SIGNAL_KIND, dispatch_id, summary)).fetchone():
+    rows = con.execute("SELECT seq, summary, created_at FROM events WHERE run_id=? AND kind=? AND dispatch_id IS ? "
+                       "ORDER BY seq", (run["id"], SIGNAL_KIND, dispatch_id)).fetchall()
+    if len(rows) >= SIGNAL_MAX_PER_DISPATCH:
         return None
+    cur = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer='orchestrator'", (run["id"],)).fetchone()
+    read = cur[0] if cur else 0
+    now = parse_iso(now_iso())
+    for r in rows:
+        if r["summary"] == summary and (r["seq"] > read or (now - parse_iso(r["created_at"])).total_seconds() < SIGNAL_REPEAT_S):
+            return None
     return emit(con, run, SIGNAL_KIND, summary, task_id=task_id, dispatch_id=dispatch_id,
                 payload={"source": source, "reason": reason, "next": next_step})
 

@@ -113,9 +113,13 @@ def signal_refused(con, run: dict, d: dict, reason: str) -> None:
     """A refused submit is a worker stopped on something only the orchestrator resolves: `office
     wait` returns for it at once. Caller holds the transaction."""
     tid = d.get("task_id") or "run"
+    if reason.startswith("superseded-dispatch"):  # a stale session ended itself; the current holder continues
+        nxt = f"none: {tid} has a newer session; office status shows it"
+    else:
+        nxt = (f"office status; then office rerun {tid} --resume|--fresh, office revoke {tid}, "
+               f"or office amend {tid} -- \"<change>\"")
     state.signal_orchestrator(con, run, source="submit refused", task_id=d.get("task_id"), dispatch_id=d["id"],
-                              reason=reason, next_step=f"office status; then office rerun {tid} --resume|--fresh, "
-                                                       f"office revoke {tid}, or office amend {tid} -- \"<change>\"")
+                              reason=reason, next_step=nxt)
 
 
 def _bounded(argv: list[str], cwd: Path, limit: int) -> tuple[str, bool]:
@@ -491,12 +495,12 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                          f"{paths.office_trailer(run['id'])}")
     from office import planfile, prs
     base = d["base_commit"]
-    touched = paths.git(wt, "diff", "--name-only", base, commit).split()
+    touched = paths.git(wt, "diff", "--no-renames", "--name-only", base, commit).split()
     dep_bases = [b for b in _dependency_bases(con, run, task, commit) if b != base]
     for b in dep_bases:
         # A file counts only if it differs from every base the task builds on,
         # so a dependency's own later files are not this task's changes.
-        also = set(paths.git(wt, "diff", "--name-only", b, commit).split())
+        also = set(paths.git(wt, "diff", "--no-renames", "--name-only", b, commit).split())
         touched = [f for f in touched if f in also]
     if len(dep_bases) == 1 and gates._is_ancestor(run, base, dep_bases[0]):
         base = dep_bases[0]  # reviewers diff against the dependency revision it now contains

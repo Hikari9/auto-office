@@ -252,7 +252,12 @@ def _signal_next(task_id: str, dispatch_id: str, reason: str) -> str:
     if reason.startswith("contract-conflict"):
         return (f'office amend {task_id} --contract -- "<change the ACCEPT line>", or office prompt {dispatch_id} -- '
                 '"<decision>" if the finding is wrong')
-    if reason.startswith(("self-review", "findings:")) or "round cap" in reason:
+    if reason.startswith("findings:"):  # a fix round with nothing to fix: a prompt records neither findings nor a delta
+        return (f'office amend {task_id} -- "<what to fix>" (delivered to the session), or office revoke {task_id} '
+                f"then office rerun {task_id} --fresh once findings are recorded")
+    if reason.startswith("superseded"):  # a stale session ended itself; the current holder continues
+        return f"none: {task_id} has a newer session; office status shows it"
+    if reason.startswith("self-review") or "round cap" in reason:
         return f'office prompt {dispatch_id} -- "<decision>", or office revoke {task_id} then office rerun {task_id} --fresh'
     return f"office status; then office rerun {task_id} --resume|--fresh or office revoke {task_id}"
 
@@ -276,6 +281,8 @@ def preflight(con, run: dict, cwd: Path) -> Result:
     env_dispatch = os.environ.get("OFFICE_DISPATCH_ID")
     if d is None and env_dispatch:
         d = state.get_dispatch(con, env_dispatch)
+        if d is not None and d["run_id"] != run["id"]:
+            d = None  # another run's dispatch is not this worker
     if d is None or d["role"] != "executor":
         found = discovery.task_worktree(con, cwd)
         res.lines = ["PREFLIGHT stop", "role: no executor dispatch owns this directory"]
@@ -331,7 +338,7 @@ def preflight(con, run: dict, cwd: Path) -> Result:
             if a["status"] == "applied":
                 res.lines.append(f"amendment: {a['amendment_id']} applied")
             else:
-                fix.append(f"amendment: {a['amendment_id']} is in your brief but not acknowledged: apply it, then "
+                fix.append(f"amendment: {a['amendment_id']} is delivered to you but not acknowledged: apply it, then "
                            f"office ack {a['amendment_id']}")
         if not rows and not amendments:
             stop.append(f"findings: fix round for {packet['fix_of']} but no open findings or amendments are recorded; "
@@ -348,9 +355,9 @@ def preflight(con, run: dict, cwd: Path) -> Result:
         also = set(_git(wt, "diff", "--name-only", "-z", b, head).split("\0"))
         changed = [f for f in changed if f in also]
     # Submit captures uncommitted edits too, so scope is judged on the worktree as it is now.
-    touched = [f for f in _git(wt, "diff", "--name-only", "-z", base).split("\0") if f]
+    touched = [f for f in _git(wt, "diff", "--no-renames", "--name-only", "-z", base).split("\0") if f]
     for b in dep_bases:
-        also = set(_git(wt, "diff", "--name-only", "-z", b).split("\0"))
+        also = set(_git(wt, "diff", "--no-renames", "--name-only", "-z", b).split("\0"))
         touched = [f for f in touched if f in also]
     outside = [f for f in touched if not planfile.path_in_scope(f, task["scope"]) and not submit._harness_path(f)]
     if outside:

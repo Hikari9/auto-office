@@ -163,9 +163,15 @@ def test_a_fix_signals_only_after_the_round_cap(env):
 
 
 @pytest.mark.approved
-def test_preflight_changes_nothing_in_the_worktree_and_only_adds_the_event(env):
+@pytest.mark.parametrize("path", ["stop", "fix-after-cap"])
+def test_preflight_changes_nothing_in_the_worktree_and_only_adds_the_event(env, path):
+    from test_self_review_ledger import ledger_text
     wenv, wt, d = _dispatched(env)
-    env.office("revoke", "T1", env=EXTERNAL, check=0)
+    if path == "stop":
+        env.office("revoke", "T1", env=EXTERNAL, check=0)
+    else:
+        head = env.git("rev-parse", "HEAD", cwd=wt).strip()
+        write_ledger(wt, ledger_text(head, rnd=3, findings=["FINDING low calc.py:9 | nit | open"]))
 
     def snapshot():
         files = {str(p.relative_to(wt)): p.read_bytes() for p in sorted(wt.rglob("*"))
@@ -180,13 +186,48 @@ def test_preflight_changes_nothing_in_the_worktree_and_only_adds_the_event(env):
     before_fs, before_db = snapshot(), tables()
     count = len(env.con().execute("SELECT 1 FROM events").fetchall())
     code, out = env.office("preflight", cwd=wt, env=wenv)
-    assert code == 4, out
+    assert code == (4 if path == "stop" else 1), out
     assert snapshot() == before_fs and tables() == before_db
     added = env.con().execute("SELECT kind FROM events ORDER BY seq").fetchall()[count:]
     assert [r[0] for r in added] and set(r[0] for r in added) == {"worker.signal"}, added
 
 
 @pytest.mark.integration
+@pytest.mark.approved
+def test_a_dispatch_of_another_run_is_not_this_worker_and_signals_nothing(env):
+    wenv, wt, d = _dispatched(env)
+    con = env.con()
+    con.execute("UPDATE dispatches SET run_id='some-other-run' WHERE id=?", (d["id"],))
+    con.commit()
+    code, out = env.office("preflight", cwd=env.repo, env={**wenv, "OFFICE_RUN_ID": d["run_id"]})
+    assert code == 4 and "no executor dispatch owns this directory" in out, out
+    assert _signals(env) == []
+
+
+@pytest.mark.approved
+def test_a_superseded_session_is_signalled_without_a_command_that_would_hit_the_holder(env):
+    wenv, wt, d = _dispatched(env)
+    _set_task(env, current_dispatch_id="Dnewer")
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert code == 4 and "stop: superseded" in out, out
+    nxt = json.loads(_signals(env)[0]["payload_json"])["next"]
+    assert "revoke" not in nxt and "rerun" not in nxt, nxt
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert code == 4, out
+    nxt = json.loads(_signals(env)[-1]["payload_json"])["next"]
+    assert "revoke" not in nxt and "rerun" not in nxt, nxt
+
+
+@pytest.mark.approved
+def test_a_renamed_out_of_scope_file_is_still_outside_scope(env):
+    wenv, wt, d = _dispatched(env)
+    env.git("mv", "README.md", "calc_notes.md", cwd=wt)  # destination is outside SCOPE too, source was tracked
+    env.git("-c", "user.email=t@e.test", "-c", "user.name=t", "commit", "-qam", "rename", cwd=wt)
+    write_ledger(wt)
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert "README.md" in out and "calc_notes.md" in out and "tracked edits outside SCOPE" in out, out
+
+
 @pytest.mark.approved
 def test_out_of_scope_edit_and_bsd_sed_backup_are_fixes(env):
     wenv, wt, d = _dispatched(env)

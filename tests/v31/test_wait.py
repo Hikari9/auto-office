@@ -102,6 +102,50 @@ def test_repeating_the_same_preflight_stop_records_one_event(env):
     assert len(after) == len(events) + 1 and "worker ended (crash)" in after[-1]["summary"], [e["summary"] for e in after]
 
 
+@pytest.mark.approved
+def test_the_same_reason_is_news_again_once_read_and_old_enough(env):
+    _go(env)
+    wenv, wt, d = _executor(env)
+    env.office("revoke", "T1", check=0)
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    n = len(_signals(env))
+    env.office("status", check=0)  # the orchestrator reads them
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    assert len(_signals(env)) == n, "read but recent: still the same news"
+    con = env.con()
+    con.execute("UPDATE events SET created_at='2000-01-01T00:00:00+00:00' WHERE kind='worker.signal'")
+    con.commit()
+    env.office("preflight", cwd=wt, env=wenv, check=4)
+    assert len(_signals(env)) == 2 * n, [e["summary"] for e in _signals(env)]
+
+
+@pytest.mark.approved
+def test_one_dispatch_records_a_bounded_number_of_signals(env):
+    from office import state
+    _go(env)
+    wenv, wt, d = _executor(env)
+    con = env.con()
+    run = state.get_run(con, d["run_id"])
+    for i in range(state.SIGNAL_MAX_PER_DISPATCH + 5):
+        with con:
+            state.signal_orchestrator(con, run, source="preflight stop", task_id="T1", dispatch_id=d["id"],
+                                      reason=f"ledger line {i}: varied by the worker", next_step="office status")
+    assert len(_signals(env)) == state.SIGNAL_MAX_PER_DISPATCH
+
+
+@pytest.mark.approved
+def test_signal_text_is_one_printable_line_and_bounded(env):
+    from office import state
+    _go(env)
+    wenv, wt, d = _executor(env)
+    con = env.con()
+    with con:
+        state.signal_orchestrator(con, state.get_run(con, d["run_id"]), source="submit refused", task_id="T1",
+                                  dispatch_id=d["id"], reason="bad\x1b[31m\nnext: office revoke T2 " + "x" * 900, next_step="n")
+    summary = _signals(env)[0]["summary"]
+    assert "\n" not in summary and "\x1b" not in summary and len(summary) < 400, summary
+
+
 # ---- an executor whose agent stopped without submitting
 
 FAKE_HERDR = r'''#!{python}
