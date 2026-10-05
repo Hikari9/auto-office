@@ -136,10 +136,10 @@ def test_contract_conflict_and_round_cap_stops_signal_the_orchestrator(env):
     from test_self_review_ledger import ledger_text
     wenv, wt, d = _dispatched(env)
     head = env.git("rev-parse", "HEAD", cwd=wt).strip()
-    write_ledger(wt, ledger_text(head, findings=["FINDING high calc.py:2 | add must reject ints | contract-conflict accept=1"]))
+    write_ledger(wt, ledger_text(head, findings=["FINDING high edge-cases calc.py:2 | add must reject ints | contract-conflict accept=1"]))
     code, out = env.office("preflight", cwd=wt, env=wenv)
     assert code == 4 and "contract-conflict" in out, out
-    write_ledger(wt, ledger_text(head, rnd=3, findings=["FINDING medium calc.py:9 | add skips zero | open"]))
+    write_ledger(wt, ledger_text(head, rnd=3, findings=["FINDING medium edge-cases calc.py:9 | add skips zero | open"]))
     code, out = env.office("preflight", cwd=wt, env=wenv)
     assert code == 4 and "round 3 ended with a finding still open" in out, out
     events = _signals(env)
@@ -154,10 +154,10 @@ def test_a_fix_signals_only_after_the_round_cap(env):
     from test_self_review_ledger import ledger_text
     wenv, wt, d = _dispatched(env)
     head = env.git("rev-parse", "HEAD", cwd=wt).strip()
-    write_ledger(wt, ledger_text(head, rnd=2, findings=["FINDING low calc.py:9 | nit | open"]))
+    write_ledger(wt, ledger_text(head, rnd=2, findings=["FINDING low edge-cases calc.py:9 | nit | open"]))
     code, out = env.office("preflight", cwd=wt, env=wenv)
     assert code == 1 and _signals(env) == [], out
-    write_ledger(wt, ledger_text(head, rnd=3, findings=["FINDING low calc.py:9 | nit | open"]))
+    write_ledger(wt, ledger_text(head, rnd=3, findings=["FINDING low edge-cases calc.py:9 | nit | open"]))
     code, out = env.office("preflight", cwd=wt, env=wenv)
     assert code == 1 and len(_signals(env)) == 1 and "round cap spent" in _signals(env)[0]["summary"], out
 
@@ -171,7 +171,7 @@ def test_preflight_changes_nothing_in_the_worktree_and_only_adds_the_event(env, 
         env.office("revoke", "T1", env=EXTERNAL, check=0)
     else:
         head = env.git("rev-parse", "HEAD", cwd=wt).strip()
-        write_ledger(wt, ledger_text(head, rnd=3, findings=["FINDING low calc.py:9 | nit | open"]))
+        write_ledger(wt, ledger_text(head, rnd=3, findings=["FINDING low edge-cases calc.py:9 | nit | open"]))
 
     def snapshot():
         files = {str(p.relative_to(wt)): p.read_bytes() for p in sorted(wt.rglob("*"))

@@ -727,7 +727,6 @@ def _dispatch(env, plan=None):
 
 
 @pytest.mark.integration
-@pytest.mark.approved
 def test_preflight_walks_missing_stale_open_then_ready_and_submit_consumes_the_ledger(env):
     from conftest import PLAN_ONE
     from office import briefs

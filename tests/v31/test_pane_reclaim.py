@@ -239,7 +239,9 @@ def test_session_id_is_captured_and_a_busy_pane_gets_a_fresh_split(env, monkeypa
     assert res["launcher"] == "herdr" and res["pane"] == "w1:p102", res
     starts = [c for c in _data(state_file)["calls"] if c[:2] == ["agent", "start"]]
     assert [c[c.index("--pane") + 1] for c in starts] == ["w1:p101", "w1:p102"]
-    assert _col(env, d["id"], "session_id") == "sess-123"
+    # claude's session id is assigned at launch; herdr's differing report never overwrites it.
+    assigned = starts[-1][starts[-1].index("--session-id") + 1]
+    assert _col(env, d["id"], "session_id") == assigned
 
 
 @pytest.mark.approved

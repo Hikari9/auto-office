@@ -453,6 +453,7 @@ def preflight(con, run: dict, cwd: Path) -> Result:
     # 5. Scope: tracked edits outside the contract are refused at submit.
     base = d["base_commit"]
     head = _git(wt, "rev-parse", "HEAD")
+    # The committed diff: the self-review ledger vouches for HEAD.
     changed = [f for f in _git(wt, "diff", "--name-only", "-z", base, head).split("\0") if f]
     dep_bases = [b for b in submit._dependency_bases(con, run, task, head) if b != base]
     for b in dep_bases:

@@ -74,6 +74,42 @@
     "source_notes": {
       "type": "string"
     },
+    "session": {
+      "type": "object",
+      "description": "How Office learns the harness's session id for resume: assigned at launch, or detected from hooks, herdr, or CLI output.",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "assigned",
+            "detected",
+            "none"
+          ]
+        },
+        "assign_arg": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "hook",
+              "herdr",
+              "output"
+            ]
+          }
+        },
+        "output_pattern": {
+          "type": "string"
+        }
+      }
+    },
     "office_profiles": {
       "type": "object",
       "description": "v3.1 launch forms: worker, reviewer, vision. A profile is not proof the route works; visual capability needs a passing conformance probe.",
