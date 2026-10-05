@@ -41,11 +41,15 @@ def _delta(row, index, **over):
     return body
 
 
-def test_choice_is_recorded_and_off_by_default(env):
+def test_choice_is_off_by_default_and_brief_is_the_explicit_opt_in(env, monkeypatch):
+    _open_row(monkeypatch)
     run = _start(env)
     assert run["benchmark_refresh"]["enabled"] is False
-    code, out = env.office("benchmarks", "brief")
+    code, out = env.office("benchmarks", "submit", "/nonexistent.yaml")
     assert code == 4 and "benchmark-refresh-off" in out, out
+    code, out = env.office("benchmarks", "brief")
+    assert code == 0 and "brief:" in out, out
+    assert _run(env)["benchmark_refresh"]["enabled"] is True
 
 
 def test_refresh_is_bounded_validated_and_bound_to_later_routes(env, monkeypatch):

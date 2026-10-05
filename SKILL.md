@@ -50,14 +50,10 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 2. Ask how far to go after the task PRs: stop and ask after (`ask`), preview deploy only (`preview`),
    merge only (`merge`), or merge + prod deploy (`e2e`, which is merge and deploy authority). For a
    deploy, show `office land --detect`'s proposed commands and have the user confirm them.
-   In the same question, offer an opt-in benchmark refresh (default off): if the catalog lacks
-   scores for a model or effort, one low-cost background subagent fetches them during the run.
 3. `office start "<goal>" --issue <n> --end-state <answer>` (`--deploy-preview|prod|verify "<cmd>"`
-   as confirmed; `--benchmark-refresh` only if the user opted in; `--blast-radius`, `--size-class`,
-   `--irreversible` from your provisional read; unset is unknown, never low risk).
-   With the opt-in, run `office benchmarks brief`; if it prints a brief, start one background
-   subagent on the smallest capable model at low effort with it and keep working. It submits its
-   result with `office benchmarks submit`; a rejected delta changes nothing and blocks nothing.
+   as confirmed; `--blast-radius`, `--size-class`, `--irreversible` from your provisional read;
+   unset is unknown, never low risk). Never ask about benchmark refreshes; that is the
+   `auto-update-benchmarks` skill, run only when the user explicitly calls it.
 4. If the output says a planner was queued, wait (`office wait`). Otherwise you plan inline:
    interview the user directly for anything you would otherwise guess, write `.office/plans/<run>/PLAN.md` (the path `office start` prints)
    (format: `office submit --help`), then `office submit`.
@@ -88,7 +84,8 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 - An executor idle 60s without submitting (or whose process died) is a stall: `office wait` exits 3 and
   the stall line names the dispatch, any refused-submit reason, its `pane-tail.txt`, and the next command.
   Fix the blocker, then re-prompt with `office prompt T2 -- "<message>"` or follow that command.
-- Executors simplify (behavior-preserving, in SCOPE), self-review on four lenses, then `office preflight`. Each ends
+- Executors simplify (behavior-preserving, in SCOPE), self-review on four lenses at a depth Office sets from the run's
+  gear and risk (`inline`, `single`, or `deep`; an unset blast radius is never `inline`), then `office preflight`. Each ends
   with one `TASK=... SUBMIT=... NEXT=...` line (saved in `pane-final.txt`); act on its `NEXT=`. A worker
   refused as lease-lost, superseded-dispatch, or task-paused is done: never prompt it to retry.
 - Before submitting a plan inline, run the same lenses (security, edge cases, platform and build, test
@@ -120,12 +117,12 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
   `office approve waive T2:<gate> --quote "<words>"`. When a visual gate is UNAVAILABLE and the user has a
   reviewer run it by hand, record that review file as the gate result:
   `office approve visual T2 --by <harness>/<model>[@effort] --report <file> --quote "<words>"` (never the
-  producer's model family).
+  producer's own session; a fresh session of the same model is fine).
 - If a command reports a missing route or trust, show the user the route notice; only they can
   promote trust (`office approve trust <route> --quote "<words>"`).
 - When the user names a model, dispatch with `--as <harness>/<model>[@effort]` (add `--cli "<argv>"` for an
   exact agent command, or `--external` to only print how to start it) and `--review-as` to pin the code
-  reviewer, which must be a different model family. Every dispatch prints its brief, env, and herdr commands.
+  reviewer. A reviewer is always a fresh session, never the executor's, but it may share the executor's model. Every dispatch prints its brief, env, and herdr commands.
 
 ## Herdr agents
 

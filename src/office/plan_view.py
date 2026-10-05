@@ -68,10 +68,10 @@ def route_label(disclosure: dict | None) -> str:
     return f"{disclosure.get('harness')}/{disclosure.get('model_id')}@{disclosure.get('effort')}"
 
 
-def _preview_one(con, config: dict, run: dict, role: str, tid: str, exclude: set[str] | None = None,
+def _preview_one(con, config: dict, run: dict, role: str, tid: str, *,
                  task: dict | None = None, wave_load: dict | None = None, pending_explorations: int = 0) -> dict:
     try:
-        decision = candidates.route_role(con, config, run, role, task_id=tid, exclude=exclude, wave_load=wave_load,
+        decision = candidates.route_role(con, config, run, role, task_id=tid, wave_load=wave_load,
                                          pending_explorations=pending_explorations)
     except Exception as exc:  # a preview never blocks submit
         return {"route": None, "why": f"preview failed: {exc}"[:160]}
@@ -80,8 +80,7 @@ def _preview_one(con, config: dict, run: dict, role: str, tid: str, exclude: set
         why = f"{decision.get('status')}" + (f": {top.get('reason')}" if top.get("reason") else "")
         return {"route": None, "why": why[:160]}
     d = decision["selection_disclosure"]
-    out = {"route": route_label(d), "triple": decision.get("selected"), "why": short_why(d),
-           "family": candidates.model_family(d.get("model_id"))}
+    out = {"route": route_label(d), "triple": decision.get("selected"), "why": short_why(d)}
     audit = decision.get("routing")
     if audit:
         # #300: the planner's primary + fallbacks over the router's slate.
@@ -90,7 +89,6 @@ def _preview_one(con, config: dict, run: dict, role: str, tid: str, exclude: set
         slate = adaptive.slate_for(audit, plan)
         primary = decision["qualifying_candidates"][plan["primary"]]
         out.update({"route": adaptive.label(primary), "triple": plan["primary"],
-                    "family": candidates.model_family(primary.get("model_id")),
                     "why": slate[0]["reason"] if slate else out["why"],
                     "slate": slate, "route_plan": plan, "decision_hash": decision.get("decision_hash"),
                     "_audit": {**audit, "planner": plan, "phase": "plan", "task_id": tid, "role": role}})
@@ -117,8 +115,7 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
             audits.append(ex.pop("_audit"))
         rv = {}
         if code_review:
-            exclude = {ex["triple"], f"family:{ex['family']}"} if ex.get("triple") and ex.get("family") else None
-            rv = _preview_one(con, config, run, "code_reviewer", t["id"], exclude=exclude)
+            rv = _preview_one(con, config, run, "code_reviewer", t["id"])
         visual = t.get("visual") or {}
         task_gates = (["checks"] if t.get("checks") else []) + (["code review"] if code_review else []) \
             + (["ui review"] if visual and not visual.get("none") else [])

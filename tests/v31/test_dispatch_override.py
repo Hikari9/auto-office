@@ -144,12 +144,15 @@ def test_relaunch_keeps_the_override(env):
 
 
 @pytest.mark.approved
-def test_review_as_same_family_as_the_executor_is_refused(env):
+def test_review_as_same_family_as_the_executor_is_allowed(env):
+    # Independence is per agent session, not per model family: a fresh claude
+    # session may review claude work.
     approved_run(env)
     code, out = env.office("dispatch", "T1", "--as", "claude/claude-sonnet-5-5@high",
-                           "--review-as", "claude/claude-opus-5-5@low", env=EXTERNAL)
-    assert code != 0 and "review-not-independent" in out and "claude" in out, out
-    assert _dispatch_row_or_none(env) is None
+                           "--review-as", "claude/claude-opus-5-5@low", "--review-external", env=EXTERNAL)
+    assert code == 0 and "review-not-independent" not in out, out
+    pinned = json.loads(env.con().execute("SELECT review_override_json FROM tasks WHERE id='T1'").fetchone()[0])
+    assert pinned["as"] == "claude/claude-opus-5-5@low"
 
 
 def _dispatch_row_or_none(env):
@@ -171,37 +174,43 @@ def test_review_as_is_pinned_on_the_task(env):
 
 
 @pytest.mark.approved
-def test_pinned_reviewer_rechecks_independence_against_the_real_producer(env):
-    # The executor was relaunched on a different route after --review-as: the
-    # gate compares against whoever actually produced the revision.
+def test_pinned_same_model_reviewer_runs_as_a_fresh_dispatch(env):
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
-    env.office("dispatch", "T1", "--as", "claude/claude-sonnet-5-5@high", "--review-as", "codex/gpt-6-luna@xhigh",
-               check=0)
+    env.office("dispatch", "T1", "--as", "codex/gpt-6-luna@xhigh", "--review-as", "codex/gpt-6-luna@xhigh", check=0)
     con = env.con()
     reviewed = [c for c in env.calls() if c.get("role") == "code_reviewer"]
     assert reviewed and reviewed[0]["harness"] == "codex", env.calls()
-    # Now pin a same-family reviewer after the fact and re-run the gate.
-    con.execute("UPDATE tasks SET review_override_json=? WHERE id='T1'",
-                (json.dumps({"as": "claude/claude-opus-5-5@low", "by": "user"}),))
-    con.commit()
-    from office import gates, state
-    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    rows = con.execute("SELECT id, role FROM dispatches WHERE role IN ('executor','code_reviewer')").fetchall()
+    ids = {r["role"]: r["id"] for r in rows}
+    assert set(ids) == {"executor", "code_reviewer"} and ids["executor"] != ids["code_reviewer"], ids
     gate = dict(con.execute("SELECT * FROM gates WHERE task_id='T1' AND kind='code_review' ORDER BY created_at DESC")
                 .fetchone())
-    out = gates.run_reviewer(con, run, gate, "code_reviewer", "brief", cwd=env.repo)
-    assert out["verdict"] == "UNAVAILABLE" and "same model family (claude)" in out["summary"], out
+    assert gate["verdict"] == "PASS", gate
 
 
-def test_routed_review_excludes_a_declared_producers_family(env):
+def test_routed_review_does_not_exclude_the_producers_family(env):
     env.trust()
     from office import candidates, config
     con = env.con()
     cfg = config.load_yaml(config.default_config_path())
     run = {"id": "r", "gear": "", "playbook": "Change", "risk": {}}
-    got = candidates.route_role(con, cfg, run, "code_reviewer", exclude={"family:gpt"}, probe=False)
+    got = candidates.route_role(con, cfg, run, "code_reviewer", probe=False)
     chosen = got.get("candidate") or {}
-    assert candidates.model_family(chosen.get("model_id")) != "gpt"
-    assert all(candidates.model_family(c["model_id"]) != "gpt" for c in got["request"]["candidates"])
+    assert "luna" in (chosen.get("model_id") or "") and chosen.get("effort") == "xhigh", got.get("status")
+    # The family: exclusion entry is gone; it no longer filters anything.
+    again = candidates.route_role(con, cfg, run, "code_reviewer", exclude={"family:gpt"}, probe=False)
+    assert (again.get("candidate") or {}).get("model_id") == chosen.get("model_id")
+
+
+def test_default_reviewer_seeds_and_fallbacks():
+    from office import config
+    roles = config.load_yaml(config.default_config_path())["roles"]
+    code = roles["code_reviewer"]["preferred_seed"]
+    assert code[0] == {"model_id": "luna", "effort": "xhigh"}
+    assert {"model_id": "sonnet", "harness": "claude", "effort": "high"} in code
+    visual = roles["visual_reviewer"]["preferred_seed"]
+    assert visual[0] == {"model_id": "gemini-3.8-flash", "harness": "agy", "effort": "medium"}
+    assert visual[1] == {"model_id": "sonnet", "harness": "claude", "effort": "high"}
 
 
 @pytest.mark.approved

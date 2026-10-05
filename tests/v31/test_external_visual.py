@@ -1,5 +1,6 @@
 """#211: a visual review run outside Office, recorded by the user, stands in
-for an UNAVAILABLE visual gate, but never from the producer's model family."""
+for an UNAVAILABLE visual gate. Independence is per agent session, so the
+producer's model family is not a bar."""
 from __future__ import annotations
 
 import json
@@ -57,15 +58,15 @@ def test_external_pass_from_another_family_accepts_the_task(env, tmp_path):
     assert con.execute("SELECT quote FROM authorizations WHERE kind='external-visual'").fetchone()[0] == "use gemini"
 
 
-def test_external_review_from_the_producer_family_is_refused(env, tmp_path):
+def test_external_review_from_the_producers_model_family_is_accepted(env, tmp_path):
     con, producer = _blocked_on_visual(env)
     report = tmp_path / "review.md"
     report.write_text(PASS)
     harness = json.loads(con.execute("SELECT route_json FROM dispatches WHERE role='executor'").fetchone()[0])["candidate"]["harness"]
     code, out = env.office("approve", "visual", "T1", "--by", f"{harness}/{producer}", "--report", str(report),
-                           "--quote", "ok")
-    assert code != 0 and "cannot approve its own work" in out, out
-    assert con.execute("SELECT status FROM tasks WHERE id='T1'").fetchone()[0] == "blocked"
+                           "--quote", "fresh session of the same model")
+    assert code == 0 and "T1 accepted" in out, out
+    assert "not-independent" not in out and "cannot approve its own work" not in out
 
 
 def test_invalid_or_unavailable_report_is_refused(env, tmp_path):

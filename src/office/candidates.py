@@ -407,12 +407,10 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     snapshot = benchmarks.apply(run, candidates)
     if exclude:
         # Entries: an exact triple, "model:<harness>/<model>" (every effort of a
-        # model that misbehaved), "harness:<name>" (a shared quota/auth wall), or
-        # "family:<name>" (a declared producer's family, for independent review).
+        # model that misbehaved), or "harness:<name>" (a shared quota/auth wall).
         def excluded(c):
             return (routing.candidate_id(c) in exclude or f"harness:{c['harness']}" in exclude
-                    or f"model:{c['harness']}/{c['invocation_model_id']}" in exclude
-                    or f"family:{model_family(c['model_id'])}" in exclude)
+                    or f"model:{c['harness']}/{c['invocation_model_id']}" in exclude)
         candidates = [c for c in candidates if not excluded(c)]
     if exact:
         candidates = [c for c in candidates if routing.candidate_id(c) == exact]

@@ -352,13 +352,10 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     producer = _producer_route(con, gate)
     failures = []
     task = state.get_task(con, run["id"], gate["task_id"]) if gate.get("task_id") else None
-    # A user-pinned code reviewer (dispatch --review-as) replaces routing; a
-    # declared executor's family is excluded from routed review.
+    # A user-pinned code reviewer (dispatch --review-as) replaces routing.
+    # Independence is per agent: every reviewer is a fresh dispatch and session,
+    # never the producer's, so the producer's model or family is not excluded.
     pinned = (task or {}).get("review_override") if role == "code_reviewer" else None
-    producer_model, producer_declared = _producer_model(con, gate)
-    producer_family = candidates.model_family(producer_model)
-    if producer_declared and producer_family and not pinned:
-        excluded.add(f"family:{producer_family}")
     profile_kind = kind or ("vision" if visual else "reviewer")
     resume, same_route = (_reviewer_resume(con, run, resume_from, profile_kind, cwd) if resume_from
                           else (None, None))
@@ -373,10 +370,6 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         elif pinned:
             decision = candidates.declared_decision(pinned["as"], flag="--review-as")
             decision["launch"] = {k: pinned[k] for k in ("cli", "external") if pinned.get(k)}
-            if producer_family and candidates.model_family(decision["candidate"]["model_id"]) == producer_family:
-                failures.append(f"--review-as {pinned['as']} is the same model family ({producer_family}) as the "
-                                f"producer {producer_model}; not independent")
-                break
         else:
             decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
                                              exclude=excluded)
@@ -542,19 +535,6 @@ def _await_file(output: Path, wait_s: float, poll: float) -> str:
     return output.read_text(encoding="utf-8", errors="replace") if output.is_file() else ""
 
 
-def _producer_model(con, gate: dict) -> tuple[str | None, bool]:
-    """(model_id, declared) of the dispatch that produced the gate's revision."""
-    if not gate.get("revision_id"):
-        return None, False
-    row = con.execute("SELECT d.route_json, d.override_json FROM revisions r JOIN dispatches d ON d.id=r.dispatch_id "
-                      "WHERE r.id=?", (gate["revision_id"],)).fetchone()
-    if not row:
-        return None, False
-    cand = (json.loads(row["route_json"] or "{}").get("candidate") or {})
-    declared = bool(json.loads(row["override_json"] or "{}").get("declared"))
-    return cand.get("model_id"), declared
-
-
 def _producer_route(con, gate: dict) -> str | None:
     if not gate.get("revision_id"):
         return None
@@ -683,6 +663,15 @@ def detached_checkout(run: dict, commit: str, name: str, *, purpose: str) -> Pat
     paths.git(Path(run["repo_root"]), "worktree", "add", "--detach", str(path), commit)
     if purpose == "check":
         worktree_setup.prepare(run, path, "check", paths.run_dir(run["id"]) / "setup" / f"{name}.log", created=True)
+    plans = Path(run["repo_root"]) / ".office" / "plans"
+    if plans.is_dir():
+        dest = path / ".office" / "plans"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not dest.exists():
+            try:
+                dest.symlink_to(plans, target_is_directory=True)
+            except OSError:
+                shutil.copytree(plans, dest)
     return path
 
 
