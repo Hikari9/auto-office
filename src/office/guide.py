@@ -426,9 +426,30 @@ def piggyback(con, run: dict, res: Result) -> None:
         if block:
             res.notices.extend(block)
         return
-    events = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=4)
-    if events:
-        res.notices.extend(f"· {e['summary']}" for e in events)
+    shown, through = _notice_batch(state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=20),
+                                   limit=4)
+    if shown:
+        res.notices.extend(f"· {e['summary']}" for e in shown)
         from office import db
         with db.transaction(con):
-            state.advance_cursor(con, run["id"], "orchestrator", events[-1]["seq"])
+            state.advance_cursor(con, run["id"], "orchestrator", through)
+
+
+# Event kinds that mean something went wrong or waits on the orchestrator.
+_URGENT_WORDS = ("fail", "block", "refus", "reject", "unavailable", "conflict", "error", "escalat", "attention",
+                 "defect", "changes_required", "undelivered", "restack_needed", "findings_queued",
+                 "scope_requested", "questions")
+
+
+def _urgent(event: dict) -> bool:
+    return any(word in event["kind"] for word in _URGENT_WORDS)
+
+
+def _notice_batch(unread: list[dict], *, limit: int) -> tuple[list[dict], int]:
+    """(events to show, seq the cursor moves to). Failures and blockers come first, then the
+    informational notices, `limit` in all. An informational notice older than the last one shown
+    that did not fit is dropped from the news; it stays in the event log."""
+    urgent = [e for e in unread if _urgent(e)]
+    shown = urgent[:limit]
+    shown += [e for e in unread if not _urgent(e)][:limit - len(shown)]
+    return shown, max((e["seq"] for e in shown), default=0)
