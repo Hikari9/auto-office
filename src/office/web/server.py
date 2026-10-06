@@ -229,6 +229,22 @@ def pid_file() -> Path:
     return web_dir() / "web.pid"
 
 
+def _started(pid: int) -> str | None:
+    """The process start time `ps` reports (macOS and Linux), to tell a reused pid apart."""
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None
+
+
+def _ours(info: dict | None) -> bool:
+    """The pid file names a live process that is still the server that wrote it."""
+    if not info or not _alive(info["pid"]):
+        return False
+    return info.get("started") is None or _started(info["pid"]) == info["started"]
+
+
 def _alive(pid: int) -> bool:
     try:
         if os.waitpid(pid, os.WNOHANG)[0] == pid:
@@ -262,20 +278,23 @@ def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT, fixture: str | None
     httpd = make_server(service, host, port)
     real_port = httpd.server_address[1]
     url = f"http://{'[::1]' if ':' in httpd.server_address[0] else httpd.server_address[0]}:{real_port}/"
-    web_dir().mkdir(parents=True, exist_ok=True)
-    pid_file().write_text(json.dumps({"pid": os.getpid(), "host": httpd.server_address[0], "port": real_port,
-                                      "url": url, "fixture": fixture}), encoding="utf-8")
-    service.run_poller()
-    github_refresher(service)
-    log.info("office web: serving %s%s", url, f" (fixture {fixture})" if fixture else "")
-
-    def stop(*_):
-        threading.Thread(target=httpd.shutdown, daemon=True).start()
-    if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGTERM, stop)
-    if ready:
-        ready.set()
     try:
+        service.run_poller()
+        github_refresher(service)
+
+        def stop(*_):
+            threading.Thread(target=httpd.shutdown, daemon=True).start()
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, stop)
+        web_dir().mkdir(parents=True, exist_ok=True)
+        tmp = pid_file().with_suffix(".tmp")
+        tmp.write_text(json.dumps({"pid": os.getpid(), "started": _started(os.getpid()),
+                                   "host": httpd.server_address[0], "port": real_port, "url": url,
+                                   "fixture": fixture}), encoding="utf-8")
+        os.replace(tmp, pid_file())  # written last and atomically: a reader sees a ready server or none
+        log.info("office web: serving %s%s", url, f" (fixture {fixture})" if fixture else "")
+        if ready:
+            ready.set()
         httpd.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
         pass
@@ -292,7 +311,7 @@ def start(host: str = "127.0.0.1", port: int = DEFAULT_PORT, fixture: str | None
           wait: float = 20.0) -> Result:
     loopback_host(host)
     info = read_pid()
-    if info and _alive(info["pid"]):
+    if _ours(info):
         return Result(lines=[f"office web already running at {info['url']} (pid {info['pid']})"],
                       next="office web stop", data=info)
     web_dir().mkdir(parents=True, exist_ok=True)
@@ -319,7 +338,7 @@ def start(host: str = "127.0.0.1", port: int = DEFAULT_PORT, fixture: str | None
 
 def stop(wait: float = 10.0) -> Result:
     info = read_pid()
-    if not info or not _alive(info["pid"]):
+    if not _ours(info):
         pid_file().unlink(missing_ok=True)
         return Result(lines=["office web is not running"])
     os.kill(info["pid"], signal.SIGTERM)
@@ -335,7 +354,7 @@ def stop(wait: float = 10.0) -> Result:
 
 def status() -> Result:
     info = read_pid()
-    if info and _alive(info["pid"]):
+    if _ours(info):
         return Result(lines=[f"office web running at {info['url']} (pid {info['pid']})"
                              + (f" fixture {info['fixture']}" if info.get("fixture") else "")], data=info)
     return Result(lines=["office web is not running"], next="office web start", data={"running": False})

@@ -87,8 +87,9 @@ def config_args(kind: str, tier: str, key: str, value: Any = None) -> list[str]:
     if tier not in EDITABLE:
         raise ValueError(f"tier {tier!r} is not editable")
     if kind == "settings_unset":
-        return ["config", EDITABLE[tier], "--unset", key]
-    return ["config", EDITABLE[tier], key, value if isinstance(value, str) else _yaml_scalar(value)]
+        return ["config", EDITABLE[tier], "--unset", "--", key]
+    # `--` ends options: a value such as "--repo" or "--force" stays a value.
+    return ["config", EDITABLE[tier], "--", key, value if isinstance(value, str) else _yaml_scalar(value)]
 
 
 def _yaml_scalar(value: Any) -> str:

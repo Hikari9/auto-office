@@ -69,7 +69,10 @@ def test_apply_semantics(key, when):
 
 
 def test_config_args():
-    assert settings.config_args("settings_set", "machine", "a.b", True) == ["config", "--user", "a.b", "true"]
-    assert settings.config_args("settings_set", "repository", "a.b", "x") == ["config", "--repo", "a.b", "x"]
+    assert settings.config_args("settings_set", "machine", "a.b", True) == ["config", "--user", "--", "a.b", "true"]
+    assert settings.config_args("settings_set", "repository", "a.b", "x") == ["config", "--repo", "--", "a.b", "x"]
+    # A value that looks like a flag stays a value: it cannot switch tier, unset or force.
+    assert settings.config_args("settings_set", "machine", "a.b", "--repo")[-3:] == ["--", "a.b", "--repo"]
+    assert settings.config_args("settings_unset", "machine", "a.b") == ["config", "--user", "--unset", "--", "a.b"]
     with pytest.raises(ValueError):
         settings.config_args("settings_set", "run-pinned", "a.b", 1)

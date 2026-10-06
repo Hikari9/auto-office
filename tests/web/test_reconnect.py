@@ -81,11 +81,27 @@ def test_gap_resyncs(svc):
         svc.poll()
     last = svc.ring[-1]
     assert apply_delta(client, last) == "resync"  # base_rev 2 != client rev 1
-    assert svc.events_since(f"{svc.epoch}:1")[0] == "deltas"
+    mode, pending = svc.events_since(f"{svc.epoch}:1")
+    assert mode == "deltas" and [(d["base_rev"], d["rev"]) for d in pending] == [(1, 2), (2, 3)]
+    for d in pending:
+        assert apply_delta(client, d) == "applied"
+    assert client["entities"] == svc.snapshot()["entities"]
+    for bad in ("1", f"{svc.epoch}:", f"{svc.epoch}:\u00b2", f"{svc.epoch}:\u0663", f"{svc.epoch}:-1"):
+        assert svc.events_since(bad) == ("resync", [])
     assert svc.events_since(f"{svc.epoch}:99")[0] == "resync"  # from the future
     svc.ring.clear()
     assert svc.events_since(f"{svc.epoch}:1")[0] == "resync"  # fell out of the ring
     assert RING >= 64
+
+
+def test_ring_eviction_resyncs_the_oldest_base(svc, monkeypatch):
+    import collections
+    monkeypatch.setattr(svc, "ring", collections.deque(maxlen=2))
+    for n in range(3):
+        write(svc, lambda con, n=n: synthetic.insert_run(con, f"EV{n}", git_common_dir="/x/.git"))
+        svc.poll()
+    assert svc.events_since(f"{svc.epoch}:1") == ("resync", [])  # rev 2's delta was evicted
+    assert [d["rev"] for d in svc.events_since(f"{svc.epoch}:2")[1]] == [3, 4]
 
 
 def test_restart_gets_a_new_epoch_and_resyncs(svc, tmp_path):
@@ -112,7 +128,7 @@ def test_office_freshness_stale_and_disconnected(svc, tmp_path):
     assert svc.office_freshness()["state"] == "stale"
     with pytest.raises(CommandRefused) as info:
         svc.submit(Command.parse({"id": "cmd-fresh-01", "kind": "pause", "target": {"run_id": run["run_id"]}}))
-    assert info.value.reason == "office-stale"
+    assert info.value.reason == "office-stale" and svc.executor.calls == []
     assert svc.poll()["scalars"]["freshness"]["office"]["state"] == "live"
     moved = tmp_path / "moved.db"
     svc.db_path.rename(moved)

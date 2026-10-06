@@ -145,14 +145,38 @@ def test_task_must_belong_to_the_run(svc):
                                               "--priority", "high"]
 
 
-def test_stale_office_refuses_every_mutation(svc):
+@pytest.mark.parametrize("kind", KINDS)
+def test_stale_office_refuses_every_mutation(svc, kind):
     run = live_run(svc)
     svc.last_ok -= svc.stale_after + 1
     assert svc.office_freshness()["state"] == "stale"
-    for kind in ("pause", "approve_plan", "settings_set"):
-        err = refused(svc, cmd(f"cmd-stale-{kind}", kind, {"run_id": run["run_id"]}))
-        assert err.reason == "office-stale"
-    assert svc.executor.calls == []
+    target = {"run_id": run["run_id"], "repo": REPO, "issue": 3, "tier": "machine", "key": "scheduler.auto_mode"}
+    err = refused(svc, cmd(f"cmd-stale-{kind}", kind, target, {"text": "hi", "mode": "on", "value": 1}))
+    assert err.reason == "office-stale"
+    assert svc.executor.calls == [] and svc.launcher.launches == [] and svc.launcher.sent == []
+    assert svc.writer(lambda con: con.execute("SELECT COUNT(*) FROM commands").fetchone()[0]) == 0
+
+
+def test_concurrent_duplicate_that_misses_the_read_is_deduplicated_by_the_receipt(svc, monkeypatch):
+    run = live_run(svc)
+    c = cmd("cmd-race-0001", "pause", {"run_id": run["run_id"]})
+    svc.submit(c, wait=True)
+    real = svc.observer.read
+    # The second POST raced the first: its pre-check saw no receipt.
+    monkeypatch.setattr(svc.observer, "read", lambda fn: None if "_receipt" in fn.__code__.co_names else real(fn))
+    again = svc.submit(c, wait=True)
+    assert again["replayed"] is True and len(svc.executor.calls) == 1
+    with pytest.raises(CommandRefused) as info:
+        svc.submit(cmd("cmd-race-0001", "demote", {"run_id": run["run_id"]}), wait=True)
+    assert info.value.reason == "idempotency-conflict" and len(svc.executor.calls) == 1
+
+
+def test_validation_crash_fails_the_receipt_instead_of_leaving_it_accepted(svc, monkeypatch):
+    run = live_run(svc)
+    monkeypatch.setattr(svc, "_v_pause", lambda c: (_ for _ in ()).throw(KeyError("boom")))
+    err = refused(svc, cmd("cmd-crash-0001", "pause", {"run_id": run["run_id"]}))
+    assert err.reason == "validation-error" and err.receipt["status"] == "failed"
+    assert svc.command("cmd-crash-0001")["status"] == "failed" and svc.executor.calls == []
 
 
 # ------------------------------------------------------------------ start_issue
@@ -211,6 +235,24 @@ def test_launched_run_links_back_by_issue_repo_and_pane(svc):
     assert ent["run:OTHER-PANE"]["launch"] is None
 
 
+def test_queue_loop_does_not_block_the_poller_on_a_launch(svc):
+    import threading
+    release = threading.Event()
+    real = svc.launcher.launch
+
+    def slow(**kw):
+        release.wait(10)
+        return real(**kw)
+    svc.launcher.launch = slow
+    write(svc, lambda con: con.execute(
+        "INSERT INTO sched_items(id, kind, ref, title, priority, enqueued_at, updated_at) "
+        "VALUES('issue:q2','issue',?, 't', 'normal', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')", (f"{REPO}#7",)))
+    assert svc.admit_queue() == ["issue:q2"]  # returned while the launch is still in flight
+    assert svc.command("queue-admit:issue:q2")["status"] == "running"
+    release.set()
+    assert svc.wait("queue-admit:issue:q2")["status"] == "completed"
+
+
 def test_queue_loop_admits_a_queued_issue_once(svc):
     def queued(con):
         con.execute("INSERT INTO sched_items(id, kind, ref, title, priority, enqueued_at, updated_at) "
@@ -218,6 +260,7 @@ def test_queue_loop_admits_a_queued_issue_once(svc):
                     (f"{REPO}#6", "Issue 6"))
     write(svc, queued)
     assert svc.admit_queue() == ["issue:q1"]
+    svc.wait("queue-admit:issue:q1")
     svc.poll()
     assert svc.admit_queue() == []
     assert len(svc.launcher.launches) == 1
@@ -286,8 +329,8 @@ def test_settings_commands_run_office_config(svc):
     svc.submit(cmd("cmd-set-00002", "settings_unset", {"tier": "repository", "key": "scheduler.auto_mode",
                                                        "repo": REPO}), wait=True)
     assert [c["args"] for c in svc.executor.calls] == [
-        ["config", "--user", "scheduler.max_active_runs", "3"],
-        ["config", "--repo", "--unset", "scheduler.auto_mode"]]
+        ["config", "--user", "--", "scheduler.max_active_runs", "3"],
+        ["config", "--repo", "--unset", "--", "scheduler.auto_mode"]]
     assert svc.executor.calls[1]["cwd"].endswith("synth-org-0__repo-00")
     err = refused(svc, cmd("cmd-set-00003", "settings_set", {"tier": "run-pinned", "key": "a"}, {"value": 1}))
     assert err.reason == "tier-not-editable"

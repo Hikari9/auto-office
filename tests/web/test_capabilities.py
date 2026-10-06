@@ -10,9 +10,15 @@ def run(version, liveness="live", phase="executing"):
     return {"office_version": version, "liveness": liveness, "phase": phase}
 
 
+PROBED = []
+
+
 def resolver(registered=None, probe=True, current="3.3.3"):
+    def probe_fn(argv):
+        PROBED.append(argv)
+        return probe
     return Resolver(registry=lambda line: registered if registered and registered["office_version"].startswith(line)
-                    else None, probe=lambda argv: probe, current=current)
+                    else None, probe=probe_fn, current=current)
 
 
 def test_current_line_gets_every_control():
@@ -32,7 +38,9 @@ def test_older_lines_are_read_only_with_a_reason(version, line):
 
 def test_newer_registered_patch_is_probed_for_the_new_commands():
     newer = {"office_version": "3.3.9", "argv": ["/x/python", "-m", "office"]}
+    PROBED.clear()
     ok = for_run(run("3.3.1"), resolver(newer, probe=True))
+    assert PROBED and all(argv == tuple(newer["argv"]) for argv in PROBED)
     assert ok["pause"]["allowed"] and ok["runtime"]["version"] == "3.3.9"
     missing = for_run(run("3.3.1"), resolver(newer, probe=False))
     assert not missing["pause"]["allowed"] and "office queue" in missing["pause"]["reason"]

@@ -105,9 +105,24 @@ def test_localhost_host_header_is_accepted(http_svc):
 
 def test_post_needs_json_content_type(http_svc):
     svc, port = http_svc
-    status, body = request(port, "POST", "/api/commands", pause_body(svc),
-                           headers={"Content-Type": "text/plain", "X-Office-Token": token_of(port)})
-    assert status == 415 and body["reason"] == "bad-content-type"
+    for ctype in ("text/plain", None):
+        headers = {"X-Office-Token": token_of(port), **({"Content-Type": ctype} if ctype else {})}
+        status, body = request(port, "POST", "/api/commands", pause_body(svc), headers=headers)
+        assert status == 415 and body["reason"] == "bad-content-type"
+    assert_nothing_ran(svc, port)
+
+
+def assert_nothing_ran(svc, port, cid="cmd-http-0001"):
+    assert svc.executor.calls == []
+    assert request(port, "GET", f"/api/commands/{cid}")[0] == 404
+
+
+def test_post_with_wrong_host_is_refused(http_svc):
+    svc, port = http_svc
+    status, body = request(port, "POST", "/api/commands", pause_body(svc), host="evil.example",
+                           headers={"Content-Type": "application/json", "X-Office-Token": token_of(port)})
+    assert status == 421 and body["reason"] == "bad-host"
+    assert_nothing_ran(svc, port)
 
 
 def test_post_with_foreign_origin_is_refused(http_svc):
@@ -116,6 +131,7 @@ def test_post_with_foreign_origin_is_refused(http_svc):
                            headers={"Content-Type": "application/json", "X-Office-Token": token_of(port),
                                     "Origin": "http://evil.example"})
     assert status == 403 and body["reason"] == "bad-origin"
+    assert_nothing_ran(svc, port)
 
 
 @pytest.mark.parametrize("token", [None, "", "wrong-token"])
@@ -148,6 +164,7 @@ def test_unknown_kind_over_http(http_svc):
     status, body = request(port, "POST", "/api/commands", {"id": "cmd-http-0002", "kind": "merge"},
                            headers={"Content-Type": "application/json", "X-Office-Token": token_of(port)})
     assert status == 400 and body["reason"] == "unknown-kind"
+    assert_nothing_ran(svc, port, "cmd-http-0002")
 
 
 def test_read_endpoints(http_svc):
@@ -196,6 +213,16 @@ def test_fixture_mode_uses_a_temp_home(svc, tmp_path):
 
 
 # ------------------------------------------------------------------ daemon
+
+def test_a_reused_pid_is_not_taken_for_the_server(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFFICE_STATE_HOME", str(tmp_path / "st"))
+    server.web_dir().mkdir(parents=True)
+    # This test process is alive but is not the server that wrote the file.
+    server.pid_file().write_text(json.dumps({"pid": os.getpid(), "started": "Thu Jan  1 00:00:00 1970", "url": "x"}))
+    monkeypatch.setattr(server.os, "kill", lambda pid, sig: None if sig == 0 else pytest.fail("signalled"))
+    assert server.status().data == {"running": False}
+    assert server.stop().lines == ["office web is not running"] and not server.pid_file().exists()
+
 
 def test_status_and_stop_without_a_server(tmp_path, monkeypatch):
     monkeypatch.setenv("OFFICE_STATE_HOME", str(tmp_path / "st"))

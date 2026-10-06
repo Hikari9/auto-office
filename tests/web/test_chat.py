@@ -76,6 +76,8 @@ def test_resend_needs_a_new_id_naming_an_earlier_chat(svc):
     svc.launcher.send_result = "held"
     send(svc, "chat-0000004")
     assert refused(svc, "chat-0000005", resend_of="nope-0000000").reason == "bad-resend"
+    assert refused(svc, "chat-0000012", resend_of="chat-0000012").reason == "bad-resend"
+    assert len(svc.launcher.sent) == 1
     svc.launcher.send_result = "landed"
     out = send(svc, "chat-0000006", resend_of="chat-0000004")
     assert out["status"] == "completed" and out["resend_of"] == "chat-0000004"

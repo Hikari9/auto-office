@@ -221,7 +221,7 @@ class Service:
         with self.cond:
             self.cond.notify_all()
         for t in list(self.threads.values()):
-            t.join(timeout=5)
+            t.join()  # receipts need the writer: let in-flight commands record their outcome (bounded by the executor timeout)
         if self.observer:
             self.observer.close()
         if self.writer:
@@ -310,8 +310,8 @@ class Service:
         delta = _diff(prev, snap)
         if prev is not None and not (delta["upserts"] or delta["removes"] or delta["scalars"]):
             return None
-        self.rev += 1
         with self.cond:
+            self.rev += 1
             self.snapshot_state = snap
             self.ring.append(delta)
             self.cond.notify_all()
@@ -326,7 +326,7 @@ class Service:
         if not last_event_id:
             return "snapshot", []
         epoch, _, rev = last_event_id.partition(":")
-        if epoch != self.epoch or not rev.isdigit():
+        if epoch != self.epoch or not re.fullmatch(r"[0-9]{1,18}", rev):
             return "resync", []
         rev_n = int(rev)
         with self.cond:
@@ -479,7 +479,7 @@ class Service:
                           {}, {"end_state": (self.config().get("intake") or {}).get("authorization") or "preview",
                                "title": e.get("title"), "new_run_confirmed": False, "origin": "queue"})
             try:
-                self.submit(cmd, origin="web-queue", wait=True)
+                self.submit(cmd, origin="web-queue")  # never blocks the poller; the receipt stops repeats
                 launched.append(e["id"])
             except CommandRefused as exc:
                 log.info("office web: queue item %s not admitted: %s", e["id"], exc.reason)
@@ -504,12 +504,15 @@ class Service:
             return self._replay(cmd, receipt)
         try:
             plan = self._validate(cmd)
-        except CommandRefused as exc:
+        except Exception as exc:  # noqa: BLE001 - a recorded receipt never stays `accepted`
+            refusal = exc if isinstance(exc, CommandRefused) else CommandRefused(
+                "validation-error", f"validation failed: {type(exc).__name__}", http=503)
             self.writer(receipts.transition, cmd.id, "running", pid=os.getpid())
-            exc.receipt = _receipt_view(self.writer(receipts.transition, cmd.id, "failed",
-                                                    result={"refused": exc.reason, **exc.data}, error=str(exc)))
+            refusal.receipt = _receipt_view(self.writer(receipts.transition, cmd.id, "failed",
+                                                        result={"refused": refusal.reason, **refusal.data},
+                                                        error=str(refusal)))
             self.poll()
-            raise
+            raise refusal from None
         self.writer(receipts.transition, cmd.id, "running", pid=os.getpid())
         t = threading.Thread(target=self._execute, args=(cmd, plan), name=f"office-web-{cmd.id}", daemon=True)
         self.threads[cmd.id] = t
@@ -538,11 +541,13 @@ class Service:
         except Exception as exc:  # noqa: BLE001 - the effect may have happened
             log.exception("office web: command %s raised", cmd.id)
             out = Outcome("unknown", {}, f"executor raised {type(exc).__name__}")
-        self.writer(receipts.transition, cmd.id, out.status, result=out.result, error=out.error)
         try:
+            self.writer(receipts.transition, cmd.id, out.status, result=out.result, error=out.error)
             self.poll()
         except Exception:  # noqa: BLE001
-            log.exception("office web: poll after command failed")
+            log.exception("office web: recording command %s failed", cmd.id)
+        finally:
+            self.threads.pop(cmd.id, None)
 
     # ------------------------------------------------------------------ validation
 
@@ -784,7 +789,7 @@ class Service:
         resend = cmd.payload.get("resend_of")
         if resend is not None:
             prior = self.observer.read(lambda s: _receipt(s, str(resend)))
-            if prior is None or prior["kind"] != "chat_send":
+            if prior is None or prior["kind"] != "chat_send" or prior["id"] == cmd.id:
                 raise CommandRefused("bad-resend", "payload.resend_of must name an earlier chat_send command")
         run = self._live_run(cmd, "chat_send")
         try:
