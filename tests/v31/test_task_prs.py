@@ -111,3 +111,23 @@ def test_github_failure_is_a_notice_not_a_failure(env, monkeypatch):
     assert data["data"]["tasks"]["T1"] == "accepted", data
     code, out = env.office("inspect", "events")
     assert "PR revision: push of office/" in out, out
+
+
+def test_a_transient_repo_view_failure_is_probed_again_at_dispatch(env, monkeypatch):
+    """#479: one `gh repo view` TLS timeout at plan submit must not turn task PRs off for the run."""
+    github(env, monkeypatch, repo_view_failures=1)
+    env.trust()
+    env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+               convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
+    start_inline(env)
+    con = env.con()
+    try:
+        landing = json.loads(con.execute("SELECT landing_json FROM runs").fetchone()[0])
+    finally:
+        con.close()
+    assert landing["prs"]["enabled"] is False and landing["prs"]["transient"] is True, landing["prs"]
+    env.office("approve", "plan", "--quote", "go", check=0)
+    env.office("dispatch", "T1", check=0)
+    assert [p["title"].split(":")[0] for p in gh(env)["prs"]] == ["T1"], gh(env)["prs"]
+    code, out = env.office("inspect", "events")
+    assert "task PRs on: GitHub answered after an earlier failure" in out, out

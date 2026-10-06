@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -371,6 +372,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args, unknown = parser.parse_known_args(argv)
     if unknown and args.cmd not in ("amend",):
+        run_like = [u for u in unknown if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]+)*", u)]
+        if args.cmd and len(run_like) == 1 and len(unknown) == 1:
+            # `office close <run>`: the run is a flag on every command, not a positional.
+            parser.error(f"unrecognized arguments: {run_like[0]} (name the run with --run: "
+                         f"office --run {run_like[0]} {args.cmd} ...)")
         parser.parse_args(argv)  # raises the usage error
     if args.cmd == "submit" and args.reason and not args.request_scope:
         # The reason text belongs to --request-scope; a stray argument is still a usage error.

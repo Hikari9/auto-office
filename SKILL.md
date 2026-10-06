@@ -130,7 +130,9 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
   fix|fixed|dismissed|follow-up -- "<note>"` (`fix` reopens the owner for a repair without re-review).
 - Only landing authority waives a required review: the user (`office approve waive L-T1:convergence|visual --quote
   "<words>" --reason "<why>"`), or you (`--as orchestrator --reason "<why>"`) only when the end state is merge/e2e
-  or a merge is authorized. The verdict stands; the waiver binds to the composed commit.
+  or a merge is authorized. The verdict stands; the waiver binds to the composed commit. Your host's permission
+  layer may still block `--as orchestrator` as self-approval (Claude Code auto mode does): never work around
+  it; ask the user and record their waiver with `--quote`.
 - If every convergence reviewer route is UNAVAILABLE you may review it as a recorded, non-independent
   fallback: `office review L-T1:convergence --report <file>` (visual: `--inspected <every screenshot>`).
 - **v3.1 runs** (started before #337; `office inspect run` names the contract) keep PASS | CHANGES_REQUIRED |

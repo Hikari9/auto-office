@@ -137,6 +137,38 @@ def test_parser_contract_rules():
     assert blocked.valid and blocked.verdict is None  # evidence state is not a verdict
 
 
+def test_hyphenated_finding_ids_are_read_not_dropped():
+    """A reviewer writing `F-1` (codex did, #479) names the same finding as `F1`: a blocking
+    one makes RECHECK valid, a non-blocking one survives APPROVED, and RESOLVED/RETRACT match.
+    A FINDING line the grammar cannot read is an error, never silently skipped."""
+    from office import review_parse as rp
+    low_block = rp.parse(recheck(finding("F-1", severity="low", where="a.tsx:74-75; c6e2c729 commit body")),
+                         contract="convergence-v1")
+    assert low_block.valid, low_block.errors
+    assert low_block.blocking[0]["code"] == "F1" and low_block.blocking[0]["severity"] == "low"
+    kept = rp.parse(APPROVED.replace("NEXT", finding("F-1", severity="low", blocking=False) + "\nNEXT"),
+                    contract="convergence-v1")
+    assert kept.valid and [f["code"] for f in kept.findings] == ["F1"]
+    marks = rp.parse(APPROVED + "\nRESOLVED F-2\nRETRACT F-3 | wrong file", contract="convergence-v1")
+    assert marks.resolved == ["F2"] and marks.retracted[0]["code"] == "F3"
+    unread = rp.parse(recheck("FINDING #1 | low | blocking | a.py:1 | broken | fix"), contract="convergence-v1")
+    assert not unread.valid and "unreadable FINDING line" in unread.errors[0]
+    assert rp.parse("VERDICT: CHANGES_REQUIRED\nFINDING F-1 | high | a.py:1 | broken | fix").findings[0]["code"] == "F1"
+
+
+def test_hyphenated_finding_is_tracked_and_dispositioned(env):
+    """#479: APPROVED with `FINDING F-1 | low | non-blocking` is recorded as F1, and
+    `office disposition L-T1:F-1` names the same finding."""
+    _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+           convergence_reviewer=[{"reply": APPROVED.replace("NEXT", finding("F-1", severity="low", blocking=False)
+                                                            + "\nNEXT land")}])
+    env.office("dispatch", "T1", check=0)
+    rows = _q(env, "SELECT code, state FROM findings WHERE scope='L-T1'")
+    assert [(r["code"], r["state"]) for r in rows] == [("F1", "nonblocking")]
+    env.office("disposition", "L-T1:F-1", "dismissed", "--", "comment wording only", check=0)
+    assert _q(env, "SELECT disposition FROM findings WHERE scope='L-T1'")[0]["disposition"] == "dismissed"
+
+
 def test_round_ceiling_constants():
     """5: every substantive ceiling is 3, including executor self-review."""
     from office import briefs, contract, preflight
