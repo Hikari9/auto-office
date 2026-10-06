@@ -171,3 +171,15 @@ def test_a_live_task_still_receives_a_checks_amendment(cenv):
     assert [(r["task_id"], r["status"]) for r in _rows(cenv, "SELECT task_id, status FROM deliveries")] == [("T1", "queued")]
     assert _checks_gates(cenv) == []
     assert _task(cenv)["current_dispatch_id"] == live["current_dispatch_id"]
+
+
+def test_a_checks_only_amendment_does_not_fall_back_to_telling_every_other_live_task(cenv):
+    v = _v31_conftest()
+    v.approved_run(cenv, plan=v.PLAN_TWO, executor=[{"write": {"calc.py": v.GOOD_ADD}, "submit": True}],
+                   code_reviewer=[{"reply": "VERDICT: PASS"}])
+    cenv.office("dispatch", "T1", check=0)
+    assert _task(cenv)["status"] == "accepted"
+    plan = v.PLAN_TWO.replace('checks: python3 -c "import calc; assert calc.add(2, 3) == 5"', f"checks: {GOOD_CHECK}")
+    code, out = _amend(cenv, plan)
+    assert code == 0, out
+    assert "checks rerun on T1" in out and "affected" not in out and "delivering" not in out, out
