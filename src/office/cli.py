@@ -48,6 +48,8 @@ Auto Office {ver}
                                     the user's choice once a review spent its 3 RECHECK rounds
   office disposition <scope>:<F-id> fix|fixed|dismissed|follow-up -- "<note>"
                                     close a non-blocking (APPROVED) finding; fix routes it, no re-review
+  office config [<key> [<value>]]   read or set preferences like git config (--list, --unset, --edit, --repo)
+  office setup                      interactive: choose preferred agents, models, and cost policy
   office doctor                     check the installation, hooks, and runtimes
   office upgrade [run] [--to X.Y]   move a run to a newer release line (dry run; --apply)
   office prune [--run <id>]         show finished runs that office prune -f would remove
@@ -227,6 +229,22 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("inspect", parents=[common])
     s.add_argument("what", nargs="?")
     s.add_argument("ident", nargs="?")
+    s = sp.add_parser("config", parents=[common])
+    s.add_argument("key", nargs="?", help="dotted key, e.g. roles.code_reviewer.preferred_seed")
+    s.add_argument("value", nargs="?", help="new value (YAML); a preferred_seed also takes claude/sonnet@high,codex/luna@xhigh")
+    s.add_argument("--user", dest="tier", action="store_const", const="user", help="the user file (default for writes)")
+    s.add_argument("--repo", dest="tier", action="store_const", const="repo", help="this repository's .auto-office/config.yaml")
+    s.add_argument("--unset", action="store_true")
+    s.add_argument("-l", "--list", dest="list_", action="store_true", help="what the files set (--all: every effective value)")
+    s.add_argument("--all", dest="all_", action="store_true")
+    s.add_argument("-e", "--edit", action="store_true", help="open the file in $EDITOR, then validate it")
+    s.add_argument("--path", action="store_true", help="print the config file path(s)")
+    s.add_argument("--show-origin", dest="origin", action="store_true")
+    s.add_argument("--force", action="store_true", help="set a key the shipped config does not define")
+    s = sp.add_parser("setup", parents=[common])
+    s.add_argument("--user", dest="tier", action="store_const", const="user")
+    s.add_argument("--repo", dest="tier", action="store_const", const="repo")
+    s.add_argument("-y", "--yes", action="store_true", help="write without the final confirmation")
     s = sp.add_parser("doctor", parents=[common])
     s.add_argument("--fix", action="store_true")
     s.add_argument("--probe-vision", action="store_true", help="run image-capability probes on visual routes (uses quota)")
@@ -451,6 +469,14 @@ def _run(args, unknown) -> int:
             return emit(prune.force(con, only) if args.force else prune.dry_run(con, only), args)
         finally:
             con.close()
+    if cmd == "config":
+        from office import configcmd
+        return emit(configcmd.config(key=args.key, value=args.value, tier=args.tier, unset=args.unset, list_=args.list_,
+                                     all_=args.all_, edit=args.edit, path=args.path, origin=args.origin,
+                                     force=args.force, cwd=cwd), args)
+    if cmd == "setup":
+        from office import configcmd
+        return emit(configcmd.setup(tier=args.tier or "user", yes=args.yes, cwd=cwd), args)
     if cmd == "doctor":
         from office import doctor
         return emit(doctor.doctor(fix=args.fix, probe_vision=args.probe_vision), args)

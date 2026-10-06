@@ -9,7 +9,7 @@ The goal is simple: take a human intent and turn it into a reviewable, resumable
 - **Distribution:** `auto-office`
 - **Python package:** `office`
 - **CLI:** `office`
-- **Current release:** 3.3.1
+- **Current release:** 3.3.2
 - **State authority:** SQLite `runs.db` (WAL)
 - **Core rule:** agents decide; the runtime records, isolates, routes, verifies, and resumes
 
@@ -423,6 +423,27 @@ prompt / CLI > repo config > user config > plugin defaults
 ```
 
 The repo layer lives at `.auto-office/config.yaml`; user defaults live at `~/.config/auto-office/config.yaml`.
+
+### Setting preferences: `office config` and `office setup`
+
+`office config` edits those files like `git config`; `office setup` is the interactive version.
+
+```bash
+office setup                                   # prompts per role, then cost policy; --repo for this repository
+office config roles.code_reviewer.preferred_seed claude/sonnet@high,codex/luna@xhigh
+office config roles.code_reviewer.preferred_seed   # read the effective value
+office config cost_policy.default quota_saver --repo
+office config --list [--all] [--show-origin]   # what the files set (--all: every effective value)
+office config --unset roles.code_reviewer.preferred_seed
+office config --edit | --path                  # open in $EDITOR (validated afterwards) | print file paths
+```
+
+- Writes go to the user file by default and to `.auto-office/config.yaml` with `--repo`. Only the keys you set are written, never the shipped defaults.
+- A `preferred_seed` takes the same `[harness/]model[@effort]` form as `office dispatch --as`, most preferred first. Any role can carry one, including `executor`, where it is one soft term in routing.
+- Every edit is resolved and validated before it is written: unknown keys and models (with suggestions), efforts the model lacks, and invalid policy values are refused. `--force` sets a key the shipped config does not define.
+- Rewriting drops YAML comments; a file that had any is copied to `<file>.bak` first.
+- New runs pick the change up. A running run keeps the policy it pinned at `office start`.
+- Preferences are soft: floors, trust, quota, and task shape still apply. To force a route for one task, use `office dispatch --as` / `--review-as`.
 
 The shipped cost policies are `money_saver`, `quota_saver`, and `balanced`. The default is `balanced`, with a protected provider quota reserve. Cost only influences candidates that have already cleared the required gates. For executors and workers each policy is a weight set under `routing.adaptive.weights`, and `routing.adaptive.budget_ceiling_usd` is the one cost-based cut-off; `cost_policy.balanced_money_band_percent` now applies only to planner and reviewer routing.
 
