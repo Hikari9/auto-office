@@ -1,8 +1,8 @@
 """Per-task GitHub PRs (3.2): every task branch is pushed and has a draft PR.
 
 A root task's PR targets the repository's default branch; a task that depends
-on another, or was stacked on it at dispatch, targets that task's branch, so GitHub shows the stack the plan
-diagram shows. Executors push work in progress themselves; at submit the
+on another, or was stacked on it at dispatch, targets that task's branch, so
+GitHub shows the stack the plan diagram shows. Executors push work in progress themselves; at submit the
 runtime moves the branch to the reviewed revision and pushes it, so the PR
 head is always what the gates judged. Verdicts are posted as one line (never
 evidence), and a PR leaves draft when its task is accepted.
