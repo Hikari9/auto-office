@@ -61,7 +61,10 @@ def change_route(con, run: dict, target: str | None, as_route: str | None, quote
             new, how = _relaunch(con, run, task, cur, cand)
             change.update(relaunch=new, how=how)
             lines[0] = f"{tid} {d['id']} route {before} -> {after} (recorded)"
-            lines.append(f"{tid} -> {new} executor {how} on {after} launching; {d['id']} interrupted")
+            stopped = (f"{d['id']} interrupted" if cur.get("launcher") not in (None, "external", "sync") else
+                       f"{d['id']} is not under Office's process control: stop its agent by hand (its lease is "
+                       "revoked, so a late submit is fenced out)")
+            lines.append(f"{tid} -> {new} executor {how} on {after} launching; {stopped}")
         state.emit(con, run, "route.changed", f"{tid} {d['id']} route {before} -> {after}"
                    + (f" (restarted as {new})" if new else ""), task_id=tid, dispatch_id=d["id"], payload=change)
     if restart:

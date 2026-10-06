@@ -119,7 +119,6 @@ def test_refused_after_submit(live):
 @pytest.mark.parametrize("pin,dropped", [("claude/claude-haiku-4-5@low", True), ("codex/gpt-6-luna@xhigh", False)])
 def test_a_pinned_review_that_now_shares_the_family_routes_again(live, pin, dropped):
     con = live.con()
-    # The producer starts on gpt so a claude pin is independent until the change.
     con.execute("UPDATE tasks SET review_override_json=? WHERE id='T1'", (json.dumps({"as": pin, "by": "user"}),))
     con.commit()
     code, out = live.office("amend", "route", "T1", "--as", NEW, "--quote", QUOTE, env=EXTERNAL)
@@ -140,6 +139,7 @@ def test_restart_without_resume_starts_fresh_on_the_same_worktree(live, monkeypa
     old = dict(con.execute("SELECT * FROM dispatches WHERE task_id='T1'").fetchone())
     res = routechange.change_route(con, _run(con), "T1", NEW, QUOTE, restart=True)
     assert any("fresh session (worktree preserved)" in line for line in res.lines), res.lines
+    assert any("stop its agent by hand" in line for line in res.lines), "an external agent cannot be signalled"
     rows, _ = _snapshot(con)
     assert len(rows) == 2
     prev, new = rows
