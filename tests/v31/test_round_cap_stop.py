@@ -47,11 +47,26 @@ def test_submit_accepts_and_consumes_a_clean_ledger(env):
 
 @pytest.mark.integration
 @pytest.mark.approved
-def test_submit_refuses_a_ledger_fix_for_changed_work(env):
+def test_submit_accepts_changed_work_without_a_ledger(env):
     wenv, wt, _ = _dispatched(env)
     (wt / "OFFICE_SELF_REVIEW.md").unlink()
 
     code, out = env.office("submit", cwd=wt, env=wenv)
 
-    assert code == 4 and "no OFFICE_SELF_REVIEW.md" in out, out
-    assert not env.con().execute("SELECT 1 FROM revisions WHERE task_id='T1'").fetchone()
+    assert code == 0 and "captured" in out, out
+    assert env.con().execute("SELECT 1 FROM revisions WHERE task_id='T1'").fetchone()
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+def test_submit_captures_uncommitted_in_scope_work_with_a_clean_ledger(env):
+    wenv, wt, _ = _dispatched(env)
+    with (wt / "calc.py").open("a") as f:
+        f.write("# pending submit edit\n")
+
+    code, out = env.office("submit", cwd=wt, env=wenv)
+
+    assert code == 0 and "captured" in out, out
+    revision = env.con().execute("SELECT commit_sha FROM revisions WHERE task_id='T1'").fetchone()
+    assert revision
+    assert "pending submit edit" in env.git("show", f"{revision['commit_sha']}:calc.py", cwd=wt)

@@ -313,22 +313,26 @@ def _in_scope_changes(wt: Path, task: dict, changed: list[str]) -> tuple[list[st
     return mine(changed), mine(pending)
 
 
-def ledger_verdict(wt: Path, task: dict, changed: list[str], head: str, tier: str = "deep") -> tuple[list[str], list[str]]:
+def ledger_verdict(wt: Path, task: dict, changed: list[str], head: str, tier: str = "deep", *,
+                   submission: bool = False) -> tuple[list[str], list[str]]:
     """(stop, fix) for the task's self-review ledger; both empty when none is owed. The ledger names
-    HEAD, so uncommitted in-scope work is a fix: it would ship without the review the ledger vouches for."""
+    HEAD, so uncommitted in-scope work is a preflight fix. Submit captures that work and applies only
+    the ledger's stop/fix verdict, preserving ledger-less submissions that were legal before the gate."""
     name = briefs.LEDGER_FILE
     if paths.git(wt, "ls-files", "--", name, check=False).strip() or paths.git(wt, "ls-tree", "HEAD", "--", name, check=False).strip():
         return [], [f"ledger: {name} is committed or staged; leave it untracked: git rm --cached {name} (commit "
                     "that removal), then update the ledger's COMMIT"]
     committed, pending = _in_scope_changes(wt, task, changed)
-    if not committed and not pending:
+    if not submission and not committed and not pending:
         return [], []
     uncommitted = [f"ledger: uncommitted in-scope changes ({', '.join(pending[:6])}): commit them first, the "
-                   "ledger names HEAD"] if pending else []
+                   "ledger names HEAD"] if pending and not submission else []
     text = submit._read_untracked_text(wt, name, briefs.LEDGER_MAX_CHARS)
     if text is None and os.path.lexists(wt / name):
         return [], uncommitted + [f"ledger: {name} must be a regular untracked file (not a symlink or hard link)"]
     if text is None:
+        if submission:
+            return [], []
         return [], uncommitted + [f"ledger: no {name}; run the SELF-REVIEW and write it in this worktree root in "
                                   "the format the brief gives"]
     if len(text) > briefs.LEDGER_MAX_CHARS:
@@ -353,7 +357,8 @@ def ledger_round(wt: Path) -> int | None:
 
 
 def ledger_gate(con, run: dict, task: dict, d: dict, wt: Path, base: str, head: str,
-                dep_bases: list[str], *, stop: list[str], fix: list[str]) -> tuple[list[str], list[str], bool]:
+                dep_bases: list[str], *, stop: list[str], fix: list[str],
+                submission: bool = False) -> tuple[list[str], list[str], bool]:
     """Check the ledger against the committed diff and signal the orchestrator when required.
 
     `stop` and `fix` are preflight's other findings, so both commands choose the
@@ -365,7 +370,8 @@ def ledger_gate(con, run: dict, task: dict, d: dict, wt: Path, base: str, head: 
             also = set(_git(wt, "diff", "--name-only", "-z", b, head).split("\0"))
             changed = [f for f in changed if f in also]
     ledger_stop, ledger_fix = ledger_verdict(
-        wt, task, changed, head, briefs.self_review_tier(run.get("gear"), run.get("risk_json")))
+        wt, task, changed, head, briefs.self_review_tier(run.get("gear"), run.get("risk_json")),
+        submission=submission)
     all_stop = stop + ledger_stop
     all_fix = fix + ledger_fix
     signaled = bool(all_stop or (all_fix and (ledger_round(wt) or 0) >= briefs.MAX_REVIEW_ROUNDS))

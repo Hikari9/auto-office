@@ -498,7 +498,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     base = d["base_commit"]
     dep_bases = [b for b in _dependency_bases(con, run, task, head) if b != base]
     ledger_stop, ledger_fix, signaled = preflight.ledger_gate(
-        con, run, task, d, wt, base, head, dep_bases, stop=[], fix=[])
+        con, run, task, d, wt, base, head, dep_bases, stop=[], fix=[], submission=True)
     if ledger_stop or ledger_fix:
         details = "; ".join(ledger_stop + ledger_fix)
         category = "self-review-ledger-signaled" if signaled else "self-review-ledger"
