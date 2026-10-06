@@ -96,6 +96,13 @@ def check_versions(root=ROOT):
     manifest = root / '.claude-plugin' / 'plugin.json'
     if manifest.exists():
         found['.claude-plugin/plugin.json'] = json.loads(manifest.read_text()).get('version')
+    portable = root / 'plugin.json'
+    if portable.exists():
+        found['plugin.json'] = json.loads(portable.read_text()).get('version')
+    catalog = root / '.claude-plugin' / 'marketplace.json'
+    if catalog.exists():
+        for entry in json.loads(catalog.read_text()).get('plugins', []):
+            found[f".claude-plugin/marketplace.json:{entry.get('name')}"] = entry.get('version')
     project = root / 'pyproject.toml'
     if project.exists():
         found['pyproject.toml'] = tomllib.loads(project.read_text()).get('project', {}).get('version')
