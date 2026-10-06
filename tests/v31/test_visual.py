@@ -14,7 +14,7 @@ requires_playwright = pytest.mark.skipif(
 
 import pytest as _pytest  # noqa: E402
 
-pytestmark = _pytest.mark.integration
+pytestmark = [_pytest.mark.integration, _pytest.mark.review_contract("v3.1")]
 
 
 @pytest.fixture(scope="session", autouse=True)
