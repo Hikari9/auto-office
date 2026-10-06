@@ -754,7 +754,7 @@ def _ingest_checks_convergence(con, run: dict, gate: dict, task: dict, outcome: 
     """#337 task gate: deterministic checks only. Caller holds tx."""
     outcome = checks_outcome(outcome)
     verdict, status = outcome.get("verdict"), outcome.get("status")
-    if verdict is None and status is None:
+    if verdict == "STALE" or (verdict is None and status is None):
         con.execute("UPDATE gates SET status='stale', stale_reason=?, finished_at=? WHERE id=?",
                     (outcome.get("summary"), now_iso(), gate["id"]))
         return
