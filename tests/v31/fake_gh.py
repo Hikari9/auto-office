@@ -44,7 +44,11 @@ def main(argv: list[str]) -> int:
     if argv[:2] == ["issue", "close"]:
         s.setdefault("closed_issues", []).append(argv[2])
     elif argv[:2] == ["repo", "view"]:
-        out = json.dumps(s["repo"])
+        if s.get("repo_view_failures", 0) > 0:
+            s["repo_view_failures"] -= 1
+            code, out = 1, "error connecting to api.github.com: net/http: TLS handshake timeout"
+        else:
+            out = json.dumps(s["repo"])
     elif argv[:2] == ["pr", "list"]:
         head = opt(argv, "--head")
         out = json.dumps([{"number": p["number"], "url": p["url"], "baseRefName": p["base"], "isDraft": p["draft"]}
