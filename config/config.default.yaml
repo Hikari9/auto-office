@@ -279,3 +279,7 @@ intake:
   queue_issues: false
   authorization: preview       # what a queued intake is authorized to do
   ready_to_land: false
+# Local web UI (`office web`). checkouts maps owner/name to a local checkout
+# for repositories no run has used yet.
+web:
+  checkouts: {}
