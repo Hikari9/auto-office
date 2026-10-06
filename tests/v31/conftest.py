@@ -13,6 +13,8 @@ import shutil
 import signal
 import subprocess
 import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -160,6 +162,7 @@ class Env:
     def __init__(self, tmp: Path, monkeypatch, *, restored: bool = False):
         """`restored`: tmp already holds a repository copied from a snapshot."""
         self.approved = False
+        self.trust_snapshots = None  # routes `trust()` has already worked out, by inputs; the env fixture sets it
         self.tmp = tmp
         self.home = tmp / "home"
         self.data = tmp / "data"
@@ -296,19 +299,60 @@ class Env:
         from office import db
         return db.connect()
 
+    def _trust_inputs(self):
+        """Everything `trust()` derives its routes from. Calls with equal inputs record the same triples."""
+        from office import adapters, candidates, routing, scoring
+        from office.util import sha256_obj
+        all_adapters = adapters.load_all()
+        user_config = Path(os.environ["OFFICE_USER_CONFIG"])
+        found = {}  # what each adapter finds on PATH: an untouched fake of ours (by name), or whatever else it is
+        for name, adapter in all_adapters.items():
+            exe = shutil.which(adapters.executable(adapter) or "")
+            fake = exe and Path(exe) in self.fakes and Path(exe).read_text() == self.fakes[Path(exe)]
+            found[name] = Path(exe).name if fake else exe
+        data = sha256_obj([all_adapters, candidates.catalog_rows(), found,
+                           user_config.read_text() if user_config.is_file() else None])
+        # a test that replaces any of these functions gets its own routes
+        return (data, candidates.build_candidates, candidates.catalog_rows, adapters.load_all, adapters.installed,
+                adapters.harness_version, routing.candidate_id, scoring.record_trust_act)
+
     def trust(self, triple_prefix: str = ""):
-        """Record the user's explicit trust acts for every installed fake route."""
+        """Record the user's explicit trust acts for every installed fake route.
+
+        The first call per module and inputs (`trust_snapshots`, set for tests that are not `approved`)
+        builds the candidates and keeps the acts it recorded. Later calls restore those acts in one
+        transaction: same triples, states, actors and reasons, a fresh id and time for each.
+        """
         sys.path.insert(0, str(SRC))
         from office import candidates, paths, routing, scoring
+        key = None
+        if self.trust_snapshots is not None and not triple_prefix:
+            key = self._trust_inputs()
+        acts = self.trust_snapshots.get(key) if key else None
+        if acts is not None:
+            con = self.con()
+            try:
+                scoring.ensure_trust_schema(con)
+                for act in acts:
+                    con.execute("INSERT INTO adapter_trust_acts VALUES (?,?,?,?,?,?,?)", (
+                        str(uuid.uuid4()), act["triple"], act["target_state"], act["actor_id"], act["reason"],
+                        act["evidence_reference"], datetime.now(timezone.utc).isoformat()))
+                con.commit()
+            finally:
+                con.close()
+            return
+        acts = []
         con = self.con()
         try:
             for role in ("executor", "code_reviewer", "visual_reviewer", "integration_reviewer"):
                 cands, _ = candidates.build_candidates(con, role, probe=False)
                 for c in cands:
-                    scoring.record_trust_act(paths.runs_db(), routing.candidate_id(c), "proven", "user",
-                                             "test fixture: user trusts the fake route")
+                    acts.append(scoring.record_trust_act(paths.runs_db(), routing.candidate_id(c), "proven", "user",
+                                                         "test fixture: user trusts the fake route"))
         finally:
             con.close()
+        if key:
+            self.trust_snapshots[key] = acts
 
     def write_plan(self, text: str, where: Path | None = None, run_id: str | None = None):
         """Write the plan draft of run_id (default: the newest run)."""
@@ -356,6 +400,12 @@ def _approved_snapshot(tmp_path_factory):
     return root / "env", root / "snapshot"
 
 
+@pytest.fixture(scope="module")
+def _trust_snapshots():
+    """The routes `Env.trust()` records, worked out by the first call of each module and inputs."""
+    return {}
+
+
 @pytest.fixture
 def env(request, tmp_path, monkeypatch):
     """An isolated Env. With `@pytest.mark.approved`, one whose default plan is already approved."""
@@ -367,6 +417,7 @@ def env(request, tmp_path, monkeypatch):
         e.approved = True
     else:
         e = Env(tmp_path, monkeypatch)
+        e.trust_snapshots = request.getfixturevalue("_trust_snapshots")
     return _activate(e, monkeypatch)
 
 
