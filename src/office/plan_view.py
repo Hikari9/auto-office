@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from office import adaptive, candidates, contract, planfile, state, visual
+from office import adaptive, candidates, contract, convergence, planfile, state, visual
 from office.util import dumps, loads
 
 # ------------------------------------------------------------------ layout
@@ -132,7 +132,6 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
             dispatch = state.get_dispatch(con, recorded["current_dispatch_id"])
             if dispatch:
                 dispatched_route = dispatch.get("triple")
-        visual_spec = t.get("visual") or {}
         visual_gate = visual.applicability(con, run, t, [])["status"] in ("required", "probe")
         if contract.is_convergence(run):
             task_gates = ["checks"] if t.get("checks") else []
@@ -207,7 +206,7 @@ def checkpoints(run: dict, pv: dict) -> str:
         waves.setdefault(task["wave"], []).append(tid)
     task_steps = []
     for wave in sorted(waves):
-        ids = sorted(waves[wave], key=_tid_key)
+        ids = sorted(waves[wave], key=convergence._tid_key)
         parallel = " | ".join(_accepted(tid, tasks[tid]) for tid in ids)
         task_steps.append(f"wave {wave} {{{parallel}}}")
 
@@ -218,11 +217,6 @@ def checkpoints(run: dict, pv: dict) -> str:
     return " -> ".join([*task_steps, *review_steps, *landing_chain(pv)])
 
 
-def _tid_key(tid: str) -> tuple:
-    match = re.match(r"([A-Za-z]+)(\d+)$", tid)
-    return (match.group(1), int(match.group(2))) if match else (tid, 0)
-
-
 def _accepted(tid: str, task: dict) -> str:
     gates = task.get("gates") or []
     suffix = f" [{', '.join(gates)}]" if gates else ""
@@ -231,40 +225,15 @@ def _accepted(tid: str, task: dict) -> str:
 
 def _convergence_checkpoints(tasks: dict[str, dict], *, code_review: bool) -> list[str]:
     """List the convergence and visual reviews for each connected ownership lane."""
-    parent = {tid: tid for tid in tasks}
-
-    def find(tid: str) -> str:
-        while parent[tid] != tid:
-            parent[tid] = parent[parent[tid]]
-            tid = parent[tid]
-        return tid
-
-    def union(left: str, right: str) -> None:
-        a, b = find(left), find(right)
-        if a != b:
-            parent[max(a, b, key=_tid_key)] = min(a, b, key=_tid_key)
-
-    lane_owner: dict[str, str] = {}
-    for tid, task in tasks.items():
-        for dep in task.get("depends") or []:
-            if dep in parent:
-                union(tid, dep)
-        lane = task.get("lane")
-        if lane:
-            if lane in lane_owner:
-                union(tid, lane_owner[lane])
-            else:
-                lane_owner[lane] = tid
-
-    lanes: dict[str, list[str]] = {}
-    for tid in tasks:
-        lanes.setdefault(find(tid), []).append(tid)
+    lanes = convergence.group_planned_tasks(
+        [{"id": tid, "depends": task.get("depends"), "lane": task.get("lane")}
+         for tid, task in tasks.items()])
     checkpoints = []
     lane_by_converge: dict[str, list[str]] = {}
-    for tids in sorted(lanes.values(), key=lambda group: min(map(_tid_key, group))):
-        tids.sort(key=_tid_key)
-        names = sorted({tasks[tid].get("lane") for tid in tids if tasks[tid].get("lane")})
-        lane_id = "L-" + (names[0] if names else tids[0])
+    for lane in lanes:
+        tids = lane["tasks"]
+        names = lane["lane_names"]
+        lane_id = lane["id"]
         label = f"lane {names[0]}" if names else f"lane {', '.join(tids)}"
         if code_review:
             checkpoints.append(f"{label} convergence review")

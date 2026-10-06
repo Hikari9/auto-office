@@ -103,6 +103,22 @@ def test_checkpoints_match_each_review_contract():
     assert "convergence review" not in legacy and "visual review" not in legacy
 
 
+def test_checkpoints_use_shared_convergence_lane_grouping(monkeypatch):
+    calls = []
+    group = plan_view.convergence.group_planned_tasks
+
+    def observe(tasks):
+        calls.append(tasks)
+        return group(tasks)
+
+    monkeypatch.setattr(plan_view.convergence, "group_planned_tasks", observe)
+    plan_view.checkpoints(
+        {"gates": {"review_contract": "convergence-v1", "code_review": True}},
+        {"tasks": {"T1": {"wave": 1, "gates": [], "depends": [], "lane": "alpha",
+                            "converge": [], "visual_gate": False}}})
+    assert calls == [[{"id": "T1", "depends": [], "lane": "alpha"}]]
+
+
 def test_dispatched_route_is_rendered_and_omitted_from_amendment_churn():
     previous = {"tasks": {"T1": {"title": "Build", "wave": 1, "base": None, "needs": [],
                                  "route": "codex/preview@high", "review": None}}}
