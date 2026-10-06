@@ -224,6 +224,35 @@ def test_a_reused_pid_is_not_taken_for_the_server(tmp_path, monkeypatch):
     assert server.stop().lines == ["office web is not running"] and not server.pid_file().exists()
 
 
+def test_serve_records_a_start_time_that_status_recognizes(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFFICE_STATE_HOME", str(tmp_path / "st"))
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "user.yaml"))
+    ready = threading.Event()
+    t = threading.Thread(target=server.serve, args=("127.0.0.1", 0, "small", ready), daemon=True)
+    t.start()
+    assert ready.wait(30)
+    try:
+        info = server.read_pid()
+        assert info["started"] and info["started"] == server._started(os.getpid())
+        monkeypatch.setenv("TZ", "America/Los_Angeles")  # another shell's zone must not matter
+        assert server.status().data["pid"] == os.getpid()
+    finally:
+        port = server.read_pid()["port"]
+        server_httpd_stop(port)
+        t.join(20)
+    assert not server.pid_file().exists() and not list(server.web_dir().glob("*.tmp"))
+
+
+def server_httpd_stop(port):
+    """serve() in a thread has no SIGTERM handler: stop it the way the handler does."""
+    import gc
+    for obj in gc.get_objects():
+        if isinstance(obj, server._Server) and obj.server_address[1] == port:
+            threading.Thread(target=obj.shutdown, daemon=True).start()
+            return
+    pytest.fail("server not found")
+
+
 def test_status_and_stop_without_a_server(tmp_path, monkeypatch):
     monkeypatch.setenv("OFFICE_STATE_HOME", str(tmp_path / "st"))
     assert server.status().lines == ["office web is not running"]

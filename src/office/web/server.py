@@ -232,7 +232,8 @@ def pid_file() -> Path:
 def _started(pid: int) -> str | None:
     """The process start time `ps` reports (macOS and Linux), to tell a reused pid apart."""
     try:
-        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10,
+                             env={**os.environ, "TZ": "UTC", "LC_ALL": "C"})  # same text from any shell
     except (OSError, subprocess.SubprocessError):
         return None
     return out.stdout.strip() or None
@@ -287,7 +288,7 @@ def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT, fixture: str | None
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, stop)
         web_dir().mkdir(parents=True, exist_ok=True)
-        tmp = pid_file().with_suffix(".tmp")
+        tmp = web_dir() / f"web.pid.{os.getpid()}.tmp"
         tmp.write_text(json.dumps({"pid": os.getpid(), "started": _started(os.getpid()),
                                    "host": httpd.server_address[0], "port": real_port, "url": url,
                                    "fixture": fixture}), encoding="utf-8")
@@ -301,6 +302,7 @@ def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT, fixture: str | None
     finally:
         service.close()
         httpd.server_close()
+        (web_dir() / f"web.pid.{os.getpid()}.tmp").unlink(missing_ok=True)
         info = read_pid()
         if info and info["pid"] == os.getpid():
             pid_file().unlink(missing_ok=True)

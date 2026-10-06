@@ -365,3 +365,25 @@ def test_executor_crash_mid_command_leaves_unknown(svc):
     svc.executor = Boom()
     out = svc.submit(cmd("cmd-boom-0001", "demote", {"run_id": run["run_id"]}), wait=True)
     assert out["status"] == "unknown"
+
+
+def test_close_does_not_hang_on_a_stuck_command(tmp_path, monkeypatch):
+    import threading
+    import time
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "user.yaml"))
+    s = server.build_fixture("small", home=tmp_path / "fx2").start()
+    stuck = threading.Event()
+
+    class Stuck:
+        timeout, calls = 0.1, []
+
+        def run(self, args, cwd):
+            stuck.wait(30)
+            from office.web.executor import Outcome
+            return Outcome("completed", {})
+    s.executor = Stuck()
+    s.submit(cmd("cmd-stuck-001", "demote", {"run_id": live_run(s)["run_id"]}))
+    began = time.time()
+    s.close()
+    assert time.time() - began < 10
+    stuck.set()

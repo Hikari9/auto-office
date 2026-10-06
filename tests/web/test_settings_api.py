@@ -74,5 +74,10 @@ def test_config_args():
     # A value that looks like a flag stays a value: it cannot switch tier, unset or force.
     assert settings.config_args("settings_set", "machine", "a.b", "--repo")[-3:] == ["--", "a.b", "--repo"]
     assert settings.config_args("settings_unset", "machine", "a.b") == ["config", "--user", "--unset", "--", "a.b"]
+    from office import cli
+    args = cli._parser().parse_args(settings.config_args("settings_set", "machine", "a.b", "--repo"))
+    assert (args.tier, args.key, args.value, args.unset) == ("user", "a.b", "--repo", False)
+    args = cli._parser().parse_args(settings.config_args("settings_unset", "repository", "a.b"))
+    assert (args.tier, args.key, args.value, args.unset) == ("repo", "a.b", None, True)
     with pytest.raises(ValueError):
         settings.config_args("settings_set", "run-pinned", "a.b", 1)

@@ -220,8 +220,11 @@ class Service:
         self.stopping.set()
         with self.cond:
             self.cond.notify_all()
+        limit = getattr(self.executor, "timeout", 0) + 5
         for t in list(self.threads.values()):
-            t.join()  # receipts need the writer: let in-flight commands record their outcome (bounded by the executor timeout)
+            t.join(limit)  # let in-flight commands record their outcome; a hung one stays `running` -> unknown at restart
+            if t.is_alive():
+                log.warning("office web: %s still running at shutdown; its receipt becomes unknown on restart", t.name)
         if self.observer:
             self.observer.close()
         if self.writer:
