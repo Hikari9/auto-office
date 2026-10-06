@@ -98,6 +98,21 @@ def _preview_one(con, config: dict, run: dict, role: str, tid: str, *,
     return out
 
 
+def _dispatched_routes(con, run_id: str, tasks: list[dict]) -> dict[str, str]:
+    """Current routes for tasks with active dispatches, keyed by task id."""
+    if not tasks:
+        return {}
+    recorded_tasks = {t["id"]: t for t in state.tasks(con, run_id)}
+    routes = {}
+    for task in tasks:
+        recorded = recorded_tasks.get(task["id"])
+        dispatch_id = recorded and recorded.get("current_dispatch_id")
+        dispatch = state.get_dispatch(con, dispatch_id) if dispatch_id else None
+        if dispatch and dispatch.get("triple"):
+            routes[task["id"]] = dispatch["triple"]
+    return routes
+
+
 def preview(con, run: dict, tasks: list[dict]) -> dict:
     """Route every executor task and its code reviewer as a non-binding preview."""
     config = state.pinned_config(run)
@@ -107,7 +122,7 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
     quota_snapshot = candidates.probe_quota_snapshot(
         con, roles, family_floors=config.get("model_family_floors")) if tasks else {}
     quota_event_seen: set[str] = set()
-    recorded_tasks = {t["id"]: t for t in state.tasks(con, run["id"])}
+    dispatched_routes = _dispatched_routes(con, run["id"], tasks)
     out = {}
     audits = []
     loads: dict[int, dict[str, int]] = {}
@@ -126,12 +141,7 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
         if code_review:
             rv = _preview_one(con, config, run, "code_reviewer", t["id"], quota_snapshot=quota_snapshot,
                               quota_event_seen=quota_event_seen)
-        recorded = recorded_tasks.get(t["id"])
-        dispatched_route = None
-        if recorded and recorded.get("current_dispatch_id"):
-            dispatch = state.get_dispatch(con, recorded["current_dispatch_id"])
-            if dispatch:
-                dispatched_route = dispatch.get("triple")
+        dispatched_route = dispatched_routes.get(t["id"])
         visual_gate = visual.applicability(con, run, t, [])["status"] in ("required", "probe")
         if contract.is_convergence(run):
             task_gates = ["checks"] if t.get("checks") else []

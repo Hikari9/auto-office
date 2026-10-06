@@ -85,6 +85,7 @@ def test_plan_preview_shares_one_quota_snapshot_across_tasks_and_roles(monkeypat
     con = object()
     monkeypatch.setattr(state, "pinned_config", lambda run: {})
     monkeypatch.setattr(state, "current_requirements", lambda con, run_id: {"frozen": {"end_state": "ask"}})
+    monkeypatch.setattr(plan_view, "_dispatched_routes", lambda con, run_id, tasks: {})
     monkeypatch.setattr("office.prs.settings", lambda con, run: {})
     monkeypatch.setattr(candidates.adapters, "load_all", lambda: {"codex": {"id": "codex"}})
     monkeypatch.setattr(candidates, "build_candidates", lambda *a, **kw: ([{"adapter_id": "codex"}], []))
