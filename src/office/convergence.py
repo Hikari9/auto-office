@@ -805,7 +805,7 @@ def settle(con, run: dict, scope: dict) -> None:
     rechecks = [g for g in unmet.values() if g["verdict"] == "RECHECK"]
     if blocked and not rechecks:
         g = blocked[0]
-        exhausted = g.get("review_status") == contract.UNAVAILABLE
+        exhausted = g.get("review_status") in FALLBACK_STATUSES
         _set_scope(con, run, scope["id"], status="unavailable" if g.get("review_status") == contract.UNAVAILABLE
                    else "evidence_blocked" if g.get("review_status") == contract.EVIDENCE_BLOCKED else "attention",
                    detail=f"{g['kind']} {g.get('review_status')}: {(g.get('summary') or '')[:200]}",
@@ -970,15 +970,17 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
             if waiting:
                 return (f"{sid} RECHECK repairs wait for you, run them in parallel: "
                         + " ; ".join(f"office rerun {t} --resume|--fresh" for t in waiting))
-        if s["status"] == "unavailable":
+        if s["status"] in ("unavailable", "attention"):
             st = scope_state(state.get_run(con, run["id"]), sid)
             if st.get("fallback_available"):
                 kind = "visual" if st.get("fallback_kind") == "visual" else "convergence"
                 inspect = " --inspected <every screenshot>, only if you can view them" if kind == "visual" else ""
-                return (f"{sid}: every specialist reviewer route failed (runtime status, not a verdict). office resume "
-                        f"retries the chain; or review it yourself as the recorded degraded fallback: "
-                        f"office review {sid}:{kind} --report <file>{inspect}; or waive with landing authority")
-            return f"{sid}: a review is unavailable ({s['detail']}); office resume retries it, or waive it"
+                return (f"{sid}: no specialist reviewer returned a verdict (runtime status, not a verdict). As the "
+                        f"orchestrator you are authorized to review on the reviewer's behalf, recorded as the degraded, "
+                        f"non-independent fallback: office review {sid}:{kind} --report <file>{inspect}; or office "
+                        f"resume retries the chain; or waive with landing authority")
+            if s["status"] == "unavailable":
+                return f"{sid}: a review is unavailable ({s['detail']}); office resume retries it, or waive it"
         if s["status"] in ("evidence_blocked", "attention", "conflict", "blocked"):
             return (f"{sid} {s['status']}: {s['detail']}; fix the cause, then office resume (a waiver needs landing "
                     f"authority: office approve waive {sid}:<convergence|visual> ...)")
@@ -1208,6 +1210,9 @@ def _decide_plan(con, run: dict, choice: str, quote: str, reason: str | None) ->
                   next="revise the plan, then office amend plan --contract -- \"<what changed>\" (or office submit)")
 
 
+FALLBACK_STATUSES = (contract.UNAVAILABLE, contract.INVALID_RESULT)
+
+
 def fallback_review(con, run: dict, spec: str, report: Path, *, inspected: list[str]) -> Result:
     """The orchestrator reviews a convergence gate itself once every specialist
     route failed: recorded as degraded and non-independent (#337). For visual,
@@ -1232,9 +1237,12 @@ def fallback_review(con, run: dict, spec: str, report: Path, *, inspected: list[
             raise Usage("unknown-scope", f"no lane or shared scope {scope_id}")
         st = scope_state(run, scope["id"])
         g = _latest(con, run, scope["id"], st.get("commit") or "").get(kind)
-        if g is None or g["status"] != "done" or g.get("review_status") != contract.UNAVAILABLE:
+        # The orchestrator may review on behalf of any reviewer that did not
+        # return a verdict: every route failed (UNAVAILABLE) or the last one
+        # never produced a parseable reply (INVALID_RESULT).
+        if g is None or g["status"] != "done" or g.get("review_status") not in FALLBACK_STATUSES:
             raise Refused("fallback-not-allowed", f"{scope['id']} {kind}: the degraded fallback is only for a review "
-                          "every specialist reviewer route failed to give", scope=scope["id"],
+                          "no specialist reviewer returned a verdict for", scope=scope["id"],
                           next_step="office resume retries the reviewer chain")
         if kind == "visual":
             row = con.execute("SELECT path FROM evidence WHERE gate_id=? AND kind='capture_receipt' ORDER BY created_at "

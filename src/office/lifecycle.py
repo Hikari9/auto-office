@@ -254,14 +254,11 @@ def reconcile(con, run: dict) -> list[str]:
             notes.append(f"{d['task_id']} worker process is gone")
             from office import dispatch
             dispatch.after_worker_exit(con, run, d["id"])
-    # A revision planned with no gates before acceptance was evaluated on
-    # submit (or by an older runtime) has nothing left to trigger it.
+    # A submitted revision with no gate still pending has nothing left to
+    # trigger its acceptance: it was planned with no gates, or its gates ended
+    # while something else held it (an open plan review or blocking finding).
     from office import gates
-    for t in con.execute("SELECT t.id FROM tasks t WHERE t.run_id=? AND t.status='submitted' AND t.current_revision_id IS NOT NULL "
-                         "AND NOT EXISTS (SELECT 1 FROM gates g WHERE g.revision_id=t.current_revision_id)",
-                         (run["id"],)).fetchall():
-        if gates.evaluate_acceptance(con, run, t["id"]):
-            notes.append(f"{t['id']} accepted (no gate required by policy)")
+    notes += [f"{tid} accepted" for tid in gates.reevaluate_submitted(con, run)]
     jobs.reclaim(con, run["id"])
     return notes
 

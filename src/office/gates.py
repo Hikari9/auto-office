@@ -450,6 +450,24 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             # (R13), never from pane or transcript text.
             text, parsed, attention = _reprompt_until_valid(con, run, d, ddir, output, parsed,
                                                             plan_review=plan_review, visual=visual)
+            never_replied = not (output.is_file() and output.stat().st_size > 0)
+            if attention and never_replied and convergence and not pinned:
+                # Every re-prompt came back empty: the reviewer never worked (a
+                # quota wall the harness did not report, a brief that never
+                # landed). That is a launch failure, so the next route runs
+                # instead of the gate ending INVALID_RESULT on this one (#384).
+                (ddir / "pane-tail.txt").unlink(missing_ok=True)  # re-read after the re-prompts
+                log_text = _log_text(state.get_dispatch(con, dispatch_id), ddir)
+                wall = "quota" if _quota_signature(log_text) else "auth" if _auth_signature(log_text) else None
+                failures.append(f"{triple}: no reply after re-prompts" + (f" [{wall}]" if wall else ""))
+                # A harness that silently answers nothing is walled for every
+                # model on it, so the chain moves to another harness.
+                excluded.update({triple, f"harness:{cand['harness']}"})
+                with db.transaction(con):
+                    con.execute("UPDATE gates SET env_failures=env_failures+1 WHERE id=?", (gate["id"],))
+                    con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?",
+                                (dispatch_id,))
+                continue
             if attention:
                 with db.transaction(con):
                     state.record_evidence(con, run["id"], "review_output", output if output.is_file() else None,
@@ -515,8 +533,20 @@ def _reply_text(d: dict, ddir: Path, output: Path) -> str:
 
 
 def _log_text(d: dict, ddir: Path) -> str:
-    log = Path(d.get("log_path") or ddir / "output.log")
-    return log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+    """The harness's own output. A herdr pane agent has no log file, so its
+    pane text stands in (saved once to pane-tail.txt): a quota or auth wall
+    the harness prints but does not exit on shows only there (#384)."""
+    tail = ddir / "pane-tail.txt"
+    if d.get("launcher") == "herdr" and d.get("pane_id") and not tail.is_file() and shutil.which("herdr"):
+        from office import dispatch as dispatch_mod
+        snap = dispatch_mod._pane_snapshot(dispatch_mod.herdr_agent_name(d["id"]), d["pane_id"])
+        if snap:
+            tail.write_text(snap, encoding="utf-8")
+    text = ""
+    for log in (Path(d.get("log_path") or ddir / "output.log"), ddir / "pane-tail.txt"):
+        if log.is_file():
+            text += log.read_text(encoding="utf-8", errors="replace")[-4000:] + "\n"
+    return text
 
 
 def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, parsed, *, plan_review: bool,
@@ -1143,6 +1173,21 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
     from office import integration
     integration.maybe_queue(con, run)
     return True
+
+
+def reevaluate_submitted(con, run: dict) -> list[str]:
+    """Re-run acceptance for every submitted task whose current revision has no
+    gate still pending. Acceptance is otherwise evaluated only when a gate ends,
+    so a revision whose gates all ended while a plan review, blocking finding or
+    pause held it would sit at `submitted` forever once that hold lifts.
+    Returns the tasks accepted. Caller holds the tx."""
+    accepted = []
+    for t in con.execute("SELECT t.id FROM tasks t WHERE t.run_id=? AND t.status='submitted' AND t.current_revision_id IS NOT NULL "
+                         "AND NOT EXISTS (SELECT 1 FROM gates g WHERE g.revision_id=t.current_revision_id "
+                         "AND g.status IN ('queued','running','waiting'))", (run["id"],)).fetchall():
+        if evaluate_acceptance(con, run, t["id"]):
+            accepted.append(t["id"])
+    return accepted
 
 
 def stale_dependency(con, run: dict, task: dict) -> str | None:
