@@ -441,7 +441,7 @@ def ledger_lines() -> list[str]:
         "    Record severity as found: a fix never lowers it. Low findings are fixed but do not trigger a re-review. A medium",
         "    or high fix that changes behavior gets one fix-diff re-review (the same lenses over the fix diff, as the next",
         "    ROUND, with the findings kept).",
-        f"    The {MAX_REVIEW_ROUNDS}-round cap: a medium or high finding still open in round {MAX_REVIEW_ROUNDS} stops you.",
+        f"    At the {MAX_REVIEW_ROUNDS}-round cap, a medium or high finding still open stops you.",
         "    Run `office preflight` anyway (it records the stop for the orchestrator), then print the status line and stop.",
         "    Preflight reports a missing, stale, or malformed ledger, a lens with no line, and any open finding as a fix;",
         "    it never skips a bad line.",

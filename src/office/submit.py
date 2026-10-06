@@ -493,22 +493,13 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
         raise Refused("task-paused", f"{task['id']} is {task['status']}: {task.get('pause_reason') or ''}",
                       scope=task["id"], preserved="your worktree", next_step="stop and wait; the orchestrator is resolving it")
     # A duplicate submission is returned above before this check. For a new revision,
-    # apply the same ledger verdict as preflight against committed and pending work.
+    # use the same ledger gate as preflight against committed and pending work.
     from office import preflight
     base = d["base_commit"]
-    changed = [f for f in paths.git(wt, "diff", "--name-only", "-z", base, head).split("\0") if f]
     dep_bases = [b for b in _dependency_bases(con, run, task, head) if b != base]
-    for b in dep_bases:
-        also = set(paths.git(wt, "diff", "--name-only", "-z", b, head).split("\0"))
-        changed = [f for f in changed if f in also]
-    ledger_stop, ledger_fix = preflight.ledger_verdict(
-        wt, task, changed, head, briefs.self_review_tier(run.get("gear"), run.get("risk_json")))
+    ledger_stop, ledger_fix, signaled = preflight.ledger_gate(
+        con, run, task, d, wt, base, head, dep_bases, stop=[], fix=[])
     if ledger_stop or ledger_fix:
-        verdict = "stop" if ledger_stop else "fix"
-        reasons = ledger_stop or [f"self-review round cap spent with repairs outstanding: {item}" for item in ledger_fix]
-        signaled = bool(ledger_stop or (preflight.ledger_round(wt) or 0) >= briefs.MAX_REVIEW_ROUNDS)
-        if signaled:
-            preflight._signal(con, run, task["id"], d, verdict, reasons)
         details = "; ".join(ledger_stop + ledger_fix)
         category = "self-review-ledger-signaled" if signaled else "self-review-ledger"
         next_step = "run office preflight, apply its repairs, then office submit" if not ledger_stop else \

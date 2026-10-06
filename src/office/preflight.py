@@ -352,6 +352,30 @@ def ledger_round(wt: Path) -> int | None:
     return parse_ledger(text)[0]["round"] if text else None
 
 
+def ledger_gate(con, run: dict, task: dict, d: dict, wt: Path, base: str, head: str,
+                dep_bases: list[str], *, stop: list[str], fix: list[str]) -> tuple[list[str], list[str], bool]:
+    """Check the ledger against the committed diff and signal the orchestrator when required.
+
+    `stop` and `fix` are preflight's other findings, so both commands choose the
+    same signal verdict and reasons without duplicating the ledger gate.
+    """
+    changed = [f for f in _git(wt, "diff", "--name-only", "-z", base, head).split("\0") if f]
+    for b in dep_bases:
+        if b != base:
+            also = set(_git(wt, "diff", "--name-only", "-z", b, head).split("\0"))
+            changed = [f for f in changed if f in also]
+    ledger_stop, ledger_fix = ledger_verdict(
+        wt, task, changed, head, briefs.self_review_tier(run.get("gear"), run.get("risk_json")))
+    all_stop = stop + ledger_stop
+    all_fix = fix + ledger_fix
+    signaled = bool(all_stop or (all_fix and (ledger_round(wt) or 0) >= briefs.MAX_REVIEW_ROUNDS))
+    if signaled:
+        verdict = "stop" if all_stop else "fix"
+        reasons = all_stop or [f"self-review round cap spent with repairs outstanding: {item}" for item in all_fix]
+        _signal(con, run, task["id"], d, verdict, reasons)
+    return ledger_stop, ledger_fix, signaled
+
+
 def _signal_next(task_id: str, dispatch_id: str, reason: str) -> str:
     """The command the orchestrator runs for a stopped worker, by what stopped it."""
     if reason.startswith("contract-conflict"):
@@ -460,11 +484,7 @@ def preflight(con, run: dict, cwd: Path) -> Result:
     base = d["base_commit"]
     head = _git(wt, "rev-parse", "HEAD")
     # The committed diff: the self-review ledger vouches for HEAD.
-    changed = [f for f in _git(wt, "diff", "--name-only", "-z", base, head).split("\0") if f]
     dep_bases = [b for b in submit._dependency_bases(con, run, task, head) if b != base]
-    for b in dep_bases:
-        also = set(_git(wt, "diff", "--name-only", "-z", b, head).split("\0"))
-        changed = [f for f in changed if f in also]
     # Submit captures uncommitted edits too, so scope is judged on the worktree as it is now.
     touched = [f for f in _git(wt, "diff", "--no-renames", "--name-only", "-z", base).split("\0") if f]
     for b in dep_bases:
@@ -493,15 +513,13 @@ def preflight(con, run: dict, cwd: Path) -> Result:
     res.data["sed_backups"] = backups
 
     # 7. Self-review ledger: the brief's SELF-REVIEW block says what it holds.
-    ledger_stop, ledger_fix = ledger_verdict(wt, task, changed, head,
-                                             briefs.self_review_tier(run.get("gear"), run.get("risk_json")))
+    ledger_stop, ledger_fix, _ = ledger_gate(con, run, task, d, wt, base, head, dep_bases,
+                                             stop=stop, fix=fix)
     stop += ledger_stop
     fix += ledger_fix
 
     res.data["head"] = head
     verdict = "stop" if stop else "fix" if fix else "wait" if wait else "ready"
-    if verdict == "stop" or (verdict == "fix" and (ledger_round(wt) or 0) >= briefs.MAX_REVIEW_ROUNDS):
-        _signal(con, run, task["id"], d, verdict, stop or [f"self-review round cap spent with repairs outstanding: {f}" for f in fix])
     res.lines = [f"PREFLIGHT {verdict}"] + [f"stop: {s}" for s in stop] + [f"fix: {f}" for f in fix] \
         + [f"wait: {w}" for w in wait] + res.lines
     res.data["verdict"] = verdict
