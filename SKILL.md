@@ -51,7 +51,8 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
    merge only (`merge`), or merge + prod deploy (`e2e`, which is merge and deploy authority). For a
    deploy, show `office land --detect`'s proposed commands and have the user confirm them.
 3. `office start "<goal>" --issue <n> --end-state <answer>` (`--deploy-preview|prod|verify "<cmd>"`
-   as confirmed; `--blast-radius`, `--size-class`, `--irreversible` from your provisional read;
+   as confirmed; `--blast-radius local|repo|production|production-data`, `--size-class S|M|L|XL`,
+   `--irreversible` from your provisional read;
    unset is unknown, never low risk). Never ask about benchmark refreshes; that is the
    `auto-update-benchmarks` skill, run only when the user explicitly calls it.
 4. If the output says a planner was queued, wait (`office wait`). Otherwise you plan inline:
