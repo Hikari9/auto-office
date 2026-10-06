@@ -175,6 +175,13 @@ added or removed, or a change to a task's `scope`, `depends`, `interfaces`, `acc
 `converge` or visual applicability, or a new requirements version. Checks, titles, routes and visual
 details are not seams.
 
+The orchestrator may veto review of an ordinary amendment: `office amend plan --no-review --reason "doc-only
+wording" -- "<delta>"` creates plan p+1 and queues no plan-review gate for it. The reason is required and is
+recorded in a `plan.review_skipped` event. Use it when review adds nothing, such as a typo or wording fix, a
+reordering that moves no seam, or a note to a worker. A gate already queued or running for an earlier version is
+left alone. The veto applies only to ordinary amendments: a contract amendment (`--contract`) or a requirements
+amendment is always reviewed, and `--no-review` on either is refused.
+
 Plan findings are dispositioned with `office disposition plan:<P-id> fixed|dismissed|follow-up --
 "<note>"`. `fix` is refused for plan findings: the planner fixes them in the plan, then you record
 `fixed`.
@@ -341,6 +348,7 @@ office start "<goal>" [--from-run <run>]          new run; --from-run carries an
 office inspect convergence [scope]                lanes, shared scopes, gates, findings, escalations
 office inspect run                                shows the run's review contract
 office amend plan --contract -- "<what changed>"  submit a plan revision after RECHECK or INTAKE_GAP
+office amend plan --no-review --reason "<why>" -- "<delta>"   ordinary amendment, no plan review (never with --contract)
 office rerun <task> --resume|--fresh [--reroute]  run a routed repair (RECHECK or disposition fix)
 office decide <scope|plan> escalate|continue|waive|stop --quote "<user's words>" [--reason "<why>"]
 office disposition <scope>:<code>[,<code>] fix|fixed|dismissed|follow-up -- "<note>"

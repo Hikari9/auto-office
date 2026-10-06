@@ -14,6 +14,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -23,6 +25,7 @@ import office_packets as pk
 EVIDENCE_HASH = "sha256:" + ("a" * 64)
 
 
+@pytest.mark.legacy  # tests the 3.0 scripts/ surface
 class AmendmentTestBase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -241,9 +244,163 @@ class AmendmentTransitionMatrixTests(AmendmentTestBase):
         self.assertEqual(after, before)
 
 
-import pytest as _pytest  # noqa: E402
+# ------------------------------------------------------------------ `office amend --no-review` (the orchestrator's veto)
+#
+# These drive the real CLI against the 3.1 runtime through the isolated Env of tests/v31. They are
+# fast enough to run in the default tier, so the file's own check exercises them.
 
-pytestmark = _pytest.mark.legacy  # tests the 3.0 scripts/ surface
+import importlib.util  # noqa: E402
+import json  # noqa: E402
+import sys  # noqa: E402
+
+_V31 = ROOT / "tests" / "v31"
+
+
+def _v31_conftest():
+    if "v31_env" not in sys.modules:
+        sys.path.insert(0, str(_V31))
+        spec = importlib.util.spec_from_file_location("v31_env", _V31 / "conftest.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["v31_env"] = mod
+        spec.loader.exec_module(mod)
+    return sys.modules["v31_env"]
+
+
+@pytest.fixture
+def veto_env(request, tmp_path, monkeypatch):
+    """An isolated Env; `@pytest.mark.parametrize("veto_env", ["v3.1"], indirect=True)` pins the review contract."""
+    v = _v31_conftest()
+    e = v.Env(tmp_path, monkeypatch, contract=getattr(request, "param", None))
+    e.trust_snapshots = {}
+    return v._activate(e, monkeypatch)
+
+
+APPROVED = "VERDICT: APPROVED\nNEXT proceed"
+MANUAL = {"OFFICE_JOBS": "manual"}
+V31_PASS = "VERDICT: PASS"
+
+
+def _start(env, *, approved: bool, gear: str = "express"):
+    """A started inline run: its plan review is APPROVED, or still queued (jobs manual)."""
+    v = _v31_conftest()
+    env.trust()
+    env.script(plan_reviewer=[{"reply": APPROVED}])
+    job_env = None if approved else MANUAL
+    code, out = env.office("start", "fixture goal", "--gear", gear, "--planner", "inline", env=job_env)
+    assert code == 0, out
+    env.write_plan(v.PLAN_ONE)
+    code, out = env.office("submit", env=job_env)
+    assert code == 0, out
+
+
+def _rows(env, sql, args=()):
+    con = env.con()
+    try:
+        return [dict(r) for r in con.execute(sql, args).fetchall()]
+    finally:
+        con.close()
+
+
+def _plan_gates(env):
+    return _rows(env, "SELECT plan_version, status FROM gates WHERE kind='plan_review' ORDER BY created_at")
+
+
+def _plan_version(env):
+    return _rows(env, "SELECT plan_version FROM runs")[0]["plan_version"]
+
+
+def _veto(env, *extra, delta="reword the docstring", reason="doc-only wording", scope="plan", check=None, jobs=MANUAL):
+    args = ["amend", scope, "--no-review"]
+    if reason is not None:
+        args += ["--reason", reason]
+    return env.office(*args, *extra, "--", delta, check=check, env=jobs)
+
+
+def test_veto_after_approved_review_makes_plan_p2_with_no_new_gate(veto_env):
+    _start(veto_env, approved=True)
+    before = _plan_gates(veto_env)
+    assert [g["status"] for g in before] == ["done"] and _plan_version(veto_env) == 1
+    code, out = _veto(veto_env)
+    assert code == 0, out
+    assert _plan_version(veto_env) == 2
+    assert _plan_gates(veto_env) == before, "a vetoed amendment queues no plan-review gate for p2"
+    assert "rereview" not in out and "plan-review" not in out, out
+    skipped = _rows(veto_env, "SELECT * FROM events WHERE kind='plan.review_skipped'")
+    assert len(skipped) == 1 and "doc-only wording" in json.dumps(skipped[0]) and "p2" in json.dumps(skipped[0])
+
+
+def test_veto_while_review_is_pending_leaves_the_queued_gate_untouched(veto_env):
+    _start(veto_env, approved=False)
+    before = _plan_gates(veto_env)
+    assert [(g["plan_version"], g["status"]) for g in before] == [(1, "queued")], before
+    code, out = _veto(veto_env)
+    assert code == 0, out
+    assert _plan_version(veto_env) == 2
+    assert _plan_gates(veto_env) == before, "the earlier version's queued gate keeps its status; none is added for p2"
+    assert len(_rows(veto_env, "SELECT 1 FROM events WHERE kind='plan.review_skipped'")) == 1
+
+
+def test_veto_leaves_a_running_gate_running(veto_env):
+    _start(veto_env, approved=False)
+    con = veto_env.con()
+    with con:
+        con.execute("UPDATE gates SET status='running' WHERE kind='plan_review'")
+    con.close()
+    code, out = _veto(veto_env)
+    assert code == 0, out
+    assert _plan_gates(veto_env) == [{"plan_version": 1, "status": "running"}]
+
+
+def test_without_the_veto_the_same_amendment_still_queues_review_while_pending(veto_env):
+    """The contrast: no --no-review, a pending review, and p2 does get its own gate."""
+    _start(veto_env, approved=False)
+    code, out = veto_env.office("amend", "plan", "--", "reword the docstring", env=MANUAL)
+    assert code == 0, out
+    assert _plan_version(veto_env) == 2
+    assert [g["plan_version"] for g in _plan_gates(veto_env)] == [1, 2]
+    assert not _rows(veto_env, "SELECT 1 FROM events WHERE kind='plan.review_skipped'")
+
+
+def test_no_review_without_a_reason_is_a_usage_error(veto_env):
+    _start(veto_env, approved=True)
+    for reason in (None, "   "):
+        code, out = _veto(veto_env, reason=reason)
+        assert code == 2 and "--reason" in out and "next:" in out, (code, out)
+    assert _plan_version(veto_env) == 1
+
+
+def test_a_reason_without_no_review_is_a_usage_error(veto_env):
+    _start(veto_env, approved=True)
+    code, out = veto_env.office("amend", "plan", "--reason", "why", "--", "reword")
+    assert code == 2 and "--no-review" in out, (code, out)
+    assert _plan_version(veto_env) == 1
+
+
+@pytest.mark.parametrize("extra,scope", [(("--contract",), "plan"), (("--requirements", "--quote", "u"), "plan"),
+                                          ((), "requirements")])
+def test_no_review_is_refused_for_contract_and_requirements_amendments(veto_env, extra, scope):
+    _start(veto_env, approved=True)
+    code, out = _veto(veto_env, *extra, scope=scope)
+    assert code != 0 and "always get review" in out and "next:" in out, (code, out)
+    assert _plan_version(veto_env) == 1
+    assert len(_plan_gates(veto_env)) == 1
+    assert not _rows(veto_env, "SELECT 1 FROM events WHERE kind IN ('plan.review_skipped','requirements.changed')")
+
+
+@pytest.mark.parametrize("veto_env", ["v3.1"], indirect=True)
+def test_the_v31_path_honours_the_veto(veto_env):
+    env = veto_env
+    _start(env, approved=False)
+    before = _plan_gates(env)
+    assert [(g["plan_version"], g["status"]) for g in before] == [(1, "queued")], before
+    code, out = _veto(env)
+    assert code == 0, out
+    assert _plan_version(env) == 2
+    assert _plan_gates(env) == before
+    assert len(_rows(env, "SELECT 1 FROM events WHERE kind='plan.review_skipped'")) == 1
+    code, out = env.office("amend", "plan", "--", "second, reviewed tweak", env=MANUAL)
+    assert code == 0 and _plan_version(env) == 3
+    assert [g["plan_version"] for g in _plan_gates(env)] == [1, 3], "without the veto p3 queues review as before"
 
 
 if __name__ == "__main__":
