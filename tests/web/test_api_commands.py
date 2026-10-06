@@ -383,7 +383,13 @@ def test_close_does_not_hang_on_a_stuck_command(tmp_path, monkeypatch):
             return Outcome("completed", {})
     s.executor = Stuck()
     s.submit(cmd("cmd-stuck-001", "demote", {"run_id": live_run(s)["run_id"]}))
+    thread = s.threads["cmd-stuck-001"]
     began = time.time()
     s.close()
     assert time.time() - began < 10
+    con = db.connect(s.db_path)
+    assert con.execute("SELECT status FROM commands WHERE id='cmd-stuck-001'").fetchone()[0] == "running"
+    con.close()
     stuck.set()
+    thread.join(10)  # a late outcome after close is logged, not raised
+    assert not thread.is_alive()
