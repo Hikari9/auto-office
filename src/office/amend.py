@@ -18,10 +18,14 @@ from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_bytes
 
 # Words that signal an authority-envelope change (external, irreversible, or
-# destructive action). An "ordinary" amendment carrying one is refused.
+# destructive action). An "ordinary" amendment carrying one is refused. A term that
+# is one part of a hyphen/underscore compound identifier (`send-keys`, `send_keys`,
+# `release-notes`) names a thing, not the action, so it does not count; `--prod` and
+# `force-push` still do.
 AUTHORITY_TERMS = re.compile(
-    r"\b(deploy|production|prod\b|publish|release|send|email|notify users|delete|drop table|truncate|force.?push|"
-    r"merge (to|into) main|migrat(e|ion) (prod|production)|payment|charge|rotate (key|secret)|credentials?)\b", re.I)
+    r"\b(?<!\w-)(?:deploy|production|prod|publish|release|send|email|notify users|delete|drop table|truncate|"
+    r"force.?push|merge (?:to|into) main|migrat(?:e|ion) (?:prod|production)|payment|charge|"
+    r"rotate (?:key|secret)|credentials?)\b(?!-\w)", re.I)
 
 
 def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, requirements: bool = False,
@@ -161,7 +165,8 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
                     (run["id"], version, "ordinary", new_text, dumps(parsed.tasks), dumps(parsed.requirements),
                      "orchestrator", now_iso(), sha256_bytes(new_text.encode()), run["plan_version"], amendment_id))
         sync = plans.sync_tasks(con, run, parsed.tasks, version)
-        affected = sorted(set(scope_ids) | set(sync["acceptance"]) | set(sync["contract"]))
+        # Added tasks are the only affected ones when the plan merely grows: a running task's contract is untouched.
+        affected = sorted(set(scope_ids) | set(sync["acceptance"]) | set(sync["contract"]) | set(sync["added"]))
         if not scope_ids and not affected:
             affected = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] not in ("accepted", "cancelled")]
         for tid in scope_ids:
