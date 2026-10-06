@@ -548,5 +548,5 @@ def trust_report(con: sqlite3.Connection) -> tuple[list[str], list[str]]:
                 line += f" | {vision_note(con, c)}"
             detail.append(line)
         tally = ", ".join(f"{n} {state}" for state, n in sorted(counts.items()))
-        summary.append(f"trust {role}: {len(cands)} routes ({tally}) | per-route detail: office start --verbose")
+        summary.append(f"trust {role}: {len(cands)} routes ({tally}) | per-route detail: office inspect trust")
     return summary, detail

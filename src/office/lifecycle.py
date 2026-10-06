@@ -172,7 +172,7 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         from office import candidates
         report_con = db.connect()
         try:
-            trust_summary, trust_detail = candidates.trust_report(report_con)
+            trust_summary, _ = candidates.trust_report(report_con)
         finally:
             report_con.close()
         for line in trust_summary:
@@ -189,7 +189,7 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         res.data = {"run_id": run_id, "office_version": ver, "gear": gear, "risk": risk, "gates": gates,
                     "planner_mode": planner_mode, "bound": [f"{h}:{s}" for h, s in bound], "warnings": warnings}
         res.verbose = [f"office_version {ver} (created by {exact})", f"state {sdir}", f"base {base_sha[:12]}",
-                       f"bindings {', '.join(f'{h}' for h, _ in bound) or 'none (use OFFICE_RUN_ID or --run)'}", *trust_detail]
+                       f"bindings {', '.join(f'{h}' for h, _ in bound) or 'none (use OFFICE_RUN_ID or --run)'}"]
         return res
     finally:
         con.close()

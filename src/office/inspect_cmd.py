@@ -36,12 +36,14 @@ def inspect(con, run: dict, what: str | None, ident: str | None) -> Result:
         return _plan(con, run, ident)
     if what == "learner":
         return _learner(con, run)
+    if what == "trust":
+        return Result(lines=candidates.trust_report(con)[1])
     if what in ("convergence", "lane", "lanes", "scope"):
         from office import convergence
         lines = convergence.inspect_lines(con, run, ident)
         return Result(lines=lines, data=convergence.receipt(con, run) if contract.is_convergence(run) else {})
     raise Usage("unknown-view", f"cannot inspect {what!r}",
-                next_step="office inspect run|plan|task|gate|evidence|events|route|learner|convergence [id]")
+                next_step="office inspect run|plan|task|gate|evidence|events|route|learner|trust|convergence [id]")
 
 
 def _plan(con, run, ident) -> Result:
