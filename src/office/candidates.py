@@ -524,24 +524,29 @@ def learner_priors(con: sqlite3.Connection, config: dict) -> dict[str, dict[str,
     return out
 
 
-def trust_report(con: sqlite3.Connection) -> list[str]:
-    """One line per candidate route of each trust-gated role, with its derived trust
-    state; non-proven routes carry the exact command a user runs to promote them."""
+def trust_report(con: sqlite3.Connection) -> tuple[list[str], list[str]]:
+    """Return (summary, detail) for each trust-gated role. Summary is one line per role
+    with counts per trust state; detail is one line per candidate route with its derived
+    state, the approve command for non-proven routes, and a vision note for vision roles."""
     from office import routing, scoring
     scoring.ensure_trust_schema(con)
-    lines = []
+    summary, detail = [], []
     for role in sorted(routing.MUTABLE_TRUST_ROLES):
         cands, _ = build_candidates(con, role, probe=False)
         if not cands:
-            lines.append(f"trust {role}: no candidate routes")
+            summary.append(f"trust {role}: no candidate routes")
             continue
+        counts: dict[str, int] = {}
         for c in cands:
             triple = routing.candidate_id(c)
             _, state = scoring.evaluate_trust_state(con, triple)
+            counts[state] = counts.get(state, 0) + 1
             line = f"trust {role} {triple}: {state}"
             if state != "proven":
                 line += f" | office approve trust {triple} --quote \"<user's words>\""
             if KIND_FOR_ROLE.get(role) == "vision" and "vision" not in c["capabilities"]:
                 line += f" | {vision_note(con, c)}"
-            lines.append(line)
-    return lines
+            detail.append(line)
+        tally = ", ".join(f"{n} {state}" for state, n in sorted(counts.items()))
+        summary.append(f"trust {role}: {len(cands)} routes ({tally}) | per-route detail: office start --verbose")
+    return summary, detail
