@@ -1,5 +1,7 @@
 # Auto Office 3.1.0 — implementation
 
+> Superseded for new runs: the review policy here is replaced by [`review-convergence.md`](review-convergence.md) (#337). It still governs runs pinned to the v3.1 review contract.
+
 Status: **implemented** (this document describes the code in `src/office/`). The product and
 design contracts it implements are the [v3.1 Wayfinder](https://github.com/Hikari9/auto-office/issues/152):
 the [charter](https://github.com/Hikari9/auto-office/issues/153#issuecomment-5832359821),

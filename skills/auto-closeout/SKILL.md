@@ -10,7 +10,7 @@ description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use t
 
 A family may report implementation complete only with evidence for: Outcome; Key implementation; Validation; browser/runtime evidence when applicable; Review result; PR/branch state; Remaining real blockers; Pinned runtime hashes.
 
-Reconcile all pending findings and dispositions, stale holders/leases, plan/packet versions, uncommitted state, and validation evidence.
+Reconcile all pending findings and dispositions, stale holders/leases, plan/packet versions, uncommitted state, and validation evidence. Under `convergence-v1`, close waits until every APPROVED finding has an `office disposition` and every required lane or shared-scope review is APPROVED or waived by landing authority.
 
 Record telemetry/outcomes before declaring completion when the recorder is available; telemetry write failure may fail soft, but surface it.
 

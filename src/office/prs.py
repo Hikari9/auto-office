@@ -281,7 +281,14 @@ def _sync(con, run: dict, task: dict, event: str, ref: str) -> dict:
         return {"skipped": "no PR yet"}
     if event == "verdict":
         gate = con.execute("SELECT * FROM gates WHERE id=?", (ref,)).fetchone()
-        kind = {"checks": "checks", "code_review": "code review", "visual": "ui review"}.get(gate["kind"], gate["kind"])
+        kind = {"checks": "checks", "code_review": "code review", "visual": "ui review",
+                "convergence_review": "convergence review"}.get(gate["kind"], gate["kind"])
+        if gate["subject"] == "lane":
+            # #337: one review of the composed lane, posted to each task PR in it.
+            _comment(run, pr, f"office: lane {gate['scope']} {kind} {gate['verdict']} (round {gate['round']}"
+                              + (", degraded orchestrator fallback" if gate["independence"] == "degraded-orchestrator"
+                                 else "") + f") on {gate['revision_id']}")
+            return {"commented": gate["verdict"]}
         _comment(run, pr, f"office: {kind} {gate['verdict']} on {gate['revision_id']} | gates: "
                           f"{_gate_line(con, run, task, gate['revision_id'])}")
         return {"commented": gate["verdict"]}

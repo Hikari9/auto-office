@@ -1,9 +1,18 @@
-"""A plan defect the user can always name, and done criteria the user can drop (#236 B2, #245)."""
+"""A plan defect the user can always name, and done criteria the user can drop (#236 B2, #245).
+
+This suite covers the v3.1 review contract, which every run started before #337 (and any run
+started with review.contract: v3.1) keeps for its whole life; it pins its runs to that contract.
+The convergence contract is covered by test_convergence_contract.py.
+"""
 from __future__ import annotations
 
 import json
 
+import pytest
+
 from conftest import PLAN_TWO
+
+pytestmark = pytest.mark.review_contract("v3.1")
 
 REUSED = ("VERDICT: PLAN_DEFECT\n"
           "FINDING P2 | material | T2 | mul reuses calc.add | implement it directly\n"

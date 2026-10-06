@@ -1,9 +1,16 @@
-"""A dependent built on a dependency revision that review later superseded (#236, #245)."""
+"""A dependent built on a dependency revision that review later superseded (#236, #245).
+
+Runs pin the v3.1 review contract (restacks triggered by per-task review supersession); every run started before #337 keeps it.
+"""
 from __future__ import annotations
+
+import pytest
 
 from pathlib import Path
 
 from conftest import GOOD_ADD, GOOD_MUL, PLAN_TWO, approved_run, task_row
+
+pytestmark = pytest.mark.review_contract("v3.1")
 
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}

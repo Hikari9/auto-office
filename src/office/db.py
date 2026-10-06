@@ -23,7 +23,7 @@ from office import paths
 # Bump when SHARED_COLUMNS or the DDL changes. The version is a record, not the
 # gate: every open also runs the additive column pass (see `migrate`), so a
 # column added without a bump still reaches existing databases.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -78,6 +78,21 @@ SHARED_COLUMNS = {
         "code TEXT", "fingerprint TEXT", "location TEXT", "category TEXT", "action TEXT",
         "measurement_json TEXT", "state TEXT", "origin_gate_id TEXT", "updated_at TEXT",
         "evidence TEXT", "level TEXT",
+        # v5 (#337): convergence-contract findings. `blocking` is the reviewer's
+        # call (independent of severity); `scope` is the lane or shared scope a
+        # convergence finding belongs to; `seam` names a hard seam its repair
+        # crosses; `disposition` closes a non-blocking finding (fixed |
+        # dismissed | follow-up | fix while its repair runs).
+        "contract TEXT", "scope TEXT", "blocking INTEGER", "seam TEXT", "root_cause TEXT", "owners TEXT",
+        "disposition TEXT", "disposition_note TEXT", "disposition_by TEXT", "disposition_at TEXT",
+    ],
+    # v5 (#337): the contract a gate row was judged under, the lane or shared
+    # scope it reviews, its runtime/evidence status (separate from the verdict),
+    # whether the reviewer was independent or the degraded orchestrator
+    # fallback, the reviewer dispatch, and the recommended next action.
+    "gates": [
+        "contract TEXT", "scope TEXT", "review_status TEXT", "independence TEXT", "reviewer_dispatch_id TEXT",
+        "next_action TEXT", "cycle INTEGER",
     ],
     "leases": [
         "task_id TEXT", "fencing INTEGER", "pid INTEGER", "dispatch_id TEXT", "renewed_at TEXT",

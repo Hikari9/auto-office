@@ -115,8 +115,8 @@ def test_install_is_idempotent_backs_up_and_uninstall_removes_only_managed(env, 
 
 def test_dedicated_planner_flow_needs_no_orchestrator_plumbing(env):
     env.trust()
-    env.script(planner=[{"plan": PLAN_ONE, "submit": True}], plan_reviewer=[{"reply": "VERDICT: PASS"}],
-               executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.script(planner=[{"plan": PLAN_ONE, "submit": True}], plan_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}],
+               executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     code, out = env.office("start", "add numbers", "--gear", "full")
     assert code == 0 and "planner P1 queued" in out, out
     code, data = env.ojson("status")
@@ -129,4 +129,4 @@ def test_dedicated_planner_flow_needs_no_orchestrator_plumbing(env):
     assert data["data"]["tasks"]["T1"] == "accepted", data
     # The orchestrator issued: start, status, approve, dispatch, status. No JSON, no receipts.
     roles = [c["role"] for c in env.calls()]
-    assert roles == ["planner", "plan_reviewer", "executor", "code_reviewer"], roles
+    assert roles == ["planner", "plan_reviewer", "executor", "convergence_reviewer"], roles

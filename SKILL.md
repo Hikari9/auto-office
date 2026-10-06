@@ -67,9 +67,6 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 - Dispatch as the approved diagram shows: a wave's roots with `office dispatch T1 T2 --parallel`,
   dependents stacked (`office dispatch T1 T3`). Dispatch runs each task's planned primary route or names the
   fallback it took and why; when every planned route is out, it stops: `office dispatch <task> --reroute`.
-- Lanes come from file disjointness, not plan waves. List append-only registries several tasks touch
-  (gate manifests, endpoint/grant lists, policy maps, shared mocks) under each task's `shared:`; they
-  never serialize tasks or count as double-scope ownership. Scope tests a change predictably breaks.
 - Check suites share a host-wide cap (`verification.check_concurrency`). A quota wall blocks the worker
   without a relaunch; rerun after the reset or with `--as`.
 - To wait on the run, use `office wait`: exit 0 means act, 3 means a stall to resolve, 5 means an agent
@@ -80,10 +77,10 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
   widget; `office prompt` types text, which a widget ignores) or `office answer <task|dispatch> -- "<text>"`.
   Take it to the user (native question tool) only when it hints at a user decision: requirements,
   authority, or an irreversible or external action. Never answer those on your own.
-- Executors push their task branch as they work and submit; the runtime pushes the reviewed revision
-  to the task's draft PR (stacked on its parent's), posts verdicts, and marks it ready on acceptance.
-- Reviewers are dispatched and read by the runtime, only from their reply files, never pane text.
-  A bad reply re-prompts the same reviewer; after three it needs you.
+- Executors push their task branch as they work and submit; the runtime pushes the accepted revision
+  to the task's draft PR (stacked on its parent's), posts review results, and marks it ready on acceptance.
+- Reviewers are dispatched and read by the runtime, only from their reply files, never pane text. A bad reply
+  re-prompts the same reviewer (no round spent); after three it needs you.
 - Never run commands inside a task worktree yourself. Tools there leave files behind (`uv run` writes
   `uv.lock`), and `office submit` then refuses them as out of scope. Reproduce a check in a scratch copy.
 - A task `checks:` command must install what its tests import (e.g. `uv run --extra visual ...` for
@@ -98,41 +95,46 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
   `contract-conflict` stops with the ACCEPT line quoted; submit consumes the file), then `office preflight`, which
   refuses a missing, stale, or open ledger. Each ends with one `TASK=... SUBMIT=... NEXT=...` line (saved in `pane-final.txt`); act on its `NEXT=`. A worker
   refused as lease-lost, superseded-dispatch, or task-paused is done: never prompt it to retry.
-- Before submitting a plan inline, run the same lenses (security, edge cases, platform and build, test
-  strength; `skills/office-submit`) over it and write what they surface into tasks' `accept:` criteria.
-- Findings never relaunch anything on their own. When `next:` says a task's findings wait for you, run
-  `office rerun T2 --resume` (the same harness session, in a fresh pane) or `office rerun T2 --fresh`;
-  resume refuses with the reason and the `--fresh` command when the session cannot be reopened.
-- After a first plan review of CHANGES_REQUIRED: edit the run's `PLAN.md`, run
-  `office amend plan -- "<what changed>"`, then dispatch eligible work immediately; the re-review
-  runs concurrently. A PLAN_DEFECT blocks its scope until an independent reviewer clears it.
-- A PLAN_DEFECT means a requirement or assumption the plan rests on is unachievable or wrong;
-  CHANGES_REQUIRED is only a plan amendment. On a defect, trace it to the requirement or assumption
-  behind it. A plan-only cause (a task split, an ordering) is a normal `--contract` fix. Otherwise
-  ask the user (native question tool) how to redirect that requirement, revise the plan, then
-  `office amend plan --contract --redirect P3 --root-cause "<requirement>" --quote "<words>"
-  [--requirement "<new requirement>"] [--reviewer same|fresh] -- "<fix>"`. The redirect resets the
-  plan-review budget. `--requirement` records r(n+1), which the same quote authorizes. Choose
-  `--reviewer same` (resumes the reviewer that raised it) when its context helps judge the fix, and
-  `fresh` (the default, another route) when its framing rested on the old requirement. A dedicated
-  planner asks the user in its own pane when it can, then runs `office submit --redirect ...`.
-  Otherwise it lists the question under `## Questions`, and you ask the user and redirect. If the
-  user judges the defect wrong, run `office approve waive P3 --quote "<words>"`.
+- Before submitting a plan inline, run the same four lenses (`skills/office-submit`) over it and write what they
+  surface into tasks' `accept:` criteria. Plan the seams, not the internals: `scope:` is an ownership envelope
+  (module or domain dirs plus their tests); name exact files only where tasks collide or depend. Append-only
+  registries several tasks touch (gate manifests, endpoint/grant lists, policy maps, shared mocks) go under each
+  task's `shared:`. Tasks that must land together share a `lane:`; lanes sharing an outcome, a `converge:`.
 - Ordinary amendments (decomposition, ordering, acceptance detail, tests) are yours:
   `office amend <T2|plan> -- "<delta>"`. Scope, interfaces, ownership, and authority are contract
   amendments: `office amend <scope> --contract -- "<request>"`. Requirements change only on the
   user's words: `office amend requirements --quote "<words>" -- "<change>"`.
-- A paused or blocked task names its blocker and what was preserved. Resolve it, or take the
-  decision to the user; after exhausted convergence the user may accept a named gap with
-  `office approve waive T2:<gate> --quote "<words>"`. When a visual gate is UNAVAILABLE and the user has a
-  reviewer run it by hand, record that review file as the gate result:
-  `office approve visual T2 --by <harness>/<model>[@effort] --report <file> --quote "<words>"` (never the
-  producer's own session; a fresh session of the same model is fine).
+- A paused or blocked task names its blocker and what was preserved: resolve it, or take the decision to the user.
 - If a command reports a missing route or trust, show the user the route notice; only they can
   promote trust (`office approve trust <route> --quote "<words>"`).
 - When the user names a model, dispatch with `--as <harness>/<model>[@effort]` (add `--cli "<argv>"` for an
-  exact agent command, or `--external` to only print how to start it) and `--review-as` to pin the code
-  reviewer. A reviewer is always a fresh session, never the executor's, but it may share the executor's model. Every dispatch prints its brief, env, and herdr commands.
+  exact agent command, or `--external` to only print how to start it); `--review-as` pins the reviewer of the task (v3.1) or of its lane
+  (convergence-v1). A reviewer is always a fresh session, never the executor's, but it may share the executor's model. Every dispatch prints its brief, env, and herdr commands.
+
+## Review
+
+New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` is the reference.
+- Plan, convergence and visual reviews answer APPROVED (advance now; findings get a disposition, not another
+  review), RECHECK (producers repair blocking findings; the same reviewer rechecks) or INTAKE_GAP (ask the user
+  the missing decision now). UNAVAILABLE and other runtime failures are not verdicts: `office resume`, no round spent.
+- Plan RECHECK holds only the tasks its blocking findings name: revise `PLAN.md`, then
+  `office amend plan --contract -- "<what changed>"`; dispatch unaffected work meanwhile.
+- A task is accepted on its own checks. Once a lane's tasks (joined by `depends` or `lane:`) are all
+  accepted, Office composes them and runs one convergence review, plus a visual review for user-visible
+  acceptance; lanes sharing a boundary then get one shared-scope review. `office inspect convergence`.
+- Findings never relaunch anything on their own. A RECHECK routes every blocking finding to its owning
+  tasks at once: run `office rerun <task> --resume|--fresh` for each, in parallel.
+- After 3 RECHECK rounds nothing runs. Ask the user at once with the remaining findings, attempts, risk
+  and your recommendation, then `office decide <scope|plan> escalate|continue|waive|stop --quote "<words>"`.
+- Before landing, give each APPROVED finding a disposition: `office disposition <scope>:<code>
+  fix|fixed|dismissed|follow-up -- "<note>"` (`fix` reopens the owner for a repair without re-review).
+- Only landing authority waives a required review: the user (`office approve waive L-T1:convergence|visual --quote
+  "<words>" --reason "<why>"`), or you (`--as orchestrator --reason "<why>"`) only when the end state is merge/e2e
+  or a merge is authorized. The verdict stands; the waiver binds to the composed commit.
+- If every convergence reviewer route is UNAVAILABLE you may review it as a recorded, non-independent
+  fallback: `office review L-T1:convergence --report <file>` (visual: `--inspected <every screenshot>`).
+- **v3.1 runs** (started before #337; `office inspect run` names the contract) keep PASS | CHANGES_REQUIRED |
+  PLAN_DEFECT | BRIEF_DEFECT, per-task review and plan-defect redirects (`--redirect`): follow their `next:` lines and `docs/v31-rolling-review-gates.md`.
 
 ## Herdr agents
 
@@ -153,18 +155,17 @@ reads `idle` mid-turn, so judge an agy pane by its footer and `git status`, neve
 
 ## Land and close
 
-When every task is accepted the runtime composes and verifies the integrated result. `office land`
+When every task is accepted and every lane converged, the runtime composes and verifies the integrated result. `office land`
 then follows the end state. `ask` lists the task PRs: ask the user and record the choice with
 `office land --merge|--preview|--e2e --quote "<words>"`, or stop with `office close --handoff <pr-url>`.
 `preview` deploys and verifies the integrated result. `merge`/`e2e` merge the PRs bottom-up after
 required checks, confirm the default branch matches the reviewed tree, close the issue, and (e2e)
 deploy prod and verify; a failure names what merged and the rollback target. Then `office close`.
 If the default branch moved after `office start`, run `office land --rebase` first. It re-composes the
-accepted work onto the new head and re-runs the run checks and an integration review. A conflict refuses
+accepted work onto the new head and re-runs the run checks and one review of the rebase. A conflict refuses
 and prints the steps to compose by hand. Office rewrites only the block above the PR body's
 `<!-- office:pr ... -->` line, so put criteria that report data in the PR body below that line. A
-check or test-runner timeout while host load exceeds twice the CPU count is UNAVAILABLE, not a
-failure. Rerun it with `office resume`.
+check or test-runner timeout while host load exceeds twice the CPU count is UNAVAILABLE, not a failure. Rerun it with `office resume`.
 With task PRs off (local, no GitHub, `--no-prs`), push the integration branch it names, open a PR
 with `Closes #<issue>`, and `office close --handoff <pr-url>`. Stop early with
 `office close --abandon "<reason>"`; nothing is deleted until `office prune -f`. When the work landed
@@ -178,12 +179,12 @@ it. It composes one integration branch, runs file-disjoint Herdr lanes and exits
 
 ## Resume
 
-After a restart or compaction: `office resume` (or `office resume <id>` when several runs exist).
-It reconstructs pending work from runs.db; never start a new run to continue an old one.
+After a restart or compaction: `office resume` (or `office resume <id>` when several runs exist). It reconstructs pending
+work from runs.db; never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract.
 
 ## Diagnostics
 
-`office inspect run|plan|task|gate|evidence|events|route|learner [id]` and `--verbose`/`--json` show the detail default output hides.
+`office inspect run|plan|task|gate|evidence|events|route|learner|convergence [id]` and `--verbose`/`--json` show the detail default output hides.
 `office doctor` checks the install, hooks, pinned runtimes, and known harness defects. `office list` and `office prune` (dry run; `-f` to delete) maintain runs.
 
-The detailed design lives in `docs/v31-implementation.md`; you do not need it to run the lifecycle.
+Review semantics live in `docs/review-convergence.md` and the runtime design in `docs/v31-implementation.md`; you need neither to run the lifecycle.

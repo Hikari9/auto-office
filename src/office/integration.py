@@ -1,10 +1,17 @@
 """Integration: verify the actual composed result, not each green worktree.
 
 When every task is accepted the runtime composes the accepted revisions onto
-the run base in dependency order, runs the run-level checks on the composed
-tree, and runs an integration review only at a real boundary (Q7): a task
-built on another's unmerged output, or two tasks that changed the same file
-or share a declared interface.
+the run base in dependency order and runs the run-level checks on the composed
+tree.
+
+v3.1 contract: it also runs an integration review at a real boundary (Q7): a
+task built on another's unmerged output, or two tasks that changed the same
+file or share a declared interface.
+
+Convergence contract (#337): those boundaries are lanes and shared scopes,
+reviewed by office.convergence before integration starts; integration waits
+until every scope converged (APPROVED, or waived by landing authority) and
+adds no review of its own.
 """
 from __future__ import annotations
 
@@ -16,7 +23,7 @@ import time
 import uuid
 from pathlib import Path
 
-from office import briefs, db, gates, paths, review_parse, state, worktree_setup
+from office import briefs, contract, db, gates, paths, review_parse, state, worktree_setup
 from office.util import claim_alive, dumps, now_iso, sha256_obj
 
 
@@ -51,6 +58,12 @@ def status(con, run: dict) -> dict:
     tasks = accepted_set(con, run)
     if tasks is None:
         return {"required": True, "status": "waiting", "detail": "tasks not all accepted"}
+    if contract.is_convergence(run):
+        from office import convergence
+        open_scopes = [s for s in convergence.summary(con, run) if s["status"] not in convergence.CONVERGED]
+        if open_scopes:
+            return {"required": True, "status": "converging",
+                    "detail": "; ".join(f"{s['id']} {s['status']}" for s in open_scopes[:4])}
     key = _set_key(con, tasks)
     if not integ or integ.get("key") != key:
         return {"required": True, "status": "pending", "detail": "composition queued"}
@@ -267,7 +280,10 @@ def _integrate(con, run: dict, job: dict) -> dict:
     commit = paths.git(wt, "rev-parse", "HEAD")
     tree = paths.git(wt, "rev-parse", "HEAD^{tree}")
     needs_review, why = review_boundary(con, run, tasks, revs)
-    if compose_base(run) != run["base_sha"]:
+    if contract.is_convergence(run):
+        # Lanes and shared scopes (a rebase included) were reviewed before this.
+        needs_review, why = False, "every lane and shared scope converged"
+    elif compose_base(run) != run["base_sha"]:
         # The accepted revisions were reviewed against the old base; the
         # composition onto the newer one gets its own independent review.
         needs_review, why = True, f"rebased onto {compose_base(run)[:12]}" + (f"; {why}" if why else "")
@@ -324,7 +340,8 @@ def _integrate(con, run: dict, job: dict) -> dict:
         if compose_base(state.get_run(con, run["id"])) != base:
             return {"skipped": "rebased while composing"}
         _set_integration(con, run, status="accepted", detail="composed result verified")
-        state.emit(con, run, "integration.accepted", f"READY: integration PASS on {commit[:10]} ({branch})")
+        state.emit(con, run, "integration.accepted", f"READY: integration verified on {commit[:10]} ({branch})"
+                   if contract.is_convergence(run) else f"READY: integration PASS on {commit[:10]} ({branch})")
     return results
 
 

@@ -17,7 +17,7 @@ SESSION = {"OFFICE_HARNESS": "claude", "OFFICE_SESSION": "sess-exec"}
 
 
 def _dispatch_external(env):
-    approved_run(env, executor=[{}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=[{}], convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     con = env.con()
     t = task_row(env)
@@ -119,7 +119,7 @@ def _blocked_reviewer_routing(monkeypatch):
     monkeypatch.setattr(candidates, "route_role", route)
 
 
-@pytest.mark.approved
+@pytest.mark.review_contract("v3.1")  # a per-task code review gate exists only under v3.1 (no shared snapshot)
 def test_protected_quota_gate_names_review_as_and_the_pinned_reserve(env, monkeypatch):
     d, wt = _dispatch_external(env)
     _blocked_reviewer_routing(monkeypatch)
@@ -170,8 +170,9 @@ def test_protected_quota_plan_gate_gives_quota_guidance_not_review_as(env, monke
     env.write_plan(PLAN_ONE)
     env.office("submit", check=0)
     con = env.con()
-    rows = [dict(r) for r in con.execute("SELECT verdict, summary FROM gates WHERE subject='plan'").fetchall()]
-    assert rows and rows[-1]["verdict"] == "UNAVAILABLE", rows
+    rows = [dict(r) for r in con.execute("SELECT verdict, review_status, summary FROM gates WHERE subject='plan'").fetchall()]
+    # #337: an unavailable reviewer is runtime status, never a verdict.
+    assert rows and rows[-1]["verdict"] is None and rows[-1]["review_status"] == "UNAVAILABLE", rows
     summary = rows[-1]["summary"]
     pinned = json.loads(con.execute("SELECT policy_json FROM runs").fetchone()[0])["quota"]["reserve_percent"]
     assert "protected_quota_would_be_consumed" in summary and f"pinned at {float(pinned):g}%" in summary, summary

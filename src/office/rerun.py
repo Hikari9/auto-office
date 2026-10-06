@@ -13,7 +13,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from office import adapters, candidates, db, dispatch, gates, jobs, paths, state
+from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import pid_alive, sha256_obj
@@ -88,7 +88,7 @@ def _set_resumed_from(con, dispatch_id: str, parent: str) -> None:
 
 
 def _findings_text(con, run: dict, tid: str) -> str:
-    rows = con.execute("SELECT code, location, summary FROM findings WHERE run_id=? AND task_id=? AND state='open' "
+    rows = con.execute("SELECT code, location, summary FROM findings WHERE run_id=? AND task_id=? AND " + contract.TASK_WORK_FINDINGS + " "
                        "ORDER BY created_at", (run["id"], tid)).fetchall()
     return "; ".join(f"{r['code']} {r['location'] or ''} {r['summary'][:120]}".strip() for r in rows[:8])
 

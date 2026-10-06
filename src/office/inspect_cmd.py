@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from office import adaptive, candidates, plans, state
+from office import adaptive, candidates, contract, plans, state
 from office.result import Result
 from office.state import Usage
 from office.util import loads, short
@@ -36,8 +36,12 @@ def inspect(con, run: dict, what: str | None, ident: str | None) -> Result:
         return _plan(con, run, ident)
     if what == "learner":
         return _learner(con, run)
+    if what in ("convergence", "lane", "lanes", "scope"):
+        from office import convergence
+        lines = convergence.inspect_lines(con, run, ident)
+        return Result(lines=lines, data=convergence.receipt(con, run) if contract.is_convergence(run) else {})
     raise Usage("unknown-view", f"cannot inspect {what!r}",
-                next_step="office inspect run|plan|task|gate|evidence|events|route|learner [id]")
+                next_step="office inspect run|plan|task|gate|evidence|events|route|learner|convergence [id]")
 
 
 def _plan(con, run, ident) -> Result:
@@ -55,7 +59,7 @@ def _run(con, run) -> Result:
     req = state.current_requirements(con, run["id"])
     plan = state.current_plan(con, run["id"])
     rs = plans.review_state(con, run)
-    lines = [f"run {run['id']} ({run['phase']}) office {run['office_version']}",
+    lines = [f"run {run['id']} ({run['phase']}) office {run['office_version']} | review contract {contract.of(run)}",
              f"goal: {run['goal']}", f"gear {run['gear']} | planner {run.get('planner_mode')} | base {run['base_sha'][:12]}",
              f"requirements r{run['requirements_version']}: {json.dumps(req['frozen'])[:300]}",
              f"plan p{run['plan_version']}" + (f" ({plan['kind']}, {plan['content_hash'][7:19]})" if plan else ""),
@@ -100,9 +104,11 @@ def _task(con, run, tid) -> Result:
     for r in con.execute("SELECT id, commit_sha, status, applied_version, created_at FROM revisions WHERE run_id=? AND task_id=? "
                          "ORDER BY seq", (run["id"], tid)).fetchall():
         lines.append(f"revision {r['id']} {r['commit_sha'][:12]} {r['status']} applied p{r['applied_version']}")
-        for g in con.execute("SELECT id, kind, status, verdict, evidence_status, round, escalated, route, summary FROM gates "
-                             "WHERE revision_id=? ORDER BY created_at", (r["id"],)).fetchall():
-            lines.append(f"  gate {g['id']} {g['kind']} {g['status']} {g['verdict'] or ''} {g['evidence_status'] or ''} "
+        for g in con.execute("SELECT id, kind, status, verdict, evidence_status, round, escalated, route, summary, contract "
+                             "FROM gates WHERE revision_id=? ORDER BY created_at", (r["id"],)).fetchall():
+            # Stored verdicts are shown as stored; a v3.1 one is labelled, never translated.
+            shown = contract.display_verdict(g["verdict"], g["contract"]) if g["verdict"] else ""
+            lines.append(f"  gate {g['id']} {g['kind']} {g['status']} {shown} {g['evidence_status'] or ''} "
                          f"round {g['round']}{' escalated' if g['escalated'] else ''} {g['route'] or ''} {(g['summary'] or '')[:100]}")
     for f in con.execute("SELECT code, gate_kind, severity, state, location, summary FROM findings WHERE run_id=? AND task_id=? "
                          "ORDER BY created_at", (run["id"], tid)).fetchall():
@@ -116,8 +122,11 @@ def _task(con, run, tid) -> Result:
 def _gate(con, run, gid) -> Result:
     q = "SELECT * FROM gates WHERE run_id=?" + (" AND id=?" if gid else " ORDER BY created_at DESC LIMIT 20")
     rows = con.execute(q, (run["id"], gid) if gid else (run["id"],)).fetchall()
-    lines = [f"{g['id']} {g['subject']} {g['task_id'] or ''} {g['kind']} rev {g['revision_id'] or 'p' + str(g['plan_version'])} "
-             f"{g['status']} {g['verdict'] or ''} {g['evidence_status'] or ''} key {g['input_key'][:16]} {g['route'] or ''}"
+    lines = [f"{g['id']} {g['subject']} {g['task_id'] or g['scope'] or ''} {g['kind']} "
+             f"rev {g['revision_id'] or 'p' + str(g['plan_version'])} {g['status']} "
+             f"{contract.display_verdict(g['verdict'], g['contract']) if g['verdict'] else ''} "
+             f"{('status=' + g['review_status']) if g['review_status'] else ''} {g['evidence_status'] or ''} "
+             f"{g['independence'] or ''} key {g['input_key'][:16]} {g['route'] or ''}"
              for g in rows]
     return Result(lines=lines or ["no gates"], data={"gates": [dict(g) for g in rows]})
 

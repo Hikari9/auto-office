@@ -158,7 +158,7 @@ def test_a_running_integrate_job_is_not_a_checks_stall(env, monkeypatch):
 
 @pytest.mark.approved
 def test_rebase_and_a_second_compose_wait_for_the_integration_lock(env, monkeypatch):
-    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1", check=0)
     con = env.con()
     run = _run_row(con)
@@ -404,7 +404,7 @@ def test_rebase_refuses_while_an_integrate_job_without_the_flock_is_live(env, mo
     """Finding r3-4: an integrate process from an older patch holds no flock;
     the job table plus its pid still refuses the rebase, and a new compose waits."""
     import subprocess
-    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1", check=0)
     con = env.con()
     run = _run_row(con)

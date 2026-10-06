@@ -175,17 +175,20 @@ def test_review_as_is_pinned_on_the_task(env):
 
 @pytest.mark.approved
 def test_pinned_same_model_reviewer_runs_as_a_fresh_dispatch(env):
-    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    """#337: --review-as pins the reviewer of the task's lane; it is still a fresh dispatch."""
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1", "--as", "codex/gpt-6-luna@xhigh", "--review-as", "codex/gpt-6-luna@xhigh", check=0)
     con = env.con()
-    reviewed = [c for c in env.calls() if c.get("role") == "code_reviewer"]
+    reviewed = [c for c in env.calls() if c.get("role") == "convergence_reviewer"]
     assert reviewed and reviewed[0]["harness"] == "codex", env.calls()
-    rows = con.execute("SELECT id, role FROM dispatches WHERE role IN ('executor','code_reviewer')").fetchall()
+    rows = con.execute("SELECT id, role, override_json FROM dispatches WHERE role IN ('executor','code_reviewer')").fetchall()
     ids = {r["role"]: r["id"] for r in rows}
     assert set(ids) == {"executor", "code_reviewer"} and ids["executor"] != ids["code_reviewer"], ids
-    gate = dict(con.execute("SELECT * FROM gates WHERE task_id='T1' AND kind='code_review' ORDER BY created_at DESC")
-                .fetchone())
-    assert gate["verdict"] == "PASS", gate
+    assert all(r["override_json"] for r in rows if r["role"] == "code_reviewer"), "the lane reviewer is the user's pin"
+    gate = dict(con.execute("SELECT * FROM gates WHERE scope='L-T1' AND kind='convergence_review' "
+                            "ORDER BY created_at DESC").fetchone())
+    assert gate["verdict"] == "APPROVED", gate
 
 
 def test_routed_review_does_not_exclude_the_producers_family(env):

@@ -106,7 +106,7 @@ def test_amend_contract_rederives_run_checks(env):
 
 def test_amend_removing_bad_run_check_retriggers_integration(env):
     approved_run(env, plan=PLAN_BAD_CHECK, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
-        code_reviewer=[{"reply": "VERDICT: PASS"}])
+        convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     code, out = env.office("dispatch", "T1", check=0)
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]
@@ -127,7 +127,7 @@ def test_amend_removing_bad_run_check_retriggers_integration(env):
 def test_no_recheck_while_a_task_is_not_accepted(env):
     approved_run(env, plan=PLAN_TWO_RC,
         executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}}, "submit": True}],
-        code_reviewer=[{"reply": "VERDICT: PASS"}])
+        convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     code, out = env.office("dispatch", "T1", check=0)
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]
@@ -154,7 +154,7 @@ def test_planner_brief_says_how_to_cap_vitest_workers(env):
 def test_stray_worktree_holding_the_integration_branch_is_named_and_resume_retries(env, tmp_path):
     # rock-mcp run C10: a manual worktree on office/<run>/integration made
     # `git worktree add -B` fail with no hint of which worktree held it.
-    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]
     stray = tmp_path / "stray"

@@ -146,6 +146,21 @@ roles:
     floor:
       min_effort: medium
       allowed_sources: ["local-evidence:", "documented:"]
+# Review contract (#337). Each run pins the contract it starts with
+# (gates_json.review_contract); this key picks it for future runs only, so a
+# rollback to v3.1 never reinterprets a run that already started.
+#   convergence-v1: APPROVED | RECHECK | INTAKE_GAP; executors self-review and
+#     run checks; one independent convergence review per ownership/composition
+#     lane (plus one per shared composition boundary); 3 substantive rounds per
+#     RECHECK sequence, then the operator decides.
+#   v3.1: PASS | CHANGES_REQUIRED | PLAN_DEFECT | BRIEF_DEFECT | UNAVAILABLE,
+#     rolling plan review and per-task independent review.
+review:
+  contract: convergence-v1
+# Gear presets. Under convergence-v1, `independent_code_review` funds the lane
+# convergence review (a hard landing gate) and `plan_review` funds plan review;
+# the round ceiling is always 3 and the *_max_rounds keys below apply only to
+# runs pinned to the v3.1 contract.
 gear_presets:
   direct:
     dedicated_planner: false
@@ -195,7 +210,7 @@ gear_presets:
     allow_advisory_undercut: false
     plan_review_max_rounds: 5
     code_review_max_rounds: 5
-# Round budget for a review that a gear's own preset doesn't fund (`plan_review: false`
+# (v3.1 contract only) Round budget for a review that a gear's own preset doesn't fund (`plan_review: false`
 # or `risk_forced` resolving False) but that fires anyway — an ad-hoc user-requested plan
 # review, or a `risk_forced` gate that resolved True under a pinned low gear. Was
 # previously bare prose in skills/auto-review/SKILL.md with no config backing; a caller
@@ -208,7 +223,7 @@ ad_hoc_review_max_rounds: 2
 verification:
   environment_retry_max: 2
   recapture_max: 1
-  visual_review_max_rounds: 2
+  visual_review_max_rounds: 2   # v3.1 contract only; convergence-v1 caps every RECHECK sequence at 3
   no_progress_repeats: 2
   job_timeout_seconds: 3600
   check_timeout_seconds: 1800
