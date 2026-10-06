@@ -465,9 +465,57 @@ def piggyback(con, run: dict, res: Result) -> None:
         if block:
             res.notices.extend(block)
         return
-    events = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=4)
-    if events:
-        res.notices.extend(f"· {e['summary']}" for e in events)
-        from office import db
+    from office import db
+    unread = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=200)
+    held = _held_seqs(con, run["id"])
+    shown = _notice_batch([e for e in unread if e["seq"] not in held], limit=4)
+    if shown:
+        res.notices.extend(f"· {e['summary']}" for e in shown)
         with db.transaction(con):
-            state.consume_events(con, run["id"], events)
+            _consume(con, run["id"], unread, held | {e["seq"] for e in shown})
+            signals = [e["seq"] for e in shown if e["kind"] == state.SIGNAL_KIND]
+            if signals:
+                state.advance_cursor(con, run["id"], state.SIGNAL_CONSUMER, max(signals))
+
+
+# Kinds that mean something failed or waits on the orchestrator. Everything else is informational.
+_URGENT_KINDS = frozenset({
+    "task.blocked", "task.paused", "task.findings_queued", "task.scope_requested", "task.restack_needed",
+    "task.amend_undelivered", "submit.refused", "submit.rejected", "integration.conflict", "integration.failed",
+    "gate.unavailable", "gate.changes_required", "gate.attention", "gate.escalated", "gate.brief_defect",
+    "plan.unavailable", "plan.changes_required", "plan.attention", "plan.escalated", "plan.defect",
+    "plan.questions", "plan.contract_requested", "pr.error", "lease.revoked"})
+_SEEN = "orchestrator:seen:"
+
+
+def _urgent(event: dict) -> bool:
+    return event["kind"] in _URGENT_KINDS or event["kind"].endswith(".failed")
+
+
+def _notice_batch(pending: list[dict], *, limit: int) -> list[dict]:
+    """The events to show: failures and blockers first, then informational notices in order,
+    `limit` in all. What does not fit stays unread for the next command."""
+    return ([e for e in pending if _urgent(e)] + [e for e in pending if not _urgent(e)])[:limit]
+
+
+def _held_seqs(con, run_id: str) -> set[int]:
+    """Events shown while an older one was still waiting: the cursor is one number, so each is
+    remembered on its own until the cursor passes it."""
+    return {int(r[0][len(_SEEN):]) for r in con.execute(
+        "SELECT consumer FROM cursors WHERE run_id=? AND consumer LIKE ?", (run_id, _SEEN + "%"))}
+
+
+def _consume(con, run_id: str, unread: list[dict], consumed: set[int]) -> None:
+    """Move the orchestrator cursor over the leading run of consumed events; remember the rest by seq."""
+    through = 0
+    for e in unread:
+        if e["seq"] not in consumed:
+            break
+        through = e["seq"]
+    if through:
+        state.advance_cursor(con, run_id, "orchestrator", through)
+        con.execute("DELETE FROM cursors WHERE run_id=? AND consumer LIKE ? AND CAST(substr(consumer, ?) AS INTEGER)<=?",
+                    (run_id, _SEEN + "%", len(_SEEN) + 1, through))
+    for seq in consumed:
+        if seq > through:
+            state.advance_cursor(con, run_id, _SEEN + str(seq), seq)

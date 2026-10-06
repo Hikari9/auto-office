@@ -443,16 +443,23 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     floors = None if override else config.get("model_family_floors")
     candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors,
                                            quota_snapshot=quota_snapshot)
-    if probe:
+    if probe and os.environ.get("OFFICE_QUOTA_PROBE") != "off" and run.get("id"):
+        # One notice per call, naming every harness whose quota could not be read. A probe the
+        # operator switched off is a choice, not a failure, and says nothing.
         seen = quota_event_seen if quota_event_seen is not None else set()
+        unknown: dict[str, str] = {}
         for c in candidates:
             quota = c.get("quota") or {}
             harness = c.get("adapter_id")
-            cause = quota.get("cause")
-            if quota.get("status") == "unknown" and cause and harness not in seen and run.get("id"):
-                state.emit(con, run, "quota-probe-unknown", f"Quota probe unknown for {harness}: {cause}",
-                           task_id=task_id, payload={"harness": harness, "cause": cause})
-                seen.add(harness)
+            if quota.get("status") == "unknown" and quota.get("cause") and harness not in seen:
+                unknown.setdefault(harness, quota["cause"])
+        if unknown:
+            seen.update(unknown)
+            payload = ({"harness": next(iter(unknown)), "cause": next(iter(unknown.values()))} if len(unknown) == 1
+                       else {"harnesses": unknown})
+            state.emit(con, run, "quota-probe-unknown",
+                       "Quota probe unknown for " + "; ".join(f"{h}: {why}" for h, why in unknown.items()),
+                       task_id=task_id, payload=payload)
     from office import benchmarks
     snapshot = benchmarks.apply(run, candidates)
     if exclude:
