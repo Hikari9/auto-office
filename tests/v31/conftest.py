@@ -304,13 +304,21 @@ class Env:
         from office import adapters, candidates, routing, scoring
         from office.util import sha256_obj
         all_adapters = adapters.load_all()
+        catalog = candidates.catalog_rows()
         user_config = Path(os.environ["OFFICE_USER_CONFIG"])
         found = {}  # what each adapter finds on PATH: an untouched fake of ours (by name), or whatever else it is
         for name, adapter in all_adapters.items():
             exe = shutil.which(adapters.executable(adapter) or "")
             fake = exe and Path(exe) in self.fakes and Path(exe).read_text() == self.fakes[Path(exe)]
             found[name] = Path(exe).name if fake else exe
-        data = sha256_obj([all_adapters, candidates.catalog_rows(), found,
+        # Route identity includes the resolved harness major, which can change
+        # while the executable path and adapter configuration stay the same.
+        route_harnesses = {row.get("invocation_harness") for row in catalog
+                           if row.get("dispatchable") is not False}
+        versions = {name: scoring.harness_major(adapters.harness_version(all_adapters[name]))
+                    for name in route_harnesses
+                    if name in all_adapters and found.get(name)}
+        data = sha256_obj([all_adapters, catalog, found, versions,
                            user_config.read_text() if user_config.is_file() else None])
         # a test that replaces any of these functions gets its own routes
         return (data, candidates.build_candidates, candidates.catalog_rows, adapters.load_all, adapters.installed,
