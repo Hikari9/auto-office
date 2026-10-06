@@ -1,67 +1,101 @@
 ---
 name: auto-closeout
-description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use the office CLI). Internal Auto Office v3 closeout spoke. Use after implementation/review to reconcile findings, validate completion evidence, report branch/PR state and real blockers, record pinned runtime hashes and telemetry, enforce the human merge-to-main boundary, and finish family state without claiming success from model confidence alone.
+description: >-
+  Internal Auto Office closeout spoke for 3.x runs. Use when a run's work is accepted and landed (or ready to hand
+  off) and it is time to run `office close`: confirm the target run, verify the gate, respect the PR merge boundary,
+  update the docs the repo keeps, sync the local base branch and remove the run's worktrees, close loops including
+  panes, and end with the `office close done` report line. Never claims success from model confidence alone.
 ---
 
 # Auto Closeout
 
-> **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
-> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
+`office close` is the closeout. The runtime owns the mechanics (archive receipt, base sync, worktree removal,
+pane reclamation, the report line); this spoke owns the order and the judgment around it. Follow `office status`
+and its `next:` line; never run the 3.0 `office_runtime.py` helpers for a 3.x run.
 
-A family may report implementation complete only with evidence for: Outcome; Key implementation; Validation; browser/runtime evidence when applicable; Review result; PR/branch state; Remaining real blockers; Pinned runtime hashes.
+## The Process
 
-Reconcile all pending findings and dispositions, stale holders/leases, plan/packet versions, uncommitted state, and validation evidence. Under `convergence-v1`, close waits until every APPROVED finding has an `office disposition` and every required lane or shared-scope review is APPROVED or waived by landing authority.
+### 0. Confirm target
 
-Record telemetry/outcomes before declaring completion when the recorder is available; telemetry write failure may fail soft, but surface it.
+Run from inside the run's repository. `office status` must name the run you mean; with several runs open, pass
+`--run <id>`. A refused or missing run still ends with an `office close done — stopped early (...)` line: read it,
+do not guess another target.
 
-**Close recorded routing defects.** Run `python3 scripts/office_runtime.py check-route-defects
---state-dir <run-state-dir>`. Never report complete on exit 2, and read which exit 2 it is.
-`error: no_run_state`: no `state.json` at that path, so nothing was gated — no pinned hashes, no
-spoke receipts, no defect record. Either `--state-dir` is wrong or the lifecycle never ran `start`;
-say so plainly and name which gates did not apply, rather than reporting closeout as gated. An
-`unresolved` list: this run emitted a route the harness could not invoke and nothing has amended
-the catalog — dispatch `auto-self-improve`, then `resolve-route-defect --id <id> --proposal-ref
-<branch-or-PR>`. Exit 0 means a started run with every defect amended; it never means "no run".
+### 1. Verify the gate
 
-**Report unverified spoke receipts.** Read `spokes_loaded` in `state.json` and name any row with `verified: false` — a spoke marked with `--unverified`, or a row carried over from a run that predates the digest requirement. These are not failures, but a gate satisfied without proof that its spoke was located is how a run reaches dispatch with spokes marked and none loaded. State them; do not quietly pass them.
+Close needs every task accepted, integration verified, and the landing recorded. `office close` refuses
+(`close-blocked`) otherwise and its `next:` names the step. Under `convergence-v1` every APPROVED finding needs an
+`office disposition` and every required lane or shared-scope review is APPROVED or waived by landing authority.
+Uncommitted work, an un-run gate, or a branch with no PR is a defect of the loop: report it. Close never commits
+leftovers for you.
 
-**Reclaim the dispatch surface.** A run that ends leaving its workers parked is not closed out.
-Once a ticket's work is merged and its evidence lives somewhere durable (the PR body, the
-resolution comment, a findings file), close the panes that produced it — a finished worker's
-scrollback is not a reason to keep a pane, because the evidence should already have been lifted
-out of it. Close, in this order:
+### 2. PR state and the merge boundary
 
-- panes whose agent produced nothing (a mis-routed dispatch, an agent that died at startup);
-- panes whose work is merged and whose findings are recorded;
-- the run's tab or workspace once every pane in it is closed.
+`main` stays the human's unless the user chose `merge` or `e2e` at intake (or answered `office land --merge|--e2e
+--quote`). Plan approval alone never authorizes a merge; `office close` itself never merges or arms automerge.
 
-Do this mechanically, not from memory. `scripts/hooks/close_finished_panes.mjs` (a Stop hook from
-`install_hooks.sh`) closes ledger panes whose agent is `done` or gone, and is safe to run by hand:
-`node scripts/hooks/close_finished_panes.mjs < /dev/null`. It reads only the
-`office_spawn.sh --pane-id` ledger, never `herdr pane list`, so it cannot touch the user's own
-panes, and no-ops without `herdr`. Run it, then read `herdr pane list` yourself — a surviving pane
-needs a reason you can state.
+- Merged by `office land`: `office close`.
+- Merged through a PR Office did not open: `office close --landed-externally <pr-url>` (add `--quote` with the
+  user's words when the merge commit does not contain every accepted revision).
+- Not authorized to merge: `office close --handoff <pr-url>`. The PR is marked ready, and base sync and worktree
+  removal wait until the user merges.
 
-Keep a pane only while its agent may still be resumed for another round — a reviewer mid-round,
-an executor awaiting fixes. Never close a pane you did not create, and never close one hosting a
-`working` agent. Run this reclamation on **every** closeout, not only the last one in a session:
-panes accumulate silently across waves, and an operator who cannot read the layout cannot
-supervise the dispatch, which is the entire justification for visible workers.
+### 3. Document
 
-After closeout, run eligible lazy maintenance and, when justified, hand sanitized proposal candidates to `auto-self-improve` in a separate worktree/branch.
+Before closing, update the docs the repo already maintains for this change (CHANGELOG, README, doc comments) and
+make the PR body describe the change accurately. Do not invent a new docs file. `office close` prints a
+non-blocking `warning:` when the diff changes code but touches no CHANGELOG/README the repo keeps; act on it or
+say why it does not apply.
 
-**Cleanup post-merge.** The run stops at a ready PR; `main` remains the human boundary. Merging on
-the run's own initiative is prohibited — plan approval alone does not authorize it. Merge only with
-an explicit per-run user statement authorizing it; absent that, mark the PR ready and stop. A policy
-or self-improvement change needs that statement too, and never merges autonomously. After an
-authorized merge, auto-delete used worktrees created for the run and execute the post-merge sweep.
+### 4. Sync base and remove worktrees (runtime)
 
-**The sweep** runs inline, in this skill. Why: `references/why-closeout.md`.
+On a merged close the runtime:
 
-1. Uncommitted work, an un-run gate, or a branch with no PR means `auto-loop` did not finish.
-   Name that as a defect; the pre-merge validation evidence already covers a clean tree.
-2. Sync the local base branch to match `origin/<base>`.
-3. Auto-delete used worktrees this run created:
-   `python3 scripts/office_runtime.py cleanup-worktrees --state-dir <path>`, or `office_worktree.sh cleanup-run --state-dir <path>`, then `prune`, then `git branch -d`.
-4. Close loops: issues this run changed, scratch files in `<state_dir>/tmp` (never `/tmp`), and
-   unanswered user questions.
+1. `git fetch origin <base>` and fast-forwards local `<base>`: by ref when no worktree has it checked out,
+   `git merge --ff-only` in the checkout when that tree is clean, then verifies local `<base>` == `origin/<base>`.
+2. If `<base>` is checked out in a tree with uncommitted changes it is left untouched, the sync is reported as
+   skipped, and `next:` tells you to ask the user (native question tool) whether to fast-forward it. Ask.
+3. Removes only the worktrees Office created for this run (its worktree root) and its `office/<run>/` branches
+   with `git branch -d`, then `git worktree prune`. A worktree with changes no revision recorded is kept and
+   named; a branch `-d` refuses is kept and named. Never `-D`, never someone else's worktree.
+
+### 5. Close loops
+
+- Panes: `office close` snapshots then closes the run's dispatch panes and tab. Afterwards read `herdr pane
+  list`; a surviving pane needs a reason you can state. Never close a pane you did not create or one hosting a
+  `working` agent (`herdr-close-panes` for the ledger sweep).
+- Route defects: a route the harness could not invoke goes to `auto-self-improve` in its own worktree/branch;
+  policy or self-improvement changes never merge autonomously.
+- Issues this run resolves (`Closes #N` only fires on the default branch), scratch files under
+  `<state_dir>/tmp`, and any user question never answered: surface them now.
+
+### 6. Report
+
+Every `office close` ends its output with one line: `office close done — <summary>` (for example
+`PR #12 merged, main synced, 2 worktree(s) removed` or `handed off <pr>, worktrees kept`). Relay it as the final
+line of your report, on every path, including a refused close.
+
+## Quick Reference
+
+| Situation | Action |
+|---|---|
+| Several runs open | `office close --run <id>`; never guess |
+| `close-blocked` | Follow its `next:`; finish the loop, do not force |
+| Merged via `office land` | `office close` |
+| Merged via a PR Office did not open | `office close --landed-externally <pr-url>` |
+| Merge not authorized at intake | `office close --handoff <pr-url>`; worktrees kept |
+| Docs warning | Update the CHANGELOG/README the repo keeps, or say why not |
+| Base checked out and dirty | Sync skipped; ask the user (native question tool) |
+| Worktree kept as dirty | Report it as a defect; never auto-commit |
+| Branch kept (`-d` refused) | Report it; never `-D` |
+| Any path | End with `office close done — <summary>` |
+
+## Common Mistakes
+
+- **Merging because the plan was approved.** Only an intake `merge`/`e2e` choice or the user's quoted answer
+  authorizes it.
+- **Handing off, then deleting worktrees.** A handoff PR may need another round; keep its workspace.
+- **Committing leftovers to make close pass.** Uncommitted work is a loop defect to report, not to hide.
+- **Fast-forwarding a dirty base checkout.** Ask the user; their uncommitted work outranks a tidy sync.
+- **Reporting "merged" when only GitHub moved.** Done means local `<base>` == `origin/<base>` too.
+- **Dropping the report line on a refused close.** The `office close done` line says what state was reached.
