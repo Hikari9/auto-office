@@ -9,7 +9,7 @@ The goal is simple: take a human intent and turn it into a reviewable, resumable
 - **Distribution:** `auto-office`
 - **Python package:** `office`
 - **CLI:** `office`
-- **Current release:** 3.3.0
+- **Current release:** 3.3.1
 - **State authority:** SQLite `runs.db` (WAL)
 - **Core rule:** agents decide; the runtime records, isolates, routes, verifies, and resumes
 
@@ -67,6 +67,21 @@ Auto Office turns those into runtime behavior rather than hoping every agent rem
 ---
 
 ## Install
+
+### Install the skills as a plugin
+
+This repo is a plugin marketplace for both Claude Code and Codex / ChatGPT. The plugin ships the skills only; you still need the CLI above.
+
+```bash
+# Claude Code
+claude plugin marketplace add Hikari9/auto-office
+claude plugin install auto-office@auto-office
+
+# Codex / ChatGPT desktop
+codex plugin marketplace add Hikari9/auto-office
+```
+
+Then enable `auto-office` from the Codex plugin directory. Claude reads `.claude-plugin/marketplace.json`; Codex reads `.agents/plugins/marketplace.json` and the root `plugin.json`. Keep `VERSION`, `plugin.json`, `.claude-plugin/*.json`, and `pyproject.toml` in sync; `scripts/check_ecosystem.py` enforces it.
 
 ### 1. Install the CLI
 

@@ -15,7 +15,7 @@ def test_version_identity_is_exact_pep440(env):
     from office import version
     v = version.current()
     assert version.is_exact(v), v
-    assert v.startswith("3.3.0")
+    assert v.startswith("3.3.1")
     assert not version.is_exact("dev") and not version.is_exact("3.1-dev")
 
 

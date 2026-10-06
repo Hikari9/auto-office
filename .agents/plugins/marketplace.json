@@ -1,0 +1,20 @@
+{
+  "name": "auto-office",
+  "interface": {
+    "displayName": "Auto Office"
+  },
+  "plugins": [
+    {
+      "name": "auto-office",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
