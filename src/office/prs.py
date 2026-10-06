@@ -1,7 +1,7 @@
 """Per-task GitHub PRs (3.2): every task branch is pushed and has a draft PR.
 
 A root task's PR targets the repository's default branch; a task that depends
-on another targets that task's branch, so GitHub shows the stack the plan
+on another, or was stacked on it at dispatch, targets that task's branch, so GitHub shows the stack the plan
 diagram shows. Executors push work in progress themselves; at submit the
 runtime moves the branch to the reviewed revision and pushes it, so the PR
 head is always what the gates judged. Verdicts are posted as one line (never
@@ -81,9 +81,22 @@ def enabled(run: dict) -> bool:
 # ------------------------------------------------------------------ stack shape
 
 def parent(con, run: dict, task: dict) -> dict | None:
-    """The task this one stacks on: its last dependency, as in the diagram."""
+    """The task this one stacks on: its last dependency, as in the diagram, or
+    else the task it was cut from when it was stacked at dispatch."""
     deps = [d for d in task["depends"] if state.get_task(con, run["id"], d)]
-    return state.get_task(con, run["id"], deps[-1]) if deps else None
+    return state.get_task(con, run["id"], deps[-1]) if deps else _cut_from(con, run, task)
+
+
+def _cut_from(con, run: dict, task: dict) -> dict | None:
+    """`office dispatch T1 T5` stacks T5 without a `depends:` line; the only trace
+    is that T5's dispatch was based on one of T1's revisions rather than the run base."""
+    current = state.get_dispatch(con, task["current_dispatch_id"]) if task.get("current_dispatch_id") else None
+    base = (current or {}).get("base_commit")
+    if not base or base == run["base_sha"]:
+        return None
+    row = con.execute("SELECT task_id FROM revisions WHERE run_id=? AND commit_sha=? AND task_id<>? "
+                      "ORDER BY created_at DESC LIMIT 1", (run["id"], base, task["id"])).fetchone()
+    return state.get_task(con, run["id"], row["task_id"]) if row else None
 
 
 def pr_base(con, run: dict, task: dict) -> str:
@@ -263,20 +276,27 @@ def job_pr_sync(con, run: dict, job: dict) -> dict:
         return {"error": str(exc)[:300]}
 
 
+def _publish(con, run: dict, task: dict, rev_id: str) -> tuple[dict, dict]:
+    """Push the revision to its task branch and find or open the PR for it."""
+    rev = con.execute("SELECT * FROM revisions WHERE id=?", (rev_id,)).fetchone()
+    dispatch = state.get_dispatch(con, rev["dispatch_id"])
+    ok, err = push(run, dispatch, commit=rev["commit_sha"])
+    if not ok:
+        raise RuntimeError(f"push of {dispatch['branch']} failed: {err}"[:300])
+    return rev, ensure_pr(con, run, task, dispatch)
+
+
 def _sync(con, run: dict, task: dict, event: str, ref: str) -> dict:
     if event == "revision":
-        rev = con.execute("SELECT * FROM revisions WHERE id=?", (ref,)).fetchone()
-        dispatch = state.get_dispatch(con, rev["dispatch_id"])
-        ok, err = push(run, dispatch, commit=rev["commit_sha"])
-        if not ok:
-            raise RuntimeError(f"push of {dispatch['branch']} failed: {err}"[:300])
-        pr = ensure_pr(con, run, task, dispatch)
+        rev, pr = _publish(con, run, task, ref)
         attempt = con.execute("SELECT COUNT(*) FROM revisions WHERE run_id=? AND task_id=?",
                               (run["id"], task["id"])).fetchone()[0]
         if attempt > 1:
             _comment(run, pr, f"office: revision {ref} pushed (attempt {attempt}, replaces attempt {attempt - 1})")
         return {"pr": pr["number"], "pushed": rev["commit_sha"]}
     pr = task.get("pr") or {}
+    if event == "accepted" and not pr.get("number"):
+        pr = _publish(con, run, task, ref)[1]  # the revision sync has not recorded the PR yet
     if not pr.get("number"):
         return {"skipped": "no PR yet"}
     if event == "verdict":
@@ -293,7 +313,9 @@ def _sync(con, run: dict, task: dict, event: str, ref: str) -> dict:
                           f"{_gate_line(con, run, task, gate['revision_id'])}")
         return {"commented": gate["verdict"]}
     if event == "accepted":
-        _gh(["pr", "ready", str(pr["number"])], run["repo_root"])
+        ready = _gh(["pr", "ready", str(pr["number"])], run["repo_root"])
+        if ready.returncode != 0:
+            raise RuntimeError(f"gh pr ready failed: {(ready.stderr or ready.stdout).strip()}"[:300])
         _comment(run, pr, f"office: {task['id']} accepted on {ref}; ready for review")
         return {"ready": pr["number"]}
     return {"skipped": event}
