@@ -9,7 +9,7 @@ The goal is simple: take a human intent and turn it into a reviewable, resumable
 - **Distribution:** `auto-office`
 - **Python package:** `office`
 - **CLI:** `office`
-- **Current release:** 3.2.7
+- **Current release:** 3.3.0
 - **State authority:** SQLite `runs.db` (WAL)
 - **Core rule:** agents decide; the runtime records, isolates, routes, verifies, and resumes
 
