@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "auto-office",
-  "version": "3.3.1",
+  "version": "3.3.2",
   "description": "Adaptive office engineering runtime: routed execution, independent review, verification, and closeout through one `office` CLI.",
   "homepage": "https://github.com/Hikari9/auto-office",
   "repository": "https://github.com/Hikari9/auto-office",
