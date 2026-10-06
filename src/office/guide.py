@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 
 import os
+from pathlib import Path
 
 from office import amend, contract, paths, planpath, plans, state
 from office.result import Result
@@ -319,6 +320,12 @@ def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:
                 con.execute("UPDATE dispatches SET stall_kind=NULL, resets_at=NULL, limit_label=NULL, "
                             "limit_fingerprint=NULL WHERE id=?", (d["id"],))
         changed = act["hash"] is not None and d.get("idle_hash") not in (None, act["hash"])
+        final = None if act["busy"] else _final_status(act["text"])
+        if final is not None:
+            tail = _write_pane_tail(run, d, act)
+            out.append(f"{who}: ended its turn with SUBMIT={final['submit']}{why}; NEXT={final['next']}; "
+                       f"pane tail in {tail}; next: {actions}")
+            continue
         if act["busy"] or changed:
             idle_since = None
         else:
@@ -332,13 +339,41 @@ def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:
         idle = (parse_iso(now_iso()) - parse_iso(idle_since)).total_seconds()
         if idle < threshold:
             continue
-        tail = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "pane-tail.txt"
-        if act["text"] is not None:
-            atomic_write_text(tail, "\n".join(act["text"].splitlines()[-40:]) + "\n")
+        tail = _write_pane_tail(run, d, act)
         prompt = f'office prompt {d["id"]} -- "<message>", ' if d["launcher"] == "herdr" else ""
         out.append(f"{who}: idle {int(idle)}s without submitting{why}; pane tail in {tail}; "
                    f"next: {prompt}{actions}")
     return out
+
+
+def _write_pane_tail(run: dict, d: dict, act: dict) -> Path:
+    tail = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "pane-tail.txt"
+    if act["text"] is not None:
+        atomic_write_text(tail, "\n".join(act["text"].splitlines()[-40:]) + "\n")
+    return tail
+
+
+# The executor's closing status line: "TASK=.. SUBMIT=<..> NEXT=<..>". A pane
+# wraps it, so the line runs on until a blank line.
+_FINAL_SUBMIT = re.compile(r"\bSUBMIT=(not attempted|refused\b.*?)\s+NEXT=(.*)", re.S)
+
+
+def _final_status(text: str | None) -> dict | None:
+    """The pane's last status line when it says the executor ended without a
+    submit ({"submit", "next"}), else None. A status line followed by a newer
+    turn (an echoed prompt or new assistant output) is history, not the end."""
+    from office import dispatch
+    lines = (text or "").splitlines()
+    start = next((i for i in range(len(lines) - 1, -1, -1) if "SUBMIT=" in lines[i]), None)
+    if start is None:
+        return None
+    end = next((i for i in range(start + 1, len(lines)) if not lines[i].strip()), len(lines))
+    if any(dispatch._LIMIT_ACTIVITY.match(line) for line in lines[end:]):
+        return None
+    m = _FINAL_SUBMIT.search(" ".join(line.strip() for line in lines[start:end]))
+    if not m:
+        return None
+    return {"submit": m.group(1).strip(), "next": " ".join(m.group(2).split())[:300]}
 
 
 def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str) -> str:
