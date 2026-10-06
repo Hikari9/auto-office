@@ -1252,9 +1252,26 @@ BUSY_MARKERS = ("esc to cancel", "esc to interrupt")
 _SPINNER = re.compile(r"(?:…|\.\.\.)\s*\(\s*(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b")
 
 
+# A Claude footer segment counting the pane's own background work:
+# "· 1 shell, 3 monitors still running", "2 shells", "3 monitors". The pane is
+# waiting on them, not stalled. Bare counts must be a whole segment so prose
+# like "ran 1 shell command" does not match.
+_BG_COUNTS = r"\d+ (?:shells?|monitors?)(?:, \d+ (?:shells?|monitors?))*"
+_BACKGROUND = re.compile(
+    rf"(?:^|[·•|])\s*{_BG_COUNTS}(?:\s+still running\s*$|\s*(?:[·•|]|$))", re.I | re.M)
+# Only the footer region: a count scrolled up in the history is stale.
+BACKGROUND_TAIL_LINES = 8
+
+
+def _background_running(text: str) -> bool:
+    tail = [ln for ln in (text or "").splitlines() if ln.strip()][-BACKGROUND_TAIL_LINES:]
+    return bool(_BACKGROUND.search("\n".join(tail)))
+
+
 def _pane_busy(text: str) -> bool:
     low = (text or "").lower()
-    return any(m in low for m in BUSY_MARKERS) or bool(_SPINNER.search(text or ""))
+    return (any(m in low for m in BUSY_MARKERS) or bool(_SPINNER.search(text or ""))
+            or _background_running(text))
 
 
 # Claude Code stops on its session limit and sits on a screen like
