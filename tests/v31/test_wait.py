@@ -651,3 +651,15 @@ def test_a_local_reset_later_today_is_today(new_york):
     from office import dispatch
     got = dispatch._usage_limit("Usage limit reached · resets 9:30pm", _utc(2026, 7, 1, 12, 0))
     assert got["resets_at"] == _utc(2026, 7, 2, 1, 30) and got["local"] == "21:30" and got["tz"] == "EDT", got
+
+
+def test_a_codex_pane_herdr_calls_working_but_idle_times_out_to_a_stall(env):
+    # herdr keeps reporting a codex pane `working` after its turn ended (G3).
+    _go(env)
+    e = _herdr(env, status="working", pane="> waiting for input")
+    d = _as_herdr(env)
+    con = env.con()
+    con.execute("UPDATE dispatches SET harness='codex', adapter_id='codex' WHERE id=?", (d["id"],))
+    con.commit()
+    code, out = _wait(env, e, timeout="3")
+    assert code == 3 and "stall:" in out and d["id"] in out and "idle" in out, out

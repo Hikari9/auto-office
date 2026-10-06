@@ -56,7 +56,9 @@ def agent_activity(d: dict) -> dict | None:
     A headless process has no idle state: it is busy while its pid lives.
     A pane-hosted agent is busy when herdr reports `working` or the pane shows a
     turn in progress (agy reports idle mid-turn, so its pane decides); `hash`
-    is the pane content, which changes while the agent is doing anything."""
+    is the pane content, which changes while the agent is doing anything.
+    herdr reports a codex pane `working` long after its turn ended, so for codex
+    only the pane markers and the hash decide."""
     alive = agent_alive(d)
     if alive is None:
         return None
@@ -72,7 +74,8 @@ def agent_activity(d: dict) -> dict | None:
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
     status = agent.get("status") or agent.get("agent_status")
-    return {"alive": True, "busy": status == "working" or dispatch._pane_busy(text), "hash": sha256_obj(text),
+    working = status == "working" and (d.get("adapter_id") or d.get("harness")) != "codex"
+    return {"alive": True, "busy": working or dispatch._pane_busy(text), "hash": sha256_obj(text),
             "text": text, "status": status}
 
 
