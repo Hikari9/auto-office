@@ -16,7 +16,6 @@ from office import frontdoor, version
 CONTROL_LINE = "3.3"
 RUN_KINDS = ("resume_run", "attach_run", "pause", "resume", "set_priority", "demote", "set_auto_mode",
              "change_route", "approve_plan", "chat_send")
-FEATURES = (("queue", "--help"), ("amend", "--help"))
 
 
 def _probe_runtime(argv: tuple[str, ...]) -> bool:

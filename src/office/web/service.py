@@ -185,6 +185,8 @@ class Service:
         self.cond = threading.Condition()
         self.lock = threading.RLock()
         self.marker = None
+        self._github_rev: str | None = None
+        self._db_inode: tuple[int, int] | None = None
         self.last_ok: float | None = None
         self.last_error: tuple[float, str] | None = None
         self.launches: dict[str, dict] = {}
@@ -268,7 +270,7 @@ class Service:
 
     def _marker(self):
         st = os.stat(self.db_path)  # a missing or replaced runs.db is not read through a stale handle
-        if (st.st_dev, st.st_ino) != getattr(self, "_db_inode", None):
+        if (st.st_dev, st.st_ino) != self._db_inode:
             self.observer.close()
             self._db_inode = (st.st_dev, st.st_ino)
 
@@ -290,7 +292,7 @@ class Service:
                 self.observer.close()
                 marker = None
             github_rev = _github_signature(self.github.snapshot()) if self.github else None
-            changed = force or marker != self.marker or github_rev != getattr(self, "_github_rev", None)
+            changed = force or marker != self.marker or github_rev != self._github_rev
             freshness_moved = self.office_freshness()["state"] != before
             if not changed and not freshness_moved:
                 return None

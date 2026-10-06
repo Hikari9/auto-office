@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
 import pytest
 
 from office.web import server
 
 
+HERE = Path(__file__).parent
+
+
 def pytest_collection_modifyitems(items):
-    for item in items:
-        item.add_marker(pytest.mark.integration)
+    for item in items:  # this hook sees the whole session: mark only the browser tests
+        if HERE in Path(str(item.fspath)).parents:
+            item.add_marker(pytest.mark.integration)
 
 
 @pytest.fixture

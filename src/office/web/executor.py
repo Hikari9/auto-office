@@ -18,6 +18,7 @@ from office import frontdoor
 TIMEOUT = 300.0
 # Exit codes an OfficeError (Refused, Usage, RuntimeUnavailable, ...) returns.
 REFUSAL_EXITS = range(1, 64)
+DISPATCH_ENV = ("OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE_ROLE", "OFFICE_FRONT_DOOR_HOPS")
 
 
 @dataclass
@@ -37,9 +38,8 @@ def _env(override: dict | None = None) -> dict:
     env = dict(os.environ)
     env.update(extra)
     env.update(override or {})
-    for key in [k for k in env if k.startswith(("OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID",
-                                                  "OFFICE_ROLE", "OFFICE_FRONT_DOOR_HOPS"))]:
-        del env[key]  # the web service acts as the operator, never as a dispatch
+    for key in DISPATCH_ENV:
+        env.pop(key, None)  # the web service acts as the operator, never as a dispatch
     return env
 
 
