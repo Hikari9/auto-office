@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from office import adaptive, candidates, planfile, state
+from office import adaptive, candidates, contract, planfile, state, visual
 from office.util import dumps, loads
 
 # ------------------------------------------------------------------ layout
@@ -107,6 +107,7 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
     quota_snapshot = candidates.probe_quota_snapshot(
         con, roles, family_floors=config.get("model_family_floors")) if tasks else {}
     quota_event_seen: set[str] = set()
+    recorded_tasks = {t["id"]: t for t in state.tasks(con, run["id"])}
     out = {}
     audits = []
     loads: dict[int, dict[str, int]] = {}
@@ -125,11 +126,24 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
         if code_review:
             rv = _preview_one(con, config, run, "code_reviewer", t["id"], quota_snapshot=quota_snapshot,
                               quota_event_seen=quota_event_seen)
-        visual = t.get("visual") or {}
-        task_gates = (["checks"] if t.get("checks") else []) + (["code review"] if code_review else []) \
-            + (["ui review"] if visual and not visual.get("none") else [])
+        recorded = recorded_tasks.get(t["id"])
+        dispatched_route = None
+        if recorded and recorded.get("current_dispatch_id"):
+            dispatch = state.get_dispatch(con, recorded["current_dispatch_id"])
+            if dispatch:
+                dispatched_route = dispatch.get("triple")
+        visual_spec = t.get("visual") or {}
+        visual_gate = visual.applicability(con, run, t, [])["status"] in ("required", "probe")
+        if contract.is_convergence(run):
+            task_gates = ["checks"] if t.get("checks") else []
+        else:
+            task_gates = (["checks"] if t.get("checks") else []) + (["code review"] if code_review else []) \
+                + (["ui review"] if visual_gate else [])
         out[t["id"]] = {"title": t["title"], "depends": list(t.get("depends") or []), **lay[t["id"]],
-                        "route": ex.get("route"), "why": ex.get("why"), "gates": task_gates,
+                        "route": dispatched_route or ex.get("route"), "dispatched_route": dispatched_route,
+                        "why": ex.get("why"), "gates": task_gates,
+                        "lane": t.get("lane"), "converge": list(t.get("converge") or []),
+                        "visual_gate": visual_gate,
                         "review": rv.get("route"), "review_why": rv.get("why"),
                         **{k: ex[k] for k in ("slate", "route_plan", "decision_hash") if k in ex}}
     from office import prs
@@ -187,10 +201,83 @@ def _where(entry: dict) -> str:
 
 
 def checkpoints(run: dict, pv: dict) -> str:
-    order = sorted(pv["tasks"], key=lambda t: (pv["tasks"][t]["wave"], int(t[1:]) if t[1:].isdigit() else 0))
-    chain = [f"{t} accepted" + (f" [{', '.join(pv['tasks'][t]['gates'])}]" if pv["tasks"][t].get("gates") else "")
-             for t in order] + ["integration review"] + landing_chain(pv)
-    return " -> ".join(chain)
+    tasks = pv["tasks"]
+    waves: dict[int, list[str]] = {}
+    for tid, task in tasks.items():
+        waves.setdefault(task["wave"], []).append(tid)
+    task_steps = []
+    for wave in sorted(waves):
+        ids = sorted(waves[wave], key=_tid_key)
+        parallel = " | ".join(_accepted(tid, tasks[tid]) for tid in ids)
+        task_steps.append(f"wave {wave} {{{parallel}}}")
+
+    if contract.is_convergence(run):
+        review_steps = _convergence_checkpoints(tasks, code_review=bool((run.get("gates") or {}).get("code_review")))
+    else:
+        review_steps = ["integration review"]
+    return " -> ".join([*task_steps, *review_steps, *landing_chain(pv)])
+
+
+def _tid_key(tid: str) -> tuple:
+    match = re.match(r"([A-Za-z]+)(\d+)$", tid)
+    return (match.group(1), int(match.group(2))) if match else (tid, 0)
+
+
+def _accepted(tid: str, task: dict) -> str:
+    gates = task.get("gates") or []
+    suffix = f" [{', '.join(gates)}]" if gates else ""
+    return f"{tid} accepted{suffix}"
+
+
+def _convergence_checkpoints(tasks: dict[str, dict], *, code_review: bool) -> list[str]:
+    """List the convergence and visual reviews for each connected ownership lane."""
+    parent = {tid: tid for tid in tasks}
+
+    def find(tid: str) -> str:
+        while parent[tid] != tid:
+            parent[tid] = parent[parent[tid]]
+            tid = parent[tid]
+        return tid
+
+    def union(left: str, right: str) -> None:
+        a, b = find(left), find(right)
+        if a != b:
+            parent[max(a, b, key=_tid_key)] = min(a, b, key=_tid_key)
+
+    lane_owner: dict[str, str] = {}
+    for tid, task in tasks.items():
+        for dep in task.get("depends") or []:
+            if dep in parent:
+                union(tid, dep)
+        lane = task.get("lane")
+        if lane:
+            if lane in lane_owner:
+                union(tid, lane_owner[lane])
+            else:
+                lane_owner[lane] = tid
+
+    lanes: dict[str, list[str]] = {}
+    for tid in tasks:
+        lanes.setdefault(find(tid), []).append(tid)
+    checkpoints = []
+    lane_by_converge: dict[str, list[str]] = {}
+    for tids in sorted(lanes.values(), key=lambda group: min(map(_tid_key, group))):
+        tids.sort(key=_tid_key)
+        names = sorted({tasks[tid].get("lane") for tid in tids if tasks[tid].get("lane")})
+        lane_id = "L-" + (names[0] if names else tids[0])
+        label = f"lane {names[0]}" if names else f"lane {', '.join(tids)}"
+        if code_review:
+            checkpoints.append(f"{label} convergence review")
+        if any(tasks[tid].get("visual_gate") for tid in tids):
+            checkpoints.append(f"{label} visual review")
+        for tid in tids:
+            for name in tasks[tid].get("converge") or []:
+                lane_by_converge.setdefault(name, []).append(lane_id)
+    if code_review:
+        for name, lane_ids in sorted(lane_by_converge.items()):
+            if len(set(lane_ids)) > 1:
+                checkpoints.append(f"shared-scope {name} review")
+    return checkpoints
 
 
 def landing_chain(pv: dict) -> list[str]:
@@ -212,8 +299,8 @@ def render(run: dict, version: int, pv: dict) -> list[str]:
     waves = sorted({e["wave"] for e in tasks.values()})
     width = max((len(f"{t}  {e['title']}") for t, e in tasks.items()), default=0)
     width = min(max(width, 20), 44)
-    route_w = max((len(e["route"] or "no route") for e in tasks.values()), default=8)
-    lines = [f"plan p{version} diagram (routes are a preview; dispatch re-resolves)", ""]
+    route_w = max((len(_display_route(e)) for e in tasks.values()), default=8)
+    lines = [f"plan p{version} diagram (routes are previews until dispatched; actual route shown after dispatch)", ""]
     for w in waves:
         ids = [t for t, e in tasks.items() if e["wave"] == w]
         lines.append(f"wave {w}" + (f"  ({' | '.join(ids)} in parallel)" if len(ids) > 1 else ""))
@@ -221,11 +308,13 @@ def render(run: dict, version: int, pv: dict) -> list[str]:
             e = tasks[tid]
             head = f"{tid}  {e['title']}"
             head = head if len(head) <= width else head[: width - 1] + "~"
-            if e.get("slate") is not None:
+            if e.get("dispatched_route"):
+                lines.append(f"  {head:<{width}}  {_display_route(e):<{route_w}}  {_where(e)}")
+            elif e.get("slate") is not None:
                 lines.append(f"  {head:<{width}}  {_where(e)}")
                 lines.extend(adaptive.render_slate(e["slate"], indent="      ", notes=_slate_notes(e)))
             else:
-                lines.append(f"  {head:<{width}}  {(e['route'] or 'no route'):<{route_w}}  {_where(e)}")
+                lines.append(f"  {head:<{width}}  {_display_route(e):<{route_w}}  {_where(e)}")
                 if e.get("why"):
                     lines.append(f"  {'':<{width}}  why: {e['why']}")
             if e.get("review"):
@@ -246,6 +335,13 @@ def _slate_notes(entry: dict) -> list[str]:
     return notes
 
 
+def _display_route(entry: dict) -> str:
+    route = entry.get("dispatched_route")
+    if route:
+        return f"dispatched: {route}"
+    return entry.get("route") or "no route"
+
+
 def diff(prev: dict | None, cur: dict, prev_version: int) -> list[str]:
     """What changed against the previous plan version's diagram."""
     if not prev:
@@ -261,7 +357,7 @@ def diff(prev: dict | None, cur: dict, prev_version: int) -> list[str]:
             out.append(f"{tid} title: {x.get('title')} -> {y['title']}")
         if (x.get("base"), x.get("needs")) != (y["base"], y["needs"]):
             out.append(f"{tid} {_where(x)} -> {_where(y)}")
-        if x.get("route") != y["route"]:
+        if not y.get("dispatched_route") and x.get("route") != y["route"]:
             out.append(f"{tid} route: {x.get('route') or 'no route'} -> {y['route'] or 'no route'}"
                        + (f" ({y['why']})" if y.get("why") else ""))
         if x.get("review") != y.get("review"):
