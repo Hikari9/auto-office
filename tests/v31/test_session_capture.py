@@ -86,6 +86,9 @@ def _sync_launch(ledger, monkeypatch, on_supervisor=None):
     monkeypatch.setenv("OFFICE_LAUNCHER", "sync")
     monkeypatch.setattr(dispatch_mod.frontdoor, "current_argv", lambda: (["office"], {}))
     monkeypatch.setattr(dispatch_mod.subprocess, "run", run)
+    # tests run the supervisor in-process (conftest); stand in for that the same way
+    monkeypatch.setattr(dispatch_mod, "_supervise_in_process",
+                        lambda did, cwd, extra: on_supervisor(did) if on_supervisor else None)
     return dispatch_mod
 
 
