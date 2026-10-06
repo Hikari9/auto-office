@@ -161,7 +161,8 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
                     (run["id"], version, "ordinary", new_text, dumps(parsed.tasks), dumps(parsed.requirements),
                      "orchestrator", now_iso(), sha256_bytes(new_text.encode()), run["plan_version"], amendment_id))
         sync = plans.sync_tasks(con, run, parsed.tasks, version)
-        affected = sorted(set(scope_ids) | set(sync["acceptance"]) | set(sync["contract"]))
+        # Added tasks are the only affected ones when the plan merely grows: a running task's contract is untouched.
+        affected = sorted(set(scope_ids) | set(sync["acceptance"]) | set(sync["contract"]) | set(sync["added"]))
         if not scope_ids and not affected:
             affected = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] not in ("accepted", "cancelled")]
         for tid in scope_ids:
