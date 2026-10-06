@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Read remaining AGY (Antigravity/Gemini) quota programmatically.
 
-Reads OAuth credentials from ~/.gemini/antigravity-cli/antigravity-oauth-token,
+Reads OAuth credentials from the first of these that exists:
+  1. ~/.gemini/antigravity-cli/antigravity-oauth-token   (legacy)
+  2. ~/.gemini/jetski-standalone-oauth-token             (written by agy 1.3)
 refreshes the access token via Google OAuth2, and queries the CloudCode API endpoint:
 https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota
 
@@ -49,7 +51,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-TOKEN_PATH = os.path.expanduser("~/.gemini/antigravity-cli/antigravity-oauth-token")
+# Ordered: first existing file wins. agy 1.3 moved the token; older installs
+# keep the legacy location.
+TOKEN_LOCATIONS = (
+    "~/.gemini/antigravity-cli/antigravity-oauth-token",
+    "~/.gemini/jetski-standalone-oauth-token",
+)
+
+
+def token_paths():
+    """Expanded at call time so HOME is read when the probe runs, not at import."""
+    return [os.path.expanduser(p) for p in TOKEN_LOCATIONS]
 
 # ---------------------------------------------------------------------------
 # OAuth client credentials are DISCOVERED from the installed Antigravity CLI,
@@ -198,19 +210,26 @@ def resolve_oauth_client():
 
 
 def get_refreshed_access_token():
-    if not os.path.exists(TOKEN_PATH):
-        return None, f"Token file not found at {TOKEN_PATH} (run `agy` and log in)"
+    paths = token_paths()
+    token_path = next((p for p in paths if os.path.exists(p)), None)
+    if not token_path:
+        return None, (
+            "Token file not found; tried " + ", ".join(paths) + " (run `agy` and log in)"
+        )
 
     try:
-        with open(TOKEN_PATH, "r") as f:
+        with open(token_path, "r") as f:
             data = json.load(f)
     except Exception as e:
-        return None, f"Failed to read token file: {e}"
+        return None, f"Failed to read token file {token_path}: {e}"
 
-    tok_obj = data.get("token", {})
-    refresh_token = tok_obj.get("refresh_token")
-    if not refresh_token:
-        return None, f"No refresh_token found in {TOKEN_PATH} (run `agy` and log in)"
+    tok_obj = data.get("token") if isinstance(data, dict) else None
+    refresh_token = tok_obj.get("refresh_token") if isinstance(tok_obj, dict) else None
+    if not refresh_token or not isinstance(refresh_token, str):
+        return None, (
+            f"Token file {token_path} has an unrecognised format: no token.refresh_token "
+            "(agy may have changed its layout; run `agy` and log in again)"
+        )
 
     candidates, cache_key, cred_err = resolve_oauth_client()
     if cred_err:
