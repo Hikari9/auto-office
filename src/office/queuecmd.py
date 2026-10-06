@@ -43,6 +43,11 @@ def auto_mode(con: sqlite3.Connection, run_id: str | None = None, *, default_on:
     return modes.get(_scope(run_id), "on")
 
 
+def _stored_auto(con: sqlite3.Connection, run_id: str | None) -> str | None:
+    row = con.execute("SELECT auto_mode FROM sched_state WHERE scope=?", (_scope(run_id),)).fetchone()
+    return row["auto_mode"] if row else None
+
+
 def _set_auto(con: sqlite3.Connection, run_id: str | None, mode: str, reason: str) -> None:
     con.execute("INSERT OR REPLACE INTO sched_state(scope, auto_mode, reason, updated_at) VALUES(?,?,?,?)",
                 (_scope(run_id), mode, reason, now_iso()))
@@ -135,14 +140,13 @@ def pause(con, *, item: str | None = None, run_arg: str | None = None, task: str
                     "WHERE id=?", (reason or "operator", at, _next_demotion(con), at, it["id"]))
         it = _get(con, it["id"])
         auto = None
-        if not _runnable_left(con, it):
+        if not _runnable_left(con, it) and _stored_auto(con, it["run_id"]) != "off":
             auto = "run" if it["run_id"] else "global"
             _set_auto(con, it["run_id"], "paused", f"last runnable work paused ({it['id']})")
         _emit(con, it["run_id"], "queue.paused", f"queue: paused {it['id']}",
               {"item": it["id"], "auto_paused": auto})
-    res = Result(lines=[f"paused {it['id']}" + (f"; {auto} auto mode paused" if auto else "")],
-                 next=resume_command(it), data={"item": it, "auto_paused": auto})
-    return res
+    return Result(lines=[f"paused {it['id']}" + (f"; {auto} auto mode paused" if auto else "")],
+                  next=resume_command(it), data={"item": it, "auto_paused": auto})
 
 
 def resume(con, *, item: str | None = None, run_arg: str | None = None, task: str | None = None) -> Result:
@@ -150,7 +154,9 @@ def resume(con, *, item: str | None = None, run_arg: str | None = None, task: st
         it = _resolve(con, item, run_arg, task, create=False)
         con.execute("UPDATE sched_items SET paused=0, pause_reason=NULL, paused_at=NULL, updated_at=? WHERE id=?",
                     (now_iso(), it["id"]))
-        _set_auto(con, it["run_id"], "on", f"resumed {it['id']}")
+        # Resume undoes the pause's own auto-pause; an operator's `auto off` stays off.
+        if _stored_auto(con, it["run_id"]) == "paused":
+            _set_auto(con, it["run_id"], "on", f"resumed {it['id']}")
         _emit(con, it["run_id"], "queue.resumed", f"queue: resumed {it['id']}", {"item": it["id"]})
         it = _get(con, it["id"])
     return Result(lines=[f"resumed {it['id']}"], next="office queue list", data={"item": it})

@@ -160,6 +160,19 @@ def test_pausing_the_last_queued_issue_pauses_global_auto(tmp_path):
         con.close()
 
 
+def test_resume_does_not_override_an_operator_auto_off(tmp_path):
+    con = db.connect(tmp_path / "runs.db")
+    try:
+        a = queuecmd.add(con, "#1").data["item"]["id"]
+        queuecmd.auto(con, "off")
+        assert queuecmd.pause(con, item=a).data["auto_paused"] is None
+        assert queuecmd.auto_mode(con) == "off"
+        queuecmd.resume(con, item=a)
+        assert queuecmd.auto_mode(con) == "off"
+    finally:
+        con.close()
+
+
 def test_add_is_idempotent_by_command_id(tmp_path):
     con = db.connect(tmp_path / "runs.db")
     try:

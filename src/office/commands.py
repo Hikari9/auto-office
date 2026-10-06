@@ -19,12 +19,8 @@ TRANSITIONS = {
 }
 
 
-def _receipt(row) -> dict | None:
-    return db.row_dict(row)
-
-
 def get(con: sqlite3.Connection, command_id: str) -> dict | None:
-    return _receipt(con.execute("SELECT * FROM commands WHERE id=?", (command_id,)).fetchone())
+    return db.row_dict(con.execute("SELECT * FROM commands WHERE id=?", (command_id,)).fetchone())
 
 
 def record(con: sqlite3.Connection, *, command_id: str, kind: str, target: str | None, payload: dict,
