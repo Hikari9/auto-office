@@ -65,3 +65,35 @@ def test_an_added_task_alongside_a_changed_acceptance_still_delivers_to_the_chan
     assert code == 0, out
     assert "affected T1,T2" in out and "delivering to T1" in out, out
     assert [r["task_id"] for r in _deliveries(env)] == ["T1"]
+
+
+# M7: AUTHORITY_TERMS must not fire on a term that is part of a hyphen/underscore compound identifier.
+@pytest.mark.parametrize("text", [
+    "drive herdr with send-text", "drive herdr with send-keys", "call send_keys on the pane", "add release-notes to the docs",
+    "write the release_notes file", "a pre-release check", "the email-validator helper", "see deploy_log.txt",
+])
+def test_authority_terms_ignore_compound_identifiers(text):
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is None, text
+
+
+@pytest.mark.parametrize("text", [
+    "send email to the team", "deploy", "vercel deploy --prod", "vercel --prod", "force-push the branch",
+    "force push the branch", "merge into main", "merge to main", "publish the package", "then send-keys and deploy",
+    "release.", "(send)", "rotate key",
+])
+def test_authority_terms_still_match_standalone_actions(text):
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is not None, text
+
+
+def test_a_delta_naming_a_compound_identifier_is_an_ordinary_amendment(env):
+    _running(env)
+    code, out = env.office("amend", "plan", "--", "use herdr send-keys in the helper", env=EXTERNAL)
+    assert code == 0 and "contract-level-change" not in out, out
+
+
+def test_a_delta_naming_a_standalone_action_is_refused_as_contract_level(env):
+    _running(env)
+    code, out = env.office("amend", "plan", "--", "then send email to the team", env=EXTERNAL)
+    assert code == 4 and "contract-level-change" in out, out

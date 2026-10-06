@@ -18,10 +18,14 @@ from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_bytes
 
 # Words that signal an authority-envelope change (external, irreversible, or
-# destructive action). An "ordinary" amendment carrying one is refused.
+# destructive action). An "ordinary" amendment carrying one is refused. A term that
+# is one part of a hyphen/underscore compound identifier (`send-keys`, `send_keys`,
+# `release-notes`) names a thing, not the action, so it does not count; `--prod` and
+# `force-push` still do.
 AUTHORITY_TERMS = re.compile(
-    r"\b(deploy|production|prod\b|publish|release|send|email|notify users|delete|drop table|truncate|force.?push|"
-    r"merge (to|into) main|migrat(e|ion) (prod|production)|payment|charge|rotate (key|secret)|credentials?)\b", re.I)
+    r"\b(?<!\w-)(?:deploy|production|prod|publish|release|send|email|notify users|delete|drop table|truncate|"
+    r"force.?push|merge (?:to|into) main|migrat(?:e|ion) (?:prod|production)|payment|charge|"
+    r"rotate (?:key|secret)|credentials?)\b(?!-\w)", re.I)
 
 
 def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, requirements: bool = False,
