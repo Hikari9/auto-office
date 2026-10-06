@@ -248,3 +248,37 @@ def test_a_signal_during_an_in_process_agent_stops_it_like_a_killed_child(env, m
     assert rows == {("signal", -int(signum), int(signum))}, rows
     assert not after
     assert handlers == {s: signal.getsignal(s) for s in handlers}
+
+
+@pytest.mark.approved
+def test_a_signal_before_the_in_process_agent_starts_keeps_it_from_running(env, monkeypatch):
+    from office import dispatch
+    ran, real_identity = [], dispatch._record_identity
+
+    def identity(run_id, dispatch_id, which, pid):
+        real_identity(run_id, dispatch_id, which, pid)
+        if which == "agent":
+            os.kill(os.getpid(), signal.SIGTERM)  # after the spawn, before the agent's first read
+
+    monkeypatch.setattr(dispatch, "_record_identity", identity)
+    monkeypatch.setattr(fake_agent, "run", lambda *a: ran.append(a) or (0, b""))
+    approved_run(env, executor=[{}])
+    env.office("dispatch", "T1", check=0)
+    rows = {tuple(r) for r in env.con().execute(
+        "SELECT terminal_classification, exit_code, signal FROM dispatches WHERE role='executor'")}
+    assert rows == {("signal", -int(signal.SIGTERM), int(signal.SIGTERM))}, rows
+    assert not ran
+
+
+def test_a_harness_profile_wall_cap_needs_a_real_process(env):
+    # agy's own profiles carry max_minutes; the supervisor arms a timer for them even without the env override.
+    assert env._has_wall_cap("agy", {})
+    assert not env._has_wall_cap("codex", {})
+    assert env._has_wall_cap("codex", {"OFFICE_WORKER_MAX_MINUTES": "5"})
+    from conftest import InProcessAgent
+    child_env = {"PATH": os.environ["PATH"], "FAKE_SCENARIO": str(env.scenario)}
+    started = []
+    spawn = lambda name: env._spawn_agent(lambda *a: started.append(a[0]) or "real child", [name], str(env.repo),
+                                          child_env, subprocess.PIPE)
+    assert spawn("agy") == "real child" and started == [["agy"]]
+    assert isinstance(spawn("codex"), InProcessAgent)

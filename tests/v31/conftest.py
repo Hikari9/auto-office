@@ -111,25 +111,38 @@ class InProcessAgent:
         self.stdin = _Pipe() if stdin == subprocess.PIPE else None
         self.stdout = self
         self._output = None
+        self._pending = []
+        self._running = False
+        # From the spawn on, a signal is chained to the supervisor's own handler (which records it for the
+        # classification) and either stops the running agent or, before it starts, keeps it from starting.
+        self._previous = {s: signal.signal(s, self._on_signal) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+
+    def _on_signal(self, signum, frame):
+        handler = self._previous.get(signum)
+        if callable(handler):
+            handler(signum, frame)
+        self._pending.append(signum)
+        if self._running:
+            raise _Interrupted(signum)
 
     def _run(self):
         if self._output is not None:
             return
-
-        def interrupt(signum, _frame):
-            raise _Interrupted(signum)
-
-        signals = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
-        previous = {s: signal.signal(s, interrupt) for s in signals}
         prompt = self.stdin.data.decode() if self.stdin else ""
         try:
+            if self._pending:  # a signal arrived before the agent started: it never runs
+                raise _Interrupted(self._pending[0])
+            self._running = True
             self.returncode, output = fake_agent.run(self.argv, prompt, self.env, self.cwd)
         except _Interrupted as stop:
             self.returncode, output = -stop.signum, b""
-        finally:
-            for s, handler in previous.items():
-                signal.signal(s, handler)
+        self._running = False
         self._output = io.BytesIO(output)
+        self._restore()
+
+    def _restore(self):
+        for s, handler in self._previous.items():
+            signal.signal(s, handler)
 
     def read1(self, size=-1) -> bytes:
         self._run()
@@ -206,10 +219,20 @@ class Env:
         the scenario cannot emulate) is started as one."""
         exe = shutil.which(argv[0], path=env.get("PATH"))
         fake = exe and Path(exe) in self.fakes and Path(exe).read_text() == self.fakes[Path(exe)]
-        if not fake or env.get("OFFICE_WORKER_MAX_MINUTES") or not fake_agent.scenario_runs_in_process(env):
+        if not fake or self._has_wall_cap(Path(exe).name, env) or not fake_agent.scenario_runs_in_process(env):
             return spawn_process(argv, cwd, env, stdin)
         env = {**env, "FAKE_HARNESS": Path(exe).name}
         return InProcessAgent(argv, cwd, env, stdin)
+
+    @staticmethod
+    def _has_wall_cap(harness, env):
+        """Whether the supervisor would arm a wall-clock cap for this harness: the env override or
+        any of its profiles' own `max_minutes`."""
+        from office import adapters, dispatch
+        with mock.patch.dict(os.environ, {k: v for k, v in env.items() if k == "OFFICE_WORKER_MAX_MINUTES"}):
+            return any(dispatch._wall_cap_seconds(prof or {}) for adapter in adapters.load_all().values()
+                       if adapters.executable(adapter) == harness
+                       for prof in (adapter.get("office_profiles") or {}).values())
 
     def _init_repo(self):
         self.repo.mkdir()
