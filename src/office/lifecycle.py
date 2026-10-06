@@ -37,7 +37,21 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
           sets: list[str] | None = None, harness: str | None = None, session: str | None = None,
           base: str | None = None, planner: str | None = None, issue: str | None = None,
           no_prs: bool = False, end_state: str | None = None, deploy: dict | None = None,
-          benchmark_refresh: bool = False) -> Result:
+          benchmark_refresh: bool = False, from_run: str | None = None) -> Result:
+    source = None
+    if from_run:
+        # #337: moving old work onto the current review contract is an explicit,
+        # auditable new run, never an in-place rewrite of the old run.
+        scon = db.connect()
+        try:
+            source = state.find_run(scon, from_run)
+            if source is None:
+                raise Usage("unknown-run", f"no run {from_run}", next_step="office list --all")
+            source = {**source, "frozen": state.current_requirements(scon, source["id"])["frozen"],
+                      "plan": state.current_plan(scon, source["id"])}
+        finally:
+            scon.close()
+        goal = goal or source["goal"]
     if not goal or not goal.strip():
         raise Usage("missing-goal", "office start needs a goal", next_step='office start "<goal>"')
     ident = paths.repo_identity(cwd)
@@ -61,7 +75,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
     gear = cfg.fit_gear(gear, risk, volume, interview, adversarial)
     if gear not in cfg.GEARS:
         raise Usage("bad-gear", f"unknown gear {gear!r}", next_step="use one of " + ", ".join(cfg.GEARS))
-    gates = cfg.resolve_gates(gear, risk["high"], config)
+    try:
+        gates = cfg.resolve_gates(gear, risk["high"], config)
+    except ValueError as exc:
+        raise Usage("bad-config", f"config is invalid: {exc}", next_step="fix review.contract, then retry")
     base_sha = paths.git(top, "rev-parse", base or "HEAD")
     run_id = new_run_id()
     sdir = paths.run_dir(run_id)
@@ -74,6 +91,12 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
     plan_review = {"required": bool(gates["plan_review"]), "ended": False}
     frozen = {"goal": goal.strip(), "done_criteria": [], "blast_radius": blast_radius,
               "non_goals": [], "named_actions": []}
+    if source:
+        # The user's frozen intent carries over; authorization, plan review and
+        # every review record start fresh under this run's contract.
+        frozen = {**{k: v for k, v in source["frozen"].items() if k != "goal"}, **{k: v for k, v in frozen.items()
+                                                                                  if v not in (None, [], "")},
+                  "goal": goal.strip()}
     if end_state:
         frozen["end_state"] = end_state  # the user's intake answer; the plan may restate it
     if deploy:
@@ -102,6 +125,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                  dumps(plan_review), planner_mode, now))
             landing = {**({"issue": issue} if issue else {}),
                        **({"prs": {"enabled": False, "reason": "--no-prs"}} if no_prs else {})}
+            if source:
+                from office import contract
+                landing["derived_from"] = {"run": source["id"], "review_contract": contract.of(source),
+                                           "plan_version": (source["plan"] or {}).get("version"), "at": now}
             if landing:
                 con.execute("UPDATE runs SET landing_json=? WHERE id=?", (dumps(landing), run_id))
             from office import benchmarks
@@ -112,6 +139,16 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                         "VALUES(?,?,?,?,?,?)", (run_id, 1, dumps(frozen), "start", None, now))
             run = state.get_run(con, run_id)
             state.emit(con, run, "run.started", f"run started: {goal.strip()[:80]}")
+            if source:
+                from office import contract
+                state.emit(con, run, "run.derived", f"derived from run {short(source['id'])} "
+                           f"({contract.of(source)}); review state starts fresh under {gates['review_contract']}",
+                           payload={"source": source["id"]})
+                # Appended to the source run's own history; nothing there is rewritten.
+                state.emit(con, state.get_run(con, source["id"]), "run.successor",
+                           f"successor run {short(run_id)} carries this work under the {gates['review_contract']} "
+                           f"review contract; this run keeps its {contract.of(source)} records",
+                           payload={"successor": run_id})
             bound = discovery.bind(con, run, discovery.session_keys(harness, session), "start")
             planner_note = "plan inline"
             if planner_mode == "dedicated":
@@ -120,10 +157,18 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                 planner_note = "planner P1 queued"
         _ensure_local_exclude(common)
         state.write_projection(con, run_id)
+        if source and source.get("plan"):
+            draft = planpath.draft(top, run)
+            draft.parent.mkdir(parents=True, exist_ok=True)
+            draft.write_text(source["plan"]["body"], encoding="utf-8")
         if planner_mode == "dedicated":
             jobs.kick(con, run_id)
         res = Result()
-        res.add(f"{short(run_id)} planning | gear {gear} | {planner_note}")
+        res.add(f"{short(run_id)} planning | gear {gear} | {planner_note} | review contract {gates['review_contract']}")
+        if source:
+            res.add(f"derived from {short(source['id'])}: requirements carried over; "
+                    + (f"its plan p{source['plan']['version']} is the draft at {planpath.rel(run)} (review it, then "
+                       "office submit)" if source.get("plan") else "no plan to carry"))
         from office import candidates
         report_con = db.connect()
         try:
@@ -181,6 +226,14 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
             from office import gates
             for t in state.tasks(con, run["id"]):
                 gates.rerun_unavailable_checks(con, state.get_run(con, run["id"]), t)
+            from office import contract
+            if contract.is_convergence(run):
+                # Runtime/evidence failures retry on the same revision; no round is spent.
+                from office import convergence, plans
+                convergence.retry_blocked(con, state.get_run(con, run["id"]))
+                current = state.get_run(con, run["id"])
+                if (current.get("plan_review") or {}).get("status") in ("unavailable", "attention") and current["plan_version"]:
+                    plans.queue_plan_review(con, current, current["plan_version"])
     jobs.kick(con, run["id"])
     from office import guide
     return guide.status(con, state.get_run(con, run["id"]), resumed=True)
@@ -395,6 +448,11 @@ def _archive_receipt(con, run: dict, landing: dict, handoff: str | None) -> dict
             "policy_hash": run["policy_hash"], "config_hash": run["config_hash"], "tasks": tasks,
             "accepted_commits": {t["id"]: revs.get(t["accepted_revision"]) for t in tasks},
             "landing": landing, "handoff": handoff}
+    from office import contract
+    body["review_contract"] = contract.of(run)
+    if contract.is_convergence(run):
+        from office import convergence
+        body["convergence"] = convergence.receipt(con, run)
     digest = sha256_obj(body)
     try:
         from office.util import atomic_write_json

@@ -5,7 +5,8 @@ Reads the prompt (stdin or last argv), finds the role from its first line and
 performs the next scripted action for that role from $FAKE_SCENARIO (JSON):
 
   {"executor": [{"write": {"calc.py": "..."}, "submit": true}],
-   "code_reviewer": [{"reply": "VERDICT: PASS"}],
+   "code_reviewer": [{"reply": "VERDICT: PASS"}],            (v3.1 per-task review)
+   "convergence_reviewer": [{"reply": "VERDICT: APPROVED\nNEXT proceed"}],   (#337 lane review)
    "plan_reviewer": [...], "planner": [{"plan": "...", "submit": true}],
    "visual_reviewer": [...], "probe": [{"reply": "auto"}]}
 
@@ -79,6 +80,7 @@ def _role(first):
     if first.startswith("ROLE planner"):
         return "planner"
     for marker, role in (("plan reviewer", "plan_reviewer"), ("integration reviewer", "integration_reviewer"),
+                         ("convergence reviewer", "convergence_reviewer"),
                          ("code reviewer", "code_reviewer"), ("conformance probe", "probe"),
                          ("visual reviewer", "visual_reviewer")):
         if marker in first:

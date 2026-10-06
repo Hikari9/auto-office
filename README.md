@@ -26,11 +26,11 @@ flowchart LR
     C --> D["Plan diagram<br/>Waves · routes · checkpoints"]
     D --> E{"User approval"}
     E -->|approved| F["Parallel / stacked execution"]
-    F --> G["Immutable submission"]
-    G --> H["Checks + independent review<br/>+ visual review when applicable"]
-    H -->|CHANGES_REQUIRED| F
-    H -->|PLAN_DEFECT| C
-    H -->|PASS| I["Integration + run-level verification"]
+    F --> G["Immutable submission<br/>checks + executor self-review"]
+    G --> H["Lane composed: one convergence review<br/>+ visual review when applicable"]
+    H -->|RECHECK| F
+    H -->|INTAKE_GAP| C
+    H -->|APPROVED| I["Integration + run-level verification"]
     I --> J{"Landing policy"}
     J -->|ask| K["Human decides"]
     J -->|preview| L["Preview deploy + verify"]
@@ -248,14 +248,14 @@ flowchart TB
     T2 --> P2["Task PR T2"]
     T3 --> P3["Task PR T3"]
 
-    P1 --> INT["Compose accepted revisions"]
+    P1 --> INT["Compose each lane · convergence review per lane / shared scope"]
     P2 --> INT
     P3 --> INT
-    INT --> RUN["Run checks + integration review when a real boundary exists"]
+    INT --> RUN["Compose everything + run-level checks"]
     RUN --> LAND["Landing policy"]
 ```
 
-**Figure 2 — Parallel work is isolated first, integrated once accepted.** Task PRs may be stacked on their dependency's branch; the integrated tree is verified again because it is the first place all accepted work exists together.
+**Figure 2 — Parallel work is isolated first, reviewed per lane, integrated once converged.** Task PRs may be stacked on their dependency's branch; the integrated tree is verified again because it is the first place all accepted work exists together.
 
 ### 5. Submission captures an immutable revision
 
@@ -263,31 +263,34 @@ flowchart TB
 
 The runtime then evaluates the current revision through the gates funded by the run:
 
-- deterministic task checks;
-- independent code review;
-- visual capture + visual review when the acceptance contract is user-visible;
+- deterministic task checks (the executor has already self-reviewed on four lenses, capped at 3 rounds);
 - dependency/current-amendment checks;
+- once every task of its lane is accepted, one independent convergence review of the composed lane, plus visual capture + visual review when the acceptance contract is user-visible;
 - later, run-level integration checks.
+
+There is no routine per-task independent code review under the current review contract.
 
 ### 6. Review converges; it does not rubber-stamp
 
-Gate verdicts are:
+New runs use the `convergence-v1` review contract ([`docs/review-convergence.md`](docs/review-convergence.md)). Plan, convergence, and visual reviews answer:
 
 ```text
-PASS | CHANGES_REQUIRED | PLAN_DEFECT | BRIEF_DEFECT | UNAVAILABLE
+APPROVED | RECHECK | INTAKE_GAP
 ```
 
-- `CHANGES_REQUIRED` goes back to the owning executor.
-- `PLAN_DEFECT` routes back toward the plan/requirement assumption that failed.
-- `BRIEF_DEFECT` means the delegated brief itself is malformed or insufficient.
-- `UNAVAILABLE` is not a pass.
-- stale findings from an older revision are audit history, not acceptance of the new one.
+- `APPROVED`: no blocking finding; the work advances now. Remaining findings must be fixed or dispositioned (`office disposition`) before landing, without another independent review.
+- `RECHECK`: blocking findings. All of them route at once to the tasks that own them; repairs run in parallel, the lane recomposes, and the same reviewer reviews again.
+- `INTAKE_GAP`: a missing or conflicting user-owned decision; the orchestrator asks the user at once.
+- Severity (`high | medium | low`) is separate from blocking, and runtime status (`COMPLETED | UNAVAILABLE | EVIDENCE_BLOCKED | INVALID_RESULT`) is separate from both. An unavailable reviewer walks the fallback chain and never counts as a pass or a round.
+- A repair that would move a hard seam (requirements, authority, ownership, dependency, interface, acceptance) is never APPROVED cleanup.
 
-Round budgets, no-progress detection, and a bounded escalation prevent review loops from becoming infinite conversations.
+Review happens per ownership/composition **lane** (tasks joined by `depends` or a shared `lane:`), on the composed result, and once more per **shared scope** where lanes share a `converge:` name, an interface, a `shared:` registry, or changed files. Each RECHECK sequence stops after 3 substantive rounds; the user then chooses `escalate`, `continue`, `waive`, or `stop` (`office decide`). Required reviews are hard landing gates that only landing authority can waive, and the waiver keeps the underlying verdict on the receipt.
+
+Each run is pinned to the review contract it started with. Runs started before #337 stay on the `v3.1` contract (`PASS | CHANGES_REQUIRED | PLAN_DEFECT | BRIEF_DEFECT | UNAVAILABLE`, per-task review, rolling plan review); `review.contract` in config picks the default for future runs only, and `office start --from-run <run>` moves old work onto the current contract as a new run.
 
 ### 7. Integration is a separate gate
 
-Once every task is accepted, Office composes the accepted revisions in dependency order, runs the plan's run-level checks, and launches an integration reviewer only when a real cross-task boundary exists (for example, dependent/merging outputs or a shared interface).
+Once every task is accepted and every lane and shared scope has converged, Office composes the accepted revisions in dependency order and runs the plan's run-level checks. Under `convergence-v1` there is no separate integration review: shared scopes already reviewed the cross-lane boundaries. (`v3.1` runs launch an integration reviewer at a real cross-task boundary, for example dependent/merging outputs or a shared interface.)
 
 The integrated tree is the artifact that lands—not a collection of individually-green branches assumed to compose.
 
@@ -343,7 +346,7 @@ The shipped config currently expresses preferences such as:
 | Planner | Prefer `opus@medium`, then `astra@low`; requires planning capability and at least low effort. |
 | Plan reviewer | Prefer `luna@xhigh`, then Claude `opus@low`; requires review capability and benchmark index score >= 31. |
 | Executor | Requires builder capability and benchmark index score >= 31; selection is shaped by task evidence, quota, policy, and cost. |
-| Code reviewer | Prefer `luna@xhigh`, then Claude `opus@low`; independent from the producer's model family; benchmark score >= 31. |
+| Code reviewer | Reviews each lane's composed result (per task on `v3.1` runs). Prefer `luna@xhigh`, then Claude `opus@low`; independent from the producer's model family; benchmark score >= 31. |
 | Visual reviewer | Prefer agy `gemini-3.8-flash` routes, then Sonnet, then Luna; also requires a passing image-sensitive conformance proof for that exact route. |
 | Closeout verifier | Requires verification capability and at least medium effort. |
 
@@ -501,7 +504,7 @@ When acceptance names user-visible behavior, Office can capture deterministic br
 COMPARABLE | INVALID_COMPARISON | NOT_APPLICABLE | CAPTURE_BLOCKED
 ```
 
-A visual reviewer is eligible only after its exact harness/model/effort path passes an image-sensitive conformance probe. Code review and visual judgment are different dispatches.
+A visual reviewer is eligible only after its exact harness/model/effort path passes an image-sensitive conformance probe. Code review and visual judgment are different dispatches. Under `convergence-v1` the visual review runs once per lane, on the same composed commit as the lane's convergence review.
 
 Install the visual extra when you expect browser/UI work:
 
@@ -516,6 +519,7 @@ office doctor --probe-vision
 
 ```text
 office start "<goal>"                 create a run; queues the planner when policy requires one
+office start --from-run <run>         new run carrying an old run's requirements + plan draft (old run unchanged)
 office resume [run]                   bind this session to a run and show where it stands
 office status                         what matters now, ending with the next legal action
 office wait                           wait until the run has something actionable
@@ -523,14 +527,17 @@ office dispatch <task>... [--parallel]
 office answer <task|dispatch> <n> | -- "<text>"   answer the question a pane agent is waiting on (wait exits 5)
 office prompt <task|dispatch> -- "<message>"
 office submit                         planner/executor: submit a plan or work
-office rerun <task> --resume|--fresh  continue after review findings
+office rerun <task> --resume|--fresh  run a routed repair (RECHECK or disposition fix)
 office amend <scope> -- "<delta>"     ordinary, --contract, or requirements amendment
 office ack <amendment-id>             worker: confirm delivered amendment is applied
 office land                           compose/verify and follow the run's landing policy
 office close                          finish after acceptance + landing/handoff
 
-office inspect run|plan|task|gate|evidence|events|route [id]
+office inspect run|plan|task|gate|evidence|events|route|convergence [id]
 office approve plan|merge|trust|waive|visual ... --quote "<user words>"
+office decide <scope|plan> escalate|continue|waive|stop --quote "<user words>"
+office disposition <scope>:<code> fix|fixed|dismissed|follow-up -- "<note>"
+office review <scope>:convergence|visual --report <file>   degraded fallback review
 office benchmarks brief|submit ...
 office list
 office doctor [--fix]
@@ -609,7 +616,8 @@ The README is the developer entrypoint; the detailed contracts live here:
 
 - [`SKILL.md`](SKILL.md) — current orchestrator operating contract.
 - [`docs/v31-implementation.md`](docs/v31-implementation.md) — implementation architecture and module map.
-- [`docs/v31-rolling-review-gates.md`](docs/v31-rolling-review-gates.md) — convergence, review, and amendment semantics.
+- [`docs/review-convergence.md`](docs/review-convergence.md) — the `convergence-v1` review contract (#337): verdicts, lanes, rounds, waivers, compatibility.
+- [`docs/v31-rolling-review-gates.md`](docs/v31-rolling-review-gates.md) — review and amendment semantics of runs pinned to the `v3.1` review contract.
 - [`references/OFFICE-SKILLS-V3-LIFECYCLE-SPEC.md`](references/OFFICE-SKILLS-V3-LIFECYCLE-SPEC.md) — lifecycle rationale and invariants.
 - [`references/OFFICE-SKILLS-V3-SPEC.md`](references/OFFICE-SKILLS-V3-SPEC.md) — routing policy and role contracts.
 - [`CONTEXT.md`](CONTEXT.md) — project terminology and design context.

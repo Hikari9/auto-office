@@ -20,8 +20,8 @@ def _run(env, monkeypatch):
     bare = github(env, monkeypatch)
     env.trust()
     env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}, {"submit": True}],
-               code_reviewer=[{"reply": "VERDICT: PASS"}, {"reply": "VERDICT: PASS"}],
-               integration_reviewer=[{"reply": "VERDICT: PASS"}])
+               convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}, {"reply": "VERDICT: APPROVED\nNEXT proceed"}],
+               )
     start_inline(env, plan=PLAN_COMMENT, extra=("--issue", "7"))
     env.office("approve", "plan", "--quote", "go", check=0)
     code, out = env.office("dispatch", "T1", "T2")
@@ -54,13 +54,13 @@ def test_scope_none_task_is_accepted_without_a_pr_and_land_skips_it(env, monkeyp
     assert [p["state"] for p in gh(env)["prs"]] == ["merged"]
 
 
-def test_scope_none_evidence_reaches_the_code_reviewer(env, monkeypatch):
+def test_scope_none_evidence_reaches_the_lane_reviewer(env, monkeypatch):
     github(env, monkeypatch)
     env.trust()
     env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True},
                          {"write": {"OFFICE_EVIDENCE.md": "comment https://github.com/o/r/issues/7#c1: shipped"},
                           "submit": True}],
-               code_reviewer=[{"reply": "VERDICT: PASS"}, {"reply": "VERDICT: PASS"}],
+               convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}, {"reply": "VERDICT: APPROVED\nNEXT proceed"}],
                integration_reviewer=[{"reply": "VERDICT: PASS"}])
     start_inline(env, plan=PLAN_COMMENT, extra=("--issue", "7"))
     env.office("approve", "plan", "--quote", "go", check=0)
@@ -84,7 +84,7 @@ visual: none
 
 def test_land_with_prs_off_is_a_no_op_when_no_task_needs_a_pr(env):
     env.trust()
-    env.script(executor=[{"submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}],
+    env.script(executor=[{"submit": True}], convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}],
                integration_reviewer=[{"reply": "VERDICT: PASS"}])
     start_inline(env, plan=PLAN_ONLY_COMMENT, extra=("--no-prs",))
     env.office("approve", "plan", "--quote", "go", check=0)
@@ -96,7 +96,7 @@ def test_land_with_prs_off_is_a_no_op_when_no_task_needs_a_pr(env):
 def test_land_with_prs_off_still_refuses_when_a_scoped_task_needs_merging(env):
     env.trust()
     env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}, {"submit": True}],
-               code_reviewer=[{"reply": "VERDICT: PASS"}, {"reply": "VERDICT: PASS"}],
+               convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}, {"reply": "VERDICT: APPROVED\nNEXT proceed"}],
                integration_reviewer=[{"reply": "VERDICT: PASS"}])
     start_inline(env, plan=PLAN_COMMENT, extra=("--no-prs",))
     env.office("approve", "plan", "--quote", "go", check=0)

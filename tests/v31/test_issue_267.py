@@ -44,7 +44,7 @@ def _failing_check_plan(env) -> str:
 def _checks_gate(env) -> dict:
     con = env.con()
     try:
-        return dict(con.execute("SELECT verdict, summary FROM gates WHERE kind='checks' ORDER BY rowid LIMIT 1").fetchone())
+        return dict(con.execute("SELECT verdict, review_status, summary FROM gates WHERE kind='checks' ORDER BY rowid LIMIT 1").fetchone())
     finally:
         con.close()
 
@@ -60,10 +60,12 @@ def _open_check_findings(env) -> int:
 def test_runner_timeout_under_load_is_unavailable_not_a_finding(env, monkeypatch):
     monkeypatch.setenv("OFFICE_CHECK_LOAD_FACTOR", "0")  # any load counts as overloaded
     approved_run(env, plan=_failing_check_plan(env), executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
-                 code_reviewer=[{"reply": "VERDICT: PASS"}])
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1", check=0)
     gate = _checks_gate(env)
-    assert gate["verdict"] == "UNAVAILABLE" and "test-runner timeout" in gate["summary"] and "host load" in gate["summary"], gate
+    # #337: the environment is runtime status (UNAVAILABLE), never a verdict.
+    assert gate["verdict"] is None and gate["review_status"] == "UNAVAILABLE", gate
+    assert "test-runner timeout" in gate["summary"] and "host load" in gate["summary"], gate
     assert _open_check_findings(env) == 0
     assert task_row(env)["status"] == "blocked"
 
@@ -71,9 +73,9 @@ def test_runner_timeout_under_load_is_unavailable_not_a_finding(env, monkeypatch
 def test_runner_timeout_on_a_quiet_host_is_still_a_finding(env, monkeypatch):
     monkeypatch.setenv("OFFICE_CHECK_LOAD_FACTOR", "1000000")  # never overloaded
     approved_run(env, plan=_failing_check_plan(env), executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
-                 code_reviewer=[{"reply": "VERDICT: PASS"}])
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1", check=0)
-    assert _checks_gate(env)["verdict"] == "CHANGES_REQUIRED"
+    assert _checks_gate(env)["verdict"] == "RECHECK"  # a real failing check is a blocking finding
 
 
 # ------------------------------------------------------------------ A3
@@ -95,7 +97,7 @@ def _executor_dispatches(env) -> list[dict]:
 @pytest.mark.approved
 def test_quota_wall_blocks_without_relaunching(env):
     approved_run(env, executor=[{"stderr": CLAUDE_WALL + "\n", "exit": 1}] * 4,
-                 code_reviewer=[{"reply": "VERDICT: PASS"}])
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1", check=0)
     assert len(_executor_dispatches(env)) == 1, _executor_dispatches(env)
     t = task_row(env)
@@ -105,7 +107,7 @@ def test_quota_wall_blocks_without_relaunching(env):
 @pytest.mark.approved
 def test_quota_word_in_early_narration_still_relaunches(env):
     narration = "Checking the quota module first.\n" + "\n".join(f"step {i}" for i in range(10)) + "\ncrashed\n"
-    approved_run(env, executor=[{"stderr": narration, "exit": 3}] * 4, code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=[{"stderr": narration, "exit": 3}] * 4, convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1", check=0)
     assert len(_executor_dispatches(env)) == 3
     t = task_row(env)

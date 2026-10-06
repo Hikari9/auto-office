@@ -1,4 +1,9 @@
-"""Submission, gates, convergence bounds, amendments, and terminal classification."""
+"""Submission, gates, convergence bounds, amendments, and terminal classification.
+
+This is the v3.1 gate engine suite (per-task code and visual review), which every run started
+before #337 keeps; it pins its runs to the v3.1 review contract. The convergence contract's
+gates are covered by test_convergence_contract.py.
+"""
 from __future__ import annotations
 
 import json
@@ -7,6 +12,8 @@ from pathlib import Path
 import pytest
 
 from conftest import GOOD_ADD, PLAN_ONE, PLAN_TWO, approved_run, task_row
+
+pytestmark = pytest.mark.review_contract("v3.1")
 
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}

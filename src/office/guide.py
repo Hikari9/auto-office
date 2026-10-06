@@ -9,7 +9,7 @@ import re
 
 import os
 
-from office import amend, paths, planpath, plans, state
+from office import amend, contract, paths, planpath, plans, state
 from office.result import Result
 from office.util import atomic_write_text, short
 
@@ -63,7 +63,11 @@ def next_action(con, run: dict) -> str:
     if planfile.parse(plan["body"]).questions and not plans._answered(con, run):
         return 'ask the user the plan questions (native question tool), then office amend plan --contract -- "<answers>"'
     rs = plans.review_state(con, run)
-    if rs["required"] and not rs["ended"] and rs["first_verdict"] is None:
+    if contract.is_convergence(run):
+        nxt = _plan_next_convergence(con, run, rs)
+        if nxt:
+            return nxt
+    elif rs["required"] and not rs["ended"] and rs["first_verdict"] is None:
         return "no action; plan review is running"
     if rs["first_verdict"] == "CHANGES_REQUIRED" and run["plan_version"] <= (rs["first_version"] or 0) and not rs["ended"]:
         return f'amend the plan: office amend plan -- "<changes>" (edit {planpath.rel(run)} for task changes); safe work may launch right after'
@@ -102,6 +106,12 @@ def next_action(con, run: dict) -> str:
             t = next(x for x in tasks if x["id"] == tid)
             return f"resolve {tid} ({t.get('pause_reason') or status}); office inspect task {tid}"
     from office import gates as gates_mod
+    if contract.is_convergence(run):
+        # A lane RECHECK routes one consolidated repair set: name every owner at once.
+        from office import convergence
+        nxt = convergence.next_action(con, run)
+        if nxt:
+            return nxt
     for t in tasks:
         if t["status"] == "changes_required" and not gates_mod.worker_live(con, t.get("current_dispatch_id")):
             # Findings wait for the orchestrator's choice (R8); nothing relaunches on its own.
@@ -117,6 +127,11 @@ def next_action(con, run: dict) -> str:
     live = [t for t in tasks if t["status"] not in ("accepted", "cancelled", "planned")]
     if live:
         return "exceptions only; office status"
+    if contract.is_convergence(run):
+        from office import convergence
+        nxt = convergence.next_action(con, run, dispositions=True)
+        if nxt:
+            return nxt
     from office import integration
     integ = integration.status(con, run)
     if integ["required"] and integ["status"] not in ("accepted",):
@@ -125,6 +140,8 @@ def next_action(con, run: dict) -> str:
         if integ["status"] in ("blocked", "unavailable"):
             return (f"integration {integ['status']}: {integ.get('detail', '')}; fix the cause, then office resume "
                     "to retry integration")
+        if integ["status"] == "converging":
+            return f"no action; lane convergence is running ({integ.get('detail', '')})"
         return "no action; integration verification is running"
     if ((run.get("landing") or {}).get("prs") or {}).get("enabled"):
         from office import land
@@ -132,6 +149,41 @@ def next_action(con, run: dict) -> str:
     branch = integ.get("branch")
     return (f"land it: push {branch} and open a PR (merge to main stays with the user), then office close --handoff <pr-url>"
             if branch else "office close --handoff <ref>")
+
+
+def _plan_next_convergence(con, run: dict, rs: dict) -> str | None:
+    """The plan-review step under the convergence contract (#337), or None."""
+    if not rs["required"] or rs["ended"]:
+        return None
+    st = rs["status"]
+    dedicated = run.get("planner_mode") == "dedicated"
+    revise = ('have the planner revise it: office amend plan --contract -- "<the findings>"' if dedicated
+              else f'revise {planpath.rel(run)}, then office amend plan --contract -- "<what changed>"')
+    if st == "unavailable":
+        return ("plan review is UNAVAILABLE (runtime status, not a verdict; no round spent): office resume retries "
+                'the reviewer chain, or the user may waive: office approve waive plan-review --quote "<words>"')
+    if st == "attention":
+        return ("the plan reviewer left no readable reply (INVALID_RESULT, no round spent): re-prompt it in its pane "
+                "or office resume")
+    if rs["pending"] or rs["first_verdict"] is None:
+        return "no action; plan review is running"
+    if st == "escalated":
+        esc = rs.get("escalation") or {}
+        return (f"plan review spent {contract.MAX_ROUNDS} RECHECK rounds: ask the user now (native question tool), "
+                f"showing the remaining findings, attempts and risk (office inspect run) and your recommendation "
+                f"({(esc.get('recommendation') or '')[:100]}); then office decide plan escalate|continue|waive|stop "
+                "--quote \"<user's words>\"")
+    if st == "intake_gap":
+        gap = rs.get("intake_gap") or {}
+        return (f"plan INTAKE_GAP: ask the user (native question tool): {gap.get('decision')} (affects "
+                f"{gap.get('affects')}); record their answer (office amend requirements --quote ...), then {revise}")
+    if st in ("recheck", "pending"):
+        codes = ", ".join(f["code"] for f in rs["blocking"][:4])
+        held = plans.held_tasks(con, run)
+        ready = [t for t in ready_tasks(con, run) if t not in held]
+        return (f"plan RECHECK ({codes}): {revise}; the same reviewer reviews it"
+                + (f"; unaffected work may start: office dispatch {' '.join(ready)}" if ready else ""))
+    return None
 
 
 def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> Result:
@@ -436,7 +488,7 @@ def worker_status(con, run: dict, dispatch_id: str) -> Result:
     res = Result()
     res.add(f"{task['id']} {task['status']} | rev {task.get('current_revision_id') or '-'} | plan p{run['plan_version']}")
     findings = con.execute("SELECT code, severity, location, summary, action FROM findings WHERE run_id=? AND task_id=? "
-                           "AND state='open' ORDER BY created_at", (run["id"], task["id"])).fetchall()
+                           "AND " + contract.TASK_WORK_FINDINGS + " ORDER BY created_at", (run["id"], task["id"])).fetchall()
     for f in findings[:8]:
         res.add(f"{f['code']} {f['severity']} {f['location'] or ''} — {f['summary'][:140]}"
                 + (f" -> {f['action'][:80]}" if f["action"] else ""))
@@ -484,7 +536,11 @@ _URGENT_KINDS = frozenset({
     "task.amend_undelivered", "submit.refused", "submit.rejected", "integration.conflict", "integration.failed",
     "gate.unavailable", "gate.changes_required", "gate.attention", "gate.escalated", "gate.brief_defect",
     "plan.unavailable", "plan.changes_required", "plan.attention", "plan.escalated", "plan.defect",
-    "plan.questions", "plan.contract_requested", "pr.error", "lease.revoked"})
+    "plan.questions", "plan.contract_requested", "pr.error", "lease.revoked",
+    # convergence contract (#337)
+    "gate.recheck", "plan.recheck", "plan.intake_gap", "plan.escalation", "convergence.recheck",
+    "convergence.intake_gap", "convergence.escalation", "convergence.unavailable", "convergence.blocked",
+    "convergence.conflict"})
 _SEEN = "orchestrator:seen:"
 
 

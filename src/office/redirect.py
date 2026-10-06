@@ -35,6 +35,12 @@ def open_defect(con, run: dict, code: str) -> dict | None:
 
 def validate(con, run: dict, spec: dict, *, form: str = AMEND_FORM) -> dict:
     """Normalize a redirect request before anything is written."""
+    from office import contract
+    if contract.is_convergence(run):
+        raise Refused("redirect-v31-only", "defect redirects belong to the v3.1 review contract; this run is "
+                      f"{contract.of(run)}, where a requirement the plan cannot meet is an INTAKE_GAP",
+                      next_step='ask the user the decision, record it (office amend requirements --quote "<words>" '
+                                '-- "<change>"), then revise and submit the plan')
     code = (spec.get("defect") or "").strip().upper()
     quote = (spec.get("quote") or "").strip()
     root_cause = (spec.get("root_cause") or "").strip()

@@ -1,12 +1,21 @@
 """#211: a visual review run outside Office, recorded by the user, stands in
 for an UNAVAILABLE visual gate. Independence is per agent session, so the
-producer's model family is not a bar."""
+producer's model family is not a bar.
+
+This suite covers the v3.1 review contract, which every run started before #337 (and any run
+started with review.contract: v3.1) keeps for its whole life; it pins its runs to that contract.
+The convergence contract is covered by test_convergence_contract.py.
+"""
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
+import pytest
+
 from conftest import GOOD_ADD, PLAN_ONE
+
+pytestmark = pytest.mark.review_contract("v3.1")
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 PLAN = PLAN_ONE.replace('checks: python3 -c "import calc; assert calc.add(2, 3) == 5"', "checks: none").replace(

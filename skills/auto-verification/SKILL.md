@@ -8,7 +8,7 @@ description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use t
 > **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
 > role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
 
-Every mutable run self-verifies. Add independent verification when risk, gear, playbook, repository policy, or acceptance path requires it.
+Every mutable run self-verifies. Add independent verification when risk, gear, playbook, repository policy, or acceptance path requires it. Under `convergence-v1` a task is accepted on its own checks, and independent and visual review judge each lane's composed result (`docs/review-convergence.md`).
 
 Prefer existing targeted tests, regression tests, static/type/lint, build/package, focused runtime, then broader suites when justified.
 

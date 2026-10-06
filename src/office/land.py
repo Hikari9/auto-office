@@ -90,6 +90,13 @@ def _snapshot(con, run: dict) -> dict:
     tasks = integration.accepted_set(con, run)
     gates_ = con.execute("SELECT id, kind, status, verdict FROM gates WHERE run_id=? AND subject='integration' "
                          "AND input_key=? ORDER BY id", (run["id"], f"integration:{commit}")).fetchall()
+    from office import contract
+    if contract.is_convergence(run):
+        # Lane and shared-scope reviews and waivers are part of what a land stands on.
+        from office import convergence
+        conv = convergence.receipt(con, run)
+        gates_ = list(gates_) + [(s["id"], s["status"], s["commit"]) for s in conv["scopes"]] \
+            + [(w["target"], w["by"]) for w in conv["waivers"]]
     return {"commit": commit,
             "accepted": sorted((t["id"], t["accepted_revision_id"]) for t in tasks or []) if tasks is not None else None,
             "gates": [tuple(g) for g in gates_]}
@@ -374,9 +381,17 @@ def _rebase_locked(con, run: dict, tasks: list[dict]) -> Result:
         run = state.get_run(con, run["id"])
         integration._set_integration(con, run, status="pending", detail=f"rebasing onto {new[:12]}")
         state.emit(con, run, "integration.rebase", f"rebased onto origin/{base} {new[:12]}; integration re-check queued")
-        integration.retrigger(con, run)
+        from office import contract
+        if contract.is_convergence(run):
+            # The rebase is a shared composition boundary (S-rebase): reviewed once, then integration.
+            from office import convergence
+            convergence.requeue_all(con, run)
+        else:
+            integration.retrigger(con, run)
     return Result(lines=[f"every accepted task merges cleanly onto origin/{base} {new[:12]}",
-                         "integration re-composes there and re-runs the run checks and an integration review"],
+                         "integration re-composes there and re-runs the run checks and "
+                         + ("one review of the rebase scope (S-rebase)" if contract.is_convergence(run)
+                            else "an integration review")],
                   next="office status (then office land once integration is accepted)")
 
 

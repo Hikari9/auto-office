@@ -43,7 +43,11 @@ Auto Office {ver}
   office benchmarks brief|submit <f> opted-in runs: one background refresh of missing benchmark scores
 
   office list                       runs in this repository (--all for every run)
-  office inspect [run|task|gate|evidence|events|route|learner] [id]
+  office inspect [run|task|gate|evidence|events|route|learner|convergence] [id]
+  office decide <lane|plan> escalate|continue|waive|stop --quote "<user's words>"
+                                    the user's choice once a review spent its 3 RECHECK rounds
+  office disposition <scope>:<F-id> fix|fixed|dismissed|follow-up -- "<note>"
+                                    close a non-blocking (APPROVED) finding; fix routes it, no re-review
   office doctor                     check the installation, hooks, and runtimes
   office upgrade [run] [--to X.Y]   move a run to a newer release line (dry run; --apply)
   office prune [--run <id>]         show finished runs that office prune -f would remove
@@ -78,6 +82,14 @@ Checks (task `checks:` and the run-level `checks:` under Requirements):
   the run's PLAN.md first, then office amend <T> --contract; an amendment whose
   PLAN.md does not change the named task is refused.
 
+Plan review (convergence-v1 runs): APPROVED dispatches at once; its findings are
+fixed or dispositioned (office disposition plan:P<n> ...) with no re-review unless a
+revision moves a hard seam. RECHECK holds only the tasks its blocking findings name:
+revise the plan and submit again for the same reviewer (3 rounds, then office decide
+plan ...). INTAKE_GAP names a user decision: ask the user, record it with office amend
+requirements --quote ..., then revise the plan.
+
+Runs pinned to the v3.1 review contract only:
 Plan defects (PLAN_DEFECT): trace each to the requirement or assumption behind it.
 A plan-only cause is fixed in the plan. A requirement or assumption cause goes to
 the user, and the revision that follows their answer is submitted with it:
@@ -144,6 +156,9 @@ def _parser() -> argparse.ArgumentParser:
                    help="the user's intake answer: how far to go after the task PRs")
     for step in ("preview", "prod", "verify"):
         s.add_argument(f"--deploy-{step}", metavar="CMD", help=f"the user-confirmed {step} command")
+    s.add_argument("--from-run", metavar="RUN",
+                   help="start a new run carrying an earlier run's requirements and plan draft (e.g. to move "
+                        "v3.1 work onto the current review contract); the earlier run is not changed")
 
     s = sp.add_parser("resume", parents=[common])
     s.add_argument("target", nargs="?")
@@ -238,6 +253,24 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--root-cause", help="with waive P<n>: why the user judged the defect wrong")
     s.add_argument("--by", help="approve visual: the reviewer route that wrote --report (harness/model[@effort])")
     s.add_argument("--report", help="approve visual: the review file to record as the visual gate result")
+    s.add_argument("--as", dest="actor", choices=("user", "orchestrator"), default="user",
+                   help="waive: who waives (orchestrator only with delegated landing authority; needs --reason)")
+    s.add_argument("--reason", dest="waive_reason", help="waive: why the unmet gate is accepted (required)")
+    # Convergence contract (#337): the operator's round-cap decision, finding
+    # dispositions, and the orchestrator's degraded fallback review.
+    s = sp.add_parser("decide", parents=[common])
+    s.add_argument("scope", help="a lane (L-T1), shared scope (S-T1+T3), or plan")
+    s.add_argument("choice", choices=("escalate", "continue", "waive", "stop"))
+    s.add_argument("--quote", help="the user's own words")
+    s.add_argument("--reason", help="waive: why the unmet gate is accepted")
+    s = sp.add_parser("disposition", parents=[common])
+    s.add_argument("finding", help="<scope>:<code>[,<code>] (e.g. L-T1:F2 or plan:P1)")
+    s.add_argument("how", choices=("fix", "fixed", "dismissed", "follow-up"))
+    s.add_argument("note", nargs="*")
+    s = sp.add_parser("review", parents=[common])
+    s.add_argument("target", help="<scope>:convergence|visual")
+    s.add_argument("--report", required=True, help="your review, in the reviewer reply format")
+    s.add_argument("--inspected", nargs="*", default=[], help="visual: every screenshot you inspected")
     s = sp.add_parser("revoke", parents=[common])
     s.add_argument("task", help="a task id, a dispatch id, or `integration` (its reviews)")
     s.add_argument("--reason", default="orchestrator revoke")
@@ -378,7 +411,7 @@ def _run(args, unknown) -> int:
     from office.state import OfficeError
     if cmd == "start":
         from office import lifecycle, runtime_default
-        if not args.goal:
+        if not args.goal and not args.from_run:
             raise OfficeError("usage", "office start needs a goal", next_step='office start "<goal>"', exit_code=2)
         runtime_default.require_new_run_runtime()
         res = lifecycle.start(args.goal, cwd=cwd, gear=args.gear, playbook=args.playbook, blast_radius=args.blast_radius,
@@ -386,7 +419,7 @@ def _run(args, unknown) -> int:
                               interview=args.interview, adversarial=args.adversarial, sets=args.set,
                               harness=args.harness, session=args.session, base=args.base, planner=args.planner,
                               issue=args.issue, no_prs=args.no_prs, end_state=args.end_state,
-                              benchmark_refresh=args.benchmark_refresh,
+                              benchmark_refresh=args.benchmark_refresh, from_run=args.from_run,
                               deploy={k: v for k in ("preview", "prod", "verify")
                                       if (v := getattr(args, f"deploy_{k}"))})
         return emit(res, args)
@@ -518,7 +551,18 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "approve":
         from office import authority
         return authority.approve(con, run, args.target, args.quote, args.extra, root_cause=args.root_cause,
-                                 by=args.by, report=args.report)
+                                 by=args.by, report=args.report, actor=args.actor, reason=args.waive_reason)
+    if cmd == "decide":
+        from office import convergence
+        return convergence.decide(con, run, args.scope, args.choice, quote=args.quote, reason=args.reason)
+    if cmd == "disposition":
+        from office import convergence
+        note = " ".join([*(args.note or []), *[u for u in unknown if u != "--"]]).strip()
+        return convergence.disposition(con, run, args.finding, args.how, note)
+    if cmd == "review":
+        from office import convergence
+        return convergence.fallback_review(con, run, args.target, Path(args.report).expanduser(),
+                                           inspected=args.inspected)
     if cmd == "revoke":
         from office import dispatch
         return dispatch.revoke(con, run, args.task, args.reason)

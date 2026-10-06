@@ -25,7 +25,7 @@ import posixpath
 import re
 from pathlib import Path, PurePosixPath
 
-from office import briefs, db, discovery, paths, planfile, state, submit
+from office import contract, briefs, db, discovery, paths, planfile, state, submit
 from office.result import Result
 
 EXIT = {"ready": 0, "fix": 1, "stop": 4, "wait": 75}
@@ -445,7 +445,7 @@ def preflight(con, run: dict, cwd: Path) -> Result:
                        f"office ack {a['amendment_id']}")
     if packet.get("fix_of"):
         rows = con.execute("SELECT code, severity, location, summary FROM findings WHERE run_id=? AND task_id=? "
-                           "AND state='open' ORDER BY created_at", (run["id"], task["id"])).fetchall()
+                           "AND " + contract.TASK_WORK_FINDINGS + " ORDER BY created_at", (run["id"], task["id"])).fetchall()
         res.lines += [f"finding: {r['code']} [{r['severity']}] {r['location'] or ''} {r['summary']}" for r in rows]
         if not rows and not amendments:
             stop.append(f"findings: fix round for {packet['fix_of']} but no open findings or amendments are recorded; "

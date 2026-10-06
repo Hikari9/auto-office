@@ -159,8 +159,9 @@ class InProcessAgent:
 
 
 class Env:
-    def __init__(self, tmp: Path, monkeypatch, *, restored: bool = False):
-        """`restored`: tmp already holds a repository copied from a snapshot."""
+    def __init__(self, tmp: Path, monkeypatch, *, restored: bool = False, contract: str | None = None):
+        """`restored`: tmp already holds a repository copied from a snapshot. `contract`
+        pins the review contract new runs start with (the user config's review.contract)."""
         self.approved = False
         self.trust_snapshots = None  # routes `trust()` has already worked out, by inputs; the env fixture sets it
         self.tmp = tmp
@@ -208,6 +209,9 @@ class Env:
         monkeypatch.setenv("GIT_COMMITTER_NAME", "t")
         monkeypatch.setenv("GIT_COMMITTER_EMAIL", "t@t")
         self.scenario.write_text("{}")
+        if contract:
+            # A suite about v3.1 review policy runs v3.1 runs, as a run started before #337 does.
+            (tmp / "user-config.yaml").write_text(f"review:\n  contract: {contract}\n")
         if not restored:
             self._init_repo()
         sys.path.insert(0, str(SRC))
@@ -389,8 +393,14 @@ def _activate(e: Env, monkeypatch) -> Env:
     return e
 
 
+def _contract(request) -> str | None:
+    """The review contract a `review_contract("v3.1")` marker pins, if any."""
+    m = request.node.get_closest_marker("review_contract")
+    return m.args[0] if m else None
+
+
 @pytest.fixture(scope="module")
-def _approved_snapshot(tmp_path_factory):
+def _approved_snapshot(tmp_path_factory, request):
     """The state `trust + start + approve plan` for PLAN_ONE, built once per module.
 
     The steps cost about a second each time; tests marked `approved` restore this
@@ -400,7 +410,7 @@ def _approved_snapshot(tmp_path_factory):
     root = tmp_path_factory.mktemp("approved")
     monkeypatch = pytest.MonkeyPatch()
     try:
-        e = _activate(Env(root / "env", monkeypatch), monkeypatch)
+        e = _activate(Env(root / "env", monkeypatch, contract=_contract(request)), monkeypatch)
         approved_run(e)
         shutil.copytree(e.tmp, root / "snapshot", symlinks=True)
     finally:
@@ -421,10 +431,10 @@ def env(request, tmp_path, monkeypatch):
         live, snapshot = request.getfixturevalue("_approved_snapshot")
         shutil.rmtree(live, ignore_errors=True)
         shutil.copytree(snapshot, live, symlinks=True)
-        e = Env(live, monkeypatch, restored=True)
+        e = Env(live, monkeypatch, restored=True, contract=_contract(request))
         e.approved = True
     else:
-        e = Env(tmp_path, monkeypatch)
+        e = Env(tmp_path, monkeypatch, contract=_contract(request))
         e.trust_snapshots = request.getfixturevalue("_trust_snapshots")
     return _activate(e, monkeypatch)
 

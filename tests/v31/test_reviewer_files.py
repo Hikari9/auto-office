@@ -1,4 +1,7 @@
-"""Reviewers report through files; a bad reply is re-prompted, never discarded (R8, R11, R13, B9)."""
+"""Reviewers report through files; a bad reply is re-prompted, never discarded (R8, R11, R13, B9).
+
+Runs pin the v3.1 review contract (per-task reviewer reply-file mechanics); every run started before #337 keeps it.
+"""
 from __future__ import annotations
 
 import sqlite3
@@ -7,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from conftest import GOOD_ADD, approved_run, task_row
+
+pytestmark = pytest.mark.review_contract("v3.1")
 
 
 @pytest.mark.approved

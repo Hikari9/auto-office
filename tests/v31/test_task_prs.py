@@ -52,7 +52,7 @@ def test_stacked_tasks_get_stacked_draft_prs_that_leave_draft_on_accept(env, mon
     env.trust()
     env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True},
                          {"write": {"mul.py": GOOD_MUL}, "submit": True}],
-               code_reviewer=[{"reply": "VERDICT: PASS"}, {"reply": "VERDICT: PASS"}])
+               convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}, {"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     start_inline(env, plan=PLAN_STACKED, extra=("--issue", "42"))
     env.office("approve", "plan", "--quote", "go", check=0)
     code, out = env.office("dispatch", "T1", "T2")
@@ -66,7 +66,8 @@ def test_stacked_tasks_get_stacked_draft_prs_that_leave_draft_on_accept(env, mon
     assert t1["base"] == "main" and t2["base"] == t1["head"], (t1, t2)
     assert not t1["draft"] and not t2["draft"]
     assert "Part of #42" in t1["body"] and "Route: `" in t1["body"] and "stacked on T1 (#1)" in t2["body"]
-    assert any(c.startswith("office: code review PASS on R") and "checks PASS" in c for c in t1["comments"]), t1
+    # #337: one lane review per task lane, posted to the task PR (no per-task code review).
+    assert any(c.startswith("office: lane L-T1 convergence review APPROVED") for c in t1["comments"]), t1
     assert any("accepted" in c for c in t1["comments"])
     # The PR head is exactly the revision the gates accepted.
     assert remote_head(bare, t1["head"]) == _accepted_commit(env, "T1")
@@ -88,7 +89,7 @@ def test_executor_brief_carries_push_and_pr_commands(env, monkeypatch):
 def test_local_blast_radius_keeps_the_31_flow(env, monkeypatch):
     github(env, monkeypatch)
     env.trust()
-    env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     start_inline(env, plan=PLAN_TWO.replace("blast_radius: repo", "blast_radius: local"))
     env.office("approve", "plan", "--quote", "go", check=0)
     env.office("dispatch", "T1", check=0)
@@ -100,7 +101,7 @@ def test_local_blast_radius_keeps_the_31_flow(env, monkeypatch):
 def test_github_failure_is_a_notice_not_a_failure(env, monkeypatch):
     github(env, monkeypatch)
     env.trust()
-    env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     start_inline(env)
     env.office("approve", "plan", "--quote", "go", check=0)
     subprocess.run(["git", "-C", str(env.repo), "remote", "set-url", "--push", "origin", str(env.tmp / "missing.git")],

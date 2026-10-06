@@ -19,7 +19,7 @@ import fake_agent
 from conftest import GOOD_ADD, Env, _activate, approved_run, task_row
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
-PASS = {"reply": "VERDICT: PASS"}
+PASS = {"reply": "VERDICT: APPROVED\nNEXT proceed"}  # the lane reviewer (#337)
 
 
 def _supervise_as_child(dispatch_id, cwd, extra):
@@ -63,14 +63,14 @@ def _worker(env, tid="T1"):
 
 
 def _executor_flow(env):
-    """The agent itself submits, which launches the code reviewer."""
-    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[PASS])
+    """The agent itself submits, which leads to the lane reviewer."""
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[PASS])
     env.office("dispatch", "T1", check=0)
 
 
 def _reviewer_flow(env):
-    """The executor is external; the code reviewer is launched by this process's own submit."""
-    approved_run(env, executor=[{}], code_reviewer=[PASS])
+    """The executor is external; the lane reviewer is launched by this process's own submit."""
+    approved_run(env, executor=[{}], convergence_reviewer=[PASS])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
     (wt / "calc.py").write_text(GOOD_ADD)
@@ -101,9 +101,9 @@ def test_in_process_launch_records_what_real_processes_record(tmp_path, monkeypa
     assert not ran, "the real supervisor ran an agent in this process"
     assert os.getpid() not in _identity_pids(child, "supervisor") | _identity_pids(child, "agent")
     assert _outcome(child) == inproc_outcome
-    # The flow reached the end: the revision was accepted by its code review.
+    # The flow reached the end: the lane review of the accepted revision approved it.
     assert inproc_outcome["task"] == "accepted", inproc_outcome
-    assert any(v == "PASS" for _, _, v in inproc_outcome["gates"]), inproc_outcome
+    assert any(v == "APPROVED" for k, _, v in inproc_outcome["gates"] if k == "convergence_review"), inproc_outcome
     ended = {role: [d[2:4] for d in inproc_outcome["dispatches"] if d[0] == role] for role in ("executor", "code_reviewer")}
     assert ended["code_reviewer"] == [("success", 0)], ended
     # The reviewer flow's executor is external: it was never supervised.
@@ -115,11 +115,12 @@ def test_subprocess_supervisor_path_stays_end_to_end(env, monkeypatch):
     # One flow with a real supervisor process and real harness processes all the way down.
     from office import dispatch
     monkeypatch.setattr(dispatch, "_supervise_in_process", _supervise_as_child)
-    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[PASS])
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1", check=0)
     assert task_row(env)["status"] == "accepted"
     assert os.getpid() not in _identity_pids(env, "supervisor") | _identity_pids(env, "agent")
-    assert [c["role"] for c in env.calls()] == ["executor", "code_reviewer"]
+    assert [c["role"] for c in env.calls()] == ["executor", "convergence_reviewer"]
 
 
 @pytest.mark.approved

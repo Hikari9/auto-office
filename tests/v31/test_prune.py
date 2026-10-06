@@ -27,7 +27,7 @@ def _snapshot(env) -> tuple:
 
 
 def _finished_run(env) -> str:
-    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1", check=0)
     env.office("close", "--handoff", "https://example.test/pr/9", check=0)
     con = env.con()

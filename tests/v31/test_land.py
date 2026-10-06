@@ -7,7 +7,7 @@ from conftest import GOOD_ADD, GOOD_MUL, start_inline
 from test_task_prs import PLAN_STACKED, gh, github, remote_head
 
 SCRIPT = dict(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}, {"write": {"mul.py": GOOD_MUL}, "submit": True}],
-              code_reviewer=[{"reply": "VERDICT: PASS"}, {"reply": "VERDICT: PASS"}],
+              convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}, {"reply": "VERDICT: APPROVED\nNEXT proceed"}],
               integration_reviewer=[{"reply": "VERDICT: PASS"}])
 
 

@@ -80,7 +80,9 @@ def test_rollback_keeps_the_worktree_file_and_discards_the_staged_copy(env, monk
 
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
-FINDING = "VERDICT: CHANGES_REQUIRED\nFINDING F1 | material | issue #7 | the comment omits the summary | post it"
+FINDING = ("VERDICT: RECHECK\nFINDING F1 | medium | blocking | issue #7 | the comment omits the summary | post it"
+           " | owner: T1\nNEXT repost the comment")
+APPROVED = "VERDICT: APPROVED\nNEXT proceed"
 
 
 def _dispatched(env, tid="T1"):
@@ -96,7 +98,7 @@ def _comment_only_run(env, reviews):
     from conftest import start_inline
     from test_scope_none import PLAN_ONLY_COMMENT
     env.trust()
-    env.script(code_reviewer=[{"reply": r} for r in reviews])
+    env.script(convergence_reviewer=[{"reply": r} for r in reviews])
     start_inline(env, plan=PLAN_ONLY_COMMENT, extra=("--no-prs",))
     env.office("approve", "plan", "--quote", "go", check=0)
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
@@ -117,7 +119,7 @@ def test_unsubmitted_evidence_from_a_crashed_dispatch_is_moved_aside_at_launch(e
     launch moves it out of the worktree, so it cannot reach the reviewer."""
     import os
     from office import paths
-    wenv, wt, first = _comment_only_run(env, ["VERDICT: PASS"])
+    wenv, wt, first = _comment_only_run(env, [APPROVED])
     ev = wt / briefs.EVIDENCE_FILE
     ev.write_text("half-done: comment not posted yet\n")
     os.utime(ev)  # touched: newer than anything, so no timestamp could flag it
@@ -137,7 +139,7 @@ def test_resubmitted_ingested_evidence_is_refused_and_fresh_content_passes(env):
     """Second guard: content already ingested for the task is refused even when
     the executor writes it again during the new dispatch."""
     from conftest import task_row
-    wenv, wt, first = _comment_only_run(env, [FINDING, "VERDICT: PASS"])
+    wenv, wt, first = _comment_only_run(env, [FINDING, APPROVED])
     ev = wt / briefs.EVIDENCE_FILE
     ev.write_text("comment https://github.com/o/r/issues/7#c1: shipped\n")
     code, out = env.office("submit", cwd=wt, env=wenv)
@@ -162,7 +164,7 @@ def test_resubmitted_ingested_evidence_is_refused_and_fresh_content_passes(env):
 def test_evidence_saved_before_digests_were_recorded_still_counts(env):
     """A copy from an older build has no evidence row; its saved file is hashed instead."""
     from office import state
-    wenv, wt, d = _comment_only_run(env, ["VERDICT: PASS"])
+    wenv, wt, d = _comment_only_run(env, [APPROVED])
     (wt / briefs.EVIDENCE_FILE).write_text("posted\n")
     env.office("submit", cwd=wt, env=wenv, check=0)
     con = env.con()

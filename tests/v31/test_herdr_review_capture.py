@@ -323,7 +323,7 @@ def test_contract_amendment_with_the_task_edited_bumps_its_contract(env):
 def test_missing_command_on_the_composed_tree_says_to_install_dependencies(env):
     plan = PLAN_ONE.replace("blast_radius: repo\n", "blast_radius: repo\nchecks: office-test-nonexistent-cmd\n")
     env.trust()
-    env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     start_inline(env, plan=plan)
     env.office("approve", "plan", "--quote", "approved", check=0)
     env.office("dispatch", "T1", check=0)

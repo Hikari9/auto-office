@@ -161,6 +161,12 @@ def parse(text: str) -> ParsedPlan:
                 task["route"] = _split_list(value)
             elif key == "route_why":
                 task["route_why"] = value
+            elif key == "lane":
+                # #337: tasks naming one lane converge together.
+                task["lane"] = value.strip()
+            elif key == "converge":
+                # #337: lanes naming one shared boundary get one more review together.
+                task["converge"] = _split_list(value)
             elif key == "notes":
                 if value:
                     task["notes"].append(value)

@@ -31,7 +31,7 @@ ADAPTIVE_ROLES = ("executor", "worker")
 # defect is not the route's failure; mixed and unknown teach at reduced weight.
 ATTRIBUTION_WEIGHT = {"route": 1.0, "mixed": 0.5, "unknown": 0.25, "plan": 0.0, "environment": 0.0, "reviewer": 0.0}
 
-_ROUTE_FINDING_CATEGORIES = {"code_review", "checks", "visual", "carried"}
+_ROUTE_FINDING_CATEGORIES = {"code_review", "checks", "visual", "carried", "convergence"}
 _PLAN_FINDING_CATEGORIES = {"plan", "requirement-contradiction", "false-contract-assumption",
                             "double-scope-ownership", "unsafe-or-unauthorized-action", "brief"}
 _MATERIAL = {"material", "major", "high", "critical"}
@@ -138,12 +138,26 @@ def derive_outcomes(con: sqlite3.Connection) -> list[dict]:
             revs.setdefault(r[1], []).append(r[0])
     gates: dict[str, list[tuple[str, str]]] = {}
     if "revision_id" in _cols(con, "gates"):
-        for g in con.execute("SELECT revision_id, kind, verdict FROM gates WHERE revision_id IS NOT NULL").fetchall():
+        # A convergence-contract gate that could not run has a runtime status and no verdict.
+        status = "COALESCE(verdict, review_status)" if "review_status" in _cols(con, "gates") else "verdict"
+        for g in con.execute(f"SELECT revision_id, kind, {status} FROM gates WHERE revision_id IS NOT NULL").fetchall():
             gates.setdefault(g[0], []).append((g[1], g[2]))
     fcols = _cols(con, "findings")
     findings: dict[str, list[tuple]] = {}
     if {"revision_id", "category", "state"} <= fcols:
-        for f in con.execute("SELECT revision_id, dispatch_id, category, severity, state FROM findings").fetchall():
+        convergence = {"contract", "blocking", "root_cause"} <= fcols
+        extra = ", contract, blocking, root_cause" if convergence else ""
+        for f in con.execute(f"SELECT revision_id, dispatch_id, category, severity, state{extra} FROM findings").fetchall():
+            if convergence and f[5] == "convergence-v1":
+                # #337: blocking, not severity, says a finding held progression;
+                # a lane finding belongs to its owner's producing dispatch; a
+                # plan-class root cause is the plan's, not the route's.
+                category = f[7] if f[7] in _PLAN_FINDING_CATEGORIES else f[2]
+                severity = "material" if f[6] else "minor"
+                key = f[1] or f[0]
+                if key:
+                    findings.setdefault(key, []).append((category, severity, f[4]))
+                continue
             key = f[0] or f[1]
             if key:
                 findings.setdefault(key, []).append((f[2], f[3], f[4]))
@@ -172,7 +186,7 @@ def derive_outcomes(con: sqlite3.Connection) -> list[dict]:
         rounds = sum(1 for rid in my_revs for kind, verdict in gates.get(rid, [])
                      if kind == "code_review" and verdict == "CHANGES_REQUIRED")
         checks_failed = sum(1 for rid in my_revs for kind, verdict in gates.get(rid, [])
-                            if kind == "checks" and verdict == "CHANGES_REQUIRED")
+                            if kind == "checks" and verdict in ("CHANGES_REQUIRED", "RECHECK"))
         if success:
             attr, conf, prov = "route", 1.0, "accepted revision"
         else:

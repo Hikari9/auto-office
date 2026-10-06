@@ -2,6 +2,12 @@
 
 These record the user's own words. They surface only when the run needs
 them, never in normal role briefs, and nothing else grants authority.
+
+Convergence contract (#337): waiving a lane or shared-scope review gate needs
+landing authority for that scope, never a role. The user holds it; the
+orchestrator holds it only when the user delegated landing (office.convergence
+.landing_authority). A waiver keeps the unmet verdict or evidence state and is
+bound to the scope's composed commit.
 """
 from __future__ import annotations
 
@@ -16,10 +22,21 @@ from office.util import dumps, now_iso, short
 
 
 def approve(con, run: dict, target: str, quote: str | None, extra: list[str] | None = None,
-            root_cause: str | None = None, *, by: str | None = None, report: str | None = None) -> Result:
+            root_cause: str | None = None, *, by: str | None = None, report: str | None = None,
+            actor: str = "user", reason: str | None = None) -> Result:
     import os
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-approve", "a worker cannot approve anything")
+    from office import contract
+    if (target.lower() == "waive" and extra and contract.is_convergence(run)
+            and re.fullmatch(r"[LS]-[\w+.-]+:\w+", extra[0])):
+        from office import convergence
+        if actor == "user" and (not quote or len(re.sub(r"\s+", "", quote)) < 2):
+            raise Usage("user-quote-required", "a user waiver records the user's own words",
+                        next_step=f'office approve waive {extra[0]} --quote "<user\'s words>" --reason "<why>"')
+        return convergence.waive(con, run, extra[0], actor=actor, quote=quote, reason=reason)
+    if actor != "user":
+        raise Usage("orchestrator-cannot-approve", "only lane and shared-scope gate waivers accept --as orchestrator")
     if not quote or len(re.sub(r"\s+", "", quote)) < 2:
         raise Usage("user-quote-required", "approvals record the user's own words",
                     next_step=f'office approve {target} --quote "<user\'s exact words>"')
@@ -132,6 +149,11 @@ def _waive(con, run, spec: str, quote: str, root_cause: str | None = None) -> Re
             m = re.fullmatch(r"(T\d+):(checks|code_review|code|visual|ui)", spec, re.I)
             if not m:
                 raise Usage("bad-waiver", f"cannot waive {spec!r}", next_step="office approve waive T2:visual --quote ...")
+            from office import contract
+            if contract.is_convergence(run) and m.group(2).lower() != "checks":
+                raise Usage("bad-waiver", f"{spec}: under the {contract.CONVERGENCE} contract code and visual review "
+                            "are lane gates", next_step='office approve waive L-<task>:convergence|visual --quote '
+                                                         '"<words>" --reason "<why>" (office inspect convergence)')
             tid, kind = m.group(1).upper(), {"code": "code_review", "ui": "visual"}.get(m.group(2).lower(), m.group(2).lower())
             task = state.get_task(con, run["id"], tid)
             if task is None:
@@ -170,6 +192,10 @@ def _visual_verdict(con, run, tid: str, by: str, report: Path, quote: str) -> Re
     if not parsed.valid:
         raise Refused("report-invalid", "the report is not a valid visual review: " + "; ".join(parsed.errors[:3]),
                       next_step="have the reviewer rewrite it in the visual review format, then retry")
+    from office import contract
+    if contract.is_convergence(run):
+        raise Refused("lane-visual", "under the convergence contract visual review is a lane gate",
+                      next_step="office inspect convergence; a specialist re-run: office resume; or a waiver")
     if parsed.verdict not in ("PASS", "CHANGES_REQUIRED"):
         raise Refused("report-not-a-verdict", f"the report's verdict is {parsed.verdict}; only PASS or "
                       "CHANGES_REQUIRED can stand in for the gate", next_step=f"office approve waive {tid}:visual")

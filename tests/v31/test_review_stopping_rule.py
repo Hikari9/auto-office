@@ -1,9 +1,18 @@
-"""Stopping rule: after the round budget, only a high finding blocks a task."""
+"""Stopping rule: after the round budget, only a high finding blocks a task.
+
+This suite covers the v3.1 review contract, which every run started before #337 (and any run
+started with review.contract: v3.1) keeps for its whole life; it pins its runs to that contract.
+The convergence contract is covered by test_convergence_contract.py.
+"""
 from __future__ import annotations
+
+import pytest
 
 from conftest import GOOD_ADD, approved_run, task_row
 
 from office import review_parse
+
+pytestmark = pytest.mark.review_contract("v3.1")
 
 
 def test_levels_map_to_blocking_severity_and_old_words_still_parse():

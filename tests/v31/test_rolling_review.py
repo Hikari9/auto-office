@@ -1,7 +1,16 @@
-"""Rolling plan review and authority (docs/v31-rolling-review-gates.md S1-S3, N1-N3, N10-N11)."""
+"""Rolling plan review and authority (docs/v31-rolling-review-gates.md S1-S3, N1-N3, N10-N11).
+
+This suite covers the v3.1 review contract, which every run started before #337 (and any run
+started with review.contract: v3.1) keeps for its whole life; it pins its runs to that contract.
+The convergence contract is covered by test_convergence_contract.py.
+"""
 from __future__ import annotations
 
+import pytest
+
 from conftest import PLAN_ONE, PLAN_TWO
+
+pytestmark = pytest.mark.review_contract("v3.1")
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 CR = ("VERDICT: CHANGES_REQUIRED\n"

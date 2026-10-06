@@ -173,7 +173,11 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
         run = state.get_run(con, run["id"])
         delivered = _deliver(con, run, amendment_id, affected, delta.strip(), version)
         rereview = None
-        if plans.review_required(run) and not plans.plan_review_ended(con, run):
+        from office import contract
+        if contract.is_convergence(run):
+            rereview = plans.review_after_revision(con, run, current["tasks"], parsed.tasks, version)
+            rereview = rereview if "queued" in rereview else None
+        elif plans.review_required(run) and not plans.plan_review_ended(con, run):
             rereview = plans.queue_plan_review(con, run, version)
         state.emit(con, run, "plan.amended", f"plan p{version} ({amendment_id}, ordinary)"
                    + (f" | affected {', '.join(affected)}" if affected else ""), audience="runtime")
@@ -247,6 +251,7 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
             redirect_lines = redirect_mod.record(con, run, redirect)
             run = state.get_run(con, run["id"])
         version = run["plan_version"] + 1
+        prev_tasks = (state.current_plan(con, run["id"]) or {}).get("tasks")
         amendment_id = _record(con, run, "contract", scope_ids, delta, run["plan_version"], version)
         con.execute("INSERT INTO plans(run_id, version, kind, body, tasks_json, requirements_json, created_by, created_at, "
                     "content_hash, parent_version, amendment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -260,7 +265,10 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
         affected = sorted(set(scope_ids) | set(sync["contract"]) | set(sync["acceptance"]))
         _deliver(con, run, amendment_id, affected, delta.strip(), version)
         flagged = _envelope_changes(con, run, parsed)
-        if plans.review_required(run):
+        from office import contract
+        if contract.is_convergence(run):
+            plans.review_after_revision(con, run, prev_tasks, parsed.tasks, version)
+        elif plans.review_required(run):
             plans.queue_plan_review(con, run, version, escalated=plans.plan_review_ended(con, run))
         state.emit(con, run, "plan.amended", f"plan p{version} ({amendment_id}, contract)", audience="runtime")
     jobs.kick(con, run["id"])

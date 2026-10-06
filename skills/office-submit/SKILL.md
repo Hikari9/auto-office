@@ -15,7 +15,7 @@ After targeted checks pass, refine your own `git diff <base>` (from the brief's 
 duplication, nesting, and dead code, (c) drop clearly repeated work, (d) altitude: fix the shared owner
 when it is inside SCOPE. Behavior-preserving only: no contract, auth, validation, migration, SQL, or
 data-semantic change. A higher-level owner outside SCOPE goes in the report, unedited. A real defect
-goes to step 2. Skip for an empty or tiny mechanical diff. Fix rounds repeat steps 1-6.
+goes to step 2. Skip for an empty or tiny mechanical diff. Fix rounds repeat steps 1-6, including repairs routed to you from review findings.
 
 ## 2. Adversarial self-review
 
@@ -82,7 +82,7 @@ office preflight; echo "rc=$?"
 |---|---|---|
 | `ready` | 0 | Run the `next:` line exactly as printed (`. <agent.env> && office submit`). |
 | `fix` | 1 | Apply each `fix:` line, then preflight again. |
-| `wait` | 75 | The task is paused for a plan defect or amendment, and you still hold the lease. Poll as shown below. |
+| `wait` | 75 | The task is held by a plan finding (RECHECK or INTAKE_GAP; v3.1: a plan defect) or an amendment, and you still hold the lease. Poll as shown below. |
 | `stop` | 4 | Terminal for you. Go to step 7 with `SUBMIT=refused: <stop line>`. |
 
 To wait, start this with `Bash` `run_in_background` (or the Monitor tool), and keep the session open:
