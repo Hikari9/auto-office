@@ -34,7 +34,9 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
           no_review: bool = False, reason: str | None = None) -> Result:
     """`redirect` ({defect, root_cause, requirement, reviewer}) marks a contract
     amendment as the user's redirect of a plan defect (see office.redirect).
-    `drop_criteria`/`add_criteria` edit the frozen done criteria (requirements only).
+    `drop_criteria`/`add_criteria` edit the frozen done criteria (requirements only). A requirements
+    amendment that only adds criteria is not delivered to live tasks; naming tasks as the scope
+    (`office amend T1,T2 --requirements ...`) forces delivery to those.
     `no_review` (with a `reason`) is the orchestrator's veto of plan review for an ordinary amendment."""
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-amend", "workers do not amend the plan; report the problem in your submission",
@@ -63,7 +65,8 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
                           "those always get review", scope=scope, preserved="plan unchanged",
                           next_step="rerun without --no-review (office amend --help)")
     if requirements or scope == "requirements":
-        return _requirements_change(con, run, delta, quote, drop_criteria or [], add_criteria or [])
+        to = [] if scope == "requirements" else _scope_ids(con, run, scope)
+        return _requirements_change(con, run, delta, quote, drop_criteria or [], add_criteria or [], to)
     scope_ids = _scope_ids(con, run, scope)
     plan_path = _orchestrator_plan_path(con, run, cwd)
     plan_text = planfile.strip_generated(plan_path.read_text(encoding="utf-8")) if plan_path else None
@@ -92,28 +95,36 @@ def _orchestrator_plan_path(con, run: dict, cwd: Path | None) -> Path | None:
     return draft if draft.is_file() else None
 
 
-def _requirements_change(con, run: dict, delta: str, quote: str | None, drop: list[str], add: list[str]) -> Result:
+def _requirements_change(con, run: dict, delta: str, quote: str | None, drop: list[str], add: list[str],
+                         to: list[str]) -> Result:
     if not quote or not quote.strip():
         raise Refused("user-quote-required", "only the user can change requirements; record their words",
                       next_step='office amend requirements --quote "<user\'s exact words>" -- "<change>"')
     with db.transaction(con):
-        version = record_requirements(con, state.get_run(con, run["id"]), delta, quote, drop=drop, add=add)
-        state.emit(con, run, "requirements.changed", f"REQUIREMENTS r{version}: {delta.strip()[:100]}; authorization required")
+        version, targets = record_requirements(con, state.get_run(con, run["id"]), delta, quote, drop=drop, add=add,
+                                                to=to, with_targets=True)
+        delivery = f"delivered to {', '.join(targets)}" if targets else "not delivered to live tasks"
+        state.emit(con, run, "requirements.changed",
+                   f"REQUIREMENTS r{version}: {delta.strip()[:100]}; {delivery}; authorization required")
     jobs.kick(con, run["id"])
-    return Result(lines=[f"requirements r{version} recorded | authorization for r{version} required"],
+    return Result(lines=[f"requirements r{version} recorded | {delivery} | authorization for r{version} required"],
                   next='ask the user (native question tool) for authorization, then office approve plan --quote "<user\'s words>"')
 
 
-def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[str] = (), add: list[str] = ()) -> int:
+def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[str] = (), add: list[str] = (),
+                        to: list[str] = (), with_targets: bool = False):
     """Record requirements r(n+1) from the user's words and deliver it to live
-    workers. Caller holds the tx. Returns the new version. `drop` names frozen
-    done criteria the user removed (each must match one); `add` appends new ones."""
+    workers. Caller holds the tx. Returns the new version (with `with_targets`, also the tasks
+    it was delivered to). `drop` names frozen done criteria the user removed (each must match
+    one); `add` appends new ones. A change that only adds criteria concerns no task already
+    running its contract, so it is recorded but delivered only to the live tasks in `to`."""
     cur = state.current_requirements(con, run["id"])
     frozen = dict(cur["frozen"])
     criteria = list(frozen.get("done_criteria") or [])
     for text in drop:
         criteria.remove(_match_criterion(criteria, text))
-    criteria += [a.strip() for a in add if a.strip() and a.strip() not in criteria]
+    added = [a.strip() for a in add if a.strip() and a.strip() not in criteria]
+    criteria += added
     frozen["done_criteria"] = criteria
     frozen.setdefault("user_changes", []).append(delta.strip())
     version = cur["version"] + 1
@@ -122,9 +133,11 @@ def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[st
     state.update_run(con, run["id"], requirements_version=version)
     amendment_id = _record(con, run, "requirements", [], delta, run["plan_version"], run["plan_version"])
     live = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] not in ("accepted", "cancelled", "planned")]
-    _deliver(con, state.get_run(con, run["id"]), amendment_id, live, f"requirements r{version}: {delta.strip()}",
-             run["plan_version"])
-    return version
+    if added and not drop:
+        live = [t for t in live if t in to]
+    targets = _deliver(con, state.get_run(con, run["id"]), amendment_id, live, f"requirements r{version}: {delta.strip()}",
+                       run["plan_version"])
+    return (version, targets) if with_targets else version
 
 
 CRITERIA_FORM = ('office amend requirements --quote "<user\'s words>" [--drop-criterion "<criterion>"]... '
