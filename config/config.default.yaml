@@ -86,7 +86,7 @@ roles:
       allowed_sources: ["local-evidence:", "documented:"]
   plan_reviewer:
     preferred_seed:
-      - {model_id: luna, effort: xhigh}
+      - {model_id: luna, effort: high}
       - {model_id: sonnet, harness: claude, effort: high}
       - {model_id: opus, harness: claude, effort: low}
     required_capabilities: [review]
@@ -111,7 +111,7 @@ roles:
       allowed_sources: ["local-evidence:", "documented:"]
   code_reviewer:
     preferred_seed:
-      - {model_id: luna, effort: xhigh}
+      - {model_id: luna, effort: high}
       - {model_id: sonnet, harness: claude, effort: high}
       - {model_id: opus, harness: claude, effort: low}
     required_capabilities: [review]

@@ -191,26 +191,32 @@ def test_pinned_same_model_reviewer_runs_as_a_fresh_dispatch(env):
     assert gate["verdict"] == "APPROVED", gate
 
 
-def test_routed_review_does_not_exclude_the_producers_family(env):
+@pytest.mark.parametrize("role", ["plan_reviewer", "code_reviewer"])
+def test_routed_review_does_not_exclude_the_producers_family(env, role):
     env.trust()
     from office import candidates, config
     con = env.con()
     cfg = config.load_yaml(config.default_config_path())
     run = {"id": "r", "gear": "", "playbook": "Change", "risk": {}}
-    got = candidates.route_role(con, cfg, run, "code_reviewer", probe=False)
+    got = candidates.route_role(con, cfg, run, role, probe=False)
     chosen = got.get("candidate") or {}
-    assert "luna" in (chosen.get("model_id") or "") and chosen.get("effort") == "xhigh", got.get("status")
+    assert (chosen.get("harness"), chosen.get("model_id"), chosen.get("invocation_model_id"), chosen.get("effort")) \
+        == ("codex", "luna", "gpt-6-luna", "high"), got.get("status")
+    assert not [x for x in got["skipped"] if x["reason"] == "preferred_seed entry matches no candidate"
+                and x["candidate"].startswith("luna")], got["skipped"]
     # The family: exclusion entry is gone; it no longer filters anything.
-    again = candidates.route_role(con, cfg, run, "code_reviewer", exclude={"family:gpt"}, probe=False)
+    again = candidates.route_role(con, cfg, run, role, exclude={"family:gpt"}, probe=False)
     assert (again.get("candidate") or {}).get("model_id") == chosen.get("model_id")
 
 
 def test_default_reviewer_seeds_and_fallbacks():
     from office import config
     roles = config.load_yaml(config.default_config_path())["roles"]
-    code = roles["code_reviewer"]["preferred_seed"]
-    assert code[0] == {"model_id": "luna", "effort": "xhigh"}
-    assert {"model_id": "sonnet", "harness": "claude", "effort": "high"} in code
+    for role in ("plan_reviewer", "code_reviewer"):
+        seed = roles[role]["preferred_seed"]
+        assert seed == [{"model_id": "luna", "effort": "high"},
+                        {"model_id": "sonnet", "harness": "claude", "effort": "high"},
+                        {"model_id": "opus", "harness": "claude", "effort": "low"}], role
     visual = roles["visual_reviewer"]["preferred_seed"]
     assert visual[0] == {"model_id": "gemini-3.8-flash", "harness": "agy", "effort": "medium"}
     assert visual[1] == {"model_id": "sonnet", "harness": "claude", "effort": "high"}
@@ -245,3 +251,15 @@ def test_external_dispatch_says_nothing_was_launched(env):
     approved_run(env)
     code, out = env.office("dispatch", "T1", "--as", "claude/claude-sonnet-5-5@high", "--external")
     assert code == 0 and "nothing launched" in out and " launching" not in out, out
+
+
+def test_unresolvable_seed_entry_is_reported_not_skipped(env):
+    env.trust()
+    from office import candidates, config
+    cfg = config.load_yaml(config.default_config_path())
+    cfg["roles"]["code_reviewer"]["preferred_seed"] = [{"model_id": "luna", "effort": "ludicrous"},
+                                                       {"model_id": "sonnet", "harness": "claude", "effort": "high"}]
+    run = {"id": "r", "gear": "", "playbook": "Change", "risk": {}}
+    got = candidates.route_role(env.con(), cfg, run, "code_reviewer", probe=False)
+    assert {"candidate": "luna@ludicrous", "reason": "preferred_seed entry matches no candidate"} in got["skipped"]
+    assert not [x for x in got["skipped"] if x["candidate"].startswith("claude/sonnet@high")]
