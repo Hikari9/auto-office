@@ -941,14 +941,13 @@ def test_executor_ledger_is_found_untracked_staged_or_ignored_but_not_when_head_
 
 
 @pytest.mark.integration
-def test_a_staged_ledger_under_a_wide_scope_stays_out_of_the_revision(env):
+def test_a_staged_ledger_is_rejected_and_preserved(env):
     from conftest import PLAN_ONE
     from office import briefs
     wenv, wt, d = _dispatch(env, plan=PLAN_ONE.replace("scope: calc.py", "scope: *"))
     path = write_ledger(wt)
     _git(wt, "add", "-f", briefs.LEDGER_FILE)  # staged but not committed
     code, out = env.office("submit", cwd=wt, env=wenv)
-    assert code == 0, out
-    rev = dict(env.con().execute("SELECT * FROM revisions WHERE task_id='T1'").fetchone())
-    assert briefs.LEDGER_FILE not in _git(wt, "ls-tree", "-r", "--name-only", rev["commit_sha"])
-    assert not path.exists()
+    assert code == 4 and "committed or staged" in out, out
+    assert not env.con().execute("SELECT 1 FROM revisions WHERE task_id='T1'").fetchone()
+    assert path.exists() and briefs.LEDGER_FILE in _git(wt, "diff", "--cached", "--name-only")

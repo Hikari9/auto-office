@@ -146,7 +146,9 @@ def test_contract_conflict_and_round_cap_stops_signal_the_orchestrator(env):
     assert len(events) == 2 and all(e["audience"] == "orchestrator" and e["dispatch_id"] == d["id"] for e in events), events
     assert "contract-conflict" in events[0]["summary"] and "round 3" in events[1]["summary"], events
     assert "office amend T1 --contract" in json.loads(events[0]["payload_json"])["next"]
-    assert "office rerun T1 --fresh" in json.loads(events[1]["payload_json"])["next"]
+    next_step = json.loads(events[1]["payload_json"])["next"]
+    assert "fixed <test> mutation=failed" in next_step, next_step
+    assert "office prompt" in next_step and "office preflight" in next_step and "office submit" in next_step, next_step
 
 
 @pytest.mark.approved

@@ -362,7 +362,10 @@ def _signal_next(task_id: str, dispatch_id: str, reason: str) -> str:
                 f"then office rerun {task_id} --fresh once findings are recorded")
     if reason.startswith("superseded"):  # a stale session ended itself; the current holder continues
         return f"none: {task_id} has a newer session; office status shows it"
-    if reason.startswith("self-review") or "round cap" in reason:
+    if "round cap" in reason:
+        return (f'office prompt {dispatch_id} -- "mark the line `fixed <test> mutation=failed` (or dispose it via '
+                '`office prompt`), run `office preflight`, then `office submit`"')
+    if reason.startswith("self-review"):
         return f'office prompt {dispatch_id} -- "<decision>", or office revoke {task_id} then office rerun {task_id} --fresh'
     return f"office status; then office rerun {task_id} --resume|--fresh or office revoke {task_id}"
 
