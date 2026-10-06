@@ -172,10 +172,11 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         from office import candidates
         report_con = db.connect()
         try:
-            for line in candidates.trust_report(report_con):
-                res.add(line)
+            trust_summary, _ = candidates.trust_report(report_con)
         finally:
             report_con.close()
+        for line in trust_summary:
+            res.add(line)
         if planner_problem:
             res.notices.append(planner_problem)
         moved = planpath.relocate_legacy(con, top)

@@ -43,7 +43,7 @@ Auto Office {ver}
   office benchmarks brief|submit <f> opted-in runs: one background refresh of missing benchmark scores
 
   office list                       runs in this repository (--all for every run)
-  office inspect [run|task|gate|evidence|events|route|learner|convergence] [id]
+  office inspect [run|task|gate|evidence|events|route|learner|trust|convergence] [id]
   office decide <lane|plan> escalate|continue|waive|stop --quote "<user's words>"
                                     the user's choice once a review spent its 3 RECHECK rounds
   office disposition <scope>:<F-id> fix|fixed|dismissed|follow-up -- "<note>"
