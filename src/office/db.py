@@ -23,7 +23,7 @@ from office import paths
 # Bump when SHARED_COLUMNS or the DDL changes. The version is a record, not the
 # gate: every open also runs the additive column pass (see `migrate`), so a
 # column added without a bump still reaches existing databases.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -121,6 +121,9 @@ CREATE TABLE IF NOT EXISTS capability_proofs(key TEXT PRIMARY KEY, harness TEXT 
 CREATE TABLE IF NOT EXISTS compat_calls(id TEXT PRIMARY KEY, at TEXT NOT NULL, office_version TEXT NOT NULL, run_id TEXT, command TEXT NOT NULL, argv_json TEXT NOT NULL, caller TEXT, outcome TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS visual_refs(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, name TEXT NOT NULL, version INTEGER NOT NULL, sha256 TEXT NOT NULL, path TEXT NOT NULL, kind TEXT NOT NULL, approved_by TEXT NOT NULL, provenance TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS deviations(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT, reference_id TEXT, description TEXT NOT NULL, reason TEXT NOT NULL, authorized_by TEXT NOT NULL, scope_json TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS commands(id TEXT PRIMARY KEY, kind TEXT NOT NULL, target TEXT, payload_json TEXT NOT NULL, payload_hash TEXT NOT NULL, origin TEXT, status TEXT NOT NULL, pid INTEGER, result_json TEXT, error TEXT, accepted_at TEXT NOT NULL, started_at TEXT, finished_at TEXT);
+CREATE TABLE IF NOT EXISTS sched_items(id TEXT PRIMARY KEY, kind TEXT NOT NULL, run_id TEXT, task_id TEXT, ref TEXT, title TEXT, priority TEXT NOT NULL DEFAULT 'normal', paused INTEGER NOT NULL DEFAULT 0, pause_reason TEXT, paused_at TEXT, demoted_seq INTEGER, enqueued_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sched_state(scope TEXT PRIMARY KEY, auto_mode TEXT NOT NULL, reason TEXT, updated_at TEXT NOT NULL);
 """
 
 # #131 F6: a 3.1 finding must name a recorded dispatch. Scoped to 3.1 rows
