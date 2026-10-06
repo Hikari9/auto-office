@@ -29,6 +29,7 @@ Auto Office {ver}
   office preflight                  executor: read-only checks before submit (ready|fix|wait|stop)
   office submit                     planner/executor: submit your plan or your work
   office amend <scope> -- "<delta>" change the plan (scope: plan, T2, or T2,T3)
+  office amend <scope> --no-review --reason "<why>" -- "<delta>"   ordinary amendment, no plan review
   office ack <amendment-id>         worker: record that you applied a delivered amendment
   office rerun <task> --resume|--fresh [--reroute]
                                     after a worker ends: continue its session, or start a new one with the findings
@@ -197,6 +198,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("scope")
     s.add_argument("delta", nargs="*")
     s.add_argument("--contract", action="store_true", help="a contract amendment (planner-owned)")
+    s.add_argument("--no-review", action="store_true",
+                   help="orchestrator veto: an ordinary amendment queues no plan review (needs --reason)")
+    s.add_argument("--reason", help="why plan review is vetoed (with --no-review)")
     s.add_argument("--requirements", action="store_true", help="a user-originated requirements change")
     s.add_argument("--quote", help="the user's words (requirements changes, defect redirects)")
     s.add_argument("--drop-criterion", action="append", default=[], metavar="TEXT",
@@ -546,7 +550,8 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()
         return amend.amend(con, run, args.scope, delta, contract=args.contract, requirements=args.requirements,
                            quote=args.quote, cwd=cwd, redirect=_redirect(args),
-                           drop_criteria=args.drop_criterion, add_criteria=args.add_criterion)
+                           drop_criteria=args.drop_criterion, add_criteria=args.add_criterion,
+                           no_review=args.no_review, reason=args.reason)
     if cmd == "ack":
         from office import amend
         return amend.ack(con, run, args.amendment)

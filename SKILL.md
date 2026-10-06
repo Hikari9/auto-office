@@ -101,8 +101,11 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
   registries several tasks touch (gate manifests, endpoint/grant lists, policy maps, shared mocks) go under each
   task's `shared:`. Tasks that must land together share a `lane:`; lanes sharing an outcome, a `converge:`.
 - Ordinary amendments (decomposition, ordering, acceptance detail, tests) are yours:
-  `office amend <T2|plan> -- "<delta>"`. Scope, interfaces, ownership, and authority are contract
-  amendments: `office amend <scope> --contract -- "<request>"`. Requirements change only on the
+  `office amend <T2|plan> -- "<delta>"`. When review of one adds nothing (a wording fix, a reorder
+  that moves no seam), veto it: `office amend plan --no-review --reason "doc-only wording" -- "<delta>"`
+  makes the next plan version and queues no plan review (the reason is recorded; a review already
+  running is untouched). Contract and requirements amendments always get review.
+  Scope, interfaces, ownership, and authority are contract amendments: `office amend <scope> --contract -- "<request>"`. Requirements change only on the
   user's words: `office amend requirements --quote "<words>" -- "<change>"`.
 - A paused or blocked task names its blocker and what was preserved: resolve it, or take the decision to the user.
 - If a command reports a missing route or trust, show the user the route notice; only they can

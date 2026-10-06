@@ -30,10 +30,12 @@ AUTHORITY_TERMS = re.compile(
 
 def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, requirements: bool = False,
           quote: str | None = None, cwd: Path | None = None, redirect: dict | None = None,
-          drop_criteria: list[str] | None = None, add_criteria: list[str] | None = None) -> Result:
+          drop_criteria: list[str] | None = None, add_criteria: list[str] | None = None,
+          no_review: bool = False, reason: str | None = None) -> Result:
     """`redirect` ({defect, root_cause, requirement, reviewer}) marks a contract
     amendment as the user's redirect of a plan defect (see office.redirect).
-    `drop_criteria`/`add_criteria` edit the frozen done criteria (requirements only)."""
+    `drop_criteria`/`add_criteria` edit the frozen done criteria (requirements only).
+    `no_review` (with a `reason`) is the orchestrator's veto of plan review for an ordinary amendment."""
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-amend", "workers do not amend the plan; report the problem in your submission",
                       next_step="office submit")
@@ -50,6 +52,16 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
     if (drop_criteria or add_criteria) and not (requirements or scope == "requirements"):
         raise Usage("criteria-are-requirements", "done criteria change only with a requirements amendment",
                     next_step=CRITERIA_FORM)
+    if reason and not no_review:
+        raise Usage("reason-needs-no-review", "--reason records why plan review is vetoed; it goes with --no-review",
+                    next_step=NO_REVIEW_FORM)
+    if no_review:
+        if not reason or not reason.strip():
+            raise Usage("no-review-needs-reason", "--no-review needs a reason the run's record keeps", next_step=NO_REVIEW_FORM)
+        if contract or requirements or scope == "requirements":
+            raise Refused("no-review-ordinary-only", "plan review cannot be vetoed for a contract or requirements amendment; "
+                          "those always get review", scope=scope, preserved="plan unchanged",
+                          next_step="rerun without --no-review (office amend --help)")
     if requirements or scope == "requirements":
         return _requirements_change(con, run, delta, quote, drop_criteria or [], add_criteria or [])
     scope_ids = _scope_ids(con, run, scope)
@@ -57,7 +69,7 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
     plan_text = planfile.strip_generated(plan_path.read_text(encoding="utf-8")) if plan_path else None
     if contract:
         return _contract(con, run, scope, scope_ids, delta, plan_text, redirect, plan_path)
-    return _ordinary(con, run, scope, scope_ids, delta, plan_text, plan_path)
+    return _ordinary(con, run, scope, scope_ids, delta, plan_text, plan_path, veto_reason=reason.strip() if no_review else None)
 
 
 def _scope_ids(con, run: dict, scope: str) -> list[str]:
@@ -132,8 +144,11 @@ def _match_criterion(criteria: list[str], text: str) -> str:
                   preserved="requirements unchanged", next_step=CRITERIA_FORM)
 
 
+NO_REVIEW_FORM = 'office amend <scope> --no-review --reason "<why review adds nothing>" -- "<delta>"'
+
+
 def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan_text: str | None,
-             plan_path: Path | None = None) -> Result:
+             plan_path: Path | None = None, veto_reason: str | None = None) -> Result:
     current = state.current_plan(con, run["id"])
     if current is None:
         raise Refused("no-plan", "there is no plan to amend", next_step="office submit the plan first")
@@ -179,7 +194,11 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
         delivered = _deliver(con, run, amendment_id, affected, delta.strip(), version)
         rereview = None
         from office import contract
-        if contract.is_convergence(run):
+        if veto_reason:
+            # The orchestrator's veto: p+1 queues no plan review. A gate already queued or running for an earlier
+            # version is left to finish.
+            state.emit(con, run, "plan.review_skipped", f"plan p{version}: review vetoed by the orchestrator: {veto_reason}")
+        elif contract.is_convergence(run):
             rereview = plans.review_after_revision(con, run, current["tasks"], parsed.tasks, version)
             rereview = rereview if "queued" in rereview else None
         elif plans.review_required(run) and not plans.plan_review_ended(con, run):
