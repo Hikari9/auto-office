@@ -57,9 +57,10 @@ Dispositions: `fixed <test path> mutation=failed`, `out-of-scope`, `dismissed <r
 A medium or high fix names the test file that proves it and `mutation=failed` (you reverted the fix and the test failed);
 a finding of any severity is `out-of-scope` only when its file is outside SCOPE.
 Record severity as found: a fix never lowers it. Low findings are fixed but do not trigger a re-review. A medium or
-high fix that changes behavior gets one fix-diff re-review, as the next round. The 3-round cap: a medium or high
-finding open in round 3 stops you, and `contract-conflict` stops you with the ACCEPT line quoted. Preflight reports
-a missing, stale, or malformed ledger and any open finding as a fix. Submit consumes the ledger.
+high fix that changes behavior gets one fix-diff re-review, as the next round. At the 3-round cap, a medium or high
+finding still open stops you. Run `office preflight` anyway so it records the stop for the orchestrator, then print
+the status line and stop. `contract-conflict` stops you with the ACCEPT line quoted. Preflight reports a missing,
+stale, or malformed ledger and any open finding as a fix. Submit consumes the ledger.
 
 ## 3. Checks
 

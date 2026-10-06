@@ -105,7 +105,8 @@ def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect:
                 with db.transaction(con):
                     state.emit(con, run, "submit.rejected", f"{exc.category}: {exc.message}", audience="runtime",
                                task_id=d.get("task_id"), dispatch_id=dispatch_id, payload={"code": exc.category})
-                    signal_refused(con, run, d, f"{exc.category}: {exc.message}")
+                    if exc.category != "self-review-ledger-signaled":
+                        signal_refused(con, run, d, f"{exc.category}: {exc.message}")
         raise
 
 
@@ -491,6 +492,20 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     if task["status"] in ("paused", "blocked", "cancelled") and not self_blocked(task):
         raise Refused("task-paused", f"{task['id']} is {task['status']}: {task.get('pause_reason') or ''}",
                       scope=task["id"], preserved="your worktree", next_step="stop and wait; the orchestrator is resolving it")
+    # A duplicate submission is returned above before this check. For a new revision,
+    # use the same ledger gate as preflight against committed and pending work.
+    from office import preflight
+    base = d["base_commit"]
+    dep_bases = [b for b in _dependency_bases(con, run, task, head) if b != base]
+    ledger_stop, ledger_fix, signaled = preflight.ledger_gate(
+        con, run, task, d, wt, base, head, dep_bases, stop=[], fix=[], submission=True)
+    if ledger_stop or ledger_fix:
+        details = "; ".join(ledger_stop + ledger_fix)
+        category = "self-review-ledger-signaled" if signaled else "self-review-ledger"
+        next_step = "run office preflight, apply its repairs, then office submit" if not ledger_stop else \
+            "run office preflight, report the stop for the orchestrator, and stop"
+        raise Refused(category, f"{task['id']} self-review ledger refused submission: {details}",
+                      scope=task["id"], preserved="your worktree (nothing was submitted)", next_step=next_step)
     commit = make_commit(wt, tree, head, f"office: {task['id']} submission\n\nrun {run['id'][:8]} task {task['id']}\n\n"
                          f"{paths.office_trailer(run['id'])}")
     from office import planfile, prs

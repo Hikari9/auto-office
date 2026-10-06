@@ -313,22 +313,26 @@ def _in_scope_changes(wt: Path, task: dict, changed: list[str]) -> tuple[list[st
     return mine(changed), mine(pending)
 
 
-def ledger_verdict(wt: Path, task: dict, changed: list[str], head: str, tier: str = "deep") -> tuple[list[str], list[str]]:
+def ledger_verdict(wt: Path, task: dict, changed: list[str], head: str, tier: str = "deep", *,
+                   submission: bool = False) -> tuple[list[str], list[str]]:
     """(stop, fix) for the task's self-review ledger; both empty when none is owed. The ledger names
-    HEAD, so uncommitted in-scope work is a fix: it would ship without the review the ledger vouches for."""
+    HEAD, so uncommitted in-scope work is a preflight fix. Submit captures that work and applies only
+    the ledger's stop/fix verdict, preserving ledger-less submissions that were legal before the gate."""
     name = briefs.LEDGER_FILE
     if paths.git(wt, "ls-files", "--", name, check=False).strip() or paths.git(wt, "ls-tree", "HEAD", "--", name, check=False).strip():
         return [], [f"ledger: {name} is committed or staged; leave it untracked: git rm --cached {name} (commit "
                     "that removal), then update the ledger's COMMIT"]
     committed, pending = _in_scope_changes(wt, task, changed)
-    if not committed and not pending:
+    if not submission and not committed and not pending:
         return [], []
     uncommitted = [f"ledger: uncommitted in-scope changes ({', '.join(pending[:6])}): commit them first, the "
-                   "ledger names HEAD"] if pending else []
+                   "ledger names HEAD"] if pending and not submission else []
     text = submit._read_untracked_text(wt, name, briefs.LEDGER_MAX_CHARS)
     if text is None and os.path.lexists(wt / name):
         return [], uncommitted + [f"ledger: {name} must be a regular untracked file (not a symlink or hard link)"]
     if text is None:
+        if submission:
+            return [], []
         return [], uncommitted + [f"ledger: no {name}; run the SELF-REVIEW and write it in this worktree root in "
                                   "the format the brief gives"]
     if len(text) > briefs.LEDGER_MAX_CHARS:
@@ -352,6 +356,32 @@ def ledger_round(wt: Path) -> int | None:
     return parse_ledger(text)[0]["round"] if text else None
 
 
+def ledger_gate(con, run: dict, task: dict, d: dict, wt: Path, base: str, head: str,
+                dep_bases: list[str], *, stop: list[str], fix: list[str],
+                submission: bool = False) -> tuple[list[str], list[str], bool]:
+    """Check the ledger against the committed diff and signal the orchestrator when required.
+
+    `stop` and `fix` are preflight's other findings, so both commands choose the
+    same signal verdict and reasons without duplicating the ledger gate.
+    """
+    changed = [f for f in _git(wt, "diff", "--name-only", "-z", base, head).split("\0") if f]
+    for b in dep_bases:
+        if b != base:
+            also = set(_git(wt, "diff", "--name-only", "-z", b, head).split("\0"))
+            changed = [f for f in changed if f in also]
+    ledger_stop, ledger_fix = ledger_verdict(
+        wt, task, changed, head, briefs.self_review_tier(run.get("gear"), run.get("risk_json")),
+        submission=submission)
+    all_stop = stop + ledger_stop
+    all_fix = fix + ledger_fix
+    signaled = bool(all_stop or (all_fix and (ledger_round(wt) or 0) >= briefs.MAX_REVIEW_ROUNDS))
+    if signaled:
+        verdict = "stop" if all_stop else "fix"
+        reasons = all_stop or [f"self-review round cap spent with repairs outstanding: {item}" for item in all_fix]
+        _signal(con, run, task["id"], d, verdict, reasons)
+    return ledger_stop, ledger_fix, signaled
+
+
 def _signal_next(task_id: str, dispatch_id: str, reason: str) -> str:
     """The command the orchestrator runs for a stopped worker, by what stopped it."""
     if reason.startswith("contract-conflict"):
@@ -362,7 +392,10 @@ def _signal_next(task_id: str, dispatch_id: str, reason: str) -> str:
                 f"then office rerun {task_id} --fresh once findings are recorded")
     if reason.startswith("superseded"):  # a stale session ended itself; the current holder continues
         return f"none: {task_id} has a newer session; office status shows it"
-    if reason.startswith("self-review") or "round cap" in reason:
+    if "round cap" in reason:
+        return (f'office prompt {dispatch_id} -- "mark the line `fixed <test> mutation=failed` (or dispose it via '
+                '`office prompt`), run `office preflight`, then `office submit`"')
+    if reason.startswith("self-review"):
         return f'office prompt {dispatch_id} -- "<decision>", or office revoke {task_id} then office rerun {task_id} --fresh'
     return f"office status; then office rerun {task_id} --resume|--fresh or office revoke {task_id}"
 
@@ -457,11 +490,7 @@ def preflight(con, run: dict, cwd: Path) -> Result:
     base = d["base_commit"]
     head = _git(wt, "rev-parse", "HEAD")
     # The committed diff: the self-review ledger vouches for HEAD.
-    changed = [f for f in _git(wt, "diff", "--name-only", "-z", base, head).split("\0") if f]
     dep_bases = [b for b in submit._dependency_bases(con, run, task, head) if b != base]
-    for b in dep_bases:
-        also = set(_git(wt, "diff", "--name-only", "-z", b, head).split("\0"))
-        changed = [f for f in changed if f in also]
     # Submit captures uncommitted edits too, so scope is judged on the worktree as it is now.
     touched = [f for f in _git(wt, "diff", "--no-renames", "--name-only", "-z", base).split("\0") if f]
     for b in dep_bases:
@@ -490,15 +519,13 @@ def preflight(con, run: dict, cwd: Path) -> Result:
     res.data["sed_backups"] = backups
 
     # 7. Self-review ledger: the brief's SELF-REVIEW block says what it holds.
-    ledger_stop, ledger_fix = ledger_verdict(wt, task, changed, head,
-                                             briefs.self_review_tier(run.get("gear"), run.get("risk_json")))
+    ledger_stop, ledger_fix, _ = ledger_gate(con, run, task, d, wt, base, head, dep_bases,
+                                             stop=stop, fix=fix)
     stop += ledger_stop
     fix += ledger_fix
 
     res.data["head"] = head
     verdict = "stop" if stop else "fix" if fix else "wait" if wait else "ready"
-    if verdict == "stop" or (verdict == "fix" and (ledger_round(wt) or 0) >= briefs.MAX_REVIEW_ROUNDS):
-        _signal(con, run, task["id"], d, verdict, stop or [f"self-review round cap spent with repairs outstanding: {f}" for f in fix])
     res.lines = [f"PREFLIGHT {verdict}"] + [f"stop: {s}" for s in stop] + [f"fix: {f}" for f in fix] \
         + [f"wait: {w}" for w in wait] + res.lines
     res.data["verdict"] = verdict
