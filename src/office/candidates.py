@@ -49,42 +49,55 @@ def _version_key(version: str) -> tuple[int, ...]:
 
 
 def resolve_aliases(rows: list[dict]) -> list[dict]:
-    """A row with `alias_family` (a regex with a `version` group over model_id) takes
-    the invocation and scores of the highest-version matching row at the same harness
-    and effort, so `opus` follows each new Opus as the catalog adds it. With no
-    match, the alias keeps its own static fields. A target without a proven
-    invocation_source inherits the alias's."""
+    """A row with `alias_family` (a regex with a `version` group over model_id) follows the
+    highest-version matching row at the same harness, so `opus` and `luna` track each new
+    model as the catalog adds it. The alias is offered at every effort that newest model
+    offers, taking its invocation and scores; an effort the alias row declares but the
+    newest model lacks keeps its own static fields. With no match, the alias keeps its own
+    static fields. A target without a proven invocation_source inherits the alias's."""
     # Non-dispatchable rows count: they are usually just unlistable by their CLI, and the
     # alias's own invocation_source stands behind the full model id as the slug.
     concrete = [r for r in rows if not r.get("alias_family")]
     out = []
+    expanded: set[tuple] = set()
     for row in rows:
         pattern = row.get("alias_family")
         if not pattern:
             out.append(row)
             continue
+        group = (row.get("model_id"), row.get("invocation_harness"), pattern)
+        if group in expanded:
+            continue
+        expanded.add(group)
+        own = {r.get("effort"): r for r in rows
+               if (r.get("model_id"), r.get("invocation_harness"), r.get("alias_family")) == group}
         best = None
         for r in concrete:
             m = re.match(pattern, r.get("model_id") or "")
-            if not m or r.get("invocation_harness") != row.get("invocation_harness") or r.get("effort") != row.get("effort"):
+            if not m or r.get("invocation_harness") != row.get("invocation_harness"):
                 continue
             key = _version_key(m.group("version"))
             if best is None or key > best[0]:
-                best = (key, r)
-        if best is None:
-            out.append(row)
-            continue
-        target = best[1]
-        resolved = dict(row)
-        resolved["invocation_model_id"] = target.get("invocation_model_id") or target["model_id"]
-        source = str(target.get("invocation_source") or "")
-        if source.startswith(("local-evidence:", "documented:")):
-            resolved["invocation_source"] = source
-        for field in _ALIAS_FIELDS:
-            if target.get(field):
-                resolved[field] = target[field]
-        resolved["alias_resolved_to"] = target["model_id"]
-        out.append(resolved)
+                best = (key, r["model_id"])
+        by_effort = {r.get("effort"): r for r in concrete
+                     if best and r.get("model_id") == best[1] and r.get("invocation_harness") == row.get("invocation_harness")}
+        for effort in dict.fromkeys([*own, *by_effort]):
+            base = own.get(effort) or {**row, "effort": effort, "effort_confidence": "mapped"}
+            target = by_effort.get(effort)
+            if target is None:
+                out.append(base)
+                continue
+            resolved = dict(base)
+            resolved["invocation_model_id"] = target.get("invocation_model_id") or target["model_id"]
+            source = str(target.get("invocation_source") or "")
+            if source.startswith(("local-evidence:", "documented:")):
+                resolved["invocation_source"] = source
+            for field in _ALIAS_FIELDS:
+                if target.get(field):
+                    resolved[field] = target[field]
+            resolved["source_effort"] = target.get("source_effort") or resolved.get("source_effort")
+            resolved["alias_resolved_to"] = target["model_id"]
+            out.append(resolved)
     return out
 
 
@@ -443,6 +456,12 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     floors = None if override else config.get("model_family_floors")
     candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors,
                                            quota_snapshot=quota_snapshot)
+    seed = None if override else _preferred_seed(policy_cfg, run)
+    for entry in seed or []:
+        if not any(routing.preferred_rank(c, [entry]) is not None for c in candidates):
+            wanted = f"{entry.get('harness') + '/' if entry.get('harness') else ''}{entry.get('model_id')}" \
+                     f"{'@' + entry['effort'] if entry.get('effort') else ''}"
+            skipped.append({"candidate": wanted, "reason": "preferred_seed entry matches no candidate"})
     if probe and os.environ.get("OFFICE_QUOTA_PROBE") != "off" and run.get("id"):
         # One notice per call, naming every harness whose quota could not be read. A probe the
         # operator switched off is a choice, not a failure, and says nothing.
@@ -491,7 +510,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "role": role,
         "playbook": run.get("playbook"),
         "policy": policy,
-        "preferred_seed": None if override else _preferred_seed(policy_cfg, run),
+        "preferred_seed": seed,
         "cost_policy": cost_policy,
         "allow_advisory_undercut": bool(gear.get("allow_advisory_undercut", True)),
         "runs_db": str(paths.runs_db()),
