@@ -204,11 +204,15 @@ def _apply_requirements(con, run: dict, proposed: dict, submitter: str) -> None:
     state.update_run(con, run["id"], requirements_version=version, envelope=envelope)
 
 
-def sync_tasks(con, run: dict, planned: list[dict], plan_version: int) -> dict:
-    """Make the tasks table match a plan version. Caller holds the tx."""
+def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_checks: bool = False) -> dict:
+    """Make the tasks table match a plan version. Caller holds the tx.
+
+    With `rerun_checks`, an accepted task whose only change is its `checks:` keeps its contract version and
+    is reported under `checks_only` instead of `acceptance`: it is not reopened, its checks are rerun
+    (`rerun_accepted_checks`)."""
     existing = {t["id"]: t for t in state.tasks(con, run["id"])}
     seen = set()
-    changes = {"added": [], "contract": [], "acceptance": [], "cancelled": []}
+    changes = {"added": [], "contract": [], "acceptance": [], "checks_only": [], "cancelled": []}
     now = now_iso()
     for p in planned:
         seen.add(p["id"])
@@ -225,14 +229,22 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int) -> dict:
             changes["added"].append(p["id"])
             continue
         contract = (cur["scope"] != p["scope"] or (cur["interfaces"] or []) != p["interfaces"])
-        acceptance = (cur["accept"] != p["accept"] or cur["checks"] != checks or cur["visual"] != p["visual"]
-                      or cur["depends"] != p["depends"] or cur["title"] != p["title"])
+        checks_changed = cur["checks"] != checks
+        other_acceptance = (cur["accept"] != p["accept"] or cur["visual"] != p["visual"]
+                            or cur["depends"] != p["depends"] or cur["title"] != p["title"])
+        acceptance = checks_changed or other_acceptance
+        checks_only = (rerun_checks and checks_changed and not (contract or other_acceptance)
+                       and cur["status"] == "accepted" and cur["accepted_revision_id"]
+                       and cur["accepted_revision_id"] == cur["current_revision_id"])
         fields = dict(title=p["title"], scope=p["scope"], depends=p["depends"], interfaces=p["interfaces"],
                       accept=p["accept"], checks=checks, visual=p["visual"])
         if contract:
             fields["contract_version"] = plan_version
             changes["contract"].append(p["id"])
-        if contract or acceptance:
+        if checks_only:
+            fields["acceptance_version"] = plan_version
+            changes["checks_only"].append(p["id"])
+        elif contract or acceptance:
             fields["acceptance_version"] = plan_version
             fields["contract_version"] = plan_version
             if not contract:
@@ -256,6 +268,25 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int) -> dict:
                         "AND released_at IS NULL AND revoked_at IS NULL", (now, run["id"], tid))
             changes["cancelled"].append(tid)
     return changes
+
+
+def rerun_accepted_checks(con, run: dict, task_id: str, amendment_id: str) -> bool:
+    """Run an accepted task's (amended) checks again on its accepted revision. The task keeps its status
+    until a verdict: a pass leaves it accepted, a failure delivers the finding and reopens it. No executor
+    is launched. Returns whether a checks gate was queued. Caller holds the tx."""
+    from office import gates
+    task = state.get_task(con, run["id"], task_id)
+    rev_id = task["current_revision_id"]
+    if not task["checks"]:
+        state.emit(con, run, "gate.rerun", f"{task_id} stays accepted on {rev_id}: {amendment_id} left it no checks to run",
+                   task_id=task_id)
+        return False
+    gid = gates._new_gate(con, run, task, rev_id, "checks", f"checks:{rev_id}", "queued")
+    state.enqueue(con, run, "run_checks", {"gate_id": gid, "task_id": task_id, "revision_id": rev_id},
+                  dedup_key=f"checks:{gid}", max_attempts=2)
+    state.emit(con, run, "gate.rerun", f"{task_id} checks re-run on {rev_id} ({amendment_id} changed them; no relaunch)",
+               task_id=task_id)
+    return True
 
 
 # ------------------------------------------------------------------ review state

@@ -179,18 +179,21 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
                     "content_hash, parent_version, amendment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (run["id"], version, "ordinary", new_text, dumps(parsed.tasks), dumps(parsed.requirements),
                      "orchestrator", now_iso(), sha256_bytes(new_text.encode()), run["plan_version"], amendment_id))
-        sync = plans.sync_tasks(con, run, parsed.tasks, version)
+        sync = plans.sync_tasks(con, run, parsed.tasks, version, rerun_checks=True)
+        # A checks-only change to an accepted task reruns its checks instead of reopening it.
+        rerun = sync["checks_only"]
         # Added tasks are the only affected ones when the plan merely grows: a running task's contract is untouched.
-        affected = sorted(set(scope_ids) | set(sync["acceptance"]) | set(sync["contract"]) | set(sync["added"]))
-        if not scope_ids and not affected:
+        affected = sorted((set(scope_ids) | set(sync["acceptance"]) | set(sync["contract"]) | set(sync["added"])) - set(rerun))
+        if not scope_ids and not affected and not rerun:
             affected = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] not in ("accepted", "cancelled")]
         for tid in scope_ids:
-            if tid not in sync["acceptance"]:
+            if tid not in sync["acceptance"] and tid not in rerun:
                 state.update_task(con, run["id"], tid, contract_version=version, acceptance_version=version)
         state.update_run(con, run["id"], plan_version=version)
         run = state.get_run(con, run["id"])
         plans.apply_run_checks(con, run, parsed.run_checks)
         run = state.get_run(con, run["id"])
+        rechecked = [tid for tid in rerun if plans.rerun_accepted_checks(con, run, tid, amendment_id)]
         delivered = _deliver(con, run, amendment_id, affected, delta.strip(), version)
         rereview = None
         from office import contract
@@ -211,6 +214,8 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
         parts.append("rereview queued")
     if affected:
         parts.append(f"affected {','.join(affected)}")
+    if rechecked:
+        parts.append(f"checks rerun on {','.join(rechecked)}")
     if delivered:
         parts.append(f"delivering to {','.join(delivered)}")
     res.add(" | ".join(parts))
