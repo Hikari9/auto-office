@@ -72,37 +72,49 @@ def lanes(con, run: dict) -> list[dict]:
     """Ownership/composition lanes of the run's live tasks."""
     live = [t for t in state.tasks(con, run["id"]) if t["status"] != "cancelled"]
     planned = _plan_tasks(con, run)
-    parent = {t["id"]: t["id"] for t in live}
+    tasks = [{"id": t["id"], "depends": t["depends"], "lane": (planned.get(t["id"]) or {}).get("lane")}
+             for t in live]
+    return [{"id": lane["id"], "tasks": lane["tasks"], "shared": False}
+            for lane in group_planned_tasks(tasks)]
 
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
 
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[max(ra, rb, key=_tid_key)] = min(ra, rb, key=_tid_key)
+def group_planned_tasks(tasks: list[dict]) -> list[dict]:
+    """Group planned task records by dependencies and declared lane name."""
+    parent = {task["id"]: task["id"] for task in tasks}
+
+    def find(tid: str) -> str:
+        while parent[tid] != tid:
+            parent[tid] = parent[parent[tid]]
+            tid = parent[tid]
+        return tid
+
+    def union(left: str, right: str) -> None:
+        a, b = find(left), find(right)
+        if a != b:
+            parent[max(a, b, key=_tid_key)] = min(a, b, key=_tid_key)
 
     declared: dict[str, str] = {}
-    for t in live:
-        for dep in t["depends"]:
+    for task in tasks:
+        tid = task["id"]
+        for dep in task.get("depends") or []:
             if dep in parent:
-                union(t["id"], dep)
-        name = (planned.get(t["id"]) or {}).get("lane")
+                union(tid, dep)
+        name = task.get("lane")
         if name:
             if name in declared:
-                union(t["id"], declared[name])
-            declared.setdefault(name, t["id"])
+                union(tid, declared[name])
+            else:
+                declared[name] = tid
+
     groups: dict[str, list[str]] = {}
-    for t in live:
-        groups.setdefault(find(t["id"]), []).append(t["id"])
+    by_id = {task["id"]: task for task in tasks}
+    for task in tasks:
+        groups.setdefault(find(task["id"]), []).append(task["id"])
     out = []
-    for root, ids in groups.items():
+    for ids in groups.values():
         ids.sort(key=_tid_key)
-        names = sorted({(planned.get(i) or {}).get("lane") for i in ids} - {None, ""})
-        out.append({"id": "L-" + (names[0] if names else ids[0]), "tasks": ids, "shared": False})
+        names = sorted({by_id[tid].get("lane") for tid in ids} - {None, ""})
+        out.append({"id": "L-" + (names[0] if names else ids[0]), "tasks": ids, "lane_names": names})
     return sorted(out, key=lambda lane: _tid_key(lane["tasks"][0]))
 
 
