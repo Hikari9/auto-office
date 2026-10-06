@@ -27,6 +27,20 @@ from office import briefs, contract, db, gates, paths, review_parse, state, work
 from office.util import claim_alive, dumps, now_iso, sha256_obj
 
 
+DETAIL_LIMIT = 400
+
+
+def blocked_detail(outcome):
+    """The integration blocked line: the check summary, shortened in the middle so the trailing next step survives."""
+    summary = outcome.get("summary") or ""
+    if len(summary) > DETAIL_LIMIT:
+        # The next step is the last "; " clause; elide the middle (usually the quoted command) instead.
+        cut = summary.rfind("; ")
+        tail = summary[cut:] if 0 < cut and len(summary) - cut <= DETAIL_LIMIT // 2 else summary[-(DETAIL_LIMIT // 2):]
+        summary = summary[:DETAIL_LIMIT - len(tail) - 3] + "..." + tail
+    return f"run checks {outcome['verdict']}: {summary}"
+
+
 def _topo(tasks: list[dict]) -> list[dict]:
     by_id = {t["id"]: t for t in tasks}
     out, seen = [], set()
@@ -304,7 +318,7 @@ def _integrate(con, run: dict, job: dict) -> dict:
                         (outcome["verdict"], outcome.get("summary"), now_iso(), gid))
         results["checks"] = outcome["verdict"]
         if outcome["verdict"] != "PASS":
-            detail = f"run checks {outcome['verdict']}: {outcome.get('summary', '')[:160]}"
+            detail = blocked_detail(outcome)
             hint = missing_deps_hint(outcome)
             if hint:
                 detail += f" | {hint}"
