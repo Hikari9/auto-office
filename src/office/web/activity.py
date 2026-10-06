@@ -51,7 +51,7 @@ def shorten_home(text: str, home: str | Path | None = None) -> str:
 def redact_value(value, *, home=None):
     """Recursively redact a decoded payload: secret-named keys are masked whole."""
     if isinstance(value, dict):
-        return {k: (MASK if _SECRET_KEY.search(str(k)) and v not in (None, "") else redact_value(v, home=home))
+        return {k: (MASK if _SECRET_KEY.search(str(k)) and isinstance(v, (str, dict, list)) and v else redact_value(v, home=home))
                 for k, v in value.items()}
     if isinstance(value, list):
         return [redact_value(v, home=home) for v in value]

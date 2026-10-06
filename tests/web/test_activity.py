@@ -50,7 +50,7 @@ def test_summary_and_payload_redaction(writer, make_observer, tmp_path):
             f"export OPENAI_API_KEY=\"sk-live\" from https://bob:hunter2@example.com/repo",
             payload={"token": "s3cret", "headers": {"Authorization": "Bearer zzz"}, "path": f"{home}/notes",
                      "nested": [{"api_key": "k"}, "sk-ant-abcdefghijklmnopqrstuvwx"], "count": 3,
-                     "other_home": "/Users/someone-else/x"})
+                     "other_home": "/Users/someone-else/x", "token_count": 12})
         synthetic.insert_event(con, "R", "note", "x" * 5000, payload={f"blob{i}": "y" * 900 for i in range(10)})
     obs = make_observer(path, home=home)
     big, item = obs.activity("R")["items"]
@@ -61,7 +61,7 @@ def test_summary_and_payload_redaction(writer, make_observer, tmp_path):
     p = item["payload"]
     assert p["token"] == "***" and p["headers"] == {"Authorization": "***"} and p["nested"][0]["api_key"] == "***"
     assert p["nested"][1] == "***" and p["path"] == "~/notes" and p["count"] == 3
-    assert p["other_home"] == "/Users/someone-else/x"
+    assert p["other_home"] == "/Users/someone-else/x" and p["token_count"] == 12
     assert len(big["summary"]) < 600
     assert big["payload"]["truncated"] is True and len(big["payload"]["preview"]) == activity.PAYLOAD_CAP
 

@@ -138,7 +138,10 @@ def _schema_version(snap) -> int | None:
     if not snap.has("schema_meta"):
         return None
     row = snap.rows("SELECT value FROM schema_meta WHERE key='office_schema'")
-    return int(row[0]["value"]) if row else None
+    try:
+        return int(row[0]["value"]) if row else None
+    except (TypeError, ValueError):
+        return None
 
 
 # ------------------------------------------------------------------ run
