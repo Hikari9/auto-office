@@ -2,10 +2,12 @@
 
 `serve` runs in the foreground; `start` daemonizes `serve` and waits for its
 pid file under `<state home>/web/`; `stop` and `status` read that file. The
-server binds loopback only and refuses any other `--host`. Fixture mode
-(`--fixture small|large`) serves T1's synthetic workspace from a temp Office
-home with T4's client on a fake transport and fake launcher/executor: it never
-touches the real runs.db or GitHub.
+server binds loopback only and refuses any other `--host`. Besides the API it
+serves the UI's static modules by name and, in fixture mode only, the GitHub
+fixture control. Fixture mode (`--fixture small|large`, see `fixtures.py`)
+serves a synthetic workspace from a temp Office home with a fake GitHub
+transport and fake launcher/executor: it never touches the real runs.db or
+GitHub.
 """
 from __future__ import annotations
 

@@ -3,7 +3,7 @@
 Builds T1's synthetic workspace in a temp Office home and adds what the UI's
 deliberate states need: a GitHub-visible repository that is not
 execution-ready (named failing prerequisites), an archived and an
-issues-disabled repository, command receipts in every state, and (large
+issues-disabled repository, a resumable run, command receipts in every state, and (large
 scale) at least 2000 open issues. GitHub answers come from a fake transport
 whose per-repository mode (`fresh`, `rate_limited`, `revoked`) the
 fixture-only `POST /api/fixture/github` control switches. Nothing here touches
@@ -30,6 +30,7 @@ GITHUB_MODES = ("fresh", "rate_limited", "revoked")
 RATE_RESET = 900  # seconds until a fixture rate limit resets
 MIN_LARGE_ISSUES = 2000
 NOT_READY = "synth-org-0/not-ready"
+RESUMABLE_REPO = "synth-org-2/repo-02"
 ARCHIVED = "synth-org-1/archived-repo"
 NO_ISSUES = "synth-org-2/issues-disabled"
 EXTRA_REPOS = {
@@ -131,6 +132,24 @@ def _augment(data: dict, scale: str) -> dict:
     return data
 
 
+def _add_resumable_run(db_path: Path, data: dict) -> None:
+    """One run with no session and no open dispatch on an otherwise run-free open issue: `resumable`."""
+    repo = next(r for r in data["repos"] if r["slug"] == RESUMABLE_REPO)
+    number = min(i["number"] for i in data["issues"]
+                 if i["repo"] == RESUMABLE_REPO and i["state"] == "open" and i["number"] > 2)
+    run_id = "0000fixture00001-resumable"
+    con = db.connect(db_path)
+    try:
+        with db.transaction(con):
+            synthetic.insert_run(con, run_id, git_common_dir=repo["git_common_dir"], goal="Fixture resumable run",
+                                 landing={"issue": f"https://github.com/{RESUMABLE_REPO}/issues/{number}"},
+                                 at=9000, end_state="merge")
+            synthetic.insert_task(con, run_id, "T1", status="accepted", at=9000)
+            synthetic.insert_task(con, run_id, "T2", status="queued", at=9001)
+    finally:
+        con.close()
+
+
 def _readiness(repo: dict, checkout: Path | None) -> dict:
     name = repo["full_name"]
     failing = dict(NOT_READY_FAILING) if name == NOT_READY else {}
@@ -182,6 +201,7 @@ def build(scale: str, home: Path | None = None, *, seed_receipts: bool = False) 
     root = Path(home or tempfile.mkdtemp(prefix="office-web-fixture-"))
     ws = synthetic.build_workspace(root / "data", scale)
     data = _augment(json.loads(Path(ws["github"]).read_text(encoding="utf-8")), scale)
+    _add_resumable_run(ws["db"], data)
     gh = FixtureGitHub(data)
     gh.client = GitHubClient(token="fixture-token", transport=gh.transport)
     gh.refresh()
