@@ -143,7 +143,8 @@ def test_supervisor_gets_the_subprocess_environment_and_hands_it_back(env, monke
     real_run = fake_agent.run
     monkeypatch.setattr(fake_agent, "run", lambda *a: during.append({s: signal.getsignal(s) for s in handlers}) or real_run(*a))
     monkeypatch.setattr(dispatch, "supervise", spy)
-    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[PASS])
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[PASS],
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     before = dict(os.environ), os.getcwd()
     env.office("dispatch", "T1", env={frontdoor.HOP_ENV: "1"}, check=0)
     assert before == (dict(os.environ), os.getcwd())

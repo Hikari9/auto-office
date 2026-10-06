@@ -833,6 +833,8 @@ def _unpause_plan_holds(con, run: dict) -> None:
     for t in state.tasks(con, run["id"]):
         if t["status"] == "paused" and (t.get("pause_reason") or "").startswith("plan "):
             state.update_task(con, run["id"], t["id"], status=gates.derive_status(con, run, t), pause_reason=None)
+    # Revisions whose checks ended while the plan held them are accepted now.
+    gates.reevaluate_submitted(con, run)
 
 
 def _ingest_convergence(con, run: dict, gate_id: str, outcome: dict) -> None:
