@@ -314,7 +314,8 @@ def _consider(con, run: dict, scope: dict) -> None:
         return
     _set_scope(con, run, scope["id"], status="pending", key=key, detail="composition queued")
     state.enqueue(con, run, "converge", {"scope": scope["id"], "key": key},
-                  dedup_key=f"converge:{run['id']}:{scope['id']}:{key}", max_attempts=2)
+                  # The cycle is part of the key: an operator decision may review the same composition again.
+                  dedup_key=f"converge:{run['id']}:{scope['id']}:{key}:c{int(st.get('cycle') or 1)}", max_attempts=2)
 
 
 def _close_fixes(con, run: dict, scope: dict) -> list[str]:

@@ -688,3 +688,17 @@ def test_recheck_routes_repairs_even_when_the_visual_evidence_is_blocked(env):
     env.office("dispatch", "T1", check=0)
     assert _gates(env, "visual")[0]["review_status"] == "EVIDENCE_BLOCKED"
     assert _scope(env, "L-T1")["status"] == "recheck" and task_row(env)["status"] == "changes_required"
+
+
+def test_intake_gap_answer_reviews_the_same_composition_again(env):
+    """4, 9: after the user answers an INTAKE_GAP that needs no code change, office decide
+    continue starts a new cycle that reviews the unchanged composition."""
+    gap = "VERDICT: INTAKE_GAP\nDECISION should add() accept floats?\nWHY requirements name ints only\nAFFECTS T1\nNEXT ask"
+    _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+           convergence_reviewer=[{"reply": gap}, {"reply": APPROVED}])
+    env.office("dispatch", "T1", check=0)
+    assert _scope(env, "L-T1")["status"] == "intake_gap"
+    env.office("decide", "L-T1", "continue", "--quote", "ints only is fine", check=0)
+    gates = _gates(env, "convergence_review")
+    assert len(gates) == 2 and gates[-1]["verdict"] == "APPROVED" and gates[-1]["cycle"] == 2, gates
+    assert _scope(env, "L-T1")["status"] == "approved"
