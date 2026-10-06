@@ -160,6 +160,17 @@ def test_doctor_suggests_setup_when_pnpm_lock_exists_and_none_is_set(env):
     assert "worktree.setup is not set" not in out, out
 
 
+def test_doctor_names_a_setup_tool_that_is_not_on_path(env):
+    """#479: `pnpm install` with no pnpm exits 127 in every worktree; doctor says so up front."""
+    _config(env, "office-no-such-tool install --frozen-lockfile")
+    code, out = env.office("doctor")
+    assert "office-no-such-tool is not on PATH" in out, out
+    (env.repo / ".auto-office" / "config.yaml").write_text(  # a covered alternative is not a problem
+        'worktree:\n  setup: "office-no-such-tool install || true"\n')
+    code, out = env.office("doctor")
+    assert "not on PATH" not in out, out
+
+
 def test_missing_or_failed_marker_runs_setup_on_reuse_and_only_success_marks_done(tmp_path):
     run = _run_dict("test -f ok-flag")
     # Office stopped after creating the worktree and before setup finished: no marker.

@@ -49,9 +49,11 @@ def _detect(con, run: dict) -> dict:
         proc = _gh(["repo", "view", "--json", "nameWithOwner,defaultBranchRef,mergeCommitAllowed,"
                     "squashMergeAllowed,rebaseMergeAllowed"], repo)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"enabled": False, "reason": f"gh repo view failed: {exc}"[:200]}
+        return {"enabled": False, "transient": True, "reason": f"gh repo view failed: {exc}"[:200]}
     if proc.returncode != 0:
-        return {"enabled": False, "reason": f"gh repo view failed: {(proc.stderr or proc.stdout).strip()}"[:200]}
+        # Network, TLS, rate-limit and auth-refresh failures pass: never pin one for the whole run.
+        return {"enabled": False, "transient": True,
+                "reason": f"gh repo view failed: {(proc.stderr or proc.stdout).strip()}"[:200]}
     info = json.loads(proc.stdout or "{}")
     method = next((m for m, key in (("merge", "mergeCommitAllowed"), ("squash", "squashMergeAllowed"),
                                     ("rebase", "rebaseMergeAllowed")) if info.get(key, m == "merge")), "merge")
@@ -60,18 +62,31 @@ def _detect(con, run: dict) -> dict:
 
 
 def settings(con, run: dict) -> dict:
-    """The run's PR settings, detected once (outside any transaction) and pinned."""
+    """The run's PR settings, detected once (outside any transaction) and pinned.
+
+    A transient detection failure (`gh repo view` erred or timed out) is not
+    pinned for good: it is probed again on each later call (dispatch, land,
+    plan view) until no task has submitted a revision, so one TLS timeout at
+    submit does not turn task PRs off for the whole run (#479)."""
     run = state.get_run(con, run["id"])
     landing = dict(run.get("landing") or {})
     current = landing.get("prs") or {}
-    if "enabled" in current:
+    if "enabled" in current and not (current.get("transient") and not _has_revision(con, run)):
         return current
-    detected = {**_detect(con, run), **{k: v for k, v in current.items() if k != "enabled"}}
+    carried = {k: v for k, v in current.items() if k not in ("enabled", "reason", "transient")}
+    detected = {**_detect(con, run), **carried}
     with db.transaction(con):
         landing = dict(state.get_run(con, run["id"]).get("landing") or {})
         landing["prs"] = detected
         state.update_run(con, run["id"], landing=landing)
+        if current.get("transient") and detected.get("enabled"):
+            state.emit(con, run, "prs.enabled", f"task PRs on: GitHub answered after an earlier failure "
+                       f"({current.get('reason')})", audience="runtime")
     return detected
+
+
+def _has_revision(con, run: dict) -> bool:
+    return con.execute("SELECT 1 FROM revisions WHERE run_id=? LIMIT 1", (run["id"],)).fetchone() is not None
 
 
 def enabled(run: dict) -> bool:

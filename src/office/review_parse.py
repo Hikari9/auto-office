@@ -61,6 +61,15 @@ _LEAD = re.compile(r"^(?:[-*>]\s+|[" + _LEAD_GLYPHS + r"]\s*)+")
 _TRAIL = re.compile(r"\s*[│┃║▌▐╮╯]+\s*$")
 
 
+# A finding id: letters then digits. `F-1` / `P-2` (a common reviewer spelling) are the
+# same ids as `F1` / `P2`; `finding_code` normalizes them so a hyphen never drops a line.
+_ID = r"([A-Za-z]+-?\d+)"
+
+
+def finding_code(raw: str) -> str:
+    return re.sub(r"^([A-Za-z]+)-(\d+)$", r"\1\2", raw.strip()).upper()
+
+
 def _clean(line: str) -> str:
     line = line.strip().strip("`").strip()
     line = _LEAD.sub("", line)
@@ -105,7 +114,7 @@ def parse(text: str, *, plan_review: bool = False, visual: bool = False, contrac
                 out.errors.append(f"unknown evidence status {status}")
             out.evidence_status = status
             continue
-        m = re.match(r"^FINDING\s+([A-Za-z]+\d+)\s*\|(.*)$", line, re.I)
+        m = re.match(r"^FINDING\s+" + _ID + r"\s*\|(.*)$", line, re.I)
         if m:
             parts = [p.strip() for p in m.group(2).split("|")]
             word = (parts[0].lower() if parts else "")
@@ -115,7 +124,7 @@ def parse(text: str, *, plan_review: bool = False, visual: bool = False, contrac
             # `severity` keeps its blocking meaning (material|minor); `level` grades a
             # blocking finding. An older reviewer's bare `material` grades as high.
             severity, level = LEVELS[word]
-            finding = {"code": m.group(1).upper(), "severity": severity, "level": level,
+            finding = {"code": finding_code(m.group(1)), "severity": severity, "level": level,
                        "location": parts[1] if len(parts) > 1 else "",
                        "summary": parts[2] if len(parts) > 2 else (parts[1] if len(parts) > 1 else ""),
                        "action": parts[3] if len(parts) > 3 else ""}
@@ -125,7 +134,7 @@ def parse(text: str, *, plan_review: bool = False, visual: bool = False, contrac
                 out.errors.append(f"{finding['code']}: missing description")
             out.findings.append(finding)
             continue
-        m = re.match(r"^DEFECT\s+([A-Za-z]+\d+)\s*\|(.*)$", line, re.I)
+        m = re.match(r"^DEFECT\s+" + _ID + r"\s*\|(.*)$", line, re.I)
         if m:
             parts = [p.strip() for p in m.group(2).split("|")]
             cls = parts[0].lower() if parts else ""
@@ -139,19 +148,19 @@ def parse(text: str, *, plan_review: bool = False, visual: bool = False, contrac
                 out.errors.append(f"{m.group(1)}: defect class {cls!r} is not in the closed list")
             if not evidence:
                 out.errors.append(f"{m.group(1)}: a defect must cite evidence")
-            out.defects.append({"code": m.group(1).upper(), "category": cls,
+            out.defects.append({"code": finding_code(m.group(1)), "category": cls,
                                 "location": parts[1] if len(parts) > 1 else "",
                                 "summary": parts[2] if len(parts) > 2 else "",
                                 "action": " | ".join(parts[3:ev_at]) if ev_at is not None else "",
                                 "evidence": evidence, "severity": "material", "level": "high"})
             continue
-        m = re.match(r"^(RESOLVED|CLEARED)\s+([A-Za-z]+\d+)", line, re.I)
+        m = re.match(r"^(RESOLVED|CLEARED)\s+" + _ID, line, re.I)
         if m:
-            (out.resolved if m.group(1).upper() == "RESOLVED" else out.cleared).append(m.group(2).upper())
+            (out.resolved if m.group(1).upper() == "RESOLVED" else out.cleared).append(finding_code(m.group(2)))
             continue
-        m = re.match(r"^RETRACT(?:ED)?\s+([A-Za-z]+\d+)\s*\|?\s*(.*)$", line, re.I)
+        m = re.match(r"^RETRACT(?:ED)?\s+" + _ID + r"\s*\|?\s*(.*)$", line, re.I)
         if m:
-            out.retracted.append({"code": m.group(1).upper(), "evidence": m.group(2).strip()})
+            out.retracted.append({"code": finding_code(m.group(1)), "evidence": m.group(2).strip()})
     if out.verdict is None:
         out.errors.append("no VERDICT line")
     material = [f for f in out.findings if f["severity"] == "material"]
@@ -221,22 +230,30 @@ def parse_convergence(text: str, *, visual: bool = False) -> Parsed:
             key = m.group(1).lower()
             setattr(out, "next_action" if key == "next" else key, m.group(2).strip())
             continue
-        m = re.match(r"^FINDING\s+([A-Za-z]+\d+)\s*\|(.*)$", line, re.I)
+        m = re.match(r"^FINDING\s+" + _ID + r"\s*\|(.*)$", line, re.I)
         if m:
-            out.findings.append(_convergence_finding(m.group(1).upper(), m.group(2), out.errors))
+            out.findings.append(_convergence_finding(finding_code(m.group(1)), m.group(2), out.errors))
             continue
-        m = re.match(r"^DEFECT\s+([A-Za-z]+\d+)", line, re.I)
+        m = re.match(r"^DEFECT\s+" + _ID, line, re.I)
         if m:
             out.errors.append(f"{m.group(1)}: DEFECT lines are not part of this contract; write a FINDING "
                               "(root-cause: <class>) and choose RECHECK or INTAKE_GAP")
             continue
-        m = re.match(r"^RESOLVED\s+([A-Za-z]+\d+)", line, re.I)
+        m = re.match(r"^RESOLVED\s+" + _ID, line, re.I)
         if m:
-            out.resolved.append(m.group(1).upper())
+            out.resolved.append(finding_code(m.group(1)))
             continue
-        m = re.match(r"^RETRACT(?:ED)?\s+([A-Za-z]+\d+)\s*\|?\s*(.*)$", line, re.I)
+        m = re.match(r"^RETRACT(?:ED)?\s+" + _ID + r"\s*\|?\s*(.*)$", line, re.I)
         if m:
-            out.retracted.append({"code": m.group(1).upper(), "evidence": m.group(2).strip()})
+            out.retracted.append({"code": finding_code(m.group(1)), "evidence": m.group(2).strip()})
+            continue
+        # A FINDING line this grammar cannot read is an error, never a silently
+        # dropped finding (an unread blocking finding turns into "RECHECK without
+        # a blocking finding"; an unread non-blocking one vanishes from the record).
+        m = re.match(r"^FINDING\b\s*(\S*)", line, re.I)
+        if m:
+            out.errors.append(f"unreadable FINDING line (id {m.group(1)!r}): write "
+                              "FINDING F1 | <severity> | <blocking|non-blocking> | <where> | <what> | <fix>")
     not_comparable = visual and out.evidence_status == "INVALID_COMPARISON"
     if visual and out.evidence_status is None:
         out.errors.append("no EVIDENCE_STATUS line")

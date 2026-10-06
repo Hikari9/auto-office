@@ -1274,11 +1274,11 @@ def disposition(con, run: dict, spec: str, how: str, note: str) -> Result:
     how = how.lower()
     if how not in contract.DISPOSITIONS:
         raise Usage("bad-disposition", f"choose one of {', '.join(contract.DISPOSITIONS)}")
-    m = re.fullmatch(r"([\w+.-]+):([\w,]+)", spec.strip())
+    m = re.fullmatch(r"([\w+.-]+):([\w,-]+)", spec.strip())
     if not m:
         raise Usage("bad-finding", f"name findings as <scope>:<code>[,<code>] (got {spec!r})",
                     next_step="office disposition L-T1:F1 fixed -- \"<note>\"")
-    scope_id, codes = m.group(1), [c.upper() for c in m.group(2).split(",") if c]
+    scope_id, codes = m.group(1), [review_parse.finding_code(c) for c in m.group(2).split(",") if c]
     if how != "fix" and len(re.sub(r"\s+", "", note or "")) < 2:
         raise Usage("note-required", "say what was done (the fix, why dismissed, or the follow-up issue)")
     with db.transaction(con):
