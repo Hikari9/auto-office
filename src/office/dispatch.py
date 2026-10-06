@@ -1553,6 +1553,9 @@ def _shell_run(pane: str, command: str, marker: Path, timeout: float | None = No
 _PASTE_PLACEHOLDER = re.compile(r"\[Pasted text #\d+")
 # The composer sits at the bottom of the pane; a long pointer wraps over many rows.
 _COMPOSER_ROWS = 20
+# A held pointer matches on any window this long of its letters and digits, so
+# a composer that mangled its start (a dropped "Read and ") still counts.
+_HELD_WINDOW = 24
 
 
 def _squash(text: str) -> str:
@@ -1560,16 +1563,19 @@ def _squash(text: str) -> str:
 
 
 def _composer_holds(text: str | None, prompt: str) -> bool:
-    """The prompt sits typed but unsubmitted near the bottom of the pane. Only
-    letters and digits are compared, so the composer's wrapping, borders and
-    prompt glyph (`>`, `›`, `│`) do not hide it."""
+    """Any part of the prompt sits typed but unsubmitted near the bottom of the
+    pane. Trailing blank rows are skipped, and only letters and digits are
+    compared, so the composer's wrapping, borders and prompt glyph (`>`, `›`,
+    `│`) do not hide it."""
     if not text:
         return False
-    tail = "\n".join(text.splitlines()[-_COMPOSER_ROWS:])
+    rows = text.rstrip().splitlines()
+    tail = "\n".join(rows[-_COMPOSER_ROWS:])
     if _PASTE_PLACEHOLDER.search(tail):
         return True
-    head = _squash(prompt)[:40]
-    return bool(head) and head in _squash(tail)
+    want, have = _squash(prompt), _squash(tail)
+    size = min(len(want), _HELD_WINDOW)
+    return bool(want) and any(want[i:i + size] in have for i in range(len(want) - size + 1))
 
 
 def _press_enter(name: str, pane: str | None, herdr=_herdr_quiet) -> None:
@@ -1586,19 +1592,26 @@ def _submit_held(name: str, pane: str | None, prompt: str, timeout: float, *, ba
     and Enter together; a TUI that is not ready to submit yet, or that takes the
     Enter as part of the paste, keeps the text. Returns 'landed'; 'absent' when
     the composer never held it; 'held' when it is still there after
-    OFFICE_HERDR_ENTER_TRIES Enters. A composer an Enter emptied counts as
-    landed: the harness took the submit."""
+    OFFICE_HERDR_ENTER_TRIES Enters; 'unknown' when the pane cannot be read
+    at the end. A composer an Enter emptied counts as landed: the harness took
+    the submit."""
     tries = int(os.environ.get("OFFICE_HERDR_ENTER_TRIES", "3"))
     delay = float(os.environ.get("OFFICE_HERDR_KEY_DELAY", "1"))
     wait = min(timeout, float(os.environ.get("OFFICE_HERDR_ENTER_WAIT", "5")))
     for n in range(tries):
-        if not _composer_holds(_pane_view(name), prompt):
+        view = _pane_view(name)
+        # An unreadable pane may still hold the prompt: press Enter, never
+        # report it absent (that would type the prompt again).
+        if view is not None and not _composer_holds(view, prompt):
             return "landed" if n else "absent"
         time.sleep(delay)
         _press_enter(name, pane, herdr)
         if _prompt_landed(name, wait, baseline_ctx=baseline_ctx, seen=seen) == "landed":
             return "landed"
-    return "landed" if not _composer_holds(_pane_view(name), prompt) else "held"
+    view = _pane_view(name)
+    if view is None:
+        return "unknown"
+    return "held" if _composer_holds(view, prompt) else "landed"
 
 
 def submit_prompt(name: str, text: str, *, pane: str | None = None) -> str:
@@ -1612,7 +1625,7 @@ def submit_prompt(name: str, text: str, *, pane: str | None = None) -> str:
     if _prompt_landed(name, timeout, baseline_ctx=baseline) == "landed":
         return "landed"
     got = _submit_held(name, pane, text, timeout, baseline_ctx=baseline)
-    return "" if got == "absent" else got
+    return "" if got in ("absent", "unknown") else got
 
 
 def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = False, seen=None) -> bool:
@@ -1647,6 +1660,11 @@ def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = 
     held = _submit_held(name, pane, pointer, timeout, baseline_ctx=baseline, seen=seen, herdr=herdr)
     if held != "absent":
         return held == "landed"
+    # Look again right before typing: a pointer held in any form, or a pane
+    # that cannot be read, is never typed a second time.
+    view = _pane_view(name)
+    if view is None or _composer_holds(view, pointer):
+        return False
     # The composer is empty: the pointer was lost, so type it once. A TUI can
     # take an Enter that follows typed text too closely as part of the paste:
     # pause, submit, and submit once more if it still has not landed.
