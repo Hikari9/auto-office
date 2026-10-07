@@ -594,6 +594,9 @@ class Service:
         record = next((r for r in gh["repos"] if r["full_name"].lower() == repo.lower()), None)
         if record is None:
             raise CommandRefused("repo-unknown", f"{repo} is not a discovered repository")
+        if not any(i["repo"].lower() == record["full_name"].lower() and i["number"] == number
+                   for i in gh.get("issues", [])):
+            raise CommandRefused("issue-unknown", f"{record['full_name']}#{number} is not a known issue")
         readiness = self._assess(record, self.checkouts(record["full_name"]))
         if not readiness["ready"]:
             raise CommandRefused("repo-not-ready", f"{repo} is not execution-ready: {', '.join(readiness['failing'])}",
@@ -652,10 +655,16 @@ class Service:
 
     def _v_queue_issue(self, cmd: Command):
         repo, number, _ = self._issue_target(cmd)
+        ref = f"{repo}#{number}"
+        queued = self.observer.read(lambda st: st.rows("SELECT id FROM sched_items WHERE kind='issue' AND lower(ref)=?",
+                                                       (ref.lower(),)))
+        if queued:
+            raise CommandRefused("issue-already-queued", f"{ref} is already queued as {queued[0]['id']}",
+                                 data={"item": queued[0]["id"]})
         priority = cmd.payload.get("priority") or "normal"
         if priority not in scheduler.PRIORITY_WEIGHTS:
             raise CommandRefused("bad-payload", "payload.priority must be urgent, high, normal or low", http=400)
-        args = ["queue", "add", f"{repo}#{number}", "--priority", priority]
+        args = ["queue", "add", ref, "--priority", priority]
         if cmd.payload.get("title"):
             args += ["--title", str(cmd.payload["title"])]
         return lambda: self.executor.run(args, self.state_home)
@@ -690,8 +699,8 @@ class Service:
         if run["liveness"] != "live":
             raise CommandRefused("run-not-live", "the run has no live orchestrator to attach to")
         panes = self.panes()
-        pane = next((panes.get(n["id"]) or (n["id"].rsplit("/", 1)[-1] if n["harness"] == "herdr" else None)
-                     for n in run["agents"]["columns"]["orchestrators"]), None)
+        pane = next((p for p in (panes.get(n["id"]) or (n["id"].rsplit("/", 1)[-1] if n["harness"] == "herdr" else None)
+                                 for n in run["agents"]["columns"]["orchestrators"]) if p), None)
         if not pane:
             raise CommandRefused("no-pane", "no Herdr pane is known for the run's orchestrator")
 
@@ -799,6 +808,11 @@ class Service:
             raise CommandRefused("tier-not-editable", "target.tier must be machine or repository", http=400)
         if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_]+(\.[A-Za-z0-9_-]+)*", key):
             raise CommandRefused("bad-target", "target.key must be a dotted config key", http=400)
+        from office import configcmd
+        try:
+            configcmd._check_key(key, "user" if tier == "machine" else "repo", False)
+        except OfficeError as exc:
+            raise CommandRefused("unknown-key", exc.message) from None
         if tier == "machine":
             return tier, self.state_home
         run = self._run(cmd.target) if cmd.target.get("run_id") else None

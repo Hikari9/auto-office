@@ -257,7 +257,7 @@ def test_queue_loop_admits_a_queued_issue_once(svc):
     def queued(con):
         con.execute("INSERT INTO sched_items(id, kind, ref, title, priority, enqueued_at, updated_at) "
                     "VALUES('issue:q1','issue',?,?, 'normal', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')",
-                    (f"{REPO}#6", "Issue 6"))
+                    (f"{REPO}#10", "Issue 10"))
     write(svc, queued)
     assert svc.admit_queue() == ["issue:q1"]
     svc.wait("queue-admit:issue:q1")
@@ -389,3 +389,80 @@ def test_close_does_not_hang_on_a_stuck_command(tmp_path, monkeypatch):
     stuck.set()
     thread.join(10)  # a late outcome after close is logged, not raised
     assert not thread.is_alive()
+
+
+# ------------------------------------------------------------------ per-kind validation (A11)
+
+def _not_ready(svc):
+    def boom(cmd):
+        raise AssertionError("GitHub readiness consulted for a non-issue kind")
+    svc._issue_target = boom
+
+
+def test_issue_kinds_need_the_exact_issue(svc):
+    for kind in ("start_issue", "queue_issue"):
+        err = refused(svc, cmd(f"cmd-{kind[:5]}-nope1", kind, {"repo": REPO, "issue": 9999}))
+        assert err.reason == "issue-unknown"
+        err = refused(svc, cmd(f"cmd-{kind[:5]}-nope2", kind, {"repo": "synth-org-0/no-such", "issue": 1}))
+        assert err.reason == "repo-unknown"
+    assert svc.executor.calls == [] and svc.launcher.launches == []
+
+
+def test_queue_issue_refuses_a_duplicate_queue_item(svc):
+    out = svc.submit(cmd("cmd-queue-001", "queue_issue", {"repo": REPO, "issue": 9}), wait=True)
+    assert out["status"] == "completed"
+    assert svc.executor.calls[-1]["args"][:3] == ["queue", "add", f"{REPO}#9"]
+    write(svc, lambda con: con.execute(
+        "INSERT INTO sched_items(id, kind, ref, title, priority, enqueued_at, updated_at) "
+        "VALUES('issue:dup','issue',?, 't', 'normal', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')", (f"{REPO}#9",)))
+    err = refused(svc, cmd("cmd-queue-002", "queue_issue", {"repo": REPO, "issue": 9}))
+    assert err.reason == "issue-already-queued" and err.data["item"] == "issue:dup"
+    assert len(svc.executor.calls) == 1
+
+
+def test_queue_issue_refuses_a_repo_that_is_not_ready(svc):
+    svc.readiness = lambda repo, checkout: {"ready": False, "failing": ["checkout"]}
+    assert refused(svc, cmd("cmd-queue-003", "queue_issue", {"repo": REPO, "issue": 9})).reason == "repo-not-ready"
+
+
+def test_attach_run_needs_a_live_run(svc):
+    run_id = live_run(svc)["run_id"]
+    write(svc, lambda con: synthetic.insert_binding(con, run_id, "herdr", "pane-attach"))
+    svc.launcher.live.add("pane-attach")
+    out = svc.submit(cmd("cmd-attach-01", "attach_run", {"run_id": run_id}), wait=True)
+    assert out["status"] == "completed" and out["result"]["pane"] == "pane-attach"
+    write(svc, lambda con: synthetic.insert_run(con, "ATTACH-RESUMABLE", git_common_dir="/synthetic/src/repo-00/.git"))
+    assert refused(svc, cmd("cmd-attach-02", "attach_run", {"run_id": "ATTACH-RESUMABLE"})).reason == "run-not-live"
+
+
+@pytest.mark.parametrize("kind,payload", [("pause", {}), ("resume", {}), ("demote", {}),
+                                          ("set_priority", {"level": "high"})])
+def test_scheduler_kinds_check_item_or_run_never_github_readiness(svc, kind, payload):
+    _not_ready(svc)
+    write(svc, lambda con: con.execute(
+        "INSERT INTO sched_items(id, kind, ref, title, priority, enqueued_at, updated_at) "
+        "VALUES('issue:s1','issue',?, 't', 'normal', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')", (f"{REPO}#5",)))
+    svc.submit(cmd(f"cmd-{kind[:6]}-item1", kind, {"item": "issue:s1"}, payload), wait=True)
+    assert svc.executor.calls[-1]["args"][:3] == ["queue", "priority" if kind == "set_priority" else kind, "issue:s1"]
+    svc.submit(cmd(f"cmd-{kind[:6]}-run01", kind, {"run_id": live_run(svc)["run_id"]}, payload), wait=True)
+    assert svc.executor.calls[-1]["args"][2] == "--run"
+    assert refused(svc, cmd(f"cmd-{kind[:6]}-item2", kind, {"item": "issue:nope"}, payload)).reason == "item-missing"
+    assert refused(svc, cmd(f"cmd-{kind[:6]}-run02", kind, {"run_id": "NO-SUCH-RUN"}, payload)).reason == "run-missing"
+    assert len(svc.executor.calls) == 2
+
+
+def test_set_auto_mode_is_machine_level_without_a_run(svc):
+    _not_ready(svc)
+    svc.submit(cmd("cmd-auto-0001", "set_auto_mode", {}, {"mode": "on"}), wait=True)
+    assert svc.executor.calls[-1]["args"] == ["queue", "auto", "on"]
+    assert refused(svc, cmd("cmd-auto-0002", "set_auto_mode", {"run_id": "NO-SUCH-RUN"},
+                            {"mode": "off"})).reason == "run-missing"
+
+
+def test_settings_need_a_known_key(svc):
+    err = refused(svc, cmd("cmd-set-00010", "settings_set", {"tier": "machine", "key": "no_such.key"}, {"value": 1}))
+    assert err.reason == "unknown-key"
+    err = refused(svc, cmd("cmd-set-00011", "settings_set", {"tier": "machine", "key": "scheduler.no_such_leaf"},
+                           {"value": 1}))
+    assert err.reason == "unknown-key"
+    assert svc.executor.calls == []

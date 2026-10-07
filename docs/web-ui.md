@@ -160,7 +160,8 @@ characters of `[A-Za-z0-9_.:-]`).
 4. A receipt is recorded through T2's `commands.record` before anything runs.
 5. The exact target is re-validated against a fresh observer read, with checks chosen per kind rather than one
    combined gate:
-   - issue kinds (`start_issue`, `queue_issue`): repository + issue identity and execution readiness;
+   - issue kinds (`start_issue`, `queue_issue`): repository + issue identity (a known open issue) and execution
+     readiness, plus no live run (start) or no existing queue item for the issue (queue);
    - run kinds (`resume_run`, `attach_run`): a non-terminal run and its capability;
    - scheduler kinds (`pause`, `resume`, `set_priority`, `demote`, `set_auto_mode`): an existing queue item or run
      plus runtime capability, never GitHub readiness;
@@ -171,7 +172,8 @@ characters of `[A-Za-z0-9_.:-]`).
    T9 completes and tests the full table. On failure the receipt becomes `failed` with a
    named reason, and the API returns 409 with that reason and the receipt. Reasons include `run-missing`,
    `run-terminal`, `capability-missing`, `dispatch-not-current`, `harness-mismatch`,
-   `not-awaiting-plan-authorization`, `binding-ended`, `agent-not-live`, `repo-not-ready`, `issue-has-live-run`,
+   `not-awaiting-plan-authorization`, `binding-ended`, `agent-not-live`, `repo-not-ready`, `repo-unknown`,
+   `issue-unknown`, `issue-already-queued`, `item-missing`, `unknown-key`, `issue-has-live-run`,
    `issue-has-resumable-run`, `launcher-unavailable` and `expectation-failed`. `expect` keys (for example `phase`,
    `liveness`, `dispatch_id`, `route`, `plan_version`) must equal the freshly read values.
 6. It executes in the background (HTTP 202) and the receipt ends `completed`, `failed` or `unknown`.
