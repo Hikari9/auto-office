@@ -37,6 +37,10 @@ elif args[:2] == ["agent", "start"] and not os.environ.get("FAKE_HERDR_NO_AGENT"
     data.setdefault("pane_agents", {{}})[args[args.index("--pane") + 1]] = args[2]
 elif args[:2] == ["pane", "get"]:
     result = {{"pane": {{"pane_id": args[2], "agent": data.get("pane_agents", {{}}).get(args[2])}}}}
+elif args[:2] == ["pane", "read"]:
+    print(os.environ.get("FAKE_HERDR_PANE_READ", data.get("content", "")))
+    json.dump(data, open(state, "w"))
+    sys.exit(0)
 elif args[:2] == ["agent", "get"]:
     seq = data["get"]
     status = seq.pop(0) if len(seq) > 1 else (seq[0] if seq else "gone")
@@ -330,6 +334,26 @@ def test_failed_agent_start_is_disclosed_before_headless_fallback(env, monkeypat
         con.close()
     events = _launch_events(env, run)
     assert len(events) == 1 and "herdr agent start failed" in events[0] and "invalid_agent_name" in events[0]
+    assert "orchestrator recovery" in events[0] and "instead of abandoning the run" in events[0]
+
+
+@pytest.mark.approved
+def test_failed_start_snapshots_and_names_a_codex_hook_trust_screen(env, monkeypatch):
+    monkeypatch.setenv("FAKE_HERDR_START_FAIL", "1")
+    monkeypatch.setenv("FAKE_HERDR_PANE_READ", "Hooks need review\n1 hook is new or changed\n2. Trust all and continue")
+    state_file, run, d, ddir, res = launch_in_herdr(env, monkeypatch)
+    assert res["launcher"] == "process-fallback"
+    events = _launch_events(env, run)
+    assert len(events) == 1
+    assert "Codex 'Hooks need review'" in events[0]
+    assert "herdr pane read" in events[0]
+    assert "do not auto-approve trust" in events[0]
+    assert "Hooks need review" in (ddir / "pane-tail.txt").read_text()
+    spec = json.loads((ddir / "launch.json").read_text())
+    assert spec["failed_herdr_screen"] == "Codex 'Hooks need review'"
+    assert spec["failed_herdr_pane"] in " ".join(events)
+    from office import dispatch
+    assert spec["failed_herdr_pane"] in dispatch._busy_panes(run)
 
 
 def test_busy_pane_never_settles_as_done(env, monkeypatch):

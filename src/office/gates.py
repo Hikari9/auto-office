@@ -450,6 +450,27 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             # (R13), never from pane or transcript text.
             text, parsed, attention = _reprompt_until_valid(con, run, d, ddir, output, parsed,
                                                             plan_review=plan_review, visual=visual)
+            never_replied = not (output.is_file() and output.stat().st_size > 0)
+            if attention and never_replied and convergence and not pinned:
+                # Every re-prompt came back empty: the reviewer never worked (a
+                # quota wall the harness did not report, a brief that never
+                # landed). That is a launch failure, so the next route runs
+                # instead of the gate ending INVALID_RESULT on this one (#384).
+                (ddir / "pane-tail.txt").unlink(missing_ok=True)  # re-read after the re-prompts
+                log_text = _log_text(state.get_dispatch(con, dispatch_id), ddir, pane=True)
+                wall = "quota" if _quota_signature(log_text) else "auth" if _auth_signature(log_text) else None
+                failures.append(f"{triple}: no reply after re-prompts" + (f" [{wall}]" if wall else ""))
+                # A harness that silently answers nothing is walled for every
+                # model on it, so the chain moves to another harness.
+                excluded.update({triple, f"harness:{cand['harness']}"})
+                with db.transaction(con):
+                    con.execute("UPDATE gates SET env_failures=env_failures+1 WHERE id=?", (gate["id"],))
+                    con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?",
+                                (dispatch_id,))
+                # The silent session may still be alive: close its pane before
+                # the next route opens another.
+                dispatch_mod.reclaim_pane(run, dispatch_id)
+                continue
             if attention:
                 with db.transaction(con):
                     state.record_evidence(con, run["id"], "review_output", output if output.is_file() else None,
@@ -462,6 +483,11 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                 return {"verdict": "ATTENTION", "parsed": None, "route": triple, "dispatch_id": dispatch_id,
                         "summary": attention, "producer_route": producer}
             d = state.get_dispatch(con, dispatch_id)
+        if parsed.valid and text and not (output.is_file() and output.stat().st_size):
+            # The reply came from the headless harness's stdout log (no reply
+            # file and no `-o` to write one, #399). Keep it as the reply file:
+            # later steps (an INTAKE_GAP's decision) re-read the evidence path.
+            output.write_text(text, encoding="utf-8")
         with db.transaction(con):
             state.record_evidence(con, run["id"], "review_output", output if output.is_file() else None,
                                   task_id=gate.get("task_id"), revision_id=gate.get("revision_id"), gate_id=gate["id"],
@@ -517,9 +543,26 @@ def _reply_text(d: dict, ddir: Path, output: Path) -> str:
     return _log_text(d, ddir)
 
 
-def _log_text(d: dict, ddir: Path) -> str:
+def _log_text(d: dict, ddir: Path, *, pane: bool = False) -> str:
+    """The harness's own output log. With `pane`, a herdr pane agent's pane
+    text is appended (saved once to pane-tail.txt): a quota or auth wall the
+    harness prints but does not exit on shows only there (#384). Pane text
+    also holds the agent's own work, so only a caller that knows the agent
+    never replied asks for it; the reply and wall checks elsewhere read the
+    log alone."""
     log = Path(d.get("log_path") or ddir / "output.log")
-    return log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+    text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+    if not pane:
+        return text
+    tail = ddir / "pane-tail.txt"
+    if d.get("launcher") == "herdr" and d.get("pane_id") and not tail.is_file() and shutil.which("herdr"):
+        from office import dispatch as dispatch_mod
+        snap = dispatch_mod._pane_snapshot(dispatch_mod.herdr_agent_name(d["id"]), d["pane_id"])
+        if snap:
+            tail.write_text(snap, encoding="utf-8")
+    if tail.is_file():
+        text += "\n" + tail.read_text(encoding="utf-8", errors="replace")[-4000:]
+    return text
 
 
 def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, parsed, *, plan_review: bool,
@@ -534,6 +577,7 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
     name = dispatch_mod.herdr_agent_name(d["id"])
     errors = parsed.errors or ["no reply file"]
     text = ""
+    sent = 0
     if d.get("launcher") in ("sync", "process", "process-fallback"):
         log = Path(d.get("log_path") or ddir / "output.log")
         return text, parsed, (f"reviewer {d['id']} ({d.get('triple')}) left no valid reply file: "
@@ -549,6 +593,7 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
                   f"in the format the brief requires (a VERDICT line first), to {output}. {REPLY_FILE_RULE}")
         # Left unsubmitted in the composer, it gets Enter, never a second copy.
         got = dispatch_mod.submit_prompt(name, prompt, pane=d.get("pane_id"))
+        sent += 1
         unsent = " (typed but unsubmitted)" if got == "held" else ""
         with db.transaction(con):
             state.emit(con, run, "review.reprompt", f"{d.get('task_id') or 'plan'} {d['role']} {d['id']}: re-prompted "
@@ -564,9 +609,21 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
         if parsed.valid:
             return text, parsed, None
         errors = parsed.errors or ["no reply file"]
-    reason = (f"reviewer {d['id']} ({d.get('triple')}) left no valid reply file after re-prompting: "
-              f"{'; '.join(errors[:3])}; its pane is kept. Re-prompt it (office prompt {d['id']} -- \"<message>\") "
-              "or waive the gate")
+    if d.get("launcher") != "herdr":
+        reason = (f"reviewer {d['id']} ({d.get('triple')}) left no valid reply file in headless "
+                  f"{d.get('launcher') or 'process'} mode: {'; '.join(errors[:3])}; no live reviewer pane exists, "
+                  f"so Office could not re-prompt it. Inspect {ddir / 'output.log'} and {output}; then use "
+                  "`office resume` or the status-directed reroute/recovery instead of abandoning the run")
+    elif not sent:
+        # A herdr reviewer whose session had already ended: nothing was re-prompted.
+        reason = (f"reviewer {d['id']} ({d.get('triple')}) left no valid reply file and its herdr session ended "
+                  f"before Office could re-prompt it: {'; '.join(errors[:3])}. Inspect its dispatch dir {ddir} "
+                  f"and {output}; then use `office resume` or the status-directed reroute/recovery instead of "
+                  "abandoning the run")
+    else:
+        reason = (f"reviewer {d['id']} ({d.get('triple')}) left no valid reply file after re-prompting: "
+                  f"{'; '.join(errors[:3])}; its pane is kept. Re-prompt it (office prompt {d['id']} -- \"<message>\") "
+                  "or waive the gate")
     return text, parsed, reason
 
 
@@ -1152,6 +1209,21 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
     from office import integration
     integration.maybe_queue(con, run)
     return True
+
+
+def reevaluate_submitted(con, run: dict) -> list[str]:
+    """Re-run acceptance for every submitted task whose current revision has no
+    gate still pending. Acceptance is otherwise evaluated only when a gate ends,
+    so a revision whose gates all ended while a plan review, blocking finding or
+    pause held it would sit at `submitted` forever once that hold lifts.
+    Returns the tasks accepted. Caller holds the tx."""
+    accepted = []
+    for t in con.execute("SELECT t.id FROM tasks t WHERE t.run_id=? AND t.status='submitted' AND t.current_revision_id IS NOT NULL "
+                         "AND NOT EXISTS (SELECT 1 FROM gates g WHERE g.revision_id=t.current_revision_id "
+                         "AND g.status IN ('queued','running','waiting'))", (run["id"],)).fetchall():
+        if evaluate_acceptance(con, run, t["id"]):
+            accepted.append(t["id"])
+    return accepted
 
 
 def stale_dependency(con, run: dict, task: dict) -> str | None:
