@@ -5,6 +5,8 @@
 import { Store } from "./store.js";
 import { AUTHORIZATIONS, QUEUE_AUTHORIZATION, QUEUE_ONLY_WHY, endStateLabel, githubMark, issueActions,
   issueRows, localMark, receiptState, repoName, shortRun, startCommand } from "./model.js";
+import * as allocationView from "./allocation.js";
+import * as settingsView from "./settings.js";
 import { renderAgents } from "./agents.js";
 
 const ROW = 44;
@@ -12,6 +14,8 @@ const OVERSCAN = 8;
 const COLUMNS = ["Repository", "Issue", "Owner", "Phase", "Progress", "Priority", "Authorization", "PR / run",
   "State", "Office gates", "GitHub checks", "Action"];
 const SURFACES = { agents: "Agents", allocation: "Allocation", settings: "Settings" };
+// Surface registry: name -> module with render(root, ctx); its section is #surface-<name>.
+const VIEWS = { allocation: allocationView, settings: settingsView };
 const $ = (id) => document.getElementById(id);
 const meta = (name) => document.querySelector(`meta[name="${name}"]`).content;
 const token = meta("office-token");
@@ -144,6 +148,12 @@ function renderBanners() {
   $("banners").replaceChildren(...out);
 }
 
+// What a registered surface view may use: the live state, DOM helpers and the one command path.
+function viewContext() {
+  return { state: store.state, status: store.status, h, token, send, inFlight, local: ui.local, rerender: schedule,
+    receiptState, repoName, shortRun };
+}
+
 // ------------------------------------------------------------------ rails
 
 function renderSurfaces() {
@@ -152,11 +162,15 @@ function renderSurfaces() {
     else b.removeAttribute("aria-current");
   }
   $("surface-issues").hidden = ui.surface !== "issues";
+  for (const name of Object.keys(VIEWS)) $(`surface-${name}`).hidden = ui.surface !== name;
   $("surface-agents").hidden = ui.surface !== "agents";
   if (ui.surface === "agents") renderAgents(agentsCtx, $("surface-agents"));
   const other = $("surface-other");
-  other.hidden = ui.surface === "issues" || ui.surface === "agents";
-  if (!other.hidden) {
+  other.hidden = ui.surface === "issues" || ui.surface === "agents" || ui.surface in VIEWS;
+  if (ui.surface in VIEWS) {
+    const root = $(`surface-${ui.surface}`);
+    keep(root, () => VIEWS[ui.surface].render(viewContext()));
+  } else if (!other.hidden) {
     other.replaceChildren(h("h1", { text: SURFACES[ui.surface] }),
       h("p", { class: "sub", text: `The ${SURFACES[ui.surface]} surface is not part of this build yet. Issues is available.` }));
   }
@@ -467,6 +481,7 @@ function newId() {
 }
 
 async function send(kind, subject, target, payload, expect, label, id = newId()) {
+  if (!label) label = kind.replace(/_/g, " ");
   ui.local.set(id, { id, kind, subject, status: "pending", label, error: null, at: new Date().toISOString() });
   renderAll();
   let res;
@@ -488,6 +503,7 @@ async function send(kind, subject, target, payload, expect, label, id = newId())
     Object.assign(entry, { status: "unknown", error: "no answer from the service; check the result before sending again" });
   }
   renderAll();
+  return entry;
 }
 
 async function act(a, r) {
