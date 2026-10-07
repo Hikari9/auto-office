@@ -194,4 +194,4 @@ def test_revoking_a_cancelled_task_does_not_make_it_accepted_again(env):
     con.execute("UPDATE tasks SET status='cancelled', pause_reason='removed in plan p2' WHERE id='T1'")
     con.commit()
     assert env.office("revoke", "T1")[0] == 0
-    assert task_row(env)["status"] != "accepted"
+    assert task_row(env)["status"] == "cancelled"

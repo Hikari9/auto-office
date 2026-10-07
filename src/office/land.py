@@ -547,8 +547,10 @@ def _move_onto_new_base(run: dict, tid: str, wt: Path, new: str, old: str, head:
     if commit.returncode != 0:
         raise Refused("move-failed", f"could not record {tid}'s moved commit: {commit.stderr.strip()[:200]}", scope=tid)
     moved = commit.stdout.strip()
-    untracked = set(paths.git(wt, "ls-files", "--others", "--exclude-standard", check=False).splitlines())
-    in_the_way = sorted(untracked & set(paths.git(wt, "ls-tree", "-r", "--name-only", moved).splitlines()))
+    # Paths the move newly tracks that already exist untracked (ignored ones included) would be overwritten.
+    new_paths = set(paths.git(wt, "ls-tree", "-r", "--name-only", moved).splitlines()) \
+        - set(paths.git(wt, "ls-tree", "-r", "--name-only", "HEAD").splitlines())
+    in_the_way = sorted(p for p in new_paths if os.path.lexists(wt / p))
     if in_the_way:  # `reset --hard` would overwrite them (a merge would refuse)
         raise Refused("worktree-dirty", f"{tid}'s worktree has untracked files the moved commit tracks: "
                       f"{', '.join(in_the_way[:8])}", scope=tid, preserved="the worktree, unchanged",

@@ -516,7 +516,8 @@ def _revoke_task(con, run: dict, task_id: str, reason: str) -> Result:
         else:
             con.execute("UPDATE leases SET revoked_at=?, revoke_reason=? WHERE run_id=? AND task_id=? AND released_at IS NULL "
                         "AND revoked_at IS NULL", (now_iso(), reason, run["id"], task_id))
-            state.update_task(con, run["id"], task_id, status="paused", pause_reason=f"lease revoked: {reason}")
+            if task["status"] != "cancelled":  # a task the plan removed stays removed
+                state.update_task(con, run["id"], task_id, status="paused", pause_reason=f"lease revoked: {reason}")
             state.emit(con, run, "lease.revoked", f"{task_id} lease revoked", task_id=task_id)
     live = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE run_id=? AND task_id=? AND ended_at IS NULL "
                                          "AND status IN ('launching', 'running')", (run["id"], task_id)).fetchall()]

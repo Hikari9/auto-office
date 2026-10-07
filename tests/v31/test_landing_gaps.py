@@ -421,6 +421,8 @@ def test_move_refuses_rather_than_overwrite_an_untracked_file_the_moved_commit_t
     bare, row, wt, wenv, onto = _reopened_after_rebase(env, monkeypatch, {"NOTES.md": "unrelated\n"})
     _commit(env, wt, {"calc.py": GOOD_ADD + "# amended\n"})
     (wt / "NOTES.md").write_text("my scratch notes\n")  # untracked here, tracked on the new main
+    exclude = Path(env.git("rev-parse", "--path-format=absolute", "--git-path", "info/exclude", cwd=wt).strip())
+    exclude.write_text(exclude.read_text() + "NOTES.md\n")  # even an ignored one is not overwritten
     _worker_exits(env, row)
     head = env.git("rev-parse", "HEAD", cwd=wt).strip()
     code, out = env.office("rebase", "T1", "--move")
