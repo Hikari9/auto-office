@@ -282,10 +282,13 @@ def test_status_shows_urgent_events_first_and_never_skips_the_informational_ones
         _emit(env, "dispatch", f"gap {n}")
     _emit(env, "task.paused", "far urgent")
     code, out = env.office("status", check=0)
-    assert out.splitlines()[1:7] and "· urgent 0" in out and "· gap 0" not in out, out
+    assert sum(ln.startswith("· urgent") for ln in out.splitlines()) == 6 and "· gap 0" not in out, out
     shown = out
-    for _ in range(80):
-        shown += env.office("status", check=0)[1]
+    for _ in range(200):  # until nothing more is shown
+        more = env.office("status", check=0)[1]
+        if "· " not in more:
+            break
+        shown += more
     missing = [n for n in range(100) if f"· gap {n}\n" not in shown]
     assert not missing and "· far urgent\n" in shown and "· fyi first\n" in shown, missing[:5]
 
