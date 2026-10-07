@@ -191,6 +191,107 @@ def compose_base(run: dict) -> str:
     return ((run.get("landing") or {}).get("rebase") or {}).get("onto") or run["base_sha"]
 
 
+def stale_base(run: dict, base: str, head: str) -> str | None:
+    """The run's new base (`office land --rebase`) when the worktree at `head` already holds it but the
+    task's recorded `base` does not: the default branch's own files would read as the task's edits
+    until the orchestrator records the move (`office rebase <task>`)."""
+    onto = ((run.get("landing") or {}).get("rebase") or {}).get("onto")
+    if onto and not gates._is_ancestor(run, onto, base) and gates._is_ancestor(run, onto, head):
+        return onto
+    return None
+
+
+def dependency_heads(con, run: dict, task: dict, *, stack_after: str | None = None) -> list[dict]:
+    """[{task, revision, commit}] for each dependency (and the task it is stacked after) that has a
+    revision: its accepted one, else its current one. A dependency with none is the caller's to
+    report, except the stacked-after task, which may simply not have submitted yet."""
+    out = []
+    for dep in dict.fromkeys(list(task["depends"]) + ([stack_after] if stack_after else [])):
+        d = state.get_task(con, run["id"], dep) or {}
+        rev_id = d.get("accepted_revision_id") or d.get("current_revision_id")
+        row = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (rev_id,)).fetchone() if rev_id else None
+        if row:
+            out.append({"task": dep, "revision": rev_id, "commit": row["commit_sha"]})
+    return out
+
+
+def _merge_tree(repo: Path, a: str, b: str) -> tuple[str, list[str]]:
+    """(merged tree, conflicted paths) of two commits, however many merge bases they have."""
+    proc = subprocess.run(["git", "-C", str(repo), "merge-tree", "--write-tree", "--name-only", "-z", a, b],
+                          capture_output=True, text=True)
+    if proc.returncode == 129:
+        raise state.Refused("git-too-old", "this needs git >= 2.40 (git merge-tree --write-tree and --merge-base)",
+                            next_step="upgrade git, then retry")
+    if proc.returncode not in (0, 1):
+        raise state.Refused("merge-tree-failed", f"git merge-tree could not merge {a[:12]} and {b[:12]}: "
+                            f"{(proc.stderr or proc.stdout).strip()[:200]}", next_step="office doctor")
+    tree, files = parse_merge_tree(proc.stdout)
+    return tree, (files if proc.returncode == 1 else [])
+
+
+def parse_merge_tree(out: str) -> tuple[str, list[str]]:
+    """(tree, conflicted paths) from `git merge-tree --write-tree --name-only -z`. Paths are made printable:
+    a committed name is shown in messages and briefs, so control characters never reach them."""
+    tree, *rest = out.split("\0")
+    files = []
+    for name in rest:
+        if not name:
+            break
+        files.append("".join(c if c.isprintable() else "?" for c in name))
+    return tree, files
+
+
+def combine(run: dict, parts: list[dict], what: str) -> str:
+    """One commit that contains every part's commit: the part that already contains the others
+    when one does, else an Office merge commit of them (never checked out, reachable from the
+    branch that starts there). Parts that conflict refuse, naming the tasks and paths.
+    `parts` are {task, commit, ...} in dependency order."""
+    repo = Path(run["repo_root"])
+    heads: list[dict] = []
+    for p in parts:
+        same = next((h for h in heads if h["commit"] == p["commit"]), None)
+        if same:
+            same["tasks"].append(p["task"])
+        else:
+            heads.append({"commit": p["commit"], "tasks": [p["task"]]})
+    heads = [h for h in heads if not any(o is not h and gates._is_ancestor(run, h["commit"], o["commit"]) for o in heads)]
+    if not heads:
+        return run["base_sha"]
+    cur = heads[0]
+    for nxt in heads[1:]:
+        tree, files = _merge_tree(repo, cur["commit"], nxt["commit"])
+        if files:
+            raise _conflict(repo, what, heads, cur, nxt, files)
+        env = {**os.environ, **paths.commit_identity_env(repo)}
+        names = sorted(set(cur["tasks"] + nxt["tasks"]))
+        commit = subprocess.run(
+            ["git", "-C", str(repo), "commit-tree", tree, "-p", cur["commit"], "-p", nxt["commit"], "-m",
+             f"office: base of {what}, a merge of {', '.join(names)}\n\n{paths.office_trailer(run['id'])}"],
+            capture_output=True, text=True, env=env)
+        if commit.returncode != 0:
+            raise state.Refused("merge-commit-failed", f"could not record the merged base of {what}: {commit.stderr.strip()[:200]}")
+        cur = {"commit": commit.stdout.strip(), "tasks": names}
+    return cur["commit"]
+
+
+def _conflict(repo: Path, what: str, heads: list[dict], cur: dict, nxt: dict, files: list[str]) -> state.Refused:
+    """Name the dependency pairs whose revisions conflict, or the group the fold stopped on."""
+    pairs = []
+    for i, a in enumerate(heads):
+        for b in heads[i + 1:]:
+            _, conflicted = _merge_tree(repo, a["commit"], b["commit"])
+            if conflicted:
+                pairs.append((a["tasks"], b["tasks"], conflicted))
+    if not pairs:
+        pairs = [(cur["tasks"], nxt["tasks"], files)]
+    said = "; ".join(f"{'+'.join(a)} and {'+'.join(b)} conflict on {', '.join(f[:8])}" for a, b, f in pairs)
+    tasks = sorted({t for a, b, _ in pairs for t in a + b})
+    return state.Refused("dependency-conflict", f"{what}: its dependency revisions conflict with each other: {said}",
+                         preserved="every dependency's accepted revision",
+                         next_step=f"make the later of {' and '.join(tasks)} depend on the other (office amend plan), "
+                                   "or amend one of them so their changes agree; then dispatch or rerun again")
+
+
 def _set_integration(con, run: dict, **fields) -> None:
     run = state.get_run(con, run["id"])
     landing = dict(run.get("landing") or {})

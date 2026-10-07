@@ -25,7 +25,7 @@ import posixpath
 import re
 from pathlib import Path, PurePosixPath
 
-from office import contract, briefs, db, discovery, paths, planfile, state, submit
+from office import contract, briefs, db, discovery, integration, paths, planfile, state, submit
 from office.result import Result
 
 EXIT = {"ready": 0, "fix": 1, "stop": 4, "wait": 75}
@@ -480,8 +480,12 @@ def preflight(con, run: dict, cwd: Path) -> Result:
         rows = con.execute("SELECT code, severity, location, summary FROM findings WHERE run_id=? AND task_id=? "
                            "AND " + contract.TASK_WORK_FINDINGS + " ORDER BY created_at", (run["id"], task["id"])).fetchall()
         res.lines += [f"finding: {r['code']} [{r['severity']}] {r['location'] or ''} {r['summary']}" for r in rows]
-        if not rows and not amendments:
-            stop.append(f"findings: fix round for {packet['fix_of']} but no open findings or amendments are recorded; "
+        restack = packet.get("restack") or {}
+        if restack.get("merged") or restack.get("conflict"):
+            res.lines.append("restack: " + ", ".join(f"{m['task']} {m['revision']}" for m in
+                                                     (restack.get("merged") or []) + [restack.get("conflict") or {}] if m))
+        if not rows and not amendments and not (restack.get("merged") or restack.get("conflict")):
+            stop.append(f"findings: fix round for {packet['fix_of']} but no open findings or amendments are recorded and it is not a restack; "
                         f"the orchestrator resolves it with: office amend {task['id']} -- \"<what to fix>\" (delivered "
                         f"to this session), or office revoke {task['id']} then office rerun {task['id']} --fresh once "
                         "findings are recorded")
@@ -489,6 +493,15 @@ def preflight(con, run: dict, cwd: Path) -> Result:
     # 5. Scope: tracked edits outside the contract are refused at submit.
     base = d["base_commit"]
     head = _git(wt, "rev-parse", "HEAD")
+    moved = integration.stale_base(run, base, head)
+    if moved:
+        # The worktree holds the run's new base (land --rebase) but the task's base is older: judge the
+        # scope against the new base meanwhile, and wait for the orchestrator to record it.
+        why = (f"base: this worktree holds the run's new base {moved[:12]} but {task['id']}'s recorded base is older; "
+               f"waiting for the orchestrator to record it (office rebase {task['id']} --record)")
+        wait.append(why)
+        _signal(con, run, task["id"], d, "wait", [why])
+        base = moved
     # The committed diff: the self-review ledger vouches for HEAD.
     dep_bases = [b for b in submit._dependency_bases(con, run, task, head) if b != base]
     # Submit captures uncommitted edits too, so scope is judged on the worktree as it is now.

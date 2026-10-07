@@ -13,7 +13,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, state
+from office import adapters, candidates, contract, db, dispatch, gates, integration, jobs, paths, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import pid_alive, sha256_obj
@@ -97,38 +97,46 @@ def _findings_text(con, run: dict, tid: str) -> str:
 
 
 def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
-    """Bring the task worktree up to its dependencies' accepted revisions.
+    """Bring the task worktree up to its dependencies' revisions.
 
     A task built on a dependency revision that review later superseded can
     never be accepted (gates.stale_dependency). Office merges each accepted
-    revision the worktree lacks; a merge is never a rebase, so the pushed
+    (else current) revision the worktree lacks; a merge is never a rebase, so the pushed
     branch needs no force-push. On a conflict the merge is aborted and the
-    executor is told to make it. Returns {"base", "merged", "conflict", "line"}."""
+    executor is told to make it. The new dispatch's base is the commit that contains every
+    dependency revision (integration.combine); dependencies that conflict with each other
+    refuse before anything is merged.
+    Returns {"base", "merged", "conflict", "line"}."""
     if not worktree or not (Path(worktree) / ".git").exists():
         return None
     wt = Path(worktree)
-    pending = []
-    for dep in task["depends"]:
-        dt = state.get_task(con, run["id"], dep)
-        if not dt or dt["status"] != "accepted" or not dt.get("accepted_revision_id"):
-            continue
-        row = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (dt["accepted_revision_id"],)).fetchone()
-        if row and not gates._is_ancestor(run, row["commit_sha"], paths.git(wt, "rev-parse", "HEAD")):
-            pending.append((dep, dt["accepted_revision_id"], row["commit_sha"]))
+    heads = integration.dependency_heads(con, run, task)
+    head = paths.git(wt, "rev-parse", "HEAD")
+    pending = [h for h in heads if not gates._is_ancestor(run, h["commit"], head)]
     if not pending:
         return None
+    onto = ((run.get("landing") or {}).get("rebase") or {}).get("onto")
+    if onto and gates._is_ancestor(run, onto, head):
+        # `office rebase` put this worktree on the run's moved base: the new base keeps it.
+        heads = heads + [{"task": "the new run base", "revision": onto[:12], "commit": onto}]
+    try:
+        base = integration.combine(run, heads, task["id"])
+    except Refused as e:
+        e.scope = e.scope or task["id"]
+        e.preserved = "the task worktree"
+        raise
     env = {**os.environ, **paths.commit_identity_env(wt)}
     merged = []
-    for dep, rev_id, sha in pending:
+    for i, h in enumerate(pending):
         proc = subprocess.run(["git", "-C", str(wt), "merge", "--no-edit", "-m",
-                               f"office: restack {task['id']} onto {dep} {rev_id}\n\n{paths.office_trailer(run['id'])}", sha],
-                              capture_output=True, text=True, env=env)
+                               f"office: restack {task['id']} onto {h['task']} {h['revision']}\n\n{paths.office_trailer(run['id'])}",
+                               h["commit"]], capture_output=True, text=True, env=env)
         if proc.returncode != 0:
             subprocess.run(["git", "-C", str(wt), "merge", "--abort"], capture_output=True)
-            return {"base": None, "merged": merged, "conflict": {"task": dep, "revision": rev_id, "commit": sha},
-                    "line": f"restack onto {dep} {rev_id} conflicts; the executor merges {sha[:7]} first"}
-        merged.append({"task": dep, "revision": rev_id, "commit": sha})
-    base = merged[-1]["commit"] if len(task["depends"]) == 1 else None
+            conflict = {**h, "then": pending[i + 1:]}
+            return {"base": base, "merged": merged, "conflict": conflict,
+                    "line": f"restack onto {h['task']} {h['revision']} conflicts; the executor merges {h['commit'][:7]} first"}
+        merged.append(h)
     return {"base": base, "merged": merged, "conflict": None,
             "line": "restacked onto " + ", ".join(f"{m['task']} {m['revision']}" for m in merged)}
 
