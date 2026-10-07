@@ -85,15 +85,19 @@ function checksText(prs) {
 }
 
 // Every issue row: GitHub's open issues plus issues known only from an Office run record.
-// The task line under a run's phase: plan authorization, else the first unfinished task.
+// The task line under a run's phase: its unsettled tasks and their states (e.g. `T7 submitted · T9 running`).
 const SETTLED = new Set(["accepted", "cancelled"]);
+const TASKS_SHOWN = 3;
 function phaseDetail(run, tasks) {
   if (!run) return "No run yet";
-  if (run.awaiting_plan_authorization) return "Awaiting plan authorization";
-  if (!tasks || !tasks.length) return run.liveness === "terminal" ? "Run closed" : "No tasks recorded";
-  const current = tasks.find((t) => t.current_dispatch && !SETTLED.has(t.status)) || tasks.find((t) => !SETTLED.has(t.status));
-  if (!current) return `All ${tasks.length} tasks settled`;
-  return `${current.task_id} ${String(current.status || "unknown").replace(/_/g, " ")}${current.title ? ` · ${current.title}` : ""}`;
+  const open = (tasks || []).filter((t) => !SETTLED.has(t.status));
+  if (!open.length) {
+    if (run.awaiting_plan_authorization) return "Awaiting plan authorization";
+    if (!tasks || !tasks.length) return run.liveness === "terminal" ? "Run closed" : "No tasks recorded";
+    return `All ${tasks.length} tasks settled`;
+  }
+  const shown = open.slice(0, TASKS_SHOWN).map((t) => `${t.task_id} ${String(t.status || "unknown").replace(/_/g, " ")}`);
+  return shown.join(" · ") + (open.length > TASKS_SHOWN ? ` · +${open.length - TASKS_SHOWN} more` : "");
 }
 
 const ATTENTION_TASK = new Set(["paused", "failed", "blocked", "needs_attention", "stopped"]);
@@ -157,7 +161,7 @@ export function issueRows(state) {
     const linkedPrs = prsFor(linked, prs);
     const q = primary ? queue[primary.id] : null;
     const repo = repos[row.repoKey] || null;
-    const runTasks = primary ? tasksByRun.get(primary.id) || [] : null;
+    const runTasks = primary ? (tasksByRun.get(primary.id) || []).sort((a, b) => String(a.task_id).localeCompare(String(b.task_id))) : null;
     out.push({
       ...row, repo, runs: linked, run: primary, prs: linkedPrs, queue: q,
       liveness: primary ? primary.liveness : "none",

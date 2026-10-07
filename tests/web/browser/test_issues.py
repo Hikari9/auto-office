@@ -100,7 +100,12 @@ def test_table_columns_and_running_and_incoming_rows(page, served):
     assert live[0] == "synth-org-0/repo-00" and live[1].startswith("#1 Issue 1")
     assert live[2].endswith("orchestrator") and live[3].startswith("executing")
     detail = row(page, "issue:repo:github.com/synth-org-0/repo-00#1").locator("[data-testid=phase-detail]")
-    assert detail.text_content() != "" and live[3] == "executing" + detail.text_content()
+    assert live[3] == "executing" + detail.text_content()
+    run = svc.snapshot()["entities"]["issues"]["issue:repo:github.com/synth-org-0/repo-00#1"]["live_run"]
+    tasks = sorted((t for t in svc.snapshot()["entities"]["tasks"].values()
+                    if t["run"] == run and t["status"] not in ("accepted", "cancelled")), key=lambda t: t["task_id"])
+    want = " · ".join(f"{t['task_id']} {t['status'].replace('_', ' ')}" for t in tasks[:3])
+    assert tasks and detail.text_content().startswith(want)
     assert "/" in live[4]  # weighted progress fraction next to the bar
     assert live[5] == "normal" and live[6] == "PR" and live[7].startswith("run ")
     assert live[8].startswith("Live run") and live[9].startswith("code review")
