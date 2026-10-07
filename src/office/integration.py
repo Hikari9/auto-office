@@ -191,6 +191,28 @@ def compose_base(run: dict) -> str:
     return ((run.get("landing") or {}).get("rebase") or {}).get("onto") or run["base_sha"]
 
 
+def moved_base(con, run: dict) -> str | None:
+    """origin/<default branch> when it moved ahead of the compose base by a
+    fast-forward, else None. A failed fetch or a diverged branch is None:
+    `office land --rebase` names those to the orchestrator."""
+    from office import prs
+    branch = prs.settings(con, run).get("base_branch") or "main"
+    repo = Path(run["repo_root"])
+    try:  # runs inside the integrate job, under the worktree lock: never hang it on the network
+        fetched = subprocess.run(["git", "-C", str(repo), "fetch", "-q", "origin", branch], capture_output=True,
+                                 timeout=120)
+    except subprocess.TimeoutExpired:
+        return None
+    if fetched.returncode != 0:
+        return None
+    new = paths.git(repo, "rev-parse", f"origin/{branch}", check=False)
+    old = compose_base(run)
+    if not new or new == old:
+        return None
+    ahead = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", old, new], capture_output=True)
+    return new if ahead.returncode == 0 else None
+
+
 def _set_integration(con, run: dict, **fields) -> None:
     run = state.get_run(con, run["id"])
     landing = dict(run.get("landing") or {})
@@ -322,7 +344,21 @@ def _integrate(con, run: dict, job: dict) -> dict:
             hint = missing_deps_hint(outcome)
             if hint:
                 detail += f" | {hint}"
+            # A failure on a base the default branch has since moved past may be
+            # one the branch already fixed: rebase once onto the new head and
+            # re-check there before calling the work blocked. The accepted
+            # revisions are kept either way.
+            onto = moved_base(con, run) if outcome["verdict"] == "CHANGES_REQUIRED" else None
             with db.transaction(con):
+                if onto and state.enqueue(con, run, "auto_rebase", {"onto": onto},
+                                          dedup_key=f"auto_rebase:{run['id']}:{onto}", max_attempts=1):
+                    _set_integration(con, run, status="pending",
+                                     detail=f"{detail} | the default branch moved to {onto[:12]}: rebasing onto it "
+                                            "and re-checking")
+                    state.emit(con, run, "integration.auto_rebase", f"INTEGRATION checks {outcome['verdict']} on base "
+                               f"{base[:12]}; the default branch moved to {onto[:12]}, so the run rebases onto it and "
+                               "re-checks")
+                    return results
                 _set_integration(con, run, status="blocked", detail=detail)
                 state.emit(con, run, "integration.failed", f"INTEGRATION checks {outcome['verdict']} on the composed result"
                            + (f"; {hint}" if hint else ""))

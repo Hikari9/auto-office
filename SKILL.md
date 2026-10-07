@@ -181,7 +181,9 @@ required checks, confirm the default branch matches the reviewed tree, close the
 deploy prod and verify; a failure names what merged and the rollback target. Then `office close`.
 If the default branch moved after `office start`, run `office land --rebase` first. It re-composes the
 accepted work onto the new head and re-runs the run checks and one review of the rebase. A conflict refuses
-and prints the steps to compose by hand. Office rewrites only the block above the PR body's
+and prints the steps to compose by hand. When run checks fail and the default branch has moved past the
+compose base, Office does this rebase itself once per new head before reporting the integration blocked.
+Office rewrites only the block above the PR body's
 `<!-- office:pr ... -->` line, so put criteria that report data in the PR body below that line. A
 check or test-runner timeout while host load exceeds twice the CPU count is UNAVAILABLE, not a failure. Rerun it with `office resume`.
 With task PRs off (local, no GitHub, `--no-prs`), push the integration branch it names, open a PR

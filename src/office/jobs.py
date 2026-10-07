@@ -25,7 +25,7 @@ KICK_THROTTLE_SECONDS = 10
 
 
 def _handlers():
-    from office import convergence, dispatch, gates, plans, prs, visual, integration
+    from office import convergence, dispatch, gates, plans, prs, visual, integration, land
     return {
         "converge": convergence.job_converge,
         "convergence_review": convergence.job_convergence_review,
@@ -39,6 +39,7 @@ def _handlers():
         "visual_capture": visual.job_capture,
         "visual_review": visual.job_visual_review,
         "integrate": integration.job_integrate,
+        "auto_rebase": land.job_auto_rebase,
     }
 
 
