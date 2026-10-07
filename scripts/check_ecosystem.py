@@ -109,6 +109,31 @@ def check_versions(root=ROOT):
     return [f'{where}: version {got!r} does not match VERSION {want!r}' for where, got in found.items() if got != want]
 
 
+
+def check_skill_metadata(root=ROOT):
+    """Require each skill's OpenAI display name to equal its canonical skill name."""
+    errors=[]
+    for skill in discovered_skills(root):
+        ok, _, fm, _ = frontmatter(skill)
+        if not ok or not fm:
+            continue
+        agent = skill.parent / 'agents' / 'openai.yaml'
+        if not agent.exists():
+            continue
+        try:
+            meta = yaml.safe_load(agent.read_text(encoding='utf-8')) or {}
+        except Exception as exc:
+            errors.append(f'{agent.relative_to(root)}: invalid YAML: {exc}')
+            continue
+        interface = meta.get('interface') if isinstance(meta, dict) else None
+        display = interface.get('display_name') if isinstance(interface, dict) else None
+        if display != fm['name']:
+            errors.append(
+                f'{agent.relative_to(root)}: interface.display_name {display!r} '
+                f'must equal skill name {fm["name"]!r}'
+            )
+    return errors
+
 def main():
     errors=[]
     skills = discovered_skills(ROOT)
@@ -163,6 +188,7 @@ def main():
     budget_errors = check_skill_budgets()
     errors.extend(budget_errors)
     errors.extend(check_versions())
+    errors.extend(check_skill_metadata())
         
     if errors:
         print('FAIL')

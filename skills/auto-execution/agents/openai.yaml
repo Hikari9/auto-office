@@ -1,3 +1,3 @@
 interface:
-  display_name: "Auto Execution"
+  display_name: "auto-execution"
   short_description: "Auto Office v3 primitive"
