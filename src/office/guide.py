@@ -148,7 +148,9 @@ def next_action(con, run: dict) -> str:
         from office import land
         return f"office land (end state: {land.end_state(con, run)['mode']})"
     branch = integ.get("branch")
-    return (f"land it: push {branch} and open a PR (merge to main stays with the user), then office close --handoff <pr-url>"
+    from office import closeout
+    return (f"land it: push {branch} and open a PR (merge to main stays with the user), "
+            f"{closeout.DOCS_STEP}office close --handoff <pr-url>"
             if branch else "office close --handoff <ref>")
 
 

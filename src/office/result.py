@@ -12,6 +12,7 @@ class Result:
     verbose: list[str] = field(default_factory=list)
     exit_code: int = 0
     notices: list[str] = field(default_factory=list)
+    final: str | None = None  # printed last, after next: (office close's report line)
 
     def add(self, line: str) -> "Result":
         self.lines.append(line)
