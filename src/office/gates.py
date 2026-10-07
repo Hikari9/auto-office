@@ -457,7 +457,7 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                 # landed). That is a launch failure, so the next route runs
                 # instead of the gate ending INVALID_RESULT on this one (#384).
                 (ddir / "pane-tail.txt").unlink(missing_ok=True)  # re-read after the re-prompts
-                log_text = _log_text(state.get_dispatch(con, dispatch_id), ddir)
+                log_text = _log_text(state.get_dispatch(con, dispatch_id), ddir, pane=True)
                 wall = "quota" if _quota_signature(log_text) else "auth" if _auth_signature(log_text) else None
                 failures.append(f"{triple}: no reply after re-prompts" + (f" [{wall}]" if wall else ""))
                 # A harness that silently answers nothing is walled for every
@@ -467,6 +467,9 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                     con.execute("UPDATE gates SET env_failures=env_failures+1 WHERE id=?", (gate["id"],))
                     con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?",
                                 (dispatch_id,))
+                # The silent session may still be alive: close its pane before
+                # the next route opens another.
+                dispatch_mod.reclaim_pane(run, dispatch_id)
                 continue
             if attention:
                 with db.transaction(con):
@@ -532,20 +535,25 @@ def _reply_text(d: dict, ddir: Path, output: Path) -> str:
     return _log_text(d, ddir)
 
 
-def _log_text(d: dict, ddir: Path) -> str:
-    """The harness's own output. A herdr pane agent has no log file, so its
-    pane text stands in (saved once to pane-tail.txt): a quota or auth wall
-    the harness prints but does not exit on shows only there (#384)."""
+def _log_text(d: dict, ddir: Path, *, pane: bool = False) -> str:
+    """The harness's own output log. With `pane`, a herdr pane agent's pane
+    text is appended (saved once to pane-tail.txt): a quota or auth wall the
+    harness prints but does not exit on shows only there (#384). Pane text
+    also holds the agent's own work, so only a caller that knows the agent
+    never replied asks for it; the reply and wall checks elsewhere read the
+    log alone."""
+    log = Path(d.get("log_path") or ddir / "output.log")
+    text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+    if not pane:
+        return text
     tail = ddir / "pane-tail.txt"
     if d.get("launcher") == "herdr" and d.get("pane_id") and not tail.is_file() and shutil.which("herdr"):
         from office import dispatch as dispatch_mod
         snap = dispatch_mod._pane_snapshot(dispatch_mod.herdr_agent_name(d["id"]), d["pane_id"])
         if snap:
             tail.write_text(snap, encoding="utf-8")
-    text = ""
-    for log in (Path(d.get("log_path") or ddir / "output.log"), ddir / "pane-tail.txt"):
-        if log.is_file():
-            text += log.read_text(encoding="utf-8", errors="replace")[-4000:] + "\n"
+    if tail.is_file():
+        text += "\n" + tail.read_text(encoding="utf-8", errors="replace")[-4000:]
     return text
 
 

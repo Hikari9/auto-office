@@ -43,3 +43,14 @@ def test_resume_accepts_a_submitted_task_whose_gates_all_ended(env):
         con.close()
     env.office("resume", check=0)
     assert _q(env, "SELECT status FROM tasks WHERE id='T1'")[0]["status"] == "accepted"
+
+
+def test_a_headless_reply_read_from_the_log_is_whole_and_never_pane_text(tmp_path):
+    from office import gates
+    review = "FINDING: " + "x" * 6000 + "\nVERDICT: APPROVED\n"
+    (tmp_path / "output.log").write_text(review)
+    (tmp_path / "pane-tail.txt").write_text("rate limit reached\n")
+    d = {"id": "D1", "launcher": "process"}
+    assert gates._reply_text(d, tmp_path, tmp_path / "reply.txt") == review
+    assert gates._log_text(d, tmp_path) == review
+    assert gates._log_text(d, tmp_path, pane=True).endswith("rate limit reached\n")
