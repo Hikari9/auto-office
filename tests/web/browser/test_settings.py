@@ -5,6 +5,7 @@ import json
 import sqlite3
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -79,27 +80,118 @@ def test_machine_scope_rows_badges_and_intake_defaults(page, served):
     assert errors == []
 
 
-def test_machine_edit_goes_through_settings_set_and_shows_the_reread_value(page, served):
+def rescope_machine(page):
+    """Leave and return to Machine scope: the view re-reads /api/settings."""
+    page.select_option("[data-testid=scope-repo]", REPO)
+    page.wait_for_selector("[data-testid=settings-scope][data-scope=repository]")
+    page.click("[data-testid=scope-machine]")
+    page.wait_for_selector("[data-testid=settings-scope][data-scope=machine]")
+
+
+def last_settled(page):
+    loc = page.locator("[data-testid=settings-last-command]")
+    assert wait_for(lambda: loc.count() and loc.text_content().rsplit(": ", 1)[-1].startswith(("completed", "failed")))
+
+
+def test_machine_edit_goes_through_settings_set_and_shows_only_the_reread_value(page, served):
     url, svc, user = served
     errors = open_settings(page, url)
     q = setting(page, "intake.queue_issues")
     q.locator("[data-testid=setting-inspect]").click()
     q.locator("[data-testid=setting-edit][data-tier=machine]").click()
     q.locator("[data-testid=setting-input]").select_option("true")
-    # The value shown comes from the server's re-read, not from what was typed.
-    user.write_text("intake:\n  queue_issues: true\n", encoding="utf-8")
-    assert q.locator("[data-testid=setting-value]").text_content() == "false"
     q.locator("[data-testid=setting-save]").click()
     calls = svc.executor.calls
     assert wait_for(lambda: any(c["args"] == ["config", "--user", "--", "intake.queue_issues", "true"] for c in calls)), calls
+    last_settled(page)
+    # The fake executor wrote nothing: after the re-read the server still says default/false.
+    page.wait_for_timeout(300)
+    q = setting(page, "intake.queue_issues")
+    assert q.locator("[data-testid=setting-value]").text_content() == "false"
+    assert q.get_attribute("data-source") == "default"
+    # Once the server's files change, the re-read value is shown with its tier.
+    user.write_text("intake:\n  queue_issues: true\n", encoding="utf-8")
+    rescope_machine(page)
     page.wait_for_selector('[data-testid=setting-row][data-key="intake.queue_issues"][data-source=machine]', timeout=8000)
     q = setting(page, "intake.queue_issues")
     assert q.locator("[data-testid=setting-value]").text_content() == "true"
     assert q.locator("[data-testid=setting-marker]").text_content() == "overridden"
-    # Unset is offered for a tier that has a value, through settings_unset.
+    # Unset is offered for a tier that has a value, through settings_unset; the view follows the re-read.
+    q.locator("[data-testid=setting-inspect]").click()
     q.locator("[data-testid=setting-edit][data-tier=machine]").click()
     q.locator("[data-testid=setting-unset]").click()
     assert wait_for(lambda: any(c["args"] == ["config", "--user", "--unset", "--", "intake.queue_issues"] for c in calls))
+    user.write_text("{}\n", encoding="utf-8")
+    rescope_machine(page)
+    page.wait_for_selector('[data-testid=setting-row][data-key="intake.queue_issues"][data-source=default]', timeout=8000)
+    assert setting(page, "intake.queue_issues").locator("[data-testid=setting-marker]").text_content() == "inherited"
+    assert errors == []
+
+
+def test_string_keys_send_text_and_other_keys_send_parsed_values(page, served):
+    url, svc, _ = served
+    sent = []
+    page.on("request", lambda r: sent.append(json.loads(r.post_data)) if r.url.endswith("/api/commands") else None)
+    errors = open_settings(page, url)
+    a = setting(page, "intake.authorization")
+    a.locator("[data-testid=setting-inspect]").click()
+    a.locator("[data-testid=setting-edit][data-tier=machine]").click()
+    a.locator("[data-testid=setting-input]").fill("123")
+    a.locator("[data-testid=setting-input]").press("Enter")
+    assert wait_for(lambda: len(sent) == 1)
+    assert sent[0]["kind"] == "settings_set" and sent[0]["payload"] == {"value": "123"}
+    page.fill("[data-testid=settings-filter]", "scheduler.cpu_pressure")
+    c = setting(page, "scheduler.cpu_pressure")
+    c.locator("[data-testid=setting-inspect]").click()
+    c.locator("[data-testid=setting-edit][data-tier=machine]").click()
+    c.locator("[data-testid=setting-input]").fill("0.75")
+    c.locator("[data-testid=setting-input]").press("Enter")
+    assert wait_for(lambda: len(sent) == 2)
+    assert sent[1]["payload"] == {"value": 0.75}
+    # The filter hides every non-matching row outside Auto Intake.
+    keys = [r.get_attribute("data-key") for r in page.locator("[data-testid=settings-group] [data-testid=setting-row]").all()]
+    assert keys == ["scheduler.cpu_pressure"]
+    assert errors == []
+
+
+def test_scope_change_never_shows_the_previous_scopes_rows(page, served):
+    url, _, _ = served
+    errors = open_settings(page, url)
+    held = []
+    page.route("**/api/settings?repo=*", lambda route: held.append(route))
+    page.select_option("[data-testid=scope-repo]", REPO)
+    for _ in range(50):
+        if held:
+            break
+        page.wait_for_timeout(100)
+    assert held
+    assert page.locator("[data-testid=setting-row]").count() == 0
+    assert "Loading" in page.text_content("[data-testid=settings-status]")
+    held[0].continue_()
+    page.wait_for_selector("[data-testid=settings-scope][data-scope=repository]")
+    assert errors == []
+
+
+def test_a_failed_read_is_retried_without_a_scope_change(page, served):
+    url, _, _ = served
+    failures = []
+
+    def flaky(route):
+        if not failures:
+            failures.append(1)
+            route.abort()
+        else:
+            route.continue_()
+    page.route("**/api/settings", flaky)
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.set_viewport_size({"width": 1440, "height": 900})
+    page.goto(url)
+    page.wait_for_selector("[data-testid=issue-row]", timeout=20000)
+    page.click(".product-rail >> text=Settings")
+    page.wait_for_selector("[data-testid=settings-status]:has-text('retrying')", timeout=8000)
+    page.wait_for_selector("[data-testid=setting-row]", timeout=15000)
+    assert failures == [1]
     assert errors == []
 
 
@@ -119,12 +211,25 @@ def test_repository_scope_offers_the_repository_tier(page, served):
     assert wait_for(lambda: any(c["args"] == ["config", "--repo", "--", "intake.authorization", "pr"] for c in calls)), calls
     call = next(c for c in calls if c["args"][:2] == ["config", "--repo"])
     assert call["cwd"] and call["cwd"].endswith("synth-org-0__repo-00")
+    # A repository-tier value in the checkout becomes the effective value, marked as its source.
+    conf = Path(call["cwd"]) / ".auto-office" / "config.yaml"
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text("intake:\n  authorization: pr\n", encoding="utf-8")
+    page.click("[data-testid=scope-machine]")
+    page.select_option("[data-testid=scope-repo]", REPO)
+    page.wait_for_selector('[data-testid=setting-row][data-key="intake.authorization"][data-source=repository]', timeout=8000)
+    a = setting(page, "intake.authorization")
+    assert a.locator("[data-testid=setting-value]").text_content() == "pr"
+    assert a.locator("[data-testid=setting-source]").text_content() == "Repository"
+    assert a.locator("[data-testid=setting-marker]").text_content() == "overridden"
+    a.locator("[data-testid=setting-inspect]").click()
+    assert a.locator("[data-testid=setting-tier][data-tier=repository] dd").text_content() == "pr"
     assert errors == []
 
 
 def test_run_pinned_values_are_read_only_with_the_reason(page, served):
     url, svc, _ = served
-    con = sqlite3.connect(svc.db_path)
+    con = sqlite3.connect(svc.db_path, timeout=30)
     con.execute("UPDATE runs SET policy_json=? WHERE id=?", (json.dumps({"quota": {"reserve_percent": 12}}), RUN))
     con.commit()
     con.close()
@@ -144,6 +249,7 @@ def test_run_pinned_values_are_read_only_with_the_reason(page, served):
     assert pinned.locator("[data-testid=setting-edit]").count() == 0
     assert "never edited" in pinned.locator("[data-testid=setting-readonly]").text_content()
     assert r.locator("[data-testid=setting-tier][data-tier=default] dd").text_content() == "5"
+    assert "machine" in [b.get_attribute("data-tier") for b in r.locator("[data-testid=setting-edit]").all()]
     assert errors == []
 
 

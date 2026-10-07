@@ -28,7 +28,7 @@ def served(tmp_path, monkeypatch):
 
 
 def write(svc, sql: str, args=()):
-    con = sqlite3.connect(svc.db_path)
+    con = sqlite3.connect(svc.db_path, timeout=30)
     try:
         con.execute(sql, args)
         con.commit()
@@ -56,6 +56,13 @@ def open_allocation(page, url, width=1440, height=900):
 
 def alloc_row(page, item_id):
     return page.locator(f'[data-testid=alloc-row][data-id="{item_id}"]')
+
+
+def settled(page, label_part):
+    """Wait until the last command (its label containing `label_part`) has a final result."""
+    loc = page.locator("[data-testid=alloc-last-command]")
+    assert wait_for(lambda: loc.count() and label_part in loc.text_content()
+                    and loc.get_attribute("data-status") in ("completed", "failed")), label_part
 
 
 def wait_for(fn, timeout=8.0):
@@ -107,7 +114,7 @@ def test_scheduler_rows_panels_and_no_fabricated_values(page, served):
 
 def test_queue_order_groups_and_critical_path_follow_the_server(page, served):
     url, svc = served
-    con = sqlite3.connect(svc.db_path)
+    con = sqlite3.connect(svc.db_path, timeout=30)
     deps = con.execute("SELECT id FROM tasks WHERE run_id=? ORDER BY id", (RUN,)).fetchall()
     con.close()
     first, second = deps[0][0], deps[1][0]
@@ -128,7 +135,16 @@ def test_queue_order_groups_and_critical_path_follow_the_server(page, served):
     crit = alloc_row(page, "task:crit")
     assert crit.locator("[data-testid=alloc-critical]").text_content() == "critical path · unblocks 1"
     assert crit.locator("[data-testid=alloc-role]").text_content() == "Task"
-    assert alloc_row(page, "issue:paused").locator("[data-testid=alloc-resume]").is_visible()
+    comps = {c.get_attribute("data-comp"): c.text_content() for c in crit.locator(".comp").all()}
+    assert comps["priority"] == "priority 20" and comps["critical_path"] == "critical path 5"
+    assert comps["protected"] == "protected 0"
+    total = sum(float(v.rsplit(" ", 1)[1]) for v in comps.values())
+    assert abs(float(crit.locator("[data-testid=alloc-score] b").text_content()) - total) < 0.01
+    assert "demoted" in alloc_row(page, "issue:demoted").locator(".marks").text_content()
+    paused = alloc_row(page, "issue:paused")
+    assert "paused" in paused.locator(".marks").text_content()
+    paused.locator("[data-testid=alloc-resume]").click()
+    assert wait_for(lambda: any(c["args"] == ["queue", "resume", "issue:paused"] for c in svc.executor.calls))
     assert alloc_row(page, "issue:high").locator("[data-testid=alloc-role]").text_content() == "New run"
     assert errors == []
 
@@ -150,7 +166,7 @@ def test_controls_send_commands_and_show_only_server_state(page, served):
     q = alloc_row(page, "issue:q")
     q.locator("[data-testid=alloc-priority]").select_option("urgent")
     assert wait_for(lambda: any(c["args"] == ["queue", "priority", "issue:q", "urgent"] for c in calls)), calls
-    page.wait_for_timeout(500)
+    settled(page, "Priority urgent")
     assert q.locator("[data-testid=alloc-priority]").input_value() == "normal"
     q.locator("[data-testid=alloc-demote]").click()
     assert wait_for(lambda: any(c["args"] == ["queue", "demote", "issue:q"] for c in calls)), calls
@@ -159,7 +175,7 @@ def test_controls_send_commands_and_show_only_server_state(page, served):
     assert wait_for(lambda: any(c["args"] == ["queue", "auto", "off", "--run", RUN] for c in calls)), calls
     page.click("[data-testid=alloc-auto-toggle]")
     assert wait_for(lambda: any(c["args"] == ["queue", "auto", "off"] for c in calls)), calls
-    page.wait_for_timeout(500)
+    settled(page, "Auto mode off (machine)")
     assert page.get_attribute("[data-testid=alloc-auto-global]", "data-mode") == "on"
 
     # The server's state changes: the view follows, and offers an explicit resume.
@@ -170,6 +186,15 @@ def test_controls_send_commands_and_show_only_server_state(page, served):
     assert wait_for(lambda: q.locator("[data-testid=alloc-priority]").input_value() == "high")
     page.click("[data-testid=alloc-auto-toggle]")
     assert wait_for(lambda: any(c["args"] == ["queue", "auto", "on"] for c in calls)), calls
+    # A run whose own auto mode is off offers an explicit per-run resume.
+    write(svc, "DELETE FROM sched_state WHERE scope='global'")
+    write(svc, "INSERT OR REPLACE INTO sched_state(scope, auto_mode, reason, updated_at) VALUES(?, 'off', 't', 'x')",
+          (f"run:{RUN}",))
+    r.locator("[data-testid=alloc-auto][data-mode=off]").wait_for(timeout=8000)
+    resume = r.locator("[data-testid=alloc-set_auto_mode]")
+    assert resume.text_content() == "Resume auto"
+    resume.click()
+    assert wait_for(lambda: any(c["args"] == ["queue", "auto", "on", "--run", RUN] for c in calls)), calls
     assert errors == []
 
 
@@ -200,6 +225,6 @@ def test_keyboard_operable_and_usable_at_1100(page, served):
     page.keyboard.press("Enter")
     assert wait_for(lambda: any(c["args"][:2] == ["queue", "demote"] for c in svc.executor.calls))
     # The last control used keeps focus through re-renders.
-    page.wait_for_timeout(600)
+    settled(page, "Demote")
     assert page.evaluate("document.activeElement.dataset.testid") == "alloc-demote"
     assert errors == []

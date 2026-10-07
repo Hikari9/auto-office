@@ -7,12 +7,11 @@ const GLOBAL = "alloc:global";
 const ROLE = { run: "Orchestrator", task: "Task", issue: "New run" };
 
 // The server's ready order (office.scheduler.ready_order): paused last, demoted just before,
-// then highest score, then earliest enqueued. Deltas do not keep object order, so it is re-derived.
+// then highest score, then earliest enqueued, then id. Deltas do not keep object order, so it is re-derived.
 export function readyOrder(entries) {
   const key = (e) => [e.paused ? 1 : 0, e.demoted_seq !== null && e.demoted_seq !== undefined ? 1 : 0,
     e.demoted_seq || 0, -((e.score || {}).total || 0), e.enqueued_at || "", e.id];
   return [...entries].sort((a, b) => {
-    if (typeof a.rank === "number" && typeof b.rank === "number") return a.rank - b.rank;
     const ka = key(a), kb = key(b);
     for (let i = 0; i < ka.length; i += 1) if (ka[i] !== kb[i]) return ka[i] < kb[i] ? -1 : 1;
     return 0;
@@ -68,7 +67,8 @@ function prioritySelect(ctx, e) {
       if (busy(ctx, "set_priority", `alloc:${e.id}`)) return;
       ctx.send("set_priority", `alloc:${e.id}`, target(e), { level }, {}, `Priority ${level} ${e.title || e.id}`);
     },
-  }, PRIORITIES.map((p) => ctx.h("option", { value: p, selected: p === e.priority }, p)));
+  }, PRIORITIES.includes(e.priority) ? null : ctx.h("option", { value: "", selected: true, disabled: true }, `${e.priority || "unknown"}`),
+  PRIORITIES.map((p) => ctx.h("option", { value: p, selected: p === e.priority }, p)));
 }
 
 function score(ctx, e) {
@@ -95,10 +95,10 @@ function row(ctx, e, i) {
   const run = runOf(ctx.state, e);
   const repo = run && run.repo ? (run.repo.slug || run.repo.key) : (e.ref ? String(e.ref).split("#")[0] : "—");
   const auto = e.auto_mode || "unknown";
-  const autoBtn = e.run_id
-    ? (auto === "on" ? btn(ctx, e, "set_auto_mode", "Auto off", { mode: "off" }, "Turn auto mode off for")
-      : btn(ctx, e, "set_auto_mode", "Resume auto", { mode: "on" }, "Resume auto mode for"))
-    : null;
+  // Only a known state offers a toggle; "paused" and "unknown" are shown, never guessed into "off".
+  const autoBtn = !e.run_id || !["on", "off", "paused"].includes(auto) ? null
+    : (auto === "on" ? btn(ctx, e, "set_auto_mode", "Auto off", { mode: "off" }, "Turn auto mode off for")
+      : btn(ctx, e, "set_auto_mode", "Resume auto", { mode: "on" }, "Resume auto mode for"));
   const why = run && run.controls && run.controls.runtime && run.controls.runtime.read_only
     ? h("div", { class: "why", dataset: { testid: "alloc-readonly" }, text: (run.controls.pause || {}).reason || "read-only runtime" }) : null;
   return h("div", { class: "arow", role: "row", dataset: { testid: "alloc-row", id: e.id, group: group(e) } },
@@ -135,7 +135,9 @@ function table(ctx, title, testid, entries, offset, empty) {
 function sample(ctx, name, s, pressure) {
   const h = ctx.h;
   const measured = s && (s.status === "ok" || s.status === "measured") && typeof s.value === "number";
-  const value = measured ? (s.value <= 1 ? `${Math.round(s.value * 100)}%` : String(s.value)) : `${name} unavailable`;
+  const value = !measured ? `${name} unavailable`
+    : String(s.unit).startsWith("fraction") ? `${Math.round(s.value * 100)}%`
+      : s.unit === "percent" ? `${Math.round(s.value)}%` : `${s.value} ${s.unit || ""}`.trim();
   return h("div", { class: "metric", dataset: { testid: `alloc-${name.toLowerCase()}`, status: measured ? "measured" : "unavailable" } },
     h("div", { class: "v", text: value }),
     h("div", { class: "k", text: measured ? `${name} pressure (${pressure || "ok"})` : `${name}: ${(s && s.status) || "unknown"}; not gating` }));

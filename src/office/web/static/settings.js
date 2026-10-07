@@ -10,7 +10,7 @@ const APPLY_LABEL = { immediate: "applies immediately", "before-dispatch": "appl
   "future-runs": "applies to future runs", restart: "applies after restart" };
 
 const ui = { scope: "machine", repo: "", run: "", query: "", inspect: new Set(), edit: null, data: null, loadedFor: null,
-  error: null, loading: false, seen: new Set() };
+  error: null, loading: false, retryAt: 0, seen: new Set() };
 
 export const settingsUi = ui; // inspected by browser tests
 
@@ -20,9 +20,11 @@ export function query() {
   return "";
 }
 
+const RETRY_MS = 3000;
+
 async function load(ctx, force = false) {
   const q = query();
-  if (!force && (ui.loadedFor === q || ui.loading)) return;
+  if (!force && (ui.loadedFor === q || ui.loading || Date.now() < ui.retryAt)) return;
   ui.loading = true;
   ui.loadedFor = q;
   try {
@@ -30,15 +32,23 @@ async function load(ctx, force = false) {
     const body = await res.json().catch(() => null);
     if (query() !== q) return; // the scope moved on while this was in flight
     if (res.ok && body && Array.isArray(body.entries)) { ui.data = body; ui.error = null; } else {
-      ui.data = null;
-      ui.error = (body && (body.message || body.reason)) || `settings unavailable (HTTP ${res.status})`;
+      fail(ctx, `${(body && (body.message || body.reason)) || `settings unavailable (HTTP ${res.status})`}`);
     }
   } catch {
-    if (query() === q) { ui.data = null; ui.error = "the Office service did not answer; settings unavailable"; }
+    if (query() === q) fail(ctx, "the Office service did not answer; settings unavailable");
   } finally {
     ui.loading = false;
     ctx.rerender();
   }
+}
+
+// A failed read is retried on a later render, after RETRY_MS.
+function fail(ctx, message) {
+  setTimeout(ctx.rerender, RETRY_MS);
+  ui.data = null;
+  ui.error = `${message}; retrying`;
+  ui.loadedFor = null;
+  ui.retryAt = Date.now() + RETRY_MS;
 }
 
 // A settings command that finished (either way) means the files may have changed: re-read them.
@@ -60,9 +70,10 @@ function refocus(key) {
   }));
 }
 
-export function parseValue(text) {
-  const t = text.trim();
-  try { return JSON.parse(t); } catch { return text; }
+// Text for a string-valued key stays a string ("123" is not 123); other keys parse as JSON when they can.
+export function parseValue(text, like) {
+  if (typeof like === "string") return text;
+  try { return JSON.parse(text.trim()); } catch { return text; }
 }
 
 const show = (v) => (v === null || v === undefined ? "—" : typeof v === "string" ? v : JSON.stringify(v));
@@ -72,7 +83,9 @@ function editor(ctx, e, tier) {
   const current = e.values[tier];
   const bool = typeof e.value === "boolean";
   const subject = `settings:${tier}:${e.key}`;
-  const pending = ctx.inFlight("settings_set", subject) || ctx.inFlight("settings_unset", subject);
+  const office = (ctx.state.freshness.office || {}).state;
+  const stale = office !== "live" ? "Office data is not live; commands are refused" : null;
+  const pending = ctx.inFlight("settings_set", subject) || ctx.inFlight("settings_unset", subject) || !!stale;
   const target = { tier, key: e.key, ...(ui.scope === "run" ? { run_id: ui.run } : ui.scope === "repository" ? { repo: ui.repo } : {}) };
   const input = bool
     ? h("select", { class: "field", "aria-label": `New ${TIER_LABEL[tier]} value for ${e.key}`, dataset: { key: `edit-input:${e.key}`, testid: "setting-input" },
@@ -83,14 +96,15 @@ function editor(ctx, e, tier) {
   if (ui.edit.focus) { ui.edit.focus = false; setTimeout(() => input.focus(), 0); }
   const close = () => { ui.edit = null; ctx.rerender(); refocus(`edit:${tier}:${e.key}`); };
   const save = () => {
-    ctx.send("settings_set", subject, target, { value: parseValue(ui.edit.text) }, {}, `Set ${e.key} (${TIER_LABEL[tier]})`);
+    if (pending) return;
+    ctx.send("settings_set", subject, target, { value: parseValue(ui.edit.text, current ?? e.value) }, {}, `Set ${e.key} (${TIER_LABEL[tier]})`);
     ui.edit = null;
     refocus(`edit:${tier}:${e.key}`);
   };
   return h("form", { class: "edit", dataset: { testid: "setting-editor" }, onsubmit: (ev) => { ev.preventDefault(); save(); },
     onkeydown: (ev) => { if (ev.key === "Escape") { ev.preventDefault(); close(); } } },
     input,
-    h("button", { type: "submit", class: "btn primary", disabled: pending, dataset: { key: `edit-save:${e.key}`, testid: "setting-save" } }, "Save"),
+    h("button", { type: "submit", class: "btn primary", disabled: pending, title: stale, dataset: { key: `edit-save:${e.key}`, testid: "setting-save" } }, "Save"),
     current !== null && current !== undefined
       ? h("button", { type: "button", class: "btn", disabled: pending, dataset: { key: `edit-unset:${e.key}`, testid: "setting-unset" },
         onclick: () => { ctx.send("settings_unset", subject, target, {}, {}, `Unset ${e.key} (${TIER_LABEL[tier]})`); ui.edit = null; refocus(`edit:${tier}:${e.key}`); } },
@@ -135,7 +149,14 @@ function scopePicker(ctx) {
   const repos = Object.values(s.entities.repos).map((r) => r.full_name).filter(Boolean).sort();
   const runs = Object.values(s.entities.runs).filter((r) => !ui.repo || (r.repo && r.repo.slug === ui.repo))
     .sort((a, b) => String(a.run_id).localeCompare(String(b.run_id)));
-  const set = (patch) => { Object.assign(ui, patch); ui.edit = null; ui.inspect.clear(); load(ctx); ctx.rerender(); };
+  const set = (patch) => {
+    Object.assign(ui, patch);
+    // Rows of the previous scope must not be shown (or edited) under the new one.
+    Object.assign(ui, { edit: null, data: null, error: null, retryAt: 0 });
+    ui.inspect.clear();
+    load(ctx);
+    ctx.rerender();
+  };
   return h("nav", { class: "cascade", "aria-label": "Settings scope", dataset: { testid: "settings-cascade" } },
     h("button", { type: "button", class: "btn", "aria-pressed": String(ui.scope === "machine"), dataset: { key: "scope-machine", testid: "scope-machine" },
       onclick: () => set({ scope: "machine", repo: "", run: "" }) }, "Machine"),
