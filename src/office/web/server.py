@@ -2,10 +2,12 @@
 
 `serve` runs in the foreground; `start` daemonizes `serve` and waits for its
 pid file under `<state home>/web/`; `stop` and `status` read that file. The
-server binds loopback only and refuses any other `--host`. Fixture mode
-(`--fixture small|large`) serves T1's synthetic workspace from a temp Office
-home with T4's client on a fake transport and fake launcher/executor: it never
-touches the real runs.db or GitHub.
+server binds loopback only and refuses any other `--host`. Besides the API it
+serves the UI's static modules by name and, in fixture mode only, the GitHub
+fixture control. Fixture mode (`--fixture small|large`, see `fixtures.py`)
+serves a synthetic workspace from a temp Office home with a fake GitHub
+transport and fake launcher/executor: it never touches the real runs.db or
+GitHub.
 """
 from __future__ import annotations
 
@@ -13,11 +15,11 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from functools import lru_cache
@@ -29,7 +31,7 @@ from office import paths
 from office.result import Result
 from office.state import OfficeError
 from office.web import api, launcher as launch_mod
-from office.web.service import FakeExecutor, Service, _effective_config
+from office.web.service import Service, _effective_config
 
 log = logging.getLogger("office.web")
 DEFAULT_PORT = 8765
@@ -64,91 +66,67 @@ class _Server6(_Server):
     address_family = socket.AF_INET6
 
 
+STATIC_NAME = re.compile(r"[a-z][a-z0-9-]*\.(js|css)")
+STATIC_TYPES = {"js": "text/javascript; charset=utf-8", "css": "text/css; charset=utf-8"}
+
+
+class _WebHandler(api.Handler):
+    """The API handler plus the UI's static modules and the fixture-only GitHub control."""
+
+    def do_GET(self):  # noqa: N802
+        path = urlparse(self.path).path
+        if not path.startswith("/static/"):
+            return super().do_GET()
+        if not self._host_ok():
+            return
+        name = path[len("/static/"):]
+        match = STATIC_NAME.fullmatch(name)
+        file = api.STATIC / name
+        if not match or not file.is_file():
+            return self._refuse(404, "not-found", path)
+        self._send(200, file.read_bytes(), STATIC_TYPES[match.group(1)])
+
+    def do_POST(self):  # noqa: N802
+        if urlparse(self.path).path != "/api/fixture/github":
+            return super().do_POST()
+        if not self._host_ok() or not self._post_ok():
+            return
+        gh = getattr(self.service, "fixture_github", None)
+        if not self.service.fixture or gh is None:
+            return self._refuse(403, "fixture-only", "the GitHub fixture control exists only in fixture mode")
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) if 0 < length <= api.MAX_BODY else b"null")
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or not isinstance(body.get("repo"), str):
+            return self._refuse(400, "bad-request", "body must be {repo, state}")
+        try:
+            with self.service.lock:
+                out = gh.set_mode(body["repo"], body.get("state"))
+        except ValueError as exc:
+            return self._refuse(400, "bad-state", str(exc))
+        except KeyError:
+            return self._refuse(404, "repo-unknown", f"{body['repo']} is not a fixture repository")
+        self.service.poll(force=True)
+        self._send(200, {"ok": True, **out})
+
+
 def make_server(service: Service, host: str = "127.0.0.1", port: int = 0) -> ThreadingHTTPServer:
     bind = loopback_host(host)
     cls = _Server6 if ":" in bind else _Server
-    httpd = cls((bind, port), api.Handler)
+    httpd = cls((bind, port), _WebHandler)
     real_port = httpd.server_address[1]
-    httpd.RequestHandlerClass = api.make_handler(service, bind, real_port)
+    httpd.RequestHandlerClass = type("OfficeWebHandler", (_WebHandler,),
+                                     {"service": service, "hosts": api.allowed_hosts(bind, real_port)})
     return httpd
 
 
 # ------------------------------------------------------------------ fixture mode
 
-def fixture_transport(github_json: Path):
-    """A GitHub transport answering from a synthetic workspace's github.json."""
-    from office.web.github import Response
-    data = json.loads(Path(github_json).read_text(encoding="utf-8"))
-    repos = {r["slug"]: r for r in data["repos"]}
-
-    def transport(method, url, headers):
-        path = urlparse(url).path
-        parts = [p for p in path.split("/") if p]
-        if path == "/user/repos":
-            body = [{"id": i + 1, "node_id": f"R{i + 1}", "full_name": slug, "private": False, "archived": False,
-                     "has_issues": True, "permissions": {"pull": True, "push": True}}
-                    for i, slug in enumerate(repos)]
-            return Response(200, {"etag": '"repos"'}, body)
-        if len(parts) >= 4 and parts[0] == "repos":
-            slug = f"{parts[1]}/{parts[2]}"
-            if slug not in repos:
-                return Response(404, {}, None)
-            if parts[3] == "issues":
-                return Response(200, {}, [{"number": i["number"], "title": i["title"], "state": i["state"],
-                                           "html_url": f"https://github.com/{slug}/issues/{i['number']}",
-                                           "labels": [], "updated_at": None}
-                                          for i in data["issues"] if i["repo"] == slug and i["state"] == "open"])
-            if parts[3] == "pulls":
-                prs = [p for p in data["prs"] if p["repo"] == slug]
-                view = [{"number": p["number"], "state": "open", "draft": False, "base": {"ref": p["base"]},
-                         "head": {"ref": p["head"], "sha": f"sha{p['number']}"}, "merged_at": None,
-                         "html_url": f"https://github.com/{slug}/pull/{p['number']}"} for p in prs]
-                if len(parts) == 5:
-                    one = [v for v in view if str(v["number"]) == parts[4]]
-                    return Response(200 if one else 404, {}, one[0] if one else None)
-                return Response(200, {}, view)
-            if parts[3] == "commits":
-                return Response(200, {}, {"state": "success"})
-        return Response(404, {}, None)
-    return transport
-
-
-def build_fixture(scale: str, home: Path | None = None) -> Service:
-    from office.web import synthetic
-    from office.web.github import GitHubClient
-    root = Path(home or tempfile.mkdtemp(prefix="office-web-fixture-"))
-    ws = synthetic.build_workspace(root / "data", scale)
-    client = GitHubClient(token="fixture-token", transport=fixture_transport(ws["github"]))
-    client.discover()
-    slugs = synthetic.repo_slugs(ws["github"])
-    for slug in sorted(set(slugs.values())):
-        client.refresh_issues(slug)
-        client.refresh_pulls(slug)
-    checkouts_root = root / "checkouts"
-
-    def checkouts(full_name: str) -> Path | None:
-        if not full_name:
-            return None
-        path = checkouts_root / full_name.replace("/", "__")
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    def readiness(repo: dict, checkout: Path | None) -> dict:
-        return {"full_name": repo["full_name"], "attached": True, "checkout": "fixture", "ready": True,
-                "failing": [], "prerequisites": []}
-
-    return Service(ws["db"], root / "state", launcher=launch_mod.FakeLauncher(), executor=FakeExecutor(),
-                   resolver=_fixture_resolver(), github=client, checkouts=checkouts, readiness=readiness,
-                   host_probe=lambda: {"cpu": {"status": "unavailable", "value": None},
-                                       "ram": {"status": "unavailable", "value": None}},
-                   observer_ctx={"repo_slugs": slugs, "runs_dir": ws["runs_dir"], "home": str(root)},
-                   fixture=scale)
-
-
-def _fixture_resolver():
-    from office.web import synthetic
-    from office.web.capabilities import Resolver
-    return Resolver(registry=lambda line: None, probe=lambda argv: False, current=synthetic.CURRENT_VERSION)
+def build_fixture(scale: str, home: Path | None = None, *, seed_receipts: bool = False) -> Service:
+    from office.web import fixtures
+    return fixtures.build(scale, home, seed_receipts=seed_receipts)
 
 
 # ------------------------------------------------------------------ the real service
@@ -274,7 +252,7 @@ def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT, fixture: str | None
     """Foreground server. Writes the pid file once bound; removes it on exit."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     loopback_host(host)
-    service = build_fixture(fixture) if fixture else build_real()
+    service = build_fixture(fixture, seed_receipts=True) if fixture else build_real()
     service.start()
     httpd = make_server(service, host, port)
     real_port = httpd.server_address[1]

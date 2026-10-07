@@ -7,58 +7,64 @@
 <meta name="office-fixture" content="__OFFICE_FIXTURE__">
 <title>Auto Office</title>
 <link rel="icon" href="data:,">
-<style>
-  body { font: 14px/1.4 system-ui, sans-serif; margin: 2rem; }
-  #fixture { display: none; background: #fde68a; padding: .25rem .5rem; border-radius: 4px; }
-  #fixture.on { display: inline-block; }
-</style>
+<link rel="stylesheet" href="/static/app.css">
+<script type="module" src="/static/app.js"></script>
 </head>
 <body>
-<!-- Placeholder: T6 replaces this page. -->
-<h1>Auto Office <span id="fixture" data-testid="fixture-marker"></span></h1>
-<p>Office: <span id="office" data-testid="office-freshness">connecting</span>
-   · GitHub: <span id="github">unknown</span>
-   · rev <span id="rev" data-testid="rev">-</span>
-   · runs <span id="runs" data-testid="runs">-</span></p>
-<script>
-(function () {
-  "use strict";
-  var fixture = document.querySelector('meta[name="office-fixture"]').content;
-  if (fixture) {
-    var marker = document.getElementById("fixture");
-    marker.textContent = "FIXTURE MODE (" + fixture + ")";
-    marker.className = "on";
-  }
-  var state = null;
-  function render() {
-    document.getElementById("office").textContent = state.freshness.office.state;
-    document.getElementById("github").textContent = state.freshness.github.state;
-    document.getElementById("rev").textContent = state.epoch + ":" + state.rev;
-    document.getElementById("runs").textContent = Object.keys(state.entities.runs).length;
-  }
-  function full(ev) { state = JSON.parse(ev.data); render(); }
-  var es;
-  function connect() {
-    es = new EventSource("/api/stream");
-    es.addEventListener("snapshot", full);
-    es.addEventListener("resync", full);
-    es.addEventListener("delta", delta);
-  }
-  function delta(ev) {
-    var d = JSON.parse(ev.data);
-    if (!state) { return; }
-    if (d.epoch === state.epoch && d.rev <= state.rev) { return; }  // duplicate
-    if (d.epoch !== state.epoch || d.base_rev !== state.rev) { es.close(); connect(); return; }  // gap: resync
-    Object.keys(d.upserts).forEach(function (c) { Object.assign(state.entities[c], d.upserts[c]); });
-    Object.keys(d.removes).forEach(function (c) { d.removes[c].forEach(function (id) { delete state.entities[c][id]; }); });
-    Object.keys(d.scalars).forEach(function (k) {
-      if (k === "freshness") { state.freshness = d.scalars[k]; } else { state.scalars[k] = d.scalars[k]; }
-    });
-    state.rev = d.rev;
-    render();
-  }
-  connect();
-})();
-</script>
+<div class="shell">
+  <header class="topbar">
+    <div class="brand"><span class="logo" aria-hidden="true"></span><span class="brand-name">Auto Office</span>
+      <span class="chip" id="fixture" data-testid="fixture-marker" hidden></span></div>
+    <div class="fresh" role="group" aria-label="Data freshness">
+      <span class="indicator" data-testid="office-indicator" data-state="loading">
+        <span class="glyph" aria-hidden="true"></span>Office
+        <span class="state" id="office" data-testid="office-freshness">connecting</span>
+        <span class="age" data-testid="office-age"></span></span>
+      <span class="indicator" data-testid="github-indicator" data-state="loading">
+        <span class="glyph" aria-hidden="true"></span>GitHub
+        <span class="state" data-testid="github-freshness">unknown</span>
+        <span class="age" data-testid="github-age"></span></span>
+      <span class="indicator stream" data-testid="stream-indicator" data-state="loading">
+        <span class="glyph" aria-hidden="true"></span><span class="state" data-testid="stream-state">connecting</span>
+        <span class="rev">rev <span data-testid="rev">-</span></span></span>
+    </div>
+  </header>
+  <nav class="product-rail" aria-label="Surfaces">
+    <button type="button" class="surface" data-surface="issues" aria-current="page"><span class="dot blue" aria-hidden="true"></span>Issues</button>
+    <button type="button" class="surface" data-surface="agents"><span class="dot green" aria-hidden="true"></span>Agents</button>
+    <button type="button" class="surface" data-surface="allocation"><span class="dot purple" aria-hidden="true"></span>Allocation</button>
+    <button type="button" class="surface" data-surface="settings"><span class="dot grey" aria-hidden="true"></span>Settings</button>
+  </nav>
+  <aside class="repo-rail" aria-label="Repositories">
+    <h2 class="rail-title">Repositories</h2>
+    <input type="search" class="field" id="repo-search" data-testid="repo-search" placeholder="Search repositories…" aria-label="Search repositories">
+    <div id="repo-list" class="repo-list" data-testid="repo-list" role="list"></div>
+  </aside>
+  <main class="canvas" id="canvas">
+    <div id="banners" class="banners" data-testid="banners" aria-live="polite"></div>
+    <section id="surface-issues" class="surface-view" data-testid="surface-issues">
+      <div class="canvas-head">
+        <div><h1>Issues</h1><p class="sub">What is waiting, running, reviewing, or ready to land.</p></div>
+        <div class="kpis" id="kpis"></div>
+      </div>
+      <div class="toolbar">
+        <input type="search" class="field" id="issue-search" data-testid="issue-search" placeholder="Search issues, numbers, runs…" aria-label="Search issues">
+        <span class="count" id="issue-count" data-testid="issue-count" aria-live="polite"></span>
+      </div>
+      <div class="work">
+        <div class="table-wrap">
+          <div class="table" id="issue-table" data-testid="issue-table" role="grid" aria-label="Issues" aria-rowcount="0">
+            <div class="thead" role="row" aria-rowindex="1"></div>
+            <div class="tbody" id="issue-body"></div>
+          </div>
+          <div class="empty" id="table-empty" data-testid="table-empty" hidden></div>
+        </div>
+        <aside class="inspector" id="inspector" data-testid="inspector" aria-label="Issue inspector" hidden></aside>
+      </div>
+      <section class="receipts" id="receipts" data-testid="receipts" aria-label="Commands"></section>
+    </section>
+    <section id="surface-other" class="surface-view placeholder" data-testid="surface-other" hidden></section>
+  </main>
+</div>
 </body>
 </html>
