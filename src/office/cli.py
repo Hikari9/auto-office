@@ -51,6 +51,8 @@ Auto Office {ver}
   office disposition <scope>:<F-id> fix|fixed|dismissed|follow-up -- "<note>"
                                     close a non-blocking (APPROVED) finding; fix routes it, no re-review
   office config [<key> [<value>]]   read or set preferences like git config (--list, --unset, --edit, --repo)
+  office queue list|add|pause|resume|priority|demote|auto
+                                    the machine-level scheduler queue (--run <id> [--task T] for a run)
   office setup                      interactive: choose preferred agents, models, and cost policy
   office doctor                     check the installation, hooks, and runtimes
   office upgrade [run] [--to X.Y]   move a run to a newer release line (dry run; --apply)
@@ -246,6 +248,15 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--path", action="store_true", help="print the config file path(s)")
     s.add_argument("--show-origin", dest="origin", action="store_true")
     s.add_argument("--force", action="store_true", help="set a key the shipped config does not define")
+    s = sp.add_parser("queue", parents=[common])
+    s.add_argument("action", choices=["list", "add", "pause", "resume", "priority", "demote", "auto"])
+    s.add_argument("target", nargs="?", help="queue item id, issue ref (add), priority (priority) or on|off|status (auto)")
+    s.add_argument("value", nargs="?", help="the new priority (priority)")
+    s.add_argument("--task", help="with --run: one task of the run")
+    s.add_argument("--title")
+    s.add_argument("--priority", choices=["urgent", "high", "normal", "low"])
+    s.add_argument("--reason")
+    s.add_argument("--command-id", dest="command_id", help="idempotency id; a repeat returns the first receipt")
     s = sp.add_parser("setup", parents=[common])
     s.add_argument("--user", dest="tier", action="store_const", const="user")
     s.add_argument("--repo", dest="tier", action="store_const", const="repo")
@@ -492,6 +503,13 @@ def _run(args, unknown) -> int:
         return emit(configcmd.config(key=args.key, value=args.value, tier=args.tier, unset=args.unset, list_=args.list_,
                                      all_=args.all_, edit=args.edit, path=args.path, origin=args.origin,
                                      force=args.force, cwd=cwd), args)
+    if cmd == "queue":
+        from office import queuecmd
+        con = _con()
+        try:
+            return emit(queuecmd.run_command(con, args), args)
+        finally:
+            con.close()
     if cmd == "setup":
         from office import configcmd
         return emit(configcmd.setup(tier=args.tier or "user", yes=args.yes, cwd=cwd), args)
