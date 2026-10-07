@@ -12,7 +12,7 @@ Settings. Start it with `office web serve` (foreground) or `office web start|sto
 ```text
 browser (static ES modules, no build step)
   store.js   SSE snapshot + deltas, resync on gap/epoch     app.js  shell, Issues, banners, receipts
-  agents.js / chat.js / routing.js / allocation.js / settings.js   one module per surface
+  agents.js / chat.js / routing.js / allocation.js / settings.js   one module per surface   scrollhint.js  sideways-scroll hint
         |  GET /api/stream (SSE)   POST /api/commands (token)   GET /api/settings, /api/activity
 local service (office.web, one process, loopback only)
   observer.py  read-only runs.db        projection.py  runs, tasks, agents, routes
@@ -201,7 +201,7 @@ Other reads:
 characters of `[A-Za-z0-9_.:-]`).
 
 1. Shape and kind are checked first. An unknown kind gets 400 `unknown-kind`. There is no merge, land, deploy, shell
-   or plan-approval kind. The target must match the kind's declared shape (see "Target validation"), otherwise 400
+   or plan-approval kind (see "Landing stays in `office land`"). The target must match the kind's declared shape (see "Target validation"), otherwise 400
    `bad-target`.
 2. While Office freshness is not `live`, every command is refused with 409 `office-stale`.
 3. A repeated `id` with the same request returns the first receipt with `replayed: true` (HTTP 200) and never
@@ -322,10 +322,37 @@ never edited.
 | `tests/web/test_api_commands.py`, `test_target_validation.py`, `test_launcher.py` | receipts, idempotency, per-kind target validation, orchestrator fallback |
 | `tests/web/test_readback.py` | web pause, priority, resume and settings writes read back through `commands`, `sched_items`, `events`, `office queue list --json` and `office config --list --show-origin` (real `office` CLI) |
 | `tests/web/browser/test_e2e.py` | the real `office web serve --fixture small` process in Chromium: every surface at 1440x900, 1920x1080 and 1100x800, repo switching, issue to run/PR drilldown, Start/Attach/Resume eligibility, pause, exact-target chat, duplicate and stale command refusal, GitHub revoked and rate limit, restart and resync, routing display, unavailable telemetry, the plan-approval command |
+| `tests/web/test_land_via_office.py` | the command catalog has no land, merge or deploy kind (HTTP 400, no receipt); a start with end state `merge` or `e2e` reaches `office start --end-state`, which records it in the frozen requirements; `office land` before acceptance is refused (`not-ready`) |
+| `tests/web/browser/test_layout.py` | DOM measurements at 1100x800, 1440x900 and 1920x1080: Issues headers never overlap, long titles and repositories end in an ellipsis with a `title`; the Allocation work cell never breaks mid-word and its Auto, Decision and Controls columns fit or scroll into view; the Agents graph's last column is visible or reachable; scroll positions survive a rebuild. Screenshots go to `$OFFICE_WEB_SHOTS` (default: the test's tmp directory) |
 | `tests/web/test_perf.py` | the budgets below on `--fixture large` |
 
 Run them with `uv run --frozen --extra test --extra visual pytest -q -m integration tests/web` (Chromium via
 Playwright, or an installed Chrome).
+
+### Wide tables and landing
+
+Layout rules the browser tests pin down:
+
+- Issues keeps its twelve columns in a horizontally scrolling table. Its minimum width is the sum of the column
+  tracks, so the last column never spills past its row. Header labels, issue titles, repositories and owners that do
+  not fit end in an ellipsis, and the full text is the element's `title`.
+- Allocation tables scroll inside their own container (never the surface or the page) below about 1300 px. Their
+  `Work` cell is a plain block: words wrap at spaces and never break mid-word.
+- The Agents graph shows its five role columns without scrolling from 1440 px; with the inspector open or on a
+  narrower window it scrolls sideways.
+- Native scrollbars are hidden or overlaid on many systems, so a table or graph that scrolls sideways shows a
+  hint ("More columns off-screen", with scroll left and right buttons) while columns are cut off, and no hint when
+  everything fits (`scrollhint.js`). A rebuild of a surface keeps the scroll position of regions marked
+  `data-scroll-key`.
+
+#### Landing stays in `office land`
+
+The browser starts runs and steers the scheduler; it never lands work. A start carries the operator's end state
+(`preview`, `merge`, `e2e` or `ask`): the launched orchestrator is told to run
+`office start --issue <url> --end-state <state>`, which freezes it in the run's requirements. Nothing in the web
+service merges, lands or deploys. Landing is `office land` and takes the normal gates, whatever the end state: with
+nothing accepted it is refused with `not-ready` ("nothing verified to land"), and an end state of `merge` or `e2e`
+does not change that.
 
 ### Performance
 

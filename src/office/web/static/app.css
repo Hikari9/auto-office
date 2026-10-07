@@ -100,12 +100,13 @@ h1 { margin: 0; font-size: 23px; font-weight: 780; }
 .table-wrap { position: relative; flex: 1; min-width: 0; display: flex; background: var(--panel);
   border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
 .table { flex: 1; overflow: auto; min-width: 0; }
-.thead, .tr { display: grid; min-width: 1640px;
-  grid-template-columns: 130px minmax(220px, 1fr) 110px 150px 130px 64px 160px 260px 96px 120px 96px 130px; }
+/* min-width is the sum of the fixed tracks plus the Issue minimum, so the last column never spills past its row. */
+.thead, .tr { display: grid; min-width: 1826px;
+  grid-template-columns: 150px minmax(240px, 1fr) 110px 150px 130px 84px 232px 260px 110px 120px 110px 130px; }
 .thead { position: sticky; top: 0; z-index: 2; height: 40px; background: var(--head); align-items: center;
   border-bottom: 1px solid var(--line); }
 .th { padding: 0 10px; font-size: 9px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: #828da0;
-  white-space: nowrap; }
+  white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .tbody { position: relative; }
 .tr { position: absolute; left: 0; right: 0; height: var(--row); align-items: center; border-bottom: 1px solid var(--line-2);
   cursor: pointer; }
@@ -113,7 +114,8 @@ h1 { margin: 0; font-size: 23px; font-weight: 780; }
 .tr[aria-selected=true] { background: var(--sel); box-shadow: inset 3px 0 0 var(--blue); }
 .tr:focus-visible { outline-offset: -2px; }
 .td { padding: 0 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-2); }
-.td.issue .t { color: #e9edf5; font-weight: 600; }
+.td.issue .t { color: #e9edf5; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.td.issue .s { overflow: hidden; text-overflow: ellipsis; }
 .td .s { font-size: 10px; color: #778398; }
 .muted { color: var(--muted); }
 .phase::before { content: "●"; margin-right: 5px; color: var(--grey); }
@@ -166,6 +168,12 @@ code.copy { display: block; padding: 6px 8px; background: #080a0e; border: 1px s
 .receipt[data-status=unknown]::before { content: "?"; color: var(--yellow); }
 .receipt[data-status=unknown] { border-color: #6b5a22; }
 .receipt[data-status=failed] { border-color: #6b2a2a; }
+
+/* Wide regions: a hint with scroll buttons shows only while columns are off-screen. */
+.scroll-hint { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; font-size: 11px; color: var(--muted); }
+.scroll-hint .msg::before { content: "⇆ "; color: var(--blue); }
+.scroll-hint .btn { min-width: 26px; }
+.scroll-hint .btn[aria-disabled=true] { opacity: .4; cursor: default; }
 
 @media (max-width: 1280px) { .kpi { width: 140px; } .inspector { width: 360px; } }
 @media (max-width: 900px) {

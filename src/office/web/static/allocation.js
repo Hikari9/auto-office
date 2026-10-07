@@ -2,6 +2,8 @@
 // service's scheduler projection; controls send commands and the view changes only when the
 // server's state does. No value is invented: unmeasured host and unknown quota say so.
 
+import { scrollHint } from "./scrollhint.js";
+
 export const PRIORITIES = ["urgent", "high", "normal", "low"];
 const GLOBAL = "alloc:global";
 const ROLE = { run: "Orchestrator", task: "Task", issue: "New run" };
@@ -130,13 +132,16 @@ const HEAD = ["#", "Work", "Repository", "Run", "Role", "Priority", "Score", "Ma
 
 function table(ctx, title, testid, entries, offset, empty) {
   const h = ctx.h;
+  if (!entries.length) {
+    return h("section", { class: "alloc-group", dataset: { testid }, "aria-label": title },
+      h("h2", { text: `${title} (0)` }), h("p", { class: "muted", text: empty }));
+  }
+  const scroller = h("div", { class: "atable", role: "table", "aria-label": title, dataset: { scrollKey: testid } },
+    h("div", { class: "arow head", role: "row" }, HEAD.map((c) => h("div", { class: "c", role: "columnheader", text: c }))),
+    entries.map((e, i) => row(ctx, e, offset + i)));
   return h("section", { class: "alloc-group", dataset: { testid }, "aria-label": title },
-    h("h2", { text: `${title} (${entries.length})` }),
-    entries.length
-      ? h("div", { class: "atable", role: "table", "aria-label": title },
-        h("div", { class: "arow head", role: "row" }, HEAD.map((c) => h("div", { class: "c", role: "columnheader", text: c }))),
-        entries.map((e, i) => row(ctx, e, offset + i)))
-      : h("p", { class: "muted", text: empty }));
+    h("div", { class: "alloc-head" }, h("h2", { text: `${title} (${entries.length})` }), scrollHint(h, scroller, "columns", testid)),
+    scroller);
 }
 
 function sample(ctx, name, s, pressure) {

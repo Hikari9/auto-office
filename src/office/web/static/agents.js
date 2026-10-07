@@ -6,6 +6,7 @@
 // unavailable: nothing is guessed and no missing metric is drawn as 0.
 import { chatComposer } from "./chat.js";
 import { routingView } from "./routing.js";
+import { scrollHint } from "./scrollhint.js";
 
 export const ROLE_COLUMNS = [
   ["orchestrators", "Orchestrators"], ["plan_reviewers", "Plan Reviewers"], ["executors", "Executors"],
@@ -132,6 +133,8 @@ function drawEdges(graph, run) {
     graph.prepend(svg);
   }
   const box = graph.getBoundingClientRect();
+  svg.setAttribute("width", 0); // measure the graph without the previous drawing inflating its scroll extent
+  svg.setAttribute("height", 0);
   svg.setAttribute("width", graph.scrollWidth);
   svg.setAttribute("height", graph.scrollHeight);
   const lines = [];
@@ -257,6 +260,15 @@ function inspector(ctx, n, state) {
   ];
 }
 
+// Redraw the edges when the graph is resized: they are sized to its scroll extent.
+let graphWatch = null;
+function watchGraph(graph, run) {
+  if (graphWatch) graphWatch.disconnect();
+  if (!graph || typeof ResizeObserver !== "function") return;
+  graphWatch = new ResizeObserver(() => drawEdges(graph, run));
+  graphWatch.observe(graph);
+}
+
 export function renderAgents(base, root) {
   const ctx = { ...base, selectedNode: () => (view.selected && base.store.state ? base.store.state.entities.agents[view.selected] : null) };
   const { h, store, keep } = ctx;
@@ -273,31 +285,36 @@ export function renderAgents(base, root) {
     s.value = value;
     return s;
   };
-  keep(root, () => [
-    h("div", { class: "canvas-head" },
-      h("div", {}, h("h1", { text: "Agents" }), h("p", { class: "sub", text: "Current work of open runs across this machine. Earlier attempts live in each run's history." }))),
-    h("div", { class: "toolbar" },
-      select("agents-repo", "Repository filter", view.repo, [["all", "All repositories"], ...repoOptions(state)],
-        (ev) => { view.repo = ev.target.value; ctx.rerender(); }),
-      select("agents-state", "Run state filter", view.runState, RUN_STATES, (ev) => {
-        view.runState = ev.target.value;
-        if (view.runState === "terminal") view.includeCompleted = true;
-        ctx.rerender();
-      }),
-      h("label", { class: "check" },
-        h("input", { type: "checkbox", checked: view.includeCompleted, dataset: { testid: "agents-include-completed", key: "agents-include-completed" },
-          onchange: (ev) => { view.includeCompleted = ev.target.checked; ctx.rerender(); } }),
-        " Include completed"),
-      h("span", { class: "count", dataset: { testid: "agents-count" }, text: `${total} agent${total === 1 ? "" : "s"}` })),
-    h("div", { class: "agents-work" },
-      h("div", { class: "graph", role: "group", "aria-label": "Agents graph", dataset: { testid: "agents-graph" }, onkeydown: moveFocus },
-        ...ROLE_COLUMNS.map(([c, label]) => h("div", { class: "role-col", role: "group", "aria-label": label, dataset: { testid: "role-column", column: c } },
-          h("h2", { class: "col-title", text: `${label} (${cols[c].length})` }),
-          ...(cols[c].length ? cols[c].map((n) => nodeCard(ctx, n, state)) : [h("p", { class: "muted empty-col", text: "None" })])))),
-      selected ? h("aside", { class: "agent-inspector", dataset: { testid: "agent-inspector", id: selected.id }, "aria-label": "Agent inspector",
-        onkeydown: (ev) => { if (ev.key === "Escape") { const id = view.selected; view.selected = null; ctx.rerender(); root.querySelector(`.node[data-id="${CSS.escape(id)}"]`)?.focus(); } } },
-      ...inspector(ctx, selected, state)) : null),
-  ]);
+  keep(root, () => {
+    const graph = h("div", { class: "graph", role: "group", "aria-label": "Agents graph", dataset: { testid: "agents-graph", scrollKey: "agents-graph" }, onkeydown: moveFocus },
+      ...ROLE_COLUMNS.map(([c, label]) => h("div", { class: "role-col", role: "group", "aria-label": label, dataset: { testid: "role-column", column: c } },
+        h("h2", { class: "col-title", text: `${label} (${cols[c].length})` }),
+        ...(cols[c].length ? cols[c].map((n) => nodeCard(ctx, n, state)) : [h("p", { class: "muted empty-col", text: "None" })]))));
+    return [
+      h("div", { class: "canvas-head" },
+        h("div", {}, h("h1", { text: "Agents" }), h("p", { class: "sub", text: "Current work of open runs across this machine. Earlier attempts live in each run's history." }))),
+      h("div", { class: "toolbar" },
+        select("agents-repo", "Repository filter", view.repo, [["all", "All repositories"], ...repoOptions(state)],
+          (ev) => { view.repo = ev.target.value; ctx.rerender(); }),
+        select("agents-state", "Run state filter", view.runState, RUN_STATES, (ev) => {
+          view.runState = ev.target.value;
+          if (view.runState === "terminal") view.includeCompleted = true;
+          ctx.rerender();
+        }),
+        h("label", { class: "check" },
+          h("input", { type: "checkbox", checked: view.includeCompleted, dataset: { testid: "agents-include-completed", key: "agents-include-completed" },
+            onchange: (ev) => { view.includeCompleted = ev.target.checked; ctx.rerender(); } }),
+          " Include completed"),
+        h("span", { class: "count", dataset: { testid: "agents-count" }, text: `${total} agent${total === 1 ? "" : "s"}` }),
+        scrollHint(h, graph, "role columns", "agents")),
+      h("div", { class: "agents-work" },
+        graph,
+        selected ? h("aside", { class: "agent-inspector", dataset: { testid: "agent-inspector", id: selected.id }, "aria-label": "Agent inspector",
+          onkeydown: (ev) => { if (ev.key === "Escape") { const id = view.selected; view.selected = null; ctx.rerender(); root.querySelector(`.node[data-id="${CSS.escape(id)}"]`)?.focus(); } } },
+        ...inspector(ctx, selected, state)) : null),
+    ];
+  });
   const graph = root.querySelector(".graph");
   requestAnimationFrame(() => drawEdges(graph, selected && selected.run));
+  watchGraph(graph, selected && selected.run);
 }
