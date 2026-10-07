@@ -462,6 +462,11 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                 return {"verdict": "ATTENTION", "parsed": None, "route": triple, "dispatch_id": dispatch_id,
                         "summary": attention, "producer_route": producer}
             d = state.get_dispatch(con, dispatch_id)
+        if parsed.valid and text and not (output.is_file() and output.stat().st_size):
+            # The reply came from the headless harness's stdout log (no reply
+            # file and no `-o` to write one, #399). Keep it as the reply file:
+            # later steps (an INTAKE_GAP's decision) re-read the evidence path.
+            output.write_text(text, encoding="utf-8")
         with db.transaction(con):
             state.record_evidence(con, run["id"], "review_output", output if output.is_file() else None,
                                   task_id=gate.get("task_id"), revision_id=gate.get("revision_id"), gate_id=gate["id"],
