@@ -1133,7 +1133,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         proc = subprocess.run(["herdr", "agent", "start", name, "--kind", herdr_kind, "--pane", pane, "--", *args],
                               capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.SubprocessError) as exc:
-        _launch_notice(run, dispatch, f"herdr agent start failed ({exc}); running headless instead")
+        _launch_notice(run, dispatch, _agent_start_failure(herdr_kind, pane, str(exc)))
         return None
     if proc.returncode != 0:
         why = (proc.stdout or proc.stderr or "").strip()[:200]
@@ -1143,7 +1143,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
             fresh = _herdr_fresh_pane(run, cwd, pane)
             if fresh:
                 return _herdr_agent_start(run, dispatch, spec, env, inter, fresh, cwd, ddir, retried=True, label=label)
-        _launch_notice(run, dispatch, f"herdr agent start failed ({why}); running headless instead")
+        _launch_notice(run, dispatch, _agent_start_failure(herdr_kind, pane, why))
         return None
     spec.update({"herdr_agent": name, "pane": pane})
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
@@ -1203,9 +1203,10 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
             _launch_notice(run, dispatch, f"brief pointer is typed but unsubmitted in herdr agent {name} (pane "
                                           f"{pane}); submit it: herdr pane send-keys {pane} Enter")
         else:
-            trust = _trust_dialog(view)
-            why = (" a folder-trust dialog holds the composer; answer it in the pane (1. Trust and continue) and"
-                   if trust else "")
+            screen = _startup_screen(view)
+            title = "folder-trust dialog" if screen == "Trust this folder" else f"'{screen}' screen"
+            why = (f" the {title} holds the composer; review or skip it in the pane and"
+                   if screen else "")
             _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
                                           f"re-prompt it: office prompt {dispatch['id']} -- {shlex.quote(pointer)}")
     spec["prompt_landed"] = landed
@@ -1385,6 +1386,32 @@ def _trust_dialog(text: str | None) -> bool:
     return any(m in low for m in TRUST_DIALOG_MARKERS)
 
 
+def _startup_screen(text: str | None) -> str | None:
+    low = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text or "").lower()
+    for marker, title in (("hooks need review", "Hooks need review"),
+                          ("trust this folder", "Trust this folder"),
+                          ("update available", "Update available")):
+        if marker in low:
+            return title
+    return None
+
+
+def _agent_start_failure(kind: str, pane: str, why: str) -> str:
+    """Inspect the failed startup's pane without accepting any trust prompt."""
+    screen = None
+    if kind == "codex":
+        try:
+            proc = subprocess.run(["herdr", "pane", "read", pane, "--source", "visible", "--lines", "40"],
+                                  capture_output=True, text=True, timeout=10)
+            if proc.returncode == 0:
+                screen = _startup_screen(proc.stdout)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    detail = (f"; Codex is waiting on '{screen}' in pane {pane}. Review or skip that screen in the pane "
+              "before the next Office launch" if screen else f"; inspect pane {pane}")
+    return f"herdr agent start failed ({why[:200]}){detail}; running headless instead"
+
+
 def _ctx_k(text: str | None) -> float | None:
     found = _CTX_RE.findall(text or "")
     return float(found[-1]) if found else None
@@ -1409,7 +1436,7 @@ def _agent_up(pane: str, name: str | None = None) -> bool:
 
 
 def _landed_in(text: str | None, baseline_ctx: float | None) -> bool:
-    if text is None or _trust_dialog(text):
+    if text is None or _startup_screen(text):
         return False
     if _pane_busy(text):
         return True
@@ -1427,7 +1454,7 @@ def _prompt_landed(name: str, timeout: float, *, baseline_ctx: float | None = No
     deadline = time.time() + timeout
     while True:
         text = _pane_view(name)
-        if _trust_dialog(text):
+        if _startup_screen(text):
             return "trust"
         if _landed_in(text, baseline_ctx):
             return "landed"
@@ -1447,6 +1474,8 @@ def _await_agent_ui(name: str, pane: str, timeout: float, *, answer_trust: bool,
     answered = False
     while True:
         text = _pane_view(name)
+        if _startup_screen(text) and not _trust_dialog(text):
+            return "trust"  # hook trust and updates always need a user decision
         if _trust_dialog(text):
             if not answer_trust or answered:
                 if time.time() >= deadline:
@@ -1669,7 +1698,7 @@ def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = 
     if got == "trust":
         # The dialog came up after the prompt was sent (a slow start): answer
         # it if Office may, then send the pointer again.
-        if not answer_trust:
+        if not answer_trust or not _trust_dialog(_pane_view(name)):
             return False
         herdr("pane", "send-keys", pane, "Enter")
         if _await_agent_ui(name, pane, timeout, answer_trust=False, herdr=herdr) != "ready":

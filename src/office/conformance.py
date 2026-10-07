@@ -105,9 +105,8 @@ def probe_vision(con, run: dict, cand: dict, adapter: dict) -> dict:
     out = ddir / "reply.txt"
     dispatch_mod.launch(run, d, "vision", ddir, cwd=ddir, wait=True, output=out, images=[image], include_dirs=[ddir])
     d = state.get_dispatch(con, dispatch_id)
-    text = out.read_text(errors="replace") if out.is_file() and out.stat().st_size else ""
-    if not text and d.get("log_path") and Path(d["log_path"]).is_file():
-        text = Path(d["log_path"]).read_text(errors="replace")
+    from office import gates
+    text = gates._reply_text(d, ddir, out)
     import re
     m = re.findall(r"PROBE\s+(\d{4})\s+(red|green|blue)", text, re.I)
     seen = m[-1] if m else None

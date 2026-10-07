@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import tomllib
 from pathlib import Path
 
 from office import adapters, config_repairs, db, frontdoor, install, legacy, paths, read_scope, runtime_default, state, version
@@ -135,6 +137,7 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
         res.lines.extend(lines)
         problems += count
     res.add("known gap: Codex tool.pre denial is unverified; Codex hooks stay warn-only and are not installed")
+    res.lines.extend(codex_hook_warnings(ident[0] if ident else None))
     res.add("known gap: compact_advisor.sh was never wired to PostCompact; 3.1 keeps state durable in runs.db instead")
     all_adapters = adapters.load_all()
     for aid, a in sorted(all_adapters.items()):
@@ -166,6 +169,50 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
     res.next = "office doctor --fix" if problems and not fix else None
     res.exit_code = 1 if problems else 0
     return res
+
+
+def codex_hook_warnings(cwd: Path | None = None) -> list[str]:
+    """Conservative preflight: hook hashes belong to Codex, not Office.
+
+    Presence of trust entries does not prove the current handlers are trusted:
+    moving a handler changes its positional key. Never approve or rewrite them.
+    """
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    cfg_path = home / "config.toml"
+    try:
+        cfg = tomllib.loads(cfg_path.read_text()) if cfg_path.is_file() else {}
+    except (OSError, ValueError):
+        return [f"codex: cannot read hook configuration in {cfg_path}; check Codex startup manually"]
+    if (cfg.get("features") or {}).get("hooks") is False:
+        return []
+    files = [home / "hooks.json"]
+    if cwd:
+        files.append(cwd / ".codex" / "hooks.json")
+    # Enabled plugins can contribute hooks even with no user hooks.json.
+    plugins = cfg.get("plugins") or {}
+    for key, settings in plugins.items():
+        if not isinstance(settings, dict) or settings.get("enabled") is not True:
+            continue
+        name, sep, market = key.partition("@")
+        if sep and all(part and part not in (".", "..") and "/" not in part for part in (name, market)):
+            files.extend((home / "plugins" / "cache" / market / name).glob("*/hooks/hooks.json"))
+    configured = []
+    for path in files:
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            configured.append(f"{path} (unreadable)")
+            continue
+        if isinstance(data, dict) and data.get("hooks"):
+            configured.append(str(path))
+    if not configured:
+        return []
+    return ["codex: hook trust UNVERIFIED for " + ", ".join(configured) +
+            "; new, changed or reordered hooks may block Herdr startup at 'Hooks need review'. "
+            "Office cannot validate Codex's trusted_hash values. Open Codex in the dispatch directory and "
+            "review or skip pending hooks before launching; office doctor --fix does not trust hooks"]
 
 
 def _probe_all(con) -> list[str]:
