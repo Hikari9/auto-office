@@ -360,6 +360,24 @@ def test_office_prompt_never_echoes_a_control_character_in_the_panes_cwd(light, 
     assert sent == ["hello"] and "\x1b" not in res.lines[0] and "\n" not in res.lines[0], res.lines
 
 
+def test_a_launch_mismatch_never_echoes_a_control_character_from_the_panes_cwd(light):
+    from office import dispatch
+    nasty = str(light.wt("D2")) + "/sub\n\x1b[2Jfake line"  # herdr reports a path inside another task's worktree
+    pane_state(light.state, "w1:p101", cwd=nasty)
+    why = dispatch._pane_mismatch(light.run, {"id": "D1", "task_id": "T1"}, "w1:p101", light.wt("D1"), check_cwd=True)
+    assert why and "belongs to dispatch D2 (T2)" in why and "fake line" in why, why
+    assert "\x1b" not in why and "\n" not in why, why
+
+
+def test_office_prompt_refusal_never_echoes_a_control_character_from_the_panes_cwd(light, monkeypatch):
+    from office import prompting
+    sent = _prompt_target(light, monkeypatch, "D1", "w1:p101", str(light.wt("D2")) + "/sub\n\x1b[2Jfake line")
+    with pytest.raises(prompting.Refused) as err:
+        prompting.prompt(light.con, light.run, "D1", "hello")
+    assert "belongs to T2" in err.value.message and "\x1b" not in err.value.message and "\n" not in err.value.message
+    assert not sent
+
+
 def test_office_prompt_still_prompts_a_pane_herdr_reports_no_cwd_for(light, monkeypatch):
     from office import prompting
     sent = _prompt_target(light, monkeypatch, "D1", "w1:p101", light.wt("D1"))
