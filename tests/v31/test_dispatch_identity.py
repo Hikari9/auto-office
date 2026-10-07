@@ -219,6 +219,41 @@ def test_a_failed_launch_releases_its_pane(light):
     assert dispatch._herdr_pane(light.run, light.wt("D2"), dispatch_id="D2") == pane
 
 
+def test_a_retried_launch_takes_back_its_own_reserved_pane(light):
+    # A launch that died after reserving its pane (job retried) is not blocked by its own reservation.
+    from office import dispatch, paths
+    pane_state(light.state, "w1:p101")
+    (paths.run_dir(light.run["id"]) / "herdr-tab.json").write_text(
+        json.dumps({"mode": "split", "anchor": "w1:pQ", "panes": ["w1:p101"], "reserved": {"w1:p101": "D1"}}))
+    assert dispatch._herdr_pane(light.run, light.wt("D1"), dispatch_id="D1") == "w1:p101"
+    assert dispatch._herdr_pane(light.run, light.wt("D2"), dispatch_id="D2") != "w1:p101"
+    assert light.layout()["reserved"]["w1:p101"] == "D1" and len(light.layout()["reserved"]) == 2
+
+
+def test_a_dispatch_holds_one_pane_at_a_time(light):
+    from office import dispatch
+    layout = {"reserved": {"w1:p101": "D1", "w1:p102": "D2"}}
+    dispatch._reserve(layout, "w1:p103", "D1")
+    assert layout["reserved"] == {"w1:p102": "D2", "w1:p103": "D1"}
+    dispatch._reserve(layout, "w1:p102", None)  # a caller naming no dispatch takes the pane over
+    assert layout["reserved"] == {"w1:p103": "D1"}
+
+
+def test_a_release_and_a_reservation_at_once_lose_neither_record(light):
+    from office import dispatch
+    held = dispatch._herdr_pane(light.run, light.wt("D1"), dispatch_id="D1")
+    _, other = together(lambda: dispatch._release_panes(light.run, "D1"),
+                        lambda: dispatch._herdr_pane(light.run, light.wt("D2"), dispatch_id="D2"))
+    layout = light.layout()
+    assert layout["reserved"] == {other: "D2"} and other in layout["panes"] and held in layout["panes"], layout
+
+
+def test_printable_collapses_control_characters_and_caps_length():
+    from office import dispatch
+    assert dispatch.printable("/wt/a\n\x1b[31mFAKE\tline") == "/wt/a [31mFAKE line"
+    assert len(dispatch.printable("/x" * 500)) == 200
+
+
 def _start_stubs(light, monkeypatch):
     """Stub the launch steps around the pane checks; collect the launch notices."""
     import types
@@ -303,6 +338,26 @@ def test_office_prompt_refuses_a_pane_in_another_tasks_worktree(light, monkeypat
         prompting.prompt(light.con, light.run, "D1", "hello")
     assert err.value.category == "pane-mismatch" and "T2" in err.value.message and "D2" in err.value.message
     assert not sent, "nothing is typed into the other task's pane"
+
+
+def test_office_prompt_refuses_a_pane_reserved_for_another_dispatch(light, monkeypatch):
+    from office import dispatch, paths, prompting
+    sent = _prompt_target(light, monkeypatch, "D1", "w1:p101", light.wt("D1"))
+    (paths.run_dir(light.run["id"]) / "herdr-tab.json").write_text(
+        json.dumps({"mode": "split", "anchor": "w1:pQ", "panes": ["w1:p101"], "reserved": {"w1:p101": "D2"}}))
+    with pytest.raises(prompting.Refused) as err:
+        prompting.prompt(light.con, light.run, "D1", "hello")
+    assert err.value.category == "pane-mismatch" and "reserved for dispatch D2" in err.value.message
+    assert not sent
+
+
+def test_office_prompt_never_echoes_a_control_character_in_the_panes_cwd(light, monkeypatch):
+    from office import prompting
+    nasty = light.wt("D1") / "sub\n\x1b[2Jfake line"
+    nasty.mkdir()
+    sent = _prompt_target(light, monkeypatch, "D1", "w1:p101", nasty)
+    res = prompting.prompt(light.con, light.run, "D1", "hello")
+    assert sent == ["hello"] and "\x1b" not in res.lines[0] and "\n" not in res.lines[0], res.lines
 
 
 def test_office_prompt_still_prompts_a_pane_herdr_reports_no_cwd_for(light, monkeypatch):
@@ -472,6 +527,8 @@ def test_two_tasks_dispatched_in_parallel_each_get_their_own_pane_and_brief(env,
     state = install_fake(env.bin, env.tmp, monkeypatch)
     run, ((d1, dir1), (d2, dir2)) = _two_dispatches(env, monkeypatch)
     r1, r2 = together(lambda: _launch(run, d1, dir1), lambda: _launch(run, d2, dir2))
+    starts = [c[c.index("--pane") + 1] for c in calls(state) if c[:2] == ["agent", "start"]]
+    assert len(starts) == len(set(starts)) == 2, starts  # no pane was started twice: no busy-pane retry rescued a shared one
     assert r1["launcher"] == r2["launcher"] == "herdr"
     assert r1["pane"] != r2["pane"], (r1, r2)
     assert r1["prompt_landed"] is True and r2["prompt_landed"] is True
@@ -509,6 +566,14 @@ def test_office_prompt_names_the_pane_cwd_and_task_and_refuses_another_tasks_pan
     con = env.con()
     con.execute("UPDATE dispatches SET pane_id=? WHERE id=?", (r2["pane"], d1["id"]))
     n = len([c for c in calls(state) if c[:2] == ["agent", "prompt"]])
+    code, out = env.office("prompt", "T1", "--", "hello again")
+    assert code != 0 and "reserved for dispatch " + d2["id"] in out, out
+    # A run laid out before reservations existed still has the cwd to go by.
+    from office import paths
+    tab = paths.run_dir(run["id"]) / "herdr-tab.json"
+    layout = json.loads(tab.read_text())
+    layout.pop("reserved")
+    tab.write_text(json.dumps(layout))
     code, out = env.office("prompt", "T1", "--", "hello again")
     assert code != 0 and "belongs to T2" in out and f"dispatch {d2['id']}" in out, out
     assert len([c for c in calls(state) if c[:2] == ["agent", "prompt"]]) == n

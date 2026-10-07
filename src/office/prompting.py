@@ -32,16 +32,21 @@ def _resolve(con, run: dict, target: str) -> dict:
 def _pane_identity(con, run: dict, d: dict, who: str, pane: str) -> str:
     """What herdr says the pane is in, and whose task that is. A pane in another task's
     worktree is refused: the text would brief the wrong agent."""
+    holder = dispatch._reserved_by(run, pane)
+    if holder and holder != d["id"]:
+        raise Refused("pane-mismatch", f"pane {pane} of {d['id']} ({who}) is reserved for dispatch {holder}; not prompting it",
+                      scope=who, next_step=f"herdr pane read {pane}; office status")
     cwd = (dispatch._herdr_json(["pane", "get", pane]).get("pane") or {}).get("cwd")
     if not cwd:
         return "cwd not reported by herdr"
     owner = dispatch.cwd_owner(con, run["id"], cwd)
     owner_task = owner and owner.get("task_id")
+    shown = dispatch.printable(cwd)
     if owner_task and owner_task != d.get("task_id"):
-        raise Refused("pane-mismatch", f"pane {pane} of {d['id']} ({who}) is in {cwd}, which belongs to {owner_task} "
+        raise Refused("pane-mismatch", f"pane {pane} of {d['id']} ({who}) is in {shown}, which belongs to {owner_task} "
                       f"(dispatch {owner['id']}); not prompting it", scope=who,
                       next_step=f"herdr pane read {pane}; office status")
-    return f"cwd {cwd}" + (f", task {owner_task}" if owner_task else ", no task of this run")
+    return f"cwd {shown}" + (f", task {owner_task}" if owner_task else ", no task of this run")
 
 
 def prompt(con, run: dict, target: str | None, text: str) -> Result:

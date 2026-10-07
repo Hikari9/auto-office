@@ -157,8 +157,7 @@ and refuses a pane whose cwd is another task's worktree. Office reserves each di
 checks it (reservation, then cwd) before typing the brief pointer; a `launch` notice naming two dispatches means the
 pane was not this one's, nothing was typed, and the pointer is yours to re-prompt. An amendment's nudge that lands marks
 it delivered; one that cannot reach the worker stays queued, and `office status` and `office inspect task` say why.
-Never use `herdr pane run` or
-`pane send-text` on an agent pane; Claude takes their Enter as part of the paste and leaves the text unsubmitted.
+Never use `herdr pane run` or `pane send-text` on an agent pane; Claude takes their Enter as part of the paste and leaves the text unsubmitted.
 To relaunch a dispatch by hand, `office revoke T1`, then `office dispatch T1 --external` (plus `--as`
 for another model); it prints the `herdr pane run`, `herdr agent start`, and `herdr agent prompt` commands
 to run. A prompt has landed when the agent reports `working` or its pane shows a running turn. agy

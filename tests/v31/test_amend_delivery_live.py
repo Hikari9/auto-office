@@ -57,6 +57,8 @@ def test_landed_notify_prompt_marks_the_delivery_delivered(env, monkeypatch):
     line = _task_lines(env)
     assert "delivered" in line and "prompt landed in pane p1" in line, line
     assert "delivered 0x" not in line and "carried 0x on the worker's own commands" in line, line
+    code, out = env.office("status", env=MANUAL)
+    assert "A1 delivered (prompt landed in pane p1)" in out, out
     # The worker's own next office command still carries the text and counts it.
     from office import amend
     con = env.con()
@@ -78,7 +80,7 @@ def test_headless_worker_stays_queued_with_a_recorded_reason(env, monkeypatch, l
 
 
 @pytest.mark.approved
-@pytest.mark.parametrize("landed, reason", [("held", "typed but unsubmitted in pane p1"),
+@pytest.mark.parametrize("landed, reason", [("held", "typed but unsubmitted in pane p1 when last checked"),
                                             ("sent", "no landed signal")])
 def test_prompt_that_did_not_land_stays_queued_with_why(env, monkeypatch, landed, reason):
     _amended_live_worker(env)

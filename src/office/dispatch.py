@@ -1126,6 +1126,12 @@ def cwd_owner(con, run_id: str, cwd: str) -> dict | None:
     return best[1] if best else None
 
 
+def printable(text: str) -> str:
+    """A herdr-reported path as one safe line for a notice or message (control characters and
+    newlines collapsed, length capped); comparisons use the raw path."""
+    return " ".join("".join(c if c.isprintable() else " " for c in text).split())[:200]
+
+
 def _who(dispatch_id: str, task_id: str | None = None) -> str:
     """`D1 (T1)`: a dispatch with its task, looked up when not given."""
     if task_id is None:
@@ -1167,7 +1173,7 @@ def _pane_mismatch(run: dict, dispatch: dict, pane: str, cwd: Path, *, check_cwd
     except Exception:
         pass
     other = f"dispatch {_who(owner['id'], owner['task_id'])}" if owner else "no dispatch worktree of this run"
-    return f"pane {pane} is in {actual}, which belongs to {other}, not {me}'s worktree {cwd}"
+    return f"pane {pane} is in {printable(actual)}, which belongs to {other}, not {me}'s worktree {cwd}"
 
 
 def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
@@ -1997,10 +2003,10 @@ def _reserved_by(run: dict, pane: str) -> str | None:
     return ((layout or {}).get("reserved") or {}).get(pane)
 
 
-def _reserved_busy(layout: dict) -> set:
-    """Reserved panes whose dispatch is still launching or running: a
-    launch reserves its pane well before the dispatch row records it."""
-    reserved = layout.get("reserved") or {}
+def _reserved_busy(layout: dict, dispatch_id: str | None = None) -> set:
+    """Reserved panes whose dispatch is still launching or running: a launch reserves its
+    pane well before the dispatch row records it. `dispatch_id`'s own reservation is not busy to it."""
+    reserved = {p: d for p, d in (layout.get("reserved") or {}).items() if d != dispatch_id}
     if not reserved:
         return set()
     con = db.connect()
@@ -2091,7 +2097,7 @@ def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None,
     layout = layout or {"mode": "split", "anchor": anchor, "panes": []}
     anchor = layout.get("anchor") or anchor
     live = [p for p in layout["panes"] if _herdr_json(["pane", "get", p])]  # the user may close panes
-    busy = _busy_panes(run) | _reserved_busy(layout)
+    busy = _busy_panes(run) | _reserved_busy(layout, dispatch_id)
     for pane in live:
         if pane not in busy and _pane_is_shell(pane):
             subprocess.run(["herdr", "pane", "run", pane, f"cd {shlex.quote(str(cwd))}"], capture_output=True, timeout=30)
@@ -2114,8 +2120,13 @@ def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None,
 
 
 def _reserve(layout: dict, pane: str, dispatch_id: str | None) -> None:
+    """Reserve `pane` for `dispatch_id`, which holds one pane at a time: an earlier launch attempt's
+    pane (a retried job, a busy-pane retry) is given up."""
     if dispatch_id:
-        layout.setdefault("reserved", {})[pane] = dispatch_id
+        reserved = layout.setdefault("reserved", {})
+        for held in [p for p, holder in reserved.items() if holder == dispatch_id]:
+            del reserved[held]
+        reserved[pane] = dispatch_id
     else:
         layout.get("reserved", {}).pop(pane, None)  # a caller naming no dispatch takes the pane over
 
@@ -2138,7 +2149,7 @@ def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None, 
         _reserve(tab, root, dispatch_id)
         atomic_write_json(tab_file, tab)
         return root
-    busy = _busy_panes(run) | _reserved_busy(tab)
+    busy = _busy_panes(run) | _reserved_busy(tab, dispatch_id)
     for pane in tab["panes"]:
         if pane not in busy and _pane_is_shell(pane):
             subprocess.run(["herdr", "pane", "run", pane, f"cd {shlex.quote(str(cwd))}"], capture_output=True, timeout=30)
@@ -2375,7 +2386,7 @@ def _set_dispatch(dispatch_id: str, **cols) -> None:
 
 def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str, dispatch_id: str | None = None) -> str | None:
     """A new pane split from one herdr refused as busy, recorded in the run's layout
-    and reserved for the dispatch in place of the busy one."""
+    and reserved for the dispatch in place of the busy one (`_reserve` gives that up)."""
     with _pane_lock(run) as tab_file:
         res = _herdr_json(["pane", "split", "--pane", busy_pane, "--direction", "down", "--cwd", str(cwd), "--no-focus"])
         pane = (res.get("pane") or {}).get("pane_id")
@@ -2384,8 +2395,6 @@ def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str, dispatch_id: str | N
         layout = _read_layout(tab_file)
         if layout is not None:
             layout.setdefault("panes", []).append(pane)
-            if dispatch_id and (layout.get("reserved") or {}).get(busy_pane) == dispatch_id:
-                del layout["reserved"][busy_pane]
             _reserve(layout, pane, dispatch_id)
             atomic_write_json(tab_file, layout)
     return pane
@@ -2848,7 +2857,7 @@ def job_notify_worker(con, run: dict, job: dict) -> dict:
             _amendment_undelivered(con, run, payload, d)
     pane = d["pane_id"]
     note(landed == "landed", f"prompt landed in pane {pane}" if landed == "landed" else
-         f"prompt typed but unsubmitted in pane {pane}" if landed == "held" else
+         f"prompt typed but unsubmitted in pane {pane} when last checked" if landed == "held" else
          f"prompt sent to pane {pane} but no landed signal")
     return {"sent": True, "landed": landed}
 
