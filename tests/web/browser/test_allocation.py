@@ -215,6 +215,11 @@ def test_keyboard_operable_and_usable_at_1100(page, served):
     errors = open_allocation(page, url, 1100, 800)
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     page.focus("[data-testid=alloc-auto-toggle]")
+    # At 1100 the table scrolls sideways: its two scroll buttons come next (the left one is inert at the start).
+    page.wait_for_selector("[data-testid=alloc-active-group] [data-testid=scroll-hint][data-more=right]")
+    for stop in ("scroll-left", "scroll-right"):
+        page.keyboard.press("Tab")
+        assert page.evaluate("document.activeElement.dataset.testid") == stop
     page.keyboard.press("Tab")
     focused = page.evaluate("document.activeElement.dataset.testid")
     assert focused == "alloc-priority"

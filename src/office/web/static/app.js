@@ -8,6 +8,7 @@ import { AUTHORIZATIONS, FILTERS, PLAN_APPROVAL_COMMAND, QUEUE_AUTHORIZATION, QU
 import * as allocationView from "./allocation.js";
 import * as settingsView from "./settings.js";
 import { renderAgents } from "./agents.js";
+import { scrollHint } from "./scrollhint.js";
 
 const ROW = 44;
 const OVERSCAN = 8;
@@ -46,15 +47,21 @@ function h(tag, attrs = {}, ...children) {
   return el;
 }
 
-// Rebuild `container` with `build()` while keeping its focused control, text selection and scroll.
+// Rebuild `container` with `build()` while keeping its focused control, text selection and scroll,
+// and the scroll of any inner scroller marked `data-scroll-key` (a wide table or graph).
 function keep(container, build) {
   const active = document.activeElement;
   const key = active && container.contains(active) ? active.dataset.key : null;
   let range = null;
   if (key && typeof active.selectionStart === "number") range = [active.selectionStart, active.selectionEnd];
   const scroll = container.scrollTop;
+  const inner = [...container.querySelectorAll("[data-scroll-key]")].map((el) => [el.dataset.scrollKey, el.scrollLeft, el.scrollTop]);
   container.replaceChildren(...[build()].flat(Infinity).filter((c) => c !== null && c !== undefined && c !== false));
   container.scrollTop = scroll;
+  for (const [name, left, top] of inner) {
+    const el = container.querySelector(`[data-scroll-key="${CSS.escape(name)}"]`);
+    if (el) { el.scrollLeft = left; el.scrollTop = top; }
+  }
   if (!key) return;
   const again = container.querySelector(`[data-key="${CSS.escape(key)}"]`);
   if (!again) return;
@@ -256,6 +263,7 @@ function cells(r, active) {
   const a = actions.primary;
   const prCount = r.prs.length;
   const td = (cls, ...c) => h("div", { class: `td ${cls}`, role: "gridcell" }, ...c);
+  const issueTitle = `#${r.number} ${r.title || "(not among GitHub's open issues)"}`;
   const by = Object.fromEntries(actions.list.map((x) => [x.kind, x]));
   const tab = active ? "0" : "-1";
   const stop = (ev) => ev.stopPropagation();
@@ -280,10 +288,10 @@ function cells(r, active) {
       ui.copied === r.id ? "Copied" : "Copy")] : h("span", { class: "muted", text: "no issue URL" });
   }
   return [
-    td("repo", h("span", { text: r.repoName })),
-    td("issue", h("div", { class: "t", text: `#${r.number} ${r.title || "(not among GitHub's open issues)"}` }),
+    td("repo", h("span", { title: r.repoName, text: r.repoName })),
+    td("issue", h("div", { class: "t", title: issueTitle, text: issueTitle }),
       h("div", { class: "s", text: r.provenance === "github" ? "GitHub issue" : "From Office record" })),
-    td(r.owner === "No owner" ? "muted" : "", r.owner),
+    td(r.owner === "No owner" ? "muted" : "", h("span", { title: r.owner, text: r.owner })),
     td("phasecell", h("span", { class: "phase", dataset: { tone: r.run ? r.liveness : "incoming" }, text: r.phase }),
       h("div", { class: "s", dataset: { testid: "phase-detail" }, title: r.phaseDetail, text: r.phaseDetail })),
     td("progress", pct === null ? h("span", { class: "muted", text: "—", title: "no task structure recorded" })
@@ -294,7 +302,7 @@ function cells(r, active) {
     td(r.run ? "links" : "links command", command),
     td("", { live: "Live run", resumable: "Resumable", terminal: "Closed run", none: "No run" }[r.liveness]
       + (r.queue ? ` · ${r.queue.decision}` : "")),
-    td(r.gates ? "" : "muted", r.gates || "—"),
+    td(r.gates ? "" : "muted", h("span", { title: r.gates || null, text: r.gates || "—" })),
     td(r.checks && r.checks !== "unavailable" ? "" : "muted", r.checks || "—"),
     td("act", h("button", { type: "button", class: `btn ${a.enabled ? "primary" : ""}`, tabindex: active ? "0" : "-1",
       disabled: !a.enabled, title: a.reason || a.label, "aria-label": `${a.label} #${r.number}${a.reason ? ` (unavailable: ${a.reason})` : ""}`,
@@ -644,7 +652,8 @@ function init() {
     marker.textContent = `FIXTURE MODE (${fixture})`;
     marker.hidden = false;
   }
-  $("issue-table").querySelector(".thead").replaceChildren(...COLUMNS.map((c) => h("div", { class: "th", role: "columnheader", text: c })));
+  $("issue-count").after(scrollHint(h, $("issue-table"), "columns", "issues"));
+  $("issue-table").querySelector(".thead").replaceChildren(...COLUMNS.map((c) => h("div", { class: "th", role: "columnheader", title: c, text: c })));
   for (const b of document.querySelectorAll(".surface")) b.addEventListener("click", () => { ui.surface = b.dataset.surface; renderSurfaces(); });
   $("issue-search").addEventListener("input", (ev) => { ui.query = ev.target.value; ui.cursor = null; renderTable(); });
   $("repo-search").addEventListener("input", (ev) => { ui.repoQuery = ev.target.value; renderRepos(); });
