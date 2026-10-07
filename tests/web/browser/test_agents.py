@@ -268,3 +268,19 @@ def test_desktop_widths_show_every_column_without_errors(page, served, size):
     for c in COLUMNS:
         assert page.locator(f"[data-testid=role-column][data-column={c}]").is_visible()
     assert errors == []
+
+
+def test_failed_route_change_is_shown_and_the_route_is_unchanged(page, served):
+    url, svc = served
+    open_agents(page, url)
+    a = _live_executor(svc)
+    page.route("**/api/commands", lambda route: route.fulfill(status=409, content_type="application/json",
+        body=json.dumps({"ok": False, "reason": "harness-mismatch", "message": "a route change keeps the harness"})))
+    inspect(page, a["id"])
+    page.select_option("[data-testid=route-effort]", "low" if a["effort"] != "low" else "max")
+    page.click("[data-testid=route-apply]")
+    page.wait_for_selector("[data-testid=route-failed]", timeout=5000)
+    assert "a route change keeps the harness" in page.text_content("[data-testid=route-failed]")
+    assert page.locator("[data-testid=route-pending-detail]").count() == 0
+    assert page.text_content("[data-testid=insp-effort]") == a["effort"]
+    assert page.is_enabled("[data-testid=route-apply]")

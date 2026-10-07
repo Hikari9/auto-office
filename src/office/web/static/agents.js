@@ -81,7 +81,8 @@ function nodeCard(ctx, n, state) {
   const { h } = ctx;
   const run = state.entities.runs[n.run] || {};
   const flags = evidence(n.state).filter(([, v]) => v !== "no" && v !== "unknown");
-  const pending = view.routePending.get(n.id);
+  const record = view.routePending.get(n.id);
+  const pending = record && !record.error ? record : null;
   const work = n.current_work || {};
   return h("button", { type: "button", class: `node ${n.column}`, "aria-pressed": view.selected === n.id ? "true" : "false",
     dataset: { testid: "agent-node", id: n.id, column: n.column, run: n.run, key: `node:${n.id}` },
@@ -167,7 +168,8 @@ function routeControl(ctx, n, state) {
   if (n.kind !== "dispatch" || !cap || !cap.allowed || s.process === "exited" || s.complete || s.stale) return null;
   const draft = view.routeDraft.get(n.id) || { model: n.model, effort: n.effort };
   view.routeDraft.set(n.id, draft);
-  const pending = view.routePending.get(n.id);
+  const record = view.routePending.get(n.id);
+  const pending = record && !record.error ? record : null;
   const target = `${n.harness}/${draft.model}@${draft.effort}`;
   const unchanged = draft.model === n.model && draft.effort === n.effort;
   const pick = (field, options, label) => {
@@ -183,7 +185,7 @@ function routeControl(ctx, n, state) {
     h("p", { class: "muted", text: `Harness stays ${n.harness}. The current model work restarts; run and worktree state are kept.` }),
     h("div", { class: "row" },
       h("span", { class: "fixed", dataset: { testid: "route-harness" }, text: n.harness }),
-      pick("model", knownModels(state, n.harness).includes(n.model) ? knownModels(state, n.harness) : [n.model, ...knownModels(state, n.harness)], "Model"),
+      pick("model", [...new Set([n.model, ...knownModels(state, n.harness)])].filter(Boolean), "Model"),
       pick("effort", efforts, "Effort"),
       h("button", { type: "button", class: "btn primary", dataset: { testid: "route-apply", key: `route-apply:${n.id}` },
         disabled: Boolean(pending) || unchanged, onclick: () => {
@@ -194,7 +196,9 @@ function routeControl(ctx, n, state) {
             { dispatch_id: rawDispatch(n.id), route: routeOf(n) }, `Route ${rawDispatch(n.id)}`, id);
         } }, "Apply")),
     pending ? h("p", { class: "pending", dataset: { testid: "route-pending-detail" },
-      text: `Pending: ${pending.route}. Shown as current once Office records it.${pending.error ? ` ${pending.error}` : ""}` }) : null);
+      text: `Pending: ${pending.route}. Shown as current once Office records it.` }) : null,
+    record && record.error ? h("p", { class: "why", dataset: { testid: "route-failed" },
+      text: `Route change to ${record.route} failed: ${record.error}` }) : null);
 }
 
 // A pending route change ends when the snapshot reports the new model and effort, or its command fails.
@@ -203,7 +207,7 @@ function settlePending(ctx, state) {
     const n = state.entities.agents[id];
     const r = ctx.receipt(p.id);
     if (!n || (n.model === p.model && n.effort === p.effort)) { view.routePending.delete(id); view.routeDraft.delete(id); }
-    else if (r.status === "failed") { view.routePending.delete(id); p.error = r.error; ctx.flash?.(r.error); }
+    else if (r.status === "failed" && !p.error) p.error = r.error || "refused";
   }
 }
 
