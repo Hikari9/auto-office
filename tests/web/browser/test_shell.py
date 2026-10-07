@@ -147,6 +147,7 @@ def test_focused_inspector_control_survives_a_delta(page, fx):
         select = page.locator("[data-testid=auth-start]")
         select.select_option("merge")
         select.focus()
+        page.dispatch_event("[data-testid=auth-start]", "pointerdown")  # the dropdown is open
         page.evaluate("window.__select = document.activeElement")
         rev = page.evaluate("window.officeStore.state.rev")
         set_github(url, fx, "synth-org-0/repo-00", "rate_limited")  # the inspected issue's own repository
@@ -245,15 +246,25 @@ def test_backoff_resets_once_a_stream_reopens(page, fx):
                 clearTimeout(s.timer);
                 s.connect();
                 made[made.length - 1].l.open();
+                s.delta({epoch: "e", rev: s.state.rev + 1, base_rev: s.state.rev, upserts: {}, removes: {}, scalars: {}});
                 seen.push(s.status);
             }
             made[made.length - 1].onerror(); seen.push(s.status); clearTimeout(s.timer); s.connect();
             made[made.length - 1].onerror(); seen.push(s.status); clearTimeout(s.timer); s.connect();
             made[made.length - 1].onerror(); seen.push(s.status); clearTimeout(s.timer);
+            // An unreadable frame backs off like a drop instead of reconnecting at once.
+            s.attempt = 0; s.connect();
+            const before = made.length;
+            made[made.length - 1].l.delta({type: "delta", data: "{not json"});
+            seen.push(s.status, made.length === before);
+            await new Promise((r) => setTimeout(r, 700));
+            seen.push(made.length === before + 1);
+            clearTimeout(s.timer);
             return seen;
         }""")
         assert out[:6] == ["reconnecting", "live"] * 3
-        assert out[6:] == ["reconnecting", "reconnecting", "disconnected"]
+        assert out[6:9] == ["reconnecting", "reconnecting", "disconnected"]
+        assert out[9:] == ["reconnecting", True, True]
 
 
 def test_stale_office_and_github_banners_and_reset_time(page, fx):

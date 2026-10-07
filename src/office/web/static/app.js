@@ -18,7 +18,7 @@ const fixture = meta("office-fixture");
 
 const ui = {
   surface: "issues", repo: null, repoQuery: "", query: "", selected: null, cursor: null,
-  drafts: new Map(), local: new Map(), copied: null,
+  drafts: new Map(), local: new Map(), copied: null, selectOpen: false,
 };
 let rows = [];
 let visible = [];
@@ -415,9 +415,8 @@ function renderInspector({ force = false } = {}) {
   const r = ui.selected && rows.find((x) => x.id === ui.selected);
   panel.hidden = !ui.selected;
   if (!ui.selected) return;
-  // An open native <select> closes when it is replaced: leave the panel alone until it loses focus.
-  if (!force && document.activeElement && document.activeElement.tagName === "SELECT" && panel.contains(document.activeElement)
-      && panel.dataset.issue === ui.selected) return;
+  // An open native <select> closes when it is replaced: leave the panel alone while one is open.
+  if (!force && ui.selectOpen && panel.dataset.issue === ui.selected) return;
   panel.dataset.issue = ui.selected;
   keep(panel, () => {
     if (!r) return [h("p", { class: "muted", text: "This issue is no longer listed." })];
@@ -486,7 +485,6 @@ async function send(kind, subject, target, payload, expect, label) {
     // No answer: the command may or may not have run. Never retried automatically.
     Object.assign(entry, { status: "unknown", error: "no answer from the service; check the result before sending again" });
   }
-  if (entry.status !== "pending" && entry.status !== "accepted" && entry.status !== "running") ui.local.set(id, entry);
   renderAll();
 }
 
@@ -519,11 +517,17 @@ function renderReceipts() {
     merged.set(l.id, sv ? { ...sv, label: l.label } : { ...l, accepted_at: l.at });
   }
   const list = [...merged.values()].sort((a, b) => String(b.accepted_at).localeCompare(String(a.accepted_at))).slice(0, 8);
-  const text = { pending: "pending", completed: "completed", failed: "failed", unknown: "result unknown, not retried" };
+  const text = { pending: "pending", completed: "completed", failed: "failed", unknown: "result unknown, not retried",
+    checked: "result unknown, checked" };
   $("receipts").replaceChildren(...(list.length ? [h("span", { class: "muted", text: "Commands" })] : []), ...list.map((c) => {
     const st = receiptState(c.status);
+    const local = ui.local.get(c.id);
+    const clear = st === "unknown" && local && local.status === "unknown" && !server[`command:${c.id}`]
+      ? h("button", { type: "button", class: "btn", dataset: { testid: "receipt-checked", key: `checked:${c.id}` },
+        "aria-label": `I checked ${c.label}; allow sending it again`,
+        onclick: () => { local.status = "checked"; renderAll(); } }, "Checked, allow resend") : null;
     return h("span", { class: "receipt", dataset: { status: st, testid: "receipt", id: c.id }, title: c.error || c.id },
-      `${c.label} · ${text[st] || st}`);
+      `${c.label} · ${text[st] || st}`, clear);
   }));
 }
 
@@ -560,7 +564,10 @@ function init() {
   $("issue-table").addEventListener("scroll", () => renderRows(), { passive: true });
   $("issue-table").addEventListener("keydown", onTableKey);
   $("inspector").addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeInspector(); });
-  $("inspector").addEventListener("focusout", (ev) => { if (ev.target.tagName === "SELECT") schedule(); }); // catch up
+  const closeSelect = (ev) => { if (ev.target.tagName === "SELECT" && ui.selectOpen) { ui.selectOpen = false; schedule(); } };
+  $("inspector").addEventListener("pointerdown", (ev) => { if (ev.target.tagName === "SELECT") ui.selectOpen = true; });
+  $("inspector").addEventListener("change", closeSelect);
+  $("inspector").addEventListener("focusout", closeSelect);
   window.addEventListener("resize", () => renderRows());
   store.subscribe(schedule);
   setInterval(() => { renderHeader(); renderBanners(); }, 1000);

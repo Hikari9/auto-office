@@ -51,25 +51,25 @@ export class Store {
     this.es = es;
     const parsed = (fn) => (ev) => {
       let data;
-      try { data = JSON.parse(ev.data); } catch { this.connect({ fresh: true }); return; }
+      try { data = JSON.parse(ev.data); } catch { this.fail(es, { fresh: true }); return; }
       fn(data, ev.type);
     };
     es.addEventListener("snapshot", parsed((d, type) => this.replace(d, type)));
     es.addEventListener("resync", parsed((d, type) => this.replace(d, type)));
     es.addEventListener("delta", parsed((d) => this.delta(d)));
-    es.addEventListener("open", () => {
-      this.attempt = 0; // a stream that came back resets the backoff
-      if (this.state) this.setStatus("live");
-    });
-    es.onerror = () => {
-      if (this.es !== es) return;
-      es.close();
-      this.es = null;
-      this.setStatus(this.attempt >= 2 ? "disconnected" : "reconnecting");
-      const wait = BACKOFF_MS[Math.min(this.attempt, BACKOFF_MS.length - 1)];
-      this.attempt += 1;
-      this.timer = setTimeout(() => this.connect(), wait);
-    };
+    es.addEventListener("open", () => { if (this.state) this.setStatus("live"); });
+    es.onerror = () => this.fail(es);
+  }
+
+  // A dropped or unreadable stream: back off, then reconnect (fresh when the data could not be trusted).
+  fail(es, { fresh = false } = {}) {
+    if (this.es !== es) return;
+    es.close();
+    this.es = null;
+    this.setStatus(this.attempt >= 2 ? "disconnected" : "reconnecting");
+    const wait = BACKOFF_MS[Math.min(this.attempt, BACKOFF_MS.length - 1)];
+    this.attempt += 1;
+    this.timer = setTimeout(() => this.connect({ fresh }), wait);
   }
 
   setStatus(status) {
@@ -94,6 +94,7 @@ export class Store {
     if (outcome === "duplicate") { this.stats.duplicates += 1; return outcome; }
     if (outcome === "resync") { this.stats.resyncs += 1; this.connect({ fresh: true }); return outcome; }
     this.stats.applied += 1;
+    this.attempt = 0; // data flows again: the backoff starts over
     this.status = "live";
     this.emit("delta");
     return outcome;

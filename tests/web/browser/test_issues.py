@@ -255,6 +255,9 @@ def test_unknown_result_is_shown_and_never_retried(page, served):
     time.sleep(3)  # longer than the first backoff steps; nothing re-sends it
     assert len(attempts) == 1
     assert page.locator("[data-testid=receipt][data-status=unknown] >> text=Start #3").count() == 1
+    page.click("[data-testid=receipt-checked]")  # the operator checked the result: sending again is allowed
+    assert page.is_enabled("[data-testid=action-start_issue]")
+    assert len(attempts) == 1
 
 
 def test_a_second_click_while_pending_sends_nothing(page, served):
