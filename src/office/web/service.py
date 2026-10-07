@@ -40,12 +40,77 @@ log = logging.getLogger("office.web")
 
 KINDS = ("start_issue", "queue_issue", "resume_run", "attach_run", "pause", "resume", "set_priority", "demote",
          "set_auto_mode", "change_route", "chat_send", "settings_set", "settings_unset")
+# What each command kind targets: the accepted target shapes, as ({required key: type}, {optional key: type}).
+# A target must match one shape exactly (no other keys); readiness of the thing it names is each kind's validator.
+_ISSUE = [({"repo": str, "issue": int}, {})]
+_RUN = [({"run_id": str}, {})]
+_SCHED_ITEM = [({"item": str}, {}), ({"run_id": str}, {"task_id": str})]
+TARGETS = {
+    "issue": _ISSUE,
+    "run": _RUN,
+    "scheduler_item": _SCHED_ITEM,
+    "scheduler_scope": [({}, {}), ({"run_id": str}, {})],
+    "dispatch": [({"run_id": str, "dispatch_id": str}, {})],
+    "orchestrator_session": [({"run_id": str, "session": str}, {"host": str})],
+    "settings_tier": [({"tier": str, "key": str}, {"repo": str, "run_id": str})],
+}
+KIND_TARGET = {
+    "start_issue": "issue", "queue_issue": "issue",
+    "resume_run": "run", "attach_run": "run",
+    "pause": "scheduler_item", "resume": "scheduler_item", "set_priority": "scheduler_item", "demote": "scheduler_item",
+    "set_auto_mode": "scheduler_scope", "change_route": "dispatch", "chat_send": "orchestrator_session",
+    "settings_set": "settings_tier", "settings_unset": "settings_tier",
+}
+
+
+def _typed(value: Any, want: type) -> bool:
+    if want is int:
+        return isinstance(value, int) and not isinstance(value, bool) and value > 0
+    return isinstance(value, str) and bool(value.strip()) and len(value) <= 512
+
+
+def check_target(kind: str, target: dict) -> None:
+    """Refuse a target that is not one of `kind`'s shapes (CommandRefused bad-target, HTTP 400)."""
+    what = KIND_TARGET[kind]
+    for required, optional in TARGETS[what]:
+        allowed = {**required, **optional}
+        if set(required) <= set(target) <= set(allowed) and all(_typed(target[k], allowed[k]) for k in target):
+            return
+    shapes = " or ".join("{" + ", ".join([*req, *(f"{k}?" for k in opt)]) + "}" for req, opt in TARGETS[what])
+    raise CommandRefused("bad-target", f"{kind} targets a {what.replace('_', ' ')}: target must be {shapes}", http=400)
+
+
 COLLECTIONS = ("repos", "issues", "prs", "runs", "tasks", "agents", "queue", "commands")
 COMMAND_ID = re.compile(r"[A-Za-z0-9_.:-]{8,128}")
 STALE_AFTER = 15.0
 RING = 512
 COMMANDS_SHOWN = 200
 LIVE, STALE, DISCONNECTED = "live", "stale", "disconnected"
+# Machine-level orchestrator launch events (fallbacks, held launches) are recorded under this events run id.
+MACHINE_EVENTS = "office-web"
+NOTICES_SHOWN = 20
+
+
+def orchestrator_route(conf: dict, quota: dict | None) -> dict:
+    """The harness an orchestrator launch uses under policy.
+
+    `scheduler.orchestrator_route` unless its quota is known to be at or below
+    the reserve; then the first `scheduler.orchestrator_fallbacks` harness whose
+    quota is known to be above it. Unknown quota never falls back. With no
+    allowed fallback, `harness` is None: the launch waits.
+    """
+    sched = conf.get("scheduler") or {}
+    primary = str(sched.get("orchestrator_route") or "claude")
+    reserve = float((conf.get("quota") or {}).get("reserve_percent", 5))
+    status = scheduler._quota(primary, quota, reserve)["status"]
+    if status != "exhausted":
+        return {"harness": primary, "fallback_from": None, "quota": status, "reason": None}
+    reason = f"{primary} quota is at or below the {reserve:g}% reserve"
+    for fb in sched.get("orchestrator_fallbacks") or []:
+        if fb and str(fb) != primary and scheduler._quota(str(fb), quota, reserve)["status"] == "ok":
+            return {"harness": str(fb), "fallback_from": primary, "quota": "ok", "reason": reason}
+    return {"harness": None, "fallback_from": primary, "quota": status,
+            "reason": f"{reason} and no allowed fallback (scheduler.orchestrator_fallbacks) has known quota"}
 
 
 class CommandRefused(Exception):
@@ -111,6 +176,7 @@ class Command:
         for k, v in parts.items():
             if not isinstance(v, dict):
                 raise CommandRefused("bad-request", f"{k} must be an object", http=400)
+        check_target(kind, parts["target"])
         return cls(cid, kind, parts["target"], parts["expect"], parts["payload"])
 
 
@@ -166,7 +232,7 @@ class Service:
                  host_probe: Callable[[], dict] = hostmetrics.host, observer_ctx: dict | None = None,
                  config: Callable[[], dict] | None = None, fixture: str | None = None,
                  clock: Callable[[], float] = time.time, stale_after: float = STALE_AFTER,
-                 queue_loop: bool = True):
+                 queue_loop: bool = True, quota_probe: Callable[[], dict] | None = None):
         self.db_path, self.state_home = Path(db_path), Path(state_home)
         self.launcher = launcher or launch_mod.FakeLauncher(reason="no launcher configured")
         self.executor = executor or Executor(env={"AUTO_OFFICE_RUNS_DB": str(self.db_path)})
@@ -175,6 +241,9 @@ class Service:
         self.checkouts = checkouts or (lambda full_name: None)
         self.readiness = readiness
         self.host_probe, self.observer_ctx = host_probe, dict(observer_ctx or {})
+        # {harness: {remaining_percent}}; a harness absent here is unknown. Fixture mode never probes.
+        self.quota_probe = quota_probe or (dict if fixture else lambda: _probe_quota(self.config()))
+        self.held: dict[str, str] = {}  # queue item -> why its launch waits (one event per reason)
         self.config = config or _effective_config
         self.fixture, self.clock, self.stale_after, self.queue_loop = fixture, clock, stale_after, queue_loop
         self.epoch = secrets.token_hex(6)
@@ -355,6 +424,9 @@ class Service:
         queue_rows, active, auto = self.observer.read(lambda s: _queue_rows(s, conf))
         host = self.host_probe()
         plan = scheduler.plan_admission(queue_rows, active, host, {}, conf, datetime.now(timezone.utc))
+        notices = self.observer.read(lambda s: s.rows(
+            "SELECT seq, kind, summary, payload_json, created_at FROM events WHERE run_id=? ORDER BY seq DESC LIMIT ?",
+            (MACHINE_EVENTS, NOTICES_SHOWN)) if s.has("events") else [])
         command_rows = self.observer.read(
             lambda s: s.table("commands", order=f"accepted_at DESC LIMIT {COMMANDS_SHOWN}") if s.has("commands") else [])
         gh = self.github.snapshot() if self.github else {"repos": [], "issues": [], "pulls": [], "github_checks": []}
@@ -414,6 +486,8 @@ class Service:
             "scheduler": {"active": plan["active"], "host": plan["host"], "auto_mode": auto},
             "fixture": self.fixture,
             "launcher": {"available": launcher_reason is None, "reason": launcher_reason},
+            "orchestrator_notices": [{"seq": n["seq"], "kind": n["kind"], "summary": n["summary"],
+                                      "at": n["created_at"], **_loads(n["payload_json"])} for n in notices],
             "schema": ws["schema"],
         }
         return ent, scalars
@@ -480,6 +554,11 @@ class Service:
             repo, number = _split_ref(e.get("ref"))
             if not repo:
                 continue
+            route = orchestrator_route(self.config(), self.quota_probe())
+            if route["harness"] is None:
+                self._hold(e["id"], route)  # stays queued; launched once quota or policy allows
+                continue
+            self.held.pop(e["id"], None)
             cmd = Command(cid, "start_issue", {"repo": repo, "issue": number},
                           {}, {"end_state": (self.config().get("intake") or {}).get("authorization") or "preview",
                                "title": e.get("title"), "new_run_confirmed": False, "origin": "queue"})
@@ -489,6 +568,36 @@ class Service:
             except CommandRefused as exc:
                 log.info("office web: queue item %s not admitted: %s", e["id"], exc.reason)
         return launched
+
+    def _hold(self, item: str, route: dict) -> None:
+        if self.held.get(item) == route["reason"]:
+            return
+        self.held[item] = route["reason"]
+        self._event("queue.orchestrator_held", f"queue: {item} waits: {route['reason']}",
+                    {"item": item, "from": route["fallback_from"], "reason": route["reason"]})
+
+    def _event(self, kind: str, summary: str, payload: dict) -> None:
+        from office import state
+        self.writer(lambda con: state.emit(con, {"id": MACHINE_EVENTS}, kind, summary, audience="operator",
+                                           payload=payload))
+
+    def _route_for_launch(self) -> dict:
+        route = orchestrator_route(self.config(), self.quota_probe())
+        if route["harness"] is None:
+            raise CommandRefused("orchestrator-quota-exhausted", route["reason"], data={"route": route})
+        why = self.launcher.unavailable(route["harness"])
+        if why:
+            raise CommandRefused("launcher-unavailable", why)
+        return route
+
+    def _launch(self, cmd: Command, route: dict, **kwargs) -> dict:
+        res = self.launcher.launch(harness=route["harness"], **kwargs)
+        if route["fallback_from"] and res.get("pane"):
+            self._event("queue.orchestrator_fallback",
+                        f"orchestrator for {cmd.id} launched on {route['harness']}: {route['reason']}",
+                        {"command": cmd.id, "harness": route["harness"], "from": route["fallback_from"],
+                         "reason": route["reason"]})
+        return {**res, "route": route}
 
     # ------------------------------------------------------------------ commands
 
@@ -632,11 +741,12 @@ class Service:
             raise CommandRefused("launcher-unavailable", why, data={"command": copy})
         checkout = self.checkouts(repo)
         self._expect(cmd, {"live_run": None, "resumable_run": resumable[0]["id"] if resumable else None})
+        route = self._route_for_launch()
 
         def go() -> Outcome:
             prompt = launch_mod.start_prompt(issue_ref=url, issue_title=cmd.payload.get("title"),
                                              end_state=end_state, receipt_id=cmd.id)
-            res = self.launcher.launch(cwd=checkout, prompt=prompt, label=cmd.id[-8:])
+            res = self._launch(cmd, route, cwd=checkout, prompt=prompt, label=cmd.id[-8:])
             return self._record_launch(cmd, res, issue=ref, repo=key, copy=copy)
         return go
 
@@ -648,6 +758,8 @@ class Service:
                                          "kind": cmd.kind}
                 self._save_launches()
         result = {"pane": res.get("pane"), "command": copy}
+        if res.get("route"):
+            result["orchestrator"] = {k: res["route"][k] for k in ("harness", "fallback_from", "reason")}
         if res.get("ok"):
             return Outcome("completed", result)
         return Outcome("unknown" if res.get("pane") else "failed", result, res.get("reason"))
@@ -678,11 +790,12 @@ class Service:
         checkout = self._checkout_of(run)
         if checkout is None:
             raise CommandRefused("repo-not-ready", "the run's checkout is not on this machine")
+        route = self._route_for_launch()
 
         def go() -> Outcome:
-            res = self.launcher.launch(cwd=checkout, prompt=launch_mod.resume_prompt(run_id=run["run_id"],
-                                                                                     receipt_id=cmd.id),
-                                       label=cmd.id[-8:])
+            res = self._launch(cmd, route, cwd=checkout, prompt=launch_mod.resume_prompt(run_id=run["run_id"],
+                                                                                         receipt_id=cmd.id),
+                               label=cmd.id[-8:])
             return self._record_launch(cmd, res, issue=None, repo=run["repo"]["key"],
                                        copy=f"office resume {run['run_id']}", run=run["run_id"])
         return go
@@ -847,6 +960,24 @@ class Service:
 
 
 # ------------------------------------------------------------------ helpers
+
+def _probe_quota(conf: dict) -> dict:
+    """Known quota of the orchestrator route and its fallbacks, from each adapter's quota probe."""
+    from office import adapters, candidates
+    sched = conf.get("scheduler") or {}
+    wanted = [sched.get("orchestrator_route") or "claude", *(sched.get("orchestrator_fallbacks") or [])]
+    try:
+        known = adapters.load_all()
+    except Exception:  # noqa: BLE001 - no adapters: every quota is unknown
+        return {}
+    out = {}
+    for harness in dict.fromkeys(str(h) for h in wanted if h):
+        if harness in known:
+            q = candidates.probe_quota(known[harness])
+            if q.get("status") == "ok" and q.get("tightest_remaining_percent") is not None:
+                out[harness] = {"remaining_percent": q["tightest_remaining_percent"]}
+    return out
+
 
 def _loads(raw) -> dict:
     try:
