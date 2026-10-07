@@ -60,6 +60,7 @@ def test_command_not_found_stops_the_dispatch_before_the_executor_starts(env):
     blocked = [e["summary"] for e in _rows(env, "SELECT summary FROM events WHERE kind='task.blocked'")]
     assert len(blocked) == 1 and "office-no-such-tool --install" in blocked[0] and "was not started" in blocked[0], blocked
     assert "start a new run" in reason  # worktree.setup is pinned to the run
+    assert "office rerun T1 --fresh" in reason and "setup.log" in reason and "office rerun T1 --fresh" in blocked[0], blocked
 
 
 def test_other_setup_failures_still_launch_with_the_notice(env):
@@ -199,7 +200,7 @@ def test_doctor_does_not_believe_a_missing_run_in_an_empty_db(env):
     con.commit()
     assert (env.repo / ".office" / "active" / live).exists()
     res = Result()
-    assert doctor._stale_active_pointers(res, env.repo, fix=True) == 1
+    assert doctor._stale_active_pointers(res, env.repo, fix=True) == 0  # unverifiable is not a problem
     assert (env.repo / ".office" / "active" / live).exists() and "left alone" in res.lines[0], res.lines
 
 
@@ -222,3 +223,43 @@ def test_session_start_keeps_a_legacy_run_and_fails_open_on_an_unreadable_db(env
     assert "3 active Office runs here" in out, out  # unverifiable: every pointer is kept
     (env.repo / ".office" / "active" / live).write_text("closed\tgoal\n")
     assert "2 active Office runs here" in _hook(env)  # a pointer that says closed is ignored without the db
+
+
+def test_a_stale_pointer_reaches_the_doctor_problem_count_and_next_step(env):
+    start_inline(env)
+    code, clean = env.ojson("doctor")
+    _pointer(env, GHOST)
+    code, dirty = env.ojson("doctor")
+    assert dirty["data"]["problems"] == clean["data"]["problems"] + 1, (clean["data"], dirty["data"])
+    assert dirty["next"] == "office doctor --fix"
+    code, fixed = env.ojson("doctor", "--fix")
+    assert not (env.repo / ".office" / "active" / GHOST).exists()
+    code, after = env.ojson("doctor")
+    assert after["data"]["problems"] == 0  # --fix also installs what the clean run flagged
+
+
+def test_session_start_says_nothing_when_runs_db_is_absent(env):
+    start_inline(env)
+    for p in (env.repo / ".office" / "sessions").glob("*.json"):
+        p.unlink()
+    assert "Active Office run" in _hook(env)
+    (env.data / "runs.db").rename(env.data / "elsewhere.db")  # another data home: no run is active here
+    assert _hook(env) == ""
+
+
+@pytest.mark.parametrize("name", ["a b", "a#b", "a?b", "a%41b"])
+def test_verifying_pointers_reads_the_right_db_whatever_the_path_holds(tmp_path, monkeypatch, name):
+    """The runs.db path goes into a sqlite URI: `?`, `#` and `%` must not truncate or decode it."""
+    import sqlite3
+    from office import hooks
+    home = tmp_path / name
+    home.mkdir()
+    db = home / "runs.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE runs(id TEXT, phase TEXT)")
+    con.execute("INSERT INTO runs VALUES('R1','executing'), ('R2','closed')")
+    con.commit()
+    con.close()
+    monkeypatch.setenv("AUTO_OFFICE_RUNS_DB", str(db))
+    assert hooks._verified([("R1", "executing"), ("R2", "executing"), ("R3", "executing")]) == [("R1", "executing")]
+    assert sorted(p.name for p in tmp_path.iterdir()) == [name]  # nothing created beside it

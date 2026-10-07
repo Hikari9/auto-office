@@ -103,7 +103,7 @@ def _active_runs(primary: Path, *, verify: bool = False) -> list[tuple[str, str]
 
 def _verified(pointers: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """The pointed-at runs runs.db still has as active (phase from the db). Stdlib only, read-only, a
-    short timeout: this runs in a hook. Anything unverifiable (no db, unreadable) keeps them all."""
+    short timeout: this runs in a hook. An unreadable db keeps them all."""
     if not pointers:
         return pointers
     try:
@@ -111,8 +111,8 @@ def _verified(pointers: list[tuple[str, str]]) -> list[tuple[str, str]]:
         from office import paths
         db_path = paths.runs_db()
         if not db_path.exists():
-            return pointers
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
+            return []  # no runs in this data home: nothing is active here
+        con = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
         try:
             marks = ",".join("?" * len(pointers))
             phases = dict(con.execute(f"SELECT id, phase FROM runs WHERE id IN ({marks})", [p[0] for p in pointers]))

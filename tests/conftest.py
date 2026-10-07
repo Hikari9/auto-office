@@ -57,7 +57,7 @@ def check_office_dir(root, before, nodeid: str) -> None:
     """Fail `nodeid` when `root/.office` is not as `before` (a snapshot) left it."""
     if office_dir_snapshot(root) != before:
         pytest.fail(f"{nodeid} {'created' if before is None else 'wrote'} the real repository's "
-                    f"{Path(root) / '.office'}; point it at a temporary repository (the `env` fixture) and a temporary "
+                    f"{Path(root) / '.office'} (or another process did while it ran: workers share it); point it at a temporary repository (the `env` fixture) and a temporary "
                     "OFFICE_STATE_HOME", pytrace=False)
 
 

@@ -266,3 +266,37 @@ def test_an_entry_whose_preconditions_the_plan_changed_can_be_declined(env):
     _set_envelope(env, [{**ENTRY, "preconditions": ["old precondition"]}])
     code, out = env.office("decline", "X1", "--reason", "preconditions changed", check=0)
     assert "dropped" in out and _envelope(env) == [], out
+
+
+# ---- events: the cursor never skips what was not shown
+
+@pytest.mark.approved
+def test_status_shows_urgent_events_first_and_never_skips_the_informational_ones_between(env):
+    """Urgent events beyond the 200-event window show too; the cursor must not jump over the
+    informational events between the window and them."""
+    _go(env)
+    _emit(env, "dispatch", "fyi first")
+    for n in range(199):  # the whole window is urgent: shown first, remembered by seq
+        _emit(env, "gate.attention", f"urgent {n}")
+    for n in range(100):
+        _emit(env, "dispatch", f"gap {n}")
+    _emit(env, "task.paused", "far urgent")
+    code, out = env.office("status", check=0)
+    assert out.splitlines()[1:7] and "· urgent 0" in out and "· gap 0" not in out, out
+    shown = out
+    for _ in range(80):
+        shown += env.office("status", check=0)[1]
+    missing = [n for n in range(100) if f"· gap {n}\n" not in shown]
+    assert not missing and "· far urgent\n" in shown and "· fyi first\n" in shown, missing[:5]
+
+
+@pytest.mark.approved
+def test_status_without_record_shows_events_but_leaves_them_unread(env):
+    from office import guide, state
+    _go(env)
+    _emit(env, "gate.attention", "urgent one")
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    res = guide.status(con, run, record=False)
+    assert "· urgent one" in res.lines
+    assert _wait(env)[0] == 0  # the orchestrator was not shown it: still news

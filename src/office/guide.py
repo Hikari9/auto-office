@@ -194,8 +194,8 @@ def _plan_next_convergence(con, run: dict, rs: dict) -> str | None:
 
 
 def status(con, run: dict, *, resumed: bool = False, verbose: bool = False, record: bool = True) -> Result:
-    """`record`: this output reaches the orchestrator whole, so the pending item counts as shown (the
-    session-start hook cuts it to a byte budget and passes False)."""
+    """`record`: this output reaches the orchestrator whole, so what it shows counts as shown: the pending
+    item, and the events it marks read (the session-start hook cuts it to a byte budget and passes False)."""
     worker = os.environ.get("OFFICE_DISPATCH_ID")
     if worker:
         return worker_status(con, run, worker)
@@ -237,7 +237,7 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False, reco
     from office import questions
     for q in questions.recorded(con, run):
         res.add(f"question: {q}")
-    for e in _show_events(con, run, limit=6):
+    for e in _show_events(con, run, limit=6, consume=record):
         res.add(f"· {e['summary']}")
     res.next = next_action(con, run)
     if record:
@@ -654,19 +654,22 @@ def _consume(con, run_id: str, unread: list[dict], consumed: set[int]) -> None:
             state.advance_cursor(con, run_id, _SEEN + str(seq), seq)
 
 
-def _show_events(con, run: dict, *, limit: int) -> list[dict]:
+def _show_events(con, run: dict, *, limit: int, consume: bool = True) -> list[dict]:
     """The unread orchestrator events to show now (failures and blockers first, `limit` in all), marked
-    read. What does not fit stays unread for the next command."""
+    read unless `consume` is off. What does not fit stays unread for the next command."""
     from office import db
-    unread = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=200)
-    seen = {e["seq"] for e in unread}
-    unread += [e for e in _unread_urgent(con, run["id"]) if e["seq"] not in seen]
-    unread.sort(key=lambda e: e["seq"])
+    window = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=200)
+    seen = {e["seq"] for e in window}
+    # Urgent events past the window show too, but never move the cursor over the events between.
+    unread = window + [e for e in _unread_urgent(con, run["id"]) if e["seq"] not in seen]
     held = _held_seqs(con, run["id"])
-    shown = _notice_batch([e for e in unread if e["seq"] not in held], limit=limit)
-    if shown:
+    shown = _notice_batch([e for e in sorted(unread, key=lambda e: e["seq"]) if e["seq"] not in held], limit=limit)
+    if shown and consume:
         with db.transaction(con):
-            _consume(con, run["id"], unread, held | {e["seq"] for e in shown})
+            _consume(con, run["id"], window, held | {e["seq"] for e in shown})
+            for e in shown:
+                if e["seq"] not in seen:
+                    state.advance_cursor(con, run["id"], _SEEN + str(e["seq"]), e["seq"])
             signals = [e["seq"] for e in shown if e["kind"] == state.SIGNAL_KIND]
             if signals:
                 state.advance_cursor(con, run["id"], state.SIGNAL_CONSUMER, max(signals))

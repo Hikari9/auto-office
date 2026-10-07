@@ -264,15 +264,16 @@ def _stale_active_pointers(res: Result, primary: Path, fix: bool) -> int:
         con.close()
     left = 0
     for pointer, why in stale:
-        removable = fix and (why != "run missing" or known)
-        if removable:
+        believed = why != "run missing" or known
+        if fix and believed:
             pointer.unlink(missing_ok=True)
-        else:
+            note = " - removed"
+        elif believed:
             left += 1
-        res.add(f"active run pointer {pointer.name[:8]}: stale ({why})"
-                + (" - removed" if removable else f" in {pointer.parent}; "
-                   + ("office doctor --fix removes it" if known or why != "run missing" else
-                      "runs.db holds no runs (another data home?), so it is left alone")))
+            note = f" in {pointer.parent}; office doctor --fix removes it"
+        else:
+            note = " (runs.db holds no runs: another data home? left alone)"
+        res.add(f"active run pointer {pointer.name[:8]}: stale ({why}){note}")
     return left
 
 
