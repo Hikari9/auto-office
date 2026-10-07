@@ -483,6 +483,11 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                 return {"verdict": "ATTENTION", "parsed": None, "route": triple, "dispatch_id": dispatch_id,
                         "summary": attention, "producer_route": producer}
             d = state.get_dispatch(con, dispatch_id)
+        if parsed.valid and text and not (output.is_file() and output.stat().st_size):
+            # The reply came from the headless harness's stdout log (no reply
+            # file and no `-o` to write one, #399). Keep it as the reply file:
+            # later steps (an INTAKE_GAP's decision) re-read the evidence path.
+            output.write_text(text, encoding="utf-8")
         with db.transaction(con):
             state.record_evidence(con, run["id"], "review_output", output if output.is_file() else None,
                                   task_id=gate.get("task_id"), revision_id=gate.get("revision_id"), gate_id=gate["id"],
@@ -572,6 +577,7 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
     name = dispatch_mod.herdr_agent_name(d["id"])
     errors = parsed.errors or ["no reply file"]
     text = ""
+    sent = 0
     if d.get("launcher") in ("sync", "process", "process-fallback"):
         log = Path(d.get("log_path") or ddir / "output.log")
         return text, parsed, (f"reviewer {d['id']} ({d.get('triple')}) left no valid reply file: "
@@ -587,6 +593,7 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
                   f"in the format the brief requires (a VERDICT line first), to {output}. {REPLY_FILE_RULE}")
         # Left unsubmitted in the composer, it gets Enter, never a second copy.
         got = dispatch_mod.submit_prompt(name, prompt, pane=d.get("pane_id"))
+        sent += 1
         unsent = " (typed but unsubmitted)" if got == "held" else ""
         with db.transaction(con):
             state.emit(con, run, "review.reprompt", f"{d.get('task_id') or 'plan'} {d['role']} {d['id']}: re-prompted "
@@ -602,9 +609,21 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
         if parsed.valid:
             return text, parsed, None
         errors = parsed.errors or ["no reply file"]
-    reason = (f"reviewer {d['id']} ({d.get('triple')}) left no valid reply file after re-prompting: "
-              f"{'; '.join(errors[:3])}; its pane is kept. Re-prompt it (office prompt {d['id']} -- \"<message>\") "
-              "or waive the gate")
+    if d.get("launcher") != "herdr":
+        reason = (f"reviewer {d['id']} ({d.get('triple')}) left no valid reply file in headless "
+                  f"{d.get('launcher') or 'process'} mode: {'; '.join(errors[:3])}; no live reviewer pane exists, "
+                  f"so Office could not re-prompt it. Inspect {ddir / 'output.log'} and {output}; then use "
+                  "`office resume` or the status-directed reroute/recovery instead of abandoning the run")
+    elif not sent:
+        # A herdr reviewer whose session had already ended: nothing was re-prompted.
+        reason = (f"reviewer {d['id']} ({d.get('triple')}) left no valid reply file and its herdr session ended "
+                  f"before Office could re-prompt it: {'; '.join(errors[:3])}. Inspect its dispatch dir {ddir} "
+                  f"and {output}; then use `office resume` or the status-directed reroute/recovery instead of "
+                  "abandoning the run")
+    else:
+        reason = (f"reviewer {d['id']} ({d.get('triple')}) left no valid reply file after re-prompting: "
+                  f"{'; '.join(errors[:3])}; its pane is kept. Re-prompt it (office prompt {d['id']} -- \"<message>\") "
+                  "or waive the gate")
     return text, parsed, reason
 
 

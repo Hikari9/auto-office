@@ -68,6 +68,14 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 - Dispatch as the approved diagram shows: a wave's roots with `office dispatch T1 T2 --parallel`,
   dependents stacked (`office dispatch T1 T3`). Dispatch runs each task's planned primary route or names the
   fallback it took and why; when every planned route is out, it stops: `office dispatch <task> --reroute`.
+- A dispatch failure is a recovery checkpoint, not permission to abandon the Office run. Inspect the launch
+  notice and `office inspect task <T> --verbose`; when Office names a failed Herdr pane, read it yourself with
+  `herdr pane read <pane>` (and use the saved `pane-tail.txt`) to identify a startup dialog, dead harness, quota,
+  or other runtime blocker. Resolve only safe implementation/runtime details inside your authority; never approve
+  trust, credentials, irreversible actions, or user authority on the user's behalf. Then keep Office moving via
+  the printed `next:` step: re-prompt a live pane, `office resume`, `office rerun <task> --resume|--fresh`,
+  `office dispatch <task> --reroute`, or the documented external/manual launch. Stop or abandon only when those
+  recovery paths are exhausted or a genuine user decision is required.
 - Check suites share a host-wide cap (`verification.check_concurrency`). A quota wall blocks the worker
   without a relaunch; rerun after the reset or with `--as`.
 - To wait on the run, use `office wait`: exit 0 means act, 3 means a stall to resolve, 5 means an agent
@@ -150,7 +158,9 @@ Inside Herdr, Office starts each dispatch as a real interactive agent in a pane 
 confirms the brief pointer landed. A pane closes itself once its result is accepted, after saving
 `pane-final.txt` in the dispatch dir; a failed end keeps it open. `office dismiss <T2|dispatch|--all>`
 closes kept panes, and `OFFICE_KEEP_PANES=1` on `office dispatch` keeps them for debugging. A `launch` notice in `office status` means it could not: the
-pane agent never started (the dispatch ran headless) or the prompt never landed (re-prompt it).
+pane agent never started (the dispatch ran headless) or the prompt never landed (re-prompt it). When startup
+fails before Herdr registers an agent, Office keeps the pane, snapshots its last screen, names recognized startup
+interstitials, and prints the pane id so you can inspect the actual blocker before choosing the next recovery.
 Office presses Enter for a prompt left typed but unsubmitted; a notice saying it is still unsubmitted
 means `herdr pane send-keys <pane> Enter`, not a re-prompt, which would send it twice. To message a live worker or
 reviewer yourself (an amendment nudge, a missing detail), run `office prompt <T2|dispatch> -- "<message>"`: it sends

@@ -40,6 +40,16 @@ IDENTITY_ENV = ("OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE
                 "OFFICE_SESSION", "OFFICE_HARNESS", "OFFICE_VERSION", "OFFICE_FRONT_DOOR_HOPS")
 PLANNER_TASK = "P1"
 
+# Startup screens that can make `herdr agent start` time out before Herdr has
+# registered an agent. These are diagnostic only: Office never answers a trust
+# or authority prompt on the orchestrator's behalf (#399).
+_STARTUP_SCREEN_MARKERS = (
+    ("hooks need review", "Codex 'Hooks need review'"),
+    ("trust this folder", "folder-trust"),
+    ("allow external claude.md file imports", "Claude external-import approval"),
+    ("update available", "update prompt"),
+)
+
 
 # ------------------------------------------------------------------ planner task
 
@@ -1113,6 +1123,39 @@ def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = Tru
     return env_file
 
 
+def _startup_screen(text: str | None) -> str | None:
+    low = (text or "").lower()
+    return next((label for marker, label in _STARTUP_SCREEN_MARKERS if marker in low), None)
+
+
+def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pane: str,
+                           failure: str, why: str) -> None:
+    """Preserve failed-pane evidence and hand recovery back to the orchestrator.
+
+    The automatic workaround remains the existing headless fallback. The pane
+    is kept so the orchestrator can inspect the actual blocker and choose a
+    safe next route instead of abandoning the Office run (#399).
+    """
+    # No agent is registered, so read the pane itself. Only the last screen
+    # counts: older scrollback may mention any of the markers.
+    view = "\n".join(_pane_read(pane).splitlines()[-40:]) or None
+    tail = ddir / "pane-tail.txt"
+    screen = _startup_screen(view)
+    if view:
+        tail.write_text(view + "\n", encoding="utf-8")
+    spec["failed_herdr_pane"] = pane
+    spec["failed_herdr_snapshot"] = str(tail) if view else None
+    spec["failed_herdr_screen"] = screen
+    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    observed = (f"; pane {pane} is waiting on {screen}" if screen
+                else f"; pane {pane} snapshot saved to {tail}" if view
+                else f"; pane {pane} could not be read")
+    recovery = (f"orchestrator recovery: inspect it with `herdr pane read {pane}`; do not auto-approve trust, "
+                "credentials, or user-authority prompts; resolve a safe runtime blocker or choose another route, "
+                "then follow `office status` / `office resume` instead of abandoning the run")
+    _launch_notice(run, dispatch, f"{failure} ({why}){observed}; running headless instead. {recovery}")
+
+
 def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
                        cwd: Path, ddir: Path, *, retried: bool = False, label: str | None = None) -> dict | None:
     """Start the real harness in the pane with `herdr agent start`, hand it a
@@ -1126,14 +1169,14 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     env_file = write_agent_env(run, dispatch, ddir, worker=worker)
     setup = f". {shlex.quote(str(env_file))} && cd {shlex.quote(str(cwd))}"
     if not _shell_run(pane, setup, ddir / "shell-ready"):
-        _launch_notice(run, dispatch, f"the shell in pane {pane} never ran Office's setup line (env and cd) within "
-                                      f"{_shell_timeout():g}s; running headless instead")
+        _herdr_fallback_notice(run, dispatch, spec, ddir, pane, f"the shell in pane {pane} never ran Office's setup "
+                               "line (env and cd)", f"within {_shell_timeout():g}s")
         return None
     try:
         proc = subprocess.run(["herdr", "agent", "start", name, "--kind", herdr_kind, "--pane", pane, "--", *args],
                               capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.SubprocessError) as exc:
-        _launch_notice(run, dispatch, _agent_start_failure(herdr_kind, pane, str(exc)))
+        _herdr_fallback_notice(run, dispatch, spec, ddir, pane, "herdr agent start failed", str(exc))
         return None
     if proc.returncode != 0:
         why = (proc.stdout or proc.stderr or "").strip()[:200]
@@ -1143,7 +1186,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
             fresh = _herdr_fresh_pane(run, cwd, pane)
             if fresh:
                 return _herdr_agent_start(run, dispatch, spec, env, inter, fresh, cwd, ddir, retried=True, label=label)
-        _launch_notice(run, dispatch, _agent_start_failure(herdr_kind, pane, why))
+        _herdr_fallback_notice(run, dispatch, spec, ddir, pane, "herdr agent start failed", why)
         return None
     spec.update({"herdr_agent": name, "pane": pane})
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
@@ -1394,22 +1437,6 @@ def _startup_screen(text: str | None) -> str | None:
         if marker in low:
             return title
     return None
-
-
-def _agent_start_failure(kind: str, pane: str, why: str) -> str:
-    """Inspect the failed startup's pane without accepting any trust prompt."""
-    screen = None
-    if kind == "codex":
-        try:
-            proc = subprocess.run(["herdr", "pane", "read", pane, "--source", "visible", "--lines", "40"],
-                                  capture_output=True, text=True, timeout=10)
-            if proc.returncode == 0:
-                screen = _startup_screen(proc.stdout)
-        except (OSError, subprocess.SubprocessError):
-            pass
-    detail = (f"; Codex is waiting on '{screen}' in pane {pane}. Review or skip that screen in the pane "
-              "before the next Office launch" if screen else f"; inspect pane {pane}")
-    return f"herdr agent start failed ({why[:200]}){detail}; running headless instead"
 
 
 def _ctx_k(text: str | None) -> float | None:
@@ -1941,10 +1968,22 @@ def relabel_task_panes(run: dict, task_id: str) -> None:
 def _busy_panes(run: dict) -> set:
     con = db.connect()
     try:
-        return {r["pane_id"] for r in con.execute("SELECT pane_id FROM dispatches WHERE run_id=? AND launcher='herdr' "
+        busy = {r["pane_id"] for r in con.execute("SELECT pane_id FROM dispatches WHERE run_id=? AND launcher='herdr' "
                                                   "AND status IN ('launching','running')", (run["id"],)).fetchall()}
     finally:
         con.close()
+    # A failed startup can leave the harness TUI alive in a pane even though
+    # Herdr never registered an agent. Each dispatch records that pane in its
+    # own launch.json; derive reservations from those per-dispatch records so
+    # parallel failures cannot race on shared layout state (#399).
+    for launch_file in (paths.run_dir(run["id"]) / "dispatches").glob("*/launch.json"):
+        try:
+            failed = json.loads(launch_file.read_text()).get("failed_herdr_pane")
+        except (OSError, ValueError):
+            failed = None
+        if failed:
+            busy.add(failed)
+    return busy
 
 
 def _pane_is_shell(pane: str) -> bool:
@@ -2256,6 +2295,16 @@ def _pane_exists(pane: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return True
     return "pane_not_found" not in (proc.stdout or "") + (proc.stderr or "")
+
+
+def _pane_read(pane: str) -> str:
+    """The pane's recent text, or "" when herdr cannot read it."""
+    try:
+        proc = subprocess.run(["herdr", "pane", "read", pane, "--source", "recent-unwrapped", "--lines", "5000"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout if proc.returncode == 0 else ""
 
 
 def _pane_snapshot(name: str, pane: str) -> str:
