@@ -23,7 +23,7 @@ from office import paths
 # Bump when SHARED_COLUMNS or the DDL changes. The version is a record, not the
 # gate: every open also runs the additive column pass (see `migrate`), so a
 # column added without a bump still reaches existing databases.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -97,6 +97,10 @@ SHARED_COLUMNS = {
     "leases": [
         "task_id TEXT", "fencing INTEGER", "pid INTEGER", "dispatch_id TEXT", "renewed_at TEXT",
     ],
+    # v7 (#403, #404): the fencing token of the attempt that owns a claimed job.
+    # Every claim writes a new one; a requeue clears it. A row claimed by an
+    # older runtime has none and keeps that runtime's pid liveness rule.
+    "outbox": ["claim_token TEXT"],
 }
 
 OFFICE_DDL = """
@@ -239,12 +243,56 @@ def transaction(con: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     else:  # pragma: no cover - only under pathological contention
         raise sqlite3.OperationalError("runs.db stayed locked")
     try:
+        _check_fence(con)
         yield con
     except BaseException:
         con.execute("ROLLBACK")
         raise
     else:
         con.execute("COMMIT")
+
+
+class StaleAttempt(Exception):
+    """A job attempt lost ownership of its job (it was reclaimed, retried or
+    revoked): nothing it computed may be written (#403)."""
+
+
+# The (job id, claim token) of the job attempt this process is running, innermost
+# last (inline mode nests jobs). While one is set, every transaction on any
+# connection first proves, under the write lock, that the attempt still owns its
+# claim, so an attempt that lost it can never commit a verdict, finding, task
+# status or job result, however late it finishes.
+_FENCES: list[tuple[str, str]] = []
+
+
+@contextmanager
+def fenced(job_id: str, token: str) -> Iterator[None]:
+    _FENCES.append((job_id, token))
+    try:
+        yield
+    finally:
+        _FENCES.remove((job_id, token))
+
+
+@contextmanager
+def unfenced() -> Iterator[None]:
+    """Audit writes a stale attempt may still make (its own rejection)."""
+    saved = _FENCES[:]
+    _FENCES.clear()
+    try:
+        yield
+    finally:
+        _FENCES[:] = saved
+
+
+def _check_fence(con: sqlite3.Connection) -> None:
+    if not _FENCES:
+        return
+    job_id, token = _FENCES[-1]
+    row = con.execute("SELECT status, claim_token FROM outbox WHERE id=?", (job_id,)).fetchone()
+    if row is None or row[0] != "claimed" or row[1] != token:
+        held = f"{row[0]}, claim {row[1] or 'none'}" if row is not None else "gone"
+        raise StaleAttempt(f"job {job_id} attempt {token} no longer owns its claim ({held})")
 
 
 def row_dict(row: sqlite3.Row | None) -> dict | None:

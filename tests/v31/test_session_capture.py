@@ -103,7 +103,7 @@ def test_seed_adapters_declare_how_each_harness_yields_a_session_id():
     seeds = adapters.load_all()
     claude, codex, agy = (adapters.session_spec(seeds[h]) for h in ("claude", "codex", "agy"))
     assert claude["id"] == "assigned" and claude["assign_arg"] == ["--session-id", "{session_id}"]
-    assert codex["id"] == "detected" and set(codex["sources"]) == {"hook", "herdr", "output"}
+    assert codex["id"] == "detected" and set(codex["sources"]) == {"hook", "herdr", "output", "transcript"}
     assert adapters.session_output_pattern(seeds["codex"]).match("session id: 019ff3a4-fbe0-73c0-bf5f-727665d09f20")
     assert adapters.session_output_pattern(seeds["claude"]) is None and adapters.session_output_pattern(seeds["agy"]) is None
     assert agy["id"] == "none"

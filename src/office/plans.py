@@ -476,10 +476,13 @@ def job_plan_review(con, run: dict, job: dict) -> dict:
 
 def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
     """Record a plan-review result. Caller holds the tx."""
+    from office import gates as gate_engine
+    gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gate_id,)).fetchone())
+    if gate_engine._already_decided(con, run, gate, outcome):
+        return  # one round, one result (#403)
     if contract.is_convergence(run):
         _ingest_convergence(con, run, gate_id, outcome)
         return
-    gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gate_id,)).fetchone())
     verdict = outcome["verdict"]
     con.execute("UPDATE gates SET status='done', verdict=?, route=?, finished_at=?, summary=? WHERE id=?",
                 (verdict, outcome.get("route"), now_iso(), outcome.get("summary"), gate_id))
@@ -738,6 +741,12 @@ def review_after_revision(con, run: dict, prev_tasks: list[dict] | None, new_tas
     return "plan-review queued" if gid else "plan review not queued"
 
 
+def recheck_reviewer(con, run: dict) -> str | None:
+    """The reviewer dispatch a plan RECHECK sequence continues with (#337)."""
+    prev = [g for g in _cycle_gates(con, run) if g.get("reviewer_dispatch_id") and g.get("review_status") == contract.COMPLETED]
+    return prev[-1]["reviewer_dispatch_id"] if prev else None
+
+
 def _queue_convergence_review(con, run: dict, plan_version: int, *, exclude: list[str] | None = None) -> str | None:
     run = state.get_run(con, run["id"])
     gates = plan_gates(con, run["id"])
@@ -751,9 +760,11 @@ def _queue_convergence_review(con, run: dict, plan_version: int, *, exclude: lis
         return None
     payload = {"exclude": list(exclude or [])}
     # Same reviewer across a RECHECK sequence when it is still available (#337).
-    prev = [g for g in _cycle_gates(con, run) if g.get("reviewer_dispatch_id") and g.get("review_status") == contract.COMPLETED]
+    prev = recheck_reviewer(con, run)
     if prev and not payload["exclude"]:
-        payload["resume_from"] = prev[-1]["reviewer_dispatch_id"]
+        payload["resume_from"] = prev
+        from office import gates as gate_engine
+        gate_engine.recheck_continuity(con, run, prev)  # a fallback is announced before the round runs
     elif pr.get("exclude_route") and pr["exclude_route"] not in payload["exclude"]:
         payload["exclude"].append(pr["exclude_route"])  # an operator-chosen technical escalation
     gate_id = "G" + uuid.uuid4().hex[:8]
@@ -910,9 +921,11 @@ def _ingest_convergence(con, run: dict, gate_id: str, outcome: dict) -> None:
     pr["status"] = "recheck"
     state.update_run(con, run["id"], plan_review=pr)
     paused = _pause_affected(con, run, blocking, "plan recheck")
+    from office import gates as gate_engine
+    who = gate_engine.recheck_continuity(con, run, reviewer)
     state.emit(con, run, "plan.recheck", f"PLAN RECHECK {v} (round {rounds}/{contract.MAX_ROUNDS}): "
                + "; ".join(f"{f['code']} {f.get('location') or ''} {f['summary'][:80]}" for f in blocking[:4])
-               + (f"; paused {', '.join(paused)}" if paused else ""),
+               + (f"; paused {', '.join(paused)}" if paused else "") + f"; next round: {who}",
                payload={"findings": parsed.findings, "next_action": parsed.next_action})
 
 

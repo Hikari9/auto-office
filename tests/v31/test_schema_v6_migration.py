@@ -54,7 +54,7 @@ def _build_v5(db, path) -> None:
 
 def test_new_tables_are_create_if_not_exists_only():
     db = _db()
-    assert db.SCHEMA_VERSION == 6
+    assert db.SCHEMA_VERSION >= 6  # v7 (#403) added outbox.claim_token additively
     for table in NEW_TABLES:
         assert re.search(rf"CREATE TABLE IF NOT EXISTS {table}\(", db.OFFICE_DDL)
     assert "DROP " not in db.OFFICE_DDL.upper()
@@ -67,12 +67,12 @@ def test_v5_database_upgrades_and_keeps_rows(tmp_path):
     con = db.connect(path)
     try:
         assert set(NEW_TABLES) <= _tables(con)
-        assert db._schema_version(con) == 6
+        assert db._schema_version(con) == db.SCHEMA_VERSION
         assert con.execute("SELECT phase FROM runs WHERE id='r-old'").fetchone()[0] == "executing"
         before = _snapshot(con)
         _remigrate_twice(db, con)
         assert _snapshot(con) == before
-        assert db._schema_version(con) == 6
+        assert db._schema_version(con) == db.SCHEMA_VERSION
     finally:
         con.close()
 
@@ -105,11 +105,12 @@ def test_older_runtime_drift_check_passes_on_a_v6_file(tmp_path, monkeypatch):
     db.connect(path).close()
     v5_tables = re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", _v5_ddl(db))
     assert not set(NEW_TABLES) & set(v5_tables)
+    current = db.SCHEMA_VERSION
     monkeypatch.setattr(db, "_TABLES", v5_tables)
     monkeypatch.setattr(db, "SCHEMA_VERSION", 5)
     old = db.connect(path)
     try:
         assert not db._drifted(old)
-        assert db._schema_version(old) == 6
+        assert db._schema_version(old) == current  # never lowered
     finally:
         old.close()

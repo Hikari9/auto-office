@@ -232,7 +232,11 @@ On `RECHECK`:
    Findings never relaunch anything on their own.
 3. When every repaired task is accepted again, the lane recomposes (a new composed commit).
 4. The same reviewer reviews round n+1 when it is still available, with the previous round's open
-   findings listed.
+   findings listed. When its harness session cannot be resumed (no session id was recorded, no
+   resume form, no herdr session), the round runs in a fresh session on the same route, and the
+   orchestrator is told first: the RECHECK line names it, and a `review.resume_fallback` notice
+   ("Reviewer D… cannot be resumed: …; the recheck continues in a fresh session on its route …")
+   is recorded before the fresh reviewer starts (#406).
 
 A substantive round is a completed review (`COMPLETED`, with a verdict) in the current cycle. Each
 RECHECK sequence (plan, each lane or shared scope convergence review, each visual review) is capped at

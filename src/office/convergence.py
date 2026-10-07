@@ -720,6 +720,8 @@ def ingest(con, run: dict, gate_id: str, outcome: dict, *, independence: str = c
     """Record one convergence or visual review result, then settle the scope
     once every gate of its composed revision is done. Caller holds tx."""
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gate_id,)).fetchone())
+    if gates._already_decided(con, run, gate, outcome):
+        return  # one round, one result (#403)
     status = outcome.get("status") or contract.UNAVAILABLE
     verdict = outcome.get("verdict") if status == contract.COMPLETED else None
     parsed = outcome.get("parsed")
@@ -827,9 +829,12 @@ def settle(con, run: dict, scope: dict) -> None:
     owners = route_repairs(con, run, scope, blocking)
     _set_scope(con, run, scope["id"], status="recheck", round=round_no + 1,
                detail=f"round {round_no} RECHECK: repairs routed to {', '.join(owners)}")
+    who = "; ".join(dict.fromkeys(gates.recheck_continuity(con, run, g.get("reviewer_dispatch_id"),
+                                                          "vision" if g["kind"] == "visual" else "reviewer")
+                                  for g in rechecks))
     state.emit(con, run, "convergence.recheck", f"{scope['id']} RECHECK (round {round_no}/{contract.MAX_ROUNDS}): "
                f"{len(blocking)} blocking finding(s) routed to {', '.join(owners)}; repair them in parallel "
-               f"(office rerun <task> --resume|--fresh), then the scope recomposes for the same reviewer",
+               f"(office rerun <task> --resume|--fresh), then the scope recomposes; next round: {who}",
                payload={"scope": scope["id"], "owners": owners, "findings": [f["code"] for f in blocking]})
 
 

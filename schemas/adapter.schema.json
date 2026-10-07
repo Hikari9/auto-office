@@ -101,7 +101,8 @@
             "enum": [
               "hook",
               "herdr",
-              "output"
+              "output",
+              "transcript"
             ]
           }
         },

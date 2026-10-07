@@ -29,6 +29,7 @@ elif args[:2] == ["pane", "run"] and " && touch " in args[3]:
     drop = os.environ.get("FAKE_HERDR_SHELL_DROP", "0")
     if drop != "deaf" and data["shell_runs"] > int(drop):
         open(shlex.split(args[3])[-1], "w").close()
+        data.setdefault("pane_lines", []).append("$ " + args[3])
 elif args[:2] == ["agent", "start"] and os.environ.get("FAKE_HERDR_START_FAIL"):
     code = 1
     result = {{"error": {{"code": "invalid_agent_name"}}}}
@@ -48,6 +49,13 @@ elif args[:2] == ["agent", "get"]:
         code = 1
     else:
         result = {{"agent": {{"name": args[2], "status": status}}}}
+elif args[:2] == ["pane", "read"]:
+    # The pane's screen: what was there before (FAKE_HERDR_PRELUDE), the shell lines
+    # Office ran, then what the agent drew at startup (FAKE_HERDR_BANNER).
+    print("\n".join([os.environ.get("FAKE_HERDR_PRELUDE", ""), *data.get("pane_lines", []),
+                     os.environ.get("FAKE_HERDR_BANNER", "")]))
+    json.dump(data, open(state, "w"))
+    sys.exit(0)
 elif args[:2] == ["agent", "read"] and os.environ.get("FAKE_HERDR_READ_FAIL"):
     json.dump(data, open(state, "w"))
     sys.exit(1)

@@ -26,6 +26,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import time
 import uuid
@@ -210,7 +211,7 @@ def stale_open_gates(con, run: dict, task_id: str, new_rev: str) -> None:
 
 def mark_unavailable(con, run: dict, gate_id: str, reason: str) -> None:
     g = con.execute("SELECT * FROM gates WHERE id=?", (gate_id,)).fetchone()
-    if g is None or g["status"] == "done":
+    if g is None or g["status"] in ("done", "stale", "cancelled"):
         return
     con.execute("UPDATE gates SET status='done', verdict='UNAVAILABLE', summary=?, finished_at=? WHERE id=?",
                 (reason[:500], now_iso(), gate_id))
@@ -231,7 +232,10 @@ def job_run_checks(con, run: dict, job: dict) -> dict:
     rev = dict(con.execute("SELECT * FROM revisions WHERE id=?", (gate["revision_id"],)).fetchone())
     d = state.get_dispatch(con, rev["dispatch_id"])
     with db.transaction(con):
-        con.execute("UPDATE gates SET status='running', started_at=? WHERE id=?", (now_iso(), gate["id"]))
+        cur = con.execute("UPDATE gates SET status='running', started_at=? WHERE id=? AND status IN ('queued','running')",
+                          (now_iso(), gate["id"]))
+        if cur.rowcount == 0:
+            return {"skipped": "gate already decided"}
     outcome = run_commands(con, run, task["checks"], Path(d["worktree"]), rev, gate)
     with db.transaction(con):
         ingest_task_gate(con, state.get_run(con, run["id"]), gate["id"], outcome)
@@ -287,12 +291,7 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
             return {"verdict": "STALE", "summary": "worktree changed after submit; checks cannot bind to the revision"}
         log = evdir / f"check-{i}.log"
         started = time.time()
-        try:
-            proc = subprocess.run(command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=timeout,
-                                  env=_check_env(run))
-            code, out = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
-        except subprocess.TimeoutExpired as exc:
-            code, out = 124, f"timed out after {timeout}s\n{exc.stdout or ''}"
+        code, out = _run_check(command, cwd, timeout, _check_env(run))
         # Office's own timeout (124) or a test runner's per-test timeout (exit 1)
         # under host load is the environment, not the code (issue #267 A2).
         loaded = host_overloaded() if code == 124 or (code != 0 and runner_timeout(out)) else None
@@ -324,6 +323,28 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
     parsed = review_parse.Parsed(verdict=verdict, findings=findings)
     return {"verdict": verdict, "parsed": parsed, "results": results, "route": "deterministic",
             "summary": f"{len(commands) - len(findings)}/{len(commands)} checks passed"}
+
+
+def _run_check(command: str, cwd: Path, timeout: int, env: dict) -> tuple[int, str]:
+    """(exit code, output) of one check command. It runs in its own process
+    group, which inherits the job's execution lock (#403): no replacement
+    attempt of this job can start its checks while any process of this one
+    lives, and a timeout stops the whole group, not just the shell."""
+    proc = subprocess.Popen(command, shell=True, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, env=env, start_new_session=True,
+                            pass_fds=jobs.attempt_lock_fds())
+    jobs.register_child(proc.pid)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return proc.returncode, (stdout or "") + (stderr or "")
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        try:
+            stdout, _ = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:  # a process left the group and holds the pipe
+            stdout = ""
+        return 124, f"timed out after {timeout}s\n{stdout or ''}"
 
 
 def host_overloaded() -> str | None:
@@ -392,13 +413,17 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     # never the producer's, so the producer's model or family is not excluded.
     pinned = review_override or ((task or {}).get("review_override") if role == "code_reviewer" else None)
     profile_kind = kind or ("vision" if visual else "reviewer")
-    resume, same_route = (_reviewer_resume(con, run, resume_from, profile_kind, cwd) if resume_from
+    resume, same_route = (_reviewer_resume(con, run, resume_from, profile_kind, cwd, gate_id=gate["id"]) if resume_from
                           else (None, None))
     for attempt in range(limit + 1):
         if attempt == 0 and same_route:
             decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
                                              exact=same_route)
             if decision.get("status") != "selected":
+                if resume:
+                    with db.transaction(con):
+                        notify_fallback(con, run, resume["parent"], f"its route {same_route} cannot run now "
+                                        f"({decision.get('status')})", None, gate_id=gate["id"])
                 resume = None
                 decision = candidates.route_role(con, state.pinned_config(run), run, role,
                                                  task_id=gate.get("task_id"), exclude=excluded)
@@ -427,8 +452,11 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         d = state.get_dispatch(con, dispatch_id)
         launch_form = decision.get("launch") or {}
         if resume and attempt == 0:
+            # The resumed reviewer continues its parent's session: it records that
+            # id, so the next RECHECK round can resume it again.
             with db.transaction(con):
-                con.execute("UPDATE dispatches SET resumed_from=? WHERE id=?", (resume["parent"], dispatch_id))
+                con.execute("UPDATE dispatches SET resumed_from=?, session_id=COALESCE(session_id, ?) WHERE id=?",
+                            (resume["parent"], resume["session_id"], dispatch_id))
         dispatch_mod.launch(run, d, profile_kind, ddir, cwd=cwd, wait=True, output=output, images=images,
                             include_dirs=include_dirs, cli=launch_form.get("cli"),
                             external=bool(launch_form.get("external")),
@@ -655,34 +683,82 @@ def _producer_route(con, gate: dict) -> str | None:
     return row["triple"] if row else None
 
 
-def _reviewer_resume(con, run: dict, parent_id: str, profile_kind: str, cwd: Path) -> tuple[dict | None, str | None]:
+def resume_blocker(con, run: dict, parent: dict | None, profile_kind: str, cwd: Path | None = None) -> str | None:
+    """Why reviewer dispatch `parent` cannot be resumed from what is recorded
+    (its harness session id, its adapter's resume form, a herdr session), or
+    None when it can. Liveness is checked only at launch (_reviewer_resume)."""
+    from office import adapters, dispatch as dispatch_mod
+    if parent is None:
+        return "the reviewer dispatch is not recorded"
+    harness = parent.get("adapter_id") or parent.get("harness") or ""
+    adapter = adapters.load_all().get(harness)
+    if not dispatch_mod.backfill_session(con, run, parent):
+        return f"no stored harness session id ({harness or 'unknown harness'} reported none Office could verify)"
+    if adapter is None:
+        return f"no adapter {harness}"
+    if not dispatch_mod.herdr_usable():
+        return "a native resume needs a herdr session"
+    session = state.get_dispatch(con, parent["id"])["session_id"]
+    if adapters.resume_argv(adapter, profile_kind, session_id=session, model=parent.get("model") or "",
+                            effort=parent.get("effort") or "", cwd=cwd or Path(".")) is None:
+        return f"adapter {adapter.get('id')} declares no resume form"
+    return None
+
+
+def fallback_notice(parent_id: str, why: str, route: str | None) -> str:
+    """What the orchestrator is told before a recheck runs without its reviewer."""
+    return (f"Reviewer {parent_id} cannot be resumed: {why}. The recheck continues in a fresh session on its route "
+            f"{route or 'chosen by routing'}; it is not the same reviewer session.")
+
+
+def notify_fallback(con, run: dict, parent_id: str, why: str, route: str | None, *, gate_id: str | None = None) -> None:
+    """Record the fallback once per reviewer, where the orchestrator reads it
+    (status, wait, its next prompt), before the fresh reviewer starts (#406).
+    Caller holds the tx."""
+    if con.execute("SELECT 1 FROM events WHERE run_id=? AND kind='review.resume_fallback' AND payload_json LIKE ?",
+                   (run["id"], f'%"parent": "{parent_id}"%')).fetchone():
+        return  # said once per reviewer: at the RECHECK, at queueing, or at launch
+    state.emit(con, run, "review.resume_fallback", fallback_notice(parent_id, why, route),
+               payload={"parent": parent_id, "gate": gate_id, "why": why, "route": route})
+
+
+def recheck_continuity(con, run: dict, parent_id: str | None, profile_kind: str = "reviewer") -> str:
+    """How the next round of a RECHECK is reviewed, for the orchestrator's
+    RECHECK line: the same reviewer when its session can be resumed, else the
+    fallback notice, recorded once before that round is queued (#406). Caller
+    holds the tx."""
+    if not parent_id:
+        return "a fresh reviewer reviews it (no reviewer dispatch is recorded)"
+    parent = state.get_dispatch(con, parent_id)
+    why = resume_blocker(con, run, parent, profile_kind)
+    if why is None:
+        return f"the same reviewer ({parent_id}) reviews it"
+    notify_fallback(con, run, parent_id, why, (parent or {}).get("triple"))
+    return fallback_notice(parent_id, why, (parent or {}).get("triple"))
+
+
+def _reviewer_resume(con, run: dict, parent_id: str, profile_kind: str, cwd: Path,
+                     gate_id: str | None = None) -> tuple[dict | None, str | None]:
     """(resume spec or None, the parent's route) for continuing reviewer `parent_id`.
-    Without a resumable session the route alone is reused: a fresh session there."""
-    from office import adapters, dispatch as dispatch_mod, rerun
+    Without a resumable session the route alone is reused: a fresh session
+    there, announced to the orchestrator before it launches."""
+    from office import adapters, rerun
     parent = state.get_dispatch(con, parent_id)
     if parent is None:
         return None, None
     same_route = parent["triple"]
-    adapter = adapters.load_all().get(parent.get("adapter_id") or parent.get("harness") or "")
+    why = resume_blocker(con, run, parent, profile_kind, cwd)
     argv = None
-    why = None
-    if not parent.get("session_id"):
-        why = "no stored harness session id"
-    elif adapter is None:
-        why = f"no adapter {parent.get('adapter_id') or parent.get('harness')}"
-    elif not dispatch_mod.herdr_usable():
-        why = "a native resume needs a herdr session"
-    else:
+    if why is None:
+        parent = state.get_dispatch(con, parent_id)
+        adapter = adapters.load_all().get(parent.get("adapter_id") or parent.get("harness") or "")
         argv = adapters.resume_argv(adapter, profile_kind, session_id=parent["session_id"],
                                     model=parent.get("model") or "", effort=parent.get("effort") or "", cwd=cwd)
-        if argv is None:
-            why = f"adapter {adapter.get('id')} declares no resume form"
-        elif rerun.agent_alive(parent) is not False:
+        if rerun.agent_alive(parent) is not False:
             why = "its agent may still be running"
     if why:
         with db.transaction(con):
-            state.emit(con, run, "review.resume_fallback", f"cannot resume reviewer {parent_id} ({why}); "
-                       f"a fresh session runs on its route {same_route}", audience="runtime")
+            notify_fallback(con, run, parent_id, why, same_route, gate_id=gate_id)
         return None, same_route
     return {"parent": parent_id, "session_id": parent["session_id"], "argv": argv[0], "herdr_kind": argv[1]}, same_route
 
@@ -816,8 +892,34 @@ def checks_outcome(outcome: dict) -> dict:
                                           next_action="make the failing check pass" if findings else "proceed")}
 
 
+TERMINAL_GATE = ("done", "stale")
+
+
+def _already_decided(con, run: dict, gate: dict, outcome: dict) -> bool:
+    """One gate round takes one terminal result: the first one recorded (#403).
+    A later result for a decided gate (a duplicate or late attempt) changes no
+    verdict, finding or task status; it is kept as audit evidence. This is not
+    the stale-revision rule: a result for a superseded revision is recorded as
+    stale on a gate that was still open. Caller holds the tx."""
+    if gate["status"] not in TERMINAL_GATE:
+        return False
+    verdict = outcome.get("verdict") or outcome.get("status")
+    task_id = gate.get("task_id")
+    state.emit(con, run, "gate.duplicate_result",
+               f"{task_id or gate['subject']} {gate['kind']} gate {gate['id']} already {gate['status']} "
+               f"({gate['verdict'] or 'no verdict'}); a later {verdict or 'result'} was not applied",
+               audience="runtime", task_id=task_id,
+               payload={"gate": gate["id"], "recorded": {"status": gate["status"], "verdict": gate["verdict"],
+                                                         "summary": gate.get("summary")},
+                        "rejected": {"verdict": verdict, "summary": (outcome.get("summary") or "")[:500],
+                                     "route": outcome.get("route")}})
+    return True
+
+
 def _ingest_checks_convergence(con, run: dict, gate: dict, task: dict, outcome: dict) -> None:
     """#337 task gate: deterministic checks only. Caller holds tx."""
+    if _already_decided(con, run, gate, outcome):
+        return
     outcome = checks_outcome(outcome)
     verdict, status = outcome.get("verdict"), outcome.get("status")
     if verdict == "STALE" or (verdict is None and status is None):
@@ -861,6 +963,8 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gate_id,)).fetchone())
     if contract.is_convergence(run) and gate["kind"] == "checks":
         _ingest_checks_convergence(con, run, gate, state.get_task(con, run["id"], gate["task_id"]), outcome)
+        return
+    if _already_decided(con, run, gate, outcome):
         return
     task = state.get_task(con, run["id"], gate["task_id"])
     verdict = outcome["verdict"]
@@ -1276,13 +1380,51 @@ def owning_jobs(con, run: dict, gate) -> list[dict]:
     integrate job while it runs, so its owner is an integrate job claimed no
     later than the gate was created. Unrelated jobs in the run never count."""
     if gate["subject"] == "integration":
-        rows = con.execute("SELECT id, status, claimed_pid, claimed_by FROM outbox WHERE run_id=? AND kind='integrate' "
+        rows = con.execute("SELECT * FROM outbox WHERE run_id=? AND kind='integrate' "
                            "AND status='claimed' AND (claimed_at IS NULL OR claimed_at<=?)",
                            (run["id"], gate["created_at"])).fetchall()
     else:
-        rows = con.execute("SELECT id, status, claimed_pid, claimed_by FROM outbox WHERE run_id=? AND status IN ('queued','claimed') "
+        rows = con.execute("SELECT * FROM outbox WHERE run_id=? AND status IN ('queued','claimed') "
                            "AND payload_json LIKE ?", (run["id"], f'%"{gate["id"]}"%')).fetchall()
     return [dict(r) for r in rows]
+
+
+def owner_state(con, run: dict, gate) -> tuple[str, str]:
+    """Who can still finish an open gate, by the same ownership truth reclaim
+    uses (#404): ("queued" | "alive" | "unknown" | "dead" | "reviewer" | "none", detail).
+    A claimed job whose owner cannot be proven dead still owns the gate."""
+    from office.util import ALIVE, DEAD
+    if con.execute("SELECT 1 FROM dispatches WHERE gate_id=? AND ended_at IS NULL", (gate["id"],)).fetchone():
+        return "reviewer", "a reviewer is running"
+    found = None
+    for job in owning_jobs(con, run, gate):
+        if job["status"] == "queued":
+            return "queued", f"job {job['id']} is queued"
+        liveness, why = jobs.claim_state(job)
+        if liveness == ALIVE:
+            return "alive", f"job {job['id']} is running ({why})"
+        if liveness != DEAD:
+            found = ("unknown", f"job {job['id']} owner liveness unknown: {why}; it is not reclaimed")
+        elif found is None:
+            found = ("dead", f"job {job['id']}'s worker is gone ({why}); the next office command retries or fails it")
+    return found or ("none", "no job is queued or running")
+
+
+def orphaned_gates(con, run: dict) -> list[tuple[dict, dict]]:
+    """Open task gates whose job already failed, with no other owner: left by a
+    runtime that failed a dead worker's job without settling its gate (#404).
+    [(gate, failed job)]"""
+    out = []
+    for g in con.execute("SELECT * FROM gates WHERE run_id=? AND subject='task' AND status IN ('queued','running')",
+                         (run["id"],)).fetchall():
+        g = dict(g)
+        if owner_state(con, run, g)[0] != "none":
+            continue
+        row = con.execute("SELECT id FROM outbox WHERE run_id=? AND status='failed' AND payload_json LIKE ? "
+                          "ORDER BY finished_at DESC LIMIT 1", (run["id"], f'%"{g["id"]}"%')).fetchone()
+        if row is not None:
+            out.append((g, state.get_job(con, row["id"])))
+    return out
 
 
 def superseded_integration_gate(con, run: dict, gate) -> bool:
