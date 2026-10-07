@@ -1,3 +1,3 @@
 interface:
-  display_name: "Auto Routing"
+  display_name: "auto-routing"
   short_description: "Auto Office v3 primitive"
