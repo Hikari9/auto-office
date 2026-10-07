@@ -1,5 +1,6 @@
 """#399: Codex startup diagnostics and independent reply/last-message files."""
 import json
+from pathlib import Path
 import subprocess
 import sys
 
@@ -64,6 +65,7 @@ def test_failed_codex_start_names_the_screen(tmp_path, monkeypatch, screen, time
     monkeypatch.setattr(dispatch, "write_agent_env", lambda *a, **kw: tmp_path / "agent.env")
     monkeypatch.setattr(dispatch, "_shell_run", lambda *a: True)
     monkeypatch.setattr(dispatch, "_launch_notice", lambda run, d, text: notices.append(text))
+    monkeypatch.setattr(dispatch, "atomic_write_json", lambda *a, **kw: None)
 
     def run(argv, **kwargs):
         calls.append(argv)
@@ -75,7 +77,7 @@ def test_failed_codex_start_names_the_screen(tmp_path, monkeypatch, screen, time
         return subprocess.CompletedProcess(argv, 0, screen, "")
 
     monkeypatch.setattr(dispatch.subprocess, "run", run)
-    assert dispatch._herdr_agent_start({}, {"id": "D1"}, {"kind": "reviewer"}, {},
+    assert dispatch._herdr_agent_start({"id": "R1"}, {"id": "D1"}, {"kind": "reviewer"}, {},
                                        (["--sandbox", "workspace-write"], "codex"), "w1:p1",
                                        tmp_path, tmp_path) is None
     assert screen.rstrip("?") in notices[0] and "w1:p1" in notices[0]
@@ -87,8 +89,13 @@ def test_unreadable_startup_screen_keeps_original_failure(monkeypatch):
     def fail(*a, **kw):
         raise OSError("unavailable")
     monkeypatch.setattr(dispatch.subprocess, "run", fail)
-    text = dispatch._agent_start_failure("codex", "w1:p1", "startup timeout")
-    assert "startup timeout" in text and "inspect pane w1:p1" in text
+    notices = []
+    monkeypatch.setattr(dispatch, "_launch_notice", lambda run, d, text: notices.append(text))
+    monkeypatch.setattr(dispatch, "atomic_write_json", lambda *a, **kw: None)
+    monkeypatch.setattr(dispatch.paths, "run_dir", lambda run_id: Path("/nonexistent"))
+    dispatch._herdr_fallback_notice({"id": "R1"}, {"id": "D1"}, {}, Path("/nonexistent"), "w1:p1",
+                                    "herdr agent start failed", "startup timeout")
+    assert "startup timeout" in notices[0] and "pane w1:p1 could not be read" in notices[0]
 
 
 def test_hook_screen_never_gets_auto_accepted(monkeypatch):
