@@ -31,6 +31,8 @@ Auto Office {ver}
   office submit                     planner/executor: submit your plan or your work
   office amend <scope> -- "<delta>" change the plan (scope: plan, T2, or T2,T3)
   office amend <scope> --no-review --reason "<why>" -- "<delta>"   ordinary amendment, no plan review
+  office amend route <task> --as <harness>/<model>[@effort] --quote "<words>" [--restart]
+                                    re-record a live dispatch's model (same harness); --restart relaunches it
   office ack <amendment-id>         worker: record that you applied a delivered amendment
   office rerun <task> --resume|--fresh [--reroute]
                                     after a worker ends: continue its session, or start a new one with the findings
@@ -51,6 +53,10 @@ Auto Office {ver}
   office disposition <scope>:<F-id> fix|fixed|dismissed|follow-up -- "<note>"
                                     close a non-blocking (APPROVED) finding; fix routes it, no re-review
   office config [<key> [<value>]]   read or set preferences like git config (--list, --unset, --edit, --repo)
+  office queue list|add|pause|resume|priority|demote|auto
+                                    the machine-level scheduler queue (--run <id> [--task T] for a run)
+  office web start|stop|status|serve [--port N] [--fixture small|large]
+                                    the local Office web UI (loopback only)
   office setup                      interactive: choose preferred agents, models, and cost policy
   office doctor                     check the installation, hooks, and runtimes
   office upgrade [run] [--to X.Y]   move a run to a newer release line (dry run; --apply)
@@ -203,7 +209,11 @@ def _parser() -> argparse.ArgumentParser:
                    help="orchestrator veto: an ordinary amendment queues no plan review (needs --reason)")
     s.add_argument("--reason", help="why plan review is vetoed (with --no-review)")
     s.add_argument("--requirements", action="store_true", help="a user-originated requirements change")
-    s.add_argument("--quote", help="the user's words (requirements changes, defect redirects)")
+    s.add_argument("--quote", help="the user's words (requirements changes, defect redirects, route changes)")
+    s.add_argument("--as", dest="route_as", metavar="HARNESS/MODEL[@EFFORT]",
+                   help="amend route: the live dispatch's new model/effort (same harness)")
+    s.add_argument("--restart", action="store_true",
+                   help="amend route: interrupt the agent and relaunch it on the new route")
     s.add_argument("--drop-criterion", action="append", default=[], metavar="TEXT",
                    help="requirements: remove the frozen done criterion this names")
     s.add_argument("--add-criterion", action="append", default=[], metavar="TEXT",
@@ -246,6 +256,21 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--path", action="store_true", help="print the config file path(s)")
     s.add_argument("--show-origin", dest="origin", action="store_true")
     s.add_argument("--force", action="store_true", help="set a key the shipped config does not define")
+    s = sp.add_parser("queue", parents=[common])
+    s.add_argument("action", choices=["list", "add", "pause", "resume", "priority", "demote", "auto"])
+    s.add_argument("target", nargs="?", help="queue item id, issue ref (add), priority (priority) or on|off|status (auto)")
+    s.add_argument("value", nargs="?", help="the new priority (priority)")
+    s.add_argument("--task", help="with --run: one task of the run")
+    s.add_argument("--title")
+    s.add_argument("--priority", choices=["urgent", "high", "normal", "low"])
+    s.add_argument("--reason")
+    s.add_argument("--command-id", dest="command_id", help="idempotency id; a repeat returns the first receipt")
+    s = sp.add_parser("web", parents=[common])
+    s.add_argument("action", choices=["start", "stop", "status", "serve"])
+    s.add_argument("--host", default="127.0.0.1", help="loopback address to bind (127.0.0.1, localhost or ::1)")
+    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--fixture", choices=["small", "large"],
+                   help="serve a synthetic workspace with fake GitHub and launcher (never the real runs.db)")
     s = sp.add_parser("setup", parents=[common])
     s.add_argument("--user", dest="tier", action="store_const", const="user")
     s.add_argument("--repo", dest="tier", action="store_const", const="repo")
@@ -329,7 +354,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def emit(res: Result, args, ok: bool = True) -> int:
     if getattr(args, "json", False):
-        print(json.dumps({"ok": ok, "lines": res.lines, "notices": res.notices, "next": res.next, "data": res.data},
+        print(json.dumps({"ok": ok, "lines": res.lines, "notices": res.notices, "next": res.next, "data": res.data,
+                          **({"final": res.final} if res.final else {})},
                          indent=2, sort_keys=True, default=str))
         return res.exit_code
     out = list(res.lines)
@@ -338,6 +364,8 @@ def emit(res: Result, args, ok: bool = True) -> int:
     out += res.notices
     if res.next:
         out.append(f"next: {res.next}")
+    if res.final:
+        out.append(res.final)
     if out:
         print("\n".join(out))
     return res.exit_code
@@ -358,6 +386,8 @@ def emit_error(err: OfficeError, args) -> int:
         lines.append(f"preserved: {err.preserved}")
     if err.next_step:
         lines.append(f"next: {err.next_step}")
+    if err.data.get("final"):
+        lines.append(err.data["final"])
     print("\n".join(lines))
     return err.exit_code
 
@@ -395,6 +425,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _run(args, unknown)
     except OfficeError as err:
+        if args.cmd == "close":  # every office close path ends with its report line
+            from office import closeout
+            err.data.setdefault("final", closeout.done(f"stopped early ({err.category}); nothing closed or cleaned up"))
         return emit_error(err, args)
     except KeyboardInterrupt:
         return 130
@@ -484,6 +517,17 @@ def _run(args, unknown) -> int:
         return emit(configcmd.config(key=args.key, value=args.value, tier=args.tier, unset=args.unset, list_=args.list_,
                                      all_=args.all_, edit=args.edit, path=args.path, origin=args.origin,
                                      force=args.force, cwd=cwd), args)
+    if cmd == "queue":
+        from office import queuecmd
+        con = _con()
+        try:
+            return emit(queuecmd.run_command(con, args), args)
+        finally:
+            con.close()
+    if cmd == "web":
+        from office.web import server
+        out = server.main(args)
+        return out if isinstance(out, int) else emit(out, args)
     if cmd == "setup":
         from office import configcmd
         return emit(configcmd.setup(tier=args.tier or "user", yes=args.yes, cwd=cwd), args)
@@ -551,6 +595,11 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return submit.submit(con, run, cwd=cwd, plan_path=args.plan, redirect=_redirect(args),
                              request_scope=args.request_scope,
                              reason=" ".join(args.reason or []).strip())
+    if cmd == "amend" and args.scope == "route":
+        from office import routechange
+        rest = [*(args.delta or []), *[u for u in unknown if u != "--"]]
+        return routechange.change_route(con, run, rest[0] if len(rest) == 1 else None, args.route_as, args.quote,
+                                        restart=args.restart)
     if cmd == "amend":
         from office import amend
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()

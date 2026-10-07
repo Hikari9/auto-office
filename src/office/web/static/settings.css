@@ -1,0 +1,30 @@
+/* Settings surface: the Machine -> Repository -> Run cascade. */
+#surface-settings { overflow: auto; }
+.cascade { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.cascade .arrow { color: var(--faint); }
+.cascade select.field { max-width: 260px; }
+.btn[aria-pressed=true] { border-color: var(--blue); color: var(--text); }
+.scope-now { color: var(--muted); margin: 8px 0; }
+.scard { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; }
+.scard h2 { margin: 0 0 6px; font-size: 13px; color: var(--text-2); }
+.srow { border-top: 1px solid var(--line-2); padding: 6px 0; }
+.srow .line { display: grid; align-items: center; gap: 8px;
+  grid-template-columns: minmax(200px, 2fr) minmax(100px, 1.5fr) 100px 90px 190px 90px; }
+.srow .k { overflow-wrap: anywhere; color: var(--text-2); }
+.srow .v { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.tier { font-size: 11px; border-radius: 6px; padding: 1px 6px; border: 1px solid var(--line-3); text-align: center; }
+.tier.t-machine { color: var(--blue); border-color: var(--blue); }
+.tier.t-repository { color: var(--purple); border-color: var(--purple); }
+.tier.t-run-pinned { color: var(--green); border-color: var(--green); }
+.pill.m-overridden { color: var(--purple); border-color: var(--purple); }
+.pill.m-inherited { color: var(--muted); }
+.pill.a-immediate { color: var(--green); border-color: var(--green); }
+.pill.a-restart { color: var(--yellow); border-color: var(--yellow); }
+.tiers { margin: 6px 0 0 16px; display: grid; gap: 4px; }
+.tierrow { display: grid; grid-template-columns: 110px minmax(100px, 1fr) minmax(200px, 2fr); gap: 8px; align-items: center; }
+.tierrow.effective dt { color: var(--text); font-weight: 700; }
+.tierrow dt, .tierrow dd { margin: 0; }
+.tierrow .ro { font-size: 11px; }
+.edit { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.edit .field { min-width: 160px; }
+@media (max-width: 1300px) { .srow .line { display: flex; flex-wrap: wrap; } .srow .k { flex: 1 1 100%; } }

@@ -83,8 +83,13 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
         candidates.declared_decision(review_as, flag="--review-as")  # validates the route's shape
     if state.is_terminal(run):
         raise Refused("run-terminal", f"run is {run['phase']}")
-    from office import guide, plan_view, plans, prs
+    from office import guide, plan_view, plans, prs, queuecmd
     plans.require_dispatchable(con, run)
+    for tid in task_ids:
+        held = queuecmd.paused_block(con, run["id"], tid)
+        if held:
+            raise Refused("scheduler-paused", f"{held['id']} is paused by the operator",
+                          next_step=queuecmd.resume_command(held))
     prs.settings(con, run)  # detected once, outside the transaction (it asks GitHub)
     # Route before the write transaction: routing reads evidence and probes quota.
     routes = {}

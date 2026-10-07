@@ -266,3 +266,24 @@ hard_invariants:
   - packet_validation
   - policy_snapshot_pinning
   - human_merge_to_main
+# Machine-level scheduler (`office queue`). Pressure thresholds gate admission
+# only when measured; quota gates only when known.
+scheduler:
+  auto_mode: true
+  aging_per_hour: 1.0          # score added per hour an item waits
+  cpu_pressure: 0.9            # 1-minute load per core
+  ram_pressure: 0.9            # fraction of physical memory in use
+  max_active_runs: null        # null: no fixed cap
+  orchestrator_route: claude   # harness that launches queued runs' orchestrators
+  # Harnesses allowed, in order, when orchestrator_route's quota is known to be at
+  # or below quota.reserve_percent. Unknown quota never falls back; with no
+  # allowed fallback that has known quota, queued work stays queued.
+  orchestrator_fallbacks: []
+intake:
+  queue_issues: false
+  authorization: preview       # what a queued intake is authorized to do
+  ready_to_land: false
+# Local web UI (`office web`). checkouts maps owner/name to a local checkout
+# for repositories no run has used yet.
+web:
+  checkouts: {}

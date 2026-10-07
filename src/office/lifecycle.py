@@ -264,7 +264,7 @@ def reconcile(con, run: dict) -> list[str]:
 
 
 def close(con, run: dict, *, handoff: str | None = None) -> Result:
-    from office import dispatch, gates, guide
+    from office import closeout, dispatch, gates, guide
     dispatch.reap_orphans(con, run)
     blockers = gates.close_blockers(con, run)
     landing = gates.landing_state(con, run, handoff)
@@ -277,7 +277,8 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
     with db.transaction(con):
         current = state.get_run(con, run["id"])
         if state.is_terminal(current):
-            return Result(lines=[f"{short(run['id'])} already {current['phase']}"], next=None)
+            return Result(lines=[f"{short(run['id'])} already {current['phase']}"], next=None,
+                          final=closeout.done(f"already {current['phase']}, nothing to do"))
         receipt = _archive_receipt(con, current, landing, handoff)
         scoring.label_run_outcomes(con, run["id"], "closed")
         state.update_run(con, run["id"], phase="closed", terminal_at=now_iso(), terminal_reason="closed",
@@ -291,8 +292,37 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
     rerun.reclaim_all(run)  # snapshot, then close each dispatch pane
     dispatch.close_herdr_tab(run)
     planpath.remove(Path(run["repo_root"]), run)
-    return Result(lines=[f"{short(run['id'])} closed | archive receipt {receipt['digest'][7:15]}"],
-                  data={"archive_digest": receipt["digest"]})
+    res = Result(lines=[f"{short(run['id'])} closed | archive receipt {receipt['digest'][7:15]}"],
+                 data={"archive_digest": receipt["digest"]})
+    _closeout(con, run, landing, res, handoff=handoff)
+    return res
+
+
+def _closeout(con, run: dict, landing: dict, res: Result, *, handoff: str | None = None, pr: str | None = None) -> None:
+    """The /cleanup tail of a close: docs warning, then either the handoff (PR
+    ready, everything kept) or, on a real merge, base sync and worktree removal."""
+    from office import closeout
+    warn = closeout.docs_warning(Path(run["repo_root"]), run.get("base_sha"), landing.get("commit") or landing.get("merge_commit"))
+    if warn:
+        res.notices.append(warn)
+    if handoff:
+        note = closeout.mark_ready(run["repo_root"], handoff)
+        if note:
+            res.add(note)
+        res.add("handed off: base sync and worktree removal left for after the user merges")
+        res.final = closeout.done(f"handed off {handoff}, worktrees kept")
+        return
+    merged = pr or landing.get("target") or str(landing.get("detail", "")).startswith("task PRs merged")
+    if not merged:
+        res.add(f"not merged ({landing.get('detail')}): base sync and worktree removal skipped")
+        res.final = closeout.done(f"closed without a merge ({landing.get('detail')}), worktrees kept")
+        return
+    lines, ask, summary = closeout.finish(con, run, landing, pr=pr)
+    res.lines.extend(lines)
+    if ask:
+        res.next = ask
+    res.data["closeout"] = {"summary": summary, "ask": ask}
+    res.final = closeout.done(summary)
 
 
 LANDED_FORM = 'office close --landed-externally <merged PR URL> [--quote "<user\'s words>"]'
@@ -303,7 +333,7 @@ def _merged_pr(run: dict, ref: str) -> dict:
     import json
     import subprocess
     try:
-        proc = subprocess.run(["gh", "pr", "view", ref, "--json", "state,mergeCommit,url,number"], cwd=run["repo_root"],
+        proc = subprocess.run(["gh", "pr", "view", ref, "--json", "state,mergeCommit,url,number,baseRefName"], cwd=run["repo_root"],
                               capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError) as exc:
         raise Refused("pr-unverified", f"cannot ask GitHub about {ref}: {exc}", next_step=LANDED_FORM)
@@ -317,7 +347,8 @@ def _merged_pr(run: dict, ref: str) -> dict:
     if info.get("state") != "MERGED" or not (info.get("mergeCommit") or {}).get("oid"):
         raise Refused("pr-not-merged", f"{info.get('url') or ref} is {info.get('state') or 'unknown'}, not merged",
                       next_step="merge it first, or office close --handoff <pr-url> to hand it to the user")
-    return {"url": info.get("url") or ref, "number": info.get("number"), "merge_commit": info["mergeCommit"]["oid"]}
+    return {"url": info.get("url") or ref, "number": info.get("number"), "merge_commit": info["mergeCommit"]["oid"],
+            "base": info.get("baseRefName")}
 
 
 def _contains(run: dict, commit: str, merge: str) -> bool:
@@ -335,8 +366,10 @@ def close_landed_externally(con, run: dict, ref: str, quote: str | None = None) 
     its merge commit contains every accepted revision and no task is left;
     otherwise the user's words (--quote) record the override. Open gates,
     blockers, and an unaccepted integration no longer apply: the work has landed."""
+    from office import closeout
     if state.is_terminal(run):
-        return Result(lines=[f"{short(run['id'])} already {run['phase']}"], next=None)
+        return Result(lines=[f"{short(run['id'])} already {run['phase']}"], next=None,
+                      final=closeout.done(f"already {run['phase']}, nothing to do"))
     pr = _merged_pr(run, ref)
     tasks = state.tasks(con, run["id"])
     accepted = {t["id"]: con.execute("SELECT commit_sha FROM revisions WHERE id=?", (t["accepted_revision_id"],)
@@ -350,11 +383,13 @@ def close_landed_externally(con, run: dict, ref: str, quote: str | None = None) 
                       preserved="the run", next_step=f"ask the user (native question tool) whether {pr['url']} landed "
                       f"this run's work, then {LANDED_FORM.replace('<merged PR URL>', pr['url'])}")
     landing = {"status": "landed-externally", "pr": pr["url"], "merge_commit": pr["merge_commit"],
+               **({"base": pr["base"]} if pr.get("base") else {}),
                "contains": contained, "unproven": unproven, "quote": (quote or "").strip() or None}
     with db.transaction(con):
         current = state.get_run(con, run["id"])
         if state.is_terminal(current):
-            return Result(lines=[f"{short(run['id'])} already {current['phase']}"], next=None)
+            return Result(lines=[f"{short(run['id'])} already {current['phase']}"], next=None,
+                          final=closeout.done(f"already {current['phase']}, nothing to do"))
         live = _stop_work(con, run)
         con.execute("UPDATE gates SET status='cancelled', stale_reason='landed externally' WHERE run_id=? "
                     "AND status IN ('queued','running','waiting')", (run["id"],))
@@ -377,8 +412,10 @@ def close_landed_externally(con, run: dict, ref: str, quote: str | None = None) 
     lines = [f"{short(run['id'])} closed | landed externally via {pr['url']} ({pr['merge_commit'][:12]})"]
     if unproven:
         lines.append(f"not in the merge commit, closed on the user's word: {', '.join(unproven)}")
-    return Result(lines=lines + [f"archive receipt {receipt['digest'][7:15]}"], data={"archive_digest": receipt["digest"],
-                                                                                    "landing": landing})
+    res = Result(lines=lines + [f"archive receipt {receipt['digest'][7:15]}"], data={"archive_digest": receipt["digest"],
+                                                                                   "landing": landing})
+    _closeout(con, run, landing, res, pr=f"PR #{pr['number']}" if pr.get("number") else pr["url"])
+    return res
 
 
 def _stop_work(con, run: dict) -> list:

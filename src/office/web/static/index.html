@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="office-token" content="__OFFICE_TOKEN__">
+<meta name="office-fixture" content="__OFFICE_FIXTURE__">
+<title>Auto Office</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/allocation.css">
+<link rel="stylesheet" href="/static/settings.css">
+<link rel="stylesheet" href="/static/agents.css">
+<script type="module" src="/static/app.js"></script>
+</head>
+<body>
+<div class="shell">
+  <header class="topbar">
+    <div class="brand"><span class="logo" aria-hidden="true"></span><span class="brand-name">Auto Office</span>
+      <span class="chip" id="fixture" data-testid="fixture-marker" hidden></span></div>
+    <div class="fresh" role="group" aria-label="Data freshness">
+      <span class="indicator" data-testid="office-indicator" data-state="loading">
+        <span class="glyph" aria-hidden="true"></span>Office
+        <span class="state" id="office" data-testid="office-freshness">connecting</span>
+        <span class="age" data-testid="office-age"></span></span>
+      <span class="indicator" data-testid="github-indicator" data-state="loading">
+        <span class="glyph" aria-hidden="true"></span>GitHub
+        <span class="state" data-testid="github-freshness">unknown</span>
+        <span class="age" data-testid="github-age"></span></span>
+      <span class="indicator stream" data-testid="stream-indicator" data-state="loading">
+        <span class="glyph" aria-hidden="true"></span><span class="state" data-testid="stream-state">connecting</span>
+        <span class="rev">rev <span data-testid="rev">-</span></span></span>
+    </div>
+  </header>
+  <nav class="product-rail" aria-label="Surfaces">
+    <button type="button" class="surface" data-surface="issues" aria-current="page"><span class="dot blue" aria-hidden="true"></span>Issues</button>
+    <button type="button" class="surface" data-surface="agents"><span class="dot green" aria-hidden="true"></span>Agents</button>
+    <button type="button" class="surface" data-surface="allocation"><span class="dot purple" aria-hidden="true"></span>Allocation</button>
+    <button type="button" class="surface" data-surface="settings"><span class="dot grey" aria-hidden="true"></span>Settings</button>
+  </nav>
+  <aside class="repo-rail" aria-label="Repositories">
+    <h2 class="rail-title">Repositories</h2>
+    <input type="search" class="field" id="repo-search" data-testid="repo-search" placeholder="Search repositories…" aria-label="Search repositories">
+    <div id="repo-list" class="repo-list" data-testid="repo-list" role="list"></div>
+  </aside>
+  <main class="canvas" id="canvas">
+    <div id="banners" class="banners" data-testid="banners" aria-live="polite"></div>
+    <section id="surface-issues" class="surface-view" data-testid="surface-issues">
+      <div class="canvas-head">
+        <div><h1>Issues</h1><p class="sub">What is waiting, running, reviewing, or ready to land.</p></div>
+        <div class="kpis" id="kpis"></div>
+      </div>
+      <div class="toolbar">
+        <input type="search" class="field" id="issue-search" data-testid="issue-search" placeholder="Search issues, numbers, runs…" aria-label="Search issues">
+        <div class="filters" id="issue-filters" data-testid="issue-filters" role="group" aria-label="Issue filters"></div>
+        <span class="count" id="issue-count" data-testid="issue-count" aria-live="polite"></span>
+      </div>
+      <div class="work">
+        <div class="table-wrap">
+          <div class="table" id="issue-table" data-testid="issue-table" role="grid" aria-label="Issues" aria-rowcount="0">
+            <div class="thead" role="row" aria-rowindex="1"></div>
+            <div class="tbody" id="issue-body"></div>
+          </div>
+          <div class="empty" id="table-empty" data-testid="table-empty" hidden></div>
+        </div>
+        <aside class="inspector" id="inspector" data-testid="inspector" aria-label="Issue inspector" hidden></aside>
+      </div>
+      <section class="receipts" id="receipts" data-testid="receipts" aria-label="Commands"></section>
+    </section>
+    <section id="surface-allocation" class="surface-view" data-testid="surface-allocation" aria-label="Allocation" hidden></section>
+    <section id="surface-settings" class="surface-view" data-testid="surface-settings" aria-label="Settings" hidden></section>
+    <section id="surface-agents" class="surface-view agents" data-testid="surface-agents" aria-label="Agents" hidden></section>
+    <section id="surface-other" class="surface-view placeholder" data-testid="surface-other" hidden></section>
+  </main>
+</div>
+</body>
+</html>
