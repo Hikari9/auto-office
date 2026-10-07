@@ -404,7 +404,7 @@ def _ask(con, run: dict) -> Result:
             continue
         pr = t.get("pr") or {}
         lines.append(f"  {t['id']} {pr.get('url') or '(no PR: ' + _pr_reason(run) + ')'}")
-    if not prs.enabled(run):
+    if prs.retryable((run.get("landing") or {}).get("prs") or {}):
         lines.append("  office pr on: push the accepted branches and open the PRs once GitHub is reachable")
     return Result(lines=lines, next='ask the user (native question tool): merge | preview deploy | merge + prod | stop; '
                   'then office land --merge|--preview|--e2e --quote "<words>", or office close --handoff <pr-url>')

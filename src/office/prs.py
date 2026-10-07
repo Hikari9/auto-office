@@ -94,6 +94,11 @@ def settings(con, run: dict) -> dict:
     return detected
 
 
+def retryable(setting: dict) -> bool:
+    """Whether `office pr on` is worth suggesting: PRs went off for a GitHub failure, not by choice or by run."""
+    return bool(setting.get("transient")) and not setting.get("enabled")
+
+
 def reenable(con, run: dict) -> Result:
     """`office pr on`: turn task PRs on for a run that is already past its first revision.
 
@@ -107,6 +112,11 @@ def reenable(con, run: dict) -> Result:
     if state.is_terminal(run):
         raise state.Refused("run-ended", f"run {run['id'][:8]} has ended; task PRs stay as they were")
     before = ((run.get("landing") or {}).get("prs") or {})
+    if before.get("reason") == "--no-prs":
+        raise state.Refused("prs-opted-out", "task PRs stay off: this run was started with --no-prs",
+                            preserved="the run, its task branches and revisions (nothing was pushed)",
+                            next_step="push the integration branch it names and office close --handoff <pr-url>, "
+                                      "or start a new run without --no-prs")
     detected = _detect(con, run)  # GitHub is never called inside a transaction
     if not detected.get("enabled"):
         raise state.Refused("prs-unavailable", f"task PRs stay off: {detected.get('reason')}",
@@ -160,7 +170,7 @@ def status(con, run: dict) -> Result:
             pr = t.get("pr") or {}
             res.add(f"{t['id']} ({t['status']}) " + (f"#{pr['number']} {'merged' if pr.get('merged') else 'open'}"
                                                    if pr.get("number") else "no PR"))
-    res.next = ("office pr on" if not s.get("enabled") and _has_revision(con, run) else "office status")
+    res.next = ("office pr on" if retryable(s) and _has_revision(con, run) else "office status")
     return res
 
 

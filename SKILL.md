@@ -174,7 +174,7 @@ and prints the steps to compose by hand. Office rewrites only the block above th
 check or test-runner timeout while host load exceeds twice the CPU count is UNAVAILABLE, not a failure. Rerun it with `office resume`.
 If task PRs went off for a transient GitHub failure and revisions already exist, `office pr on` probes
 GitHub again, pushes the accepted task branches, opens the stacked PRs and records the change; it refuses
-with the reason while GitHub is unavailable, and repeating it finishes any PR that did not sync. `office land` marks each
+with the reason while GitHub is unavailable (and always under `--no-prs`: that opt-out stands), and repeating it finishes any PR that did not sync. `office land` marks each
 accepted task's draft PR ready before merging it.
 With task PRs off (local, no GitHub, `--no-prs`), push the integration branch it names, open a PR
 with `Closes #<issue>`, and `office close --handoff <pr-url>`. Stop early with

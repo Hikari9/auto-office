@@ -119,3 +119,41 @@ def test_prs_on_after_the_run_ended_pushes_nothing(env, monkeypatch):
     assert code != 0 and "no-active-run" in out, out
     assert gh(env)["prs"] == [] and _prs_setting(env)["enabled"] is False
     assert env.git("--git-dir", str(bare), "branch", "--list", "office/*").strip() == ""
+
+
+def test_prs_on_refuses_after_no_prs_and_pushes_nothing(env, monkeypatch):
+    bare = github(env, monkeypatch)
+    env.trust()
+    env.script(**SCRIPT)
+    start_inline(env, plan=PLAN_STACKED, extra=("--no-prs",))
+    env.office("approve", "plan", "--quote", "go", check=0)
+    env.office("dispatch", "T1", "T2", check=0)
+    code, out = env.office("pr", "on")
+    assert code == 4 and "prs-opted-out" in out and "--no-prs" in out and "office close --handoff" in out, out
+    assert not (env.tmp / "gh.json").exists()  # gh was never called
+    assert _prs_setting(env) == {"enabled": False, "reason": "--no-prs"}  # the opt-out is not overwritten
+    assert env.git("--git-dir", str(bare), "branch", "--list", "office/*").strip() == ""  # nothing pushed
+
+
+def test_no_hint_to_run_pr_on_for_no_prs_or_local_runs(env, monkeypatch):
+    github(env, monkeypatch)
+    env.trust()
+    env.script(**SCRIPT)
+    start_inline(env, plan=PLAN_STACKED, extra=("--no-prs",))
+    env.office("approve", "plan", "--quote", "go", check=0)
+    env.office("dispatch", "T1", "T2", check=0)
+    code, out = env.office("pr", "status")
+    assert code == 0 and "task PRs off: --no-prs" in out and "office pr on" not in out, out
+    code, out = env.office("land")  # integration verified: the ask lines
+    assert "office pr on" not in out, out
+
+
+def test_no_hint_to_run_pr_on_for_a_local_run(env, monkeypatch):
+    github(env, monkeypatch)
+    env.trust()
+    env.script(**SCRIPT)
+    start_inline(env, plan=PLAN_STACKED.replace("blast_radius: repo", "blast_radius: local"))
+    env.office("approve", "plan", "--quote", "go", check=0)
+    env.office("dispatch", "T1", "T2", check=0)
+    code, out = env.office("pr", "status")
+    assert code == 0 and "task PRs off: blast radius is local" in out and "office pr on" not in out, out
