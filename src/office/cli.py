@@ -55,6 +55,8 @@ Auto Office {ver}
   office config [<key> [<value>]]   read or set preferences like git config (--list, --unset, --edit, --repo)
   office queue list|add|pause|resume|priority|demote|auto
                                     the machine-level scheduler queue (--run <id> [--task T] for a run)
+  office web start|stop|status|serve [--port N] [--fixture small|large]
+                                    the local Office web UI (loopback only)
   office setup                      interactive: choose preferred agents, models, and cost policy
   office doctor                     check the installation, hooks, and runtimes
   office upgrade [run] [--to X.Y]   move a run to a newer release line (dry run; --apply)
@@ -263,6 +265,12 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--priority", choices=["urgent", "high", "normal", "low"])
     s.add_argument("--reason")
     s.add_argument("--command-id", dest="command_id", help="idempotency id; a repeat returns the first receipt")
+    s = sp.add_parser("web", parents=[common])
+    s.add_argument("action", choices=["start", "stop", "status", "serve"])
+    s.add_argument("--host", default="127.0.0.1", help="loopback address to bind (127.0.0.1, localhost or ::1)")
+    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--fixture", choices=["small", "large"],
+                   help="serve a synthetic workspace with fake GitHub and launcher (never the real runs.db)")
     s = sp.add_parser("setup", parents=[common])
     s.add_argument("--user", dest="tier", action="store_const", const="user")
     s.add_argument("--repo", dest="tier", action="store_const", const="repo")
@@ -516,6 +524,10 @@ def _run(args, unknown) -> int:
             return emit(queuecmd.run_command(con, args), args)
         finally:
             con.close()
+    if cmd == "web":
+        from office.web import server
+        out = server.main(args)
+        return out if isinstance(out, int) else emit(out, args)
     if cmd == "setup":
         from office import configcmd
         return emit(configcmd.setup(tier=args.tier or "user", yes=args.yes, cwd=cwd), args)

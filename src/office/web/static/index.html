@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="office-token" content="__OFFICE_TOKEN__">
+<meta name="office-fixture" content="__OFFICE_FIXTURE__">
+<title>Auto Office</title>
+<link rel="icon" href="data:,">
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 2rem; }
+  #fixture { display: none; background: #fde68a; padding: .25rem .5rem; border-radius: 4px; }
+  #fixture.on { display: inline-block; }
+</style>
+</head>
+<body>
+<!-- Placeholder: T6 replaces this page. -->
+<h1>Auto Office <span id="fixture" data-testid="fixture-marker"></span></h1>
+<p>Office: <span id="office" data-testid="office-freshness">connecting</span>
+   · GitHub: <span id="github">unknown</span>
+   · rev <span id="rev" data-testid="rev">-</span>
+   · runs <span id="runs" data-testid="runs">-</span></p>
+<script>
+(function () {
+  "use strict";
+  var fixture = document.querySelector('meta[name="office-fixture"]').content;
+  if (fixture) {
+    var marker = document.getElementById("fixture");
+    marker.textContent = "FIXTURE MODE (" + fixture + ")";
+    marker.className = "on";
+  }
+  var state = null;
+  function render() {
+    document.getElementById("office").textContent = state.freshness.office.state;
+    document.getElementById("github").textContent = state.freshness.github.state;
+    document.getElementById("rev").textContent = state.epoch + ":" + state.rev;
+    document.getElementById("runs").textContent = Object.keys(state.entities.runs).length;
+  }
+  function full(ev) { state = JSON.parse(ev.data); render(); }
+  var es;
+  function connect() {
+    es = new EventSource("/api/stream");
+    es.addEventListener("snapshot", full);
+    es.addEventListener("resync", full);
+    es.addEventListener("delta", delta);
+  }
+  function delta(ev) {
+    var d = JSON.parse(ev.data);
+    if (!state) { return; }
+    if (d.epoch === state.epoch && d.rev <= state.rev) { return; }  // duplicate
+    if (d.epoch !== state.epoch || d.base_rev !== state.rev) { es.close(); connect(); return; }  // gap: resync
+    Object.keys(d.upserts).forEach(function (c) { Object.assign(state.entities[c], d.upserts[c]); });
+    Object.keys(d.removes).forEach(function (c) { d.removes[c].forEach(function (id) { delete state.entities[c][id]; }); });
+    Object.keys(d.scalars).forEach(function (k) {
+      if (k === "freshness") { state.freshness = d.scalars[k]; } else { state.scalars[k] = d.scalars[k]; }
+    });
+    state.rev = d.rev;
+    render();
+  }
+  connect();
+})();
+</script>
+</body>
+</html>
