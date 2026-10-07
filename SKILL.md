@@ -43,9 +43,14 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
   invisible to `--version`. Run `office doctor`; if it prints `install: STALE`, tell the user and offer
   the same reinstall. Runs pinned to this release pick up the reinstalled code.
 
+At lifecycle intake, run `office update --check` as part of repository reconnaissance. If it reports
+an update, ask in the next native intake question round whether the user wants to update Auto Office
+before starting the run. If they choose yes, run `office update`, then continue intake; if they defer,
+continue with the installed runtime. A failed or offline check is informational and does not block intake.
+
 ## Start
 
-1. Create or reuse exactly one tracking GitHub issue for the request (search for duplicates first;
+1. Check for an Auto Office update as described above, then create or reuse exactly one tracking GitHub issue for the request (search for duplicates first;
    do not ask for a draft or routine approval). Stop if you cannot file it safely.
 2. Ask how far to go after the task PRs: stop and ask after (`ask`), preview deploy only (`preview`),
    merge only (`merge`), or merge + prod deploy (`e2e`, which is merge and deploy authority). For a

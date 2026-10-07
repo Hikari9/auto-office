@@ -59,6 +59,7 @@ Auto Office {ver}
                                     the local Office web UI (loopback only)
   office setup                      interactive: choose preferred agents, models, and cost policy
   office doctor                     check the installation, hooks, and runtimes
+  office update [--check]           update Auto Office itself; --check looks for release/source updates
   office upgrade [run] [--to X.Y]   move a run to a newer release line (dry run; --apply)
   office prune [--run <id>]         show finished runs that office prune -f would remove
 
@@ -278,6 +279,8 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("doctor", parents=[common])
     s.add_argument("--fix", action="store_true")
     s.add_argument("--probe-vision", action="store_true", help="run image-capability probes on visual routes (uses quota)")
+    s = sp.add_parser("update", parents=[common])
+    s.add_argument("--check", action="store_true", help="check PyPI and a source checkout's upstream without installing updates")
     s = sp.add_parser("upgrade", parents=[common])
     s.add_argument("target", nargs="?", help="the run (default: this session's run)")
     s.add_argument("--to", metavar="X.Y", help="the release line (default: this runtime's)")
@@ -534,6 +537,9 @@ def _run(args, unknown) -> int:
     if cmd == "doctor":
         from office import doctor
         return emit(doctor.doctor(fix=args.fix, probe_vision=args.probe_vision), args)
+    if cmd == "update":
+        from office import self_update
+        return emit(self_update.check() if args.check else self_update.update(), args)
     if cmd == "install":
         from office import install
         return emit(install.install(only=args.only, dry_run=args.dry_run, migrate_legacy=args.migrate_legacy_hooks,
