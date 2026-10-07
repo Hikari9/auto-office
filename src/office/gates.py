@@ -531,6 +531,7 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
     name = dispatch_mod.herdr_agent_name(d["id"])
     errors = parsed.errors or ["no reply file"]
     text = ""
+    sent = 0
     for n in range(1, limit + 1):
         if d.get("launcher") != "herdr" or not _agent_alive(name):
             break  # no live session to ask: the orchestrator decides (never a substitute)
@@ -540,6 +541,7 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
                   f"in the format the brief requires (a VERDICT line first), to {output}. {REPLY_FILE_RULE}")
         # Left unsubmitted in the composer, it gets Enter, never a second copy.
         got = dispatch_mod.submit_prompt(name, prompt, pane=d.get("pane_id"))
+        sent += 1
         unsent = " (typed but unsubmitted)" if got == "held" else ""
         with db.transaction(con):
             state.emit(con, run, "review.reprompt", f"{d.get('task_id') or 'plan'} {d['role']} {d['id']}: re-prompted "
@@ -560,6 +562,12 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
                   f"{d.get('launcher') or 'process'} mode: {'; '.join(errors[:3])}; no live reviewer pane exists, "
                   f"so Office could not re-prompt it. Inspect {ddir / 'output.log'} and {output}; then use "
                   "`office resume` or the status-directed reroute/recovery instead of abandoning the run")
+    elif not sent:
+        # A herdr reviewer whose session had already ended: nothing was re-prompted.
+        reason = (f"reviewer {d['id']} ({d.get('triple')}) left no valid reply file and its herdr session ended "
+                  f"before Office could re-prompt it: {'; '.join(errors[:3])}. Inspect its dispatch dir {ddir} "
+                  f"and {output}; then use `office resume` or the status-directed reroute/recovery instead of "
+                  "abandoning the run")
     else:
         reason = (f"reviewer {d['id']} ({d.get('triple')}) left no valid reply file after re-prompting: "
                   f"{'; '.join(errors[:3])}; its pane is kept. Re-prompt it (office prompt {d['id']} -- \"<message>\") "

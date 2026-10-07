@@ -30,3 +30,15 @@ def test_headless_invalid_result_does_not_claim_it_reprompted_or_kept_a_pane(tmp
     assert "no live reviewer pane exists" in reason
     assert "output.log" in reason
     assert "office resume" in reason
+
+
+def test_herdr_reviewer_that_ended_before_any_reprompt_is_not_told_it_was_reprompted(tmp_path, monkeypatch):
+    from office import gates
+
+    monkeypatch.setattr(gates, "_agent_alive", lambda name: False)
+    d = {"id": "D399", "triple": "codex/test@high", "launcher": "herdr", "pane_id": "p1"}
+    parsed = SimpleNamespace(errors=["no VERDICT line"])
+    _, _, reason = gates._reprompt_until_valid(None, {"gates": {"review_reprompt_max": 3}}, d, tmp_path,
+                                                tmp_path / "reply.txt", parsed, plan_review=False, visual=False)
+    assert "ended before Office could re-prompt it" in reason
+    assert "after re-prompting" not in reason and "pane is kept" not in reason

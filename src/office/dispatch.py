@@ -1128,15 +1128,6 @@ def _startup_screen(text: str | None) -> str | None:
     return next((label for marker, label in _STARTUP_SCREEN_MARKERS if marker in low), None)
 
 
-def _herdr_pane_read(pane: str) -> str | None:
-    """Read a pane even when `herdr agent start` failed before an agent exists."""
-    try:
-        proc = subprocess.run(["herdr", "pane", "read", pane], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return proc.stdout if proc.returncode == 0 else None
-
-
 def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pane: str,
                            failure: str, why: str) -> None:
     """Preserve failed-pane evidence and hand recovery back to the orchestrator.
@@ -1145,11 +1136,13 @@ def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pa
     is kept so the orchestrator can inspect the actual blocker and choose a
     safe next route instead of abandoning the Office run (#399).
     """
-    view = _herdr_pane_read(pane)
+    # No agent is registered, so _pane_snapshot falls through to `herdr pane read`.
+    # Only the last screen counts: older scrollback may mention any of the markers.
+    view = "\n".join(_pane_snapshot(herdr_agent_name(dispatch["id"]), pane).splitlines()[-40:]) or None
     tail = ddir / "pane-tail.txt"
     screen = _startup_screen(view)
     if view:
-        tail.write_text("\n".join(view.splitlines()[-40:]) + "\n", encoding="utf-8")
+        tail.write_text(view + "\n", encoding="utf-8")
     spec["failed_herdr_pane"] = pane
     spec["failed_herdr_snapshot"] = str(tail) if view else None
     spec["failed_herdr_screen"] = screen
@@ -1176,8 +1169,8 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     env_file = write_agent_env(run, dispatch, ddir, worker=worker)
     setup = f". {shlex.quote(str(env_file))} && cd {shlex.quote(str(cwd))}"
     if not _shell_run(pane, setup, ddir / "shell-ready"):
-        _herdr_fallback_notice(run, dispatch, spec, ddir, pane, "herdr shell setup failed",
-                               f"Office's env/cd line did not run within {_shell_timeout():g}s")
+        _herdr_fallback_notice(run, dispatch, spec, ddir, pane, f"the shell in pane {pane} never ran Office's setup "
+                               "line (env and cd)", f"within {_shell_timeout():g}s")
         return None
     try:
         proc = subprocess.run(["herdr", "agent", "start", name, "--kind", herdr_kind, "--pane", pane, "--", *args],
