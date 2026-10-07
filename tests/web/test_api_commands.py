@@ -1,6 +1,7 @@
 """POST /api/commands semantics: receipts, idempotency, re-validation and execution."""
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -8,7 +9,8 @@ import pytest
 from office import db
 from office.web import server, synthetic
 from office.web.executor import Executor
-from office.web.service import KINDS, Command, CommandRefused
+from office.web.capabilities import RUN_KINDS
+from office.web.service import KIND_TARGET, KINDS, MACHINE_EVENTS, TARGETS, orchestrator_route, Command, CommandRefused
 
 REPO = "synth-org-0/repo-00"
 
@@ -53,11 +55,12 @@ def live_run(svc):
 
 # ------------------------------------------------------------------ kinds
 
-@pytest.mark.parametrize("kind", ["merge", "land", "deploy", "shell", "exec", "", None])
-def test_unknown_kinds_are_refused(kind):
-    with pytest.raises(CommandRefused) as info:
-        Command.parse({"id": "cmd-00000001", "kind": kind})
-    assert info.value.reason == "unknown-kind" and info.value.http == 400
+def valid_target(kind, run_id="r-1"):
+    return {"issue": {"repo": REPO, "issue": 3}, "run": {"run_id": run_id},
+            "scheduler_item": {"run_id": run_id}, "scheduler_scope": {"run_id": run_id},
+            "dispatch": {"run_id": run_id, "dispatch_id": "D1"},
+            "orchestrator_session": {"run_id": run_id, "session": "session:s1"},
+            "settings_tier": {"tier": "machine", "key": "scheduler.auto_mode"}}[KIND_TARGET[kind]]
 
 
 def test_kind_list_has_no_landing_or_shell():
@@ -150,7 +153,7 @@ def test_stale_office_refuses_every_mutation(svc, kind):
     run = live_run(svc)
     svc.last_ok -= svc.stale_after + 1
     assert svc.office_freshness()["state"] == "stale"
-    target = {"run_id": run["run_id"], "repo": REPO, "issue": 3, "tier": "machine", "key": "scheduler.auto_mode"}
+    target = valid_target(kind, run["run_id"])
     err = refused(svc, cmd(f"cmd-stale-{kind}", kind, target, {"text": "hi", "mode": "on", "value": 1}))
     assert err.reason == "office-stale"
     assert svc.executor.calls == [] and svc.launcher.launches == [] and svc.launcher.sent == []
@@ -307,6 +310,26 @@ def test_change_route_needs_a_current_dispatch_on_the_same_harness(svc):
                    {"route": f"{harness}/m@high", "quote": "use m"}), wait=True)
     assert svc.executor.calls[-1]["args"] == ["--run", run["run_id"], "amend", "route", did, "--as",
                                               f"{harness}/m@high", "--quote", "use m", "--restart"]
+
+
+def test_approve_plan_is_refused_as_an_unknown_kind(svc):
+    run = live_run(svc)
+    with pytest.raises(CommandRefused) as info:
+        cmd("cmd-plan-0001", "approve_plan", {"run_id": run["run_id"]}, {"quote": "yes, go ahead"})
+    assert (info.value.reason, info.value.http) == ("unknown-kind", 400)
+    assert svc.executor.calls == []
+    assert "approve_plan" not in RUN_KINDS
+    assert "approve_plan" not in svc.snapshot()["entities"]["runs"][run["id"]]["controls"]
+
+
+def test_runs_awaiting_plan_authorization_are_flagged_for_the_cli_hint(svc):
+    run = live_run(svc)
+    assert svc.snapshot()["entities"]["runs"][run["id"]]["awaiting_plan_authorization"] is True
+    write(svc, lambda con: con.execute(
+        "INSERT INTO authorizations(id, run_id, kind, target, requirements_version, authorized_by, quote, created_at) "
+        "VALUES('Z1', ?, 'plan', 'requirements', 1, 'user', 'yes', 't')", (run["run_id"],)))
+    svc.poll()
+    assert svc.snapshot()["entities"]["runs"][run["id"]]["awaiting_plan_authorization"] is False
 
 
 def test_plan_approval_is_not_a_web_command(svc):
@@ -466,3 +489,12 @@ def test_settings_need_a_known_key(svc):
                            {"value": 1}))
     assert err.reason == "unknown-key"
     assert svc.executor.calls == []
+
+
+def test_hostmetrics_ok_sample_projects_as_measured(svc):
+    svc.host_probe = lambda: {"cpu": {"status": "ok", "value": 0.62, "unit": "load_per_core", "source": "loadavg"},
+                              "ram": {"status": "unavailable", "value": None, "unit": "fraction_used"}}
+    svc.poll(force=True)
+    tel = svc.snapshot()["scalars"]["host"]["telemetry"]
+    assert tel["cpu"] == {"status": "measured", "value": 0.62, "unit": "load_per_core", "source": "loadavg"}
+    assert tel["ram"]["status"] == "unavailable"

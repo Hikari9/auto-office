@@ -118,6 +118,9 @@ class Handler(BaseHTTPRequestHandler):
         fixture = self.service.fixture or ""
         page = page.replace("__OFFICE_TOKEN__", html.escape(self.service.token, quote=True))
         page = page.replace("__OFFICE_FIXTURE__", html.escape(fixture, quote=True))
+        if fixture:  # the marker shows before (and without) the scripts
+            page = page.replace('data-testid="fixture-marker" hidden></span>',
+                                f'data-testid="fixture-marker">FIXTURE MODE ({html.escape(fixture)})</span>')
         self._send(200, page.encode(), "text/html; charset=utf-8")
 
     def _event(self, event: str, data: dict, event_id: str | None = None) -> None:

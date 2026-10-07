@@ -3,16 +3,16 @@
 // fields, the table scroller) are never rebuilt; regions that are rebuilt
 // keep the focused control, its text selection and their scroll position.
 import { Store } from "./store.js";
-import { AUTHORIZATIONS, QUEUE_AUTHORIZATION, QUEUE_ONLY_WHY, endStateLabel, githubMark, issueActions,
-  issueRows, localMark, receiptState, repoName, shortRun, startCommand } from "./model.js";
+import { AUTHORIZATIONS, FILTERS, PLAN_APPROVAL_COMMAND, QUEUE_AUTHORIZATION, QUEUE_ONLY_WHY, endStateLabel, githubMark,
+  issueActions, issueRows, localMark, receiptState, repoName, shortRun, startCommand } from "./model.js";
 import * as allocationView from "./allocation.js";
 import * as settingsView from "./settings.js";
 import { renderAgents } from "./agents.js";
 
 const ROW = 44;
 const OVERSCAN = 8;
-const COLUMNS = ["Repository", "Issue", "Owner", "Phase", "Progress", "Priority", "Authorization", "PR / run",
-  "State", "Office gates", "GitHub checks", "Action"];
+const COLUMNS = ["Repository", "Issue", "Owner", "Phase", "Progress", "Priority", "Authorization · Auto queue",
+  "Run / command", "State", "Office gates", "GitHub checks", "Action"];
 const SURFACES = { agents: "Agents", allocation: "Allocation", settings: "Settings" };
 // Surface registry: name -> module with render(root, ctx); its section is #surface-<name>.
 const VIEWS = { allocation: allocationView, settings: settingsView };
@@ -22,7 +22,7 @@ const token = meta("office-token");
 const fixture = meta("office-fixture");
 
 const ui = {
-  surface: "issues", repo: null, repoQuery: "", query: "", selected: null, cursor: null,
+  surface: "issues", repo: null, repoQuery: "", query: "", filter: "open", selected: null, cursor: null,
   drafts: new Map(), local: new Map(), copied: null, selectOpen: false,
 };
 let rows = [];
@@ -143,6 +143,13 @@ function renderBanners() {
     if (repos("unauthenticated").length) out.push(banner("err", "banner-unauthenticated", "GitHub sign-in failed", "The GitHub token was rejected (HTTP 401)."));
     const stale = repos("stale");
     if (stale.length) out.push(banner("warn", "banner-github-stale", "GitHub data stale", `${stale.join(", ")}: the last refresh failed; showing the previous fetch.`));
+    // Reroutes and held launches stay inspectable on their Allocation row; the banner shows the last hour's.
+    const recent = (s.scalars.orchestrator_notices || []).filter((n) => now() - isoSeconds(n.at) < 3600).slice(0, 3);
+    for (const n of recent) {
+      const fell = n.kind === "queue.orchestrator_fallback";
+      out.push(banner(fell ? "info" : "warn", fell ? "banner-orchestrator-fallback" : "banner-orchestrator-held",
+        fell ? `Orchestrator rerouted to ${n.harness}` : "Queued launch waiting", n.summary));
+    }
     if (g.state === "disabled") out.push(banner("info", "banner-github-disabled", "GitHub not connected", g.reason || "no GitHub client; issues come from Office records only"));
   }
   $("banners").replaceChildren(...out);
@@ -162,9 +169,9 @@ function renderSurfaces() {
     else b.removeAttribute("aria-current");
   }
   $("surface-issues").hidden = ui.surface !== "issues";
-  for (const name of Object.keys(VIEWS)) $(`surface-${name}`).hidden = ui.surface !== name;
   $("surface-agents").hidden = ui.surface !== "agents";
   if (ui.surface === "agents") renderAgents(agentsCtx, $("surface-agents"));
+  for (const name of Object.keys(VIEWS)) $(`surface-${name}`).hidden = ui.surface !== name;
   const other = $("surface-other");
   other.hidden = ui.surface === "issues" || ui.surface === "agents" || ui.surface in VIEWS;
   if (ui.surface in VIEWS) {
@@ -213,19 +220,31 @@ function renderKpis() {
     && a.state.process !== "exited").length;
   const cpu = ((s.scalars.host || {}).telemetry || {}).cpu || {};
   const measured = cpu.status === "measured" && typeof cpu.value === "number";
+  const perCore = cpu.unit === "load_per_core";
   const kpi = (tone, value, label, testid) => h("div", { class: `kpi ${tone}`, dataset: { testid } },
     h("div", { class: "v", text: value }), h("div", { class: "l", text: label }));
   $("kpis").replaceChildren(
     kpi("", String(running), running ? "Running issues" : "No active runs", "kpi-running"),
     kpi("green", String(agents), "Active agents", "kpi-agents"),
-    kpi("purple", measured ? `${Math.round(cpu.value)}%` : "—", measured ? "CPU load" : "CPU telemetry unavailable", "kpi-cpu"));
+    kpi("purple", measured ? `${Math.round(perCore ? cpu.value * 100 : cpu.value)}%` : "—",
+      measured ? (perCore ? "CPU load (per core)" : "CPU load") : "CPU telemetry unavailable", "kpi-cpu"));
 }
 
 // ------------------------------------------------------------------ table
 
 function filtered() {
   const q = ui.query.trim().toLowerCase();
-  return rows.filter((r) => (!ui.repo || r.repoKey === ui.repo) && (!q || r.search.includes(q)));
+  const chip = FILTERS.find((f) => f.value === ui.filter) || FILTERS[0];
+  return rows.filter((r) => (!ui.repo || r.repoKey === ui.repo) && chip.test(r) && (!q || r.search.includes(q)));
+}
+
+function renderFilters() {
+  const scoped = rows.filter((r) => !ui.repo || r.repoKey === ui.repo);
+  keep($("issue-filters"), () => FILTERS.map((f) => h("button", {
+    type: "button", class: "pill filter", "aria-pressed": String(ui.filter === f.value),
+    dataset: { key: `filter:${f.value}`, testid: `filter-${f.value}` },
+    onclick: () => { ui.filter = f.value; ui.cursor = null; renderFilters(); renderTable(); },
+  }, `${f.label} `, h("span", { class: "n", text: String(scoped.filter(f.test).length) }))));
 }
 
 function rowIndex(id) { return visible.findIndex((r) => r.id === id); }
@@ -237,19 +256,42 @@ function cells(r, active) {
   const a = actions.primary;
   const prCount = r.prs.length;
   const td = (cls, ...c) => h("div", { class: `td ${cls}`, role: "gridcell" }, ...c);
+  const by = Object.fromEntries(actions.list.map((x) => [x.kind, x]));
+  const tab = active ? "0" : "-1";
+  const stop = (ev) => ev.stopPropagation();
+  let auth = r.authorization ? h("span", { class: "pill", text: r.authorization }) : h("span", { class: "muted", text: "—" });
+  let queue = null;
+  let command = [r.run ? h("span", { text: `run ${shortRun(r.run.id)}` }) : h("span", { class: "muted", text: "no run" }),
+    prCount ? h("span", { class: "s", text: ` · ${prCount} PR${prCount > 1 ? "s" : ""}` }) : null];
+  if (!r.run) {
+    const d = draft(r.id);
+    auth = authSelect(r.id, `row:${r.id}`, d.auth, (v) => { d.auth = v; renderRows(); renderInspector({ force: true }); },
+      null, { testid: "row-auth", tabindex: tab, label: `Authorization for #${r.number}`, onclick: stop });
+    const q = by.queue_issue;
+    queue = h("input", { type: "checkbox", class: "queuecheck", checked: Boolean(r.queued), disabled: !q.enabled || Boolean(r.queued),
+      tabindex: tab, title: r.queued ? `In the Auto Queue (${r.queued.decision || "waiting"})` : q.reason || "Auto Queue this issue",
+      "aria-label": `Auto Queue #${r.number}${r.queued ? " (queued)" : q.reason ? ` (unavailable: ${q.reason})` : ""}`,
+      dataset: { key: `row-queue:${r.id}`, testid: "row-queue" }, onclick: stop,
+      onchange: (ev) => { ev.target.checked = Boolean(r.queued); act(q, r); } });
+    const cmd = r.url ? startCommand(r.url, d.auth) : null;
+    command = cmd ? [h("code", { class: "cmd", title: cmd, dataset: { testid: "row-start-command" }, text: cmd }),
+      h("button", { type: "button", class: "btn sm copy", tabindex: tab, "aria-label": `Copy office start for #${r.number}`,
+        dataset: { key: `row-copy:${r.id}`, testid: "row-copy" }, onclick: (ev) => { stop(ev); act(by.copy_start, r); } },
+      ui.copied === r.id ? "Copied" : "Copy")] : h("span", { class: "muted", text: "no issue URL" });
+  }
   return [
     td("repo", h("span", { text: r.repoName })),
     td("issue", h("div", { class: "t", text: `#${r.number} ${r.title || "(not among GitHub's open issues)"}` }),
       h("div", { class: "s", text: r.provenance === "github" ? "GitHub issue" : "From Office record" })),
     td(r.owner === "No owner" ? "muted" : "", r.owner),
-    td("", h("span", { class: "phase", dataset: { tone: r.run ? r.liveness : "incoming" }, text: r.phase })),
+    td("phasecell", h("span", { class: "phase", dataset: { tone: r.run ? r.liveness : "incoming" }, text: r.phase }),
+      h("div", { class: "s", dataset: { testid: "phase-detail" }, title: r.phaseDetail, text: r.phaseDetail })),
     td("progress", pct === null ? h("span", { class: "muted", text: "—", title: "no task structure recorded" })
       : [h("span", { class: "bar", "aria-hidden": "true" }, h("span", { style: `width:${pct}%` })),
         h("span", { text: `${p.accepted_weight}/${p.total_weight}` })]),
     td(r.priority ? "" : "muted", r.priority || "—"),
-    td("", r.authorization ? h("span", { class: "pill", text: r.authorization }) : h("span", { class: "muted", text: "—" })),
-    td("links", r.run ? h("span", { text: `run ${shortRun(r.run.id)}` }) : h("span", { class: "muted", text: "no run" }),
-      prCount ? h("span", { class: "s", text: ` · ${prCount} PR${prCount > 1 ? "s" : ""}` }) : null),
+    td("auth", auth, queue),
+    td(r.run ? "links" : "links command", command),
     td("", { live: "Live run", resumable: "Resumable", terminal: "Closed run", none: "No run" }[r.liveness]
       + (r.queue ? ` · ${r.queue.decision}` : "")),
     td(r.gates ? "" : "muted", r.gates || "—"),
@@ -266,6 +308,8 @@ function renderRows() {
   const height = scroller.clientHeight || 600;
   const first = Math.max(0, Math.floor(scroller.scrollTop / ROW) - OVERSCAN);
   const last = Math.min(visible.length, Math.ceil((scroller.scrollTop + height) / ROW) + OVERSCAN);
+  const open = document.activeElement;
+  if (ui.selectOpen && open && open.tagName === "SELECT" && body.contains(open)) return;
   if (ui.cursor === null || rowIndex(ui.cursor) < 0) ui.cursor = (visible[rowIndex(ui.selected)] || visible[first] || {}).id ?? null;
   keep(body, () => {
     const out = [];
@@ -294,12 +338,14 @@ function renderTable() {
   if (!store.state) [kind, text] = ["loading", "Loading Office data…"];
   else if (!Object.keys(store.state.entities.repos).length) [kind, text] = ["no-repos", "No repositories yet. Connect GitHub or start a run from a checkout."];
   else if (!visible.length && ui.query.trim()) [kind, text] = ["no-results", `No issues match “${ui.query.trim()}”${ui.repo ? " in this repository" : ""}.`];
-  else if (!visible.length) [kind, text] = ["no-issues", ui.repo ? "No open issues in this repository." : "No open issues."];
+  else if (!visible.length && ui.filter !== "open") {
+    [kind, text] = ["no-filter", `No issues under “${FILTERS.find((f) => f.value === ui.filter).label}”${ui.repo ? " in this repository" : ""}.`];
+  } else if (!visible.length) [kind, text] = ["no-issues", ui.repo ? "No open issues in this repository." : "No open issues."];
   empty.hidden = !kind;
   if (kind) {
     empty.dataset.kind = kind;
-    empty.replaceChildren(h("strong", { text }),
-      kind === "no-results" ? h("button", { type: "button", class: "btn", text: "Clear search", onclick: () => { $("issue-search").value = ""; ui.query = ""; renderAll(); } }) : null);
+    empty.replaceChildren(h("strong", { text }), ...(kind === "no-results"
+      ? [h("button", { type: "button", class: "btn", text: "Clear search", onclick: () => { $("issue-search").value = ""; ui.query = ""; renderAll(); } })] : []));
   }
   renderRows();
 }
@@ -362,8 +408,10 @@ function actionButton(a, r, extra = {}) {
 
 const why = (a) => (a.reason ? h("span", { class: "why warn", id: `why-${a.kind}`, dataset: { testid: `why-${a.kind}` }, text: a.reason }) : null);
 
-function authSelect(id, key, value, onchange, disabledWhy) {
-  return h("select", { "aria-label": key === "queue" ? "Auto Queue authorization" : "Start authorization", dataset: { key: `auth:${key}`, testid: `auth-${key}` },
+function authSelect(id, key, value, onchange, disabledWhy, opts = {}) {
+  return h("select", { class: opts.testid ? "auth" : null, tabindex: opts.tabindex,
+    "aria-label": opts.label || (key === "queue" ? "Auto Queue authorization" : "Start authorization"),
+    dataset: { key: `auth:${key}`, testid: opts.testid || `auth-${key}` }, onclick: opts.onclick,
     onchange: (ev) => onchange(ev.target.value) },
   AUTHORIZATIONS.map((o) => {
     const off = disabledWhy && o.value !== QUEUE_AUTHORIZATION;
@@ -411,6 +459,12 @@ function runCard(run) {
     kv("Office gates", run.gates && run.gates.office ? `${run.gates.office.total} recorded` : "—"),
     kv("GitHub checks", "see PRs"),
     run.launch ? kv("Launched", `from the web (command ${run.launch.command})`) : null,
+    run.awaiting_plan_authorization ? h("div", { class: "plan-auth", dataset: { testid: "plan-approval" } },
+      h("div", { class: "why warn", text: "Office is waiting for plan authorization. The browser cannot authorize a plan: run this in a terminal with your own words." }),
+      h("code", { class: "copy", dataset: { testid: "plan-approval-command" }, text: PLAN_APPROVAL_COMMAND }),
+      h("button", { type: "button", class: "btn", dataset: { key: `copy-plan:${run.id}`, testid: "copy-plan-approval" },
+        onclick: () => copyText(PLAN_APPROVAL_COMMAND, `plan:${run.id}`) }, "Copy"),
+      ui.copied === `plan:${run.id}` ? h("span", { class: "why", role: "status", text: "Copied to the clipboard" }) : null) : null,
     c.runtime && c.runtime.read_only && c.resume_run ? h("div", { class: "why warn", text: `Capability unavailable: ${c.resume_run.reason}` }) : null,
     h("div", { class: "prov", text: `Provenance: ${run.issue ? `${run.issue.provenance} (${run.issue.source})` : "runs.db"}` }));
 }
@@ -506,12 +560,16 @@ async function send(kind, subject, target, payload, expect, label, id = newId())
   return entry;
 }
 
+async function copyText(text, key) {
+  try { await navigator.clipboard.writeText(text); ui.copied = key; } catch { ui.copied = null; }
+  renderRows();
+  renderInspector({ force: true });
+}
+
 async function act(a, r) {
   if (!a.enabled) return;
   if (a.kind === "copy_start") {
-    const cmd = startCommand(r.url, draft(r.id).auth);
-    try { await navigator.clipboard.writeText(cmd); ui.copied = r.id; } catch { ui.copied = null; }
-    renderInspector();
+    await copyText(startCommand(r.url, draft(r.id).auth), r.id);
     return;
   }
   const label = `${a.label} #${r.number}`;
@@ -568,6 +626,7 @@ function renderAll() {
   renderSurfaces();
   renderRepos();
   renderKpis();
+  renderFilters();
   renderTable();
   renderInspector();
   renderReceipts();
@@ -593,6 +652,12 @@ function init() {
   $("issue-table").addEventListener("keydown", onTableKey);
   $("inspector").addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeInspector(); });
   const closeSelect = (ev) => { if (ev.target.tagName === "SELECT" && ui.selectOpen) { ui.selectOpen = false; schedule(); } };
+  // A row's open authorization <select> closes when the rows re-render: hold row renders while one is open.
+  $("issue-body").addEventListener("pointerdown", (ev) => { if (ev.target.tagName === "SELECT") ui.selectOpen = true; });
+  $("issue-body").addEventListener("change", closeSelect);
+  $("issue-body").addEventListener("focusout", closeSelect);
+  // Escape closes a native select without a change event.
+  $("issue-body").addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeSelect(ev); });
   $("inspector").addEventListener("pointerdown", (ev) => { if (ev.target.tagName === "SELECT") ui.selectOpen = true; });
   $("inspector").addEventListener("change", closeSelect);
   $("inspector").addEventListener("focusout", closeSelect);

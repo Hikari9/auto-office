@@ -9,8 +9,8 @@ import pytest
 
 from office.web import server
 
-COLUMNS = ["Repository", "Issue", "Owner", "Phase", "Progress", "Priority", "Authorization", "PR / run", "State",
-           "Office gates", "GitHub checks", "Action"]
+COLUMNS = ["Repository", "Issue", "Owner", "Phase", "Progress", "Priority", "Authorization · Auto queue",
+           "Run / command", "State", "Office gates", "GitHub checks", "Action"]
 
 
 def _serve(svc):
@@ -66,7 +66,7 @@ def test_large_fixture_is_virtualized_and_scrolls_smoothly(page, served):
     errors = open_page(page, url)
     count = page.text_content("[data-testid=issue-count]")
     shown, _, total = count.partition(" of ")
-    assert int(shown) == int(total.split()[0]) >= 2000
+    assert int(total.split()[0]) >= int(shown) >= 2000  # the default chip hides closed runs
     assert page.locator("[data-testid=issue-row]").count() < 80  # only the visible window is in the DOM
     timing = page.evaluate("""async () => {
         const el = document.getElementById('issue-table');
@@ -98,15 +98,30 @@ def test_table_columns_and_running_and_incoming_rows(page, served):
     assert page.locator("[role=columnheader]").all_text_contents() == COLUMNS
     live = cells(row(page, "issue:repo:github.com/synth-org-0/repo-00#1"))
     assert live[0] == "synth-org-0/repo-00" and live[1].startswith("#1 Issue 1")
-    assert live[2].endswith("orchestrator") and live[3] == "executing"
+    assert live[2].endswith("orchestrator") and live[3].startswith("executing")
+    detail = row(page, "issue:repo:github.com/synth-org-0/repo-00#1").locator("[data-testid=phase-detail]")
+    assert live[3] == "executing" + detail.text_content()
+    run = svc.snapshot()["entities"]["issues"]["issue:repo:github.com/synth-org-0/repo-00#1"]["live_run"]
+    tasks = sorted((t for t in svc.snapshot()["entities"]["tasks"].values()
+                    if t["run"] == run and t["status"] not in ("accepted", "cancelled")), key=lambda t: t["task_id"])
+    want = " · ".join(f"{t['task_id']} {t['status'].replace('_', ' ')}" for t in tasks[:3])
+    assert tasks and detail.text_content().startswith(want)
     assert "/" in live[4]  # weighted progress fraction next to the bar
-    assert live[5] == "normal" and live[7].startswith("run ")
+    assert live[5] == "normal" and live[6] == "PR" and live[7].startswith("run ")
     assert live[8].startswith("Live run") and live[9].startswith("code review")
-    assert live[10] in ("—", "unavailable") or "success" in live[10]  # GitHub checks are their own column
+    e = svc.snapshot()["entities"]
+    issue = e["issues"]["issue:repo:github.com/synth-org-0/repo-00#1"]
+    states = [e["prs"].get(p["ref"], {}).get("github_checks") for r in issue["runs"] for p in e["runs"][r]["prs"]]
+    counts = {}
+    for st in filter(None, states):
+        counts[st] = counts.get(st, 0) + 1
+    want = "—" if not states else ", ".join(f"{n} {st}" for st, n in counts.items()) or "unavailable"
+    assert live[10] == want  # GitHub checks are their own column, from GitHub's check states
     assert live[11] == "Attach"
     incoming = cells(row(page, "issue:repo:github.com/synth-org-0/not-ready#1"))
-    assert incoming[2] == "No owner" and incoming[3] == "Incoming" and incoming[4] == "—"
-    assert incoming[7] == "no run" and incoming[8] == "No run" and incoming[11] == "Copy office start"
+    assert incoming[2] == "No owner" and incoming[3] == "IncomingNo run yet" and incoming[4] == "—"
+    assert incoming[7].startswith("office start --issue ") and incoming[7].endswith("Copy")
+    assert incoming[8] == "No run" and incoming[11] == "Copy office start"
     bars = row(page, "issue:repo:github.com/synth-org-0/repo-00#1").locator(".bar")
     assert bars.count() == 1
 
@@ -174,6 +189,98 @@ def test_no_run_issue_offers_copyable_start_and_authorization(page, served):
     assert page.is_enabled("[data-testid=action-start_issue]")
     assert page.is_enabled("[data-testid=action-queue_issue]")
     assert page.is_enabled("[data-testid=action-copy_start]")
+
+
+def test_no_run_rows_have_inline_command_authorization_and_auto_queue(page, served):
+    url, svc = served()
+    open_page(page, url, width=1440, height=900)
+    r = row(page, "issue:repo:github.com/synth-org-0/repo-00#3")
+    assert r.locator("[data-testid=row-start-command]").text_content().endswith('--end-state preview '
+                                                                                '"Resolve issue https://github.com/synth-org-0/repo-00/issues/3"')
+    r.locator("[data-testid=row-auth]").select_option("merge")
+    assert "--end-state merge" in r.locator("[data-testid=row-start-command]").text_content()
+    assert row(page, "issue:repo:github.com/synth-org-0/repo-00#3").get_attribute("aria-selected") == "false"
+    r.locator("[data-testid=row-queue]").click()
+    page.wait_for_function("() => Object.values(window.officeStore.state.entities.commands)"
+                           ".some(c => c.kind === 'queue_issue' && c.status === 'completed')", timeout=15000)
+    sent = [c for c in svc.snapshot()["entities"]["commands"].values() if c["kind"] == "queue_issue"]
+    assert len(sent) == 1 and sent[0]["target"] == {"repo": "synth-org-0/repo-00", "issue": 3}
+    assert sent[0]["result"]["args"] == ["queue", "add", "synth-org-0/repo-00#3", "--priority", "normal", "--title", "Issue 3 of synth-org-0/repo-00"]
+    not_ready = row(page, "issue:repo:github.com/synth-org-0/not-ready#1").locator("[data-testid=row-queue]")
+    assert not_ready.is_disabled() and "not execution-ready" in not_ready.get_attribute("aria-label")
+    # Once Office has the queue item (here in URL form), the row shows it queued and sends nothing more.
+    from office import db
+    con = db.connect(svc.db_path)
+    try:
+        with db.transaction(con):
+            con.execute("INSERT INTO sched_items(id, kind, ref, title, priority, enqueued_at, updated_at) VALUES("
+                        "'issue:q3','issue','https://github.com/synth-org-0/repo-00/issues/3','t','normal',"
+                        "'2026-09-01T00:00:00Z','2026-09-01T00:00:00Z')")
+    finally:
+        con.close()
+    queued = '[data-testid=issue-row][data-id="issue:repo:github.com/synth-org-0/repo-00#3"] [data-testid=row-queue]'
+    page.wait_for_selector(f"{queued}:checked:disabled", timeout=15000)
+    assert "(queued)" in page.get_attribute(queued, "aria-label")
+    page.locator(queued).click(force=True)
+    assert len([c for c in svc.snapshot()["entities"]["commands"].values() if c["kind"] == "queue_issue"]) == 1
+
+
+def test_plan_approval_hint_only_while_office_awaits_it(page, served):
+    url, svc = served()
+    open_page(page, url)
+    run = svc.snapshot()["entities"]["issues"]["issue:repo:github.com/synth-org-0/repo-00#1"]["live_run"]
+    card = f'[data-testid=run-card][data-run="{run}"]'
+    row(page, "issue:repo:github.com/synth-org-0/repo-00#1").click()
+    assert page.text_content(f"{card} [data-testid=plan-approval-command]") == 'office approve plan --quote "<words>"'
+    from office import db
+    con = db.connect(svc.db_path)
+    try:
+        with db.transaction(con):
+            con.execute("INSERT INTO authorizations(id, run_id, kind, target, requirements_version, authorized_by, quote, "
+                        "created_at) VALUES('A-web', ?, 'plan', 'requirements', 1, 'user', 'yes', 't')",
+                        (run.removeprefix("run:"),))
+    finally:
+        con.close()
+    page.wait_for_selector(f"{card} [data-testid=plan-approval-command]", state="detached", timeout=15000)
+
+
+def test_filter_chips_split_open_incoming_attention_and_done(page, served):
+    url, svc = served()
+    open_page(page, url)
+    runs = svc.snapshot()["entities"]["runs"]
+    def shown():
+        return {i: runs.get(i) for i in page.locator("[data-testid=issue-row]").evaluate_all(
+            "els => els.map(e => e.dataset.id)")}
+    assert page.get_attribute("[data-testid=filter-open]", "aria-pressed") == "true"
+    e = svc.snapshot()["entities"]
+    open_ids = set(shown())
+
+    def primary(issue_id):
+        """The row's run, as model.js picks it: live, else resumable, else the latest linked run."""
+        linked = [r for r in e["runs"].values() if (r.get("issue") or {}).get("ref") == issue_id]
+        if issue_id in e["issues"]:
+            linked = [e["runs"][r] for r in e["issues"][issue_id]["runs"]]
+        return next((r for r in linked if r["liveness"] == "live"), None) or \
+            next((r for r in linked if r["liveness"] == "resumable"), None) or (linked[-1] if linked else None)
+
+    def attention(run):
+        tasks = [t for t in e["tasks"].values() if t["run"] == run["id"]]
+        return run["liveness"] == "resumable" or bool(run.get("awaiting_plan_authorization")) or \
+            any(t["status"] in ("paused", "failed", "blocked", "needs_attention", "stopped") for t in tasks)
+
+    page.click("[data-testid=filter-incoming]")
+    incoming = set(shown())
+    assert incoming and incoming == {i for i in open_ids if primary(i) is None}
+    assert all(row(page, i).locator("[data-testid=row-start-command]").count() == 1 for i in incoming)
+    page.click("[data-testid=filter-attention]")
+    want = {i for i in open_ids if primary(i) and attention(primary(i))}
+    assert want and set(shown()) == want
+    page.click("[data-testid=filter-done]")
+    # Every closed run in the small fixture shares its issue with a live run, so Done is empty and says so.
+    assert page.text_content("[data-testid=filter-done] .n") == "0" and not shown()
+    assert page.get_attribute("[data-testid=table-empty]", "data-kind") == "no-filter"
+    assert page.text_content("[data-testid=table-empty]") == "No issues under “Done”."
+    assert int(page.text_content("[data-testid=filter-open] .n")) == len(open_ids)
 
 
 def test_not_ready_repository_disables_start_and_names_prerequisites(page, served):

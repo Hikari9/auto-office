@@ -40,12 +40,84 @@ log = logging.getLogger("office.web")
 
 KINDS = ("start_issue", "queue_issue", "resume_run", "attach_run", "pause", "resume", "set_priority", "demote",
          "set_auto_mode", "change_route", "chat_send", "settings_set", "settings_unset")
+# What each command kind targets: the accepted target shapes, as ({required key: type}, {optional key: type}).
+# A target must match one shape exactly (no other keys); readiness of the thing it names is each kind's validator.
+_ISSUE = [({"repo": str, "issue": int}, {})]
+_RUN = [({"run_id": str}, {})]
+_SCHED_ITEM = [({"item": str}, {}), ({"run_id": str}, {"task_id": str})]
+TARGETS = {
+    "issue": _ISSUE,
+    "run": _RUN,
+    "scheduler_item": _SCHED_ITEM,
+    "scheduler_scope": [({}, {}), ({"run_id": str}, {})],
+    "dispatch": [({"run_id": str, "dispatch_id": str}, {})],
+    "orchestrator_session": [({"run_id": str, "session": str}, {"host": str})],
+    "settings_tier": [({"tier": str, "key": str}, {"repo": str, "run_id": str})],
+}
+KIND_TARGET = {
+    "start_issue": "issue", "queue_issue": "issue",
+    "resume_run": "run", "attach_run": "run",
+    "pause": "scheduler_item", "resume": "scheduler_item", "set_priority": "scheduler_item", "demote": "scheduler_item",
+    "set_auto_mode": "scheduler_scope", "change_route": "dispatch", "chat_send": "orchestrator_session",
+    "settings_set": "settings_tier", "settings_unset": "settings_tier",
+}
+
+
+def _typed(value: Any, want: type) -> bool:
+    if want is int:
+        return isinstance(value, int) and not isinstance(value, bool) and value > 0
+    return isinstance(value, str) and bool(value.strip()) and len(value) <= 512
+
+
+def check_target(kind: str, target: dict) -> None:
+    """Refuse a target that is not one of `kind`'s shapes (CommandRefused bad-target, HTTP 400)."""
+    what = KIND_TARGET[kind]
+    for required, optional in TARGETS[what]:
+        allowed = {**required, **optional}
+        if set(required) <= set(target) <= set(allowed) and all(_typed(target[k], allowed[k]) for k in target):
+            return
+    shapes = " or ".join("{" + ", ".join([*req, *(f"{k}?" for k in opt)]) + "}" for req, opt in TARGETS[what])
+    raise CommandRefused("bad-target", f"{kind} targets a {what.replace('_', ' ')}: target must be {shapes}", http=400)
+
+
 COLLECTIONS = ("repos", "issues", "prs", "runs", "tasks", "agents", "queue", "commands")
 COMMAND_ID = re.compile(r"[A-Za-z0-9_.:-]{8,128}")
 STALE_AFTER = 15.0
 RING = 512
 COMMANDS_SHOWN = 200
 LIVE, STALE, DISCONNECTED = "live", "stale", "disconnected"
+# Machine-level orchestrator launch events (fallbacks, held launches) are recorded under this events run id.
+MACHINE_EVENTS = "office-web"
+NOTICES_SHOWN = 20
+
+
+def orchestrator_route(conf: dict, quota: dict | None, available: Callable[[str], bool] = lambda h: True) -> dict:
+    """The harness an orchestrator launch uses under policy.
+
+    `scheduler.orchestrator_route` unless its quota is known to be at or below
+    the reserve; then the first `scheduler.orchestrator_fallbacks` harness that is
+    `available` (installed) and whose quota is known to be above it. Unknown quota never falls back. With no
+    allowed fallback, `harness` is None: the launch waits.
+    """
+    sched = conf.get("scheduler") or {}
+    primary = str(sched.get("orchestrator_route") or "claude")
+    reserve = float((conf.get("quota") or {}).get("reserve_percent", 5))
+    status = scheduler._quota(primary, quota, reserve)["status"]
+    if status != "exhausted":
+        return {"harness": primary, "fallback_from": None, "quota": status, "reason": None}
+    reason = f"{primary} quota is at or below the {reserve:g}% reserve"
+    for fb in sched.get("orchestrator_fallbacks") or []:
+        if fb and str(fb) != primary and scheduler._quota(str(fb), quota, reserve)["status"] == "ok" \
+                and available(str(fb)):
+            return {"harness": str(fb), "fallback_from": primary, "quota": "ok", "reason": reason}
+    return {"harness": None, "fallback_from": primary, "quota": status,
+            "reason": f"{reason} and no allowed fallback (scheduler.orchestrator_fallbacks) has known quota"}
+
+
+def _host_telemetry(host: dict) -> dict:
+    """hostmetrics reports a taken sample as `ok`; the web vocabulary calls it `measured`."""
+    return {name: {**m, "status": "measured"} if isinstance(m, dict) and m.get("status") == "ok" else m
+            for name, m in host.items()}
 
 
 class CommandRefused(Exception):
@@ -111,6 +183,7 @@ class Command:
         for k, v in parts.items():
             if not isinstance(v, dict):
                 raise CommandRefused("bad-request", f"{k} must be an object", http=400)
+        check_target(kind, parts["target"])
         return cls(cid, kind, parts["target"], parts["expect"], parts["payload"])
 
 
@@ -166,7 +239,7 @@ class Service:
                  host_probe: Callable[[], dict] = hostmetrics.host, observer_ctx: dict | None = None,
                  config: Callable[[], dict] | None = None, fixture: str | None = None,
                  clock: Callable[[], float] = time.time, stale_after: float = STALE_AFTER,
-                 queue_loop: bool = True):
+                 queue_loop: bool = True, quota_probe: Callable[[], dict] | None = None):
         self.db_path, self.state_home = Path(db_path), Path(state_home)
         self.launcher = launcher or launch_mod.FakeLauncher(reason="no launcher configured")
         self.executor = executor or Executor(env={"AUTO_OFFICE_RUNS_DB": str(self.db_path)})
@@ -175,6 +248,9 @@ class Service:
         self.checkouts = checkouts or (lambda full_name: None)
         self.readiness = readiness
         self.host_probe, self.observer_ctx = host_probe, dict(observer_ctx or {})
+        # {harness: {remaining_percent}}; a harness absent here is unknown. Fixture mode never probes.
+        self.quota_probe = quota_probe or (dict if fixture else lambda: _probe_quota(self.config()))
+        self.held: dict[str, str] = {}  # queue item -> why its launch waits (one event per reason)
         self.config = config or _effective_config
         self.fixture, self.clock, self.stale_after, self.queue_loop = fixture, clock, stale_after, queue_loop
         self.epoch = secrets.token_hex(6)
@@ -355,15 +431,20 @@ class Service:
         queue_rows, active, auto = self.observer.read(lambda s: _queue_rows(s, conf))
         host = self.host_probe()
         plan = scheduler.plan_admission(queue_rows, active, host, {}, conf, datetime.now(timezone.utc))
+        notices = self.observer.read(lambda s: s.rows(
+            "SELECT seq, kind, summary, payload_json, created_at FROM events WHERE run_id=? ORDER BY seq DESC LIMIT ?",
+            (MACHINE_EVENTS, NOTICES_SHOWN)) if s.has("events") else [])
         command_rows = self.observer.read(
             lambda s: s.table("commands", order=f"accepted_at DESC LIMIT {COMMANDS_SHOWN}") if s.has("commands") else [])
         gh = self.github.snapshot() if self.github else {"repos": [], "issues": [], "pulls": [], "github_checks": []}
         self._link_launches(ws["runs"])
         launcher_reason = self.launcher.unavailable()
+        awaiting_plan = self.observer.read(_awaiting_plan_authorization)
         ent: dict[str, dict] = {c: {} for c in COLLECTIONS}
         for r in ws["runs"]:
             run = {k: v for k, v in r.items() if k not in ("tasks", "agents")}
             run["controls"] = caps.for_run(r, self.resolver, launcher_reason=launcher_reason)
+            run["awaiting_plan_authorization"] = r["run_id"] in awaiting_plan
             run["launch"] = next(({"command": cid, "pane": l["pane"], "provenance": "web-launch"}
                                   for cid, l in self.launches.items() if l.get("run") == r["run_id"]), None)
             ent["runs"][r["id"]] = run
@@ -408,10 +489,12 @@ class Service:
         for c in command_rows:
             ent["commands"][f"command:{c['id']}"] = _receipt_view(c)
         scalars = {
-            "host": {"id": identity.host(self.host_id), "telemetry": host},
+            "host": {"id": identity.host(self.host_id), "telemetry": _host_telemetry(host)},
             "scheduler": {"active": plan["active"], "host": plan["host"], "auto_mode": auto},
             "fixture": self.fixture,
             "launcher": {"available": launcher_reason is None, "reason": launcher_reason},
+            "orchestrator_notices": [{"seq": n["seq"], "kind": n["kind"], "summary": n["summary"],
+                                      "at": n["created_at"], **_loads(n["payload_json"])} for n in notices],
             "schema": ws["schema"],
         }
         return ent, scalars
@@ -466,10 +549,13 @@ class Service:
 
     def admit_queue(self) -> list[str]:
         """Launch admitted queued issues (one receipt per item, so never twice)."""
-        if self.office_freshness()["state"] != LIVE or self.launcher.unavailable():
+        if self.office_freshness()["state"] != LIVE:
             return []
         launched = []
-        for e in list((self.snapshot_state or {}).get("entities", {}).get("queue", {}).values()):
+        entries = list((self.snapshot_state or {}).get("entities", {}).get("queue", {}).values())
+        for item in set(self.held) - {e["id"] for e in entries}:
+            self.held.pop(item, None)  # left the queue
+        for e in entries:
             if e.get("kind") != "issue" or e.get("decision") != "admit":
                 continue
             cid = "queue-admit:" + e["id"]
@@ -478,6 +564,15 @@ class Service:
             repo, number = _split_ref(e.get("ref"))
             if not repo:
                 continue
+            # Route and launcher are checked before any receipt: a refusal here leaves the item queued, while a
+            # recorded queue-admit receipt would end it for good.
+            route = self._orchestrator_route()
+            if route["harness"] is None:
+                self._hold(e["id"], route)  # stays queued; launched once quota or policy allows
+                continue
+            if self.launcher.unavailable(route["harness"]):
+                continue
+            self.held.pop(e["id"], None)
             cmd = Command(cid, "start_issue", {"repo": repo, "issue": number},
                           {}, {"end_state": (self.config().get("intake") or {}).get("authorization") or "preview",
                                "title": e.get("title"), "new_run_confirmed": False, "origin": "queue"})
@@ -487,6 +582,46 @@ class Service:
             except CommandRefused as exc:
                 log.info("office web: queue item %s not admitted: %s", e["id"], exc.reason)
         return launched
+
+    def _orchestrator_route(self) -> dict:
+        return orchestrator_route(self.config(), self.quota_probe(),
+                                  available=lambda h: self.launcher.unavailable(h) is None)
+
+    def _hold(self, item: str, route: dict) -> None:
+        if self.held.get(item) == route["reason"]:
+            return
+        self.held[item] = route["reason"]
+        last = self.observer.read(lambda s: s.rows(
+            "SELECT json_extract(payload_json, '$.reason') AS reason FROM events WHERE run_id=? "
+            "AND kind='queue.orchestrator_held' AND json_extract(payload_json, '$.item')=? ORDER BY seq DESC LIMIT 1",
+            (MACHINE_EVENTS, item)) if s.has("events") else [])
+        if last and last[0]["reason"] == route["reason"]:
+            return  # already recorded, e.g. before a restart
+        self._event("queue.orchestrator_held", f"queue: {item} waits: {route['reason']}",
+                    {"item": item, "from": route["fallback_from"], "reason": route["reason"]})
+
+    def _event(self, kind: str, summary: str, payload: dict) -> None:
+        from office import state
+        self.writer(lambda con: state.emit(con, {"id": MACHINE_EVENTS}, kind, summary, audience="operator",
+                                           payload=payload))
+
+    def _route_for_launch(self, copy: str | None = None) -> dict:
+        route = self._orchestrator_route()
+        if route["harness"] is None:
+            raise CommandRefused("orchestrator-quota-exhausted", route["reason"], data={"route": route})
+        why = self.launcher.unavailable(route["harness"])
+        if why:
+            raise CommandRefused("launcher-unavailable", why, data={"command": copy} if copy else None)
+        return route
+
+    def _launch(self, cmd: Command, route: dict, **kwargs) -> dict:
+        res = self.launcher.launch(harness=route["harness"], **kwargs)
+        if route["fallback_from"] and res.get("pane"):
+            self._event("queue.orchestrator_fallback",
+                        f"orchestrator for {cmd.id} launched on {route['harness']}: {route['reason']}",
+                        {"command": cmd.id, "harness": route["harness"], "from": route["fallback_from"],
+                         "reason": route["reason"]})
+        return {**res, "route": route}
 
     # ------------------------------------------------------------------ commands
 
@@ -628,16 +763,14 @@ class Service:
                 raise CommandRefused("runtime-refuses-new-run", exc.message) from None
         url = f"https://github.com/{repo}/issues/{number}"
         copy = launch_mod.start_command(url, end_state)
-        why = self.launcher.unavailable()
-        if why:
-            raise CommandRefused("launcher-unavailable", why, data={"command": copy})
+        route = self._route_for_launch(copy)
         checkout = self.checkouts(repo)
         self._expect(cmd, {"live_run": None, "resumable_run": resumable[0]["id"] if resumable else None})
 
         def go() -> Outcome:
             prompt = launch_mod.start_prompt(issue_ref=url, issue_title=cmd.payload.get("title"),
                                              end_state=end_state, receipt_id=cmd.id)
-            res = self.launcher.launch(cwd=checkout, prompt=prompt, label=cmd.id[-8:])
+            res = self._launch(cmd, route, cwd=checkout, prompt=prompt, label=cmd.id[-8:])
             return self._record_launch(cmd, res, issue=ref, repo=key, copy=copy)
         return go
 
@@ -649,6 +782,8 @@ class Service:
                                          "kind": cmd.kind}
                 self._save_launches()
         result = {"pane": res.get("pane"), "command": copy}
+        if res.get("route"):
+            result["orchestrator"] = {k: res["route"][k] for k in ("harness", "fallback_from", "reason")}
         if res.get("ok"):
             return Outcome("completed", result)
         return Outcome("unknown" if res.get("pane") else "failed", result, res.get("reason"))
@@ -656,10 +791,11 @@ class Service:
     def _v_queue_issue(self, cmd: Command):
         repo, number, _ = self._issue_target(cmd)
         ref = f"{repo}#{number}"
-        queued = self.observer.read(lambda st: st.rows("SELECT id FROM sched_items WHERE kind='issue' AND lower(ref)=?",
-                                                       (ref.lower(),)))
+        items = self.observer.read(lambda s: s.rows("SELECT id, ref FROM sched_items WHERE kind='issue'")
+                                   if s.has("sched_items") else [])
+        queued = [i for i in items if _canonical_ref(i["ref"]) == _canonical_ref(ref)]
         if queued:
-            raise CommandRefused("issue-already-queued", f"{ref} is already queued as {queued[0]['id']}",
+            raise CommandRefused("issue-already-queued", f"{ref} is already queue item {queued[0]['id']}",
                                  data={"item": queued[0]["id"]})
         priority = cmd.payload.get("priority") or "normal"
         if priority not in scheduler.PRIORITY_WEIGHTS:
@@ -685,11 +821,12 @@ class Service:
         checkout = self._checkout_of(run)
         if checkout is None:
             raise CommandRefused("repo-not-ready", "the run's checkout is not on this machine")
+        route = self._route_for_launch()
 
         def go() -> Outcome:
-            res = self.launcher.launch(cwd=checkout, prompt=launch_mod.resume_prompt(run_id=run["run_id"],
-                                                                                     receipt_id=cmd.id),
-                                       label=cmd.id[-8:])
+            res = self._launch(cmd, route, cwd=checkout, prompt=launch_mod.resume_prompt(run_id=run["run_id"],
+                                                                                         receipt_id=cmd.id),
+                               label=cmd.id[-8:])
             return self._record_launch(cmd, res, issue=None, repo=run["repo"]["key"],
                                        copy=f"office resume {run['run_id']}", run=run["run_id"])
         return go
@@ -808,11 +945,8 @@ class Service:
             raise CommandRefused("tier-not-editable", "target.tier must be machine or repository", http=400)
         if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_]+(\.[A-Za-z0-9_-]+)*", key):
             raise CommandRefused("bad-target", "target.key must be a dotted config key", http=400)
-        from office import configcmd
-        try:
-            configcmd._check_key(key, "user" if tier == "machine" else "repo", False)
-        except OfficeError as exc:
-            raise CommandRefused("unknown-key", exc.message) from None
+        if not _known_setting(key):
+            raise CommandRefused("unknown-key", f"{key} is not a configurable key")
         if tier == "machine":
             return tier, self.state_home
         run = self._run(cmd.target) if cmd.target.get("run_id") else None
@@ -860,6 +994,39 @@ class Service:
 
 # ------------------------------------------------------------------ helpers
 
+def _known_setting(key: str) -> bool:
+    """A key the shipped default config defines, or an entry of a map it ships empty (e.g. web.checkouts.<repo>)."""
+    from office import config as cfg
+    node: Any = {k: v for k, v in (cfg.load_yaml(cfg.default_config_path()) or {}).items()
+                 if k not in cfg.NON_CONFIGURABLE_KEYS}
+    parts = key.split(".")
+    for i, part in enumerate(parts):
+        if not isinstance(node, dict):
+            return False
+        if part not in node:
+            return node == {} and i == len(parts) - 1  # one entry of a map shipped empty
+        node = node[part]
+    return not isinstance(node, dict) or node == {}  # a leaf, never a whole section
+
+
+def _probe_quota(conf: dict) -> dict:
+    """Known quota of the orchestrator route and its fallbacks, from each adapter's quota probe."""
+    from office import adapters, candidates
+    sched = conf.get("scheduler") or {}
+    wanted = [sched.get("orchestrator_route") or "claude", *(sched.get("orchestrator_fallbacks") or [])]
+    try:
+        known = adapters.load_all()
+    except Exception:  # noqa: BLE001 - no adapters: every quota is unknown
+        return {}
+    out = {}
+    for harness in dict.fromkeys(str(h) for h in wanted if h):
+        if harness in known:
+            q = candidates.probe_quota(known[harness])
+            if q.get("status") == "ok" and q.get("tightest_remaining_percent") is not None:
+                out[harness] = {"remaining_percent": q["tightest_remaining_percent"]}
+    return out
+
+
 def _loads(raw) -> dict:
     try:
         value = json.loads(raw) if raw else {}
@@ -879,6 +1046,12 @@ def _effective_config() -> dict:
 def _split_ref(ref: str | None) -> tuple[str | None, int | None]:
     m = re.search(r"([\w.-]+/[\w.-]+?)(?:#|/issues/)(\d+)$", str(ref or "").strip())
     return (m.group(1), int(m.group(2))) if m else (None, None)
+
+
+def _canonical_ref(ref: str | None) -> str | None:
+    """`owner/name#n`, lower case, for any issue ref form `queue add` accepts (`o/r#5`, an issue URL)."""
+    repo, number = _split_ref(ref)
+    return f"{repo.lower()}#{number}" if repo else None
 
 
 def _github_signature(gh: dict) -> str:
@@ -914,6 +1087,21 @@ def _queue_rows(snap, conf: dict) -> tuple[list[dict], list[dict], str]:
     rows, active = queuecmd._projection(snap.con, conf)
     auto = queuecmd.auto_mode(snap.con, default_on=scheduler.settings(conf)["auto_mode"])
     return rows, active, auto
+
+
+def _awaiting_plan_authorization(snap) -> set[str]:
+    """Runs with a plan and no active plan authorization for their requirements version.
+
+    The browser has no plan-authorization path: these runs show the copyable
+    `office approve plan --quote` command for the user to run.
+    """
+    if not snap.has("runs", "plan_version") or not snap.has("authorizations"):
+        return set()
+    return {r["id"] for r in snap.rows(
+        "SELECT id FROM runs r WHERE plan_version IS NOT NULL AND plan_version != '' "
+        "AND phase NOT IN ('closed', 'abandoned') AND NOT EXISTS (SELECT 1 FROM authorizations a "
+        "WHERE a.run_id=r.id AND a.kind='plan' AND a.revoked_at IS NULL "
+        "AND a.requirements_version=r.requirements_version)")}
 
 
 def _diff(prev: dict | None, snap: dict) -> dict:

@@ -38,8 +38,8 @@ def resume_prompt(*, run_id: str, receipt_id: str) -> str:
 
 
 class Launcher(Protocol):
-    def unavailable(self) -> str | None: ...
-    def launch(self, *, cwd: Path, prompt: str, label: str) -> dict: ...
+    def unavailable(self, harness: str | None = None) -> str | None: ...
+    def launch(self, *, cwd: Path, prompt: str, label: str, harness: str | None = None) -> dict: ...
     def agent_live(self, pane: str) -> bool: ...
     def send(self, pane: str, text: str) -> str: ...
     def focus(self, pane: str) -> bool: ...
@@ -55,17 +55,18 @@ class HerdrLauncher:
     def __init__(self, harness: str = "claude"):
         self.harness = harness
 
-    def unavailable(self) -> str | None:
+    def unavailable(self, harness: str | None = None) -> str | None:
         from office import dispatch
         if not dispatch.herdr_usable():
             return "Herdr is not available to the web service (start it inside Herdr, HERDR_ENV=1)"
-        if not shutil.which(self.harness):
-            return f"orchestrator harness {self.harness!r} is not on PATH"
+        if not shutil.which(harness or self.harness):
+            return f"orchestrator harness {harness or self.harness!r} is not on PATH"
         return None
 
-    def launch(self, *, cwd: Path, prompt: str, label: str) -> dict:
+    def launch(self, *, cwd: Path, prompt: str, label: str, harness: str | None = None) -> dict:
         from office import dispatch
-        why = self.unavailable()
+        harness = harness or self.harness
+        why = self.unavailable(harness)
         if why:
             return {"ok": False, "reason": why}
         res = dispatch._herdr_json(["tab", "create", "--label", f"office-{label}", "--cwd", str(cwd), "--no-focus"])
@@ -74,14 +75,14 @@ class HerdrLauncher:
             return {"ok": False, "reason": "herdr did not create a pane"}
         name = _agent_name(label)
         try:
-            proc = subprocess.run(["herdr", "agent", "start", name, "--kind", self.harness, "--pane", pane, "--",
-                                   self.harness], capture_output=True, text=True, timeout=120)
+            proc = subprocess.run(["herdr", "agent", "start", name, "--kind", harness, "--pane", pane, "--",
+                                   harness], capture_output=True, text=True, timeout=120)
         except (OSError, subprocess.SubprocessError) as exc:
             return {"ok": False, "pane": pane, "reason": f"herdr agent start failed: {type(exc).__name__}"}
         if proc.returncode != 0:
             return {"ok": False, "pane": pane, "reason": (proc.stdout or proc.stderr or "").strip()[:200]}
         delivered = dispatch._deliver_prompt(name, pane, prompt)
-        return {"ok": delivered, "pane": pane, "agent": name,
+        return {"ok": delivered, "pane": pane, "agent": name, "harness": harness,
                 "reason": None if delivered else "the prompt did not land in the agent"}
 
     def agent_live(self, pane: str) -> bool:
@@ -112,16 +113,16 @@ class FakeLauncher:
         self.sent: list[tuple[str, str]] = []
         self.live: set[str] = set()
 
-    def unavailable(self) -> str | None:
+    def unavailable(self, harness: str | None = None) -> str | None:
         return self.reason
 
-    def launch(self, *, cwd: Path, prompt: str, label: str) -> dict:
+    def launch(self, *, cwd: Path, prompt: str, label: str, harness: str | None = None) -> dict:
         if self.reason:
             return {"ok": False, "reason": self.reason}
         pane = f"fake-pane-{len(self.launches) + 1}"
-        self.launches.append({"cwd": str(cwd), "prompt": prompt, "label": label, "pane": pane})
+        self.launches.append({"cwd": str(cwd), "prompt": prompt, "label": label, "pane": pane, "harness": harness})
         self.live.add(pane)
-        return {"ok": True, "pane": pane, "agent": _agent_name(label)}
+        return {"ok": True, "pane": pane, "agent": _agent_name(label), "harness": harness}
 
     def agent_live(self, pane: str) -> bool:
         return pane in self.live

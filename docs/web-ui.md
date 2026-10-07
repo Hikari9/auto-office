@@ -1,5 +1,53 @@
 # Web UI
 
+`office web` serves a local workstation over every Auto Office run on this machine: Issues, Agents, Allocation and
+Settings. Start it with `office web serve` (foreground) or `office web start|stop|status` (daemon), default URL
+`http://127.0.0.1:8765/`; `office web serve --fixture small` serves a synthetic demo. Screenshots at 1440x900 are in
+[web-ui/screenshots](web-ui/screenshots/): [Issues](web-ui/screenshots/issues.png),
+[Agents](web-ui/screenshots/agents.png), [Allocation](web-ui/screenshots/allocation.png),
+[Settings](web-ui/screenshots/settings.png) and the [disconnected state](web-ui/screenshots/disconnected.png).
+
+## Architecture
+
+```text
+browser (static ES modules, no build step)
+  store.js   SSE snapshot + deltas, resync on gap/epoch     app.js  shell, Issues, banners, receipts
+  agents.js / chat.js / routing.js / allocation.js / settings.js   one module per surface
+        |  GET /api/stream (SSE)   POST /api/commands (token)   GET /api/settings, /api/activity
+local service (office.web, one process, loopback only)
+  observer.py  read-only runs.db        projection.py  runs, tasks, agents, routes
+  github.py    issues/PRs + freshness   service.py     snapshot, deltas, command validation, queue loop
+  executor.py  runs the `office` CLI    launcher.py    orchestrator in a Herdr pane (quota-aware route)
+        |  reads                                  |  writes only through the office CLI and receipts
+runs.db (lifecycle authority)             GitHub (issue and PR authority)
+```
+
+## Data and source of truth
+
+- runs.db is the lifecycle authority: runs, tasks, dispatches, gates, scheduler items and command receipts. The service
+  reads it through a read-only connection and writes only command receipts (`commands`). Every other mutation runs the
+  `office` CLI, which records its own rows and events.
+- GitHub is the issue and PR authority. Issues and PR states come from the GitHub API, each source with its own
+  freshness (`fresh`, `stale`, `rate_limited`, `revoked`, `unauthenticated`, `disabled`).
+- The browser is never authoritative. It mirrors the last snapshot plus deltas and shows Office and GitHub freshness;
+  a value the service did not send (CPU, RAM, quota, progress, GitHub checks) is shown as unavailable.
+- Weighted progress counts accepted tasks over non-cancelled tasks from runs.db. It is never time-based.
+
+## Schema v6
+
+Schema v6 (T2) adds `commands` (idempotent command receipts: id, kind, target, payload hash, origin, status, result),
+`sched_items` (queued issues, runs and tasks with priority, pause and demotion) and `sched_state` (auto mode per
+scope). `db.connect` migrates once at service start. The observer reads older schemas as they are: a missing table
+turns the matching capability off instead of failing. Machine-level orchestrator launch notices are `events` rows
+under the run id `office-web` (`queue.orchestrator_fallback`, `queue.orchestrator_held`).
+
+## Compatibility
+
+- Runs on release line 3.3 get web controls when the serving runtime has `office queue` and
+  `office amend route --restart`. Runs on 3.0 (legacy), 3.1 and 3.2 are shown read-only with the reason.
+- Web commands run the `office` CLI in the run's checkout, so the frontdoor pins each run to its own runtime.
+- Terminal-started runs are observed exactly like web-started ones; the scheduler projects them as active work.
+
 ## Observer and projection
 
 `office.web` reads runs.db for the web view. It never writes to it.
@@ -152,8 +200,9 @@ Other reads:
 `POST /api/commands` takes `{id, kind, target, expect, payload}`. `id` is the client's idempotency key (8 to 128
 characters of `[A-Za-z0-9_.:-]`).
 
-1. Shape and kind are checked first. An unknown kind gets 400 `unknown-kind`. There is no merge, land, deploy or shell
-   kind.
+1. Shape and kind are checked first. An unknown kind gets 400 `unknown-kind`. There is no merge, land, deploy, shell
+   or plan-approval kind. The target must match the kind's declared shape (see "Target validation"), otherwise 400
+   `bad-target`.
 2. While Office freshness is not `live`, every command is refused with 409 `office-stale`.
 3. A repeated `id` with the same request returns the first receipt with `replayed: true` (HTTP 200) and never
    executes again. The same `id` with a different request gets `idempotency-conflict`.
@@ -171,9 +220,8 @@ characters of `[A-Za-z0-9_.:-]`).
 
    T9 completes and tests the full table. On failure the receipt becomes `failed` with a
    named reason, and the API returns 409 with that reason and the receipt. Reasons include `run-missing`,
-   `run-terminal`, `capability-missing`, `dispatch-not-current`, `harness-mismatch`,
-   `not-awaiting-plan-authorization`, `binding-ended`, `agent-not-live`, `repo-not-ready`, `repo-unknown`,
-   `issue-unknown`, `issue-already-queued`, `item-missing`, `unknown-key`, `issue-has-live-run`,
+   `run-terminal`, `capability-missing`, `dispatch-not-current`, `harness-mismatch`, `binding-ended`, `agent-not-live`,
+   `repo-not-ready`, `repo-unknown`, `issue-unknown`, `issue-already-queued`, `item-missing`, `unknown-key`, `issue-has-live-run`,
    `issue-has-resumable-run`, `launcher-unavailable` and `expectation-failed`. `expect` keys (for example `phase`,
    `liveness`, `dispatch_id`, `route`, `plan_version`) must equal the freshly read values.
 6. It executes in the background (HTTP 202) and the receipt ends `completed`, `failed` or `unknown`.
@@ -196,8 +244,26 @@ Exit 0 maps to `completed`, an Office refusal exit (1 to 63) maps to `failed`, a
 | `chat_send` | `{host, run_id, session}` | `text`, `resend_of` | `dispatch.submit_prompt` to the orchestrator's pane |
 | `settings_set` / `settings_unset` | `{tier: machine/repository, key[, repo/run_id]}` | `value` | `office config --user/--repo …` in that checkout |
 
-Plan authorization is not a web command: the browser shows the copyable `office approve plan --quote "<words>"`
-command for the user to run.
+There is no plan-authorization path in the browser. When a run waits for plan authorization (it has a plan and no
+active plan authorization for its requirements version), its run card shows the copyable
+`office approve plan --quote "<words>"` command, and `approve_plan` is refused as an unknown kind.
+
+### Target validation
+
+`service.TARGETS` and `service.KIND_TARGET` declare what each kind targets. `Command.parse` checks the shape (required
+keys, optional keys, types, nothing else); the kind's validator then checks the thing it names against a fresh read.
+Every kind first needs Office freshness `live`. A mismatch fails closed with the named reason.
+
+| kind | target | then requires |
+|---|---|---|
+| `start_issue` | issue `{repo, issue}` | a discovered repository (`repo-unknown`) and known issue (`issue-unknown`), execution-ready, and no live run for the issue (`issue-has-live-run`) |
+| `queue_issue` | issue `{repo, issue}` | as above, and no queue item for the issue yet (`issue-already-queued`) |
+| `resume_run` / `attach_run` | run `{run_id}` | an existing non-terminal run with the capability; resume also needs no live orchestrator (`run-live`) |
+| `pause` / `resume` / `set_priority` / `demote` | scheduler item `{item}` or `{run_id[, task_id]}` | an existing item (`item-missing`) or a non-terminal run with the capability, and its task; never GitHub readiness |
+| `set_auto_mode` | scheduler scope `{}` or `{run_id}` | only a live Office source (a run scope also needs that run) |
+| `change_route` | dispatch `{run_id, dispatch_id}` | the exact current live dispatch, the same harness, and the capability |
+| `chat_send` | orchestrator session `{run_id, session[, host]}` | this host, the run's active orchestrator binding and a live Herdr agent on that pane |
+| `settings_set` / `settings_unset` | settings tier `{tier, key[, repo / run_id]}` | a known key (`unknown-key`) and an editable tier: machine, or repository with an attached checkout |
 
 `start_issue` is refused when the issue has a live run (attach to it instead). When the issue has a resumable run it
 is refused unless `payload.new_run_confirmed` is true and the runtime allows a new run.
@@ -216,6 +282,16 @@ process when it is on the line and at least the newest registered patch, otherwi
 (`scheduler.orchestrator_route`) and delivers an `/auto-office` prompt that carries the issue URL, the authorized end
 state and the command receipt id. Without Herdr or the harness, start/resume capability is `false` with the reason,
 and the copyable `office start --issue <url> --end-state <s> "…"` command is returned instead.
+
+Every orchestrator launch (start, resume and the queue loop) takes its harness from `orchestrator_route`:
+`scheduler.orchestrator_route` unless that harness's quota is known to be at or below `quota.reserve_percent`, then the
+first harness in `scheduler.orchestrator_fallbacks` whose quota is known to be above it. Unknown quota never falls
+back. A fallback is recorded in the receipt (`result.orchestrator = {harness, fallback_from, reason}`) and as a
+`queue.orchestrator_fallback` event; with no allowed fallback the queued item stays queued and a
+`queue.orchestrator_held` event records why (once per reason), while a manual start is refused with
+`orchestrator-quota-exhausted`. The snapshot carries the recent notices (`scalars.orchestrator_notices`): the page shows
+the last hour's as banners and each item's latest reroute or hold on its Allocation row. Fixture mode never probes
+quota.
 
 Each poll, the queue loop runs `scheduler.plan_admission` over the queue. It launches admitted `issue` items through
 the launcher, under one receipt per item (`queue-admit:<item>`), so an item is never launched twice. A launched run is
@@ -238,3 +314,30 @@ the effective `value`, its `source` tier, per-tier `values`, `set_in`, `inherite
 and `apply`. `apply` is `immediate` for `scheduler.*` and `intake.*`, `before-dispatch` for `quota.*` and `roles.*`,
 `restart` for `paths.*`, and `future-runs` for everything else (pinned at `office start`). Run-pinned values are
 never edited.
+
+## Verification
+
+| suite | what it proves |
+|---|---|
+| `tests/web/test_api_commands.py`, `test_target_validation.py`, `test_launcher.py` | receipts, idempotency, per-kind target validation, orchestrator fallback |
+| `tests/web/test_readback.py` | web pause, priority, resume and settings writes read back through `commands`, `sched_items`, `events`, `office queue list --json` and `office config --list --show-origin` (real `office` CLI) |
+| `tests/web/browser/test_e2e.py` | the real `office web serve --fixture small` process in Chromium: every surface at 1440x900, 1920x1080 and 1100x800, repo switching, issue to run/PR drilldown, Start/Attach/Resume eligibility, pause, exact-target chat, duplicate and stale command refusal, GitHub revoked and rate limit, restart and resync, routing display, unavailable telemetry, the plan-approval command |
+| `tests/web/test_perf.py` | the budgets below on `--fixture large` |
+
+Run them with `uv run --frozen --extra test --extra visual pytest -q -m integration tests/web` (Chromium via
+Playwright, or an installed Chrome).
+
+### Performance
+
+Measured on an Apple M1 Pro (8 cores, 16 GB), macOS 26.6.2, Python 3.14, Playwright Chromium, `--fixture large`
+(40 repositories, 2,270 issue rows, 320 runs, 3,200 tasks); three runs, median shown. Budgets in `test_perf.py` carry
+3x to 6x headroom.
+
+| measure | measured | budget |
+|---|---|---|
+| snapshot build (`poll(force=True)`) | 0.48 s | 2.0 s |
+| snapshot payload (JSON) | 15.2 MB | 30 MB |
+| delta latency (runs.db write to delta, 0.2 s poll) | 0.76 s | 2.5 s |
+| first render (navigation to first issue row) | 0.67 s | 3.0 s |
+| table scroll, p95 frame over 60 jumps | 7.5 ms | 40 ms |
+| reconnect to resync (fresh stream to full snapshot) | 0.56 s | 3.0 s |

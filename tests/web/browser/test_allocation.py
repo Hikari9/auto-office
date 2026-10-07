@@ -233,7 +233,7 @@ def test_keyboard_operable_and_usable_at_1100(page, served):
 def test_unknown_states_are_shown_not_guessed(page, served):
     url, svc = served
     svc.host_probe = lambda: {"cpu": {"status": "ok", "value": 37.4, "unit": "percent"},
-                              "ram": {"status": "ok", "value": 0.42, "unit": "fraction_used"}}
+                              "ram": {"status": "ok", "value": 0.42, "unit": "fraction_used"}}  # hostmetrics vocabulary
     add_item(svc, "issue:odd", "issue", ref="synth-org-0/repo-00#7", title="Odd priority", priority="weird")
     write(svc, "INSERT OR REPLACE INTO sched_state(scope, auto_mode, reason, updated_at) VALUES(?, 'bogus', 't', 'x')",
           (f"run:{RUN}",))
@@ -249,4 +249,23 @@ def test_unknown_states_are_shown_not_guessed(page, served):
     assert page.get_attribute("[data-testid=alloc-cpu]", "data-status") == "measured"
     assert page.locator("[data-testid=alloc-cpu] .v").text_content() == "37%"
     assert page.locator("[data-testid=alloc-ram] .v").text_content() == "42%"
+    assert errors == []
+
+
+def test_controls_column_is_not_clipped_at_1440(page, served):
+    url, svc = served
+    errors = open_allocation(page, url, 1440, 900)
+    clipped = page.evaluate("""() => [...document.querySelectorAll('[data-testid=alloc-row]')].flatMap(row => {
+        const table = row.closest('.atable').getBoundingClientRect();
+        const cell = row.lastElementChild.getBoundingClientRect();
+        const ctl = [...row.lastElementChild.querySelectorAll('button, select')].map(b => b.getBoundingClientRect());
+        const overflow = cell.right > table.right + 0.5 || ctl.some(b => b.right > cell.right + 0.5 || b.right > table.right + 0.5);
+        return overflow ? [row.dataset.id] : [];
+    })""")
+    assert clipped == []
+    # Every table, controls column included, fits the surface: nothing is cut off at the viewport edge.
+    assert page.evaluate("""() => { const s = document.getElementById('surface-allocation');
+        const right = s.getBoundingClientRect().right;
+        return s.scrollWidth <= s.clientWidth && [...document.querySelectorAll('.atable')].every(t =>
+            t.scrollWidth <= t.clientWidth && t.getBoundingClientRect().right <= right + 0.5); }""")
     assert errors == []
