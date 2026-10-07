@@ -92,7 +92,7 @@ h1 { margin: 0; font-size: 23px; font-weight: 780; }
 .kpi.green { border-top-color: var(--green); } .kpi.purple { border-top-color: var(--purple); }
 .kpi .v { font-size: 20px; font-weight: 800; }
 .kpi .l { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
-.toolbar { display: flex; gap: 12px; align-items: center; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
 .toolbar .field { max-width: 420px; }
 .count { color: var(--muted); font-size: 11px; }
 
@@ -115,8 +115,7 @@ h1 { margin: 0; font-size: 23px; font-weight: 780; }
 .tr:focus-visible { outline-offset: -2px; }
 .td { padding: 0 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-2); }
 .td.issue .t { color: #e9edf5; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
-.td.issue .s { overflow: hidden; text-overflow: ellipsis; }
-.td .s { font-size: 10px; color: #778398; }
+.td .s { overflow: hidden; text-overflow: ellipsis; font-size: 10px; color: #778398; }
 .muted { color: var(--muted); }
 .phase::before { content: "●"; margin-right: 5px; color: var(--grey); }
 .phase[data-tone=live]::before { color: var(--green); }

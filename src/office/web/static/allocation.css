@@ -18,12 +18,13 @@
 .alloc-tables { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
 .alloc-group { min-width: 0; }
 .atable { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
-.arow { display: grid; min-width: 1064px; /* the sum of the track minimums */ align-items: center; border-bottom: 1px solid var(--line-2);
-  grid-template-columns: 28px minmax(140px, 2fr) minmax(100px, 1.2fr) 78px 96px 104px minmax(96px, 1fr) minmax(84px, 1fr) 68px minmax(100px, 1.3fr) 170px; }
+.arow { display: grid; min-width: 1072px; /* the sum of the track minimums */ align-items: center; border-bottom: 1px solid var(--line-2);
+  grid-template-columns: 36px minmax(140px, 2fr) minmax(100px, 1.2fr) 78px 96px 104px minmax(96px, 1fr) minmax(84px, 1fr) 68px minmax(100px, 1.3fr) 170px; }
 .arow:last-child { border-bottom: 0; }
 .arow.head { background: var(--head); color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .03em; }
 .arow .c { padding: 6px 8px; min-width: 0; overflow-wrap: anywhere; }
 /* `.work` is also the Issues layout row (flex); here it is a plain cell whose words never break mid-word. */
+.arow .c.n { white-space: nowrap; }
 .arow .c.work { display: block; flex: none; gap: 0; overflow-wrap: break-word; }
 .arow .c.work .t { font-weight: 600; }
 .alloc-head { display: flex; align-items: baseline; gap: 12px; margin: 0 0 8px; }

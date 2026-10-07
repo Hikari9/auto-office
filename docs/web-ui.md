@@ -323,7 +323,7 @@ never edited.
 | `tests/web/test_readback.py` | web pause, priority, resume and settings writes read back through `commands`, `sched_items`, `events`, `office queue list --json` and `office config --list --show-origin` (real `office` CLI) |
 | `tests/web/browser/test_e2e.py` | the real `office web serve --fixture small` process in Chromium: every surface at 1440x900, 1920x1080 and 1100x800, repo switching, issue to run/PR drilldown, Start/Attach/Resume eligibility, pause, exact-target chat, duplicate and stale command refusal, GitHub revoked and rate limit, restart and resync, routing display, unavailable telemetry, the plan-approval command |
 | `tests/web/test_land_via_office.py` | the command catalog has no land, merge or deploy kind (HTTP 400, no receipt); a start with end state `merge` or `e2e` reaches `office start --end-state`, which records it in the frozen requirements; `office land` before acceptance is refused (`not-ready`) |
-| `tests/web/browser/test_layout.py` | DOM measurements at 1100x800, 1440x900 and 1920x1080: Issues headers never overlap, long titles and repositories end in an ellipsis with a `title`; the Allocation work cell never breaks mid-word and its Auto, Decision and Controls columns fit or scroll into view; the Agents graph's last column is visible or reachable; scroll positions survive a rebuild. Screenshots go to `$OFFICE_WEB_SHOTS` (default: the test's tmp directory) |
+| `tests/web/browser/test_layout.py` | DOM measurements at 1100x800, 1440x900 and 1920x1080: Issues headers never overlap, long titles, repositories, phase sub-lines and gates end in an ellipsis with a `title`, and the off-screen columns have a scroll hint and are reachable; the Allocation work cell never breaks mid-word and its Auto, Decision and Controls columns fit or scroll into view; the Agents graph's last column is visible or reachable; scroll positions survive a rebuild. Screenshots go to `$OFFICE_WEB_SHOTS` (default: the test's tmp directory) |
 | `tests/web/test_perf.py` | the budgets below on `--fixture large` |
 
 Run them with `uv run --frozen --extra test --extra visual pytest -q -m integration tests/web` (Chromium via
@@ -335,9 +335,12 @@ Layout rules the browser tests pin down:
 
 - Issues keeps its twelve columns in a horizontally scrolling table. Its minimum width is the sum of the column
   tracks, so the last column never spills past its row. Header labels, issue titles, repositories and owners that do
-  not fit end in an ellipsis, and the full text is the element's `title`.
+  not fit end in an ellipsis, and the full text is the element's `title`; so do the phase sub-line and the Office
+  gates cell. The table is wider than its pane at every tested size, so the toolbar always shows the sideways-scroll
+  hint (below) for it.
 - Allocation tables scroll inside their own container (never the surface or the page) below about 1300 px. Their
-  `Work` cell is a plain block: words wrap at spaces and never break mid-word.
+  `Work` cell is a plain block: words wrap at spaces and never break mid-word, and the `#` column never wraps a
+  two-digit number.
 - The Agents graph shows its five role columns without scrolling from 1440 px; with the inspector open or on a
   narrower window it scrolls sideways.
 - Native scrollbars are hidden or overlaid on many systems, so a table or graph that scrolls sideways shows a

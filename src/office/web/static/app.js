@@ -8,6 +8,7 @@ import { AUTHORIZATIONS, FILTERS, PLAN_APPROVAL_COMMAND, QUEUE_AUTHORIZATION, QU
 import * as allocationView from "./allocation.js";
 import * as settingsView from "./settings.js";
 import { renderAgents } from "./agents.js";
+import { scrollHint } from "./scrollhint.js";
 
 const ROW = 44;
 const OVERSCAN = 8;
@@ -301,7 +302,7 @@ function cells(r, active) {
     td(r.run ? "links" : "links command", command),
     td("", { live: "Live run", resumable: "Resumable", terminal: "Closed run", none: "No run" }[r.liveness]
       + (r.queue ? ` · ${r.queue.decision}` : "")),
-    td(r.gates ? "" : "muted", r.gates || "—"),
+    td(r.gates ? "" : "muted", h("span", { title: r.gates || null, text: r.gates || "—" })),
     td(r.checks && r.checks !== "unavailable" ? "" : "muted", r.checks || "—"),
     td("act", h("button", { type: "button", class: `btn ${a.enabled ? "primary" : ""}`, tabindex: active ? "0" : "-1",
       disabled: !a.enabled, title: a.reason || a.label, "aria-label": `${a.label} #${r.number}${a.reason ? ` (unavailable: ${a.reason})` : ""}`,
@@ -651,6 +652,7 @@ function init() {
     marker.textContent = `FIXTURE MODE (${fixture})`;
     marker.hidden = false;
   }
+  $("issue-count").after(scrollHint(h, $("issue-table"), "columns", "issues"));
   $("issue-table").querySelector(".thead").replaceChildren(...COLUMNS.map((c) => h("div", { class: "th", role: "columnheader", title: c, text: c })));
   for (const b of document.querySelectorAll(".surface")) b.addEventListener("click", () => { ui.surface = b.dataset.surface; renderSurfaces(); });
   $("issue-search").addEventListener("input", (ev) => { ui.query = ev.target.value; ui.cursor = null; renderTable(); });

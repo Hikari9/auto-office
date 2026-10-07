@@ -17,7 +17,9 @@ VIEWPORTS = [(1100, 800), (1440, 900), (1920, 1080)]
 IDS = [f"{w}x{h}" for w, h in VIEWPORTS]
 EPS = 0.75
 SHOTS = os.environ.get("OFFICE_WEB_SHOTS")  # read at import: the autouse fixture scrubs OFFICE_* per test
-LONG_REPO = "synth-org-9/a-repository-with-a-deliberately-very-long-name"  # its issues have long titles too
+# Its issues have long titles too ("Issue N of <slug>"): about 115 characters, wider than the Issue column
+# even if the pane grows well past the 1920x1080 layout, so truncation never depends on the pane width.
+LONG_REPO = "synth-org-9/a-repository-with-a-deliberately-very-long-name-that-keeps-going-" + "and-going-" * 3 + "to-the-end"
 
 
 @pytest.fixture
@@ -100,6 +102,19 @@ def test_issue_headers_do_not_overlap_and_long_text_ends_in_an_ellipsis(page, se
         row.lastElementChild.getBoundingClientRect().right > row.getBoundingClientRect().right + 1).length""")
     assert spill == 0
 
+    # The phase sub-line ("T4 submitted · T5 running · T6") ends in an ellipsis, in full as title, like titles do.
+    details = page.evaluate(TRUNCATION, [".phasecell .s", ".phasecell .s"])
+    assert [d for d in details if d["text"]] and [d for d in details if d["cut"]], "no phase sub-line is cut: nothing proven"
+    for cell in details:
+        assert cell["title"] == cell["text"], cell
+        if cell["cut"]:
+            assert cell["overflow"] == "hidden" and cell["ellipsis"] == "ellipsis", cell
+    gates = page.evaluate("""() => [...document.querySelectorAll('[data-testid=issue-row] .td:nth-child(10)')].map((cell) => {
+        const css = getComputedStyle(cell), el = cell.firstElementChild;
+        return { text: el.textContent, title: el.getAttribute('title'), overflow: css.overflowX, ellipsis: css.textOverflow };
+    })""")
+    assert gates and all((g["title"] or "—") == g["text"] and g["overflow"] == "hidden" and g["ellipsis"] == "ellipsis" for g in gates)
+
     page.click(f'[data-testid="repo-{LONG_REPO}"]')  # the long names sort below the fold of the unfiltered table
     page.wait_for_function("(slug) => [...document.querySelectorAll('[data-testid=issue-row] .td.repo')].length > 0 && "
                            "[...document.querySelectorAll('[data-testid=issue-row] .td.repo')].every(e => e.textContent === slug)",
@@ -118,6 +133,41 @@ def test_issue_headers_do_not_overlap_and_long_text_ends_in_an_ellipsis(page, se
     no_sideways_page_scroll(page, width)
     assert errors == []
     shot(f"issues-{width}x{height}")
+
+
+ISSUES_HINT = "[data-testid=surface-issues] [data-testid=scroll-hint]"
+ISSUE_REACH = """() => {
+    const table = document.querySelector('[data-testid=issue-table]'), box = table.getBoundingClientRect();
+    const heads = Object.fromEntries([...table.querySelectorAll('[role=columnheader]')]
+        .map((el) => [el.textContent, el.getBoundingClientRect()]));
+    const cell = document.querySelector('[data-testid=issue-row] .td:last-child').getBoundingClientRect();
+    const inside = (r) => r.left >= box.left - 1 && r.right <= box.right + 1;
+    return { scrollLeft: table.scrollLeft, over: table.scrollWidth - table.clientWidth,
+             inside: Object.fromEntries(Object.entries(heads).map(([k, r]) => [k, inside(r)])), actionInside: inside(cell) };
+}"""
+
+
+@pytest.mark.parametrize("width,height", VIEWPORTS, ids=IDS)
+def test_issues_columns_off_screen_have_a_visible_hint_and_are_reachable(page, served, shot, width, height):
+    url, _ = served
+    errors = open_surface(page, url, width, height)
+    start = page.evaluate(ISSUE_REACH)
+    assert start["over"] > 1, "the Issues table is wider than its pane at every tested size"
+    page.wait_for_selector(f"{ISSUES_HINT}[data-more=right]")
+    hint = page.locator(ISSUES_HINT)
+    assert hint.is_visible() and "More columns off-screen" in hint.inner_text()
+    box, toolbar = hint.bounding_box(), page.locator(".toolbar").bounding_box()
+    assert toolbar["x"] - 1 <= box["x"] and box["x"] + box["width"] <= toolbar["x"] + toolbar["width"] + 1
+    assert not all(start["inside"].values()), "something starts off-screen"
+    assert start["inside"]["Repository"] and not start["inside"]["Office gates"]
+    shot(f"issues-hint-{width}x{height}-start")
+    scroll_to_end(page, ISSUES_HINT)
+    end = page.evaluate(ISSUE_REACH)
+    assert end["scrollLeft"] > 0 and end["inside"]["Office gates"] and end["inside"]["Action"] and end["actionInside"]
+    assert page.locator(f"{ISSUES_HINT} [data-testid=scroll-left]").get_attribute("aria-disabled") == "false"
+    no_sideways_page_scroll(page, width)
+    assert errors == []
+    shot(f"issues-hint-{width}x{height}-end")
 
 
 # ------------------------------------------------------------------ Allocation
@@ -163,6 +213,17 @@ def scroll_to_end(page, hint_selector):
     pytest.fail("the scroll button never reached the end")
 
 
+def settle(page, selector, quiet_ms=700):
+    """Wait until the surface has not been rebuilt for `quiet_ms`: the scheduler keeps re-rendering it for a moment
+    after rows are added, and a click on a button that is replaced under the pointer never lands."""
+    page.evaluate("""([sel, quiet]) => new Promise((resolve) => {
+        let timer; const done = () => { observer.disconnect(); resolve(); };
+        const observer = new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(done, quiet); });
+        observer.observe(document.querySelector(sel), { childList: true, subtree: true, attributes: true });
+        timer = setTimeout(done, quiet);
+    })""", [selector, quiet_ms])
+
+
 def add_item(svc, item_id, title, ref="synth-org-0/repo-00#3"):
     con = sqlite3.connect(svc.db_path, timeout=30)
     try:
@@ -178,10 +239,22 @@ def test_allocation_active_table_columns_are_reachable_and_work_never_breaks_mid
     url, svc = served
     add_item(svc, "issue:wordy", "Reconcile the scheduler fixtures for the quarterly allocation review",
              ref="synth-org-0/repo-00#3")
+    for n in range(12):  # enough rows for a two-digit number in the "#" column
+        add_item(svc, f"issue:pad-{n}", f"Padding row {n}", ref=f"synth-org-0/repo-00#{n + 10}")
     errors = open_surface(page, url, width, height, "allocation", "[data-testid=alloc-row]")
-    page.wait_for_selector('[data-testid=alloc-row][data-id="issue:wordy"]', timeout=10000)
+    for item in ("issue:wordy", "issue:pad-11"):  # the surface settles once the last row is in
+        page.wait_for_selector(f'[data-testid=alloc-row][data-id="{item}"]', timeout=10000)
+    settle(page, "[data-testid=surface-allocation]")
     words = page.evaluate(WORK_WORDS)
     assert len(words) > 20 and not [w for w in words if w["lines"] > 1], "a word of the work cell broke across lines"
+
+    numbers = page.evaluate("""() => [...document.querySelectorAll('[data-testid=alloc-row] .c.n')].map((el) => {
+        const range = document.createRange(); range.selectNodeContents(el);
+        return { text: el.textContent, lines: new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size,
+                 fits: el.scrollWidth <= el.clientWidth + 1 };
+    })""")
+    assert any(len(n["text"]) == 2 for n in numbers), "no two-digit row number: nothing proven"
+    assert all(n["lines"] == 1 and n["fits"] for n in numbers), numbers  # "10" never breaks into "1" over "0"
 
     hint = page.locator(f"{ACTIVE} [data-testid=scroll-hint]")
     assert page.locator("[data-testid=surface-allocation]").evaluate("el => el.scrollWidth <= el.clientWidth"), \
@@ -196,12 +269,14 @@ def test_allocation_active_table_columns_are_reachable_and_work_never_breaks_mid
     else:
         page.wait_for_selector(f"{ACTIVE} [data-testid=scroll-hint][data-more=right]")
         assert not all(reach["reachable"])  # Auto, Decision and Controls start off-screen ...
-        hint.scroll_into_view_if_needed()
+        # not hint.scroll_into_view_if_needed(): it waits for a stable element, and a rebuild may replace it
+        page.evaluate("(sel) => document.querySelector(sel).scrollIntoView({ block: 'nearest' })", f"{ACTIVE} [data-testid=scroll-hint]")
         shot(f"allocation-{width}x{height}-start")
         scroll_to_end(page, f"{ACTIVE} [data-testid=scroll-hint]")  # ... and a click or two brings them in.
         end = page.evaluate(REACH, ACTIVE)
         assert end["scrollLeft"] > 0 and all(end["reachable"]) and end["buttonsInside"]
-        assert page.locator(f"{ACTIVE} [data-testid=scroll-left]").get_attribute("aria-disabled") == "false"
+        # a rebuilt hint measures a frame after it appears, so wait for it rather than read it at once
+        page.wait_for_selector(f"{ACTIVE} [data-testid=scroll-left][aria-disabled=false]", timeout=5000)
     assert errors == []
     shot(f"allocation-{width}x{height}")
 
@@ -211,6 +286,7 @@ def test_scroll_buttons_keep_focus_at_the_end_and_through_a_rebuild(page, served
     open_surface(page, url, 1100, 800, "allocation", "[data-testid=alloc-row]")
     hint = f"{ACTIVE} [data-testid=scroll-hint]"
     page.wait_for_selector(f"{hint}[data-more=right]")
+    settle(page, "[data-testid=surface-allocation]")
     right = page.locator(f"{hint} [data-testid=scroll-right]")
     right.focus()
     for _ in range(8):
@@ -230,6 +306,7 @@ def test_allocation_scroll_position_survives_a_state_change(page, served):
     url, svc = served
     open_surface(page, url, 1100, 800, "allocation", "[data-testid=alloc-row]")
     page.wait_for_selector(f"{ACTIVE} [data-testid=scroll-hint][data-more=right]")
+    settle(page, "[data-testid=surface-allocation]")
     scroll_to_end(page, f"{ACTIVE} [data-testid=scroll-hint]")
     before = page.evaluate(REACH, ACTIVE)["scrollLeft"]
     assert before > 0
