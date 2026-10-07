@@ -1,3 +1,7 @@
+interface:
+  display_name: "hermes-cli"
+  short_description: "Auto Office v3 primitive"
+
 tools:
   - type: computer
     display_width: 1024

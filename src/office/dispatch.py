@@ -1136,9 +1136,9 @@ def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pa
     is kept so the orchestrator can inspect the actual blocker and choose a
     safe next route instead of abandoning the Office run (#399).
     """
-    # No agent is registered, so _pane_snapshot falls through to `herdr pane read`.
-    # Only the last screen counts: older scrollback may mention any of the markers.
-    view = "\n".join(_pane_snapshot(herdr_agent_name(dispatch["id"]), pane).splitlines()[-40:]) or None
+    # No agent is registered, so read the pane itself. Only the last screen
+    # counts: older scrollback may mention any of the markers.
+    view = "\n".join(_pane_read(pane).splitlines()[-40:]) or None
     tail = ddir / "pane-tail.txt"
     screen = _startup_screen(view)
     if view:
@@ -1246,9 +1246,10 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
             _launch_notice(run, dispatch, f"brief pointer is typed but unsubmitted in herdr agent {name} (pane "
                                           f"{pane}); submit it: herdr pane send-keys {pane} Enter")
         else:
-            trust = _trust_dialog(view)
-            why = (" a folder-trust dialog holds the composer; answer it in the pane (1. Trust and continue) and"
-                   if trust else "")
+            screen = _startup_screen(view)
+            title = "folder-trust dialog" if screen == "Trust this folder" else f"'{screen}' screen"
+            why = (f" the {title} holds the composer; review or skip it in the pane and"
+                   if screen else "")
             _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
                                           f"re-prompt it: office prompt {dispatch['id']} -- {shlex.quote(pointer)}")
     spec["prompt_landed"] = landed
@@ -1428,6 +1429,16 @@ def _trust_dialog(text: str | None) -> bool:
     return any(m in low for m in TRUST_DIALOG_MARKERS)
 
 
+def _startup_screen(text: str | None) -> str | None:
+    low = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text or "").lower()
+    for marker, title in (("hooks need review", "Hooks need review"),
+                          ("trust this folder", "Trust this folder"),
+                          ("update available", "Update available")):
+        if marker in low:
+            return title
+    return None
+
+
 def _ctx_k(text: str | None) -> float | None:
     found = _CTX_RE.findall(text or "")
     return float(found[-1]) if found else None
@@ -1452,7 +1463,7 @@ def _agent_up(pane: str, name: str | None = None) -> bool:
 
 
 def _landed_in(text: str | None, baseline_ctx: float | None) -> bool:
-    if text is None or _trust_dialog(text):
+    if text is None or _startup_screen(text):
         return False
     if _pane_busy(text):
         return True
@@ -1470,7 +1481,7 @@ def _prompt_landed(name: str, timeout: float, *, baseline_ctx: float | None = No
     deadline = time.time() + timeout
     while True:
         text = _pane_view(name)
-        if _trust_dialog(text):
+        if _startup_screen(text):
             return "trust"
         if _landed_in(text, baseline_ctx):
             return "landed"
@@ -1490,6 +1501,8 @@ def _await_agent_ui(name: str, pane: str, timeout: float, *, answer_trust: bool,
     answered = False
     while True:
         text = _pane_view(name)
+        if _startup_screen(text) and not _trust_dialog(text):
+            return "trust"  # hook trust and updates always need a user decision
         if _trust_dialog(text):
             if not answer_trust or answered:
                 if time.time() >= deadline:
@@ -1712,7 +1725,7 @@ def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = 
     if got == "trust":
         # The dialog came up after the prompt was sent (a slow start): answer
         # it if Office may, then send the pointer again.
-        if not answer_trust:
+        if not answer_trust or not _trust_dialog(_pane_view(name)):
             return False
         herdr("pane", "send-keys", pane, "Enter")
         if _await_agent_ui(name, pane, timeout, answer_trust=False, herdr=herdr) != "ready":
@@ -2282,6 +2295,16 @@ def _pane_exists(pane: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return True
     return "pane_not_found" not in (proc.stdout or "") + (proc.stderr or "")
+
+
+def _pane_read(pane: str) -> str:
+    """The pane's recent text, or "" when herdr cannot read it."""
+    try:
+        proc = subprocess.run(["herdr", "pane", "read", pane, "--source", "recent-unwrapped", "--lines", "5000"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout if proc.returncode == 0 else ""
 
 
 def _pane_snapshot(name: str, pane: str) -> str:

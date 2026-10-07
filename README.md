@@ -9,7 +9,6 @@ The goal is simple: take a human intent and turn it into a reviewable, resumable
 - **Distribution:** `auto-office`
 - **Python package:** `office`
 - **CLI:** `office`
-- **Current release:** 3.3.3
 - **State authority:** SQLite `runs.db` (WAL)
 - **Core rule:** agents decide; the runtime records, isolates, routes, verifies, and resumes
 
@@ -529,6 +528,16 @@ office doctor
 ```
 
 A cross-line upgrade is explicit and dry-runs by default.
+
+Codex reviews keep the agent-written `reply.txt` separate from the CLI's final
+chat message in `last-message.txt`. Headless reviews read the reply first and
+use the final message only when the reply is absent or empty.
+
+If a Codex Herdr launch fails, Office checks the pane for hook review, folder
+trust, and update screens and names the blocking screen in its fallback notice.
+Review or skip it in the named pane before the next launch. `office doctor`
+warns when user, project, or enabled plugin hooks need a manual trust check;
+it cannot verify Codex's hook hashes, and `--fix` never grants hook trust.
 
 ---
 

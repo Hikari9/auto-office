@@ -32,6 +32,31 @@ def test_headless_invalid_reply_is_not_substituted_or_unavailable(env):
 
 
 @pytest.mark.approved
+def test_codex_headless_gate_accepts_written_reply_before_final_chat(env, monkeypatch):
+    # #399: Codex's exit capture used to overwrite the valid agent-written file.
+    import fake_agent
+    act = fake_agent._act
+
+    def write_reply(argv, prompt, *args):
+        if "-o" in argv and "code reviewer" in prompt.lower():
+            Path(argv[argv.index("-o") + 1]).with_name("reply.txt").write_text("VERDICT: PASS\n")
+        return act(argv, prompt, *args)
+
+    monkeypatch.setattr(fake_agent, "_act", write_reply)
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+                 **{"codex:code_reviewer": [{"reply": "[review](reply.txt)"}]})
+    env.office("dispatch", "T1", check=0)
+    assert task_row(env)["status"] == "accepted"
+    con = env.con()
+    reviewer = con.execute("SELECT id, run_id, launcher FROM dispatches WHERE role='code_reviewer' AND harness='codex'").fetchone()
+    assert reviewer is not None and reviewer["launcher"] == "sync"
+    from office import paths
+    ddir = paths.run_dir(reviewer["run_id"]) / "dispatches" / reviewer["id"]
+    assert (ddir / "reply.txt").read_text() == "VERDICT: PASS\n"
+    assert (ddir / "last-message.txt").read_text() == "[review](reply.txt)"
+
+
+@pytest.mark.approved
 def test_launch_failure_still_substitutes(env):
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
         **{"codex:code_reviewer": [{"stderr": "Not logged in · Please run /login", "exit": 1}],

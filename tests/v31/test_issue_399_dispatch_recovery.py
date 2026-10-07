@@ -12,7 +12,6 @@ def test_codex_headless_review_does_not_clobber_the_reply_file():
     codex = yaml.safe_load((root / "adapters" / "seed" / "codex.yaml").read_text())
     for role in ("reviewer", "vision"):
         argv = codex["office_profiles"][role]["argv"]
-        assert "-o" not in argv, (role, argv)
         assert "{output}" not in argv, (role, argv)
 
 
@@ -24,12 +23,12 @@ def test_headless_invalid_result_does_not_claim_it_reprompted_or_kept_a_pane(tmp
     parsed = SimpleNamespace(errors=["no VERDICT line"])
     _, _, reason = gates._reprompt_until_valid(None, {"gates": {"review_reprompt_max": 3}}, d, tmp_path, output,
                                                 parsed, plan_review=False, visual=False)
-    assert "headless process-fallback" in reason
+    assert "headless (process-fallback)" in reason
     assert "after re-prompting" not in reason
     assert "pane is kept" not in reason
-    assert "no live reviewer pane exists" in reason
+    assert "no re-prompt was possible" in reason
     assert "output.log" in reason
-    assert "office resume" in reason
+    assert "rerun the review or waive the gate" in reason
 
 
 def test_herdr_reviewer_that_ended_before_any_reprompt_is_not_told_it_was_reprompted(tmp_path, monkeypatch):

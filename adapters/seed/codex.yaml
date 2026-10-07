@@ -68,7 +68,7 @@ office_profiles:
       argv: [-c, "projects={{cwd_toml}={trust_level=\"trusted\"}}", --yolo, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}"]
       resume_argv: [resume, "{session_id}"]
   reviewer:
-    argv: [exec, --sandbox, workspace-write, --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{sandbox_dir}", "-"]
+    argv: [exec, --sandbox, workspace-write, --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{sandbox_dir}", -o, "{last_message}", "-"]
     prompt: stdin
     output: file
     herdr_kind: codex
@@ -76,7 +76,7 @@ office_profiles:
       argv: [-c, "projects={{sandbox_dir_toml}={trust_level=\"trusted\"}}", --sandbox, workspace-write, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{sandbox_dir}"]
       resume_argv: [resume, "{session_id}"]
   vision:
-    argv: [exec, --sandbox, workspace-write, --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{sandbox_dir}", "{images}", "-"]
+    argv: [exec, --sandbox, workspace-write, --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{sandbox_dir}", -o, "{last_message}", "{images}", "-"]
     image_arg: [--image, "{image}"]
     image_transport: argv
     prompt: stdin
