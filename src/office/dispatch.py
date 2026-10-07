@@ -1154,19 +1154,6 @@ def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pa
     spec["failed_herdr_snapshot"] = str(tail) if view else None
     spec["failed_herdr_screen"] = screen
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
-    # A pane can still contain the blocked harness TUI even though Herdr never
-    # registered an agent. Reserve it for the rest of the run so a concurrent
-    # dispatch cannot recycle it and destroy the evidence/recovery surface.
-    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
-    try:
-        layout = json.loads(tab_file.read_text()) if tab_file.is_file() else {}
-        failed = list(layout.get("failed_panes") or [])
-        if pane not in failed:
-            failed.append(pane)
-            layout["failed_panes"] = failed
-            atomic_write_json(tab_file, layout)
-    except (OSError, ValueError):
-        pass
     observed = (f"; pane {pane} is waiting on {screen}" if screen
                 else f"; pane {pane} snapshot saved to {tail}" if view
                 else f"; pane {pane} could not be read")
@@ -1979,12 +1966,17 @@ def _busy_panes(run: dict) -> set:
                                                   "AND status IN ('launching','running')", (run["id"],)).fetchall()}
     finally:
         con.close()
-    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
-    try:
-        layout = json.loads(tab_file.read_text()) if tab_file.is_file() else {}
-        busy.update(layout.get("failed_panes") or [])
-    except (OSError, ValueError):
-        pass
+    # A failed startup can leave the harness TUI alive in a pane even though
+    # Herdr never registered an agent. Each dispatch records that pane in its
+    # own launch.json; derive reservations from those per-dispatch records so
+    # parallel failures cannot race on shared layout state (#399).
+    for launch_file in (paths.run_dir(run["id"]) / "dispatches").glob("*/launch.json"):
+        try:
+            failed = json.loads(launch_file.read_text()).get("failed_herdr_pane")
+        except (OSError, ValueError):
+            failed = None
+        if failed:
+            busy.add(failed)
     return busy
 
 
