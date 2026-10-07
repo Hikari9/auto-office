@@ -7,6 +7,7 @@ import { AUTHORIZATIONS, QUEUE_AUTHORIZATION, QUEUE_ONLY_WHY, endStateLabel, git
   issueRows, localMark, receiptState, repoName, shortRun, startCommand } from "./model.js";
 import * as allocationView from "./allocation.js";
 import * as settingsView from "./settings.js";
+import { renderAgents } from "./agents.js";
 
 const ROW = 44;
 const OVERSCAN = 8;
@@ -162,12 +163,14 @@ function renderSurfaces() {
   }
   $("surface-issues").hidden = ui.surface !== "issues";
   for (const name of Object.keys(VIEWS)) $(`surface-${name}`).hidden = ui.surface !== name;
+  $("surface-agents").hidden = ui.surface !== "agents";
+  if (ui.surface === "agents") renderAgents(agentsCtx, $("surface-agents"));
   const other = $("surface-other");
-  other.hidden = ui.surface === "issues" || ui.surface in VIEWS;
+  other.hidden = ui.surface === "issues" || ui.surface === "agents" || ui.surface in VIEWS;
   if (ui.surface in VIEWS) {
     const root = $(`surface-${ui.surface}`);
     keep(root, () => VIEWS[ui.surface].render(viewContext()));
-  } else if (ui.surface !== "issues") {
+  } else if (!other.hidden) {
     other.replaceChildren(h("h1", { text: SURFACES[ui.surface] }),
       h("p", { class: "sub", text: `The ${SURFACES[ui.surface]} surface is not part of this build yet. Issues is available.` }));
   }
@@ -477,8 +480,7 @@ function newId() {
   return `web-${Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("")}`;
 }
 
-async function send(kind, subject, target, payload, expect, label) {
-  const id = newId();
+async function send(kind, subject, target, payload, expect, label, id = newId()) {
   if (!label) label = kind.replace(/_/g, " ");
   ui.local.set(id, { id, kind, subject, status: "pending", label, error: null, at: new Date().toISOString() });
   renderAll();
@@ -546,6 +548,16 @@ function renderReceipts() {
       `${c.label} · ${text[st] || st}`, clear);
   }));
 }
+
+// ------------------------------------------------------------------ Agents surface
+
+// One command's latest state: the server receipt when it has one, else the local send.
+function receipt(id) {
+  const sv = store.state ? store.state.entities.commands[`command:${id}`] : null;
+  const l = ui.local.get(id) || {};
+  return { status: (sv && sv.status) || l.status || "pending", error: (sv && sv.error) || l.error || null };
+}
+const agentsCtx = { h, keep, store, send, newId, receipt, rerender: () => schedule() };
 
 // ------------------------------------------------------------------ wiring
 

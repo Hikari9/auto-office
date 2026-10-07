@@ -19,8 +19,9 @@ from office.web import identity
 TERMINAL_PHASES = ("closed", "abandoned")
 COLUMNS = ("orchestrators", "plan_reviewers", "executors", "code_reviewers", "visual_verifiers", "other")
 ROLE_COLUMNS = {"executor": "executors", "plan_reviewer": "plan_reviewers", "code_reviewer": "code_reviewers",
-                "visual_reviewer": "visual_verifiers", "visual_verifier": "visual_verifiers"}
-REVIEWER_ROLES = ("plan_reviewer", "code_reviewer", "visual_reviewer", "visual_verifier")
+                "visual_reviewer": "visual_verifiers", "visual_verifier": "visual_verifiers",
+                "browser_verifier": "visual_verifiers"}
+REVIEWER_ROLES = ("plan_reviewer", "code_reviewer", "visual_reviewer", "visual_verifier", "browser_verifier")
 RUNNING_DISPATCH = ("launching", "running", "claimed")
 STALE_DISPATCH = ("stale", "superseded")
 UNAVAILABLE_DISPATCH = ("failed", "cancelled")
