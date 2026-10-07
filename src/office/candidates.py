@@ -330,6 +330,13 @@ def model_family(model_id: str | None) -> str | None:
     return _FAMILY_ALIASES.get(head, head) or None
 
 
+def declared_route(candidate: dict) -> str:
+    """The `harness/model[@effort]` form of a candidate, as --as and --review-as take it
+    (route identity `harness@major/model@effort` is not accepted there)."""
+    effort = candidate.get("effort")
+    return f"{candidate['harness']}/{candidate['model_id']}" + (f"@{effort}" if effort and effort != "none" else "")
+
+
 def declared_candidate(harness: str, model: str, effort: str | None = None) -> dict:
     """A candidate the user named with --as/--review-as. It bypasses the
     registry, trust, and floors, but still resolves through the catalog when a

@@ -32,6 +32,8 @@ import uuid
 from pathlib import Path
 
 from office import briefs, candidates, contract, db, jobs, paths, planfile, review_parse, routing, state, version, worktree_setup
+from office.result import Result
+from office.state import Refused, Usage
 from office.util import dumps, now_iso, pid_alive, sha256_bytes, sha256_obj
 
 TASK_GATES = ("checks", "code_review", "visual")
@@ -49,6 +51,7 @@ def cap_diff(diff: str) -> str:
 
 def plan_for_revision(con, run: dict, task: dict, rev_id: str, changed: list[str], d: dict) -> dict:
     """Create gate rows for a new revision and queue the first step. Caller holds tx."""
+    archive_ledger(run, task, rev_id, d)
     if contract.is_convergence(run):
         return _plan_for_revision_convergence(con, run, task, rev_id)
     from office import visual
@@ -85,6 +88,66 @@ def plan_for_revision(con, run: dict, task: dict, rev_id: str, changed: list[str
         if evaluate_acceptance(con, run, task["id"]):
             summary.append("accepted (no gate required by policy)")
     return {"gates": rows, "summary": summary}
+
+
+LEDGER_ARCHIVE = "self-review-ledger.md"
+
+
+def ledger_archive_path(run: dict, task_id: str, rev_id: str) -> Path:
+    return paths.run_dir(run["id"]) / "evidence" / task_id / rev_id / LEDGER_ARCHIVE
+
+
+def archive_ledger(run: dict, task: dict, rev_id: str, d: dict) -> None:
+    """Keep the executor's self-review ledger with the revision it vouched for. Submit consumes
+    the worktree's copy right after this runs; a later submission of an identical tree restores it
+    (restore_ledger) instead of asking the executor to review the same content again. Best effort:
+    a ledger that cannot be read is simply not reused."""
+    from office import submit
+    try:
+        text = submit._read_untracked_text(Path(d["worktree"]), briefs.LEDGER_FILE, briefs.LEDGER_MAX_CHARS)
+        if not text or len(text) > briefs.LEDGER_MAX_CHARS:
+            return
+        dest = ledger_archive_path(run, task["id"], rev_id)
+        if dest.exists():
+            return  # a re-plan of the same revision (office resume) must not overwrite what vouched for it
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+        os.chmod(dest, 0o600)
+    except (OSError, paths.GitError):
+        return
+
+
+def restore_ledger(con, run: dict, task: dict, wt: Path) -> str | None:
+    """Put back the self-review ledger of an already reviewed revision when the worktree holds exactly
+    its tree and nothing is left to fix: the content was reviewed on the four lenses, so resubmitting it
+    demands no new producer work. The ledger names HEAD, so its COMMIT line is rewritten to the current
+    HEAD. Never replaces a ledger the executor wrote. Returns the revision whose ledger came back, or None."""
+    target = wt / briefs.LEDGER_FILE
+    if os.path.lexists(target):
+        return None
+    if con.execute("SELECT 1 FROM findings WHERE run_id=? AND task_id=? AND " + contract.TASK_WORK_FINDINGS,
+                   (run["id"], task["id"])).fetchone():
+        return None  # a fix round changes the tree: the earlier ledger would only be stale at submit
+    try:
+        if paths.git(wt, "status", "--porcelain", "--untracked-files=no").strip():
+            return None
+        head, tree = paths.git(wt, "rev-parse", "HEAD"), paths.git(wt, "rev-parse", "HEAD^{tree}")
+    except paths.GitError:
+        return None
+    for r in con.execute("SELECT id FROM revisions WHERE run_id=? AND task_id=? AND tree_sha=? ORDER BY seq DESC",
+                         (run["id"], task["id"], tree)).fetchall():
+        try:
+            saved = ledger_archive_path(run, task["id"], r["id"])
+            if not saved.is_file():
+                continue
+            text = re.sub(r"(?m)^COMMIT\s+\S+\s*$", f"COMMIT {head}", saved.read_text(encoding="utf-8"), count=1)
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except (OSError, ValueError):
+            return None
+        return r["id"]
+    return None
 
 
 def _plan_for_revision_convergence(con, run: dict, task: dict, rev_id: str) -> dict:
@@ -146,15 +209,20 @@ def start_waiting(con, run: dict, task_id: str, rev_id: str) -> list[str]:
     return started
 
 
+REVIEW_STOPPED = ("UNAVAILABLE", "ATTENTION")
+
+
 def unavailable_review_block(con, run: dict, task: dict) -> dict | None:
-    """The UNAVAILABLE code-review gate that alone blocks the task's current
-    (submitted) revision, or None when the task is blocked for another reason."""
+    """The code-review gate that alone blocks the task's current (submitted)
+    revision because its reviewer could not finish (UNAVAILABLE: no route could
+    answer; ATTENTION: the last wrote no readable reply), or None when the task
+    is blocked for another reason."""
     rev_id = task.get("current_revision_id")
     if task["status"] != "blocked" or not rev_id:
         return None
     latest = {g["kind"]: g for g in required_gates(con, run, task, rev_id)}
     code = latest.get("code_review")
-    if not code or code["status"] != "done" or code["verdict"] != "UNAVAILABLE":
+    if not code or code["status"] != "done" or code["verdict"] not in REVIEW_STOPPED:
         return None
     if any(g["status"] == "done" and g["verdict"] != "PASS" for k, g in latest.items() if k != "code_review"):
         return None  # another gate failed too; a re-review alone would not unblock it
@@ -163,10 +231,9 @@ def unavailable_review_block(con, run: dict, task: dict) -> dict | None:
 
 def rerun_unavailable_review(con, run: dict, task: dict) -> str | None:
     """Queue a fresh code review of the task's current revision when that
-    revision is blocked only because its code review was UNAVAILABLE (no
-    reviewer could answer). The submission is kept and no executor is
-    launched. Returns the new gate id, or None when that is not the block.
-    Caller holds the tx."""
+    revision is blocked only because its reviewer could not finish. The
+    submission is kept and no executor is launched. Returns the new gate id, or
+    None when that is not the block. Caller holds the tx."""
     code = unavailable_review_block(con, run, task)
     if code is None:
         return None
@@ -175,9 +242,85 @@ def rerun_unavailable_review(con, run: dict, task: dict) -> str | None:
                     "queued", round_no=code["round"], escalated=code["escalated"])
     state.enqueue(con, run, "review", {"gate_id": gid, "task_id": task["id"]}, dedup_key=f"review:{gid}", max_attempts=2)
     state.update_task(con, run["id"], task["id"], status="submitted", pause_reason=None)
-    state.emit(con, run, "gate.rerun", f"{task['id']} code review re-run on {rev_id} (was UNAVAILABLE)",
+    state.emit(con, run, "gate.rerun", f"{task['id']} code review re-run on {rev_id} (was {code['verdict']})",
                task_id=task["id"])
     return gid
+
+
+def fallback_options(head: str, target: str, nxt: str | None, *, subject: str, report_cmd: str,
+                     produced: str | None) -> str:
+    """The two options a `next:` line gives for a review whose reviewer could not finish, never a
+    waiver: (1) the next fallback reviewer, `office rerun <target> --review --review-as <nxt>`;
+    (2) the orchestrator's own review, recorded as a non-independent fallback for `subject`, unless
+    `produced` says the orchestrator may not review this work."""
+    first = (f"(1) the next fallback reviewer for this revision: office rerun {target} --review --review-as {nxt}" if nxt
+             else "(1) the next fallback reviewer: none qualifies now, and office resume retries the chain when one does")
+    second = (f"(2) your own review is not allowed: {produced}" if produced else
+              f"(2) review it yourself, recorded as a non-independent fallback by {actor_identity()} on route "
+              f"orchestrator for {subject}: {report_cmd}")
+    return f"{head} Two options: {first}; {second}"
+
+
+def task_review_next(con, run: dict, task: dict, block: dict) -> str:
+    """The next: line for a v3.1 task whose code reviewer could not finish: the
+    two recorded options, never a waiver (see convergence.fallback_next)."""
+    tid, rev = task["id"], task["current_revision_id"]
+    on_rev = [g["id"] for g in con.execute("SELECT id FROM gates WHERE run_id=? AND task_id=? AND revision_id=? AND "
+                                           "kind='code_review'", (run["id"], tid, rev)).fetchall()]
+    nxt = next_reviewer_route(con, run, "code_reviewer", tid, reviewer_tried(con, run["id"], on_rev))
+    head = (f"{tid}: no code reviewer returned a verdict for {rev}"
+            f"{' (the reviewer hit a usage limit)' if 'quota stall' in (block.get('summary') or '') else ''} "
+            "(runtime status, not a verdict).")
+    return fallback_options(head, tid, nxt, subject=f"revision {rev}", report_cmd=f"office review {tid} --report <file>",
+                            produced=orchestrator_produced(con, run, [tid]))
+
+
+def fallback_review_task(con, run: dict, tid: str, report: Path) -> Result:
+    """The orchestrator's code review of a v3.1 task whose reviewer could not
+    finish, recorded as degraded and non-independent: it satisfies the gate only
+    as that recorded fallback, and never for work the orchestrator produced."""
+    require_orchestrator(con, run, "review in a reviewer's place")
+    if not report.is_file():
+        raise Usage("no-report", f"no review file at {report}")
+    parsed = review_parse.parse(_last_block(report.read_text(encoding="utf-8", errors="replace")))
+    if not parsed.valid or parsed.verdict not in ("PASS", "CHANGES_REQUIRED"):
+        raise Refused("report-invalid", "the report is not a valid review: "
+                      + "; ".join(parsed.errors[:3] or [f"verdict {parsed.verdict} is not PASS or CHANGES_REQUIRED"]),
+                      next_step="rewrite it in the review format, then retry")
+    who = actor_identity()
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        task = state.get_task(con, run["id"], tid)
+        block = unavailable_review_block(con, run, task) if task else None
+        if block is None:
+            raise Refused("fallback-not-allowed", f"{tid}: the orchestrator's review stands in only for a code reviewer "
+                          "that could not finish (silent, or stopped on a usage limit); this task is not blocked on one",
+                          scope=tid, next_step="office status")
+        produced = orchestrator_produced(con, run, [tid])
+        if produced:
+            raise Refused("orchestrator-produced-work", f"{tid}: the orchestrator may not review work it produced: "
+                          f"{produced}", scope=tid, next_step=f"another reviewer: office rerun {tid} --review "
+                                                              "--review-as <route>")
+        rev_id = block["revision_id"]
+        gid = _new_gate(con, run, task, rev_id, "code_review", f"{block['input_key']}:orchestrator:{uuid.uuid4().hex[:6]}",
+                        "running", round_no=block["round"], escalated=block["escalated"])
+        con.execute("UPDATE gates SET independence=?, contract=? WHERE id=?", (contract.DEGRADED, contract.of(run), gid))
+        state.record_evidence(con, run["id"], "review_output", report, task_id=tid, revision_id=rev_id, gate_id=gid,
+                              meta={"route": "orchestrator", "who": who, "revision": rev_id,
+                                    "independence": contract.DEGRADED, "replaces_gate": block["id"]})
+        state.update_task(con, run["id"], tid, status="submitted", pause_reason=None)
+        ingest_task_gate(con, run, gid, {
+            "verdict": parsed.verdict, "parsed": parsed, "route": f"orchestrator ({who}) (degraded fallback)",
+            "summary": f"{parsed.verdict} by the orchestrator ({who}) on route orchestrator for revision {rev_id}: "
+                       f"degraded, non-independent fallback after the reviewer could not finish ({block['verdict']})"})
+        state.emit(con, run, "review.degraded_fallback", f"{tid} code review by the orchestrator ({who}, route "
+                   f"orchestrator, revision {rev_id}) as the degraded, non-independent fallback: {parsed.verdict}",
+                   task_id=tid, payload={"who": who, "route": "orchestrator", "revision": rev_id,
+                                         "replaces_gate": block["id"], "verdict": parsed.verdict})
+        status = state.get_task(con, run["id"], tid)["status"]
+    jobs.kick(con, run["id"])
+    return Result(lines=[f"{tid} code review {parsed.verdict} recorded as a degraded, non-independent orchestrator "
+                         f"review by {who} for {rev_id} | {tid} {status}"], next="exceptions only; office status")
 
 
 def rerun_unavailable_checks(con, run: dict, task: dict) -> bool:
@@ -234,6 +377,11 @@ def job_run_checks(con, run: dict, job: dict) -> dict:
         con.execute("UPDATE gates SET status='running', started_at=? WHERE id=?", (now_iso(), gate["id"]))
     outcome = run_commands(con, run, task["checks"], Path(d["worktree"]), rev, gate)
     with db.transaction(con):
+        if outcome.get("preexisting"):
+            state.emit(con, run, "gate.preexisting", f"{task['id']} checks on {rev['id']}: "
+                       f"{', '.join(p['command'] for p in outcome['preexisting'])} also fail on the base "
+                       f"{rev['base_commit'][:10]} (pre-existing, not a producer failure); independent review still runs",
+                       task_id=task["id"], payload={"preexisting": outcome["preexisting"]})
         ingest_task_gate(con, state.get_run(con, run["id"]), gate["id"], outcome)
     return {"verdict": outcome["verdict"]}
 
@@ -316,14 +464,124 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
             return {"verdict": "UNAVAILABLE", "summary": f"check command not found: {command}", "results": results}
         if not passed:
             tail = "\n".join(out.strip().splitlines()[-12:])
-            findings.append({"code": f"C{i}", "severity": "material", "location": command,
+            findings.append({"code": f"C{i}", "severity": "material", "location": command, "_output": out, "_exit": code,
                              "summary": f"check failed (exit {code}): {tail[-600:]}", "action": "make this check pass"})
         if check_tree and not matches_revision(cwd, rev["commit_sha"], paths.run_dir(run["id"]) / "tmp"):
             return {"verdict": "STALE", "summary": "worktree changed while checks ran", "results": results}
+    preexisting = []
+    if findings and gate.get("task_id") and rev.get("base_commit"):
+        findings, preexisting = _split_preexisting(con, run, gate, rev, findings, timeout, evdir)
+    for f in findings:
+        f.pop("_output", None)
+        f.pop("_exit", None)
     verdict = "PASS" if not findings else "CHANGES_REQUIRED"
     parsed = review_parse.Parsed(verdict=verdict, findings=findings)
-    return {"verdict": verdict, "parsed": parsed, "results": results, "route": "deterministic",
-            "summary": f"{len(commands) - len(findings)}/{len(commands)} checks passed"}
+    summary = f"{len(commands) - len(findings) - len(preexisting)}/{len(commands)} checks passed"
+    if preexisting:
+        summary += (f"; {len(preexisting)} failed on the base revision {rev['base_commit'][:10]} too (pre-existing, not a "
+                    "producer failure): " + "; ".join(p["command"] for p in preexisting))[:500]
+    return {"verdict": verdict, "parsed": parsed, "results": results, "route": "deterministic", "summary": summary,
+            "preexisting": preexisting}
+
+
+# What a test runner prints for each failing test, one id per line. `[ \t]*`, never `\s*`: with re.M
+# the latter rescans a long run of blank lines from every line start.
+_FAILED_ID = re.compile(r"^[ \t]*(?:FAILED|FAIL|ERROR|not ok[ \t]+\d+(?:[ \t]+-)?|[✗×✖])[:]?[ \t]+"
+                        r"([^\s(][^\n]*?)(?:[ \t]+-[ \t][^\n]*)?$", re.M)
+_FAILED_COUNT = re.compile(r"(?<!\d)(\d{1,9})[ \t]+(?:failed|failures?|errors?)\b", re.I)  # anchored: one scan per digit run
+_SCAN_CHARS = 200_000
+
+
+def failure_ids(out: str) -> set[str]:
+    """The failing test ids a runner's output names, or an empty set when it names none."""
+    return {m.group(1).strip() for m in _FAILED_ID.finditer((out or "")[-_SCAN_CHARS:])}
+
+
+def failure_count(out: str) -> int | None:
+    """How many failures a runner's summary reports, or None when it reports no count."""
+    counts = [int(n) for n in _FAILED_COUNT.findall((out or "")[-_SCAN_CHARS:])]
+    return max(counts) if counts else None
+
+
+_PATH = re.compile(r"(?:/[\w.@+~-]+)+/([\w.@+~-]+)")
+_VOLATILE = re.compile(r"0x[0-9a-f]+|\b\d+(?:\.\d+)?[ \t]*(?:ms|s|sec|secs|seconds|us|µs)\b|\bpid[ =]\d+", re.I)
+
+
+def _signature(out: str) -> list[str]:
+    """The end of a failing check's output with what differs between two checkouts removed:
+    directories (a worktree and a base checkout live in different ones), timings, addresses and
+    pids. Counts stay: a different number of failures is a different failure."""
+    lines = [ln.strip() for ln in (out or "")[-_SCAN_CHARS:].splitlines() if ln.strip()][-6:]
+    return [_VOLATILE.sub("#", _PATH.sub(r"\1", ln)) for ln in lines]
+
+
+def same_failure(head_out: str, base_out: str) -> bool:
+    """Does a check that fails on the head fail on the base for the same reason? When the head's
+    output names failing tests, every one must also fail on the base and the head may not report
+    more failures than the base (a new failing test in an already failing file is the producer's).
+    When it names none, the ends of both outputs must match: a different error (a feature missing
+    on the base, wrongly built on the head) or a different count is not the base's failure."""
+    head_ids = failure_ids(head_out)
+    if head_ids:
+        head_n, base_n = failure_count(head_out), failure_count(base_out)
+        return head_ids <= failure_ids(base_out) and (head_n is None or base_n is None or head_n <= base_n)
+    return _signature(head_out) == _signature(base_out)
+
+
+def _names_a_file(out: str, changed: list[str]) -> bool:
+    """Does a failing check's output name a file this revision changed? Then the failure is where the
+    task worked, not an inherited one, whatever the base printed."""
+    tail = (out or "")[-_SCAN_CHARS:]
+    return any(name and name in tail for f in changed for name in {f, f.rsplit("/", 1)[-1]} if len(name) >= 3)
+
+
+def _split_preexisting(con, run: dict, gate: dict, rev: dict, findings: list[dict], timeout: int,
+                       evdir: Path) -> tuple[list[dict], list[dict]]:
+    """Run each failing check on the task's base revision (#306). A check that fails there with the
+    same exit status and failures is pre-existing: the task did not break it, so it is recorded as
+    such and neither cancels independent review nor counts as a producer failure. Returns (producer
+    failures, pre-existing). A base that cannot be checked out or a command that cannot run there
+    leaves the failure the producer's."""
+    # What the task changed since its base (a revision's own delta is only since the previous revision).
+    changed = [f for f in paths.git(Path(run["repo_root"]), "-c", "core.quotepath=off", "diff", "--name-only", "-z",
+                                    "--no-renames", rev["base_commit"], rev["commit_sha"], check=False).split("\0") if f]
+    if not changed:
+        return findings, []  # nothing was changed, so nothing was inherited: an empty submission fails as the base does
+    name = f"base-{gate['id']}"
+    try:
+        checkout = detached_checkout(run, rev["base_commit"], name, purpose="check")
+    except (paths.GitError, OSError):
+        remove_checkout(run, paths.run_dir(run["id"]) / "checkouts" / name)  # a half-made checkout leaks nothing
+        return findings, []
+    mine, pre = [], []
+    try:
+        for f in findings:
+            command = f["location"]
+            try:
+                proc = subprocess.run(command, shell=True, cwd=str(checkout), capture_output=True, text=True,
+                                      timeout=timeout, env=_check_env(run))
+                code, out = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+            except subprocess.TimeoutExpired:
+                mine.append(f)
+                continue
+            if (code in (0, 124, 127) or code != f["_exit"] or "command not found" in out[-400:]
+                    or runner_timeout(f["_output"]) or _names_a_file(f["_output"], changed)
+                    or not same_failure(f["_output"], out)):
+                mine.append(f)
+                continue
+            # Kept as evidence: what the base printed is what made this not the producer's.
+            log = evdir / f"check-{f['code'][1:]}-base.log"
+            log.write_text(out, encoding="utf-8")
+            os.chmod(log, 0o600)
+            with db.transaction(con):
+                state.record_evidence(con, run["id"], "check_output_base", log, task_id=gate.get("task_id"),
+                                      revision_id=rev["id"], gate_id=gate["id"],
+                                      meta={"command": command, "exit": code, "base_commit": rev["base_commit"]})
+            pre.append({"code": f["code"], "command": command, "exit": code, "base_commit": rev["base_commit"],
+                        "base_log": str(log)})
+    finally:
+        remove_checkout(run, checkout)
+    return mine, pre
 
 
 def host_overloaded() -> str | None:
@@ -386,6 +644,7 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     rc = contract.of(run)
     producer = _producer_route(con, gate)
     failures = []
+    pinned_stall = None
     task = state.get_task(con, run["id"], gate["task_id"]) if gate.get("task_id") else None
     # A user-pinned code reviewer (dispatch --review-as) replaces routing.
     # Independence is per agent: every reviewer is a fresh dispatch and session,
@@ -395,7 +654,7 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     resume, same_route = (_reviewer_resume(con, run, resume_from, profile_kind, cwd) if resume_from
                           else (None, None))
     for attempt in range(limit + 1):
-        if attempt == 0 and same_route:
+        if attempt == 0 and same_route and not pinned:
             decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
                                              exact=same_route)
             if decision.get("status") != "selected":
@@ -405,6 +664,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         elif pinned:
             decision = candidates.declared_decision(pinned["as"], flag="--review-as")
             decision["launch"] = {k: pinned[k] for k in ("cli", "external") if pinned.get(k)}
+            if resume and routing.candidate_id(decision["candidate"]) != same_route:
+                resume = None  # the earlier session was another route's: it cannot be resumed as the pinned one
         else:
             decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
                                              exclude=excluded)
@@ -436,7 +697,7 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         d = state.get_dispatch(con, dispatch_id)
         text = _reply_text(d, ddir, output)
         parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=rc)
-        wrote_file = output.is_file() and output.stat().st_size > 0
+        wrote_file = _wrote_reply(output)
         # Wall signatures come from the harness log, never from the review
         # itself (a review of quota code must not read as a quota wall).
         log_text = "" if wrote_file else _log_text(d, ddir)
@@ -450,27 +711,29 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             # (R13), never from pane or transcript text.
             text, parsed, attention = _reprompt_until_valid(con, run, d, ddir, output, parsed,
                                                             plan_review=plan_review, visual=visual)
-            never_replied = not (output.is_file() and output.stat().st_size > 0)
-            if attention and never_replied and convergence and not pinned:
+            never_replied = not _wrote_reply(output)
+            if attention and never_replied and HELD_PROMPT not in attention:
                 # Every re-prompt came back empty: the reviewer never worked (a
                 # quota wall the harness did not report, a brief that never
-                # landed). That is a launch failure, so the next route runs
-                # instead of the gate ending INVALID_RESULT on this one (#384).
+                # landed). A wall, or any silence under the convergence contract,
+                # is a launch failure: the next route runs instead of the gate
+                # ending INVALID_RESULT on this one (#384).
                 (ddir / "pane-tail.txt").unlink(missing_ok=True)  # re-read after the re-prompts
-                log_text = _log_text(state.get_dispatch(con, dispatch_id), ddir)
-                wall = "quota" if _quota_signature(log_text) else "auth" if _auth_signature(log_text) else None
-                failures.append(f"{triple}: no reply after re-prompts" + (f" [{wall}]" if wall else ""))
-                # A harness that silently answers nothing is walled for every
-                # model on it, so the chain moves to another harness.
-                excluded.update({triple, f"harness:{cand['harness']}"})
-                with db.transaction(con):
-                    con.execute("UPDATE gates SET env_failures=env_failures+1 WHERE id=?", (gate["id"],))
-                    con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?",
-                                (dispatch_id,))
-                continue
+                d = state.get_dispatch(con, dispatch_id)
+                wall = reviewer_wall(_log_text(d, ddir))
+                if wall or (convergence and not pinned):
+                    failures.append(_failure_reason(d, triple, wall, unusable=parsed.errors))
+                    _record_env_failure(con, gate, dispatch_id, wall)
+                    if pinned:
+                        pinned_stall = (triple, wall)
+                        break
+                    # A harness that silently answers nothing is walled for every
+                    # model on it, so the chain moves to another harness.
+                    excluded.update({triple, f"harness:{cand['harness']}"})
+                    continue
             if attention:
                 with db.transaction(con):
-                    state.record_evidence(con, run["id"], "review_output", output if output.is_file() else None,
+                    state.record_evidence(con, run["id"], "review_output", _reply_file(output),
                                           task_id=gate.get("task_id"), revision_id=gate.get("revision_id"),
                                           gate_id=gate["id"], meta={"route": triple, "exit": d.get("exit_code")},
                                           digest=sha256_bytes(text.encode()))
@@ -481,7 +744,7 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                         "summary": attention, "producer_route": producer}
             d = state.get_dispatch(con, dispatch_id)
         with db.transaction(con):
-            state.record_evidence(con, run["id"], "review_output", output if output.is_file() else None,
+            state.record_evidence(con, run["id"], "review_output", _reply_file(output),
                                   task_id=gate.get("task_id"), revision_id=gate.get("revision_id"), gate_id=gate["id"],
                                   meta={"route": triple, "exit": d.get("exit_code")},
                                   digest=sha256_bytes(text.encode()))
@@ -498,20 +761,17 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         # Only a launch failure reaches here: the agent never produced a reply
         # (never started, died first, or hit an auth or quota wall). That is the
         # one case where another route is substituted.
-        log_text = _log_text(d, ddir)
-        reason = f"{triple}: exit {d.get('exit_code')} ({d.get('terminal_classification')}) with no reply"
-        wall = "quota" if _quota_signature(log_text) else "auth" if _auth_signature(log_text) else None
-        if wall:
-            reason += f" [{wall}]"
-        failures.append(reason)
+        wall = reviewer_wall(_log_text(d, ddir))
+        failures.append(_failure_reason(d, triple, wall))
+        _record_env_failure(con, gate, dispatch_id, wall)
         if pinned:
+            pinned_stall = (triple, wall)
             break  # the user named this reviewer; never substitute another
         excluded.add(triple)
         if wall:
             excluded.add(f"harness:{cand['harness']}")
-        with db.transaction(con):
-            con.execute("UPDATE gates SET env_failures=env_failures+1 WHERE id=?", (gate["id"],))
-            con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?", (dispatch_id,))
+    if pinned_stall:
+        failures.insert(0, _pinned_stall_hint(con, run, gate, role, pinned_stall, excluded))  # first: summaries are cut
     if convergence:
         return {"status": contract.UNAVAILABLE, "verdict": None, "parsed": None, "route": None,
                 "summary": "every eligible reviewer route failed: " + "; ".join(failures)[:560],
@@ -519,7 +779,23 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     return {"verdict": "UNAVAILABLE", "parsed": None, "route": None, "summary": "; ".join(failures)[:600]}
 
 
+HELD_PROMPT = "typed but unsubmitted"  # a re-prompt the reviewer never received: its agent is waiting, not silent
 REPLY_FILE_RULE = ("Office reads your review only from that file; text you print in the terminal is not read.")
+
+
+def _reply_file(output: Path) -> Path | None:
+    """The file that holds the reviewer's reply: its reply file, else the final-message file a headless
+    harness writes. What the review's evidence points at, so its findings can be read back from it."""
+    for p in (output, output.with_name("last-message.txt")):
+        if p.is_file() and p.stat().st_size > 0:
+            return p
+    return None
+
+
+def _wrote_reply(output: Path) -> bool:
+    """Did the reviewer leave a reply artifact: its reply file, or the final-message file a headless
+    harness writes? Neither is silence, whatever the reply says."""
+    return _reply_file(output) is not None
 
 
 def _reply_text(d: dict, ddir: Path, output: Path) -> str:
@@ -540,16 +816,13 @@ def _log_text(d: dict, ddir: Path) -> str:
     pane text stands in (saved once to pane-tail.txt): a quota or auth wall
     the harness prints but does not exit on shows only there (#384)."""
     tail = ddir / "pane-tail.txt"
-    if d.get("launcher") == "herdr" and d.get("pane_id") and not tail.is_file() and shutil.which("herdr"):
+    if d.get("launcher") == "herdr" and not tail.is_file():
         from office import dispatch as dispatch_mod
-        snap = dispatch_mod._pane_snapshot(dispatch_mod.herdr_agent_name(d["id"]), d["pane_id"])
+        snap = dispatch_mod.pane_text(d)
         if snap:
             tail.write_text(snap, encoding="utf-8")
-    text = ""
-    for log in (Path(d.get("log_path") or ddir / "output.log"), ddir / "pane-tail.txt"):
-        if log.is_file():
-            text += log.read_text(encoding="utf-8", errors="replace")[-4000:] + "\n"
-    return text
+    return "\n".join(log.read_text(encoding="utf-8", errors="replace")
+                     for log in (Path(d.get("log_path") or ddir / "output.log"), tail) if log.is_file())
 
 
 def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, parsed, *, plan_review: bool,
@@ -579,15 +852,15 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
                   f"in the format the brief requires (a VERDICT line first), to {output}. {REPLY_FILE_RULE}")
         # Left unsubmitted in the composer, it gets Enter, never a second copy.
         got = dispatch_mod.submit_prompt(name, prompt, pane=d.get("pane_id"))
-        unsent = " (typed but unsubmitted)" if got == "held" else ""
+        unsent = f" ({HELD_PROMPT})" if got == "held" else ""
         with db.transaction(con):
             state.emit(con, run, "review.reprompt", f"{d.get('task_id') or 'plan'} {d['role']} {d['id']}: re-prompted "
                        f"{n}/{limit}{unsent} ({'; '.join(errors[:2])})", audience="runtime", task_id=d.get("task_id"),
                        dispatch_id=d["id"])
         if got == "held":
             # No reply can come from a prompt the reviewer never received.
-            return text, parsed, (f"reviewer {d['id']} ({d.get('triple')}): Office's re-prompt is typed but "
-                                  f"unsubmitted in herdr agent {name}; submit it (herdr agent send-keys {name} "
+            return text, parsed, (f"reviewer {d['id']} ({d.get('triple')}): Office's re-prompt is {HELD_PROMPT} "
+                                  f"in herdr agent {name}; submit it (herdr agent send-keys {name} "
                                   "Enter) or waive the gate")
         text = _await_file(output, wait_s, poll)
         parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=contract.of(run))
@@ -695,15 +968,174 @@ def _last_block(text: str) -> str:
     return "\n".join(lines[start:])
 
 
+def _squash(text: str) -> str:
+    """Whitespace collapsed: a pane's width can break a wall's sentence anywhere."""
+    return re.sub(r"\s+", " ", text[-2000:])
+
+
 def _quota_signature(text: str) -> bool:
-    return bool(re.search(r"rate.?limit|quota|usage limit|session limit|weekly limit|429|too many requests|exhausted",
-                          text[-2000:], re.I))
+    """A usage or rate wall in the harness's own output. The phrases a harness prints when it stops, not the bare
+    words `quota` or `exhausted`, and a bare 429 only where it is a status (`HTTP 429`, `Error: 429.`, `429 Too
+    Many Requests`): a review of quota code, a sha, a `file.py:429` reference are no wall."""
+    return bool(re.search(r"rate.?limit|usage limit|session limit|weekly limit|(?:monthly|daily|credit|token) limit"
+                          r"|quota (?:exceeded|exhausted|reached|limit)|exceeded (?:your |the )?(?:current )?quota"
+                          r"|(?:insufficient|out of) (?:quota|credits?)|resource.?exhausted|too many requests"
+                          r"|exhausted your capacity|quota (?:is|has been|was) (?:exhausted|exceeded)"
+                          r"|\b(?:http|status|code|error|err|response)\b[^\d\n]{0,12}(?:\d\.\d )?429(?![\w/:-]|\.\d)",
+                          _squash(text), re.I))
 
 
 def _auth_signature(text: str) -> bool:
     """The harness is not signed in: every route on it will fail the same way."""
     return bool(re.search(r"not logged in|please run /login|authentication (failed|required)|unauthorized|\b401\b",
-                          text[-2000:], re.I))
+                          _squash(text), re.I))
+
+
+def reviewer_wall(text: str) -> dict | None:
+    """The wall a reviewer's harness stopped on, from its log or pane text:
+    {"kind": "quota"|"auth", "label": "resets 9:30pm (Asia/Manila)" or None,
+    "resets_at": iso or None}. A usage-limit screen shows only in the pane, and
+    the harness does not exit on it (#384), so the pane text is read too."""
+    from office import dispatch as dispatch_mod
+    limit = dispatch_mod._usage_limit(text)
+    if limit is not None or _quota_signature(text):
+        limit = limit or {}
+        resets = limit.get("resets_at")
+        return {"kind": "quota", "label": limit.get("label"), "resets_at": resets.isoformat() if resets else None}
+    if _auth_signature(text):
+        return {"kind": "auth", "label": None, "resets_at": None}
+    return None
+
+
+def _failure_reason(d: dict, triple: str, wall: dict | None, *, unusable: list[str] | None = None) -> str:
+    """One line saying why a reviewer produced no review. A wall is named as the
+    cause, never reported as an empty reply; a dispatch that ended with no
+    classification says what state it was left in (#305 B4)."""
+    if wall and wall["kind"] == "quota":
+        return (f"{triple}: quota stall{' (' + wall['label'] + ')' if wall.get('label') else ''}: the harness stopped on "
+                "its usage limit before it wrote a review")
+    if wall:
+        return f"{triple}: auth wall: the harness is not signed in, so it wrote no review"
+    if unusable is not None:
+        return (f"{triple}: no usable reply after re-prompting ({'; '.join(unusable[:2]) or 'nothing written'}) "
+                f"[{_end_state(d)}]")
+    if d.get("terminal_classification") is None:
+        return f"{triple}: ended with no recorded classification [{_end_state(d)}] and no reply"
+    return f"{triple}: exit {d.get('exit_code')} ({d.get('terminal_classification')}) with no reply"
+
+
+def _end_state(d: dict) -> str:
+    """What is known of a dispatch's end: its status, launcher, supervisor and
+    the last thing recorded about it."""
+    bits = [f"status {d.get('status')}", f"launcher {d.get('launcher') or 'none'}"]
+    if d.get("pid"):
+        bits.append(f"supervisor pid {d['pid']} {'alive' if pid_alive(d['pid']) else 'gone'}")
+    if d.get("terminal_classification"):
+        bits.append(f"classified {d['terminal_classification']}")
+    if d.get("exit_code") is not None:
+        bits.append(f"exit {d['exit_code']}")
+    return ", ".join(bits)
+
+
+def _record_env_failure(con, gate: dict, dispatch_id: str, wall: dict | None) -> None:
+    with db.transaction(con):
+        con.execute("UPDATE gates SET env_failures=env_failures+1 WHERE id=?", (gate["id"],))
+        con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?", (dispatch_id,))
+        if wall and wall["kind"] == "quota":
+            con.execute("UPDATE dispatches SET stall_kind='usage_limit', resets_at=?, limit_label=? WHERE id=?",
+                        (wall.get("resets_at"), wall.get("label"), dispatch_id))
+
+
+def require_orchestrator(con, run: dict, what: str, *, code: str = "worker-cannot-review") -> None:
+    """Refuse a dispatched agent (planner, executor, reviewer): `what` is the orchestrator's act. A
+    worker is known by its dispatch identity, and by standing in a task worktree of this run, which
+    an agent that dropped its environment still does."""
+    from office import discovery
+    if os.environ.get("OFFICE_DISPATCH_ID"):
+        raise Refused(code, f"a dispatched agent (a producer or worker) may not {what}: that is the orchestrator's")
+    try:
+        cwd = Path.cwd()
+    except OSError:
+        cwd = None  # a deleted working directory is not a task worktree
+    found = discovery.task_worktree(con, cwd) if cwd else None
+    if found and found[0]["id"] == run["id"]:
+        raise Refused(code, f"this is {found[1]['task_id']}'s task worktree, so this session is its worker, which may not "
+                            f"{what}: that is the orchestrator's", scope=found[1]["task_id"])
+
+
+def actor_identity() -> str:
+    """Who is acting: the calling agent session when the harness named it, else
+    just `orchestrator`. Recorded beside a fallback review."""
+    harness, session = os.environ.get("OFFICE_HARNESS"), os.environ.get("OFFICE_SESSION")
+    return f"orchestrator {harness}:{session}" if harness and session else "orchestrator"
+
+
+def orchestrator_produced(con, run: dict, task_ids: list[str]) -> str | None:
+    """Why the orchestrator may not review these tasks' work, or None. A task whose
+    revision came from an external session (hosted by whoever the orchestrator
+    handed it to, Office cannot tell that from its own) was produced outside
+    Office's control: its review is never the orchestrator's to give."""
+    for tid in task_ids:
+        row = con.execute("SELECT d.id FROM revisions r JOIN dispatches d ON d.id=r.dispatch_id WHERE r.run_id=? "
+                          "AND r.task_id=? AND d.launcher='external' LIMIT 1", (run["id"], tid)).fetchone()
+        if row:
+            return (f"{tid} was produced in an external session ({row['id']}) that Office cannot tell from the "
+                    "orchestrator's own, so the orchestrator is not independent of it")
+    return None
+
+
+def review_target(gate: dict) -> str | None:
+    """What `office rerun <target> --review` names for this gate: the task for a
+    task code review, `<scope>:<convergence|visual>` for a lane gate."""
+    if gate.get("subject") == "lane" and gate.get("scope"):
+        from office import convergence
+        return convergence.gate_name(gate["scope"], gate["kind"])
+    return gate.get("task_id")
+
+
+def reviewer_tried(con, run_id: str, gate_ids: list[str]) -> set[str]:
+    """Every reviewer route already used on these gates, plus the harnesses whose
+    dispatches ended on an environment failure: none of them is a next fallback."""
+    if not gate_ids:
+        return set()
+    out = set()
+    marks = ",".join("?" * len(gate_ids))
+    for r in con.execute(f"SELECT triple, harness, outcome FROM dispatches WHERE run_id=? AND gate_id IN ({marks})",
+                         (run_id, *gate_ids)).fetchall():
+        if r["triple"]:
+            out.add(r["triple"])
+        if r["outcome"] == "environment_failure" and r["harness"]:
+            out.add(f"harness:{r['harness']}")
+    return out
+
+
+def next_reviewer_route(con, run: dict, role: str, task_id: str | None, tried: set[str]) -> str | None:
+    """The route the router would pick for this review once `tried` are out, in the
+    `harness/model[@effort]` form --review-as takes, or None when none qualifies.
+    Read-only: it names the next fallback, it does not run it, and it probes no quota (it
+    runs on every `office status`), so the route it names may still be walled when it runs."""
+    try:
+        decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=task_id, exclude=set(tried),
+                                         probe=False)
+    except Exception:  # noqa: BLE001 - a routing failure leaves the next step to the orchestrator
+        return None
+    if decision.get("status") != "selected":
+        return None
+    return candidates.declared_route(decision["candidate"])
+
+
+def _pinned_stall_hint(con, run: dict, gate: dict, role: str, stall: tuple, excluded: set) -> str:
+    """A pinned reviewer is never substituted, so a wall on it ends the review:
+    say so, and name the command that re-runs only the review on another route."""
+    triple, wall = stall
+    target = review_target(gate)
+    nxt = next_reviewer_route(con, run, role, gate.get("task_id"),
+                              excluded | {triple} | reviewer_tried(con, run["id"], [gate["id"]]))
+    kind = (wall or {}).get("kind")
+    return (f"pinned reviewer {triple} {'hit a ' + kind + ' wall' if kind else 'ended without a review'} and is not "
+            "substituted; re-run only the review on another route: "
+            + (f"office rerun {target} --review --review-as {nxt or '<harness/model[@effort]>'}" if target
+               else "office resume"))
 
 
 def job_review(con, run: dict, job: dict) -> dict:
@@ -1115,16 +1547,22 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
         return False
     from office import authority
     convergence = contract.is_convergence(run)
-    waived = authority.waived(con, run["id"], task_id) if not convergence else set()
+    waived = authority.waived(con, run["id"], task_id)
+    if convergence:
+        # Only the checks gate is a task gate here; code and visual review are lane gates (waived per lane).
+        waived &= {"checks"}
     gates_now = [g for g in required_gates(con, run, task, rev_id) if g["kind"] not in waived]
     basis = "all required gates PASS"
     if convergence:
-        # #337: the task gate is its checks; independent review happens per lane.
+        # #337: the task gate is its checks; independent review happens per lane, so a checks
+        # waiver accepts the task but the lane's review still runs on the composed result.
         basis = "checks APPROVED; lane convergence pending" if gates_now else "no checks declared; lane convergence pending"
         for g in gates_now:
             if g["kind"] == "checks" and (g["status"] != "done" or g["verdict"] != "APPROVED"):
                 return False
         gates_now = []
+    elif "checks" in waived and _revive_cancelled_reviews(con, run, task, rev_id, waived):
+        return False
     elif not gates_now and not waived:
         # A revision with no gate is accepted only when policy explicitly
         # requires none: the plan declared `checks: none`, the gear funds no
@@ -1197,6 +1635,30 @@ def reevaluate_submitted(con, run: dict) -> list[str]:
         if evaluate_acceptance(con, run, t["id"]):
             accepted.append(t["id"])
     return accepted
+
+
+def _revive_cancelled_reviews(con, run: dict, task: dict, rev_id: str, waived: set[str]) -> bool:
+    """A failed (or unavailable) check cancels the review gates that waited on it. When the
+    user then waives the checks, those reviews were never run: accepting would land the
+    revision with no independent review (#306). Queue each again and report that acceptance
+    waits for them. A review the user waived by name stays waived. Caller holds the tx."""
+    revived = False
+    for g in con.execute("SELECT * FROM gates WHERE run_id=? AND task_id=? AND revision_id=? AND status='cancelled' "
+                         "AND stale_reason IN ('checks failed','checks unavailable') AND kind IN ('code_review','visual') "
+                         "ORDER BY created_at", (run["id"], task["id"], rev_id)).fetchall():
+        g = dict(g)
+        if g["kind"] in waived or any(o["status"] != "cancelled" for o in con.execute(
+                "SELECT status FROM gates WHERE revision_id=? AND kind=? AND id!=?", (rev_id, g["kind"], g["id"]))):
+            continue
+        _new_gate(con, run, task, rev_id, g["kind"], f"{g['input_key']}:revived:{uuid.uuid4().hex[:6]}", "waiting",
+                  round_no=g["round"], escalated=g["escalated"])
+        revived = True
+    if revived:
+        start_waiting(con, run, task["id"], rev_id)
+        state.emit(con, run, "gate.revived", f"{task['id']} {rev_id}: checks are waived, so the reviews they cancelled "
+                   "now run; the task is not accepted without them", task_id=task["id"])
+    return revived or bool(con.execute("SELECT 1 FROM gates WHERE revision_id=? AND status IN ('queued','running','waiting') "
+                                       "AND kind IN ('code_review','visual')", (rev_id,)).fetchone())
 
 
 def stale_dependency(con, run: dict, task: dict) -> str | None:

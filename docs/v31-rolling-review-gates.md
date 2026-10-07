@@ -164,3 +164,20 @@ JSON files remain as generated read-only views for inspection and backward-compa
 - UI capture validity, drift thresholds, and specialist fallback: [the visual-drift decision](https://github.com/Hikari9/auto-office/issues/158).
 - Migration order and pruning ratification: [the pruning ratification](https://github.com/Hikari9/auto-office/issues/157).
 - The environment-failure retry bound's numeric default is left to the pruning/acceptance ratification, measured against fixtures.
+
+## 10. A reviewer that cannot finish, and checks that already fail on the base (T3)
+
+Runs pinned to the v3.1 contract get the same reviewer handling as `convergence-v1`
+([`review-convergence.md` section 12](review-convergence.md)):
+
+- A task whose code review could not finish (`UNAVAILABLE`, a usage-limit wall classified as a quota stall, or
+  `ATTENTION`, a reviewer that never wrote a readable reply) is `blocked`, and `next:` offers two options: the next
+  fallback reviewer for the same revision (`office rerun <task> --review --review-as <route>`, which re-dispatches
+  only the reviewer, or `office dispatch <task> --review-as <route>` on the submitted revision), or the orchestrator's
+  own review recorded as a non-independent fallback (`office review <task> --report <file>`: who, route
+  `orchestrator`, revision; independence `degraded-orchestrator`). It is refused for work the orchestrator produced.
+- A check that fails on the task's base revision with the same failures is recorded as pre-existing: the checks gate
+  passes with that said in its summary (event `gate.preexisting`) and code review still runs. A failure the task
+  introduced stays the producer's.
+- Waiving `T<n>:checks` after a real failure queues again the reviews the failure cancelled; acceptance waits for them
+  unless the user waived those reviews by name.

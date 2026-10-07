@@ -21,7 +21,8 @@ def test_invalid_result_lets_the_orchestrator_review_on_the_reviewers_behalf(env
     st = _scope(env, "L-T1")
     assert st["status"] == "attention" and st["fallback_available"]
     nxt = _status(env)["next"]
-    assert "office review L-T1:convergence" in nxt and "authorized" in nxt, nxt
+    assert "office review L-T1:convergence --report <file>" in nxt, nxt
+    assert nxt.count("(1)") == 1 and nxt.count("(2)") == 1 and "waive" not in nxt.lower(), nxt  # two options, no waiver
     report = tmp_path / "review.txt"
     report.write_text(APPROVED)
     env.office("review", "L-T1:convergence", "--report", str(report), check=0)

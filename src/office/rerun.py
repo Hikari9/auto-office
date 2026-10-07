@@ -13,7 +13,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, state
+from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, plans, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import pid_alive, sha256_obj
@@ -159,14 +159,114 @@ def _sticky_check(con, run: dict, task: dict, parent: dict) -> str | None:
     return None
 
 
-def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False) -> Result:
+def review_pin(review_as: str | None, review_cli: str | None = None, review_external: bool = False) -> dict | None:
+    """The reviewer pin `--review-as` names, in the shape a task or gate stores."""
+    return {"as": review_as, "cli": review_cli, "external": bool(review_external), "by": "user"} if review_as else None
+
+
+def _why_no_review(con, run: dict, task: dict) -> str:
+    """Why a v3.1 task has no review that a re-run could replace."""
+    if gates.worker_live(con, task.get("current_dispatch_id")):
+        return f"{task['id']} still has a live worker; its review comes after it submits"
+    rev = task.get("current_revision_id")
+    if not rev:
+        return f"{task['id']} has no submitted revision to review (office dispatch {task['id']} starts its executor)"
+    code = next((g for g in gates.required_gates(con, run, task, rev) if g["kind"] == "code_review"), None)
+    if code is None:
+        return f"{task['id']} {rev} has no code review gate"
+    if code["status"] in ("queued", "running", "waiting"):
+        return f"{task['id']} code review is {code['status']}: a reviewer is already on {rev}"
+    if code["verdict"] == "UNAVAILABLE" or code["verdict"] == "ATTENTION":
+        return f"{task['id']} is {task['status']}, not blocked on that review"
+    return (f"{task['id']} code review already has a verdict on {rev} ({code['verdict']}); findings are answered with "
+            f"office rerun {task['id']} --resume|--fresh, not a second review")
+
+
+def review_rerun(con, run: dict, tid: str, pin: dict | None, *, strict: bool = True) -> tuple[list[str], bool]:
+    """Re-dispatch only the reviewer of the task's current revision (or, under the
+    convergence contract, of its lane's composed revision), after pinning its
+    route. Never launches an executor. Returns (lines, queued). A review that
+    cannot be re-run (a verdict stands, one is running, no revision yet) raises
+    Refused when `strict`; otherwise the pin is kept and the line says why.
+    Caller holds the tx."""
+    from office import convergence
+    parsed = convergence.parse_gate_target(tid)
+    task = None if parsed else state.get_task(con, run["id"], tid.upper())
+    if parsed is None and (task is None or task["role"] == "planner"):
+        raise Usage("unknown-task", f"{tid} is not a task or a lane gate", next_step="office status")
+    try:
+        if contract.is_convergence(run):
+            made, pinned = convergence.rerun_review(con, run, tid, pin=pin)
+            return [f"{', '.join(made)} reviewer re-run on its composed revision"
+                    + (f" (pinned to {pin['as']}: {', '.join(pinned)})" if pinned else "")
+                    + (f" (the {pin['as']} pin applies to a gate named by id; none was)" if pin and not pinned else "")
+                    + "; no executor launched"], True
+        if parsed:
+            raise Usage("lane-gate", f"{tid} is a lane gate; under the v3.1 contract review is per task",
+                        next_step="office rerun <task> --review")
+        if gates.unavailable_review_block(con, run, task) is None:
+            raise Refused("nothing-to-rerun", _why_no_review(con, run, task), scope=task["id"],
+                          next_step=f"office status; office rerun {task['id']} --resume|--fresh answers findings")
+        if pin:
+            convergence.set_review_pin(con, run, task["id"], pin["as"], cli=pin.get("cli"), external=pin.get("external", False))
+        rev = task["current_revision_id"]
+        gid = gates.rerun_unavailable_review(con, run, state.get_task(con, run["id"], task["id"]))
+        return [f"{task['id']} code review re-run on {rev} (gate {gid}" + (f", reviewer {pin['as']}" if pin else "")
+                + "); the submission is kept, no executor launched"], True
+    except Refused as exc:
+        if strict:
+            raise
+        if pin and task is not None:
+            convergence.set_review_pin(con, run, task["id"], pin["as"], cli=pin.get("cli"), external=pin.get("external", False))
+        return [f"{tid}: reviewer pinned to {pin['as'] if pin else '(unchanged)'} for its next review; no review to re-run "
+                f"now: {exc}"], False
+
+
+def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False, review: bool = False,
+          as_model: str | None = None, cli: str | None = None, external: bool = False, review_as: str | None = None,
+          review_cli: str | None = None, review_external: bool = False) -> Result:
+    dispatch.check_route_flags(as_model=as_model, cli=cli, external=external, review_as=review_as,
+                               review_cli=review_cli, review_external=review_external)
+    pin = review_pin(review_as, review_cli, review_external)
+    if review or pin:
+        gates.require_orchestrator(con, run, "re-run or pin a reviewer", code="worker-cannot-pin-reviewer")
+    if not convergence_gate(tid):
+        tid = tid.upper()
+    if review and state.is_terminal(run):
+        raise Refused("run-terminal", f"run is {run['phase']}")
+    if review and tid.lower() == "plan":
+        if resume or fresh or reroute or as_model or cli or external:
+            raise Usage("rerun-mode", "--review re-runs only the reviewer and takes none of --resume, --fresh, "
+                        "--reroute, --as, --cli, --external", next_step="office rerun plan --review [--review-as <route>]")
+        with db.transaction(con):
+            gid = plans.rerun_review(con, run, pin=pin)
+        jobs.kick(con, run["id"])
+        return Result(lines=[f"plan review re-run (gate {gid}" + (f", reviewer {pin['as']}" if pin else "")
+                             + "); no round spent"], next="exceptions only; office status")
+    if review:
+        if resume or fresh or reroute or as_model or cli or external:
+            raise Usage("rerun-mode", "--review re-runs only the reviewer of the current revision and never launches an "
+                        "executor, so it takes none of --resume, --fresh, --reroute, --as, --cli, --external",
+                        next_step=f"office rerun {tid} --review [--review-as <route>]")
+        with db.transaction(con):
+            lines, _ = review_rerun(con, run, tid, pin)
+        jobs.kick(con, run["id"])
+        return Result(lines=lines, next="exceptions only; office status")
     if resume == fresh:
+        if review_as and not (resume or fresh) and not (as_model or cli or external or reroute):
+            return _pin_only(con, run, tid, pin)
         raise Usage("rerun-mode", f"say how to rerun {tid}: --resume continues the ended session with its context "
-                    "(native harness resume); --fresh starts a new session with the open findings in its brief",
-                    next_step=f"office rerun {tid} --resume | {_fresh_cmd(tid)}")
+                    "(native harness resume); --fresh starts a new session with the open findings in its brief; "
+                    "--review re-runs only the reviewer",
+                    next_step=f"office rerun {tid} --resume | {_fresh_cmd(tid)} | office rerun {tid} --review")
     if reroute and resume:
         raise Usage("rerun-mode", "--reroute starts a new session on another route; a resumed session keeps its own",
                     next_step=f"{_fresh_cmd(tid)} --reroute")
+    if resume and (as_model or cli or external):
+        raise Usage("rerun-mode", "--as/--cli/--external start a new session on that route; a resumed session keeps its own",
+                    next_step=f"{_fresh_cmd(tid)} --as <route>")
+    if reroute and as_model:
+        raise Usage("invalid-override", "--reroute routes from evidence; --as names the route yourself")
     task = state.get_task(con, run["id"], tid)
     if task is None:
         raise Usage("unknown-task", f"no task {tid}")
@@ -209,7 +309,11 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         extra = {"resume": {"parent": parent["id"], "session_id": session, "argv": argv[0], "herdr_kind": argv[1],
                             "findings": found}}
     decision = None
-    if reroute:
+    if as_model:
+        decision = candidates.declared_decision(as_model)
+        if cli or external:
+            decision["launch"] = {k: v for k, v in (("cli", cli), ("external", external)) if v}
+    elif reroute:
         decision = dispatch.planned_route(con, run, task, reroute=True)
         if decision.get("status") != "selected":
             raise Refused("no-route", dispatch._route_failure(tid, decision), scope=tid,
@@ -227,6 +331,8 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
             # A resumed session reads only its prompt pointer first: name the restack there.
             extra["resume"]["findings"] = "; ".join(x for x in (restack["line"], extra["resume"]["findings"]) if x)
     with db.transaction(con):
+        if pin:
+            state.update_task(con, run["id"], tid, review_override=pin)
         if decision:
             dispatch._record_routing(con, run, decision)
         did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
@@ -238,7 +344,7 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         state.emit(con, run, "task.rerun", f"{tid} rerun {'--resume from ' + parent['id'] if resume else '--fresh'} "
                    f"as {did}", task_id=tid, dispatch_id=did)
     jobs.kick(con, run["id"])
-    route_line = (f" on {decision['selected']} (rerouted)" if decision
+    route_line = (f" on {decision['selected']} ({'your --as route' if as_model else 'rerouted'})" if decision
                   else f" on {parent.get('triple')} (original route)")
     res = Result(lines=[f"{tid} -> {did} executor {'resuming ' + parent['id'] if resume else 'fresh session'}"
                         f"{route_line} launching"]
@@ -246,6 +352,23 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
     res.lines.extend(f"  {line}" for line in dispatch.launch_instructions(run, state.get_dispatch(con, did)))
     res.next = "exceptions only; office status"
     return res
+
+
+def convergence_gate(target: str) -> bool:
+    from office import convergence
+    return convergence.parse_gate_target(target) is not None
+
+
+def _pin_only(con, run: dict, tid: str, pin: dict) -> Result:
+    """`office rerun T1 --review-as <route>` with no other mode: change the
+    reviewer pin while the worker keeps running. It applies to the next review."""
+    from office import convergence
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        what = convergence.set_review_pin(con, run, tid, pin["as"], cli=pin.get("cli"),
+                                          external=pin.get("external", False))
+    return Result(lines=[f"{what} reviewer pinned to {pin['as']}; it applies to the next review, and no worker or "
+                         "running review changes"], next="exceptions only; office status")
 
 
 def _reclaim():

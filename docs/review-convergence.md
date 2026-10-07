@@ -241,7 +241,8 @@ RECHECK sequence (plan, each lane or shared scope convergence review, each visua
 
 These never spend a round:
 
-- a reviewer or provider failure: Office walks the whole configured fallback chain automatically;
+- a reviewer or provider failure, including a usage limit: Office walks the whole configured fallback chain
+  automatically (section 12);
 - a malformed or missing reply (`INVALID_RESULT`);
 - a capture retry or evidence recovery (`EVIDENCE_BLOCKED`);
 - `office resume`, which retries unavailable, attention and evidence-blocked reviews on the same
@@ -311,23 +312,66 @@ A waiver:
 Under `convergence-v1`, `office approve waive T2:code_review|visual` and `office approve visual` are
 refused: code and visual review are lane gates. Task `checks` waivers are unchanged.
 
-## 12. Degraded fallback review
+## 12. A reviewer that cannot finish: reroute, or the recorded fallback
 
-When every specialist convergence reviewer route failed (`UNAVAILABLE`), the orchestrator may review
-the gate itself:
+A reviewer that ends without a verdict is a runtime status: every route failed (`UNAVAILABLE`), a
+reviewer stopped on its usage limit (a wall in its log or pane, classified a *quota stall*, never an empty
+reply), or the last route never wrote a readable reply (`INVALID_RESULT`). The chain moves to the next
+eligible route by itself. When it is spent, or a pinned reviewer hit a wall, the gate's `next:` line offers
+exactly two options. Waiving is neither of them.
+
+1. **The next fallback reviewer for the same revision.** `office rerun <task|<scope>:convergence|<scope>:visual>
+   --review --review-as <route>` re-dispatches only the reviewer. It never launches an executor and spends no
+   round. `office dispatch <task> --review-as <route>` on a task with a submitted revision does the same.
+2. **The orchestrator's own review**, recorded as a non-independent fallback:
 
 ```text
 office review <scope>:convergence --report <file>
 office review <scope>:visual --report <file> --inspected <every screenshot>
+office review <task> --report <file>                  (a v3.1 task's code review)
 ```
 
-The report uses the reviewer reply format. The review is recorded with independence
-`degraded-orchestrator` and shown on receipts. For visual, every screenshot of the capture must be
-listed in `--inspected`; otherwise no visual verdict is recorded and the gate stays blocked for a
-capable reviewer (`office resume`) or a waiver.
+The report uses the reviewer reply format. The gate is recorded with independence `degraded-orchestrator`,
+the route `orchestrator`, who reviewed and the revision, and the receipt shows it. For visual, every
+screenshot of the capture must be listed in `--inspected`; otherwise no visual verdict is recorded and the
+gate stays blocked for a capable reviewer.
 
-Producers can never self-approve, and a dispatched agent cannot use `office review`. Acting as the
+The orchestrator's review satisfies a gate only as that recorded fallback, and only after the reviewer
+could not finish: it is refused for a gate that has a verdict, a running review, or an evidence problem, and
+for work the orchestrator produced (a task whose revision came from an external session, which Office
+cannot tell from the orchestrator's own). A dispatched agent cannot use `office review`. Acting as the
 fallback reviewer grants no waiver or landing authority.
+
+Re-running or pinning a reviewer, and the fallback review, are the orchestrator's acts. Office refuses them from
+a dispatched agent (its dispatch identity, or standing in a task worktree of the run). That is a safeguard against a
+producer choosing its own reviewer, not a security boundary: any local shell can run `office`.
+
+### Pins
+
+`--review-as <route>` pins the reviewer for the next review of a task, or of a lane gate by id
+(`office dispatch L-T1:visual --review-as <route>`, `L-T1:convergence` likewise). It can be set while a
+worker is live: the worker and a review already running are untouched, and the pin applies to the next review.
+A pinned reviewer is never substituted; when it hits a wall, Office says so and names the review-only reroute.
+`office rerun` accepts `--as`, `--cli`, `--external` and `--review-as/--review-cli/--review-external` with the
+meaning they have on `office dispatch`.
+
+### A resubmitted tree that was already reviewed
+
+The executor's self-review ledger is archived with the revision it vouched for. When a task is relaunched with
+nothing left to fix and its worktree holds exactly that revision's tree, the ledger is put back (its COMMIT line
+naming the current HEAD), so resubmitting it demands no new self-review. A fix round never gets it back: its tree
+will change. (The natural owner of this rule is `office preflight`'s ledger check.)
+
+### A check that already fails on the base
+
+When a failing check also fails on the task's base revision with the same exit status and failures (the same failing
+tests and no more of them, or the same ending of its output), the checks gate records it as pre-existing rather than
+a producer failure: its summary says so, a `gate.preexisting` event names the command, and the base run's output is
+kept as `check_output_base` evidence. Independent review still runs. It is never pre-existing when the task changed
+no file, when the output names a file the task changed, when a test runner timed out, or when the exit status differs.
+Failing checks that were waived never leave a task accepted without the review the contract requires: under
+v3.1 the review the failure cancelled is queued again; under convergence-v1 the lane's review runs on the
+composed result.
 
 ## 13. Integration, rebase, landing, and receipts
 
@@ -349,13 +393,15 @@ office inspect convergence [scope]                lanes, shared scopes, gates, f
 office inspect run                                shows the run's review contract
 office amend plan --contract -- "<what changed>"  submit a plan revision after RECHECK or INTAKE_GAP
 office amend plan --no-review --reason "<why>" -- "<delta>"   ordinary amendment, no plan review (never with --contract)
-office rerun <task> --resume|--fresh [--reroute]  run a routed repair (RECHECK or disposition fix)
+office rerun <task> --resume|--fresh [--reroute|--as <route>] [--review-as <route>]   run a routed repair (RECHECK or disposition fix)
+office rerun <task|<scope>:convergence|<scope>:visual> --review [--review-as <route>]   re-run only the reviewer (never an executor)
+office dispatch <task|<scope>:visual> --review-as <route>   pin the reviewer for the next review
 office decide <scope|plan> escalate|continue|waive|stop --quote "<user's words>" [--reason "<why>"]
 office disposition <scope>:<code>[,<code>] fix|fixed|dismissed|follow-up -- "<note>"
 office approve waive <scope>:convergence|visual --quote "<user's words>" --reason "<why>"
 office approve waive <scope>:convergence|visual --as orchestrator --reason "<why>"   (delegated landing only)
 office approve waive plan-review --quote "<user's words>"
-office review <scope>:convergence|visual --report <file> [--inspected <screenshots>]   (degraded fallback)
+office review <scope>:convergence|visual --report <file> [--inspected <screenshots>]   (recorded non-independent fallback)
 office resume                                     retry unavailable/evidence-blocked reviews; no round spent
 ```
 

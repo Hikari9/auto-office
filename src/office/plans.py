@@ -468,7 +468,8 @@ def job_plan_review(con, run: dict, job: dict) -> dict:
         brief = briefs.plan_review_brief(run, plan, req["frozen"], open_defects(con, run["id"]), rereview)
     outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
                                        plan_review=True, exclude=job["payload"].get("exclude"),
-                                       resume_from=job["payload"].get("resume_from"))
+                                       resume_from=job["payload"].get("resume_from"),
+                                       review_override=_pr(state.get_run(con, run["id"])).get("review_pin"))
     with db.transaction(con):
         ingest_plan_review(con, state.get_run(con, run["id"]), gate["id"], outcome)
     return {"verdict": outcome.get("verdict")}
@@ -769,6 +770,107 @@ def _queue_convergence_review(con, run: dict, plan_version: int, *, exclude: lis
     return gate_id
 
 
+def review_failed(con, run: dict) -> dict | None:
+    """The plan-review gate whose reviewer could not finish and that nothing is retrying
+    (convergence contract: unavailable, or no usable reply), or None."""
+    pr = _pr(state.get_run(con, run["id"]))
+    gates = plan_gates(con, run["id"])
+    if pr.get("ended") or pr.get("status") not in ("unavailable", "attention") or not gates:
+        return None
+    last = gates[-1]
+    if last["status"] != "done" or last.get("review_status") not in (contract.UNAVAILABLE, contract.INVALID_RESULT):
+        return None
+    return last
+
+
+def fallback_next(con, run: dict) -> str:
+    """The next: line for a plan review whose reviewer could not finish: the next
+    fallback reviewer, or the orchestrator's own recorded review, never a waiver."""
+    from office import gates as gate_engine
+    last = review_failed(con, run)
+    version = last["plan_version"] if last else run["plan_version"]
+    tried = gate_engine.reviewer_tried(con, run["id"], [g["id"] for g in plan_gates(con, run["id"])
+                                                         if g["plan_version"] == version])
+    nxt = gate_engine.next_reviewer_route(con, run, "plan_reviewer", None, tried)
+    head = (f"plan review: no reviewer returned a verdict for p{version} (runtime status, not a verdict, no round "
+            "spent).")
+    produced = None if run.get("planner_mode") == "dedicated" else "you wrote this plan inline"
+    return gate_engine.fallback_options(head, "plan", nxt, subject=f"plan p{version}",
+                                        report_cmd="office review plan --report <file>", produced=produced)
+
+
+def rerun_review(con, run: dict, *, pin: dict | None) -> str:
+    """`office rerun plan --review [--review-as <route>]`: run the plan review again on the
+    current plan version after its reviewer could not finish. No round is spent. Caller holds the tx."""
+    run = state.get_run(con, run["id"])
+    from office import gates as gate_engine
+    gate_engine.require_orchestrator(con, run, "re-run a review", code="worker-cannot-pin-reviewer")
+    if not contract.is_convergence(run):
+        raise Usage("plan-review-contract", "the plan review of a v3.1 run is retried with office resume",
+                    next_step="office resume")
+    last = review_failed(con, run)
+    if last is None:
+        raise Refused("nothing-to-rerun", "the plan review has no failed reviewer to replace: it is running, has a "
+                      "verdict, or ended", scope="plan", next_step="office status")
+    if pin:
+        pr = _pr(run)
+        pr["review_pin"] = pin
+        state.update_run(con, run["id"], plan_review=pr)
+    gid = _queue_convergence_review(con, state.get_run(con, run["id"]), last["plan_version"])
+    if gid is None:
+        raise Refused("nothing-to-rerun", "no plan review round can start now", scope="plan", next_step="office status")
+    state.emit(con, run, "review.rerun", f"plan review p{last['plan_version']} re-run by its reviewer only"
+               + (f" on {pin['as']}" if pin else ""), audience="runtime")
+    return gid
+
+
+def fallback_review(con, run: dict, report: Path) -> Result:
+    """The orchestrator's plan review once the plan reviewer could not finish, recorded as degraded and
+    non-independent. Refused for a plan the orchestrator wrote (an inline planner), and for a plan review
+    that has a verdict or is still running."""
+    from office import gates as gate_engine
+    gate_engine.require_orchestrator(con, run, "review in a reviewer's place")
+    if not report.is_file():
+        raise Usage("no-report", f"no review file at {report}")
+    parsed = review_parse.parse(gate_engine._last_block(report.read_text(encoding="utf-8", errors="replace")),
+                                plan_review=True, contract=contract.CONVERGENCE)
+    if not parsed.valid or not parsed.verdict:
+        raise Refused("report-invalid", "the report is not a valid review: " + "; ".join(parsed.errors[:3] or ["no verdict"]),
+                      next_step="rewrite it in the review format, then retry")
+    who = gate_engine.actor_identity()
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        last = review_failed(con, run) if contract.is_convergence(run) else None
+        if last is None:
+            raise Refused("fallback-not-allowed", "the orchestrator's review stands in only for a plan reviewer that "
+                          "could not finish (silent, or stopped on a usage limit); this plan review is not in that state",
+                          scope="plan", next_step="office status")
+        if run.get("planner_mode") != "dedicated":
+            raise Refused("orchestrator-produced-work", "the orchestrator may not review a plan it wrote inline",
+                          scope="plan", next_step="another reviewer: office rerun plan --review --review-as <route>")
+        gid = "G" + uuid.uuid4().hex[:8]
+        con.execute("INSERT INTO gates(id, run_id, subject, plan_version, kind, input_key, status, round, escalated, "
+                    "created_at, contract, cycle) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (gid, run["id"], PLAN_SUBJECT, last["plan_version"], "plan_review", f"plan:{last['plan_version']}",
+                     "running", last["round"], 0, now_iso(), contract.CONVERGENCE, _cycle(run)))
+        state.record_evidence(con, run["id"], "review_output", report, gate_id=gid,
+                              meta={"route": "orchestrator", "who": who, "plan_version": last["plan_version"],
+                                    "independence": contract.DEGRADED, "replaces_gate": last["id"]})
+        _ingest_convergence(con, run, gid, {
+            "status": contract.COMPLETED, "verdict": parsed.verdict, "parsed": parsed,
+            "route": f"orchestrator ({who}) (degraded fallback)",
+            "summary": f"{parsed.verdict} by the orchestrator ({who}) on route orchestrator for plan "
+                       f"p{last['plan_version']}: degraded, non-independent fallback after the reviewer could not "
+                       f"finish ({last.get('review_status')})"}, independence=contract.DEGRADED)
+        state.emit(con, run, "review.degraded_fallback", f"plan p{last['plan_version']} reviewed by the orchestrator "
+                   f"({who}, route orchestrator) as the degraded, non-independent fallback: {parsed.verdict}",
+                   payload={"who": who, "route": "orchestrator", "plan_version": last["plan_version"],
+                            "replaces_gate": last["id"], "verdict": parsed.verdict})
+    jobs.kick(con, run["id"])
+    return Result(lines=[f"plan p{last['plan_version']} {parsed.verdict} recorded as a degraded, non-independent "
+                         f"orchestrator review by {who}"], next="office status")
+
+
 def _require_dispatchable_convergence(con, run: dict) -> None:
     rs = review_state(con, run)
     if not rs["required"] or rs["ended"]:
@@ -837,7 +939,7 @@ def _unpause_plan_holds(con, run: dict) -> None:
     gates.reevaluate_submitted(con, run)
 
 
-def _ingest_convergence(con, run: dict, gate_id: str, outcome: dict) -> None:
+def _ingest_convergence(con, run: dict, gate_id: str, outcome: dict, *, independence: str = contract.INDEPENDENT) -> None:
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gate_id,)).fetchone())
     status = outcome.get("status") or contract.UNAVAILABLE
     verdict = outcome.get("verdict") if status == contract.COMPLETED else None
@@ -845,7 +947,7 @@ def _ingest_convergence(con, run: dict, gate_id: str, outcome: dict) -> None:
     reviewer = outcome.get("dispatch_id")
     con.execute("UPDATE gates SET status='done', verdict=?, review_status=?, route=?, finished_at=?, summary=?, "
                 "reviewer_dispatch_id=?, independence=?, next_action=?, contract=? WHERE id=?",
-                (verdict, status, outcome.get("route"), now_iso(), outcome.get("summary"), reviewer, contract.INDEPENDENT,
+                (verdict, status, outcome.get("route"), now_iso(), outcome.get("summary"), reviewer, independence,
                  parsed.next_action if parsed else None, contract.CONVERGENCE, gate_id))
     pr = _pr(run)
     v = f"p{gate['plan_version']}"
