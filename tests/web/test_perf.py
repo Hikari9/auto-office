@@ -7,6 +7,7 @@ test observed, so `pytest -s` reproduces the table.
 from __future__ import annotations
 
 import json
+import os
 import statistics
 import threading
 import time
@@ -28,7 +29,12 @@ SCROLL_FRAME_MS = 40.0       # measured 7.5 ms p95
 RECONNECT_RESYNC_S = 3.0     # measured 0.56 s
 
 
+# A slower or busier machine may scale every time budget: OFFICE_PERF_SCALE=2 doubles them.
+SCALE = float(os.environ.get("OFFICE_PERF_SCALE") or 1)
+
+
 def measure(name: str, value: float, budget: float, unit: str) -> None:
+    budget = budget if unit == "bytes" else budget * SCALE
     print(f"perf {name}: {value:.3f} {unit} (budget {budget:g} {unit})")
     assert value <= budget, f"{name} {value:.3f} {unit} exceeds the {budget:g} {unit} budget"
 
@@ -47,11 +53,12 @@ def page():
             browser.close()
 
 
-@pytest.fixture(scope="module")
-def large(tmp_path_factory):
-    home = tmp_path_factory.mktemp("large")
-    mp = pytest.MonkeyPatch()
-    mp.setenv("OFFICE_USER_CONFIG", str(home / "user.yaml"))
+@pytest.fixture
+def large(tmp_path, monkeypatch):
+    """Per test, so no environment change outlives it on a shared xdist worker."""
+    home = tmp_path
+    for var, path in (("OFFICE_USER_CONFIG", "user.yaml"), ("OFFICE_STATE_HOME", "state"), ("OFFICE_DATA_HOME", "data")):
+        monkeypatch.setenv(var, str(home / path))
     svc = server.build_fixture("large", home=home / "fx").start()
     svc.run_poller(interval=0.2)
     httpd = server.make_server(svc, "127.0.0.1", 0)
@@ -60,7 +67,6 @@ def large(tmp_path_factory):
     svc.close()
     httpd.shutdown()
     httpd.server_close()
-    mp.undo()
 
 
 def test_snapshot_build_time_and_payload_size(large):

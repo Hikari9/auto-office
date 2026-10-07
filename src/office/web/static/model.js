@@ -115,10 +115,19 @@ export const FILTERS = [
   { value: "done", label: "Done", test: (r) => r.liveness === "terminal" },
 ];
 
-// Issue-kind queue entries by their `owner/repo#number` ref.
+// `owner/name#n` in lower case for any issue ref `office queue add` accepts (`o/r#5` or an issue URL).
+export function canonicalRef(ref) {
+  const m = /([\w.-]+\/[\w.-]+?)(?:#|\/issues\/)(\d+)$/.exec(String(ref || "").trim());
+  return m ? `${m[1].toLowerCase()}#${Number(m[2])}` : null;
+}
+
+// Issue-kind queue entries by their canonical ref.
 function queuedIssues(queue) {
   const out = new Map();
-  for (const e of Object.values(queue)) if (e.kind === "issue" && e.ref) out.set(String(e.ref).toLowerCase(), e);
+  for (const e of Object.values(queue)) {
+    const ref = e.kind === "issue" && canonicalRef(e.ref);
+    if (ref) out.set(ref, e);
+  }
   return out;
 }
 
@@ -161,14 +170,14 @@ export function issueRows(state) {
     const linkedPrs = prsFor(linked, prs);
     const q = primary ? queue[primary.id] : null;
     const repo = repos[row.repoKey] || null;
-    const runTasks = primary ? (tasksByRun.get(primary.id) || []).sort((a, b) => String(a.task_id).localeCompare(String(b.task_id))) : null;
+    const runTasks = primary ? (tasksByRun.get(primary.id) || []).sort((a, b) => String(a.task_id).localeCompare(String(b.task_id), undefined, { numeric: true })) : null;
     out.push({
       ...row, repo, runs: linked, run: primary, prs: linkedPrs, queue: q,
       liveness: primary ? primary.liveness : "none",
       phase: primary ? primary.phase : "Incoming",
       phaseDetail: phaseDetail(primary, runTasks),
       attention: needsAttention(primary, runTasks),
-      queued: primary ? null : issueQueue.get(`${row.repoName}#${row.number}`.toLowerCase()) || null,
+      queued: primary ? null : issueQueue.get(canonicalRef(`${row.repoName}#${row.number}`)) || null,
       owner: primary && primary.owner && primary.owner.kind === "session" ? `${primary.owner.harness} orchestrator` : "No owner",
       progress: primary ? primary.progress : null,
       priority: q ? q.priority : null,

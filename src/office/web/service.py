@@ -91,12 +91,12 @@ MACHINE_EVENTS = "office-web"
 NOTICES_SHOWN = 20
 
 
-def orchestrator_route(conf: dict, quota: dict | None) -> dict:
+def orchestrator_route(conf: dict, quota: dict | None, available: Callable[[str], bool] = lambda h: True) -> dict:
     """The harness an orchestrator launch uses under policy.
 
     `scheduler.orchestrator_route` unless its quota is known to be at or below
-    the reserve; then the first `scheduler.orchestrator_fallbacks` harness whose
-    quota is known to be above it. Unknown quota never falls back. With no
+    the reserve; then the first `scheduler.orchestrator_fallbacks` harness that is
+    `available` (installed) and whose quota is known to be above it. Unknown quota never falls back. With no
     allowed fallback, `harness` is None: the launch waits.
     """
     sched = conf.get("scheduler") or {}
@@ -107,7 +107,8 @@ def orchestrator_route(conf: dict, quota: dict | None) -> dict:
         return {"harness": primary, "fallback_from": None, "quota": status, "reason": None}
     reason = f"{primary} quota is at or below the {reserve:g}% reserve"
     for fb in sched.get("orchestrator_fallbacks") or []:
-        if fb and str(fb) != primary and scheduler._quota(str(fb), quota, reserve)["status"] == "ok":
+        if fb and str(fb) != primary and scheduler._quota(str(fb), quota, reserve)["status"] == "ok" \
+                and available(str(fb)):
             return {"harness": str(fb), "fallback_from": primary, "quota": "ok", "reason": reason}
     return {"harness": None, "fallback_from": primary, "quota": status,
             "reason": f"{reason} and no allowed fallback (scheduler.orchestrator_fallbacks) has known quota"}
@@ -542,10 +543,13 @@ class Service:
 
     def admit_queue(self) -> list[str]:
         """Launch admitted queued issues (one receipt per item, so never twice)."""
-        if self.office_freshness()["state"] != LIVE or self.launcher.unavailable():
+        if self.office_freshness()["state"] != LIVE:
             return []
         launched = []
-        for e in list((self.snapshot_state or {}).get("entities", {}).get("queue", {}).values()):
+        entries = list((self.snapshot_state or {}).get("entities", {}).get("queue", {}).values())
+        for item in set(self.held) - {e["id"] for e in entries}:
+            self.held.pop(item, None)  # left the queue
+        for e in entries:
             if e.get("kind") != "issue" or e.get("decision") != "admit":
                 continue
             cid = "queue-admit:" + e["id"]
@@ -554,9 +558,13 @@ class Service:
             repo, number = _split_ref(e.get("ref"))
             if not repo:
                 continue
-            route = orchestrator_route(self.config(), self.quota_probe())
+            # Route and launcher are checked before any receipt: a refusal here leaves the item queued, while a
+            # recorded queue-admit receipt would end it for good.
+            route = self._orchestrator_route()
             if route["harness"] is None:
                 self._hold(e["id"], route)  # stays queued; launched once quota or policy allows
+                continue
+            if self.launcher.unavailable(route["harness"]):
                 continue
             self.held.pop(e["id"], None)
             cmd = Command(cid, "start_issue", {"repo": repo, "issue": number},
@@ -569,10 +577,20 @@ class Service:
                 log.info("office web: queue item %s not admitted: %s", e["id"], exc.reason)
         return launched
 
+    def _orchestrator_route(self) -> dict:
+        return orchestrator_route(self.config(), self.quota_probe(),
+                                  available=lambda h: self.launcher.unavailable(h) is None)
+
     def _hold(self, item: str, route: dict) -> None:
         if self.held.get(item) == route["reason"]:
             return
         self.held[item] = route["reason"]
+        last = self.observer.read(lambda s: s.rows(
+            "SELECT json_extract(payload_json, '$.reason') AS reason FROM events WHERE run_id=? "
+            "AND kind='queue.orchestrator_held' AND json_extract(payload_json, '$.item')=? ORDER BY seq DESC LIMIT 1",
+            (MACHINE_EVENTS, item)) if s.has("events") else [])
+        if last and last[0]["reason"] == route["reason"]:
+            return  # already recorded, e.g. before a restart
         self._event("queue.orchestrator_held", f"queue: {item} waits: {route['reason']}",
                     {"item": item, "from": route["fallback_from"], "reason": route["reason"]})
 
@@ -581,13 +599,13 @@ class Service:
         self.writer(lambda con: state.emit(con, {"id": MACHINE_EVENTS}, kind, summary, audience="operator",
                                            payload=payload))
 
-    def _route_for_launch(self) -> dict:
-        route = orchestrator_route(self.config(), self.quota_probe())
+    def _route_for_launch(self, copy: str | None = None) -> dict:
+        route = self._orchestrator_route()
         if route["harness"] is None:
             raise CommandRefused("orchestrator-quota-exhausted", route["reason"], data={"route": route})
         why = self.launcher.unavailable(route["harness"])
         if why:
-            raise CommandRefused("launcher-unavailable", why)
+            raise CommandRefused("launcher-unavailable", why, data={"command": copy} if copy else None)
         return route
 
     def _launch(self, cmd: Command, route: dict, **kwargs) -> dict:
@@ -736,12 +754,9 @@ class Service:
                 raise CommandRefused("runtime-refuses-new-run", exc.message) from None
         url = f"https://github.com/{repo}/issues/{number}"
         copy = launch_mod.start_command(url, end_state)
-        why = self.launcher.unavailable()
-        if why:
-            raise CommandRefused("launcher-unavailable", why, data={"command": copy})
+        route = self._route_for_launch(copy)
         checkout = self.checkouts(repo)
         self._expect(cmd, {"live_run": None, "resumable_run": resumable[0]["id"] if resumable else None})
-        route = self._route_for_launch()
 
         def go() -> Outcome:
             prompt = launch_mod.start_prompt(issue_ref=url, issue_title=cmd.payload.get("title"),
@@ -767,9 +782,9 @@ class Service:
     def _v_queue_issue(self, cmd: Command):
         repo, number, _ = self._issue_target(cmd)
         ref = f"{repo}#{number}"
-        queued = self.observer.read(lambda s: s.rows(
-            "SELECT id FROM sched_items WHERE kind='issue' AND lower(ref)=lower(?)", (ref,))
-            if s.has("sched_items") else [])
+        items = self.observer.read(lambda s: s.rows("SELECT id, ref FROM sched_items WHERE kind='issue'")
+                                   if s.has("sched_items") else [])
+        queued = [i for i in items if _canonical_ref(i["ref"]) == _canonical_ref(ref)]
         if queued:
             raise CommandRefused("already-queued", f"{ref} is already queue item {queued[0]['id']}",
                                  data={"item": queued[0]["id"]})
@@ -975,13 +990,14 @@ def _known_setting(key: str) -> bool:
     from office import config as cfg
     node: Any = {k: v for k, v in (cfg.load_yaml(cfg.default_config_path()) or {}).items()
                  if k not in cfg.NON_CONFIGURABLE_KEYS}
-    for part in key.split("."):
+    parts = key.split(".")
+    for i, part in enumerate(parts):
         if not isinstance(node, dict):
             return False
         if part not in node:
-            return node == {}
+            return node == {} and i == len(parts) - 1  # one entry of a map shipped empty
         node = node[part]
-    return True
+    return not isinstance(node, dict) or node == {}  # a leaf, never a whole section
 
 
 def _probe_quota(conf: dict) -> dict:
@@ -1021,6 +1037,12 @@ def _effective_config() -> dict:
 def _split_ref(ref: str | None) -> tuple[str | None, int | None]:
     m = re.search(r"([\w.-]+/[\w.-]+?)(?:#|/issues/)(\d+)$", str(ref or "").strip())
     return (m.group(1), int(m.group(2))) if m else (None, None)
+
+
+def _canonical_ref(ref: str | None) -> str | None:
+    """`owner/name#n`, lower case, for any issue ref form `queue add` accepts (`o/r#5`, an issue URL)."""
+    repo, number = _split_ref(ref)
+    return f"{repo.lower()}#{number}" if repo else None
 
 
 def _github_signature(gh: dict) -> str:

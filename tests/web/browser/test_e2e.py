@@ -9,57 +9,77 @@ from __future__ import annotations
 
 import json
 import os
-import socket
+import signal
 import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
-from office.web.executor import office_argv
+from office.web.executor import _env, office_argv
 
 VIEWPORTS = [(1440, 900), (1920, 1080), (1100, 800)]
 SURFACES = ["issues", "agents", "allocation", "settings"]
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 class Server:
-    """`office web serve --fixture small` on a fixed port, in its own Office homes."""
+    """`office web serve --fixture small` in its own Office homes and process group.
+
+    The first start binds port 0 and reads the bound port from the pid file; a restart asks for that same port
+    again (the page reconnects to it), retrying while the old socket is released.
+    """
 
     def __init__(self, home: Path):
-        self.home, self.port, self.proc = home, _free_port(), None
-        self.env = {**os.environ, "OFFICE_STATE_HOME": str(home / "state"), "OFFICE_USER_CONFIG": str(home / "user.yaml"),
-                    "OFFICE_DATA_HOME": str(home / "data")}
-        self.url = f"http://127.0.0.1:{self.port}/"
+        self.home, self.port, self.proc, self.log = home, 0, None, None
+        self.env = _env({"OFFICE_STATE_HOME": str(home / "state"), "OFFICE_USER_CONFIG": str(home / "user.yaml"),
+                         "OFFICE_DATA_HOME": str(home / "data")})  # the executor's env: same runtime and PYTHONPATH
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/"
 
     def start(self, timeout: float = 60) -> "Server":
+        deadline = time.time() + timeout
+        while True:
+            try:
+                return self._start(deadline)
+            except OSError:
+                if not self.port or time.time() > deadline:
+                    raise
+                time.sleep(0.5)  # the restarted port is not free yet
+
+    def _start(self, deadline: float) -> "Server":
         pid = self.home / "state" / "web" / "web.pid"
         pid.unlink(missing_ok=True)
-        log = open(self.home / "serve.log", "ab")  # noqa: SIM115 - closed with the process
+        self.log = open(self.home / "serve.log", "ab")  # noqa: SIM115 - closed in stop()
         self.proc = subprocess.Popen([*office_argv(), "web", "serve", "--fixture", "small", "--port", str(self.port)],
-                                     env=self.env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        deadline = time.time() + timeout
+                                     env=self.env, stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
         while time.time() < deadline:
-            if pid.exists() and json.loads(pid.read_text()).get("pid") == self.proc.pid:
+            info = json.loads(pid.read_text()) if pid.exists() else {}
+            if info.get("pid") == self.proc.pid:
+                assert not self.port or info["port"] == self.port
+                self.port = info["port"]
                 return self
             if self.proc.poll() is not None:
+                self.stop()
+                if "Address already in use" in (self.home / "serve.log").read_text()[-2000:]:
+                    raise OSError("port in use")
                 raise AssertionError((self.home / "serve.log").read_text()[-2000:])
             time.sleep(0.1)
         raise AssertionError("office web serve did not report ready")
 
     def stop(self) -> None:
         if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
+            group = os.getpgid(self.proc.pid)  # its own session: executor children go with it
+            os.killpg(group, signal.SIGTERM)
             try:
                 self.proc.wait(15)
             except subprocess.TimeoutExpired:
-                self.proc.kill()
+                os.killpg(group, signal.SIGKILL)
                 self.proc.wait(5)
+        if self.log:
+            self.log.close()
+            self.log = None
 
 
 @pytest.fixture
@@ -203,6 +223,7 @@ def test_plan_authorization_is_a_copyable_command_not_a_control(page, server):
     card = page.locator(f'[data-testid=run-card][data-run="{run["id"]}"]')
     assert card.locator("[data-testid=plan-approval-command]").text_content() == 'office approve plan --quote "<words>"'
     assert page.locator("button", has_text="Approve").count() == 0
+  # the negative case (an authorized run shows no hint) is in test_issues.py
     refused = post(page, {"id": "e2e-plan-00001", "kind": "approve_plan", "target": {"run_id": run["run_id"]},
                           "payload": {"quote": "yes"}})
     assert (refused["status"], refused["body"]["reason"]) == (400, "unknown-kind")
@@ -260,12 +281,15 @@ def test_chat_goes_to_the_exact_target_and_never_retargets(page, server):
     inspect(page, a["id"])
     assert page.input_value("[data-testid=chat-input]") == "for A only"
     run = state(page)["entities"]["runs"][a["run"]]
-    # A command naming another session of the same run is refused before anything is delivered.
+    # Sending from A's composer targets exactly A: its host, run and session.
+    page.click("[data-testid=chat-send]")
+    page.wait_for_function("() => Object.values(window.officeStore.state.entities.commands).some(c => c.kind === 'chat_send')")
+    sent = [c for c in state(page)["entities"]["commands"].values() if c["kind"] == "chat_send"]
+    assert len(sent) == 1 and sent[0]["target"]["run_id"] == run["run_id"] and sent[0]["target"]["session"] == a["id"]
+    # A command naming B's session under A's run is refused before anything is delivered.
     wrong = post(page, {"id": "e2e-chat-wrong1", "kind": "chat_send",
                         "target": {"run_id": run["run_id"], "session": b["id"]}, "payload": {"text": "x"}})
-    assert wrong["status"] in (400, 409) and wrong["body"]["reason"] != "ok"
-    commands = state(page)["entities"]["commands"]
-    assert not any(c["kind"] == "chat_send" and c["status"] == "completed" for c in commands.values())
+    assert (wrong["status"], wrong["body"]["reason"]) == (409, "bad-target")
 
 
 def test_adaptive_routing_shows_the_recorded_decision(page, server):
@@ -288,8 +312,11 @@ def test_a_duplicate_command_id_runs_once(page, server):
     run = next(r for r in state(page)["entities"]["runs"].values()
                if r["liveness"] == "live" and r["controls"]["pause"]["allowed"])
     body = {"id": "e2e-dup-000001", "kind": "pause", "target": {"run_id": run["run_id"]}}
-    first, second = post(page, body), post(page, body)
+    first = post(page, body)
+    wait_command(page, "e2e-dup-000001")
+    second = post(page, body)
     assert first["status"] in (200, 202) and second["body"]["receipt"]["replayed"] is True
+    assert second["body"]["receipt"]["started_at"] == wait_command(page, "e2e-dup-000001")["started_at"]  # not re-run
     other = post(page, {**body, "payload": {"reason": "changed"}})
     assert other["body"]["reason"] == "idempotency-conflict"
     wait_command(page, "e2e-dup-000001")

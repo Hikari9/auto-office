@@ -139,10 +139,46 @@ def test_a_manual_start_without_an_allowed_route_is_refused(svc):
     assert err.reason == "orchestrator-quota-exhausted" and svc.launcher.launches == []
 
 
-
-
-def test_fake_and_herdr_launchers_take_the_harness():
+def test_the_fake_launcher_takes_the_harness():
     from office.web.launcher import FakeLauncher
     fake = FakeLauncher()
     assert fake.launch(cwd="/tmp", prompt="p", label="l", harness="codex")["harness"] == "codex"
     assert fake.launches[-1]["harness"] == "codex"
+
+
+@pytest.mark.parametrize("quota,harness", [
+    ({"codex": {"remaining_percent": 70}}, "claude"),  # primary unknown: no fallback even with codex known
+    ({"claude": {"remaining_percent": 4}, "codex": {"remaining_percent": 5}}, None),  # both at the reserve
+])
+def test_fallback_needs_known_exhausted_primary_and_known_healthy_fallback(quota, harness):
+    assert orchestrator_route(POLICY, quota)["harness"] == harness
+
+
+def test_an_uninstalled_fallback_is_skipped():
+    conf = {**POLICY, "scheduler": {"orchestrator_route": "claude", "orchestrator_fallbacks": ["agy", "codex"]}}
+    quota = {"claude": {"remaining_percent": 1}, "agy": {"remaining_percent": 90}, "codex": {"remaining_percent": 90}}
+    assert orchestrator_route(conf, quota, available=lambda h: h != "agy")["harness"] == "codex"
+    assert orchestrator_route(conf, quota, available=lambda h: False)["harness"] is None
+
+
+def test_the_queue_loop_checks_the_route_before_recording_a_receipt(svc):
+    svc.config = lambda: POLICY
+    svc.quota_probe = dict  # unknown quota: the configured route, which is not installed yet
+    real = svc.launcher.unavailable
+    svc.launcher.unavailable = lambda harness=None: "not on PATH" if harness in (None, "claude") else real(harness)
+    queue_issue_item(svc)
+    assert svc.admit_queue() == []  # the item waits; a refused receipt would end it for good
+    assert svc.command("queue-admit:issue:qf") is None
+    svc.launcher.unavailable = real
+    assert svc.admit_queue() == ["issue:qf"]  # once it is installed, the item launches
+    assert svc.wait("queue-admit:issue:qf")["result"]["orchestrator"]["harness"] == "claude"
+
+
+def test_a_held_launch_is_recorded_once_across_restarts(svc):
+    svc.config = lambda: {**POLICY, "scheduler": {"orchestrator_route": "claude"}}
+    svc.quota_probe = lambda: {"claude": {"remaining_percent": 1}}
+    queue_issue_item(svc)
+    svc.admit_queue()
+    svc.held.clear()  # what a restarted service starts with
+    svc.admit_queue()
+    assert [e["kind"] for e in machine_events(svc)] == ["queue.orchestrator_held"]

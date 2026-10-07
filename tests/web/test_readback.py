@@ -9,7 +9,6 @@ read the result back the way an operator would: the `commands` receipts, the
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import subprocess
 import threading
@@ -18,7 +17,7 @@ import time
 import pytest
 
 from office.web import fixtures, server, synthetic
-from office.web.executor import Executor, office_argv
+from office.web.executor import Executor, _env, office_argv
 from tests.web.test_server import request, token_of
 
 pytestmark = pytest.mark.integration
@@ -28,7 +27,7 @@ pytestmark = pytest.mark.integration
 def real(tmp_path, monkeypatch):
     """(service, port, env): fixture data, real `office` executor, isolated Office homes."""
     env = {"AUTO_OFFICE_RUNS_DB": "", "OFFICE_STATE_HOME": str(tmp_path / "state"),
-           "OFFICE_USER_CONFIG": str(tmp_path / "user.yaml")}
+           "OFFICE_USER_CONFIG": str(tmp_path / "user.yaml"), "OFFICE_DATA_HOME": str(tmp_path / "data")}
     svc = fixtures.build("small", tmp_path / "fx")
     env["AUTO_OFFICE_RUNS_DB"] = str(svc.db_path)
     for k, v in env.items():
@@ -45,7 +44,7 @@ def real(tmp_path, monkeypatch):
 
 def office(env, *args, cwd=None) -> subprocess.CompletedProcess:
     return subprocess.run([*office_argv(), *args], capture_output=True, text=True, timeout=120, cwd=cwd,
-                          env={**os.environ, **env})
+                          env=_env(env))  # the executor's env: same runtime and PYTHONPATH
 
 
 def post(port, token, body) -> dict:

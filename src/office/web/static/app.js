@@ -654,6 +654,8 @@ function init() {
   $("issue-body").addEventListener("pointerdown", (ev) => { if (ev.target.tagName === "SELECT") ui.selectOpen = true; });
   $("issue-body").addEventListener("change", closeSelect);
   $("issue-body").addEventListener("focusout", closeSelect);
+  // Escape closes a native select without a change event.
+  $("issue-body").addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeSelect(ev); });
   $("inspector").addEventListener("pointerdown", (ev) => { if (ev.target.tagName === "SELECT") ui.selectOpen = true; });
   $("inspector").addEventListener("change", closeSelect);
   $("inspector").addEventListener("focusout", closeSelect);

@@ -136,6 +136,15 @@ def test_queue_issue_refuses_a_duplicate_queue_item(svc):
     err = refused(svc, cmd("cmd-tv-queue1", "queue_issue", {"repo": REPO, "issue": 4}))
     assert err.reason == "already-queued" and err.data["item"] == "issue:qf"
     assert svc.executor.calls == []
+    svc.submit(cmd("cmd-tv-queue2", "queue_issue", {"repo": REPO, "issue": 5}), wait=True)  # another issue
+    assert svc.executor.calls[-1]["args"][:3] == ["queue", "add", f"{REPO}#5"]
+
+
+def test_a_url_form_queue_ref_counts_as_the_same_issue(svc):
+    write(svc, lambda con: con.execute(
+        "INSERT INTO sched_items(id, kind, ref, title, priority, enqueued_at, updated_at) VALUES('issue:url','issue',?,"
+        "'t','normal','2026-09-01T00:00:00Z','2026-09-01T00:00:00Z')", (f"https://github.com/{REPO.upper()}/issues/6",)))
+    assert refused(svc, cmd("cmd-tv-queue3", "queue_issue", {"repo": REPO, "issue": 6})).reason == "already-queued"
 
 
 def test_start_issue_needs_an_exact_discovered_repository(svc):
@@ -182,11 +191,24 @@ def test_change_route_needs_the_current_live_dispatch(svc):
     assert err.reason == "dispatch-not-current"
 
 
-def test_chat_needs_the_active_orchestrator_binding(svc):
-    run = live_run(svc)
-    err = refused(svc, cmd("cmd-tv-chat1", "chat_send", {"run_id": run["run_id"], "session": "session:not-bound"},
-                           {"text": "hi"}))
-    assert err.reason in ("not-orchestrator", "binding-ended", "bad-target")
+def chat_run(svc):
+    """A run whose orchestrator chat is allowed, and its first orchestrator session."""
+    e = svc.snapshot()["entities"]
+    a = next(a for a in e["agents"].values() if a["column"] == "orchestrators"
+             and e["runs"][a["run"]]["controls"]["chat_send"]["allowed"])
+    return e["runs"][a["run"]], a["id"]
+
+
+@pytest.mark.parametrize("session,reason", [
+    ("dispatch:D1", "not-orchestrator"),           # a worker or reviewer
+    ("session:{run}/claude/gone", "binding-ended"),  # this run's shape, but not an active binding
+    ("session:other-run/claude/s1", "bad-target"),  # another run's session
+])
+def test_chat_needs_the_active_orchestrator_binding(svc, session, reason):
+    run, _ = chat_run(svc)
+    target = {"run_id": run["run_id"], "session": session.format(run=run["run_id"])}
+    assert refused(svc, cmd("cmd-tv-chat1", "chat_send", target, {"text": "hi"})).reason == reason
+    assert svc.launcher.sent == []
 
 
 @pytest.mark.parametrize("target,reason", [
@@ -195,7 +217,25 @@ def test_chat_needs_the_active_orchestrator_binding(svc):
     ({"tier": "repository", "key": "scheduler.auto_mode", "repo": "synth-org-0/not-ready"}, "repo-not-ready"),
 ])
 def test_settings_need_a_known_key_and_an_editable_tier(svc, target, reason):
-    assert refused(svc, cmd("cmd-tv-set-01", "settings_set", target, {"value": 1})).reason == reason
+    assert refused(svc, cmd(f"cmd-tv-set-{reason}", "settings_set", target, {"value": 1})).reason == reason
+    assert svc.executor.calls == []
+
+
+@pytest.mark.parametrize("key,known", [
+    ("scheduler.auto_mode", True), ("web.checkouts.acme", True),
+    ("scheduler", False),               # a whole section, never replaced by a scalar
+    ("web.checkouts.acme.deep", False),  # one entry of an empty map, not a subtree
+    ("scheduler.no_such_key", False),
+])
+def test_known_settings(key, known):
+    from office.web.service import _known_setting
+    assert _known_setting(key) is known
+
+
+def test_a_known_key_on_the_machine_tier_runs_office_config(svc):
+    svc.submit(cmd("cmd-tv-set-ok1", "settings_set", {"tier": "machine", "key": "scheduler.auto_mode"}, {"value": False}),
+               wait=True)
+    assert svc.executor.calls[-1]["args"] == ["config", "--user", "--", "scheduler.auto_mode", "false"]
 
 
 def test_settings_accept_entries_of_a_shipped_empty_map(svc):
