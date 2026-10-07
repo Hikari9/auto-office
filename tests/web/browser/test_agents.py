@@ -53,6 +53,16 @@ def wait_ids(page, expected):
                            arg=sorted(expected), timeout=5000)
 
 
+def current(svc, a):
+    """Default graph membership: current work of a non-terminal run."""
+    runs = svc.snapshot_state["entities"]["runs"]
+    return a["column"] in COLUMNS and runs[a["run"]]["liveness"] != "terminal" and not a["state"]["complete"]
+
+
+def include_completed(page):
+    page.check("[data-testid=agents-include-completed]")
+
+
 def pick(page, js):
     """The id of the first agent entity for which the JS predicate `a => ...` holds."""
     return page.evaluate(f"Object.values(window.officeStore.state.entities.agents).find({js}).id")
@@ -67,18 +77,33 @@ def test_five_role_columns_current_topology_and_edges(page, served):
     assert [t.split(" (")[0] for t in titles] == ["Orchestrators", "Plan Reviewers", "Executors", "Code Reviewers",
                                                  "Visual Verifiers"]
     agents = svc.snapshot_state["entities"]["agents"]
-    shown = page.locator("[data-testid=agent-node]").count()
-    assert shown == sum(1 for a in agents.values() if a["column"] in COLUMNS)
+    wait_ids(page, {a["id"] for a in agents.values() if current(svc, a)})
+    # The visual gate's selector: every node names its column; orchestrators are present.
+    assert page.locator("[data-test=agent-node][data-role=orchestrators]").count() >= 1
+    for c in COLUMNS[1:]:
+        assert page.locator(f"[data-test=agent-node][data-role={c}]").count() >= 1, c
+    # Completed agents and closed runs are hidden until asked for.
+    hidden = {a["id"] for a in agents.values() if a["column"] in COLUMNS and not current(svc, a)}
+    assert hidden
+    include_completed(page)
+    wait_ids(page, {a["id"] for a in agents.values() if a["column"] in COLUMNS})
+    page.uncheck("[data-testid=agents-include-completed]")
+    wait_ids(page, {a["id"] for a in agents.values() if current(svc, a)})
     # Historical dispatches are not nodes: they live in run history only.
     history = [d["id"] for r in svc.snapshot_state["entities"]["runs"].values() for d in r["history"]]
     assert history
     for hid in history[:5]:
         assert node(page, hid).count() == 0
-    # Edges join each orchestrator to its own run's agents, and nothing else.
+    # No edges until a node is selected; then only its run's orchestrator to that run's shown agents.
+    assert page.locator("[data-testid=agent-edge]").count() == 0
+    oid = next(o for o, oa in agents.items() if oa["column"] == "orchestrators" and current(svc, oa)
+               and any(aa["run"] == oa["run"] and aa["column"] != "orchestrators" and current(svc, aa)
+                       for aa in agents.values()))
+    inspect(page, oid)
     page.wait_for_selector("[data-testid=agent-edge]", state="attached", timeout=5000)
     edges = page.eval_on_selector_all("[data-testid=agent-edge]", "es => es.map(e => [e.dataset.from, e.dataset.to])")
-    expected = {(o, a) for o, oa in agents.items() if oa["column"] == "orchestrators"
-                for a, aa in agents.items() if aa["run"] == oa["run"] and aa["column"] in COLUMNS[1:]}
+    expected = {(oid, a) for a, aa in agents.items() if aa["run"] == agents[oid]["run"]
+                and aa["column"] in COLUMNS[1:] and current(svc, aa)}
     assert {tuple(e) for e in edges} == expected and expected
     assert errors == []
 
@@ -93,11 +118,15 @@ def test_repository_and_state_filters(page, served):
     terminal = {a["id"] for a in agents if runs[a["run"]]["liveness"] == "terminal" and a["column"] in COLUMNS}
     assert in_repo and terminal and len(in_repo) < len(list(agents))
     page.select_option("[data-testid=agents-repo]", key)
+    wait_ids(page, {a["id"] for a in agents if a["id"] in in_repo and current(svc, a)})
+    include_completed(page)
     wait_ids(page, in_repo)
     page.select_option("[data-testid=agents-repo]", "all")
     wait_ids(page, {a["id"] for a in agents if a["column"] in COLUMNS})
-    page.select_option("[data-testid=agents-state]", "terminal")
+    page.uncheck("[data-testid=agents-include-completed]")
+    page.select_option("[data-testid=agents-state]", "terminal")  # asking for closed runs includes completed
     wait_ids(page, terminal)
+    assert page.is_checked("[data-testid=agents-include-completed]")
 
 
 def test_node_evidence_and_telemetry_are_labelled_never_zero(page, served):
@@ -225,6 +254,7 @@ def test_route_change_absent_without_capability_and_for_orchestrators(page, serv
     inspect(page, oid)
     assert page.locator("[data-testid=route-change]").count() == 0
     done = pick(page, "a => a.state.complete")
+    include_completed(page)
     inspect(page, done)
     assert page.locator("[data-testid=route-change]").count() == 0
 

@@ -58,3 +58,5 @@
   .node .secondary { display: none; }
   .agent-inspector { width: 340px; }
 }
+
+.toolbar .check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }

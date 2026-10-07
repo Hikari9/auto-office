@@ -97,6 +97,35 @@ def test_blocked_task_state(mini, make_observer):
     assert _col(run, "executors")["dispatch:D9"]["state"]["blocked"] is True
 
 
+def test_visual_roles_map_to_visual_verifiers_and_await_ingestion(mini, make_observer):
+    con = mini["con"]
+    with db.transaction(con):
+        synthetic.insert_dispatch(con, "D10", "R1", role="browser_verifier", task_id="T3", status="running", at=21)
+        synthetic.insert_dispatch(con, "D11", "R1", role="visual_reviewer", task_id="T2", status="running", at=22)
+    replies = {"D10": "VERDICT: PASS\n"}
+    run = make_observer(mini["path"], fs=lambda path: replies.get(path.parent.name),
+                        runs_dir=mini["runs_dir"]).run("R1")
+    visual = _col(run, "visual_verifiers")
+    assert {"dispatch:D10", "dispatch:D11"} <= set(visual)
+    assert visual["dispatch:D10"]["state"]["reply_written_awaiting_ingestion"] is True
+    assert visual["dispatch:D11"]["state"]["reply_written_awaiting_ingestion"] is False
+    assert not any(n["role"] in ("browser_verifier", "visual_reviewer") for n in run["agents"]["columns"]["other"])
+
+
+def test_synthetic_workspace_populates_visual_verifiers(tmp_path):
+    ws = synthetic.build_workspace(tmp_path / "ws", "small", seed=7)
+    con = db.connect(ws["db"])
+    try:
+        rows = con.execute("SELECT role, status, ended_at IS NULL FROM dispatches "
+                           "WHERE role IN ('visual_reviewer', 'browser_verifier')").fetchall()
+    finally:
+        con.close()
+    assert {r[0] for r in rows} == {"visual_reviewer", "browser_verifier"}
+    assert ("done", 0) in {(r[1], r[2]) for r in rows} and ("running", 1) in {(r[1], r[2]) for r in rows}
+    did = ws["specials"]["visual_awaiting_ingestion"]
+    assert any(p.name == "reply.txt" for p in ws["runs_dir"].glob(f"*/dispatches/{did}/reply.txt"))
+
+
 def test_reply_awaiting_ingestion_uses_the_injected_reader(mini, make_observer):
     reads = []
 

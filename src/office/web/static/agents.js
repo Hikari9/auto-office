@@ -1,7 +1,8 @@
 // Agents surface: the machine-wide current topology in five role columns, with
-// edges from each orchestrator to its run's agents, repository and run-state
-// filters, and an inspector. Historical attempts appear only in the inspector's
-// run history. Every runtime value is shown as recorded, or as unknown /
+// edges from the selected node's orchestrator to its run's agents, repository and
+// run-state filters, and an inspector. By default only current work of non-terminal
+// runs is shown; completed agents need "Include completed", and superseded
+// attempts appear only in the inspector's run history. Every runtime value is shown as recorded, or as unknown /
 // unavailable: nothing is guessed and no missing metric is drawn as 0.
 import { chatComposer } from "./chat.js";
 import { routingView } from "./routing.js";
@@ -14,7 +15,7 @@ const RUN_STATES = [["all", "All runs"], ["live", "Live"], ["resumable", "Resuma
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const UNITS = { percent: "%", bytes: "", tokens: " tokens", state: "" };
 
-const view = { repo: "all", runState: "all", selected: null, routeDraft: new Map(), routePending: new Map() };
+const view = { repo: "all", runState: "all", includeCompleted: false, selected: null, routeDraft: new Map(), routePending: new Map() };
 
 // Herdr names an Office agent `office-<dispatch id>` (lowercased, 32 chars), as dispatch.herdr_agent_name does.
 export const herdrAgentName = (dispatchId) => `office-${dispatchId}`.toLowerCase().replace(/[^a-z0-9_-]/g, "-").slice(0, 32);
@@ -65,6 +66,7 @@ function visibleNodes(state) {
     if (!run || !cols[a.column]) continue;
     if (view.repo !== "all" && (run.repo && run.repo.key) !== view.repo) continue;
     if (view.runState !== "all" && run.liveness !== view.runState) continue;
+    if (!view.includeCompleted && (run.liveness === "terminal" || (a.state && a.state.complete))) continue;
     cols[a.column].push(a);
   }
   for (const list of Object.values(cols)) list.sort((x, y) => String(x.run).localeCompare(String(y.run)) || String(x.id).localeCompare(String(y.id)));
@@ -85,7 +87,7 @@ function nodeCard(ctx, n, state) {
   const pending = record && !record.error ? record : null;
   const work = n.current_work || {};
   return h("button", { type: "button", class: `node ${n.column}`, "aria-pressed": view.selected === n.id ? "true" : "false",
-    dataset: { testid: "agent-node", id: n.id, column: n.column, run: n.run, key: `node:${n.id}` },
+    dataset: { testid: "agent-node", test: "agent-node", role: n.column, id: n.id, column: n.column, run: n.run, key: `node:${n.id}` },
     onclick: () => { view.selected = n.id; ctx.rerender(); } },
     h("span", { class: "node-head" },
       h("span", { class: "node-role", text: n.role || n.column }),
@@ -119,7 +121,8 @@ function moveFocus(ev) {
   if (target) target.focus();
 }
 
-function drawEdges(graph) {
+// Edges for the selected node's run only, so a full graph stays legible.
+function drawEdges(graph, run) {
   if (!graph) return;
   let svg = graph.querySelector("svg.edges");
   if (!svg) {
@@ -132,7 +135,8 @@ function drawEdges(graph) {
   svg.setAttribute("width", graph.scrollWidth);
   svg.setAttribute("height", graph.scrollHeight);
   const lines = [];
-  for (const o of graph.querySelectorAll('.node[data-column="orchestrators"]')) {
+  const orchestrators = run ? graph.querySelectorAll(`.node[data-column="orchestrators"][data-run="${CSS.escape(run)}"]`) : [];
+  for (const o of orchestrators) {
     const a = o.getBoundingClientRect();
     for (const n of graph.querySelectorAll(`.node[data-run="${CSS.escape(o.dataset.run)}"]:not([data-column="orchestrators"])`)) {
       const b = n.getBoundingClientRect();
@@ -271,11 +275,19 @@ export function renderAgents(base, root) {
   };
   keep(root, () => [
     h("div", { class: "canvas-head" },
-      h("div", {}, h("h1", { text: "Agents" }), h("p", { class: "sub", text: "Current topology across this machine. Earlier attempts live in each run's history." }))),
+      h("div", {}, h("h1", { text: "Agents" }), h("p", { class: "sub", text: "Current work of open runs across this machine. Earlier attempts live in each run's history." }))),
     h("div", { class: "toolbar" },
       select("agents-repo", "Repository filter", view.repo, [["all", "All repositories"], ...repoOptions(state)],
         (ev) => { view.repo = ev.target.value; ctx.rerender(); }),
-      select("agents-state", "Run state filter", view.runState, RUN_STATES, (ev) => { view.runState = ev.target.value; ctx.rerender(); }),
+      select("agents-state", "Run state filter", view.runState, RUN_STATES, (ev) => {
+        view.runState = ev.target.value;
+        if (view.runState === "terminal") view.includeCompleted = true;
+        ctx.rerender();
+      }),
+      h("label", { class: "check" },
+        h("input", { type: "checkbox", checked: view.includeCompleted, dataset: { testid: "agents-include-completed", key: "agents-include-completed" },
+          onchange: (ev) => { view.includeCompleted = ev.target.checked; ctx.rerender(); } }),
+        " Include completed"),
       h("span", { class: "count", dataset: { testid: "agents-count" }, text: `${total} agent${total === 1 ? "" : "s"}` })),
     h("div", { class: "agents-work" },
       h("div", { class: "graph", role: "group", "aria-label": "Agents graph", dataset: { testid: "agents-graph" }, onkeydown: moveFocus },
@@ -287,5 +299,5 @@ export function renderAgents(base, root) {
       ...inspector(ctx, selected, state)) : null),
   ]);
   const graph = root.querySelector(".graph");
-  requestAnimationFrame(() => drawEdges(graph));
+  requestAnimationFrame(() => drawEdges(graph, selected && selected.run));
 }
