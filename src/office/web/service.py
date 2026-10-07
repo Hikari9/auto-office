@@ -39,7 +39,7 @@ from office.web.observer import Observer
 log = logging.getLogger("office.web")
 
 KINDS = ("start_issue", "queue_issue", "resume_run", "attach_run", "pause", "resume", "set_priority", "demote",
-         "set_auto_mode", "change_route", "approve_plan", "chat_send", "settings_set", "settings_unset")
+         "set_auto_mode", "change_route", "chat_send", "settings_set", "settings_unset")
 COLLECTIONS = ("repos", "issues", "prs", "runs", "tasks", "agents", "queue", "commands")
 COMMAND_ID = re.compile(r"[A-Za-z0-9_.:-]{8,128}")
 STALE_AFTER = 15.0
@@ -771,20 +771,6 @@ class Service:
         args = ["--run", run["run_id"], "amend", "route", str(did), "--as", route, "--quote", quote, "--restart"]
         return lambda: self.executor.run(args, self._checkout_of(run))
 
-    def _v_approve_plan(self, cmd):
-        run = self._live_run(cmd, "approve_plan")
-        quote = (cmd.payload.get("quote") or "").strip()
-        if len(re.sub(r"\s+", "", quote)) < 2:
-            raise CommandRefused("quote-required", "plan approval records the user's typed words (payload.quote)",
-                                 http=400)
-        awaiting = self.observer.read(lambda s: _awaits_plan_authorization(s, run["run_id"]))
-        if not awaiting:
-            raise CommandRefused("not-awaiting-plan-authorization", "Office is not waiting for plan authorization")
-        self._expect(cmd, {"requirements_version": awaiting["requirements_version"],
-                           "plan_version": awaiting["plan_version"]})
-        args = ["--run", run["run_id"], "approve", "plan", "--quote", quote]
-        return lambda: self.executor.run(args, self._checkout_of(run))
-
     def _v_chat_send(self, cmd):
         text = cmd.payload.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > chat.MAX_TEXT:
@@ -914,16 +900,6 @@ def _queue_rows(snap, conf: dict) -> tuple[list[dict], list[dict], str]:
     rows, active = queuecmd._projection(snap.con, conf)
     auto = queuecmd.auto_mode(snap.con, default_on=scheduler.settings(conf)["auto_mode"])
     return rows, active, auto
-
-
-def _awaits_plan_authorization(snap, run_id: str) -> dict | None:
-    """The run has a plan and no active plan authorization for its requirements version."""
-    run = snap.rows("SELECT phase, plan_version, requirements_version FROM runs WHERE id=?", (run_id,))
-    if not run or not run[0]["plan_version"] or run[0]["phase"] in ("closed", "abandoned"):
-        return None
-    authorized = snap.rows("SELECT 1 FROM authorizations WHERE run_id=? AND kind='plan' AND revoked_at IS NULL "
-                           "AND requirements_version=?", (run_id, run[0]["requirements_version"]))
-    return None if authorized else dict(run[0])
 
 
 def _diff(prev: dict | None, snap: dict) -> dict:

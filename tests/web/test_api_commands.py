@@ -309,18 +309,14 @@ def test_change_route_needs_a_current_dispatch_on_the_same_harness(svc):
                                               f"{harness}/m@high", "--quote", "use m", "--restart"]
 
 
-def test_approve_plan_only_while_office_awaits_plan_authorization(svc):
+def test_plan_approval_is_not_a_web_command(svc):
+    assert "approve_plan" not in KINDS
     run = live_run(svc)
-    err = refused(svc, cmd("cmd-plan-0001", "approve_plan", {"run_id": run["run_id"]}, {"quote": " "}))
-    assert err.reason == "quote-required"
-    svc.submit(cmd("cmd-plan-0002", "approve_plan", {"run_id": run["run_id"]}, {"quote": "yes, go ahead"}), wait=True)
-    assert svc.executor.calls[-1]["args"] == ["--run", run["run_id"], "approve", "plan", "--quote", "yes, go ahead"]
-    write(svc, lambda con: con.execute(
-        "INSERT INTO authorizations(id, run_id, kind, target, requirements_version, authorized_by, quote, created_at) "
-        "VALUES('Z1', ?, 'plan', 'requirements', 1, 'user', 'yes', 't')", (run["run_id"],)))
-    err = refused(svc, cmd("cmd-plan-0003", "approve_plan", {"run_id": run["run_id"]}, {"quote": "again"}))
-    assert err.reason == "not-awaiting-plan-authorization"
-    assert len(svc.executor.calls) == 1
+    with pytest.raises(CommandRefused) as info:
+        svc.submit(cmd("cmd-plan-0001", "approve_plan", {"run_id": run["run_id"]}, {"quote": "yes, go ahead"}),
+                   wait=True)
+    assert info.value.reason == "unknown-kind"
+    assert svc.executor.calls == []
 
 
 def test_settings_commands_run_office_config(svc):

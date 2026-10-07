@@ -181,9 +181,11 @@ Exit 0 maps to `completed`, an Office refusal exit (1 to 63) maps to `failed`, a
 | `set_priority` | as above | `level` | `office queue priority` |
 | `set_auto_mode` | `{[run_id]}` | `mode: on/off` | `office queue auto` |
 | `change_route` | `{run_id, dispatch_id}` | `route` (same harness), `quote` | `office amend route <D> --as … --quote … --restart` |
-| `approve_plan` | `{run_id}` | `quote` (the user's typed words) | `office approve plan --quote …`, only while Office awaits plan authorization |
 | `chat_send` | `{host, run_id, session}` | `text`, `resend_of` | `dispatch.submit_prompt` to the orchestrator's pane |
 | `settings_set` / `settings_unset` | `{tier: machine/repository, key[, repo/run_id]}` | `value` | `office config --user/--repo …` in that checkout |
+
+Plan authorization is not a web command: the browser shows the copyable `office approve plan --quote "<words>"`
+command for the user to run.
 
 `start_issue` is refused when the issue has a live run (attach to it instead). When the issue has a resumable run it
 is refused unless `payload.new_run_confirmed` is true and the runtime allows a new run.
