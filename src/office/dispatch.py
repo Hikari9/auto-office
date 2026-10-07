@@ -505,7 +505,8 @@ def _revoke_task(con, run: dict, task_id: str, reason: str) -> Result:
         # An accepted task whose relaunched worker never got a newer revision in (its submit was
         # refused, or it never submitted) still stands on its accepted revision: the revoke only
         # releases the lease.
-        keeps = bool(task.get("accepted_revision_id")) and task.get("current_revision_id") == task["accepted_revision_id"]
+        keeps = (task["status"] != "cancelled" and bool(task.get("accepted_revision_id"))
+                 and task.get("current_revision_id") == task["accepted_revision_id"])
         if keeps:
             con.execute("UPDATE leases SET released_at=? WHERE run_id=? AND task_id=? AND released_at IS NULL "
                         "AND revoked_at IS NULL", (now_iso(), run["id"], task_id))

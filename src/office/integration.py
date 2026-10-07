@@ -220,7 +220,7 @@ def _merge_tree(repo: Path, a: str, b: str) -> tuple[str, list[str]]:
     proc = subprocess.run(["git", "-C", str(repo), "merge-tree", "--write-tree", "--name-only", "-z", a, b],
                           capture_output=True, text=True)
     if proc.returncode == 129:
-        raise state.Refused("git-too-old", "this needs git >= 2.40 (git merge-tree --write-tree and --merge-base)",
+        raise state.Refused("git-too-old", "this needs git >= 2.38 (git merge-tree --write-tree)",
                             next_step="upgrade git, then retry")
     if proc.returncode not in (0, 1):
         raise state.Refused("merge-tree-failed", f"git merge-tree could not merge {a[:12]} and {b[:12]}: "

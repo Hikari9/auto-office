@@ -198,3 +198,19 @@ def test_conflicted_paths_are_made_printable():
     from office import integration
     tree, files = integration.parse_merge_tree("abc\0a\x1b[2Jb.py\0plain.py\0\0Auto-merging x\0")
     assert tree == "abc" and files == ["a?[2Jb.py", "plain.py"]
+
+
+def test_an_old_git_is_refused_by_name(env):
+    """git merge-tree --write-tree needs git 2.38: older ones exit 129 and the refusal says so."""
+    import shutil
+    approved_run(env, plan=PLAN_JOIN, executor=[{}], code_reviewer=[PASS, PASS])
+    _accept_t1_t2(env)
+    real = shutil.which("git")
+    wrapper = env.bin / "git"
+    wrapper.write_text(f'#!/bin/sh\nfor a in "$@"; do [ "$a" = merge-tree ] && exit 129; done\nexec {real} "$@"\n')
+    wrapper.chmod(0o755)
+    try:
+        code, out = env.office("dispatch", "T3", env=EXTERNAL)
+    finally:
+        wrapper.unlink()
+    assert code == 4 and "git-too-old" in out and "2.38" in out, out

@@ -238,7 +238,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("task")
     how = s.add_mutually_exclusive_group()
     how.add_argument("--move", dest="rebase_how", action="store_const", const="move",
-                     help="re-apply the task's change on the new base (a version bump is made again there)")
+                     help="re-apply the task's change on the new base (a field both sides changed refuses; settle it by hand)")
     how.add_argument("--merge", dest="rebase_how", action="store_const", const="merge",
                      help="merge the new default branch into the task's branch")
     how.add_argument("--record", dest="rebase_how", action="store_const", const="record",

@@ -386,3 +386,55 @@ def test_a_restack_after_a_task_move_keeps_the_new_run_base(env, monkeypatch):
     head = env.git("rev-parse", "HEAD", cwd=wt).strip()
     assert integration.stale_base(run, restack["base"], head) is None
     assert subprocess.run(["git", "-C", str(wt), "merge-base", "--is-ancestor", onto, restack["base"]]).returncode == 0
+
+
+def _t1_accepted_again_on(env, files: dict[str, str]):
+    """T1 gets a newer accepted revision (a commit on its branch) that T2's worktree lacks."""
+    t1_wt = Path(env.con().execute("SELECT worktree FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC").fetchone()[0])
+    for name, text in files.items():
+        (t1_wt / name).write_text(text)
+    env.git("add", "-A", cwd=t1_wt)
+    env.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "t1 again", cwd=t1_wt)
+    con = env.con()
+    con.execute("INSERT INTO revisions(id, run_id, task_id, seq, commit_sha, tree_sha, requirements_version, plan_version, "
+                "applied_version, env_fingerprint, operation_id, status, created_at) SELECT 'Rnew', run_id, 'T1', 99, ?, tree_sha, "
+                "requirements_version, plan_version, applied_version, env_fingerprint, 'op-new', 'current', created_at "
+                "FROM revisions WHERE task_id='T1' LIMIT 1", (env.git("rev-parse", "HEAD", cwd=t1_wt).strip(),))
+    con.execute("UPDATE tasks SET accepted_revision_id='Rnew', current_revision_id='Rnew' WHERE id='T1'")
+    con.commit()
+    return con
+
+
+def test_a_restack_whose_dependency_collides_with_the_held_new_base_is_left_to_the_executor(env, monkeypatch):
+    from office import rerun
+    bare, row, wt, wenv, onto = _reopened_after_rebase(env, monkeypatch, {"NOTES.md": "unrelated\n"}, tid="T2")
+    _worker_exits(env, row)
+    assert env.office("rebase", "T2", "--merge")[0] == 0
+    con = _t1_accepted_again_on(env, {"calc.py": GOOD_ADD + "# t1 again\n", "NOTES.md": "t1's own notes\n"})
+    run = state.get_run(con, row["run_id"])
+    restack = rerun._restack(con, run, state.get_task(con, run["id"], "T2"), str(wt))  # does not refuse
+    assert restack and restack["conflict"] and restack["conflict"]["task"] == "T1", restack
+    assert env.git("status", "--porcelain", "--untracked-files=no", cwd=wt) == ""  # the failed merge was aborted
+
+
+def test_move_refuses_rather_than_overwrite_an_untracked_file_the_moved_commit_tracks(env, monkeypatch):
+    bare, row, wt, wenv, onto = _reopened_after_rebase(env, monkeypatch, {"NOTES.md": "unrelated\n"})
+    _commit(env, wt, {"calc.py": GOOD_ADD + "# amended\n"})
+    (wt / "NOTES.md").write_text("my scratch notes\n")  # untracked here, tracked on the new main
+    _worker_exits(env, row)
+    head = env.git("rev-parse", "HEAD", cwd=wt).strip()
+    code, out = env.office("rebase", "T1", "--move")
+    assert code == 4 and "worktree-dirty" in out and "NOTES.md" in out, out
+    assert (wt / "NOTES.md").read_text() == "my scratch notes\n" and env.git("rev-parse", "HEAD", cwd=wt).strip() == head
+
+
+def test_the_guard_refuses_a_worktree_that_is_the_primary_checkout(env, monkeypatch):
+    bare, row, wt, wenv, onto = _reopened_after_rebase(env, monkeypatch, {"NOTES.md": "unrelated\n"})
+    _worker_exits(env, row)
+    con = env.con()
+    con.execute("UPDATE dispatches SET worktree=?, branch='main' WHERE id=?", (str(env.repo), row["id"]))
+    con.commit()
+    head = env.git("rev-parse", "HEAD").strip()
+    code, out = env.office("rebase", "T1", "--merge")
+    assert code == 4 and "worktree-mismatch" in out, out
+    assert env.git("rev-parse", "HEAD").strip() == head

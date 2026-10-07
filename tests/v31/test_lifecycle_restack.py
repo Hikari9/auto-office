@@ -184,3 +184,14 @@ def test_a_prerequisites_live_lease_still_blocks_starting_its_overlapping_depend
     assert task_row(env, "T1")["status"] == "changes_required" and "T1" in _live_leases(env)
     code, out = env.office("dispatch", "T2", env=EXTERNAL)
     assert code == 4 and "scope-held" in out, out
+
+
+def test_revoking_a_cancelled_task_does_not_make_it_accepted_again(env):
+    approved_run(env, executor=[{}], code_reviewer=[PASS])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    _work(env, "T1", GOOD_ADD)
+    con = env.con()
+    con.execute("UPDATE tasks SET status='cancelled', pause_reason='removed in plan p2' WHERE id='T1'")
+    con.commit()
+    assert env.office("revoke", "T1")[0] == 0
+    assert task_row(env)["status"] != "accepted"

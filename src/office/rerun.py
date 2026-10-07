@@ -116,11 +116,17 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
     if not pending:
         return None
     onto = ((run.get("landing") or {}).get("rebase") or {}).get("onto")
-    if onto and gates._is_ancestor(run, onto, head):
-        # `office rebase` put this worktree on the run's moved base: the new base keeps it.
-        heads = heads + [{"task": "the new run base", "revision": onto[:12], "commit": onto}]
+    held = [{"task": "the new run base", "revision": onto[:12], "commit": onto}] \
+        if onto and gates._is_ancestor(run, onto, head) else []
     try:
-        base = integration.combine(run, heads, task["id"])
+        # `office rebase` put this worktree on the run's moved base: the new base keeps it. When that base
+        # collides with a dependency revision (which `office rebase` allows), the executor's merge settles it.
+        try:
+            base = integration.combine(run, heads + held, task["id"])
+        except Refused as e:
+            if not held or e.category != "dependency-conflict":
+                raise
+            base = integration.combine(run, heads, task["id"])
     except Refused as e:
         e.scope = e.scope or task["id"]
         e.preserved = "the task worktree"

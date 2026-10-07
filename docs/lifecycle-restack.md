@@ -48,7 +48,7 @@ orchestrator chooses per task, and Office never chooses:
 
 | command | what it does |
 | --- | --- |
-| `office rebase T1 --move` | re-applies T1's change since its old base on the new base as one commit on it (a version bump is made again there). The branch is rewritten: force-push with lease if it was pushed. |
+| `office rebase T1 --move` | re-applies T1's change since its old base on the new base as one commit on it (a version field both sides bumped refuses: bump it again by hand). The branch is rewritten: force-push with lease if it was pushed. |
 | `office rebase T1 --merge` | merges the new default branch into T1's branch. History is kept. |
 | `office rebase T1 --record` | T1's worktree was moved or merged by hand: verify it holds the new base and record it. |
 
@@ -69,5 +69,5 @@ and continues; a real conflict refuses with `merge-conflict` naming the files, a
 
 ## Requirements
 
-The merge-tree based steps (the merged base, `office rebase --move`, the criss-cross check) need git 2.40 or newer
-(`git merge-tree --write-tree`, `--merge-base`); an older git refuses with `git-too-old`.
+The merged base and the criss-cross check need git 2.38 (`git merge-tree --write-tree`); `office rebase --move` needs
+2.40 (`--merge-base`). An older git refuses with `git-too-old`.

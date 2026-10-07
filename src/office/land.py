@@ -398,7 +398,7 @@ def _rebase_locked(con, run: dict, tasks: list[dict]) -> Result:
 
 
 def rebase_paths_line(tid: str) -> str:
-    return (f"office rebase {tid} --move (re-apply {tid}'s change on the new base: a version bump is made again there) "
+    return (f"office rebase {tid} --move (re-apply {tid}'s change on the new base; a version field both sides bumped is bumped again by hand) "
             f"| office rebase {tid} --merge (merge the new default branch into {tid}'s branch)")
 
 
@@ -438,7 +438,7 @@ def rebase_task(con, run: dict, tid: str, how: str | None) -> Result:
         _require_task_branch(run, tid, wt, d)
     old = d["base_commit"]
     head = before = paths.git(wt, "rev-parse", "HEAD")
-    new = _new_base(run, tid, old, onto, strict=how == "move")
+    new = _new_base(run, tid, old, onto, strict=how == "move" and not _holds_new_base(run, head, onto))
     if how != "record":
         if paths.git(wt, "status", "--porcelain", "--untracked-files=no", check=False):
             raise Refused("worktree-dirty", f"{tid}'s worktree has uncommitted changes", scope=tid,
@@ -546,7 +546,14 @@ def _move_onto_new_base(run: dict, tid: str, wt: Path, new: str, old: str, head:
                             capture_output=True, text=True, env=env)
     if commit.returncode != 0:
         raise Refused("move-failed", f"could not record {tid}'s moved commit: {commit.stderr.strip()[:200]}", scope=tid)
-    paths.git(wt, "reset", "--hard", "-q", commit.stdout.strip())
+    moved = commit.stdout.strip()
+    untracked = set(paths.git(wt, "ls-files", "--others", "--exclude-standard", check=False).splitlines())
+    in_the_way = sorted(untracked & set(paths.git(wt, "ls-tree", "-r", "--name-only", moved).splitlines()))
+    if in_the_way:  # `reset --hard` would overwrite them (a merge would refuse)
+        raise Refused("worktree-dirty", f"{tid}'s worktree has untracked files the moved commit tracks: "
+                      f"{', '.join(in_the_way[:8])}", scope=tid, preserved="the worktree, unchanged",
+                      next_step=f"move or delete them in {wt}, then office rebase {tid} --move")
+    paths.git(wt, "reset", "--hard", "-q", moved)
 
 
 # ------------------------------------------------------------------ ask
