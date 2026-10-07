@@ -134,7 +134,7 @@ def test_unknown_kinds_are_refused(kind):
 def test_queue_issue_refuses_a_duplicate_queue_item(svc):
     queue_issue_item(svc, number=4)
     err = refused(svc, cmd("cmd-tv-queue1", "queue_issue", {"repo": REPO, "issue": 4}))
-    assert err.reason == "already-queued" and err.data["item"] == "issue:qf"
+    assert err.reason == "issue-already-queued" and err.data["item"] == "issue:qf"
     assert svc.executor.calls == []
     svc.submit(cmd("cmd-tv-queue2", "queue_issue", {"repo": REPO, "issue": 5}), wait=True)  # another issue
     assert svc.executor.calls[-1]["args"][:3] == ["queue", "add", f"{REPO}#5"]
@@ -144,7 +144,7 @@ def test_a_url_form_queue_ref_counts_as_the_same_issue(svc):
     write(svc, lambda con: con.execute(
         "INSERT INTO sched_items(id, kind, ref, title, priority, enqueued_at, updated_at) VALUES('issue:url','issue',?,"
         "'t','normal','2026-09-01T00:00:00Z','2026-09-01T00:00:00Z')", (f"https://github.com/{REPO.upper()}/issues/6",)))
-    assert refused(svc, cmd("cmd-tv-queue3", "queue_issue", {"repo": REPO, "issue": 6})).reason == "already-queued"
+    assert refused(svc, cmd("cmd-tv-queue3", "queue_issue", {"repo": REPO, "issue": 6})).reason == "issue-already-queued"
 
 
 def test_start_issue_needs_an_exact_discovered_repository(svc):
@@ -213,7 +213,7 @@ def test_chat_needs_the_active_orchestrator_binding(svc, session, reason):
 
 @pytest.mark.parametrize("target,reason", [
     ({"tier": "run", "key": "scheduler.auto_mode", "run_id": "r-1"}, "tier-not-editable"),
-    ({"tier": "machine", "key": "no.such.key"}, "unknown-setting"),
+    ({"tier": "machine", "key": "no.such.key"}, "unknown-key"),
     ({"tier": "repository", "key": "scheduler.auto_mode", "repo": "synth-org-0/not-ready"}, "repo-not-ready"),
 ])
 def test_settings_need_a_known_key_and_an_editable_tier(svc, target, reason):

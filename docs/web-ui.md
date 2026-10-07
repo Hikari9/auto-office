@@ -207,9 +207,21 @@ characters of `[A-Za-z0-9_.:-]`).
 3. A repeated `id` with the same request returns the first receipt with `replayed: true` (HTTP 200) and never
    executes again. The same `id` with a different request gets `idempotency-conflict`.
 4. A receipt is recorded through T2's `commands.record` before anything runs.
-5. The exact target is re-validated against a fresh observer read. On failure the receipt becomes `failed` with a
+5. The exact target is re-validated against a fresh observer read, with checks chosen per kind rather than one
+   combined gate:
+   - issue kinds (`start_issue`, `queue_issue`): repository + issue identity (a known open issue) and execution
+     readiness, plus no live run (start) or no existing queue item for the issue (queue);
+   - run kinds (`resume_run`, `attach_run`): a non-terminal run and its capability;
+   - scheduler kinds (`pause`, `resume`, `set_priority`, `demote`, `set_auto_mode`): an existing queue item or run
+     plus runtime capability, never GitHub readiness;
+   - `change_route`: the current live dispatch;
+   - `chat_send`: the active orchestrator binding with a live agent on that pane;
+   - settings kinds: a known key and an editable tier.
+
+   T9 completes and tests the full table. On failure the receipt becomes `failed` with a
    named reason, and the API returns 409 with that reason and the receipt. Reasons include `run-missing`,
-   `run-terminal`, `capability-missing`, `dispatch-not-current`, `harness-mismatch`, `binding-ended`, `agent-not-live`, `repo-not-ready`, `issue-has-live-run`,
+   `run-terminal`, `capability-missing`, `dispatch-not-current`, `harness-mismatch`, `binding-ended`, `agent-not-live`,
+   `repo-not-ready`, `repo-unknown`, `issue-unknown`, `issue-already-queued`, `item-missing`, `unknown-key`, `issue-has-live-run`,
    `issue-has-resumable-run`, `launcher-unavailable` and `expectation-failed`. `expect` keys (for example `phase`,
    `liveness`, `dispatch_id`, `route`, `plan_version`) must equal the freshly read values.
 6. It executes in the background (HTTP 202) and the receipt ends `completed`, `failed` or `unknown`.
@@ -244,14 +256,14 @@ Every kind first needs Office freshness `live`. A mismatch fails closed with the
 
 | kind | target | then requires |
 |---|---|---|
-| `start_issue` | issue `{repo, issue}` | a discovered repository, execution-ready, and no live run for the issue (`issue-has-live-run`) |
-| `queue_issue` | issue `{repo, issue}` | as above, and no queue item for the issue yet (`already-queued`) |
+| `start_issue` | issue `{repo, issue}` | a discovered repository (`repo-unknown`) and known issue (`issue-unknown`), execution-ready, and no live run for the issue (`issue-has-live-run`) |
+| `queue_issue` | issue `{repo, issue}` | as above, and no queue item for the issue yet (`issue-already-queued`) |
 | `resume_run` / `attach_run` | run `{run_id}` | an existing non-terminal run with the capability; resume also needs no live orchestrator (`run-live`) |
 | `pause` / `resume` / `set_priority` / `demote` | scheduler item `{item}` or `{run_id[, task_id]}` | an existing item (`item-missing`) or a non-terminal run with the capability, and its task; never GitHub readiness |
 | `set_auto_mode` | scheduler scope `{}` or `{run_id}` | only a live Office source (a run scope also needs that run) |
 | `change_route` | dispatch `{run_id, dispatch_id}` | the exact current live dispatch, the same harness, and the capability |
 | `chat_send` | orchestrator session `{run_id, session[, host]}` | this host, the run's active orchestrator binding and a live Herdr agent on that pane |
-| `settings_set` / `settings_unset` | settings tier `{tier, key[, repo / run_id]}` | a known key (`unknown-setting`) and an editable tier: machine, or repository with an attached checkout |
+| `settings_set` / `settings_unset` | settings tier `{tier, key[, repo / run_id]}` | a known key (`unknown-key`) and an editable tier: machine, or repository with an attached checkout |
 
 `start_issue` is refused when the issue has a live run (attach to it instead). When the issue has a resumable run it
 is refused unless `payload.new_run_confirmed` is true and the runtime allows a new run.
