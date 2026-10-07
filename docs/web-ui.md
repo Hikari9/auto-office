@@ -158,7 +158,17 @@ characters of `[A-Za-z0-9_.:-]`).
 3. A repeated `id` with the same request returns the first receipt with `replayed: true` (HTTP 200) and never
    executes again. The same `id` with a different request gets `idempotency-conflict`.
 4. A receipt is recorded through T2's `commands.record` before anything runs.
-5. The exact target is re-validated against a fresh observer read. On failure the receipt becomes `failed` with a
+5. The exact target is re-validated against a fresh observer read, with checks chosen per kind rather than one
+   combined gate:
+   - issue kinds (`start_issue`, `queue_issue`): repository + issue identity and execution readiness;
+   - run kinds (`resume_run`, `attach_run`): a non-terminal run and its capability;
+   - scheduler kinds (`pause`, `resume`, `set_priority`, `demote`, `set_auto_mode`): an existing queue item or run
+     plus runtime capability, never GitHub readiness;
+   - `change_route`: the current live dispatch;
+   - `chat_send`: the active orchestrator binding with a live agent on that pane;
+   - settings kinds: a known key and an editable tier.
+
+   T9 completes and tests the full table. On failure the receipt becomes `failed` with a
    named reason, and the API returns 409 with that reason and the receipt. Reasons include `run-missing`,
    `run-terminal`, `capability-missing`, `dispatch-not-current`, `harness-mismatch`,
    `not-awaiting-plan-authorization`, `binding-ended`, `agent-not-live`, `repo-not-ready`, `issue-has-live-run`,
