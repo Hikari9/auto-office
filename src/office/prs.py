@@ -1,8 +1,8 @@
 """Per-task GitHub PRs (3.2): every task branch is pushed and has a draft PR.
 
 A root task's PR targets the repository's default branch; a task that depends
-on another targets that task's branch, so GitHub shows the stack the plan
-diagram shows. Executors push work in progress themselves; at submit the
+on another, or was stacked on it at dispatch, targets that task's branch, so
+GitHub shows the stack the plan diagram shows. Executors push work in progress themselves; at submit the
 runtime moves the branch to the reviewed revision and pushes it, so the PR
 head is always what the gates judged. Verdicts are posted as one line (never
 evidence), and a PR leaves draft when its task is accepted.
@@ -49,9 +49,11 @@ def _detect(con, run: dict) -> dict:
         proc = _gh(["repo", "view", "--json", "nameWithOwner,defaultBranchRef,mergeCommitAllowed,"
                     "squashMergeAllowed,rebaseMergeAllowed"], repo)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"enabled": False, "reason": f"gh repo view failed: {exc}"[:200]}
+        return {"enabled": False, "transient": True, "reason": f"gh repo view failed: {exc}"[:200]}
     if proc.returncode != 0:
-        return {"enabled": False, "reason": f"gh repo view failed: {(proc.stderr or proc.stdout).strip()}"[:200]}
+        # Network, TLS, rate-limit and auth-refresh failures pass: never pin one for the whole run.
+        return {"enabled": False, "transient": True,
+                "reason": f"gh repo view failed: {(proc.stderr or proc.stdout).strip()}"[:200]}
     info = json.loads(proc.stdout or "{}")
     method = next((m for m, key in (("merge", "mergeCommitAllowed"), ("squash", "squashMergeAllowed"),
                                     ("rebase", "rebaseMergeAllowed")) if info.get(key, m == "merge")), "merge")
@@ -60,18 +62,31 @@ def _detect(con, run: dict) -> dict:
 
 
 def settings(con, run: dict) -> dict:
-    """The run's PR settings, detected once (outside any transaction) and pinned."""
+    """The run's PR settings, detected once (outside any transaction) and pinned.
+
+    A transient detection failure (`gh repo view` erred or timed out) is not
+    pinned for good: it is probed again on each later call (dispatch, land,
+    plan view) until no task has submitted a revision, so one TLS timeout at
+    submit does not turn task PRs off for the whole run (#479)."""
     run = state.get_run(con, run["id"])
     landing = dict(run.get("landing") or {})
     current = landing.get("prs") or {}
-    if "enabled" in current:
+    if "enabled" in current and not (current.get("transient") and not _has_revision(con, run)):
         return current
-    detected = {**_detect(con, run), **{k: v for k, v in current.items() if k != "enabled"}}
+    carried = {k: v for k, v in current.items() if k not in ("enabled", "reason", "transient")}
+    detected = {**_detect(con, run), **carried}
     with db.transaction(con):
         landing = dict(state.get_run(con, run["id"]).get("landing") or {})
         landing["prs"] = detected
         state.update_run(con, run["id"], landing=landing)
+        if current.get("transient") and detected.get("enabled"):
+            state.emit(con, run, "prs.enabled", f"task PRs on: GitHub answered after an earlier failure "
+                       f"({current.get('reason')})", audience="runtime")
     return detected
+
+
+def _has_revision(con, run: dict) -> bool:
+    return con.execute("SELECT 1 FROM revisions WHERE run_id=? LIMIT 1", (run["id"],)).fetchone() is not None
 
 
 def enabled(run: dict) -> bool:
@@ -81,9 +96,22 @@ def enabled(run: dict) -> bool:
 # ------------------------------------------------------------------ stack shape
 
 def parent(con, run: dict, task: dict) -> dict | None:
-    """The task this one stacks on: its last dependency, as in the diagram."""
+    """The task this one stacks on: its last dependency, as in the diagram, or
+    else the task it was cut from when it was stacked at dispatch."""
     deps = [d for d in task["depends"] if state.get_task(con, run["id"], d)]
-    return state.get_task(con, run["id"], deps[-1]) if deps else None
+    return state.get_task(con, run["id"], deps[-1]) if deps else _cut_from(con, run, task)
+
+
+def _cut_from(con, run: dict, task: dict) -> dict | None:
+    """`office dispatch T1 T5` stacks T5 without a `depends:` line; the only trace
+    is that T5's dispatch was based on one of T1's revisions rather than the run base."""
+    current = state.get_dispatch(con, task["current_dispatch_id"]) if task.get("current_dispatch_id") else None
+    base = (current or {}).get("base_commit")
+    if not base or base == run["base_sha"]:
+        return None
+    row = con.execute("SELECT task_id FROM revisions WHERE run_id=? AND commit_sha=? AND task_id<>? "
+                      "ORDER BY created_at DESC LIMIT 1", (run["id"], base, task["id"])).fetchone()
+    return state.get_task(con, run["id"], row["task_id"]) if row else None
 
 
 def pr_base(con, run: dict, task: dict) -> str:
@@ -263,30 +291,46 @@ def job_pr_sync(con, run: dict, job: dict) -> dict:
         return {"error": str(exc)[:300]}
 
 
+def _publish(con, run: dict, task: dict, rev_id: str) -> tuple[dict, dict]:
+    """Push the revision to its task branch and find or open the PR for it."""
+    rev = con.execute("SELECT * FROM revisions WHERE id=?", (rev_id,)).fetchone()
+    dispatch = state.get_dispatch(con, rev["dispatch_id"])
+    ok, err = push(run, dispatch, commit=rev["commit_sha"])
+    if not ok:
+        raise RuntimeError(f"push of {dispatch['branch']} failed: {err}"[:300])
+    return rev, ensure_pr(con, run, task, dispatch)
+
+
 def _sync(con, run: dict, task: dict, event: str, ref: str) -> dict:
     if event == "revision":
-        rev = con.execute("SELECT * FROM revisions WHERE id=?", (ref,)).fetchone()
-        dispatch = state.get_dispatch(con, rev["dispatch_id"])
-        ok, err = push(run, dispatch, commit=rev["commit_sha"])
-        if not ok:
-            raise RuntimeError(f"push of {dispatch['branch']} failed: {err}"[:300])
-        pr = ensure_pr(con, run, task, dispatch)
+        rev, pr = _publish(con, run, task, ref)
         attempt = con.execute("SELECT COUNT(*) FROM revisions WHERE run_id=? AND task_id=?",
                               (run["id"], task["id"])).fetchone()[0]
         if attempt > 1:
             _comment(run, pr, f"office: revision {ref} pushed (attempt {attempt}, replaces attempt {attempt - 1})")
         return {"pr": pr["number"], "pushed": rev["commit_sha"]}
     pr = task.get("pr") or {}
+    if event == "accepted" and not pr.get("number"):
+        pr = _publish(con, run, task, ref)[1]  # the revision sync has not recorded the PR yet
     if not pr.get("number"):
         return {"skipped": "no PR yet"}
     if event == "verdict":
         gate = con.execute("SELECT * FROM gates WHERE id=?", (ref,)).fetchone()
-        kind = {"checks": "checks", "code_review": "code review", "visual": "ui review"}.get(gate["kind"], gate["kind"])
+        kind = {"checks": "checks", "code_review": "code review", "visual": "ui review",
+                "convergence_review": "convergence review"}.get(gate["kind"], gate["kind"])
+        if gate["subject"] == "lane":
+            # #337: one review of the composed lane, posted to each task PR in it.
+            _comment(run, pr, f"office: lane {gate['scope']} {kind} {gate['verdict']} (round {gate['round']}"
+                              + (", degraded orchestrator fallback" if gate["independence"] == "degraded-orchestrator"
+                                 else "") + f") on {gate['revision_id']}")
+            return {"commented": gate["verdict"]}
         _comment(run, pr, f"office: {kind} {gate['verdict']} on {gate['revision_id']} | gates: "
                           f"{_gate_line(con, run, task, gate['revision_id'])}")
         return {"commented": gate["verdict"]}
     if event == "accepted":
-        _gh(["pr", "ready", str(pr["number"])], run["repo_root"])
+        ready = _gh(["pr", "ready", str(pr["number"])], run["repo_root"])
+        if ready.returncode != 0:
+            raise RuntimeError(f"gh pr ready failed: {(ready.stderr or ready.stdout).strip()}"[:300])
         _comment(run, pr, f"office: {task['id']} accepted on {ref}; ready for review")
         return {"ready": pr["number"]}
     return {"skipped": event}

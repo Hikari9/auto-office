@@ -7,6 +7,7 @@ injects the environment, and launches through a durable outbox job.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -30,9 +31,11 @@ from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, pla
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (atomic_write_json, claim_alive, claim_signalable, dumps, now_iso, parse_iso, pid_alive,
-                         process_is, process_start, sha256_obj, short)
+                         process_is, process_start, sha256_obj, short, loads)
 
 LEASE_TTL_SECONDS = 4 * 3600
+# A harness session id lands in a resume argv: plain id characters only, never a leading dash.
+_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 IDENTITY_ENV = ("OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE_ROLE", "OFFICE_STATE_DIR",
                 "OFFICE_SESSION", "OFFICE_HARNESS", "OFFICE_VERSION", "OFFICE_FRONT_DOOR_HOPS")
 PLANNER_TASK = "P1"
@@ -61,11 +64,14 @@ def create_planner_task(con, run: dict, *, contract_request: str | None = None, 
 
 def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, route: str | None = None,
              as_model: str | None = None, cli: str | None = None, external: bool = False,
-             review_as: str | None = None, review_cli: str | None = None, review_external: bool = False) -> Result:
+             review_as: str | None = None, review_cli: str | None = None, review_external: bool = False,
+             reroute: bool = False) -> Result:
     if not task_ids:
         raise Usage("no-task", "name at least one task", next_step="office dispatch T1 [T2 ...] [--parallel]")
     if as_model and route:
         raise Usage("invalid-override", "use --as or --route, not both")
+    if reroute and (as_model or route):
+        raise Usage("invalid-override", "--reroute routes from evidence; --as/--route name the route yourself")
     if cli and external or review_cli and review_external:
         raise Usage("invalid-override", "a CLI launch and an external launch are mutually exclusive")
     if cli and not as_model:
@@ -73,11 +79,17 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
     if (review_cli or review_external) and not review_as:
         raise Usage("invalid-override", "--review-cli/--review-external need --review-as <harness>/<model>[@effort]")
     launch_prefs = {k: v for k, v in (("cli", cli), ("external", external)) if v}
-    review_decision = candidates.declared_decision(review_as, flag="--review-as") if review_as else None
+    if review_as:
+        candidates.declared_decision(review_as, flag="--review-as")  # validates the route's shape
     if state.is_terminal(run):
         raise Refused("run-terminal", f"run is {run['phase']}")
-    from office import guide, plan_view, plans, prs
+    from office import guide, plan_view, plans, prs, queuecmd
     plans.require_dispatchable(con, run)
+    for tid in task_ids:
+        held = queuecmd.paused_block(con, run["id"], tid)
+        if held:
+            raise Refused("scheduler-paused", f"{held['id']} is paused by the operator",
+                          next_step=queuecmd.resume_command(held))
     prs.settings(con, run)  # detected once, outside the transaction (it asks GitHub)
     # Route before the write transaction: routing reads evidence and probes quota.
     routes = {}
@@ -90,24 +102,13 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             from office import gates
             block = gates.unavailable_review_block(con, run, task)
             if block:
-                # Only its review re-runs (below), so a pinned reviewer is
-                # checked against the revision's real producer.
-                if review_decision:
-                    producer, _declared = gates._producer_model(con, block)
-                    row = con.execute("SELECT d.harness FROM revisions r JOIN dispatches d ON d.id=r.dispatch_id "
-                                      "WHERE r.id=?", (block["revision_id"],)).fetchone()
-                    _require_independent(tid, {"harness": row["harness"] if row else "?", "model_id": producer},
-                                         review_decision["candidate"])
                 continue
         if as_model:
             routes[tid] = candidates.declared_decision(as_model)
         else:
-            routes[tid] = candidates.route_role(con, state.pinned_config(run), run, "executor",
-                                                task_id=tid, override=route)
+            routes[tid] = planned_route(con, run, task, override=route, reroute=reroute)
         if launch_prefs and routes[tid].get("status") == "selected":
             routes[tid]["launch"] = launch_prefs
-        if review_decision and routes[tid].get("status") == "selected":
-            _require_independent(tid, routes[tid]["candidate"], review_decision["candidate"])
     res = Result()
     with db.transaction(con):
         run = state.get_run(con, run["id"])
@@ -177,13 +178,15 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 _stash_route(con, run, tid, decision)
                 res.add(f"{tid} stacked after {stack_after}")
             else:
-                drift = plan_view.drift(con, run, tid, decision)
+                # A planned slate reports its own fallback; drift is for legacy previews.
+                drift = None if decision.get("route_source") == "plan" else plan_view.drift(con, run, tid, decision)
                 if drift:
                     res.add(drift)
                 did = request_launch(con, run, tid, role="executor", decision=decision, base=base)
                 verb = "prepared for you to start (external; nothing launched)" if external else "launching"
                 res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} {verb}"
-                        + (" (user override)" if decision.get("override") else ""))
+                        + (" (user override)" if decision.get("override") else "")
+                        + (f" ({decision['route_note']})" if decision.get("route_note") else ""))
                 res.lines.extend(f"  {line}" for line in launch_instructions(run, state.get_dispatch(con, did)))
             previous = tid
         if run["phase"] == "planning":
@@ -195,8 +198,69 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
     return res
 
 
+def _planned_slate(con, run: dict, tid: str) -> dict | None:
+    """The approved plan's route plan for `tid` (#300), or None for a legacy preview."""
+    from office import plan_view
+    pv = plan_view.load(con, run["id"], run["plan_version"]) if run.get("plan_version") else None
+    entry = ((pv or {}).get("tasks") or {}).get(tid) or {}
+    plan = entry.get("route_plan")
+    return {**plan, "audit_id": entry.get("audit_id"), "decision_hash": entry.get("decision_hash")} \
+        if plan and plan.get("primary") else None
+
+
+def planned_route(con, run: dict, task: dict, *, override: str | None = None, reroute: bool = False) -> dict:
+    """Route an executor dispatch: the planner's primary, else its fallbacks in order.
+
+    Live evidence (quota, availability, trust, learned eligibility) is refreshed
+    by routing again now; the planned routes are then tried in their recorded
+    order and the first one that still qualifies runs. A route is never swapped
+    for an unplanned one: when every planned route fails, the result is
+    `slate_exhausted` and the orchestrator reroutes (`--reroute`). Without a
+    planned slate (`--route`, `--reroute`, a pre-#300 plan) the fresh decision stands."""
+    tid = task["id"]
+    kind = "fix" if task.get("current_dispatch_id") else "fresh"
+    fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
+                                  dispatch_kind=kind)
+    planned = None if (override or reroute) else _planned_slate(con, run, tid)
+    if reroute and fresh.get("status") == "selected":
+        fresh["route_source"], fresh["route_note"] = "reroute", "rerouted from current evidence"
+    if not planned:
+        fresh.setdefault("route_source", "override" if override else "router")
+        return fresh
+    qualifying = fresh.get("qualifying_candidates") or {}
+    reasons = {r["candidate"]: r["reason"] for r in fresh.get("rejected") or []}
+    order = [planned["primary"], *(planned.get("fallbacks") or [])]
+    taken = []
+    for i, rid in enumerate(order):
+        if rid in qualifying:
+            break
+        taken.append({"route": rid, "reason": reasons.get(rid) or "no longer a candidate (harness unavailable, "
+                                                                 "excluded, or removed from the catalog)"})
+    else:
+        return {"status": "slate_exhausted", "selected": None, "rejected": fresh.get("rejected") or [],
+                "skipped": fresh.get("skipped") or [], "fallbacks_taken": taken, "fresh_status": fresh.get("status"),
+                "request": fresh.get("request"), "routing": fresh.get("routing")}
+    cand = qualifying[rid]
+    req = fresh.get("request") or {}
+    disclosure = routing.selection_disclosure("executor", cand, req.get("preferred_seed"),
+                                              (req.get("policy") or {}).get("cost_policy", "balanced"))
+    label = "planned primary" if i == 0 else f"planned fallback {i}"
+    note = label if i == 0 else f"{label}; " + "; ".join(f"{t['route']}: {t['reason']}" for t in taken)
+    disclosure["reason"] = f"{disclosure['reason'].split('; ')[0]}; {note}"
+    disclosure["adaptive"] = True
+    disclosure["route_plan"] = {k: planned.get(k) for k in ("primary", "fallbacks", "chooser", "audit_id")}
+    return {**fresh, "status": "selected", "selected": rid, "candidate": cand, "selection_disclosure": disclosure,
+            "route_source": "plan", "route_note": None if i == 0 else note, "fallbacks_taken": taken,
+            "planned": planned,
+            "decision_hash": sha256_obj({"planned": planned.get("decision_hash"), "fresh": fresh.get("decision_hash"),
+                                         "dispatched": rid, "fallbacks_taken": taken})}
+
+
 def _route_failure(tid: str, decision: dict) -> str:
     status = decision.get("status")
+    if status == "slate_exhausted":
+        tried = "; ".join(f"{t['route']}: {t['reason']}" for t in decision.get("fallbacks_taken") or [])
+        return f"{tid}: every planned route is unavailable now ({tried})"
     rejected = decision.get("rejected") or []
     top = "; ".join(f"{r['candidate']}: {r['reason']}" for r in rejected[:3])
     skipped = "; ".join(f"{s['candidate']}: {s['reason']}" for s in (decision.get("skipped") or [])[:2])
@@ -204,6 +268,9 @@ def _route_failure(tid: str, decision: dict) -> str:
 
 
 def _route_next(decision: dict, tid: str, run: dict | None = None) -> str:
+    if decision.get("status") == "slate_exhausted":
+        return (f"office dispatch {tid} --reroute routes from current evidence; office inspect route {tid} shows "
+                "the planned slate")
     for r in decision.get("rejected") or []:
         if r.get("stage") == 2:
             return (f"a user may promote a route: office approve trust {r['candidate']} --quote \"<user's words>\"; "
@@ -221,6 +288,19 @@ def _record_routing(con, run: dict, decision: dict) -> None:
                 "VALUES(?,?,?,?,?,?,?)",
                 (uuid.uuid4().hex, run["id"], req.get("role"), sha256_obj({k: v for k, v in req.items() if k != "candidates"}),
                  decision.get("selected"), decision.get("decision_hash"), now_iso()))
+    if decision.get("routing"):
+        from office import plan_view
+        planned = decision.get("planned") or {}
+        source = decision.get("route_source") or "router"
+        audit = {**decision["routing"], "phase": "reroute" if source == "reroute" else "dispatch",
+                 "task_id": req.get("task_id"), "role": req.get("role"), "decision_hash": decision.get("decision_hash"),
+                 "planner": planned or {"chooser": "router", "primary": decision.get("selected")},
+                 "dispatch": {"source": source, "dispatched": decision.get("selected"),
+                              "fallbacks_taken": decision.get("fallbacks_taken") or [],
+                              "planned_audit_id": planned.get("audit_id")}}
+        explored = source != "plan" and (audit.get("exploration") or {}).get("picked") == decision.get("selected")
+        decision["audit_id"] = plan_view.record_audit(con, run, audit, plan_version=run.get("plan_version"),
+                                                      dispatched=decision.get("selected"), explored=explored)
 
 
 def _stash_route(con, run, tid, decision):
@@ -231,21 +311,10 @@ def _route_payload(decision: dict) -> dict:
     """What a dispatch keeps of its decision, so a stacked start or a relaunch
     reproduces the same route, override, and launch form."""
     out = {"candidate": decision.get("candidate"), "selection_disclosure": decision.get("selection_disclosure")}
-    for key in ("override", "launch", "benchmark_snapshot"):
+    for key in ("override", "launch", "benchmark_snapshot", "route_source", "fallbacks_taken", "audit_id"):
         if decision.get(key):
             out[key] = decision[key]
     return out
-
-
-def _require_independent(tid: str, executor: dict, reviewer: dict) -> None:
-    """No self-approval by family: a user-pinned reviewer must come from a
-    different model family than the executor it reviews."""
-    ef, rf = candidates.model_family(executor.get("model_id")), candidates.model_family(reviewer.get("model_id"))
-    if ef and ef == rf:
-        raise Refused("review-not-independent",
-                      f"{tid}: --review-as {reviewer['harness']}/{reviewer['model_id']} is the same model family "
-                      f"({rf}) as the executor {executor['harness']}/{executor['model_id']}", scope=tid,
-                      next_step="pin a reviewer from a different family, or drop --review-as to route one")
 
 
 def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> list[str]:
@@ -263,7 +332,8 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
         adapter = adapters.load_all().get(d.get("adapter_id") or "")
         inter = adapters.interactive_argv(adapter, "worker" if output is None else "reviewer", model=d.get("model") or "",
                                           effort=d.get("effort") or "none", cwd=Path(wt),
-                                          output=Path(output) if output else None) if adapter and d.get("model") else None
+                                          output=Path(output) if output else None,
+                                          session_id=_assigned_session(d)) if adapter and d.get("model") else None
         kind, args = (inter[1], inter[0]) if inter else (d.get("harness") or "<kind>", [])
     if output is None:
         pointer = (f"Read and carry out the brief at {ddir / 'brief.md'} exactly. "
@@ -731,7 +801,6 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
         "pr": _pr_packet(con, run, task, dispatch) if role == "executor" else None,
         "requirements": req["frozen"],
         "fix_of": extra.get("fix_of"),
-        "amendment_id": extra.get("amendment_id"),
         "contract_request": extra.get("contract_request"),
         "restack": extra.get("restack"),
     }
@@ -848,6 +917,8 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
             con.execute("UPDATE dispatches SET log_path=COALESCE(log_path, ?) WHERE id=?", (spec["log_path"], dispatch["id"]))
     finally:
         con.close()
+    if not (cli or resume):
+        _assign_session(dispatch)
     argv, extra = frontdoor.current_argv()
     sup = argv + ["_supervise", dispatch["id"]]
     env = dict(os.environ)
@@ -858,6 +929,8 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
     if cli and not use_herdr:
         _launch_notice(run, dispatch, f"--cli needs a herdr session; left external instead. Start it by hand: {cli}")
         external = True
+    if resume and output:
+        resume = _resume_with_reply_access(dispatch, kind, resume, cwd, include_dirs, output)
     if resume and not use_herdr:
         # A native resume reopens the session in a pane; never fall back to a
         # fresh headless session under the resume's name (R7).
@@ -874,7 +947,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
     if launcher == "sync":
         # Deterministic mode for tests and fixtures: supervise in the foreground.
         _record_launch(run, dispatch["id"], launcher="sync", pid=os.getpid())
-        subprocess.run(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, env=env)
+        _supervise_in_process(dispatch["id"], cwd, extra)
         return _wait_terminal(dispatch["id"], timeout=5) if wait else {"launcher": "sync"}
     headless = "process"
     if use_herdr:
@@ -915,6 +988,22 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         proc.wait()
         return _wait_terminal(dispatch["id"])
     return {"launcher": headless, "pid": proc.pid}
+
+
+def _supervise_in_process(dispatch_id: str, cwd: Path, extra: dict) -> None:
+    """Run the supervisor here, under the environment and directory the
+    `office _supervise` child would have had, and put both back afterwards."""
+    from unittest import mock
+    with mock.patch.dict(os.environ, extra), contextlib.chdir(cwd):
+        os.environ.pop(frontdoor.HOP_ENV, None)
+        supervise(dispatch_id)
+
+
+def _spawn_agent(argv: list[str], cwd: str, env: dict, stdin: int) -> subprocess.Popen:
+    """Start the harness process in its own session, its output piped back.
+    The one place a harness child is created, so tests can replace it."""
+    return subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            env=env, start_new_session=True)
 
 
 def _launch_external(run: dict, dispatch: dict, kind: str, spec: dict, ddir: Path, sup: list[str], env: dict,
@@ -1005,7 +1094,8 @@ def _interactive(dispatch: dict, kind: str, cwd: Path, include_dirs: list[Path] 
     if not adapter or not dispatch.get("model"):
         return None
     return adapters.interactive_argv(adapter, kind, model=dispatch["model"], effort=dispatch.get("effort") or "none",
-                                     cwd=cwd, include_dirs=include_dirs, output=output)
+                                     cwd=cwd, include_dirs=include_dirs, output=output,
+                                     session_id=_assigned_session(dispatch))
 
 
 def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = True) -> Path:
@@ -1062,10 +1152,14 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     fresh_label = pane_label(run, dispatch, dispatch.get("kind") or "")
     if fresh_label != label or retried:
         _herdr_rename(pane, fresh_label)
-    session = _started_session(proc.stdout) or _capture_session(name)
-    if session:
-        _set_dispatch(dispatch["id"], session_id=session)
-    else:
+    # An id Office assigned at launch is already recorded; only a harness that
+    # takes none needs herdr to report the one it started.
+    session = dispatch.get("session_id")
+    if not session:
+        session = _started_session(proc.stdout) or _capture_session(name)
+        if session:
+            _record_session(run, dispatch, session, source="herdr")
+    if not session:
         # Not a launch failure: the agent runs. Recorded where `office inspect` shows it.
         con = db.connect()
         try:
@@ -1163,9 +1257,26 @@ BUSY_MARKERS = ("esc to cancel", "esc to interrupt")
 _SPINNER = re.compile(r"(?:…|\.\.\.)\s*\(\s*(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b")
 
 
+# A Claude footer segment counting the pane's own background work:
+# "· 1 shell, 3 monitors still running", "2 shells", "3 monitors". The pane is
+# waiting on them, not stalled. Bare counts must be a whole segment so prose
+# like "ran 1 shell command" does not match.
+_BG_COUNTS = r"\d+ (?:shells?|monitors?)(?:, \d+ (?:shells?|monitors?))*"
+_BACKGROUND = re.compile(
+    rf"(?:^|[·•|])\s*{_BG_COUNTS}(?:\s+still running\s*$|\s*(?:[·•|]|$))", re.I | re.M)
+# Only the footer region: a count scrolled up in the history is stale.
+BACKGROUND_TAIL_LINES = 8
+
+
+def _background_running(text: str) -> bool:
+    tail = [ln for ln in (text or "").splitlines() if ln.strip()][-BACKGROUND_TAIL_LINES:]
+    return bool(_BACKGROUND.search("\n".join(tail)))
+
+
 def _pane_busy(text: str) -> bool:
     low = (text or "").lower()
-    return any(m in low for m in BUSY_MARKERS) or bool(_SPINNER.search(text or ""))
+    return (any(m in low for m in BUSY_MARKERS) or bool(_SPINNER.search(text or ""))
+            or _background_running(text))
 
 
 # Claude Code stops on its session limit and sits on a screen like
@@ -1464,6 +1575,9 @@ def _shell_run(pane: str, command: str, marker: Path, timeout: float | None = No
 _PASTE_PLACEHOLDER = re.compile(r"\[Pasted text #\d+")
 # The composer sits at the bottom of the pane; a long pointer wraps over many rows.
 _COMPOSER_ROWS = 20
+# A held pointer matches on any window this long of its letters and digits, so
+# a composer that mangled its start (a dropped "Read and ") still counts.
+_HELD_WINDOW = 24
 
 
 def _squash(text: str) -> str:
@@ -1471,16 +1585,19 @@ def _squash(text: str) -> str:
 
 
 def _composer_holds(text: str | None, prompt: str) -> bool:
-    """The prompt sits typed but unsubmitted near the bottom of the pane. Only
-    letters and digits are compared, so the composer's wrapping, borders and
-    prompt glyph (`>`, `›`, `│`) do not hide it."""
+    """Any part of the prompt sits typed but unsubmitted near the bottom of the
+    pane. Trailing blank rows are skipped, and only letters and digits are
+    compared, so the composer's wrapping, borders and prompt glyph (`>`, `›`,
+    `│`) do not hide it."""
     if not text:
         return False
-    tail = "\n".join(text.splitlines()[-_COMPOSER_ROWS:])
+    rows = text.rstrip().splitlines()
+    tail = "\n".join(rows[-_COMPOSER_ROWS:])
     if _PASTE_PLACEHOLDER.search(tail):
         return True
-    head = _squash(prompt)[:40]
-    return bool(head) and head in _squash(tail)
+    want, have = _squash(prompt), _squash(tail)
+    size = min(len(want), _HELD_WINDOW)
+    return bool(want) and any(want[i:i + size] in have for i in range(len(want) - size + 1))
 
 
 def _press_enter(name: str, pane: str | None, herdr=_herdr_quiet) -> None:
@@ -1497,19 +1614,26 @@ def _submit_held(name: str, pane: str | None, prompt: str, timeout: float, *, ba
     and Enter together; a TUI that is not ready to submit yet, or that takes the
     Enter as part of the paste, keeps the text. Returns 'landed'; 'absent' when
     the composer never held it; 'held' when it is still there after
-    OFFICE_HERDR_ENTER_TRIES Enters. A composer an Enter emptied counts as
-    landed: the harness took the submit."""
+    OFFICE_HERDR_ENTER_TRIES Enters; 'unknown' when the pane cannot be read
+    at the end. A composer an Enter emptied counts as landed: the harness took
+    the submit."""
     tries = int(os.environ.get("OFFICE_HERDR_ENTER_TRIES", "3"))
     delay = float(os.environ.get("OFFICE_HERDR_KEY_DELAY", "1"))
     wait = min(timeout, float(os.environ.get("OFFICE_HERDR_ENTER_WAIT", "5")))
     for n in range(tries):
-        if not _composer_holds(_pane_view(name), prompt):
+        view = _pane_view(name)
+        # An unreadable pane may still hold the prompt: press Enter, never
+        # report it absent (that would type the prompt again).
+        if view is not None and not _composer_holds(view, prompt):
             return "landed" if n else "absent"
         time.sleep(delay)
         _press_enter(name, pane, herdr)
         if _prompt_landed(name, wait, baseline_ctx=baseline_ctx, seen=seen) == "landed":
             return "landed"
-    return "landed" if not _composer_holds(_pane_view(name), prompt) else "held"
+    view = _pane_view(name)
+    if view is None:
+        return "unknown"
+    return "held" if _composer_holds(view, prompt) else "landed"
 
 
 def submit_prompt(name: str, text: str, *, pane: str | None = None) -> str:
@@ -1523,7 +1647,7 @@ def submit_prompt(name: str, text: str, *, pane: str | None = None) -> str:
     if _prompt_landed(name, timeout, baseline_ctx=baseline) == "landed":
         return "landed"
     got = _submit_held(name, pane, text, timeout, baseline_ctx=baseline)
-    return "" if got == "absent" else got
+    return "" if got in ("absent", "unknown") else got
 
 
 def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = False, seen=None) -> bool:
@@ -1558,6 +1682,11 @@ def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = 
     held = _submit_held(name, pane, pointer, timeout, baseline_ctx=baseline, seen=seen, herdr=herdr)
     if held != "absent":
         return held == "landed"
+    # Look again right before typing: a pointer held in any form, or a pane
+    # that cannot be read, is never typed a second time.
+    view = _pane_view(name)
+    if view is None or _composer_holds(view, pointer):
+        return False
     # The composer is empty: the pointer was lost, so type it once. A TUI can
     # take an Enter that follows typed text too closely as part of the paste:
     # pause, submit, and submit once more if it still has not landed.
@@ -1937,6 +2066,132 @@ def _capture_session(name: str) -> str | None:
         time.sleep(0.5)
 
 
+def _resume_with_reply_access(dispatch: dict, kind: str, resume: dict, cwd: Path, include_dirs: list[Path] | None,
+                              output: Path) -> dict:
+    """A resumed reviewer still writes its reply file: rebuild the resume argv
+    with the directory that file lives in, which the caller's form lacked."""
+    adapter = adapters.load_all().get(dispatch.get("adapter_id") or "")
+    form = adapters.resume_argv(adapter, kind, session_id=resume["session_id"], model=dispatch.get("model") or "",
+                                effort=dispatch.get("effort") or "none", cwd=cwd, include_dirs=include_dirs,
+                                output=output) if adapter and resume.get("session_id") else None
+    return {**resume, "argv": form[0], "herdr_kind": form[1]} if form else resume
+
+
+def _assigned_session(d: dict) -> str | None:
+    """The id to pass a harness that takes one at launch. A resumed dispatch
+    continues its parent's session and passes none."""
+    return None if d.get("resumed_from") else d.get("session_id")
+
+
+def _assign_session(dispatch: dict) -> None:
+    """Where the harness accepts an assigned session id (claude --session-id),
+    pick it and record it before the agent starts, whatever the role. A
+    dispatch relaunched after a failed start keeps the id it already has."""
+    if dispatch.get("session_id") or not adapters.assigns_session(adapters.load_all().get(dispatch.get("adapter_id") or "")):
+        return
+    session = str(uuid.uuid4())
+    _set_dispatch(dispatch["id"], session_id=session)
+    dispatch["session_id"] = session
+
+
+def record_session(con, run: dict, dispatch_id: str, session: str, *, harness: str | None = None, source: str) -> str:
+    """Record the harness session id seen for a dispatch: "set" when it was
+    empty, "same" when it already matches, "mismatch" when a different id is
+    recorded (kept, and noted once as an event), "ignored" for another run's
+    dispatch, another harness's id, or a malformed one."""
+    d = state.get_dispatch(con, dispatch_id)
+    if (not d or d["run_id"] != run["id"] or (harness and d.get("harness") != harness)
+            or not _SESSION_ID.fullmatch(session)):
+        return "ignored"
+    if d.get("session_id") == session:
+        return "same"
+    with db.transaction(con):
+        recorded = state.get_dispatch(con, dispatch_id).get("session_id")  # re-read under the write lock
+        if not recorded:
+            con.execute("UPDATE dispatches SET session_id=? WHERE id=?", (session, dispatch_id))
+            return "set"
+        if recorded == session:
+            return "same"
+        seen = {loads(r[0], {}).get("seen") for r in con.execute(
+            "SELECT payload_json FROM events WHERE dispatch_id=? AND kind='session.mismatch'", (dispatch_id,))}
+        if session not in seen:
+            state.emit(con, run, "session.mismatch", f"{d.get('task_id') or dispatch_id}: {source} saw session {session} but "
+                       f"{recorded} is recorded for {dispatch_id}; the recorded id is kept", audience="runtime",
+                       task_id=d.get("task_id"), dispatch_id=dispatch_id,
+                       payload={"recorded": recorded, "seen": session, "source": source})
+        return "mismatch"
+
+
+class _SessionSniffer:
+    """Reads a headless agent's stream for the session id its harness prints in
+    the header block before the prompt (adapter `session.output_pattern`), and
+    records it. Only a line inside that block counts: the block is the text
+    between two rule lines, the first within a few lines of the start. A stream
+    with no such block, a prompt echoed after it, or an agent reply that happens
+    to contain the pattern is never taken for an id. Best effort: a recording
+    failure is noted in the log and retried, and never disturbs the run."""
+
+    HEADER_BYTES = 16384
+    BANNER_LINES = 3  # lines allowed before the opening rule
+    ATTEMPTS = 2
+    _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+    def __init__(self, run: dict, dispatch: dict, adapter: dict | None, log_path=None):
+        self.run, self.dispatch, self.log_path = run, dispatch, log_path
+        self.pattern = adapters.session_output_pattern(adapter)
+        self.buffer, self.seen, self.rules, self.lead = b"", 0, 0, 0
+        if not self.pattern and adapters.session_spec(adapter).get("output_pattern"):
+            _note(log_path, "office: the adapter's session.output_pattern is unusable; the session id is not captured")
+
+    def _stop(self, why: str | None = None) -> None:
+        """Stop reading. `why` is logged when no id was recorded, so a harness
+        that stops printing one is visible instead of silently unresumable."""
+        self.pattern, self.buffer = None, b""
+        if why:
+            _note(self.log_path, f"office: no session id captured: {why}")
+
+    def feed(self, chunk: bytes) -> None:
+        if not self.pattern:
+            return
+        self.seen += len(chunk)
+        self.buffer += chunk
+        *lines, self.buffer = self.buffer.split(b"\n")
+        for raw in lines:
+            line = self._ANSI.sub("", raw.decode("utf-8", "replace")).strip()
+            if re.fullmatch(r"-{8,}", line):
+                self.rules += 1
+                if self.rules >= 2:  # the header block is closed: the prompt follows
+                    return self._stop("the header block closed without a session id line")
+            elif self.rules == 0:
+                self.lead += 1 if line else 0
+                if self.lead > self.BANNER_LINES:  # no header block opens this stream
+                    return self._stop("no header block opened the stream")
+            else:
+                found = self.pattern.match(line)
+                if found:
+                    self._record(found.group(1))
+                    return self._stop()
+        if self.seen > self.HEADER_BYTES or len(self.buffer) > self.HEADER_BYTES:
+            self._stop("the header block did not finish within the first bytes")
+
+    def _record(self, session: str) -> None:
+        """Record the id, retrying a failed write once; a final failure is noted in the log."""
+        for attempt in range(self.ATTEMPTS):
+            try:
+                return _record_session(self.run, self.dispatch, session, source="output")
+            except Exception as exc:
+                if attempt + 1 == self.ATTEMPTS:
+                    _note(self.log_path, f"office: could not record session id {session}: {exc!r}")
+
+
+def _record_session(run: dict, dispatch: dict, session: str, *, source: str) -> None:
+    con = db.connect()
+    try:
+        record_session(con, run, dispatch["id"], session, harness=dispatch.get("harness"), source=source)
+    finally:
+        con.close()
+
+
 def _set_dispatch(dispatch_id: str, **cols) -> None:
     con = db.connect()
     try:
@@ -2125,8 +2380,9 @@ def supervise(dispatch_id: str) -> int:
             except OSError:
                 pass
 
-    for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-        signal.signal(s, forward)
+    # An in-process supervisor hands its caller's handlers back when the dispatch ends.
+    previous = {s: signal.signal(s, forward) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    timer = None
     log_path = None
     try:
         con = db.connect()
@@ -2161,7 +2417,8 @@ def supervise(dispatch_id: str) -> int:
         argv, prof = adapters.build_argv(adapter, spec["kind"], model=d["model"], effort=d["effort"] or "none",
                                          cwd=Path(spec["cwd"]), output=output,
                                          images=[Path(i) for i in spec.get("images") or []],
-                                         include_dirs=[Path(i) for i in spec.get("include_dirs") or []])
+                                         include_dirs=[Path(i) for i in spec.get("include_dirs") or []],
+                                         session_id=_assigned_session(d))
         prompt = Path(spec["prompt_file"]).read_text(encoding="utf-8")
         if prof.get("image_transport") in ("prompt-at", "prompt-path") and spec.get("images"):
             prefix = "@" if prof["image_transport"] == "prompt-at" else ""
@@ -2179,8 +2436,7 @@ def supervise(dispatch_id: str) -> int:
                 argv = argv + [prompt]
             elif prof.get("prompt") == "argv-bound":
                 argv = argv + [prof.get("prompt_flag", "--prompt=") + prompt]
-            child = subprocess.Popen(argv, cwd=spec["cwd"], stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                     env=env, start_new_session=True)
+            child = _spawn_agent(argv, spec["cwd"], env, stdin)
             _mark(dispatch_id, pid_child=child.pid)
             _agent_pgid_file(run, dispatch_id).write_text(str(child.pid))
             _record_identity(run["id"], dispatch_id, "agent", child.pid)
@@ -2203,9 +2459,12 @@ def supervise(dispatch_id: str) -> int:
                     child.stdin.close()
                 except BrokenPipeError:
                     pass
+            sniffer = None if d.get("resumed_from") else _SessionSniffer(run, d, adapter, log_path)
             for chunk in iter(lambda: child.stdout.read1(65536), b""):
                 log.write(chunk)
                 log.flush()
+                if sniffer:
+                    sniffer.feed(chunk)
                 if sys.stdout.isatty():
                     sys.stdout.buffer.write(chunk)
                     sys.stdout.flush()
@@ -2228,8 +2487,14 @@ def supervise(dispatch_id: str) -> int:
         classification = "supervisor_error"
         _note(log_path, f"supervisor error: {exc!r}")
     finally:
-        if classification != "duplicate_ignored":
-            _finish(dispatch_id, code, sig, classification or "unknown", time.time() - started)
+        try:
+            if classification != "duplicate_ignored":
+                _finish(dispatch_id, code, sig, classification or "unknown", time.time() - started)
+        finally:
+            if timer:
+                timer.cancel()
+            for s, handler in previous.items():
+                signal.signal(s, handler if handler is not None else signal.SIG_DFL)
     return 0 if classification == "success" else 1
 
 

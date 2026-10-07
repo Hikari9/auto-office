@@ -1,11 +1,21 @@
 """Gate engine: revision-bound verdicts, selective invalidation, bounded
 convergence, and the single acceptance evaluator.
 
-Verdicts: PASS | CHANGES_REQUIRED | PLAN_DEFECT | BRIEF_DEFECT | UNAVAILABLE.
-A gate that is skipped, unavailable, malformed, stale, or missing its command
-is never PASS. Acceptance requires every required gate to PASS on the task's
-current revision, the worker's applied version to be current, and no open
-plan defect on the task's scope.
+Two review contracts (office.contract), chosen by the run's pin:
+
+v3.1 — verdicts PASS | CHANGES_REQUIRED | PLAN_DEFECT | BRIEF_DEFECT |
+UNAVAILABLE. Every task revision gets checks, an independent code review and,
+when applicable, a visual review. Acceptance requires every required gate to
+PASS on the task's current revision, the worker's applied version to be
+current, and no open plan defect on the task's scope.
+
+convergence-v1 (#337) — a task revision gets only its deterministic checks;
+the executor's four-lens self-review is enforced by preflight. Independent
+code and visual review happen once per ownership/composition lane on the
+composed result (office.convergence). A checks gate records APPROVED (all
+pass) or RECHECK (a failure) with review status COMPLETED; a check that cannot
+run is UNAVAILABLE status with no verdict. Nothing unavailable, malformed,
+stale, or missing is ever treated as approved.
 """
 from __future__ import annotations
 
@@ -21,7 +31,7 @@ import time
 import uuid
 from pathlib import Path
 
-from office import briefs, candidates, db, jobs, paths, planfile, review_parse, routing, state, version, worktree_setup
+from office import briefs, candidates, contract, db, jobs, paths, planfile, review_parse, routing, state, version, worktree_setup
 from office.util import dumps, now_iso, pid_alive, sha256_bytes, sha256_obj
 
 TASK_GATES = ("checks", "code_review", "visual")
@@ -39,6 +49,8 @@ def cap_diff(diff: str) -> str:
 
 def plan_for_revision(con, run: dict, task: dict, rev_id: str, changed: list[str], d: dict) -> dict:
     """Create gate rows for a new revision and queue the first step. Caller holds tx."""
+    if contract.is_convergence(run):
+        return _plan_for_revision_convergence(con, run, task, rev_id)
     from office import visual
     g = run.get("gates") or {}
     rows, summary = {}, []
@@ -75,15 +87,32 @@ def plan_for_revision(con, run: dict, task: dict, rev_id: str, changed: list[str
     return {"gates": rows, "summary": summary}
 
 
+def _plan_for_revision_convergence(con, run: dict, task: dict, rev_id: str) -> dict:
+    """#337: a task revision gets its deterministic checks only. Independent code
+    and visual review run once per lane on the composed result."""
+    rows, summary = {}, []
+    if task["checks"]:
+        rows["checks"] = _new_gate(con, run, task, rev_id, "checks", f"checks:{rev_id}", "queued")
+        state.enqueue(con, run, "run_checks", {"gate_id": rows["checks"], "task_id": task["id"], "revision_id": rev_id},
+                      dedup_key=f"checks:{rows['checks']}", max_attempts=2)
+        summary.append("checks running; lane convergence review follows")
+    else:
+        summary.append("no checks declared; lane convergence review follows")
+        if evaluate_acceptance(con, run, task["id"]):
+            summary.append("task verified (lane convergence pending)")
+    return {"gates": rows, "summary": summary}
+
+
 def _new_gate(con, run, task, rev_id, kind, key, status, *, verdict=None, reused_from=None, evidence_status=None,
               escalated=0, round_no=None) -> str:
     gid = "G" + uuid.uuid4().hex[:8]
     if round_no is None:
         round_no = current_round(con, run["id"], task["id"], kind)
     con.execute("INSERT INTO gates(id, run_id, subject, task_id, revision_id, plan_version, kind, input_key, status, verdict, "
-                "evidence_status, round, escalated, reused_from, created_at, finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "evidence_status, round, escalated, reused_from, created_at, finished_at, contract) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (gid, run["id"], "task", task["id"], rev_id, run["plan_version"], kind, key, status, verdict, evidence_status,
-                 round_no, escalated, reused_from, now_iso(), now_iso() if status == "done" else None))
+                 round_no, escalated, reused_from, now_iso(), now_iso() if status == "done" else None, contract.of(run)))
     return gid
 
 
@@ -95,7 +124,7 @@ def _reusable(con, run, task, kind, key):
 
 def current_round(con, run_id: str, task_id: str, kind: str) -> int:
     rows = con.execute("SELECT DISTINCT revision_id FROM gates WHERE run_id=? AND task_id=? AND kind=? AND "
-                       "verdict='CHANGES_REQUIRED' AND escalated=0", (run_id, task_id, kind)).fetchall()
+                       "verdict IN ('CHANGES_REQUIRED','RECHECK') AND escalated=0", (run_id, task_id, kind)).fetchall()
     return len(rows) + 1
 
 
@@ -340,25 +369,28 @@ def _check_env(run: dict) -> dict:
 
 def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path, plan_review: bool = False,
                  visual: bool = False, images: list[Path] | None = None, include_dirs: list[Path] | None = None,
-                 exclude: list[str] | None = None, kind: str | None = None, resume_from: str | None = None) -> dict:
+                 exclude: list[str] | None = None, kind: str | None = None, resume_from: str | None = None,
+                 review_override: dict | None = None) -> dict:
     """Route, launch, and parse one independent review, substituting routes on
     environment/adapter/schema failure up to the configured bound.
 
     `resume_from` names an earlier reviewer dispatch to continue (a plan-defect
     redirect with --reviewer same): its session is resumed when the harness can,
     else a fresh session runs on the same route."""
-    limit = int((run.get("gates") or {}).get("environment_retry_max", 2))
+    convergence = contract.is_convergence(run)
+    # v3.1 bounds route substitution; the convergence contract walks the whole
+    # eligible fallback chain before reporting the reviewer unavailable (#337),
+    # and none of those attempts spends a substantive round.
+    limit = int((run.get("gates") or {}).get("environment_retry_max", 2)) if not convergence else 12
     excluded = set(exclude or [])
+    rc = contract.of(run)
     producer = _producer_route(con, gate)
     failures = []
     task = state.get_task(con, run["id"], gate["task_id"]) if gate.get("task_id") else None
-    # A user-pinned code reviewer (dispatch --review-as) replaces routing; a
-    # declared executor's family is excluded from routed review.
-    pinned = (task or {}).get("review_override") if role == "code_reviewer" else None
-    producer_model, producer_declared = _producer_model(con, gate)
-    producer_family = candidates.model_family(producer_model)
-    if producer_declared and producer_family and not pinned:
-        excluded.add(f"family:{producer_family}")
+    # A user-pinned code reviewer (dispatch --review-as) replaces routing.
+    # Independence is per agent: every reviewer is a fresh dispatch and session,
+    # never the producer's, so the producer's model or family is not excluded.
+    pinned = review_override or ((task or {}).get("review_override") if role == "code_reviewer" else None)
     profile_kind = kind or ("vision" if visual else "reviewer")
     resume, same_route = (_reviewer_resume(con, run, resume_from, profile_kind, cwd) if resume_from
                           else (None, None))
@@ -373,10 +405,6 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         elif pinned:
             decision = candidates.declared_decision(pinned["as"], flag="--review-as")
             decision["launch"] = {k: pinned[k] for k in ("cli", "external") if pinned.get(k)}
-            if producer_family and candidates.model_family(decision["candidate"]["model_id"]) == producer_family:
-                failures.append(f"--review-as {pinned['as']} is the same model family ({producer_family}) as the "
-                                f"producer {producer_model}; not independent")
-                break
         else:
             decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
                                              exclude=excluded)
@@ -407,7 +435,7 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                             resume=resume if attempt == 0 else None)
         d = state.get_dispatch(con, dispatch_id)
         text = _reply_text(d, ddir, output)
-        parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual)
+        parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=rc)
         wrote_file = output.is_file() and output.stat().st_size > 0
         # Wall signatures come from the harness log, never from the review
         # itself (a review of quota code must not read as a quota wall).
@@ -428,6 +456,9 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                                           task_id=gate.get("task_id"), revision_id=gate.get("revision_id"),
                                           gate_id=gate["id"], meta={"route": triple, "exit": d.get("exit_code")},
                                           digest=sha256_bytes(text.encode()))
+                if convergence:
+                    return {"status": contract.INVALID_RESULT, "verdict": None, "parsed": None, "route": triple,
+                            "dispatch_id": dispatch_id, "summary": attention, "producer_route": producer}
                 return {"verdict": "ATTENTION", "parsed": None, "route": triple, "dispatch_id": dispatch_id,
                         "summary": attention, "producer_route": producer}
             d = state.get_dispatch(con, dispatch_id)
@@ -440,8 +471,12 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             # A valid reply file is the result, whatever the exit classification.
             # The reviewer is done: snapshot and close its pane (R1).
             dispatch_mod.reclaim_pane(run, dispatch_id)
-            return {"verdict": parsed.verdict, "parsed": parsed, "route": triple, "dispatch_id": dispatch_id,
-                    "summary": f"{parsed.verdict} by {triple}", "producer_route": producer}
+            out = {"verdict": parsed.verdict, "parsed": parsed, "route": triple, "dispatch_id": dispatch_id,
+                   "summary": f"{parsed.verdict or parsed.evidence_status} by {triple}", "producer_route": producer}
+            if convergence:
+                out["status"] = contract.COMPLETED if parsed.verdict else contract.EVIDENCE_BLOCKED
+                out["env_failures"] = len(failures)
+            return out
         # Only a launch failure reaches here: the agent never produced a reply
         # (never started, died first, or hit an auth or quota wall). That is the
         # one case where another route is substituted.
@@ -459,6 +494,10 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         with db.transaction(con):
             con.execute("UPDATE gates SET env_failures=env_failures+1 WHERE id=?", (gate["id"],))
             con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?", (dispatch_id,))
+    if convergence:
+        return {"status": contract.UNAVAILABLE, "verdict": None, "parsed": None, "route": None,
+                "summary": "every eligible reviewer route failed: " + "; ".join(failures)[:560],
+                "env_failures": len(failures), "exhausted": True}
     return {"verdict": "UNAVAILABLE", "parsed": None, "route": None, "summary": "; ".join(failures)[:600]}
 
 
@@ -512,7 +551,7 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
                                   f"unsubmitted in herdr agent {name}; submit it (herdr agent send-keys {name} "
                                   "Enter) or waive the gate")
         text = _await_file(output, wait_s, poll)
-        parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual)
+        parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=contract.of(run))
         if parsed.valid:
             return text, parsed, None
         errors = parsed.errors or ["no reply file"]
@@ -540,19 +579,6 @@ def _await_file(output: Path, wait_s: float, poll: float) -> str:
         last = size or None
         time.sleep(poll)
     return output.read_text(encoding="utf-8", errors="replace") if output.is_file() else ""
-
-
-def _producer_model(con, gate: dict) -> tuple[str | None, bool]:
-    """(model_id, declared) of the dispatch that produced the gate's revision."""
-    if not gate.get("revision_id"):
-        return None, False
-    row = con.execute("SELECT d.route_json, d.override_json FROM revisions r JOIN dispatches d ON d.id=r.dispatch_id "
-                      "WHERE r.id=?", (gate["revision_id"],)).fetchone()
-    if not row:
-        return None, False
-    cand = (json.loads(row["route_json"] or "{}").get("candidate") or {})
-    declared = bool(json.loads(row["override_json"] or "{}").get("declared"))
-    return cand.get("model_id"), declared
 
 
 def _producer_route(con, gate: dict) -> str | None:
@@ -624,7 +650,7 @@ def _last_block(text: str) -> str:
     if not idx:
         return text
     start = idx[-1]
-    while start > 0 and re.match(r"^(EVIDENCE_STATUS|FINDING|DEFECT|RESOLVED|CLEARED|RETRACT)",
+    while start > 0 and re.match(r"^(EVIDENCE_STATUS|FINDING|DEFECT|RESOLVED|CLEARED|RETRACT|NEXT|DECISION|WHY|AFFECTS)",
                                  review_parse._clean(lines[start - 1]), re.I):
         start -= 1
     return "\n".join(lines[start:])
@@ -683,6 +709,15 @@ def detached_checkout(run: dict, commit: str, name: str, *, purpose: str) -> Pat
     paths.git(Path(run["repo_root"]), "worktree", "add", "--detach", str(path), commit)
     if purpose == "check":
         worktree_setup.prepare(run, path, "check", paths.run_dir(run["id"]) / "setup" / f"{name}.log", created=True)
+    plans = Path(run["repo_root"]) / ".office" / "plans"
+    if plans.is_dir():
+        dest = path / ".office" / "plans"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not dest.exists():
+            try:
+                dest.symlink_to(plans, target_is_directory=True)
+            except OSError:
+                shutil.copytree(plans, dest)
     return path
 
 
@@ -698,9 +733,69 @@ def _fingerprint(f: dict) -> str:
     return sha256_obj(sorted(set(w for w in words if len(w) > 2))[:40])
 
 
+def checks_outcome(outcome: dict) -> dict:
+    """A run_commands result in convergence-contract terms: all checks passed is
+    APPROVED, a failing check is RECHECK (a blocking finding), and a check that
+    could not run is UNAVAILABLE status with no verdict. STALE stays STALE."""
+    v = outcome.get("verdict")
+    if v == "STALE":
+        return outcome
+    if v == "UNAVAILABLE":
+        return {**outcome, "status": contract.UNAVAILABLE, "verdict": None}
+    parsed = outcome.get("parsed")
+    findings = [{**f, "severity": "high", "level": "high", "blocking": True} for f in (parsed.findings if parsed else [])]
+    verdict = "RECHECK" if findings else "APPROVED"
+    return {**outcome, "status": contract.COMPLETED, "verdict": verdict,
+            "parsed": review_parse.Parsed(verdict=verdict, findings=findings, contract=contract.CONVERGENCE,
+                                          next_action="make the failing check pass" if findings else "proceed")}
+
+
+def _ingest_checks_convergence(con, run: dict, gate: dict, task: dict, outcome: dict) -> None:
+    """#337 task gate: deterministic checks only. Caller holds tx."""
+    outcome = checks_outcome(outcome)
+    verdict, status = outcome.get("verdict"), outcome.get("status")
+    if verdict == "STALE" or (verdict is None and status is None):
+        con.execute("UPDATE gates SET status='stale', stale_reason=?, finished_at=? WHERE id=?",
+                    (outcome.get("summary"), now_iso(), gate["id"]))
+        return
+    if task["current_revision_id"] != gate["revision_id"] or gate["status"] == "cancelled":
+        con.execute("UPDATE gates SET status='stale', verdict=?, review_status=?, stale_reason=?, finished_at=? WHERE id=?",
+                    (verdict, status, f"revision {gate['revision_id']} is no longer current", now_iso(), gate["id"]))
+        return
+    con.execute("UPDATE gates SET status='done', verdict=?, review_status=?, summary=?, finished_at=?, "
+                "route=COALESCE(?, route), contract=? WHERE id=?",
+                (verdict, status, outcome.get("summary"), now_iso(), outcome.get("route"), contract.CONVERGENCE, gate["id"]))
+    if status == contract.UNAVAILABLE:
+        state.emit(con, run, "gate.unavailable", f"{task['id']} checks UNAVAILABLE (not a verdict): "
+                   f"{outcome.get('summary', '')[:400]}", task_id=task["id"])
+        state.update_task(con, run["id"], task["id"], status="blocked",
+                          pause_reason=f"checks gate unavailable: {outcome.get('summary', '')[:400]}")
+        return
+    parsed = outcome["parsed"]
+    if verdict == "APPROVED":
+        con.execute("UPDATE findings SET state='resolved', updated_at=? WHERE run_id=? AND task_id=? AND gate_kind='checks' "
+                    "AND state='open'", (now_iso(), run["id"], task["id"]))
+        state.emit(con, run, "gate.approved", f"{task['id']} checks APPROVED on {gate['revision_id']}", audience="runtime",
+                   task_id=task["id"])
+        evaluate_acceptance(con, run, task["id"])
+        return
+    for f in parsed.findings:
+        _upsert_finding(con, run, task, gate, f, outcome)
+    if int(gate["round"] or 1) >= contract.MAX_ROUNDS:
+        # Deterministic checks are the producer's job, not a reviewer's: at the
+        # cap the operator decides, nothing escalates on its own.
+        _pause(con, run, task, f"checks still failing after {contract.MAX_ROUNDS} rounds; the operator decides "
+                               f"(office rerun {task['id']} --fresh, amend the task, or stop it)")
+        return
+    deliver_findings(con, run, task, gate)
+
+
 def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
     """Record one task-gate result and re-evaluate the task. Caller holds tx."""
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gate_id,)).fetchone())
+    if contract.is_convergence(run) and gate["kind"] == "checks":
+        _ingest_checks_convergence(con, run, gate, state.get_task(con, run["id"], gate["task_id"]), outcome)
+        return
     task = state.get_task(con, run["id"], gate["task_id"])
     verdict = outcome["verdict"]
     parsed: review_parse.Parsed | None = outcome.get("parsed")
@@ -785,7 +880,12 @@ def _upsert_finding(con, run, task, gate, f, outcome, carried: bool = False) -> 
     fp = _fingerprint(f)
     existing = con.execute("SELECT id, state FROM findings WHERE run_id=? AND task_id=? AND gate_kind=? AND code=? "
                            "AND state IN ('open','minor')", (run["id"], task["id"], gate["kind"], f["code"])).fetchone()
-    new_state = "open" if f["severity"] == "material" else "minor"
+    if "blocking" in f:
+        # Convergence contract: blocking is the reviewer's call, not the severity's.
+        new_state = "open" if f["blocking"] else "minor"
+        f = {**f, "severity": "material" if f["blocking"] else "minor", "level": f.get("level") or f.get("severity")}
+    else:
+        new_state = "open" if f["severity"] == "material" else "minor"
     if existing:
         con.execute("UPDATE findings SET summary=?, location=?, action=?, fingerprint=?, gate_id=?, revision_id=?, "
                     "measurement_json=?, updated_at=?, state=?, level=? WHERE id=?",
@@ -911,7 +1011,7 @@ def _no_progress(con, run, task, gate, repeats: int) -> bool:
 
 def _pause(con, run, task, reason: str) -> None:
     preserved = task["current_revision_id"]
-    passing = [r["kind"] for r in con.execute("SELECT kind FROM gates WHERE revision_id=? AND verdict='PASS' AND status='done'",
+    passing = [r["kind"] for r in con.execute("SELECT kind FROM gates WHERE revision_id=? AND verdict IN ('PASS','APPROVED') AND status='done'",
                                               (preserved,)).fetchall()]
     state.update_task(con, run["id"], task["id"], status="paused", pause_reason=reason)
     state.emit(con, run, "task.paused", f"PAUSED {task['id']}: {reason}; preserved {preserved}"
@@ -935,8 +1035,12 @@ def deliver_findings(con, run: dict, task: dict, gate: dict) -> None:
                        "ORDER BY created_at", (run["id"], task["id"])).fetchall()
     text = "; ".join(f"{r['code']} {r['location'] or ''} {r['summary'][:100]}" for r in rows[:6])
     state.update_task(con, run["id"], task["id"], status="changes_required")
-    state.emit(con, run, "gate.changes_required", f"CHANGES_REQUIRED {gate['revision_id']}: {text}",
-               audience=f"task:{task['id']}", task_id=task["id"])
+    if contract.is_convergence(run):
+        state.emit(con, run, "gate.recheck", f"RECHECK {gate['revision_id']}: {text}",
+                   audience=f"task:{task['id']}", task_id=task["id"])
+    else:
+        state.emit(con, run, "gate.changes_required", f"CHANGES_REQUIRED {gate['revision_id']}: {text}",
+                   audience=f"task:{task['id']}", task_id=task["id"])
     if worker_live(con, task["current_dispatch_id"]):
         state.enqueue(con, run, "notify_worker", {"dispatch_id": task["current_dispatch_id"], "task_id": task["id"],
                                                   "text": f"Findings on {gate['revision_id']}: run office status, fix, then office submit."},
@@ -971,10 +1075,18 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
     if rev is None or rev["status"] != "current":
         return False
     from office import authority
-    waived = authority.waived(con, run["id"], task_id)
+    convergence = contract.is_convergence(run)
+    waived = authority.waived(con, run["id"], task_id) if not convergence else set()
     gates_now = [g for g in required_gates(con, run, task, rev_id) if g["kind"] not in waived]
     basis = "all required gates PASS"
-    if not gates_now and not waived:
+    if convergence:
+        # #337: the task gate is its checks; independent review happens per lane.
+        basis = "checks APPROVED; lane convergence pending" if gates_now else "no checks declared; lane convergence pending"
+        for g in gates_now:
+            if g["kind"] == "checks" and (g["status"] != "done" or g["verdict"] != "APPROVED"):
+                return False
+        gates_now = []
+    elif not gates_now and not waived:
         # A revision with no gate is accepted only when policy explicitly
         # requires none: the plan declared `checks: none`, the gear funds no
         # independent review, and nothing user-visible is in the acceptance.
@@ -994,7 +1106,7 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
     if con.execute("SELECT 1 FROM deliveries WHERE run_id=? AND task_id=? AND status IN ('queued','delivered')",
                    (run["id"], task_id)).fetchone():
         return False
-    for dfct in plans.open_defects(con, run["id"]):
+    for dfct in plans.open_defects(con, run["id"]) if not convergence else plans.blocking_findings(con, run):
         ids = plans._task_ids_in(dfct.get("location") or "")
         if not ids or task_id in ids:
             return False
@@ -1024,6 +1136,10 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
     for other in state.tasks(con, run["id"]):
         if task_id in other["depends"] and other["status"] == "submitted":
             evaluate_acceptance(con, run, other["id"])
+    if convergence:
+        from office import convergence as convergence_mod
+        convergence_mod.on_task_accepted(con, state.get_run(con, run["id"]), task_id)
+        return True
     from office import integration
     integration.maybe_queue(con, run)
     return True
@@ -1108,7 +1224,10 @@ def close_blockers(con, run: dict) -> list[str]:
     if any(not superseded_integration_gate(con, run, g) for g in
            con.execute("SELECT * FROM gates WHERE run_id=? AND status IN ('queued','running','waiting')", (run["id"],))):
         out.append("reviews are still running")
-    if plans.open_defects(con, run["id"]):
+    if contract.is_convergence(run):
+        from office import convergence
+        out.extend(convergence.close_blockers(con, run))
+    elif plans.open_defects(con, run["id"]):
         out.append("a plan defect is open")
     rs = plans.review_state(con, run)
     if rs["required"] and rs["pending"]:

@@ -10,12 +10,17 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
 import pytest
+
+import fake_agent
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
@@ -70,10 +75,95 @@ BAD_ADD = "def add(a, b):\n    return a - b\n"
 GOOD_MUL = "def mul(a, b):\n    return a * b\n"
 
 
+class _Pipe:
+    """The write end of an in-process agent's stdin: it only keeps the prompt."""
+
+    def __init__(self):
+        self.data = b""
+
+    def write(self, chunk: bytes) -> None:
+        self.data += chunk
+
+    def close(self) -> None:
+        pass
+
+
+class _Interrupted(BaseException):
+    """A signal reached the supervisor while an in-process agent was running."""
+
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
+
+
+class InProcessAgent:
+    """A Popen-like fake harness child that runs `fake_agent.run` in this process.
+
+    The agent runs when its output is first read, after the supervisor has
+    written the prompt. It cannot be signalled as a process, so `poll()` never
+    reports it as running (the supervisor's handler would otherwise forward to
+    its own group). A SIGTERM/SIGHUP/SIGINT that arrives meanwhile stops the
+    agent where it is, and it ends as a killed child does: return code -signum.
+    """
+
+    def __init__(self, argv, cwd, env, stdin):
+        self.argv, self.cwd, self.env = argv, cwd, env
+        self.pid = os.getpid()
+        self.returncode = None
+        self.stdin = _Pipe() if stdin == subprocess.PIPE else None
+        self.stdout = self
+        self._output = None
+        self._pending = []
+        self._running = False
+        # From the spawn on, a signal is chained to the supervisor's own handler (which records it for the
+        # classification) and either stops the running agent or, before it starts, keeps it from starting.
+        self._previous = {s: signal.signal(s, self._on_signal) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+
+    def _on_signal(self, signum, frame):
+        handler = self._previous.get(signum)
+        if callable(handler):
+            handler(signum, frame)
+        self._pending.append(signum)
+        if self._running:
+            raise _Interrupted(signum)
+
+    def _run(self):
+        if self._output is not None:
+            return
+        prompt = self.stdin.data.decode() if self.stdin else ""
+        try:
+            if self._pending:  # a signal arrived before the agent started: it never runs
+                raise _Interrupted(self._pending[0])
+            self._running = True
+            self.returncode, output = fake_agent.run(self.argv, prompt, self.env, self.cwd)
+        except _Interrupted as stop:
+            self.returncode, output = -stop.signum, b""
+        self._running = False
+        self._output = io.BytesIO(output)
+        self._restore()
+
+    def _restore(self):
+        for s, handler in self._previous.items():
+            signal.signal(s, handler)
+
+    def read1(self, size=-1) -> bytes:
+        self._run()
+        return self._output.read1(size)
+
+    def poll(self):
+        return 0 if self.returncode is None else self.returncode
+
+    def wait(self):
+        self._run()
+        return self.returncode
+
+
 class Env:
-    def __init__(self, tmp: Path, monkeypatch, *, restored: bool = False):
-        """`restored`: tmp already holds a repository copied from a snapshot."""
+    def __init__(self, tmp: Path, monkeypatch, *, restored: bool = False, contract: str | None = None):
+        """`restored`: tmp already holds a repository copied from a snapshot. `contract`
+        pins the review contract new runs start with (the user config's review.contract)."""
         self.approved = False
+        self.trust_snapshots = None  # routes `trust()` has already worked out, by inputs; the env fixture sets it
         self.tmp = tmp
         self.home = tmp / "home"
         self.data = tmp / "data"
@@ -83,9 +173,11 @@ class Env:
         self.scenario = tmp / "scenario.json"
         for d in (self.home, self.data, self.state, self.bin):
             d.mkdir(parents=True, exist_ok=True)
+        self.fakes = {}
         for name in ("codex", "claude", "gemini", "agy"):
-            (self.bin / name).write_text(f"#!{sys.executable}\nimport os, runpy\nos.environ['FAKE_HARNESS'] = '{name}'\n"
-                                         f"runpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
+            self.fakes[self.bin / name] = (f"#!{sys.executable}\nimport os, runpy\nos.environ['FAKE_HARNESS'] = '{name}'\n"
+                                           f"runpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
+            (self.bin / name).write_text(self.fakes[self.bin / name])
             (self.bin / name).chmod(0o755)
         env_drop = [k for k in os.environ if k.startswith(("OFFICE_", "HERDR_", "AUTO_OFFICE_"))]
         for k in env_drop:
@@ -117,8 +209,37 @@ class Env:
         monkeypatch.setenv("GIT_COMMITTER_NAME", "t")
         monkeypatch.setenv("GIT_COMMITTER_EMAIL", "t@t")
         self.scenario.write_text("{}")
+        if contract:
+            # A suite about v3.1 review policy runs v3.1 runs, as a run started before #337 does.
+            (tmp / "user-config.yaml").write_text(f"review:\n  contract: {contract}\n")
         if not restored:
             self._init_repo()
+        sys.path.insert(0, str(SRC))
+        from office import dispatch
+        spawn_process = dispatch._spawn_agent
+        monkeypatch.setattr(dispatch, "_spawn_agent", lambda argv, cwd, env, stdin: self._spawn_agent(
+            spawn_process, argv, cwd, env, stdin))
+
+    def _spawn_agent(self, spawn_process, argv, cwd, env, stdin):
+        """The agent seam: an unmodified fake harness runs in this process; anything
+        that needs a real process (a real binary, a sleep, a wall cap, a signal
+        the scenario cannot emulate) is started as one."""
+        exe = shutil.which(argv[0], path=env.get("PATH"))
+        fake = exe and Path(exe) in self.fakes and Path(exe).read_text() == self.fakes[Path(exe)]
+        if not fake or self._has_wall_cap(Path(exe).name, env) or not fake_agent.scenario_runs_in_process(env):
+            return spawn_process(argv, cwd, env, stdin)
+        env = {**env, "FAKE_HARNESS": Path(exe).name}
+        return InProcessAgent(argv, cwd, env, stdin)
+
+    @staticmethod
+    def _has_wall_cap(harness, env):
+        """Whether the supervisor would arm a wall-clock cap for this harness: the env override or
+        any of its profiles' own `max_minutes`."""
+        from office import adapters, dispatch
+        with mock.patch.dict(os.environ, {k: v for k, v in env.items() if k == "OFFICE_WORKER_MAX_MINUTES"}):
+            return any(dispatch._wall_cap_seconds(prof or {}) for adapter in adapters.load_all().values()
+                       if adapters.executable(adapter) == harness
+                       for prof in (adapter.get("office_profiles") or {}).values())
 
     def _init_repo(self):
         self.repo.mkdir()
@@ -182,19 +303,68 @@ class Env:
         from office import db
         return db.connect()
 
+    def _trust_inputs(self):
+        """Everything `trust()` derives its routes from. Calls with equal inputs record the same triples."""
+        from office import adapters, candidates, routing, scoring
+        from office.util import sha256_obj
+        all_adapters = adapters.load_all()
+        catalog = candidates.catalog_rows()
+        user_config = Path(os.environ["OFFICE_USER_CONFIG"])
+        found = {}  # what each adapter finds on PATH: an untouched fake of ours (by name), or whatever else it is
+        for name, adapter in all_adapters.items():
+            exe = shutil.which(adapters.executable(adapter) or "")
+            fake = exe and Path(exe) in self.fakes and Path(exe).read_text() == self.fakes[Path(exe)]
+            found[name] = Path(exe).name if fake else exe
+        # Route identity includes the resolved harness major, which can change
+        # while the executable path and adapter configuration stay the same.
+        route_harnesses = {row.get("invocation_harness") for row in catalog
+                           if row.get("dispatchable") is not False}
+        versions = {name: scoring.harness_major(adapters.harness_version(all_adapters[name]))
+                    for name in route_harnesses
+                    if name in all_adapters and found.get(name)}
+        data = sha256_obj([all_adapters, catalog, found, versions,
+                           user_config.read_text() if user_config.is_file() else None])
+        # a test that replaces any of these functions gets its own routes
+        return (data, candidates.build_candidates, candidates.catalog_rows, adapters.load_all, adapters.installed,
+                adapters.harness_version, routing.candidate_id, scoring.record_trust_act)
+
     def trust(self, triple_prefix: str = ""):
-        """Record the user's explicit trust acts for every installed fake route."""
+        """Record the user's explicit trust acts for every installed fake route.
+
+        The first call per module and inputs (`trust_snapshots`, set for tests that are not `approved`)
+        builds the candidates and keeps the acts it recorded. Later calls restore those acts in one
+        transaction: same triples, states, actors and reasons, a fresh id and time for each.
+        """
         sys.path.insert(0, str(SRC))
         from office import candidates, paths, routing, scoring
+        key = None
+        if self.trust_snapshots is not None and not triple_prefix:
+            key = self._trust_inputs()
+        acts = self.trust_snapshots.get(key) if key else None
+        if acts is not None:
+            con = self.con()
+            try:
+                scoring.ensure_trust_schema(con)
+                for act in acts:
+                    con.execute("INSERT INTO adapter_trust_acts VALUES (?,?,?,?,?,?,?)", (
+                        str(uuid.uuid4()), act["triple"], act["target_state"], act["actor_id"], act["reason"],
+                        act["evidence_reference"], datetime.now(timezone.utc).isoformat()))
+                con.commit()
+            finally:
+                con.close()
+            return
+        acts = []
         con = self.con()
         try:
             for role in ("executor", "code_reviewer", "visual_reviewer", "integration_reviewer"):
                 cands, _ = candidates.build_candidates(con, role, probe=False)
                 for c in cands:
-                    scoring.record_trust_act(paths.runs_db(), routing.candidate_id(c), "proven", "user",
-                                             "test fixture: user trusts the fake route")
+                    acts.append(scoring.record_trust_act(paths.runs_db(), routing.candidate_id(c), "proven", "user",
+                                                         "test fixture: user trusts the fake route"))
         finally:
             con.close()
+        if key:
+            self.trust_snapshots[key] = acts
 
     def write_plan(self, text: str, where: Path | None = None, run_id: str | None = None):
         """Write the plan draft of run_id (default: the newest run)."""
@@ -223,8 +393,14 @@ def _activate(e: Env, monkeypatch) -> Env:
     return e
 
 
+def _contract(request) -> str | None:
+    """The review contract a `review_contract("v3.1")` marker pins, if any."""
+    m = request.node.get_closest_marker("review_contract")
+    return m.args[0] if m else None
+
+
 @pytest.fixture(scope="module")
-def _approved_snapshot(tmp_path_factory):
+def _approved_snapshot(tmp_path_factory, request):
     """The state `trust + start + approve plan` for PLAN_ONE, built once per module.
 
     The steps cost about a second each time; tests marked `approved` restore this
@@ -234,12 +410,18 @@ def _approved_snapshot(tmp_path_factory):
     root = tmp_path_factory.mktemp("approved")
     monkeypatch = pytest.MonkeyPatch()
     try:
-        e = _activate(Env(root / "env", monkeypatch), monkeypatch)
+        e = _activate(Env(root / "env", monkeypatch, contract=_contract(request)), monkeypatch)
         approved_run(e)
         shutil.copytree(e.tmp, root / "snapshot", symlinks=True)
     finally:
         monkeypatch.undo()
     return root / "env", root / "snapshot"
+
+
+@pytest.fixture(scope="module")
+def _trust_snapshots():
+    """The routes `Env.trust()` records, worked out by the first call of each module and inputs."""
+    return {}
 
 
 @pytest.fixture
@@ -249,10 +431,11 @@ def env(request, tmp_path, monkeypatch):
         live, snapshot = request.getfixturevalue("_approved_snapshot")
         shutil.rmtree(live, ignore_errors=True)
         shutil.copytree(snapshot, live, symlinks=True)
-        e = Env(live, monkeypatch, restored=True)
+        e = Env(live, monkeypatch, restored=True, contract=_contract(request))
         e.approved = True
     else:
-        e = Env(tmp_path, monkeypatch)
+        e = Env(tmp_path, monkeypatch, contract=_contract(request))
+        e.trust_snapshots = request.getfixturevalue("_trust_snapshots")
     return _activate(e, monkeypatch)
 
 

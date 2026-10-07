@@ -1,0 +1,4 @@
+fdcbe6555954d108bb6b15e702469afb9b3f2f2d7b0945561d6fd2d0ec6f07a6  /mnt/data/auto-office-web-v2/index.html
+41416f0f21f582e808516893db10b71e335d53add8f58f283dfde1a4fae6df33  /mnt/data/auto-office-web-v2/README.md
+09b2e8f0a56cbb3426c98aed1375d32953b8da60beec178b8ab05ad7472394c7  /mnt/data/auto-office-web-v2/LOCKED-CONTRACT.md
+bfe9c5fd0469e1cfa39f029e26b02b3b962be352bcf2ae2859f0b11d19b107b2  /mnt/data/auto-office-web-v2/workstation-selected.svg

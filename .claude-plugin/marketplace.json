@@ -1,0 +1,23 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "auto-office",
+  "owner": {
+    "name": "Hikari9",
+    "url": "https://github.com/Hikari9"
+  },
+  "metadata": {
+    "description": "Auto Office: adaptive office engineering runtime for Claude Code and Codex / ChatGPT."
+  },
+  "plugins": [
+    {
+      "name": "auto-office",
+      "source": "./",
+      "description": "One `office` CLI over a single transactional runs.db authority. Adaptive harness/model/effort routing, one-submit verification with independent code and visual review, rolling plan review, durable amendments, version-pinned runs, and human merge-to-main.",
+      "version": "3.3.4",
+      "category": "productivity",
+      "homepage": "https://github.com/Hikari9/auto-office",
+      "repository": "https://github.com/Hikari9/auto-office",
+      "keywords": ["office", "orchestration", "routing", "adapters", "verification", "telemetry", "self-improvement"]
+    }
+  ]
+}

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "auto-office"
-version = "3.2.6"
+version = "3.3.4"
 description = "Auto Office: adaptive, independently reviewed agent engineering runtime behind one `office` CLI."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -52,6 +52,7 @@ testpaths = ["tests"]
 pythonpath = ["src", ".", "scripts"]
 markers = [
     "approved: the test starts from a run whose default plan is approved (restored from a per-module snapshot)",
+    "review_contract(name): runs the test's Office runs under that review contract (v3.1 suites keep testing pinned pre-#337 runs)",
     "slow: minutes-long real-gate tests (dogfood); deselected by default, run with --all or -m slow",
     "integration: needs a repo, subprocess, fake harness or browser; deselected by default, run with --all or -m integration",
     "legacy: tests the 3.0 scripts/ surface; deselected by default, run with --all or -m legacy",

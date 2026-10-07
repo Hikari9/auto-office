@@ -98,7 +98,7 @@ def test_executor_brief_forbids_sharing_node_modules_and_names_a_failed_log():
 
 def test_new_task_worktree_is_installed_before_the_agent_and_recorded(env):
     _config(env, INSTALL)
-    approved_run(env, executor=EXECUTOR, code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=EXECUTOR, convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     code, out = env.office("dispatch", "T1", check=0)
     con = env.con()
     wt = Path(con.execute("SELECT worktree FROM dispatches WHERE kind='executor'").fetchone()[0])
@@ -115,7 +115,7 @@ def test_new_task_worktree_is_installed_before_the_agent_and_recorded(env):
 
 def test_failing_setup_notifies_emits_setup_failed_and_still_launches(env):
     _config(env, "echo boom-line; exit 3")
-    approved_run(env, executor=EXECUTOR, code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=EXECUTOR, convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     code, shown = env.office("dispatch", "T1", env={"OFFICE_WORKER_LAUNCHER": "external"}, check=0)
     ddir = _dispatch_dir(env)
     assert "boom-line" in (ddir / "setup.log").read_text()
@@ -131,7 +131,7 @@ def test_failing_setup_notifies_emits_setup_failed_and_still_launches(env):
 
 
 def test_no_setup_configured_changes_nothing(env):
-    approved_run(env, executor=EXECUTOR, code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=EXECUTOR, convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1", check=0)
     ddir = _dispatch_dir(env)
     assert not (ddir / "setup.log").exists()
@@ -140,7 +140,7 @@ def test_no_setup_configured_changes_nothing(env):
 
 def test_integration_runs_setup_so_run_level_checks_need_no_install_prefix(env):
     _config(env, INSTALL)
-    approved_run(env, plan=PLAN_RC, executor=EXECUTOR, code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, plan=PLAN_RC, executor=EXECUTOR, convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1", check=0)
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]
@@ -160,6 +160,17 @@ def test_doctor_suggests_setup_when_pnpm_lock_exists_and_none_is_set(env):
     assert "worktree.setup is not set" not in out, out
 
 
+def test_doctor_names_a_setup_tool_that_is_not_on_path(env):
+    """#479: `pnpm install` with no pnpm exits 127 in every worktree; doctor says so up front."""
+    _config(env, "office-no-such-tool install --frozen-lockfile")
+    code, out = env.office("doctor")
+    assert "office-no-such-tool is not on PATH" in out, out
+    (env.repo / ".auto-office" / "config.yaml").write_text(  # a covered alternative is not a problem
+        'worktree:\n  setup: "office-no-such-tool install || true"\n')
+    code, out = env.office("doctor")
+    assert "not on PATH" not in out, out
+
+
 def test_missing_or_failed_marker_runs_setup_on_reuse_and_only_success_marks_done(tmp_path):
     run = _run_dict("test -f ok-flag")
     # Office stopped after creating the worktree and before setup finished: no marker.
@@ -175,7 +186,7 @@ def test_missing_or_failed_marker_runs_setup_on_reuse_and_only_success_marks_don
 def test_only_check_checkouts_run_setup(env):
     from office import gates, state
     _config(env, "touch setup-ran")
-    approved_run(env, executor=EXECUTOR, code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=EXECUTOR, convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     con = env.con()
     run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
     head = env.git("rev-parse", "HEAD").strip()

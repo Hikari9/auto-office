@@ -456,7 +456,7 @@ def test_recovered_busy_pane_is_not_settled_by_the_blind_limit(env, monkeypatch)
 
 @pytest.mark.approved
 def test_typed_pointer_left_in_the_composer_gets_a_second_enter(env, monkeypatch):
-    state_file, run, d, _, res = launch_in_herdr(env, monkeypatch, reads=[*PRE, EMPTY, EMPTY,
+    state_file, run, d, _, res = launch_in_herdr(env, monkeypatch, reads=[*PRE, EMPTY, EMPTY, EMPTY,
                                                                      "> pointer typed, not sent", BUSY])
     assert res["prompt_landed"] is True
     enters = [c for c in _calls(state_file) if c[:2] == ["pane", "send-keys"] and c[-1] == "Enter"]

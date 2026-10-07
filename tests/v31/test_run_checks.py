@@ -106,7 +106,7 @@ def test_amend_contract_rederives_run_checks(env):
 
 def test_amend_removing_bad_run_check_retriggers_integration(env):
     approved_run(env, plan=PLAN_BAD_CHECK, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
-        code_reviewer=[{"reply": "VERDICT: PASS"}])
+        convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     code, out = env.office("dispatch", "T1", check=0)
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]
@@ -127,7 +127,7 @@ def test_amend_removing_bad_run_check_retriggers_integration(env):
 def test_no_recheck_while_a_task_is_not_accepted(env):
     approved_run(env, plan=PLAN_TWO_RC,
         executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}}, "submit": True}],
-        code_reviewer=[{"reply": "VERDICT: PASS"}])
+        convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     code, out = env.office("dispatch", "T1", check=0)
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]
@@ -154,7 +154,7 @@ def test_planner_brief_says_how_to_cap_vitest_workers(env):
 def test_stray_worktree_holding_the_integration_branch_is_named_and_resume_retries(env, tmp_path):
     # rock-mcp run C10: a manual worktree on office/<run>/integration made
     # `git worktree add -B` fail with no hint of which worktree held it.
-    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]
     stray = tmp_path / "stray"
@@ -168,3 +168,17 @@ def test_stray_worktree_holding_the_integration_branch_is_named_and_resume_retri
     env.office("resume", check=0)
     assert _landing(con, run_id)["integration"]["status"] == "accepted", _landing(con, run_id)
     assert "integration.retry" in _events(con, run_id)
+
+
+def test_blocked_detail_keeps_the_trailing_next_step():
+    from office.integration import blocked_detail
+
+    command = "uv run --extra visual --extra test pytest -q " + " ".join(f"tests/v31/test_{i}.py" for i in range(40))
+    summary = (f"`{command}` timed out after 1800s; host load 55 exceeds 16 (8 CPUs); "
+               "rerun when the host is quieter: office resume")
+    detail = blocked_detail({"verdict": "UNAVAILABLE", "summary": summary})
+    assert detail.startswith("run checks UNAVAILABLE: `uv run")
+    assert detail.endswith("rerun when the host is quieter: office resume")
+    assert len(detail) <= 400 + len("run checks UNAVAILABLE: ")
+    short = "`pytest` failed; fix it"
+    assert blocked_detail({"verdict": "FAIL", "summary": short}) == f"run checks FAIL: {short}"

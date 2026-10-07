@@ -1,5 +1,7 @@
 # Auto Office 3.1.0 — implementation
 
+> Superseded for new runs: the review policy here is replaced by [`review-convergence.md`](review-convergence.md) (#337). It still governs runs pinned to the v3.1 review contract.
+
 Status: **implemented** (this document describes the code in `src/office/`). The product and
 design contracts it implements are the [v3.1 Wayfinder](https://github.com/Hikari9/auto-office/issues/152):
 the [charter](https://github.com/Hikari9/auto-office/issues/153#issuecomment-5832359821),
@@ -151,8 +153,8 @@ is accepted only when policy explicitly requires none (`checks: none`, a gear fu
 nothing user-visible). User waivers (`office approve waive T2:visual`) are recorded as named gaps.
 A visual review the user had run outside Office (`office approve visual T2 --by <route> --report
 <file>`) is recorded as a new visual gate on the current revision: the file must parse as a visual
-review with a PASS or CHANGES_REQUIRED verdict, and the reviewer must not share the producer's
-model family. Plan submit refuses a visual block capture could never reach (a non-local URL, or
+review with a PASS or CHANGES_REQUIRED verdict. The user attests (the quote) that it came from a
+session other than the producer's; the producer's model family is not a bar. Plan submit refuses a visual block capture could never reach (a non-local URL, or
 an unreachable local URL with no `start:`) and warns when no capture backend is installed.
 
 **Convergence.** Rounds count per (task, gate). A repeated finding fingerprint across rounds, or
@@ -189,11 +191,12 @@ form, because both travel in the stored route.
 - `--external`: prepares the worktree, lease, brief and `agent.env`, launches nothing, and emits a
   `launch` notice with the herdr commands. Every dispatch prints brief, env, worktree and those commands.
 - `--review-as <harness>/<model>[@effort]` (plus `--review-cli` / `--review-external`): pins the task's
-  code reviewer. It is refused at dispatch when it shares the executor's model family (claude, gpt,
-  gemini, ...). At review time the gate checks again against the dispatch that actually produced the
-  revision, and a pinned reviewer is never substituted by another route. An external reviewer is ended
+  code reviewer. Independence is per agent, not per model family: every reviewer is a fresh dispatch and
+  session, never the producer's, so it may share the executor's model. A pinned reviewer is never
+  substituted by another route. An external reviewer is ended
   by a watcher once its review file is written and stops growing (no timeout; revoke ends it).
-- A routed reviewer excludes a declared executor's family (`family:<name>` route exclusion).
+- A routed reviewer does not exclude the executor's model or family (the `family:<name>` route
+  exclusion was removed); the code reviewer defaults to Luna xhigh, then Sonnet 5.5 high.
 
 ## 7. Rolling plan review, amendments, authority
 
@@ -245,8 +248,8 @@ spent). No reference means "fidelity unmeasured". Visual input keys hash only pr
 the reference bytes, the viewport/state contract and the environment, so unrelated edits reuse the
 verdict and a reference change invalidates it.
 
-Judgment uses the `visual_reviewer` role. The preference is Gemini 3.8 Flash medium, then low, via agy,
-then Sonnet, then Luna. `model_family_floors` holds default Gemini routing to 3.7 or newer (an explicit
+Judgment uses the `visual_reviewer` role. The preference is Gemini 3.8 Flash medium via agy,
+then Sonnet 5.5 high, then Luna. `model_family_floors` holds default Gemini routing to 3.7 or newer (an explicit
 `--route` is exempt). A route qualifies
 only after `conformance.probe_vision` — a generated image with random digits and a coloured square,
 sent through that exact harness/model/effort/adapter path in a separate session — returns the right

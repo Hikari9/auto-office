@@ -72,11 +72,24 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
     if ident:
         from office import config as cfg
         top = ident[0]
-        effective, _ = cfg.resolve(top)
-        if (top / "pnpm-lock.yaml").is_file() and not str((effective.get("worktree") or {}).get("setup") or "").strip():
+        try:
+            effective, _ = cfg.resolve(top)
+        except ValueError as exc:
+            res.add(f"config: invalid: {exc}")
+            effective = {}
+        setup = str((effective.get("worktree") or {}).get("setup") or "").strip()
+        if (top / "pnpm-lock.yaml").is_file() and not setup:
             res.add("worktree setup: pnpm-lock.yaml found but worktree.setup is not set; new worktrees start without "
                     "node_modules. Add to .auto-office/config.yaml: worktree: {setup: \"pnpm install --offline "
-                    "--frozen-lockfile || pnpm install --frozen-lockfile\"}")
+                    "--frozen-lockfile || pnpm install --frozen-lockfile\"}"
+                    + ("" if shutil.which("pnpm") else "; pnpm is not on PATH, install it first (e.g. "
+                       "corepack enable pnpm, or brew install pnpm)"))
+        missing = setup_tools_missing(setup)
+        if missing:
+            problems += 1
+            res.add(f"worktree setup: `{setup}` runs under /bin/sh, but {', '.join(missing)} "
+                    f"{'is' if len(missing) == 1 else 'are'} not on PATH; every new worktree's setup would exit 127 "
+                    "(command not found). Install it or fix worktree.setup")
         for leg in legacy.legacy_runs(paths.primary_checkout(ident[1])):
             if leg.active:
                 have = legacy.retained_runtime(leg.plugin_commit, materialize=fix)
@@ -187,3 +200,30 @@ def _probe_all(con) -> list[str]:
         r = conformance.probe_vision(con, run, cand, adapter)
         out.append(f"probe {r['triple']}: {r['result']} ({r['detail']})")
     return out or ["no visual-capable routes installed"]
+
+
+_SH_BUILTINS = {"cd", "export", "set", "unset", "test", "[", "true", "false", "echo", "printf", ":", ".", "source",
+                "command", "exec", "eval", "if", "then", "else", "fi", "for", "do", "done", "while", "case", "esac",
+                "exit", "return", "umask", "type", "hash", "env", "{", "}", "(", ")"}
+
+
+def setup_tools_missing(setup: str) -> list[str]:
+    """The programs a `worktree.setup` command starts that are not on PATH, where
+    no `||` alternative covers them (#479: `pnpm install` with no pnpm exits 127
+    in every new worktree, and the dispatch continues without dependencies)."""
+    import re
+    import shlex
+    missing: list[str] = []
+    for step in re.split(r"&&|;|\n", setup or ""):
+        tools = []
+        for alt in step.split("||"):
+            try:
+                words = shlex.split(alt.split("|")[0])
+            except ValueError:
+                return []
+            words = [w for w in words if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", w)]
+            tools.append(words[0] if words else "")
+        if any(not t or t in _SH_BUILTINS or "/" in t or "$" in t or shutil.which(t) for t in tools):
+            continue
+        missing += [t for t in dict.fromkeys(tools) if t not in missing]
+    return missing

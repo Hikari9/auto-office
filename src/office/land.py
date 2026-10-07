@@ -32,7 +32,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from office import db, gates, integration, paths, prs, state
+from office import closeout, db, gates, integration, paths, prs, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import now_iso, short
@@ -90,6 +90,13 @@ def _snapshot(con, run: dict) -> dict:
     tasks = integration.accepted_set(con, run)
     gates_ = con.execute("SELECT id, kind, status, verdict FROM gates WHERE run_id=? AND subject='integration' "
                          "AND input_key=? ORDER BY id", (run["id"], f"integration:{commit}")).fetchall()
+    from office import contract
+    if contract.is_convergence(run):
+        # Lane and shared-scope reviews and waivers are part of what a land stands on.
+        from office import convergence
+        conv = convergence.receipt(con, run)
+        gates_ = list(gates_) + [(s["id"], s["status"], s["commit"]) for s in conv["scopes"]] \
+            + [(w["target"], w["by"]) for w in conv["waivers"]]
     return {"commit": commit,
             "accepted": sorted((t["id"], t["accepted_revision_id"]) for t in tasks or []) if tasks is not None else None,
             "gates": [tuple(g) for g in gates_]}
@@ -144,7 +151,7 @@ def _land_preview(con, run: dict, snap: dict, deploy: dict) -> Result:
             _deploy(con, run, "preview", deploy, checkout, res, commit=head, tree=head_tree)
         _record_deployed(con, run, "preview", head, head_tree)
     _record(con, run, delivered=f"preview deployed from {commit[:12]}; PRs left open for review")
-    res.next = "office close (PRs stay open for the user to merge)"
+    res.next = closeout.DOCS_STEP + "office close (PRs stay open for the user to merge)"
     return res
 
 
@@ -154,7 +161,7 @@ def _land_merge(con, run: dict, mode: str, snap: dict, deploy: dict, *, redeploy
         # PRs are off and no accepted task has file scope: nothing to merge or deploy.
         res.add("nothing to merge: no accepted task has a PR (all have no file scope)")
         _record(con, run, delivered="no task PRs to merge")
-        res.next = "office close"
+        res.next = closeout.DOCS_STEP + "office close"
         return res
     commit = snap["commit"]
     repo = Path(run["repo_root"])
@@ -175,7 +182,7 @@ def _land_merge(con, run: dict, mode: str, snap: dict, deploy: dict, *, redeploy
     if current and not redeploy and (mode != "e2e" or _deployed(con, run, "prod", _tree(repo, done))):
         res.add(f"already landed at {done[:12]}; merge and deploy steps skipped")
         _close_issue(con, run, done, res)
-        res.next = "office close"
+        res.next = closeout.DOCS_STEP + "office close"
         return res
     if mode == "e2e" and not (redeploy or mark_deployed):
         # Before any merge: a prod state Office cannot read refuses here, with nothing changed.
@@ -204,7 +211,7 @@ def _land_merge(con, run: dict, mode: str, snap: dict, deploy: dict, *, redeploy
             _record_deployed(con, run, "prod", head, head_tree, by="redeploy" if redeploy else None)
     _close_issue(con, run, main, res)
     _record(con, run, merged={"commit": main, "integration_commit": commit, "rollback": before, "at": now_iso()})
-    res.next = "office close"
+    res.next = closeout.DOCS_STEP + "office close"
     return res
 
 
@@ -411,9 +418,17 @@ def _rebase_locked(con, run: dict, tasks: list[dict]) -> Result:
         run = state.get_run(con, run["id"])
         integration._set_integration(con, run, status="pending", detail=f"rebasing onto {new[:12]}")
         state.emit(con, run, "integration.rebase", f"rebased onto origin/{base} {new[:12]}; integration re-check queued")
-        integration.retrigger(con, run)
+        from office import contract
+        if contract.is_convergence(run):
+            # The rebase is a shared composition boundary (S-rebase): reviewed once, then integration.
+            from office import convergence
+            convergence.requeue_all(con, run)
+        else:
+            integration.retrigger(con, run)
     return Result(lines=[f"every accepted task merges cleanly onto origin/{base} {new[:12]}",
-                         "integration re-composes there and re-runs the run checks and an integration review"],
+                         "integration re-composes there and re-runs the run checks and "
+                         + ("one review of the rebase scope (S-rebase)" if contract.is_convergence(run)
+                            else "an integration review")],
                   next="office status (then office land once integration is accepted)")
 
 

@@ -15,7 +15,7 @@ def _approve(env):
 def test_normal_code_task_to_close(env):
     env.trust()
     env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
-               code_reviewer=[{"reply": "VERDICT: PASS"}])
+               convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     out = start_inline(env)
     assert "plan p1 submitted" in out
     code, out = env.office("dispatch", "T1")
@@ -38,7 +38,7 @@ def test_normal_code_task_to_close(env):
 def test_code_review_failure_then_fix(env):
     approved_run(env, executor=[{"write": {"calc.py": BAD_ADD}, "submit": True},
                            {"write": {"calc.py": GOOD_ADD}, "submit": True}],
-                 code_reviewer=[{"reply": "VERDICT: PASS"}])
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     code, out = env.office("dispatch", "T1")
     assert code == 0, out
     code, data = env.ojson("status")
@@ -52,14 +52,14 @@ def test_code_review_failure_then_fix(env):
     code, data = env.ojson("status")
     assert data["data"]["tasks"]["T1"] == "accepted", data
     roles = [c["role"] for c in env.calls()]
-    assert roles.count("executor") == 2 and roles.count("code_reviewer") == 1, roles
+    assert roles.count("executor") == 2 and roles.count("convergence_reviewer") == 1, roles
 
 
 @pytest.mark.approved
 def test_tool_cache_outside_scope_is_left_out_of_the_revision(env):
     # A harness hook (graft) drops a session cache into the worktree; it is not the task's work.
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD, "graft/.cache/session/s.json": "{}"}, "submit": True}],
-                 code_reviewer=[{"reply": "VERDICT: PASS"}])
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     code, out = env.office("dispatch", "T1")
     assert code == 0, out
     code, data = env.ojson("status")
@@ -82,7 +82,7 @@ def _submitted_files(env):
 def test_untracked_file_outside_scope_is_left_out_with_a_warning(env):
     env.trust()
     env.script(executor=[{"write": {"calc.py": GOOD_ADD, "notes.txt": "x"}, "submit": True}],
-               code_reviewer=[{"reply": "VERDICT: PASS"}])
+               convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     start_inline(env)
     _approve(env)
     code, out = env.office("dispatch", "T1")
@@ -100,7 +100,7 @@ def test_harness_config_edit_outside_scope_is_left_out_with_a_warning(env):
     env.git("commit", "-qm", "harness config")
     env.trust()
     env.script(executor=[{"write": {"calc.py": GOOD_ADD, ".claude/settings.json": '{"hooks": {}}\n'}, "submit": True}],
-               code_reviewer=[{"reply": "VERDICT: PASS"}])
+               convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     start_inline(env)
     _approve(env)
     code, out = env.office("dispatch", "T1")
@@ -115,7 +115,7 @@ def test_refused_submit_blocks_instead_of_relaunching(env):
     # A tracked source edit outside scope is refused; a fresh session would hit the same
     # refusal, so the task blocks with the reason instead of relaunching.
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD, "README.md": "changed\n"}, "submit": True}],
-                 code_reviewer=[{"reply": "VERDICT: PASS"}])
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1")
     code, data = env.ojson("status")
     assert data["data"]["tasks"]["T1"] == "blocked", data
@@ -131,7 +131,7 @@ def test_dispatch_returns_while_the_worker_is_still_running(env):
     # process launcher, dispatch returns at once and the result arrives later.
     import time
     approved_run(env, executor=[{"sleep": 6, "write": {"calc.py": GOOD_ADD}, "submit": True}],
-                 code_reviewer=[{"reply": "VERDICT: PASS"}])
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     t = time.time()
     code, out = env.office("dispatch", "T1", env={"OFFICE_LAUNCHER": "process"})
     elapsed = time.time() - t

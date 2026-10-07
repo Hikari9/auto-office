@@ -13,6 +13,7 @@ path passes (office.conformance).
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -26,6 +27,8 @@ from office.util import atomic_write_json, sha256_obj
 
 PROFILE_KINDS = ("worker", "reviewer", "vision")
 _VERSION_TTL_SECONDS = 6 * 3600
+_RESOLVED_EXE: dict[tuple[str, str], tuple[str | None, float]] = {}
+_VERSION_MEMO: dict[tuple, tuple[str | None, float]] = {}
 
 
 class AdapterError(RuntimeError):
@@ -52,7 +55,36 @@ def profile(adapter: dict, kind: str) -> dict | None:
     return (adapter.get("office_profiles") or {}).get(kind)
 
 
+def session_spec(adapter: dict | None) -> dict:
+    """How the adapter's harness yields a session id: `assigned` (Office passes
+    one at launch via `assign_arg`), `detected` (read from hook payloads and
+    herdr), or `none` (the harness exposes nothing). Undeclared reads as none."""
+    spec = (adapter or {}).get("session") or {}
+    return {**spec, "id": spec.get("id") or "none"}
+
+
+def assigns_session(adapter: dict | None) -> bool:
+    spec = session_spec(adapter)
+    return spec["id"] == "assigned" and bool(spec.get("assign_arg"))
+
+
+def session_output_pattern(adapter: dict | None) -> "re.Pattern[str] | None":
+    """The adapter's `session.output_pattern` (one capture group, matched per
+    line) when `output` is among its session sources: how a headless run's
+    stream names its session id. A pattern that does not compile reads as none."""
+    spec = session_spec(adapter)
+    if spec["id"] != "detected" or "output" not in (spec.get("sources") or []) or not spec.get("output_pattern"):
+        return None
+    try:
+        pattern = re.compile(str(spec["output_pattern"]))
+    except re.error:
+        return None
+    return pattern if pattern.groups == 1 else None
+
+
 def executable(adapter: dict) -> str | None:
+    if not isinstance(adapter, dict):
+        return None
     return (adapter.get("invocation") or {}).get("executable")
 
 
@@ -63,32 +95,84 @@ def installed(adapter: dict) -> bool:
 
 def harness_version(adapter: dict) -> str | None:
     """`<harness> --version`, cached briefly so routing does not fork per call."""
-    exe = executable(adapter)
-    if not exe or not shutil.which(exe):
+    if not isinstance(adapter, dict):
         return None
+    exe = executable(adapter)
+    if not exe:
+        return None
+    path_env = os.environ.get("PATH", "")
+    now = time.time()
+
+    cached_res = _RESOLVED_EXE.get((exe, path_env))
+    if cached_res and now - cached_res[1] < _VERSION_TTL_SECONDS:
+        raw_path = cached_res[0]
+    else:
+        raw_path = shutil.which(exe)
+        _RESOLVED_EXE[(exe, path_env)] = (raw_path, now)
+
+    if not raw_path:
+        return None
+
+    try:
+        resolved_path = Path(raw_path).resolve()
+        st = resolved_path.stat()
+        mtime = st.st_mtime_ns
+    except OSError:
+        _RESOLVED_EXE.pop((exe, path_env), None)
+        return None
+
+    cmd_list = (adapter.get("version_fingerprint") or {}).get("command") or [exe, "--version"]
+    cmd_key = tuple(cmd_list)
+    memo_key = (str(resolved_path), mtime, cmd_key)
+
+    cached_entry = _VERSION_MEMO.get(memo_key)
+    if cached_entry and now - cached_entry[1] < _VERSION_TTL_SECONDS:
+        return cached_entry[0]
+
     cache_path = paths.data_home() / "harness-versions.json"
     try:
-        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        raw_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        cache = raw_cache if isinstance(raw_cache, dict) else {}
     except (OSError, ValueError):
         cache = {}
-    entry = cache.get(exe)
-    now = time.time()
-    if entry and now - entry.get("at", 0) < _VERSION_TTL_SECONDS:
-        return entry.get("version")
-    cmd = (adapter.get("version_fingerprint") or {}).get("command") or [exe, "--version"]
+
+    entry = cache.get(exe) if isinstance(cache, dict) else None
+    entry_at = entry.get("at") if isinstance(entry, dict) else None
+    if (isinstance(entry, dict)
+            and isinstance(entry_at, (int, float))
+            and now - entry_at < _VERSION_TTL_SECONDS
+            and entry.get("mtime_ns") == mtime
+            and entry.get("path") == str(resolved_path)
+            and entry.get("command") == cmd_list):
+        version = entry.get("version")
+        _VERSION_MEMO[memo_key] = (version, entry_at)
+        return version
+
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-        text = (proc.stdout or proc.stderr).strip().splitlines()
+        proc = subprocess.run(cmd_list, capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        text = (out or err).splitlines()
         raw = text[0] if text else ""
     except (OSError, subprocess.SubprocessError):
+        _VERSION_MEMO[memo_key] = (None, now)
         return None
+
     match = re.search(r"\d+\.\d+(\.\d+)?", raw)
     version = match.group(0) if match else (raw or None)
-    cache[exe] = {"version": version, "at": now}
+    cache[exe] = {
+        "version": version,
+        "at": now,
+        "mtime_ns": mtime,
+        "path": str(resolved_path),
+        "command": cmd_list,
+    }
     try:
         atomic_write_json(cache_path, cache)
     except OSError:
         pass
+
+    _VERSION_MEMO[memo_key] = (version, now)
     return version
 
 
@@ -110,9 +194,10 @@ def toml_path(path: Path) -> str:
 
 def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
                output: Path | None = None, images: list[Path] | None = None,
-               include_dirs: list[Path] | None = None) -> tuple[list[str], dict]:
+               include_dirs: list[Path] | None = None, session_id: str | None = None) -> tuple[list[str], dict]:
     """Return (argv, profile). Placeholders are substituted element-wise; the
-    prompt never passes through a shell."""
+    prompt never passes through a shell. `session_id` is appended through the
+    adapter's `session.assign_arg` when the harness accepts an assigned id."""
     prof = profile(adapter, kind)
     if not prof:
         raise AdapterError(f"adapter {adapter.get('id')} has no {kind} profile")
@@ -158,11 +243,13 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
                .replace("{cwd}", str(cwd)).replace("{output_dir}", str(Path(output).parent) if output else "")
                .replace("{output}", str(output or "")))
         argv.append(arg)
+    if session_id and assigns_session(adapter):
+        argv.extend(str(a).replace("{session_id}", session_id) for a in session_spec(adapter)["assign_arg"])
     return argv, prof
 
 
 def resume_argv(adapter: dict, kind: str, *, session_id: str, model: str, effort: str, cwd: Path,
-                include_dirs: list[Path] | None = None) -> tuple[list[str], str] | None:
+                include_dirs: list[Path] | None = None, output: Path | None = None) -> tuple[list[str], str] | None:
     """(agent args, herdr kind) that reopen `session_id` in a pane, or None when
     the profile declares no `interactive.resume_argv` (the harness cannot resume).
     The resume args follow the profile's interactive args, `{session_id}` filled in."""
@@ -170,7 +257,7 @@ def resume_argv(adapter: dict, kind: str, *, session_id: str, model: str, effort
     form = (prof.get("interactive") or {}).get("resume_argv")
     if not form or not session_id:
         return None
-    base = interactive_argv(adapter, kind, model=model, effort=effort, cwd=cwd, include_dirs=include_dirs)
+    base = interactive_argv(adapter, kind, model=model, effort=effort, cwd=cwd, include_dirs=include_dirs, output=output)
     if base is None:
         return None
     args, herdr_kind = base
@@ -178,7 +265,8 @@ def resume_argv(adapter: dict, kind: str, *, session_id: str, model: str, effort
 
 
 def interactive_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
-                     include_dirs: list[Path] | None = None, output: Path | None = None) -> tuple[list[str], str] | None:
+                     include_dirs: list[Path] | None = None, output: Path | None = None,
+                     session_id: str | None = None) -> tuple[list[str], str] | None:
     """(agent args, herdr kind) for a pane-hosted interactive session, or None
     when the profile has no interactive form. The args follow `herdr agent
     start ... --`, so the executable itself is not included."""
@@ -188,5 +276,6 @@ def interactive_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: 
         return None
     form = {"argv": inter["argv"], "include_arg": prof.get("include_arg")}
     argv, _ = build_argv({**adapter, "office_profiles": {kind: form}}, kind,
-                         model=model, effort=effort, cwd=cwd, include_dirs=include_dirs, output=output)
+                         model=model, effort=effort, cwd=cwd, include_dirs=include_dirs, output=output,
+                         session_id=session_id)
     return argv[1:], prof["herdr_kind"]

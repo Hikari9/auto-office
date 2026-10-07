@@ -13,7 +13,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from office import adapters, db, dispatch, gates, jobs, paths, state
+from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import pid_alive, sha256_obj
@@ -51,11 +51,14 @@ def agent_alive(d: dict) -> bool | None:
 
 def agent_activity(d: dict) -> dict | None:
     """What a running agent is doing now, or None when that cannot be known
-    (herdr unreachable or its pane unreadable): {"alive", "busy", "hash", "text"}.
+    (herdr unreachable or its pane unreadable): {"alive", "busy", "hash", "text", "status"}
+    (`status` is herdr's agent status; `blocked` means it sees an approval or question UI).
     A headless process has no idle state: it is busy while its pid lives.
     A pane-hosted agent is busy when herdr reports `working` or the pane shows a
     turn in progress (agy reports idle mid-turn, so its pane decides); `hash`
-    is the pane content, which changes while the agent is doing anything."""
+    is the pane content, which changes while the agent is doing anything.
+    herdr reports a codex pane `working` long after its turn ended, so for codex
+    only the pane markers and the hash decide."""
     alive = agent_alive(d)
     if alive is None:
         return None
@@ -71,8 +74,9 @@ def agent_activity(d: dict) -> dict | None:
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
     status = agent.get("status") or agent.get("agent_status")
-    return {"alive": True, "busy": status == "working" or dispatch._pane_busy(text), "hash": sha256_obj(text),
-            "text": text}
+    working = status == "working" and (d.get("adapter_id") or d.get("harness")) != "codex"
+    return {"alive": True, "busy": working or dispatch._pane_busy(text), "hash": sha256_obj(text),
+            "text": text, "status": status}
 
 
 def _set_resumed_from(con, dispatch_id: str, parent: str) -> None:
@@ -87,7 +91,7 @@ def _set_resumed_from(con, dispatch_id: str, parent: str) -> None:
 
 
 def _findings_text(con, run: dict, tid: str) -> str:
-    rows = con.execute("SELECT code, location, summary FROM findings WHERE run_id=? AND task_id=? AND state='open' "
+    rows = con.execute("SELECT code, location, summary FROM findings WHERE run_id=? AND task_id=? AND " + contract.TASK_WORK_FINDINGS + " "
                        "ORDER BY created_at", (run["id"], tid)).fetchall()
     return "; ".join(f"{r['code']} {r['location'] or ''} {r['summary'][:120]}".strip() for r in rows[:8])
 
@@ -129,11 +133,40 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
             "line": "restacked onto " + ", ".join(f"{m['task']} {m['revision']}" for m in merged)}
 
 
-def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool) -> Result:
+def _sticky_check(con, run: dict, task: dict, parent: dict) -> str | None:
+    """Why the original route may not run again now, from fresh evidence, or None.
+
+    A rerun keeps its route (#300); this only reads live quota, trust and learned
+    eligibility for that exact route. A route the fresh decision never saw
+    (a probe failure, a deduplicated alias) is not refused here."""
+    route = parent.get("route") or {}
+    if route.get("override") or parent.get("role") != "executor":
+        return None
+    try:
+        fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=task["id"],
+                                      dispatch_kind="fix")
+    except Exception:  # noqa: BLE001 - the check never blocks a rerun on its own failure
+        return None
+    from office import scoring
+    triple = scoring.normalize_triple(parent.get("triple") or "")
+    for r in fresh.get("rejected") or []:
+        # Only evidence that changes while a run lives: trust/quarantine (2), quota (6),
+        # learned eligibility (7). Unknown quota is a comparison, not proof the route cannot run.
+        if r.get("stage") not in (1, 2, 6, 7) or "quota unknown" in r["reason"]:
+            continue
+        if scoring.normalize_triple(r["candidate"]) == triple:
+            return r["reason"]
+    return None
+
+
+def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False) -> Result:
     if resume == fresh:
         raise Usage("rerun-mode", f"say how to rerun {tid}: --resume continues the ended session with its context "
                     "(native harness resume); --fresh starts a new session with the open findings in its brief",
                     next_step=f"office rerun {tid} --resume | {_fresh_cmd(tid)}")
+    if reroute and resume:
+        raise Usage("rerun-mode", "--reroute starts a new session on another route; a resumed session keeps its own",
+                    next_step=f"{_fresh_cmd(tid)} --reroute")
     task = state.get_task(con, run["id"], tid)
     if task is None:
         raise Usage("unknown-task", f"no task {tid}")
@@ -175,6 +208,18 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool) -> Result:
         found = _findings_text(con, run, tid)
         extra = {"resume": {"parent": parent["id"], "session_id": session, "argv": argv[0], "herdr_kind": argv[1],
                             "findings": found}}
+    decision = None
+    if reroute:
+        decision = dispatch.planned_route(con, run, task, reroute=True)
+        if decision.get("status") != "selected":
+            raise Refused("no-route", dispatch._route_failure(tid, decision), scope=tid,
+                          next_step=dispatch._route_next(decision, tid, run))
+    else:
+        blocked = _sticky_check(con, run, task, parent)
+        if blocked:
+            raise Refused("route-unavailable", f"{tid}'s original route {parent.get('triple')} cannot run now: {blocked}",
+                          scope=tid, preserved="the task worktree and its route history",
+                          next_step=f"{_fresh_cmd(tid)} --reroute routes from current evidence")
     restack = _restack(con, run, task, parent.get("worktree"))
     if restack:
         extra = {**(extra or {}), "restack": {k: restack[k] for k in ("merged", "conflict")}}
@@ -182,8 +227,10 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool) -> Result:
             # A resumed session reads only its prompt pointer first: name the restack there.
             extra["resume"]["findings"] = "; ".join(x for x in (restack["line"], extra["resume"]["findings"]) if x)
     with db.transaction(con):
+        if decision:
+            dispatch._record_routing(con, run, decision)
         did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
-                                      extra=extra, base=(restack or {}).get("base"))
+                                      extra=extra, base=(restack or {}).get("base"), decision=decision)
         if restack:
             state.emit(con, run, "task.restacked", f"{tid} {restack['line']}", task_id=tid, dispatch_id=did)
         if resume:
@@ -191,7 +238,10 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool) -> Result:
         state.emit(con, run, "task.rerun", f"{tid} rerun {'--resume from ' + parent['id'] if resume else '--fresh'} "
                    f"as {did}", task_id=tid, dispatch_id=did)
     jobs.kick(con, run["id"])
-    res = Result(lines=[f"{tid} -> {did} executor {'resuming ' + parent['id'] if resume else 'fresh session'} launching"]
+    route_line = (f" on {decision['selected']} (rerouted)" if decision
+                  else f" on {parent.get('triple')} (original route)")
+    res = Result(lines=[f"{tid} -> {did} executor {'resuming ' + parent['id'] if resume else 'fresh session'}"
+                        f"{route_line} launching"]
                  + ([f"{tid} {restack['line']}"] if restack else []))
     res.lines.extend(f"  {line}" for line in dispatch.launch_instructions(run, state.get_dispatch(con, did)))
     res.next = "exceptions only; office status"

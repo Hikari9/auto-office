@@ -34,6 +34,7 @@ SKILL_LINE_BUDGETS = {
     'skills/auto-self-improve/SKILL.md': 29,
     # #270: when-entry-strategy-invariants-exit plus the worker and review brief templates.
     'skills/auto-takeover/SKILL.md': 72,
+    'skills/auto-update-benchmarks/SKILL.md': 24,
     'skills/auto-verification/SKILL.md': 53,
     'skills/claude-cli/SKILL.md': 43,
     # Raised from 61 for the env -i / HERDR_ENV invisibility section: a recorded
@@ -95,6 +96,13 @@ def check_versions(root=ROOT):
     manifest = root / '.claude-plugin' / 'plugin.json'
     if manifest.exists():
         found['.claude-plugin/plugin.json'] = json.loads(manifest.read_text()).get('version')
+    portable = root / 'plugin.json'
+    if portable.exists():
+        found['plugin.json'] = json.loads(portable.read_text()).get('version')
+    catalog = root / '.claude-plugin' / 'marketplace.json'
+    if catalog.exists():
+        for entry in json.loads(catalog.read_text()).get('plugins', []):
+            found[f".claude-plugin/marketplace.json:{entry.get('name')}"] = entry.get('version')
     project = root / 'pyproject.toml'
     if project.exists():
         found['pyproject.toml'] = tomllib.loads(project.read_text()).get('project', {}).get('version')

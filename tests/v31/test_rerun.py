@@ -139,6 +139,38 @@ def test_resume_launches_a_linked_dispatch_carrying_the_resume_argv(env, monkeyp
 
 
 @pytest.mark.approved
+@pytest.mark.parametrize("adapter,form", [("claude", ["--resume"]), ("codex", ["resume"])])
+def test_resume_argv_comes_from_the_recorded_id_after_the_pane_closed(env, monkeypatch, adapter, form):
+    sid = "6f1c2a9e-3b7d-4c55-9a41-0d2e8b7a1f33"
+    parent = _setup(env, monkeypatch, session=sid)
+    monkeypatch.setenv("FAKE_HERDR_AGENT", "gone")
+    con = env.con()
+    con.execute("UPDATE dispatches SET adapter_id=?, harness=?, effort='high', pane_closed_at='2026-10-05T00:00:00Z' WHERE id=?",
+                (adapter, adapter, parent))
+    con.commit()
+    from office import rerun
+    rerun.rerun(con, _run(con), "T1", resume=True, fresh=False)  # the seed adapter, not a stand-in
+    job = con.execute("SELECT payload_json FROM outbox WHERE kind='launch_agent' ORDER BY created_at DESC LIMIT 1").fetchone()
+    resume = json.loads(job["payload_json"])["resume"]
+    assert resume["session_id"] == sid and resume["argv"][-2:] == [*form, sid], resume
+    assert "--session-id" not in resume["argv"]
+
+
+@pytest.mark.approved
+def test_inspect_task_names_the_harness_that_gave_no_session_id(env, monkeypatch):
+    parent = _setup(env, monkeypatch, session=None)
+    con = env.con()
+    con.execute("UPDATE dispatches SET harness='agy' WHERE id=?", (parent,))
+    con.commit()
+    _, out = env.office("inspect", "task", "T1", env=EXTERNAL)
+    assert "session unavailable: agy exposes none" in out, out
+    con.execute("UPDATE dispatches SET session_id='sess-7' WHERE id=?", (parent,))
+    con.commit()
+    _, out = env.office("inspect", "task", "T1", env=EXTERNAL)
+    assert "| session sess-7" in out and "unavailable" not in out, out
+
+
+@pytest.mark.approved
 def test_dismiss_closes_ended_panes_and_refuses_live_ones(env, monkeypatch):
     parent = _setup(env, monkeypatch)
     from office import dispatch, rerun
@@ -153,3 +185,21 @@ def test_dismiss_closes_ended_panes_and_refuses_live_ones(env, monkeypatch):
     with pytest.raises(rerun.Refused):
         rerun.dismiss(con, _run(con), parent)
     assert rerun.dismiss(con, _run(con), None, all_=True).lines[-1].startswith("left running")
+
+
+@pytest.mark.approved
+def test_rerun_keeps_its_route_unless_rerouted_and_refuses_on_live_quota(env, monkeypatch):
+    """#300: replay is sticky; fresh quota can refuse it; --reroute routes from current evidence."""
+    parent = _setup(env, monkeypatch)
+    con = env.con()
+    triple = con.execute("SELECT triple FROM dispatches WHERE id=?", (parent,)).fetchone()[0]
+    harness = triple.split("@", 1)[0]
+    from office import candidates
+    candidates._QUOTA_CACHE.clear()
+    code, out = env.office("rerun", "T1", "--fresh", env={**EXTERNAL, "OFFICE_QUOTA_FIXTURE": json.dumps({harness: 1})})
+    assert code != 0 and "cannot run now" in out and "--reroute" in out, out
+    code, out = env.office("rerun", "T1", "--resume", "--reroute", env=EXTERNAL)
+    assert code != 0 and "--fresh --reroute" in out, out
+    candidates._QUOTA_CACHE.clear()
+    code, out = env.office("rerun", "T1", "--fresh", env={**EXTERNAL, "OFFICE_QUOTA_FIXTURE": json.dumps({harness: 90})})
+    assert code == 0 and f"on {triple} (original route)" in out, out

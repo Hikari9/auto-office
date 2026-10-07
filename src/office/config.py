@@ -114,6 +114,10 @@ def resolve(repo_root: Path | None, sets: list[str] | None = None,
             else:
                 kept[k] = v
         effective = deep_merge(effective, kept, tier, warnings)
+    from office import adaptive
+    problems = adaptive.validate(effective)
+    if problems:
+        raise ValueError("; ".join(problems))
     return effective, warnings
 
 
@@ -256,7 +260,14 @@ def resolve_gates(gear: str, risk_high: bool, config: dict) -> dict:
         code_rounds = ad_hoc
     planner = preset.get("dedicated_planner", False)
     verification = config.get("verification") or {}
+    from office import contract
+    review_contract = contract.default_for(config)
+    if review_contract == contract.CONVERGENCE:
+        # #337: every RECHECK sequence stops at three substantive rounds.
+        plan_rounds = code_rounds = contract.MAX_ROUNDS
     return {
+        # Pinned per run (#337): the review contract this run keeps for its life.
+        "review_contract": review_contract,
         # `policy_optional` / `shallow` / `cost_bounded` fund the gate; they
         # shape its depth, they do not remove it.
         "plan_review": bool(plan_review),
@@ -266,7 +277,8 @@ def resolve_gates(gear: str, risk_high: bool, config: dict) -> dict:
         "visual": value(preset.get("funded_browser_verification", False)),
         "plan_review_max_rounds": plan_rounds or 1,
         "code_review_max_rounds": code_rounds or 1,
-        "visual_review_max_rounds": verification.get("visual_review_max_rounds", code_rounds or 1),
+        "visual_review_max_rounds": (contract.MAX_ROUNDS if review_contract == contract.CONVERGENCE
+                                     else verification.get("visual_review_max_rounds", code_rounds or 1)),
         "environment_retry_max": int(verification.get("environment_retry_max", 2)),
         "recapture_max": int(verification.get("recapture_max", 1)),
         "review_reprompt_max": int(verification.get("review_reprompt_max", 3)),

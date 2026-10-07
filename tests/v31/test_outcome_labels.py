@@ -14,7 +14,7 @@ HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 def _accepted_run(env):
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
-                 code_reviewer=[{"reply": "VERDICT: PASS"}])
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1", check=0)
     con = env.con()
     assert con.execute("SELECT status FROM tasks WHERE id='T1'").fetchone()[0] == "accepted"

@@ -7,6 +7,7 @@ description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use t
 
 > **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
 > role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
+> `convergence-v1` runs (`docs/review-convergence.md`): contract the seams, not the internals (`scope:` is an ownership envelope; `lane:`, `converge:`); plan review answers APPROVED | RECHECK | INTAKE_GAP and PLAN DEFECT is only root-cause metadata.
 
 Receive the pinned run envelope and the orchestrator's provisional intent. Own **what** up to freeze, then **how**: run `skills/auto-intake/SKILL.md`'s interview directly with the user, reshape goal/scope/done-criteria/blast-radius/named-actions/non-goals when repository evidence contradicts the provisional framing, then freeze the five fields.
 
@@ -20,4 +21,4 @@ Receive the pinned run envelope and the orchestrator's provisional intent. Own *
 7. Emit execution packets only after the plan is accepted at the required gate.
 8. On accepted `PLAN DEFECT`, increment plan version and invalidate dependent packets before revising Increment it with `office_runtime.py amend --kind plan_contract` (fields in `protocol/families-and-amendments.md`), not by editing `plan.md` alone; a file edit leaves the runtime `plan_version` stale.
 
-Planner seed preference comes from `roles.planner.preferred_seed` in resolved config (`protocol/routing.md` § advisory anchor); local evidence may supersede it. `auto-routing` selects the planner route when a dedicated planner is funded — planning never routes itself.
+Routing follows `protocol/routing.md`; the `office` runtime routes, planning never routes itself. The planner route (when a dedicated planner is funded) still uses `roles.planner.preferred_seed` as an advisory anchor. Executor routes (#300) come back after `office submit` as a slate per task: a primary and two fallbacks ranked by expected cost to success, speed, quota and learned evidence. Keep that ranking unless the task or run context says otherwise: a precise plan lets a cheaper builder succeed, and close routes may spread across parallel tasks. To choose differently, write `route: <primary>, <fallback>, <fallback>` and `route_why: <concrete reason>` on the task; a primary outside the close-call band without a reason is ignored.

@@ -58,7 +58,8 @@ def _advance_main(env, bare, path: str, text: str) -> None:
 def test_rebase_recomposes_onto_moved_main_then_merge_matches(env, monkeypatch):
     bare, _, _ = _run(env, monkeypatch, PLAN_STACKED)
     _advance_main(env, bare, "NOTES.md", "unrelated\n")
-    env.script(integration_reviewer=[{"reply": "VERDICT: PASS"}])
+    # #337: the rebase is a shared composition boundary (S-rebase) reviewed once by the lane reviewer.
+    env.script(convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     code, out = env.office("land", "--rebase")
     assert code == 0 and "merges cleanly onto origin/main" in out, out
     code, data = env.ojson("status")
@@ -68,6 +69,7 @@ def test_rebase_recomposes_onto_moved_main_then_merge_matches(env, monkeypatch):
     finally:
         con.close()
     assert landing["integration"]["status"] == "accepted", landing
+    assert landing["convergence"]["S-rebase"]["status"] == "approved", landing["convergence"]
     assert landing["integration"]["detail"] == "composed result verified"
     assert env.git("--git-dir", str(bare), "rev-parse", "main").strip() == landing["rebase"]["onto"]
     code, out = env.office("land", "--merge", "--quote", "merge them")
@@ -106,7 +108,7 @@ def test_run_check_timeout_under_load_is_unavailable_not_a_finding(env, monkeypa
     (env.repo / ".auto-office" / "config.yaml").write_text("verification:\n  check_timeout_seconds: 2\n")
     monkeypatch.setenv("OFFICE_CHECK_LOAD_FACTOR", "0")  # any load counts as overloaded
     approved_run(env, plan=plan, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
-                 code_reviewer=[{"reply": "VERDICT: PASS"}])
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1", check=0)
     con = env.con()
     try:
@@ -126,7 +128,7 @@ def test_task_check_timeout_under_load_blocks_then_resume_reruns_it(env, monkeyp
     (env.repo / ".auto-office" / "config.yaml").write_text("verification:\n  check_timeout_seconds: 2\n")
     monkeypatch.setenv("OFFICE_CHECK_LOAD_FACTOR", "0")
     approved_run(env, plan=plan, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
-                 code_reviewer=[{"reply": "VERDICT: PASS"}])
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1", check=0)
     code, data = env.ojson("status")
     assert data["data"]["tasks"]["T1"] == "blocked", data

@@ -10,7 +10,7 @@ User-facing work requires browser validation when a reachable local/preview runt
 
 Review is local first; a final/integration adversary is boundary-triggered, never a default second pass:
 
-- **Local.** Each executor owns its own implementation and review loop: self-verify, spawn/receive a code adversary when funded, accept a finding and fix it or reject it with stronger evidence. `review_mode: independent_adversary`.
+- **Local.** Each executor owns its own implementation and review loop: self-verify, simplify its own diff (behavior-preserving, inside SCOPE, before submit), spawn/receive a code adversary when funded, accept a finding and fix it or reject it with stronger evidence. `review_mode: independent_adversary`.
 - **Inline.** For cheap, reversible, low-risk work, self-review/validation substitutes for an independent adversary; review funding stays mode/risk/routing dependent, not a blanket waiver. `review_mode: labeled-inline` — never represented as `independent_adversary`.
 - **Integration.** A final orchestrator-spawned adversary exists only when two or more executors produce dependent or merging landings that must compose across a shared interface. It is triggered by the integration boundary, not by executor count: a single-executor family, or independent parallel changes with no cross-scope dependency, receives no mandatory second review. `review_mode: integration_adversary`; scope is the integrated diff, not a re-review of each executor's code.
 

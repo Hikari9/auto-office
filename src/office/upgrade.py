@@ -18,7 +18,9 @@ from office.util import dumps, loads, now_iso, short
 
 # (from_line, to_line) -> fn(con, run). Runs inside the upgrade transaction,
 # after the additive runs.db migration `db.connect` already applied. 3.1 -> 3.2
-# needs none: every 3.2 column is nullable and additive.
+# needs none: every 3.2 column is nullable and additive. 3.2 -> 3.3 needs none
+# either: schema v5 is additive, and a run keeps the review contract pinned in
+# its gates_json (none recorded = v3.1), so an upgraded run is never converted.
 MIGRATIONS: dict[tuple[str, str], object] = {}
 
 

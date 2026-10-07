@@ -22,13 +22,44 @@ worktree:
   setup_timeout_s: 600
   applies_to: [task, integration, check]
 quota:
-  # Ratified v3.1 charter (12A): protect 5% of provider quota. The balanced
-  # money band below is a different 20% and stays 20.
+  # Ratified v3.1 charter (12A): protect 5% of provider quota.
   reserve_percent: 5
 cost_policy:
   default: balanced
+  # Legacy: planner and reviewer routing only. Executor and worker routing (#300)
+  # never applies a money band; its cost safety valve is
+  # routing.adaptive.budget_ceiling_usd.
   balanced_money_band_percent: 20
   available: [money_saver, quota_saver, balanced]
+# Adaptive executor/worker routing (#300). Values are calibration defaults,
+# replayable and inspectable (office inspect route / learner); omit a key to
+# keep its default. Preference is weighted evidence, capped at 0.25.
+routing:
+  adaptive:
+    competitive_band: 0.05
+    budget_ceiling_usd: 25
+    cost_scale_usd: 25
+    spread_penalty: 0.03
+    weights:
+      balanced: {effectiveness: 0.40, cost: 0.25, speed: 0.15, quota: 0.10, preference: 0.10}
+      money_saver: {effectiveness: 0.30, cost: 0.40, speed: 0.10, quota: 0.10, preference: 0.10}
+      quota_saver: {effectiveness: 0.30, cost: 0.15, speed: 0.15, quota: 0.30, preference: 0.10}
+    exploration:
+      rate: 0.08
+      margin: 0.10
+      min_samples_mature: 6
+      max_percent_rolling_20: 10
+      max_per_run: 1
+      max_cost_vs_primary_percent: 125
+    learning:
+      prior_strength: 8
+      half_life_days: 120
+      other_playbook_weight: 0.5
+      size_mismatch_weight: 0.75
+      fix_kind_weight: 0.75
+      stale_harness_major_weight: 0.25
+# Legacy 3.0 exploration policy (scripts/). Executor/worker exploration (#300)
+# reads routing.adaptive.exploration.
 exploration:
   max_per_run: 1
   max_percent_rolling_20: 10
@@ -55,7 +86,8 @@ roles:
       allowed_sources: ["local-evidence:", "documented:"]
   plan_reviewer:
     preferred_seed:
-      - {model_id: luna, effort: xhigh}
+      - {model_id: luna, effort: high}
+      - {model_id: sonnet, harness: claude, effort: high}
       - {model_id: opus, harness: claude, effort: low}
     required_capabilities: [review]
     floor:
@@ -79,7 +111,8 @@ roles:
       allowed_sources: ["local-evidence:", "documented:"]
   code_reviewer:
     preferred_seed:
-      - {model_id: luna, effort: xhigh}
+      - {model_id: luna, effort: high}
+      - {model_id: sonnet, harness: claude, effort: high}
       - {model_id: opus, harness: claude, effort: low}
     required_capabilities: [review]
     floor:
@@ -96,12 +129,13 @@ roles:
   # Visual judgment is a separate specialist from code review (charter 8B).
   # Preference order Gemini -> Sonnet -> Luna; a route qualifies only after an
   # image-sensitive conformance probe of its exact harness/model/effort path.
+  # Reviewer independence is per agent, not per model family: a reviewer is
+  # always a fresh dispatch, so it may share the producer's model.
   visual_reviewer:
     preferred_seed:
-      # Latest Gemini Flash through agy (Gemini slugs embed effort); low is the default.
-      - {model_id: gemini-3.8-flash, harness: agy, effort: low}
+      # Latest Gemini Flash through agy (Gemini slugs embed effort); medium is the default.
       - {model_id: gemini-3.8-flash, harness: agy, effort: medium}
-      - {model_id: sonnet, harness: claude}
+      - {model_id: sonnet, harness: claude, effort: high}
       - {model_id: luna}
     required_capabilities: [review, vision]
     floor:
@@ -112,6 +146,21 @@ roles:
     floor:
       min_effort: medium
       allowed_sources: ["local-evidence:", "documented:"]
+# Review contract (#337). Each run pins the contract it starts with
+# (gates_json.review_contract); this key picks it for future runs only, so a
+# rollback to v3.1 never reinterprets a run that already started.
+#   convergence-v1: APPROVED | RECHECK | INTAKE_GAP; executors self-review and
+#     run checks; one independent convergence review per ownership/composition
+#     lane (plus one per shared composition boundary); 3 substantive rounds per
+#     RECHECK sequence, then the operator decides.
+#   v3.1: PASS | CHANGES_REQUIRED | PLAN_DEFECT | BRIEF_DEFECT | UNAVAILABLE,
+#     rolling plan review and per-task independent review.
+review:
+  contract: convergence-v1
+# Gear presets. Under convergence-v1, `independent_code_review` funds the lane
+# convergence review (a hard landing gate) and `plan_review` funds plan review;
+# the round ceiling is always 3 and the *_max_rounds keys below apply only to
+# runs pinned to the v3.1 contract.
 gear_presets:
   direct:
     dedicated_planner: false
@@ -161,7 +210,7 @@ gear_presets:
     allow_advisory_undercut: false
     plan_review_max_rounds: 5
     code_review_max_rounds: 5
-# Round budget for a review that a gear's own preset doesn't fund (`plan_review: false`
+# (v3.1 contract only) Round budget for a review that a gear's own preset doesn't fund (`plan_review: false`
 # or `risk_forced` resolving False) but that fires anyway — an ad-hoc user-requested plan
 # review, or a `risk_forced` gate that resolved True under a pinned low gear. Was
 # previously bare prose in skills/auto-review/SKILL.md with no config backing; a caller
@@ -174,7 +223,7 @@ ad_hoc_review_max_rounds: 2
 verification:
   environment_retry_max: 2
   recapture_max: 1
-  visual_review_max_rounds: 2
+  visual_review_max_rounds: 2   # v3.1 contract only; convergence-v1 caps every RECHECK sequence at 3
   no_progress_repeats: 2
   job_timeout_seconds: 3600
   check_timeout_seconds: 1800
@@ -217,3 +266,24 @@ hard_invariants:
   - packet_validation
   - policy_snapshot_pinning
   - human_merge_to_main
+# Machine-level scheduler (`office queue`). Pressure thresholds gate admission
+# only when measured; quota gates only when known.
+scheduler:
+  auto_mode: true
+  aging_per_hour: 1.0          # score added per hour an item waits
+  cpu_pressure: 0.9            # 1-minute load per core
+  ram_pressure: 0.9            # fraction of physical memory in use
+  max_active_runs: null        # null: no fixed cap
+  orchestrator_route: claude   # harness that launches queued runs' orchestrators
+  # Harnesses allowed, in order, when orchestrator_route's quota is known to be at
+  # or below quota.reserve_percent. Unknown quota never falls back; with no
+  # allowed fallback that has known quota, queued work stays queued.
+  orchestrator_fallbacks: []
+intake:
+  queue_issues: false
+  authorization: preview       # what a queued intake is authorized to do
+  ready_to_land: false
+# Local web UI (`office web`). checkouts maps owner/name to a local checkout
+# for repositories no run has used yet.
+web:
+  checkouts: {}

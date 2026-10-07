@@ -1,6 +1,22 @@
-"""Plans, rolling plan review, and the dispatch barrier.
+"""Plans, plan review, and the dispatch barrier.
 
-Fork after the first plan-review verdict (docs/v31-rolling-review-gates.md §2):
+Convergence contract (#337, office.contract):
+
+  APPROVED    dispatch-safe: plan review ends and every eligible executor may
+              fan out. Its findings stay tracked until the orchestrator or
+              planner fixes or dispositions them; that cleanup gets no new
+              review unless it moves a hard seam (requirements, ownership,
+              dependency, interface, acceptance), which reopens review.
+  RECHECK     the planner revises; tasks the blocking findings name (and their
+              dependants) wait, plan-wide findings hold every task, and the
+              same reviewer (when available) reviews the revision. Three
+              substantive rounds, then the operator decides (office decide plan).
+  INTAKE_GAP  the named user decision is asked at once; what it affects waits.
+  Reviewer unavailability or an unreadable reply is runtime status, never a
+  verdict, and spends no round.
+
+v3.1 contract — fork after the first plan-review verdict
+(docs/v31-rolling-review-gates.md §2):
 
   PASS              -> launch ready executors; plan review ends.
   CHANGES_REQUIRED  -> orchestrator amends; eligible executors launch at once,
@@ -15,7 +31,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from office import briefs, candidates, db, jobs, planfile, planpath, review_parse, routing, state
+from office import briefs, candidates, contract, db, jobs, planfile, planpath, review_parse, routing, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_bytes, short
@@ -70,6 +86,7 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
             run = state.get_run(con, run["id"])
         new_version = (run["plan_version"] or 0) + 1
         kind = "initial" if new_version == 1 else "contract"
+        prev_tasks = (current or {}).get("tasks") if current else None
         _apply_requirements(con, run, parsed.requirements, submitter)
         run = state.get_run(con, run["id"])
         con.execute("INSERT INTO plans(run_id, version, kind, body, tasks_json, requirements_json, created_by, created_at, "
@@ -99,6 +116,9 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
             state.emit(con, run, "plan.questions", f"PLAN QUESTIONS p{new_version}: " + " | ".join(parsed.questions[:4]),
                        payload={"questions": parsed.questions})
             res.add(f"plan p{new_version} submitted with {len(parsed.questions)} question(s) for the user")
+        elif contract.is_convergence(run):
+            res.add(f"plan p{new_version} submitted | " + review_after_revision(con, run, prev_tasks, parsed.tasks,
+                                                                               new_version))
         elif review_required(run) and (not plan_review_ended(con, run) or new_version > 1):
             # After plan review has ended, only contract revisions get a delta review (Q14).
             queue_plan_review(con, run, new_version, escalated=plan_review_ended(con, run))
@@ -124,6 +144,10 @@ def show_diagram(con, run: dict, version: int, tasks: list[dict], plan_path: Pat
     pv = plan_view.preview(con, run, tasks)
     with db.transaction(con):
         plan_view.store(con, run, version, pv)
+    for tid, entry in pv["tasks"].items():
+        problem = (entry.get("route_plan") or {}).get("planner_error")
+        if problem:
+            res.notices.append(f"{tid} route: {problem}; the ranked slate stands")
     full = plan_view.render(run, version, pv)
     if plan_path is not None:
         plan_view.write_into(plan_path, version, full)
@@ -180,11 +204,15 @@ def _apply_requirements(con, run: dict, proposed: dict, submitter: str) -> None:
     state.update_run(con, run["id"], requirements_version=version, envelope=envelope)
 
 
-def sync_tasks(con, run: dict, planned: list[dict], plan_version: int) -> dict:
-    """Make the tasks table match a plan version. Caller holds the tx."""
+def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_checks: bool = False) -> dict:
+    """Make the tasks table match a plan version. Caller holds the tx.
+
+    With `rerun_checks`, an accepted task whose only change is its `checks:` keeps its contract version and
+    is reported under `checks_only` instead of `acceptance`: it is not reopened, its checks are rerun
+    (`rerun_accepted_checks`)."""
     existing = {t["id"]: t for t in state.tasks(con, run["id"])}
     seen = set()
-    changes = {"added": [], "contract": [], "acceptance": [], "cancelled": []}
+    changes = {"added": [], "contract": [], "acceptance": [], "checks_only": [], "cancelled": []}
     now = now_iso()
     for p in planned:
         seen.add(p["id"])
@@ -201,14 +229,22 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int) -> dict:
             changes["added"].append(p["id"])
             continue
         contract = (cur["scope"] != p["scope"] or (cur["interfaces"] or []) != p["interfaces"])
-        acceptance = (cur["accept"] != p["accept"] or cur["checks"] != checks or cur["visual"] != p["visual"]
-                      or cur["depends"] != p["depends"] or cur["title"] != p["title"])
+        checks_changed = cur["checks"] != checks
+        other_acceptance = (cur["accept"] != p["accept"] or cur["visual"] != p["visual"]
+                            or cur["depends"] != p["depends"] or cur["title"] != p["title"])
+        acceptance = checks_changed or other_acceptance
+        checks_only = (rerun_checks and checks_changed and not (contract or other_acceptance)
+                       and cur["status"] == "accepted" and cur["accepted_revision_id"]
+                       and cur["accepted_revision_id"] == cur["current_revision_id"])
         fields = dict(title=p["title"], scope=p["scope"], depends=p["depends"], interfaces=p["interfaces"],
                       accept=p["accept"], checks=checks, visual=p["visual"])
         if contract:
             fields["contract_version"] = plan_version
             changes["contract"].append(p["id"])
-        if contract or acceptance:
+        if checks_only:
+            fields["acceptance_version"] = plan_version
+            changes["checks_only"].append(p["id"])
+        elif contract or acceptance:
             fields["acceptance_version"] = plan_version
             fields["contract_version"] = plan_version
             if not contract:
@@ -234,6 +270,25 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int) -> dict:
     return changes
 
 
+def rerun_accepted_checks(con, run: dict, task_id: str, amendment_id: str) -> bool:
+    """Run an accepted task's (amended) checks again on its accepted revision. The task keeps its status
+    until a verdict: a pass leaves it accepted, a failure delivers the finding and reopens it. No executor
+    is launched. Returns whether a checks gate was queued. Caller holds the tx."""
+    from office import gates
+    task = state.get_task(con, run["id"], task_id)
+    rev_id = task["current_revision_id"]
+    if not task["checks"]:
+        state.emit(con, run, "gate.rerun", f"{task_id} stays accepted on {rev_id}: {amendment_id} left it no checks to run",
+                   task_id=task_id)
+        return False
+    gid = gates._new_gate(con, run, task, rev_id, "checks", f"checks:{rev_id}", "queued")
+    state.enqueue(con, run, "run_checks", {"gate_id": gid, "task_id": task_id, "revision_id": rev_id},
+                  dedup_key=f"checks:{gid}", max_attempts=2)
+    state.emit(con, run, "gate.rerun", f"{task_id} checks re-run on {rev_id} ({amendment_id} changed them; no relaunch)",
+               task_id=task_id)
+    return True
+
+
 # ------------------------------------------------------------------ review state
 
 def review_required(run: dict) -> bool:
@@ -250,13 +305,17 @@ def plan_gates(con, run_id: str) -> list[dict]:
 
 
 def open_defects(con, run_id: str) -> list[dict]:
+    """v3.1 plan defects. Convergence-contract findings carry no defect class."""
     rows = con.execute("SELECT * FROM findings WHERE run_id=? AND gate_kind='plan_review' AND state='open' "
-                       "AND category IN (?,?,?,?,?)", (run_id, *review_parse.DEFECT_CLASSES, "brief")).fetchall()
+                       "AND COALESCE(contract, 'v3.1')='v3.1' AND category IN (?,?,?,?,?)",
+                       (run_id, *review_parse.DEFECT_CLASSES, "brief")).fetchall()
     return [dict(r) for r in rows]
 
 
 def review_state(con, run: dict) -> dict:
     run = state.get_run(con, run["id"])
+    if contract.is_convergence(run):
+        return _review_state_convergence(con, run)
     gates = plan_gates(con, run["id"])
     done = [g for g in gates if g["status"] == "done"]
     pending = [g for g in gates if g["status"] in ("queued", "running")]
@@ -290,6 +349,8 @@ def queue_plan_review(con, run: dict, plan_version: int, *, escalated: bool = Fa
     """Queue one plan-review round. Caller holds the tx."""
     if (state.get_run(con, run["id"]).get("plan_review") or {}).get("ended_reason") == "waived by the user":
         return None  # the user waived plan review; no further round runs
+    if contract.is_convergence(run):
+        return _queue_convergence_review(con, run, plan_version, exclude=exclude)
     gates = plan_gates(con, run["id"])
     rounds = budget_rounds(con, run)
     maximum = int((run.get("gates") or {}).get("plan_review_max_rounds") or 1)
@@ -330,6 +391,9 @@ def require_dispatchable(con, run: dict) -> None:
         raise Refused("authorization-required",
                       f"requirements r{run['requirements_version']} are not authorized by the user", scope="run",
                       preserved="the plan", next_step='ask the user (native question tool) for authorization, then office approve plan --quote "<user\'s words>"')
+    if contract.is_convergence(run):
+        _require_dispatchable_convergence(con, run)
+        return
     rs = review_state(con, run)
     if rs["required"] and not rs["ended"]:
         if rs["first_verdict"] is None:
@@ -352,6 +416,16 @@ def require_dispatchable(con, run: dict) -> None:
 
 
 def require_scope_clear(con, run: dict, task_id: str) -> None:
+    if contract.is_convergence(run):
+        for f in blocking_findings(con, run):
+            ids = _task_ids_in(f.get("location") or "")
+            if not ids or task_id in _with_dependants(con, run, ids):
+                raise Refused("plan-recheck", f"{task_id} waits on plan finding {f['code']}: {f['summary'][:100]}",
+                              scope=task_id, next_step="dispatch unaffected tasks; the plan revision is reviewed again")
+        task = state.get_task(con, run["id"], task_id)
+        if task["status"] == "paused" and (task.get("pause_reason") or "").startswith("plan "):
+            raise Refused("plan-recheck", f"{task_id} is paused: {task['pause_reason']}", scope=task_id)
+        return
     for d in open_defects(con, run["id"]):
         ids = _task_ids_in(d.get("location") or "")
         if not ids or task_id in ids:
@@ -387,7 +461,11 @@ def job_plan_review(con, run: dict, job: dict) -> dict:
     plan = state.get_plan(con, run["id"], gate["plan_version"])
     req = state.current_requirements(con, run["id"])
     rereview = gate["round"] > 1 or len(plan_gates(con, run["id"])) > 1
-    brief = briefs.plan_review_brief(run, plan, req["frozen"], open_defects(con, run["id"]), rereview)
+    if contract.is_convergence(run):
+        carried = [f for f in blocking_findings(con, run) if f["code"] != "INTAKE_GAP"]
+        brief = briefs.plan_review_brief(run, plan, req["frozen"], [], rereview, carried=carried, round_no=gate["round"])
+    else:
+        brief = briefs.plan_review_brief(run, plan, req["frozen"], open_defects(con, run["id"]), rereview)
     outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
                                        plan_review=True, exclude=job["payload"].get("exclude"),
                                        resume_from=job["payload"].get("resume_from"))
@@ -398,6 +476,9 @@ def job_plan_review(con, run: dict, job: dict) -> dict:
 
 def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
     """Record a plan-review result. Caller holds the tx."""
+    if contract.is_convergence(run):
+        _ingest_convergence(con, run, gate_id, outcome)
+        return
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gate_id,)).fetchone())
     verdict = outcome["verdict"]
     con.execute("UPDATE gates SET status='done', verdict=?, route=?, finished_at=?, summary=? WHERE id=?",
@@ -513,3 +594,339 @@ def unpause_cleared(con, run: dict) -> None:
             # Back to where it was: a submitted revision still has gates to finish.
             from office import gates
             state.update_task(con, run["id"], t["id"], status=gates.derive_status(con, run, t), pause_reason=None)
+
+
+# ------------------------------------------------------------------ convergence contract (#337)
+
+PLAN_SCOPE = "plan"
+
+
+def _pr(run: dict) -> dict:
+    return dict(run.get("plan_review") or {})
+
+
+def _cycle(run: dict) -> int:
+    return int(_pr(run).get("cycle") or 1)
+
+
+def _cycle_gates(con, run: dict) -> list[dict]:
+    return [g for g in plan_gates(con, run["id"]) if int(g.get("cycle") or 1) == _cycle(run)]
+
+
+def substantive_rounds(con, run: dict) -> int:
+    """Completed reviews in the current cycle. Unavailable routes, unreadable
+    replies and other runtime failures never count (#337)."""
+    return len([g for g in _cycle_gates(con, run) if g["status"] == "done" and g.get("review_status") == contract.COMPLETED])
+
+
+def blocking_findings(con, run: dict) -> list[dict]:
+    """What holds dispatch: open blocking plan findings, and an open intake gap
+    (as a pseudo-finding naming what it affects)."""
+    rows = [dict(r) for r in con.execute(
+        "SELECT * FROM findings WHERE run_id=? AND gate_kind='plan_review' AND state='open' AND contract=? "
+        "ORDER BY created_at", (run["id"], contract.CONVERGENCE)).fetchall()]
+    gap = _pr(state.get_run(con, run["id"])).get("intake_gap")
+    if gap:
+        rows.append({"code": "INTAKE_GAP", "location": gap.get("affects") or "", "summary": gap.get("decision") or "",
+                     "blocking": 1})
+    return rows
+
+
+def held_tasks(con, run: dict) -> set[str]:
+    """Tasks a blocking plan finding or intake gap holds (with dependants); every
+    task when one names no task."""
+    out: set[str] = set()
+    for f in blocking_findings(con, run):
+        ids = _task_ids_in(f.get("location") or "")
+        out |= _with_dependants(con, run, ids) if ids else {t["id"] for t in state.tasks(con, run["id"])}
+    return out
+
+
+def _with_dependants(con, run: dict, ids: list[str]) -> set[str]:
+    graph = {t["id"]: t["depends"] for t in state.tasks(con, run["id"])}
+    out = set(ids)
+    for tid in ids:
+        out |= planfile.dependants(graph, tid)
+    return out
+
+
+def _review_state_convergence(con, run: dict) -> dict:
+    gates = plan_gates(con, run["id"])
+    done = [g for g in gates if g["status"] == "done"]
+    completed = [g for g in done if g.get("review_status") == contract.COMPLETED]
+    pr = _pr(run)
+    return {
+        "contract": contract.CONVERGENCE,
+        "required": review_required(run),
+        "ended": bool(pr.get("ended")),
+        "ended_reason": pr.get("ended_reason"),
+        "status": pr.get("status") or ("pending" if review_required(run) else "not-required"),
+        "first_verdict": completed[0]["verdict"] if completed else None,
+        "first_version": completed[0]["plan_version"] if completed else None,
+        "last_verdict": completed[-1]["verdict"] if completed else None,
+        "last_status": done[-1].get("review_status") if done else None,
+        "pending": any(g["status"] in ("queued", "running") for g in gates),
+        "rounds_used": substantive_rounds(con, run),
+        "cycle": _cycle(run),
+        "open_defects": [],
+        "blocking": blocking_findings(con, run),
+        "nonblocking": [dict(r) for r in con.execute(
+            "SELECT * FROM findings WHERE run_id=? AND gate_kind='plan_review' AND state='nonblocking' AND "
+            "disposition IS NULL ORDER BY created_at", (run["id"],)).fetchall()],
+        "intake_gap": pr.get("intake_gap"),
+        "escalation": pr.get("escalation"),
+    }
+
+
+def _hard_seam_changes(prev: list[dict] | None, new: list[dict]) -> list[str]:
+    """Which hard seams a plan revision moved: tasks added or removed, or a task's
+    ownership envelope, dependencies, interfaces, acceptance, lane, shared
+    boundary, or visual applicability. Checks, titles, routes and visual details
+    are not seams."""
+    if prev is None:
+        return ["initial plan"]
+    old = {t["id"]: t for t in prev}
+    out = []
+    for t in new:
+        o = old.pop(t["id"], None)
+        if o is None:
+            out.append(f"{t['id']} added")
+            continue
+        for key, label in (("scope", "ownership"), ("depends", "dependency"), ("interfaces", "interface"),
+                           ("accept", "acceptance"), ("lane", "lane"), ("converge", "shared boundary")):
+            if (o.get(key) or None) != (t.get(key) or None):
+                out.append(f"{t['id']} {label}")
+        if bool((o.get("visual") or {}).get("none")) != bool((t.get("visual") or {}).get("none")) \
+                or bool(o.get("visual")) != bool(t.get("visual")):
+            out.append(f"{t['id']} visual applicability")
+    out += [f"{tid} removed" for tid in old]
+    return out
+
+
+def review_after_revision(con, run: dict, prev_tasks: list[dict] | None, new_tasks: list[dict], version: int) -> str:
+    """Decide what a plan revision needs under the convergence contract. Caller
+    holds the tx. Returns a short line for the submitter."""
+    run = state.get_run(con, run["id"])
+    if not review_required(run):
+        state.emit(con, run, "plan.ready", f"PLAN READY p{version} (no plan review funded by this gear)")
+        return "no plan review funded"
+    pr = _pr(run)
+    if pr.get("ended_reason") == "waived by the user":
+        state.emit(con, run, "plan.ready", f"PLAN READY p{version} (plan review waived)")
+        return "plan review waived"
+    seams = _hard_seam_changes(prev_tasks, new_tasks)
+    if pr.get("reviewed_requirements") and pr["reviewed_requirements"] != run["requirements_version"]:
+        seams.append(f"requirements r{pr['reviewed_requirements']} -> r{run['requirements_version']}")
+    if pr.get("ended") and not seams:
+        state.emit(con, run, "plan.cleanup", f"plan p{version}: APPROVED cleanup moves no hard seam; no re-review",
+                   audience="runtime")
+        return "APPROVED cleanup (no hard seam moved; no re-review)"
+    if pr.get("status") == "escalated":
+        return "the plan review is at its round cap; the operator decides (office decide plan ...)"
+    if pr.get("ended"):
+        # A hard-seam change after APPROVED is a contract amendment: a new review cycle.
+        pr.update({"ended": False, "ended_reason": None, "status": "pending", "cycle": _cycle(run) + 1,
+                   "reason": "hard seam moved after APPROVED: " + ", ".join(seams[:4])})
+        state.update_run(con, run["id"], plan_review=pr)
+        state.emit(con, run, "plan.rereview", f"plan p{version} moves a hard seam ({', '.join(seams[:3])}); "
+                   "it is reviewed again before affected work proceeds")
+    elif pr.get("intake_gap") and not pr.get("intake_answered"):
+        # The user's decision arrived as this revision: a fresh cycle reviews it.
+        pr.update({"cycle": _cycle(run) + 1, "intake_answered": True})
+        state.update_run(con, run["id"], plan_review=pr)
+    gid = queue_plan_review(con, state.get_run(con, run["id"]), version)
+    return "plan-review queued" if gid else "plan review not queued"
+
+
+def _queue_convergence_review(con, run: dict, plan_version: int, *, exclude: list[str] | None = None) -> str | None:
+    run = state.get_run(con, run["id"])
+    gates = plan_gates(con, run["id"])
+    if any(g["plan_version"] == plan_version and g["status"] in ("queued", "running") for g in gates):
+        return None
+    pr = _pr(run)
+    if pr.get("status") in ("escalated", "stopped"):
+        return None
+    rounds = substantive_rounds(con, run)
+    if rounds >= contract.MAX_ROUNDS:
+        return None
+    payload = {"exclude": list(exclude or [])}
+    # Same reviewer across a RECHECK sequence when it is still available (#337).
+    prev = [g for g in _cycle_gates(con, run) if g.get("reviewer_dispatch_id") and g.get("review_status") == contract.COMPLETED]
+    if prev and not payload["exclude"]:
+        payload["resume_from"] = prev[-1]["reviewer_dispatch_id"]
+    elif pr.get("exclude_route") and pr["exclude_route"] not in payload["exclude"]:
+        payload["exclude"].append(pr["exclude_route"])  # an operator-chosen technical escalation
+    gate_id = "G" + uuid.uuid4().hex[:8]
+    con.execute("INSERT INTO gates(id, run_id, subject, plan_version, kind, input_key, status, round, escalated, created_at, "
+                "contract, cycle) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (gate_id, run["id"], PLAN_SUBJECT, plan_version, "plan_review", f"plan:{plan_version}", "queued",
+                 rounds + 1, 0, now_iso(), contract.CONVERGENCE, _cycle(run)))
+    state.enqueue(con, run, "plan_review", {"gate_id": gate_id, "plan_version": plan_version, **payload},
+                  dedup_key=f"plan_review:{gate_id}", max_attempts=2)
+    if pr.get("status") in (None, "unavailable", "attention"):
+        pr["status"] = "pending"
+        state.update_run(con, run["id"], plan_review=pr)
+    return gate_id
+
+
+def _require_dispatchable_convergence(con, run: dict) -> None:
+    rs = review_state(con, run)
+    if not rs["required"] or rs["ended"]:
+        return
+    if rs["status"] == "unavailable":
+        raise Refused("plan-review-unavailable", "no plan reviewer route could review the plan (runtime status, not a "
+                      "verdict)", scope="plan", next_step='office resume retries the reviewer chain; or the user may '
+                      'waive: office approve waive plan-review --quote "<words>"')
+    if rs["status"] == "attention":
+        raise Refused("plan-review-attention", "the plan reviewer answered but left no readable reply file",
+                      scope="plan", next_step='re-prompt the reviewer in its pane, office resume, or the user may waive: '
+                                            'office approve waive plan-review --quote "<words>"')
+    if rs["first_verdict"] is None:
+        raise Refused("plan-review-pending", "the first plan review has not returned", scope="plan",
+                      next_step="no action; the verdict will return here (office status)")
+    whole = [f for f in rs["blocking"] if not _task_ids_in(f.get("location") or "")]
+    if whole:
+        f = whole[0]
+        what = "intake gap" if f["code"] == "INTAKE_GAP" else f"blocking plan finding {f['code']}"
+        raise Refused("plan-recheck", f"{what} holds the whole plan: {f['summary'][:120]}", scope="whole plan",
+                      next_step=_after_plan_next(con, run))
+
+
+def _plan_finding(con, run: dict, gate: dict, f: dict, reviewer: str | None, *, state_: str) -> None:
+    existing = con.execute("SELECT id FROM findings WHERE run_id=? AND gate_kind='plan_review' AND code=? "
+                           "AND state IN ('open','nonblocking') AND contract=?",
+                           (run["id"], f["code"], contract.CONVERGENCE)).fetchone()
+    cols = dict(summary=f["summary"], location=f.get("location"), action=f.get("action"), level=f.get("level"),
+                severity=f.get("severity"), blocking=int(bool(f.get("blocking"))), seam=f.get("seam"),
+                root_cause=f.get("root_cause"), state=state_, gate_id=gate["id"], updated_at=now_iso())
+    if existing:
+        sets = ", ".join(f"{k}=?" for k in cols)
+        con.execute(f"UPDATE findings SET {sets} WHERE id=?", (*cols.values(), existing["id"]))
+        return
+    con.execute("INSERT INTO findings(id, dispatch_id, reviewer_dispatch_id, status, severity, summary, created_at, run_id, "
+                "gate_id, gate_kind, code, location, category, action, state, origin_gate_id, updated_at, level, contract, "
+                "scope, blocking, seam, root_cause) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("F" + uuid.uuid4().hex[:10], reviewer, reviewer, "open", f.get("severity"), f["summary"], now_iso(),
+                 run["id"], gate["id"], "plan_review", f["code"], f.get("location"), "plan", f.get("action"), state_,
+                 gate["id"], now_iso(), f.get("level"), contract.CONVERGENCE, PLAN_SCOPE, int(bool(f.get("blocking"))),
+                 f.get("seam"), f.get("root_cause")))
+
+
+def _pause_affected(con, run: dict, findings: list[dict], reason: str) -> list[str]:
+    """Pause running work that a blocking plan finding names (plus dependants);
+    a plan-wide one pauses every unaccepted task. Caller holds the tx."""
+    targets: set[str] = set()
+    all_ids = [t["id"] for t in state.tasks(con, run["id"])]
+    for f in findings:
+        ids = _task_ids_in(f.get("location") or "")
+        targets |= _with_dependants(con, run, ids) if ids else set(all_ids)
+    paused = []
+    for t in state.tasks(con, run["id"]):
+        if t["id"] in targets and t["status"] not in ("accepted", "cancelled", "planned", "paused"):
+            state.update_task(con, run["id"], t["id"], status="paused", pause_reason=reason)
+            paused.append(t["id"])
+    return paused
+
+
+def _unpause_plan_holds(con, run: dict) -> None:
+    from office import gates
+    for t in state.tasks(con, run["id"]):
+        if t["status"] == "paused" and (t.get("pause_reason") or "").startswith("plan "):
+            state.update_task(con, run["id"], t["id"], status=gates.derive_status(con, run, t), pause_reason=None)
+
+
+def _ingest_convergence(con, run: dict, gate_id: str, outcome: dict) -> None:
+    gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gate_id,)).fetchone())
+    status = outcome.get("status") or contract.UNAVAILABLE
+    verdict = outcome.get("verdict") if status == contract.COMPLETED else None
+    parsed: review_parse.Parsed | None = outcome.get("parsed")
+    reviewer = outcome.get("dispatch_id")
+    con.execute("UPDATE gates SET status='done', verdict=?, review_status=?, route=?, finished_at=?, summary=?, "
+                "reviewer_dispatch_id=?, independence=?, next_action=?, contract=? WHERE id=?",
+                (verdict, status, outcome.get("route"), now_iso(), outcome.get("summary"), reviewer, contract.INDEPENDENT,
+                 parsed.next_action if parsed else None, contract.CONVERGENCE, gate_id))
+    pr = _pr(run)
+    v = f"p{gate['plan_version']}"
+    if status != contract.COMPLETED:
+        # Runtime status, not a verdict: no round is spent.
+        pr["status"] = "attention" if status == contract.INVALID_RESULT else "unavailable"
+        state.update_run(con, run["id"], plan_review=pr)
+        kind = "plan.attention" if status == contract.INVALID_RESULT else "plan.unavailable"
+        state.emit(con, run, kind, f"PLAN REVIEW {status} {v} (runtime status, not a verdict; no round spent): "
+                   f"{(outcome.get('summary') or 'no qualifying reviewer answered')[:240]}")
+        return
+    for code in parsed.resolved:
+        con.execute("UPDATE findings SET state='resolved', updated_at=? WHERE run_id=? AND gate_kind='plan_review' AND code=? "
+                    "AND state='open'", (now_iso(), run["id"], code))
+    for r in parsed.retracted:
+        con.execute("UPDATE findings SET state='retracted', updated_at=? WHERE run_id=? AND gate_kind='plan_review' "
+                    "AND code=? AND state IN ('open','nonblocking')", (now_iso(), run["id"], r["code"]))
+    restated = {f["code"] for f in parsed.findings}
+    for f in parsed.findings:
+        _plan_finding(con, run, gate, f, reviewer, state_="open" if f.get("blocking") else "nonblocking")
+    # A completed review supersedes earlier blocking findings it did not restate.
+    for row in con.execute("SELECT id, code FROM findings WHERE run_id=? AND gate_kind='plan_review' AND state='open' "
+                           "AND contract=?", (run["id"], contract.CONVERGENCE)).fetchall():
+        if row["code"] not in restated:
+            con.execute("UPDATE findings SET state='resolved', updated_at=? WHERE id=?", (now_iso(), row["id"]))
+    pr.pop("intake_gap", None)
+    pr.pop("intake_answered", None)
+    pr["reviewed_requirements"] = run["requirements_version"]
+    pr["reviewer"] = reviewer
+    nonblocking = [f for f in parsed.findings if not f.get("blocking")]
+    if verdict == "APPROVED":
+        pr.update({"ended": True, "ended_reason": f"APPROVED on {v}", "status": "approved", "escalation": None})
+        state.update_run(con, run["id"], plan_review=pr)
+        _unpause_plan_holds(con, run)
+        state.emit(con, run, "plan.approved", f"PLAN APPROVED {v}: dispatch-safe"
+                   + (f"; {len(nonblocking)} non-blocking finding(s) to fix or disposition (no re-review): "
+                      + ", ".join(f["code"] for f in nonblocking) if nonblocking else "")
+                   + (f"; reviewer recommends: {parsed.next_action[:160]}" if parsed.next_action else ""),
+                   payload={"findings": parsed.findings, "next_action": parsed.next_action})
+        return
+    if verdict == "INTAKE_GAP":
+        pr.update({"status": "intake_gap", "intake_gap": {"decision": parsed.decision, "why": parsed.why,
+                                                          "affects": parsed.affects, "gate": gate_id, "version": v}})
+        state.update_run(con, run["id"], plan_review=pr)
+        paused = _pause_affected(con, run, [{"location": parsed.affects or ""}], "plan intake gap")
+        state.emit(con, run, "plan.intake_gap", f"PLAN INTAKE_GAP {v}: the user must decide: {parsed.decision} "
+                   f"(affects {parsed.affects}; why evidence cannot settle it: {parsed.why})"
+                   + (f"; paused {', '.join(paused)}" if paused else ""),
+                   payload={"decision": parsed.decision, "why": parsed.why, "affects": parsed.affects})
+        return
+    blocking = [f for f in parsed.findings if f.get("blocking")]
+    rounds = substantive_rounds(con, run)
+    if rounds >= contract.MAX_ROUNDS:
+        pr.update({"status": "escalated", "escalation": _escalation_summary(con, run, blocking, parsed)})
+        state.update_run(con, run["id"], plan_review=pr)
+        paused = _pause_affected(con, run, blocking, "plan review at its round cap")
+        state.emit(con, run, "plan.escalation", f"PLAN RECHECK {v} after {rounds} substantive rounds: the operator "
+                   f"decides now (office decide plan escalate|continue|waive|stop); recommendation: "
+                   f"{pr['escalation']['recommendation']}" + (f"; paused {', '.join(paused)}" if paused else ""),
+                   payload=pr["escalation"])
+        return
+    pr["status"] = "recheck"
+    state.update_run(con, run["id"], plan_review=pr)
+    paused = _pause_affected(con, run, blocking, "plan recheck")
+    state.emit(con, run, "plan.recheck", f"PLAN RECHECK {v} (round {rounds}/{contract.MAX_ROUNDS}): "
+               + "; ".join(f"{f['code']} {f.get('location') or ''} {f['summary'][:80]}" for f in blocking[:4])
+               + (f"; paused {', '.join(paused)}" if paused else ""),
+               payload={"findings": parsed.findings, "next_action": parsed.next_action})
+
+
+def _escalation_summary(con, run: dict, blocking: list[dict], parsed) -> dict:
+    """What the operator sees at the plan round cap (#337 escalation)."""
+    history = [{"round": g["round"], "plan_version": g["plan_version"], "verdict": g["verdict"],
+                "summary": (g.get("summary") or "")[:160]} for g in _cycle_gates(con, run)
+               if g.get("review_status") == contract.COMPLETED]
+    material = [f for f in blocking if (f.get("level") or f.get("severity")) in ("high", "medium")]
+    return {
+        "scope": PLAN_SCOPE,
+        "remaining": [{k: f.get(k) for k in ("code", "level", "location", "summary", "seam")} for f in blocking],
+        "materiality": f"{len(material)} of {len(blocking)} blocking finding(s) are high or medium",
+        "attempts": history,
+        "risk": "dispatch stays held for the tasks these findings name until the plan is approved or the gate is waived",
+        "recommendation": parsed.next_action or ("continue: one more bounded revision cycle" if len(blocking) <= 2
+                                                  else "escalate: a different reviewer or planner"),
+        "choices": contract.round_cap_choices(PLAN_SCOPE),
+    }

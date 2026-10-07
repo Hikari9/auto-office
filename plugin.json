@@ -1,0 +1,23 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "auto-office",
+  "version": "3.3.4",
+  "description": "Adaptive office engineering runtime: routed execution, independent review, verification, and closeout through one `office` CLI.",
+  "homepage": "https://github.com/Hikari9/auto-office",
+  "repository": "https://github.com/Hikari9/auto-office",
+  "keywords": ["office", "orchestration", "routing", "adapters", "verification", "telemetry", "self-improvement"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Auto Office",
+        "shortDescription": "Adaptive office engineering runtime",
+        "longDescription": "Plan, route, execute, independently review, verify, and close out engineering work through one `office` CLI, with human merge-to-main preserved.",
+        "developerName": "Hikari9",
+        "category": "Productivity",
+        "capabilities": ["Read", "Write"],
+        "websiteURL": "https://github.com/Hikari9/auto-office",
+        "defaultPrompt": ["Use Auto Office to plan and run this change end to end."]
+      }
+    }
+  }
+}

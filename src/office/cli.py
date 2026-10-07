@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -22,17 +23,23 @@ Auto Office {ver}
   office start "<goal>"             create a run; queues the planner when policy requires one
   office resume [run]               bind this session to a run and show where it stands
   office status                     what matters now, ending with the next legal action
-  office wait [--timeout S]         block until something needs you (exit 0), a stall (3), or timeout (124)
+  office wait [--timeout S]         block until something needs you (exit 0), a stall (3), an agent's
+                                    question (5), or timeout (124)
   office dispatch <task>... [--parallel]
                                     launch tasks (routing, worktrees, leases are automatic)
   office preflight                  executor: read-only checks before submit (ready|fix|wait|stop)
   office submit                     planner/executor: submit your plan or your work
   office amend <scope> -- "<delta>" change the plan (scope: plan, T2, or T2,T3)
+  office amend <scope> --no-review --reason "<why>" -- "<delta>"   ordinary amendment, no plan review
+  office amend route <task> --as <harness>/<model>[@effort] --quote "<words>" [--restart]
+                                    re-record a live dispatch's model (same harness); --restart relaunches it
   office ack <amendment-id>         worker: record that you applied a delivered amendment
-  office rerun <task> --resume|--fresh
+  office rerun <task> --resume|--fresh [--reroute]
                                     after a worker ends: continue its session, or start a new one with the findings
   office prompt <task|dispatch> -- "<message>"
                                     message a live pane agent and confirm it was submitted (never herdr pane run)
+  office answer <task|dispatch> <n> | -- "<text>"
+                                    answer the question a pane agent is waiting on (a number presses that option)
   office dismiss <task|dispatch|--all>
                                     close the kept panes of ended dispatches (final text is saved first)
   office close                      finish the run after acceptance and landing
@@ -40,7 +47,17 @@ Auto Office {ver}
   office benchmarks brief|submit <f> opted-in runs: one background refresh of missing benchmark scores
 
   office list                       runs in this repository (--all for every run)
-  office inspect [run|task|gate|evidence|events|route] [id]
+  office inspect [run|task|gate|evidence|events|route|learner|trust|convergence] [id]
+  office decide <lane|plan> escalate|continue|waive|stop --quote "<user's words>"
+                                    the user's choice once a review spent its 3 RECHECK rounds
+  office disposition <scope>:<F-id> fix|fixed|dismissed|follow-up -- "<note>"
+                                    close a non-blocking (APPROVED) finding; fix routes it, no re-review
+  office config [<key> [<value>]]   read or set preferences like git config (--list, --unset, --edit, --repo)
+  office queue list|add|pause|resume|priority|demote|auto
+                                    the machine-level scheduler queue (--run <id> [--task T] for a run)
+  office web start|stop|status|serve [--port N] [--fixture small|large]
+                                    the local Office web UI (loopback only)
+  office setup                      interactive: choose preferred agents, models, and cost policy
   office doctor                     check the installation, hooks, and runtimes
   office upgrade [run] [--to X.Y]   move a run to a newer release line (dry run; --apply)
   office prune [--run <id>]         show finished runs that office prune -f would remove
@@ -75,6 +92,14 @@ Checks (task `checks:` and the run-level `checks:` under Requirements):
   the run's PLAN.md first, then office amend <T> --contract; an amendment whose
   PLAN.md does not change the named task is refused.
 
+Plan review (convergence-v1 runs): APPROVED dispatches at once; its findings are
+fixed or dispositioned (office disposition plan:P<n> ...) with no re-review unless a
+revision moves a hard seam. RECHECK holds only the tasks its blocking findings name:
+revise the plan and submit again for the same reviewer (3 rounds, then office decide
+plan ...). INTAKE_GAP names a user decision: ask the user, record it with office amend
+requirements --quote ..., then revise the plan.
+
+Runs pinned to the v3.1 review contract only:
 Plan defects (PLAN_DEFECT): trace each to the requirement or assumption behind it.
 A plan-only cause is fixed in the plan. A requirement or assumption cause goes to
 the user, and the revision that follows their answer is submitted with it:
@@ -141,6 +166,9 @@ def _parser() -> argparse.ArgumentParser:
                    help="the user's intake answer: how far to go after the task PRs")
     for step in ("preview", "prod", "verify"):
         s.add_argument(f"--deploy-{step}", metavar="CMD", help=f"the user-confirmed {step} command")
+    s.add_argument("--from-run", metavar="RUN",
+                   help="start a new run carrying an earlier run's requirements and plan draft (e.g. to move "
+                        "v3.1 work onto the current review contract); the earlier run is not changed")
 
     s = sp.add_parser("resume", parents=[common])
     s.add_argument("target", nargs="?")
@@ -152,13 +180,15 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("tasks", nargs="*")
     s.add_argument("--parallel", action="store_true")
     s.add_argument("--route", help="advanced: override the route (harness/model@effort)")
+    s.add_argument("--reroute", action="store_true",
+                   help="ignore the plan's route slate and route from current evidence")
     s.add_argument("--as", dest="as_model", metavar="HARNESS/MODEL[@EFFORT]",
                    help="run the executor on this model, bypassing registry, trust and floors (a user override)")
     s.add_argument("--cli", metavar="ARGV", help="with --as: start exactly this agent argv in a herdr pane")
     s.add_argument("--external", action="store_true",
                    help="prepare the dispatch and print how to start it; launch nothing")
     s.add_argument("--review-as", metavar="HARNESS/MODEL[@EFFORT]",
-                   help="pin the code reviewer (must be a different model family than the executor)")
+                   help="pin the code reviewer; it always runs as a fresh session, never the executor's")
     s.add_argument("--review-cli", metavar="ARGV", help="with --review-as: start exactly this reviewer argv in herdr")
     s.add_argument("--review-external", action="store_true",
                    help="with --review-as: you start the reviewer; Office reads its review file")
@@ -175,8 +205,15 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("scope")
     s.add_argument("delta", nargs="*")
     s.add_argument("--contract", action="store_true", help="a contract amendment (planner-owned)")
+    s.add_argument("--no-review", action="store_true",
+                   help="orchestrator veto: an ordinary amendment queues no plan review (needs --reason)")
+    s.add_argument("--reason", help="why plan review is vetoed (with --no-review)")
     s.add_argument("--requirements", action="store_true", help="a user-originated requirements change")
-    s.add_argument("--quote", help="the user's words (requirements changes, defect redirects)")
+    s.add_argument("--quote", help="the user's words (requirements changes, defect redirects, route changes)")
+    s.add_argument("--as", dest="route_as", metavar="HARNESS/MODEL[@EFFORT]",
+                   help="amend route: the live dispatch's new model/effort (same harness)")
+    s.add_argument("--restart", action="store_true",
+                   help="amend route: interrupt the agent and relaunch it on the new route")
     s.add_argument("--drop-criterion", action="append", default=[], metavar="TEXT",
                    help="requirements: remove the frozen done criterion this names")
     s.add_argument("--add-criterion", action="append", default=[], metavar="TEXT",
@@ -207,6 +244,37 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("inspect", parents=[common])
     s.add_argument("what", nargs="?")
     s.add_argument("ident", nargs="?")
+    s = sp.add_parser("config", parents=[common])
+    s.add_argument("key", nargs="?", help="dotted key, e.g. roles.code_reviewer.preferred_seed")
+    s.add_argument("value", nargs="?", help="new value (YAML); a preferred_seed also takes claude/sonnet@high,codex/luna@xhigh")
+    s.add_argument("--user", dest="tier", action="store_const", const="user", help="the user file (default for writes)")
+    s.add_argument("--repo", dest="tier", action="store_const", const="repo", help="this repository's .auto-office/config.yaml")
+    s.add_argument("--unset", action="store_true")
+    s.add_argument("-l", "--list", dest="list_", action="store_true", help="what the files set (--all: every effective value)")
+    s.add_argument("--all", dest="all_", action="store_true")
+    s.add_argument("-e", "--edit", action="store_true", help="open the file in $EDITOR, then validate it")
+    s.add_argument("--path", action="store_true", help="print the config file path(s)")
+    s.add_argument("--show-origin", dest="origin", action="store_true")
+    s.add_argument("--force", action="store_true", help="set a key the shipped config does not define")
+    s = sp.add_parser("queue", parents=[common])
+    s.add_argument("action", choices=["list", "add", "pause", "resume", "priority", "demote", "auto"])
+    s.add_argument("target", nargs="?", help="queue item id, issue ref (add), priority (priority) or on|off|status (auto)")
+    s.add_argument("value", nargs="?", help="the new priority (priority)")
+    s.add_argument("--task", help="with --run: one task of the run")
+    s.add_argument("--title")
+    s.add_argument("--priority", choices=["urgent", "high", "normal", "low"])
+    s.add_argument("--reason")
+    s.add_argument("--command-id", dest="command_id", help="idempotency id; a repeat returns the first receipt")
+    s = sp.add_parser("web", parents=[common])
+    s.add_argument("action", choices=["start", "stop", "status", "serve"])
+    s.add_argument("--host", default="127.0.0.1", help="loopback address to bind (127.0.0.1, localhost or ::1)")
+    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--fixture", choices=["small", "large"],
+                   help="serve a synthetic workspace with fake GitHub and launcher (never the real runs.db)")
+    s = sp.add_parser("setup", parents=[common])
+    s.add_argument("--user", dest="tier", action="store_const", const="user")
+    s.add_argument("--repo", dest="tier", action="store_const", const="repo")
+    s.add_argument("-y", "--yes", action="store_true", help="write without the final confirmation")
     s = sp.add_parser("doctor", parents=[common])
     s.add_argument("--fix", action="store_true")
     s.add_argument("--probe-vision", action="store_true", help="run image-capability probes on visual routes (uses quota)")
@@ -233,6 +301,24 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--root-cause", help="with waive P<n>: why the user judged the defect wrong")
     s.add_argument("--by", help="approve visual: the reviewer route that wrote --report (harness/model[@effort])")
     s.add_argument("--report", help="approve visual: the review file to record as the visual gate result")
+    s.add_argument("--as", dest="actor", choices=("user", "orchestrator"), default="user",
+                   help="waive: who waives (orchestrator only with delegated landing authority; needs --reason)")
+    s.add_argument("--reason", dest="waive_reason", help="waive: why the unmet gate is accepted (required)")
+    # Convergence contract (#337): the operator's round-cap decision, finding
+    # dispositions, and the orchestrator's degraded fallback review.
+    s = sp.add_parser("decide", parents=[common])
+    s.add_argument("scope", help="a lane (L-T1), shared scope (S-T1+T3), or plan")
+    s.add_argument("choice", choices=("escalate", "continue", "waive", "stop"))
+    s.add_argument("--quote", help="the user's own words")
+    s.add_argument("--reason", help="waive: why the unmet gate is accepted")
+    s = sp.add_parser("disposition", parents=[common])
+    s.add_argument("finding", help="<scope>:<code>[,<code>] (e.g. L-T1:F2 or plan:P1)")
+    s.add_argument("how", choices=("fix", "fixed", "dismissed", "follow-up"))
+    s.add_argument("note", nargs="*")
+    s = sp.add_parser("review", parents=[common])
+    s.add_argument("target", help="<scope>:convergence|visual")
+    s.add_argument("--report", required=True, help="your review, in the reviewer reply format")
+    s.add_argument("--inspected", nargs="*", default=[], help="visual: every screenshot you inspected")
     s = sp.add_parser("revoke", parents=[common])
     s.add_argument("task", help="a task id, a dispatch id, or `integration` (its reviews)")
     s.add_argument("--reason", default="orchestrator revoke")
@@ -240,7 +326,12 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("task")
     s.add_argument("--resume", action="store_true", help="continue the ended session (native harness resume)")
     s.add_argument("--fresh", action="store_true", help="start a new session with the open findings in its brief")
+    s.add_argument("--reroute", action="store_true",
+                   help="with --fresh: route from current evidence instead of keeping the original route")
     s = sp.add_parser("prompt", parents=[common])
+    s.add_argument("target", nargs="?")
+    s.add_argument("message", nargs="*")
+    s = sp.add_parser("answer", parents=[common])
     s.add_argument("target", nargs="?")
     s.add_argument("message", nargs="*")
     s = sp.add_parser("dismiss", parents=[common])
@@ -263,7 +354,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def emit(res: Result, args, ok: bool = True) -> int:
     if getattr(args, "json", False):
-        print(json.dumps({"ok": ok, "lines": res.lines, "notices": res.notices, "next": res.next, "data": res.data},
+        print(json.dumps({"ok": ok, "lines": res.lines, "notices": res.notices, "next": res.next, "data": res.data,
+                          **({"final": res.final} if res.final else {})},
                          indent=2, sort_keys=True, default=str))
         return res.exit_code
     out = list(res.lines)
@@ -272,6 +364,8 @@ def emit(res: Result, args, ok: bool = True) -> int:
     out += res.notices
     if res.next:
         out.append(f"next: {res.next}")
+    if res.final:
+        out.append(res.final)
     if out:
         print("\n".join(out))
     return res.exit_code
@@ -292,6 +386,8 @@ def emit_error(err: OfficeError, args) -> int:
         lines.append(f"preserved: {err.preserved}")
     if err.next_step:
         lines.append(f"next: {err.next_step}")
+    if err.data.get("final"):
+        lines.append(err.data["final"])
     print("\n".join(lines))
     return err.exit_code
 
@@ -310,6 +406,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args, unknown = parser.parse_known_args(argv)
     if unknown and args.cmd not in ("amend",):
+        run_like = [u for u in unknown if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]+)*", u)]
+        if args.cmd and len(run_like) == 1 and len(unknown) == 1:
+            # `office close <run>`: the run is a flag on every command, not a positional.
+            parser.error(f"unrecognized arguments: {run_like[0]} (name the run with --run: "
+                         f"office --run {run_like[0]} {args.cmd} ...)")
         parser.parse_args(argv)  # raises the usage error
     if args.cmd == "submit" and args.reason and not args.request_scope:
         # The reason text belongs to --request-scope; a stray argument is still a usage error.
@@ -324,6 +425,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _run(args, unknown)
     except OfficeError as err:
+        if args.cmd == "close":  # every office close path ends with its report line
+            from office import closeout
+            err.data.setdefault("final", closeout.done(f"stopped early ({err.category}); nothing closed or cleaned up"))
         return emit_error(err, args)
     except KeyboardInterrupt:
         return 130
@@ -368,7 +472,7 @@ def _run(args, unknown) -> int:
     from office.state import OfficeError
     if cmd == "start":
         from office import lifecycle, runtime_default
-        if not args.goal:
+        if not args.goal and not args.from_run:
             raise OfficeError("usage", "office start needs a goal", next_step='office start "<goal>"', exit_code=2)
         runtime_default.require_new_run_runtime()
         res = lifecycle.start(args.goal, cwd=cwd, gear=args.gear, playbook=args.playbook, blast_radius=args.blast_radius,
@@ -376,7 +480,7 @@ def _run(args, unknown) -> int:
                               interview=args.interview, adversarial=args.adversarial, sets=args.set,
                               harness=args.harness, session=args.session, base=args.base, planner=args.planner,
                               issue=args.issue, no_prs=args.no_prs, end_state=args.end_state,
-                              benchmark_refresh=args.benchmark_refresh,
+                              benchmark_refresh=args.benchmark_refresh, from_run=args.from_run,
                               deploy={k: v for k in ("preview", "prod", "verify")
                                       if (v := getattr(args, f"deploy_{k}"))})
         return emit(res, args)
@@ -408,6 +512,25 @@ def _run(args, unknown) -> int:
             return emit(prune.force(con, only) if args.force else prune.dry_run(con, only), args)
         finally:
             con.close()
+    if cmd == "config":
+        from office import configcmd
+        return emit(configcmd.config(key=args.key, value=args.value, tier=args.tier, unset=args.unset, list_=args.list_,
+                                     all_=args.all_, edit=args.edit, path=args.path, origin=args.origin,
+                                     force=args.force, cwd=cwd), args)
+    if cmd == "queue":
+        from office import queuecmd
+        con = _con()
+        try:
+            return emit(queuecmd.run_command(con, args), args)
+        finally:
+            con.close()
+    if cmd == "web":
+        from office.web import server
+        out = server.main(args)
+        return out if isinstance(out, int) else emit(out, args)
+    if cmd == "setup":
+        from office import configcmd
+        return emit(configcmd.setup(tier=args.tier or "user", yes=args.yes, cwd=cwd), args)
     if cmd == "doctor":
         from office import doctor
         return emit(doctor.doctor(fix=args.fix, probe_vision=args.probe_vision), args)
@@ -463,7 +586,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return dispatch.dispatch(con, run, args.tasks, parallel=args.parallel, route=args.route,
                                  as_model=args.as_model, cli=args.cli, external=args.external,
                                  review_as=args.review_as, review_cli=args.review_cli,
-                                 review_external=args.review_external)
+                                 review_external=args.review_external, reroute=args.reroute)
     if cmd == "preflight":
         from office import preflight
         return preflight.preflight(con, run, cwd)
@@ -472,12 +595,18 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return submit.submit(con, run, cwd=cwd, plan_path=args.plan, redirect=_redirect(args),
                              request_scope=args.request_scope,
                              reason=" ".join(args.reason or []).strip())
+    if cmd == "amend" and args.scope == "route":
+        from office import routechange
+        rest = [*(args.delta or []), *[u for u in unknown if u != "--"]]
+        return routechange.change_route(con, run, rest[0] if len(rest) == 1 else None, args.route_as, args.quote,
+                                        restart=args.restart)
     if cmd == "amend":
         from office import amend
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()
         return amend.amend(con, run, args.scope, delta, contract=args.contract, requirements=args.requirements,
                            quote=args.quote, cwd=cwd, redirect=_redirect(args),
-                           drop_criteria=args.drop_criterion, add_criteria=args.add_criterion)
+                           drop_criteria=args.drop_criterion, add_criteria=args.add_criterion,
+                           no_review=args.no_review, reason=args.reason)
     if cmd == "ack":
         from office import amend
         return amend.ack(con, run, args.amendment)
@@ -508,13 +637,24 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "approve":
         from office import authority
         return authority.approve(con, run, args.target, args.quote, args.extra, root_cause=args.root_cause,
-                                 by=args.by, report=args.report)
+                                 by=args.by, report=args.report, actor=args.actor, reason=args.waive_reason)
+    if cmd == "decide":
+        from office import convergence
+        return convergence.decide(con, run, args.scope, args.choice, quote=args.quote, reason=args.reason)
+    if cmd == "disposition":
+        from office import convergence
+        note = " ".join([*(args.note or []), *[u for u in unknown if u != "--"]]).strip()
+        return convergence.disposition(con, run, args.finding, args.how, note)
+    if cmd == "review":
+        from office import convergence
+        return convergence.fallback_review(con, run, args.target, Path(args.report).expanduser(),
+                                           inspected=args.inspected)
     if cmd == "revoke":
         from office import dispatch
         return dispatch.revoke(con, run, args.task, args.reason)
     if cmd == "rerun":
         from office import rerun
-        return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh)
+        return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh, reroute=args.reroute)
     if cmd == "dismiss":
         from office import rerun
         return rerun.dismiss(con, run, args.target, all_=args.dismiss_all)
@@ -522,6 +662,10 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         from office import prompting
         text = " ".join([*(args.message or []), *[u for u in unknown if u != "--"]]).strip()
         return prompting.prompt(con, run, args.target, text)
+    if cmd == "answer":
+        from office import questions
+        text = " ".join([*(args.message or []), *[u for u in unknown if u != "--"]]).strip()
+        return questions.answer(con, run, args.target, text)
     from office.state import OfficeError
     raise OfficeError("usage", f"unknown command {cmd}", exit_code=2)
 

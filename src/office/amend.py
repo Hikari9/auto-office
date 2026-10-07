@@ -18,18 +18,26 @@ from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_bytes
 
 # Words that signal an authority-envelope change (external, irreversible, or
-# destructive action). An "ordinary" amendment carrying one is refused.
+# destructive action). An "ordinary" amendment carrying one is refused. A term that
+# is one part of a hyphen/underscore compound identifier (`send-keys`, `send_keys`,
+# `release-notes`) names a thing, not the action, so it does not count; `--prod` and
+# `force-push` still do.
 AUTHORITY_TERMS = re.compile(
-    r"\b(deploy|production|prod\b|publish|release|send|email|notify users|delete|drop table|truncate|force.?push|"
-    r"merge (to|into) main|migrat(e|ion) (prod|production)|payment|charge|rotate (key|secret)|credentials?)\b", re.I)
+    r"\b(?<!\w-)(?:deploy|production|prod|publish|release|send|email|notify users|delete|drop table|truncate|"
+    r"force.?push|merge (?:to|into) main|migrat(?:e|ion) (?:prod|production)|payment|charge|"
+    r"rotate (?:key|secret)|credentials?)\b(?!-\w)", re.I)
 
 
 def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, requirements: bool = False,
           quote: str | None = None, cwd: Path | None = None, redirect: dict | None = None,
-          drop_criteria: list[str] | None = None, add_criteria: list[str] | None = None) -> Result:
+          drop_criteria: list[str] | None = None, add_criteria: list[str] | None = None,
+          no_review: bool = False, reason: str | None = None) -> Result:
     """`redirect` ({defect, root_cause, requirement, reviewer}) marks a contract
     amendment as the user's redirect of a plan defect (see office.redirect).
-    `drop_criteria`/`add_criteria` edit the frozen done criteria (requirements only)."""
+    `drop_criteria`/`add_criteria` edit the frozen done criteria (requirements only). A requirements
+    amendment that only adds criteria is not delivered to live tasks; naming tasks as the scope
+    (`office amend T1,T2 --requirements ...`) forces delivery to those.
+    `no_review` (with a `reason`) is the orchestrator's veto of plan review for an ordinary amendment."""
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-amend", "workers do not amend the plan; report the problem in your submission",
                       next_step="office submit")
@@ -46,14 +54,25 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
     if (drop_criteria or add_criteria) and not (requirements or scope == "requirements"):
         raise Usage("criteria-are-requirements", "done criteria change only with a requirements amendment",
                     next_step=CRITERIA_FORM)
+    if reason and not no_review:
+        raise Usage("reason-needs-no-review", "--reason records why plan review is vetoed; it goes with --no-review",
+                    next_step=NO_REVIEW_FORM)
+    if no_review:
+        if not reason or not reason.strip():
+            raise Usage("no-review-needs-reason", "--no-review needs a reason the run's record keeps", next_step=NO_REVIEW_FORM)
+        if contract or requirements or scope == "requirements":
+            raise Refused("no-review-ordinary-only", "plan review cannot be vetoed for a contract or requirements amendment; "
+                          "those always get review", scope=scope, preserved="plan unchanged",
+                          next_step="rerun without --no-review (office amend --help)")
     if requirements or scope == "requirements":
-        return _requirements_change(con, run, delta, quote, drop_criteria or [], add_criteria or [])
+        to = [] if scope == "requirements" else _scope_ids(con, run, scope)
+        return _requirements_change(con, run, delta, quote, drop_criteria or [], add_criteria or [], to)
     scope_ids = _scope_ids(con, run, scope)
     plan_path = _orchestrator_plan_path(con, run, cwd)
     plan_text = planfile.strip_generated(plan_path.read_text(encoding="utf-8")) if plan_path else None
     if contract:
         return _contract(con, run, scope, scope_ids, delta, plan_text, redirect, plan_path)
-    return _ordinary(con, run, scope, scope_ids, delta, plan_text, plan_path)
+    return _ordinary(con, run, scope, scope_ids, delta, plan_text, plan_path, veto_reason=reason.strip() if no_review else None)
 
 
 def _scope_ids(con, run: dict, scope: str) -> list[str]:
@@ -76,28 +95,36 @@ def _orchestrator_plan_path(con, run: dict, cwd: Path | None) -> Path | None:
     return draft if draft.is_file() else None
 
 
-def _requirements_change(con, run: dict, delta: str, quote: str | None, drop: list[str], add: list[str]) -> Result:
+def _requirements_change(con, run: dict, delta: str, quote: str | None, drop: list[str], add: list[str],
+                         to: list[str]) -> Result:
     if not quote or not quote.strip():
         raise Refused("user-quote-required", "only the user can change requirements; record their words",
                       next_step='office amend requirements --quote "<user\'s exact words>" -- "<change>"')
     with db.transaction(con):
-        version = record_requirements(con, state.get_run(con, run["id"]), delta, quote, drop=drop, add=add)
-        state.emit(con, run, "requirements.changed", f"REQUIREMENTS r{version}: {delta.strip()[:100]}; authorization required")
+        version, targets = record_requirements(con, state.get_run(con, run["id"]), delta, quote, drop=drop, add=add,
+                                                to=to, with_targets=True)
+        delivery = f"delivered to {', '.join(targets)}" if targets else "not delivered to live tasks"
+        state.emit(con, run, "requirements.changed",
+                   f"REQUIREMENTS r{version}: {delta.strip()[:100]}; {delivery}; authorization required")
     jobs.kick(con, run["id"])
-    return Result(lines=[f"requirements r{version} recorded | authorization for r{version} required"],
+    return Result(lines=[f"requirements r{version} recorded | {delivery} | authorization for r{version} required"],
                   next='ask the user (native question tool) for authorization, then office approve plan --quote "<user\'s words>"')
 
 
-def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[str] = (), add: list[str] = ()) -> int:
+def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[str] = (), add: list[str] = (),
+                        to: list[str] = (), with_targets: bool = False):
     """Record requirements r(n+1) from the user's words and deliver it to live
-    workers. Caller holds the tx. Returns the new version. `drop` names frozen
-    done criteria the user removed (each must match one); `add` appends new ones."""
+    workers. Caller holds the tx. Returns the new version (with `with_targets`, also the tasks
+    it was delivered to). `drop` names frozen done criteria the user removed (each must match
+    one); `add` appends new ones. A change that only adds criteria concerns no task already
+    running its contract, so it is recorded but delivered only to the live tasks in `to`."""
     cur = state.current_requirements(con, run["id"])
     frozen = dict(cur["frozen"])
     criteria = list(frozen.get("done_criteria") or [])
     for text in drop:
         criteria.remove(_match_criterion(criteria, text))
-    criteria += [a.strip() for a in add if a.strip() and a.strip() not in criteria]
+    added = [a.strip() for a in add if a.strip() and a.strip() not in criteria]
+    criteria += added
     frozen["done_criteria"] = criteria
     frozen.setdefault("user_changes", []).append(delta.strip())
     version = cur["version"] + 1
@@ -106,9 +133,11 @@ def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[st
     state.update_run(con, run["id"], requirements_version=version)
     amendment_id = _record(con, run, "requirements", [], delta, run["plan_version"], run["plan_version"])
     live = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] not in ("accepted", "cancelled", "planned")]
-    _deliver(con, state.get_run(con, run["id"]), amendment_id, live, f"requirements r{version}: {delta.strip()}",
-             run["plan_version"])
-    return version
+    if added and not drop:
+        live = [t for t in live if t in to]
+    targets = _deliver(con, state.get_run(con, run["id"]), amendment_id, live, f"requirements r{version}: {delta.strip()}",
+                       run["plan_version"])
+    return (version, targets) if with_targets else version
 
 
 CRITERIA_FORM = ('office amend requirements --quote "<user\'s words>" [--drop-criterion "<criterion>"]... '
@@ -128,8 +157,11 @@ def _match_criterion(criteria: list[str], text: str) -> str:
                   preserved="requirements unchanged", next_step=CRITERIA_FORM)
 
 
+NO_REVIEW_FORM = 'office amend <scope> --no-review --reason "<why review adds nothing>" -- "<delta>"'
+
+
 def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan_text: str | None,
-             plan_path: Path | None = None) -> Result:
+             plan_path: Path | None = None, veto_reason: str | None = None) -> Result:
     current = state.current_plan(con, run["id"])
     if current is None:
         raise Refused("no-plan", "there is no plan to amend", next_step="office submit the plan first")
@@ -160,20 +192,32 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
                     "content_hash, parent_version, amendment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (run["id"], version, "ordinary", new_text, dumps(parsed.tasks), dumps(parsed.requirements),
                      "orchestrator", now_iso(), sha256_bytes(new_text.encode()), run["plan_version"], amendment_id))
-        sync = plans.sync_tasks(con, run, parsed.tasks, version)
-        affected = sorted(set(scope_ids) | set(sync["acceptance"]) | set(sync["contract"]))
-        if not scope_ids and not affected:
+        sync = plans.sync_tasks(con, run, parsed.tasks, version, rerun_checks=True)
+        # A checks-only change to an accepted task reruns its checks instead of reopening it.
+        rerun = sync["checks_only"]
+        # Added tasks are the only affected ones when the plan merely grows: a running task's contract is untouched.
+        affected = sorted((set(scope_ids) | set(sync["acceptance"]) | set(sync["contract"]) | set(sync["added"])) - set(rerun))
+        if not scope_ids and not affected and not rerun:
             affected = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] not in ("accepted", "cancelled")]
         for tid in scope_ids:
-            if tid not in sync["acceptance"]:
+            if tid not in sync["acceptance"] and tid not in rerun:
                 state.update_task(con, run["id"], tid, contract_version=version, acceptance_version=version)
         state.update_run(con, run["id"], plan_version=version)
         run = state.get_run(con, run["id"])
         plans.apply_run_checks(con, run, parsed.run_checks)
         run = state.get_run(con, run["id"])
+        rechecked = [tid for tid in rerun if plans.rerun_accepted_checks(con, run, tid, amendment_id)]
         delivered = _deliver(con, run, amendment_id, affected, delta.strip(), version)
         rereview = None
-        if plans.review_required(run) and not plans.plan_review_ended(con, run):
+        from office import contract
+        if veto_reason:
+            # The orchestrator's veto: p+1 queues no plan review. A gate already queued or running for an earlier
+            # version is left to finish.
+            state.emit(con, run, "plan.review_skipped", f"plan p{version}: review vetoed by the orchestrator: {veto_reason}")
+        elif contract.is_convergence(run):
+            rereview = plans.review_after_revision(con, run, current["tasks"], parsed.tasks, version)
+            rereview = rereview if "queued" in rereview else None
+        elif plans.review_required(run) and not plans.plan_review_ended(con, run):
             rereview = plans.queue_plan_review(con, run, version)
         state.emit(con, run, "plan.amended", f"plan p{version} ({amendment_id}, ordinary)"
                    + (f" | affected {', '.join(affected)}" if affected else ""), audience="runtime")
@@ -183,6 +227,8 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
         parts.append("rereview queued")
     if affected:
         parts.append(f"affected {','.join(affected)}")
+    if rechecked:
+        parts.append(f"checks rerun on {','.join(rechecked)}")
     if delivered:
         parts.append(f"delivering to {','.join(delivered)}")
     res.add(" | ".join(parts))
@@ -247,6 +293,7 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
             redirect_lines = redirect_mod.record(con, run, redirect)
             run = state.get_run(con, run["id"])
         version = run["plan_version"] + 1
+        prev_tasks = (state.current_plan(con, run["id"]) or {}).get("tasks")
         amendment_id = _record(con, run, "contract", scope_ids, delta, run["plan_version"], version)
         con.execute("INSERT INTO plans(run_id, version, kind, body, tasks_json, requirements_json, created_by, created_at, "
                     "content_hash, parent_version, amendment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -260,7 +307,10 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
         affected = sorted(set(scope_ids) | set(sync["contract"]) | set(sync["acceptance"]))
         _deliver(con, run, amendment_id, affected, delta.strip(), version)
         flagged = _envelope_changes(con, run, parsed)
-        if plans.review_required(run):
+        from office import contract
+        if contract.is_convergence(run):
+            plans.review_after_revision(con, run, prev_tasks, parsed.tasks, version)
+        elif plans.review_required(run):
             plans.queue_plan_review(con, run, version, escalated=plans.plan_review_ended(con, run))
         state.emit(con, run, "plan.amended", f"plan p{version} ({amendment_id}, contract)", audience="runtime")
     jobs.kick(con, run["id"])
@@ -409,15 +459,38 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
                           "text": f"AMENDMENT {amendment_id}: run office status, apply it, office ack {amendment_id}, "
                                   "then office submit again."},
                           dedup_key=f"notify:{did}", max_attempts=1)
-        else:
-            # The worker is gone: a fresh session starts from the current
-            # contract, so the delta is carried in its brief, not acked.
+        elif task["status"] in ("planned",):
+            # Nothing has run: the first session starts from the current contract.
             con.execute("UPDATE deliveries SET status='superseded', superseded_by='relaunch' WHERE id=?", (did,))
-            if task["status"] not in ("planned",):
-                dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
-                                        extra={"amendment_id": amendment_id})
+        else:
+            # The worker is gone. The relaunched session starts from the current contract, but an ordinary
+            # delta is not in the contract and a reopened task has no findings: hand the delivery to the new
+            # session so its brief carries the delta, and it is delivered once that prompt is confirmed.
+            new_did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"))
+            con.execute("UPDATE deliveries SET dispatch_id=?, status='queued', superseded_by=NULL WHERE id=?",
+                        (new_did, did))
         targets.append(tid)
     return targets
+
+
+def confirm_launch_deliveries(con, run: dict) -> int:
+    """Mark delivered the amendments a relaunched session carries in its brief once that brief's
+    prompt landed in its running agent (launch.json records it). Only deliveries recorded before the
+    session started are in its brief; a later one reaches it by its own prompt. Returns how many changed."""
+    import json
+    n = 0
+    for r in con.execute("SELECT dl.id, dl.dispatch_id FROM deliveries dl JOIN dispatches d ON d.id=dl.dispatch_id "
+                         "WHERE dl.run_id=? AND dl.status='queued' AND d.status='running' AND d.ended_at IS NULL "
+                         "AND dl.created_at<=d.started_at", (run["id"],)).fetchall():
+        try:
+            spec = json.loads((paths.run_dir(run["id"]) / "dispatches" / r["dispatch_id"] / "launch.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(spec, dict) and spec.get("prompt_landed"):
+            with db.transaction(con):
+                n += con.execute("UPDATE deliveries SET status='delivered', delivered_at=COALESCE(delivered_at, ?) "
+                                 "WHERE id=? AND status='queued'", (now_iso(), r["id"])).rowcount
+    return n
 
 
 def pending_block(con, run: dict, dispatch_id: str) -> list[str]:

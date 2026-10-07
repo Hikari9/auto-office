@@ -1,0 +1,24 @@
+     required to delete an accessible group. [MODEL-DEF
+     API - connect.favor.church,runtime,Rock.Model.Group,,__default__,,View,"MODEL-DEFAULT View is required for loadAttributes group reads. dynamic target set: every Connect
+     Group and Connect Group Section resolved from the v
+     0
+
+⏺ S1 checks out in the data: connect has signed MODEL-DEFAULT Group/Person rows, and readmybible has none. Taking S1 and the worker routing to you.
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ T19 S1  ☐ Executor  ✔ Submit  →
+
+│ T19 (Read My Bible cutover) STOP S1: once readmybible's key leaves Group 2, its by-id reads (Groups/{id}, People/{id}, Campuses/{id}) return 401. connect works because it
+│ has operator-signed MODEL-DEFAULT rows. How should readmybible keep those reads?
+
+❯ 1. Sign View defaults (Recommended)
+     Approve MODEL-DEFAULT View (read only) on Rock.Model.Group, Person and Campus for API - readmybible, via data/rest_key_modeldefault_approvals.csv. Far narrower than
+     today's Group 2 membership. Same pattern as connect.
+  2. Per-target View
+     Exact-entity grants only. Rosters and people are runtime-selected, so this likely can't cover People/{id} and needs app-side discovery first.
+  3. Defer T19
+     Keep the current Group 2 membership on prod. #168 stays open. T61/T62/T64 are blocked behind it.
+  4. Type something.
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

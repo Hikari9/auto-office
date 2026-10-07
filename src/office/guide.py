@@ -8,8 +8,9 @@ from __future__ import annotations
 import re
 
 import os
+from pathlib import Path
 
-from office import amend, paths, planpath, plans, state
+from office import amend, contract, paths, planpath, plans, state
 from office.result import Result
 from office.util import atomic_write_text, short
 
@@ -63,7 +64,11 @@ def next_action(con, run: dict) -> str:
     if planfile.parse(plan["body"]).questions and not plans._answered(con, run):
         return 'ask the user the plan questions (native question tool), then office amend plan --contract -- "<answers>"'
     rs = plans.review_state(con, run)
-    if rs["required"] and not rs["ended"] and rs["first_verdict"] is None:
+    if contract.is_convergence(run):
+        nxt = _plan_next_convergence(con, run, rs)
+        if nxt:
+            return nxt
+    elif rs["required"] and not rs["ended"] and rs["first_verdict"] is None:
         return "no action; plan review is running"
     if rs["first_verdict"] == "CHANGES_REQUIRED" and run["plan_version"] <= (rs["first_version"] or 0) and not rs["ended"]:
         return f'amend the plan: office amend plan -- "<changes>" (edit {planpath.rel(run)} for task changes); safe work may launch right after'
@@ -102,6 +107,12 @@ def next_action(con, run: dict) -> str:
             t = next(x for x in tasks if x["id"] == tid)
             return f"resolve {tid} ({t.get('pause_reason') or status}); office inspect task {tid}"
     from office import gates as gates_mod
+    if contract.is_convergence(run):
+        # A lane RECHECK routes one consolidated repair set: name every owner at once.
+        from office import convergence
+        nxt = convergence.next_action(con, run)
+        if nxt:
+            return nxt
     for t in tasks:
         if t["status"] == "changes_required" and not gates_mod.worker_live(con, t.get("current_dispatch_id")):
             # Findings wait for the orchestrator's choice (R8); nothing relaunches on its own.
@@ -117,6 +128,11 @@ def next_action(con, run: dict) -> str:
     live = [t for t in tasks if t["status"] not in ("accepted", "cancelled", "planned")]
     if live:
         return "exceptions only; office status"
+    if contract.is_convergence(run):
+        from office import convergence
+        nxt = convergence.next_action(con, run, dispositions=True)
+        if nxt:
+            return nxt
     from office import integration
     integ = integration.status(con, run)
     if integ["required"] and integ["status"] not in ("accepted",):
@@ -125,19 +141,59 @@ def next_action(con, run: dict) -> str:
         if integ["status"] in ("blocked", "unavailable"):
             return (f"integration {integ['status']}: {integ.get('detail', '')}; fix the cause, then office resume "
                     "to retry integration")
+        if integ["status"] == "converging":
+            return f"no action; lane convergence is running ({integ.get('detail', '')})"
         return "no action; integration verification is running"
     if ((run.get("landing") or {}).get("prs") or {}).get("enabled"):
         from office import land
         return f"office land (end state: {land.end_state(con, run)['mode']})"
     branch = integ.get("branch")
-    return (f"land it: push {branch} and open a PR (merge to main stays with the user), then office close --handoff <pr-url>"
+    from office import closeout
+    return (f"land it: push {branch} and open a PR (merge to main stays with the user), "
+            f"{closeout.DOCS_STEP}office close --handoff <pr-url>"
             if branch else "office close --handoff <ref>")
+
+
+def _plan_next_convergence(con, run: dict, rs: dict) -> str | None:
+    """The plan-review step under the convergence contract (#337), or None."""
+    if not rs["required"] or rs["ended"]:
+        return None
+    st = rs["status"]
+    dedicated = run.get("planner_mode") == "dedicated"
+    revise = ('have the planner revise it: office amend plan --contract -- "<the findings>"' if dedicated
+              else f'revise {planpath.rel(run)}, then office amend plan --contract -- "<what changed>"')
+    if st == "unavailable":
+        return ("plan review is UNAVAILABLE (runtime status, not a verdict; no round spent): office resume retries "
+                'the reviewer chain, or the user may waive: office approve waive plan-review --quote "<words>"')
+    if st == "attention":
+        return ("the plan reviewer left no readable reply (INVALID_RESULT, no round spent): re-prompt it in its pane "
+                "or office resume")
+    if rs["pending"] or rs["first_verdict"] is None:
+        return "no action; plan review is running"
+    if st == "escalated":
+        esc = rs.get("escalation") or {}
+        return (f"plan review spent {contract.MAX_ROUNDS} RECHECK rounds: ask the user now (native question tool), "
+                f"showing the remaining findings, attempts and risk (office inspect run) and your recommendation "
+                f"({(esc.get('recommendation') or '')[:100]}); then office decide plan escalate|continue|waive|stop "
+                "--quote \"<user's words>\"")
+    if st == "intake_gap":
+        gap = rs.get("intake_gap") or {}
+        return (f"plan INTAKE_GAP: ask the user (native question tool): {gap.get('decision')} (affects "
+                f"{gap.get('affects')}); record their answer (office amend requirements --quote ...), then {revise}")
+    if st in ("recheck", "pending"):
+        codes = ", ".join(f["code"] for f in rs["blocking"][:4])
+        held = plans.held_tasks(con, run)
+        ready = [t for t in ready_tasks(con, run) if t not in held]
+        return (f"plan RECHECK ({codes}): {revise}; the same reviewer reviews it"
+                + (f"; unaffected work may start: office dispatch {' '.join(ready)}" if ready else ""))
+    return None
 
 
 def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> Result:
     worker = os.environ.get("OFFICE_DISPATCH_ID")
     if worker:
         return worker_status(con, run, worker)
+    amend.confirm_launch_deliveries(con, run)
     run = state.get_run(con, run["id"])
     tasks = state.tasks(con, run["id"])
     c = _counts(tasks)
@@ -172,13 +228,16 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
             waiting = _waiting_on(con, run, t)
             if waiting:
                 res.add(f"{t['id']} waiting: {waiting}")
+    from office import questions
+    for q in questions.recorded(con, run):
+        res.add(f"question: {q}")
     events = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=6)
     for e in events:
         res.add(f"· {e['summary']}")
     if events:
         from office import db
         with db.transaction(con):
-            state.advance_cursor(con, run["id"], "orchestrator", events[-1]["seq"])
+            state.consume_events(con, run["id"], events)
     res.next = next_action(con, run)
     res.data = {"run_id": run["id"], "phase": run["phase"], "office_version": run["office_version"],
                 "requirements_version": run["requirements_version"], "plan_version": run["plan_version"],
@@ -205,8 +264,9 @@ def _snapshot(con, run: dict) -> tuple:
     return run["phase"], run["requirements_version"], run["plan_version"], tasks
 
 
-def stalls(con, run: dict, since: str = "") -> list[str]:
-    """Work Office believes is in progress with nothing left to advance it."""
+def stalls(con, run: dict, since: str = "", acts: dict | None = None) -> list[str]:
+    """Work Office believes is in progress with nothing left to advance it. `acts` is the pane
+    activity `questions.scan` already read, by dispatch id, so no pane is read twice."""
     out = []
     from office import gates as gates_mod
     for g in con.execute("SELECT * FROM gates WHERE run_id=? AND status IN ('queued','running')", (run["id"],)).fetchall():
@@ -220,27 +280,11 @@ def stalls(con, run: dict, since: str = "") -> list[str]:
     for j in con.execute("SELECT kind, error FROM outbox WHERE run_id=? AND status='failed' AND finished_at > ?",
                          (run["id"], since)).fetchall():
         out.append(f"job {j['kind']} failed: {(j['error'] or '')[:120]}")
-    out.extend(_preflight_waits(con, run))
-    out.extend(_idle_executors(con, run))
+    out.extend(_idle_executors(con, run, acts))
     return out
 
 
-def _preflight_waits(con, run: dict) -> list[str]:
-    """Executors polling preflight on a wait only the orchestrator can end. They
-    are busy, never idle, so the idle-stall check alone would never name them.
-    A later orchestrator prompt to the same dispatch answers the wait."""
-    out = []
-    for row in con.execute("SELECT e.task_id, e.dispatch_id, e.summary FROM events e JOIN tasks t ON t.run_id=e.run_id "
-                           "AND t.id=e.task_id AND t.current_dispatch_id=e.dispatch_id JOIN dispatches d "
-                           "ON d.id=e.dispatch_id AND d.ended_at IS NULL WHERE e.run_id=? AND e.kind='preflight.waiting' "
-                           "AND NOT EXISTS (SELECT 1 FROM events p WHERE p.run_id=e.run_id AND p.dispatch_id=e.dispatch_id "
-                           "AND p.kind='prompt' AND p.seq > e.seq) ORDER BY e.seq", (run["id"],)).fetchall():
-        out.append(f"{row['task_id']} executor {row['dispatch_id']} is waiting on you, its work kept: {row['summary'][:200]}; "
-                   f"next: office prompt {row['dispatch_id']} -- \"<the findings to fix>\" or office rerun {row['task_id']} --fresh")
-    return out
-
-
-def _idle_executors(con, run: dict) -> list[str]:
+def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:
     """Executors whose agent stopped without submitting. Nothing else ends that
     wait: the session is alive, so no exit is recorded and no job is pending.
     Liveness unknown (herdr unreachable) is never a stall."""
@@ -254,8 +298,9 @@ def _idle_executors(con, run: dict) -> list[str]:
                            "AND d.launcher IN ('herdr','process','process-fallback') "
                            "AND t.status IN ('launching','running','changes_required')", (run["id"],)).fetchall():
         d = dict(row)
-        act = rerun.agent_activity(d)
-        if act is None:
+        act = acts[d["id"]] if acts is not None and d["id"] in acts else rerun.agent_activity(d)
+        if act is None or act.get("question"):
+            # An agent waiting on a question is reported as a `question:` line, not a stall.
             continue
         who = f"{d['task_id']} executor {d['id']}"
         tid = d["task_id"]
@@ -277,6 +322,12 @@ def _idle_executors(con, run: dict) -> list[str]:
                 con.execute("UPDATE dispatches SET stall_kind=NULL, resets_at=NULL, limit_label=NULL, "
                             "limit_fingerprint=NULL WHERE id=?", (d["id"],))
         changed = act["hash"] is not None and d.get("idle_hash") not in (None, act["hash"])
+        final = None if act["busy"] else _final_status(act["text"])
+        if final is not None:
+            tail = _write_pane_tail(run, d, act)
+            out.append(f"{who}: ended its turn with SUBMIT={final['submit']}{why}; NEXT={final['next']}; "
+                       f"pane tail in {tail}; next: {actions}")
+            continue
         if act["busy"] or changed:
             idle_since = None
         else:
@@ -290,13 +341,41 @@ def _idle_executors(con, run: dict) -> list[str]:
         idle = (parse_iso(now_iso()) - parse_iso(idle_since)).total_seconds()
         if idle < threshold:
             continue
-        tail = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "pane-tail.txt"
-        if act["text"] is not None:
-            atomic_write_text(tail, "\n".join(act["text"].splitlines()[-40:]) + "\n")
+        tail = _write_pane_tail(run, d, act)
         prompt = f'office prompt {d["id"]} -- "<message>", ' if d["launcher"] == "herdr" else ""
         out.append(f"{who}: idle {int(idle)}s without submitting{why}; pane tail in {tail}; "
                    f"next: {prompt}{actions}")
     return out
+
+
+def _write_pane_tail(run: dict, d: dict, act: dict) -> Path:
+    tail = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "pane-tail.txt"
+    if act["text"] is not None:
+        atomic_write_text(tail, "\n".join(act["text"].splitlines()[-40:]) + "\n")
+    return tail
+
+
+# The executor's closing status line: "TASK=.. SUBMIT=<..> NEXT=<..>". A pane
+# wraps it, so the line runs on until a blank line.
+_FINAL_SUBMIT = re.compile(r"\bSUBMIT=(not attempted|refused\b.*?)\s+NEXT=(.*)", re.S)
+
+
+def _final_status(text: str | None) -> dict | None:
+    """The pane's last status line when it says the executor ended without a
+    submit ({"submit", "next"}), else None. A status line followed by a newer
+    turn (an echoed prompt or new assistant output) is history, not the end."""
+    from office import dispatch
+    lines = (text or "").splitlines()
+    start = next((i for i in range(len(lines) - 1, -1, -1) if "SUBMIT=" in lines[i]), None)
+    if start is None:
+        return None
+    end = next((i for i in range(start + 1, len(lines)) if not lines[i].strip()), len(lines))
+    if any(dispatch._LIMIT_ACTIVITY.match(line) for line in lines[end:]):
+        return None
+    m = _FINAL_SUBMIT.search(" ".join(line.strip() for line in lines[start:end]))
+    if not m:
+        return None
+    return {"submit": m.group(1).strip(), "next": " ".join(m.group(2).split())[:300]}
 
 
 def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str) -> str:
@@ -330,6 +409,27 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
     return f"{who}: usage_limit, {when}; pane tail in {tail}; next: office prompt {d['id']} -- continue"
 
 
+SIGNAL_LINES = 10
+
+
+def worker_signals(con, run: dict) -> tuple[list[str], int]:
+    """(stall lines, last seq) for workers that stopped on something only the orchestrator resolves (a
+    preflight stop, a refused submit). Every unread signal counts, however many other events are
+    unread before it; the caller advances the signal cursor to `last seq` once it has reported them."""
+    import json
+    out, last = [], 0
+    signals = state.unread_signals(con, run["id"])
+    for e in signals[-SIGNAL_LINES:]:  # the newest; a worker that varies its text cannot flood the orchestrator
+        p = json.loads(e["payload_json"] or "{}")
+        who = " ".join(x for x in (e["task_id"], e["dispatch_id"]) if x)
+        out.append(f"{who} {p.get('source', 'worker')}: {p.get('reason', e['summary'])}; next: {p.get('next', 'office status')}")
+    if len(signals) > SIGNAL_LINES:
+        out.insert(0, f"{len(signals) - SIGNAL_LINES} earlier worker signals not shown (office inspect events)")
+    if signals:
+        last = signals[-1]["seq"]
+    return out, last
+
+
 def _needs_orchestrator(con, run: dict) -> bool:
     if any(t["status"] in ("paused", "blocked", "changes_required") for t in state.tasks(con, run["id"])):
         return True
@@ -340,10 +440,11 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
     """Block until something needs the orchestrator, then print status.
     Exit 0: a task, phase, plan or requirements change, or a new orchestrator
     event. Exit 3: a stall (work marked in progress that nothing can advance).
-    Exit 124: timeout with nothing new. A watcher keys on the exit code, never
-    on matching status text."""
+    Exit 5: an agent is waiting on a question (a `question:` line names it and
+    the `office answer` command). Exit 124: timeout with nothing new. A watcher
+    keys on the exit code, never on matching status text."""
     import time
-    from office import db, dispatch, jobs, lifecycle
+    from office import db, dispatch, jobs, lifecycle, questions
     from office.util import now_iso
     start = _snapshot(con, run)
     started_at = now_iso()  # only a job that fails while waiting is news
@@ -355,20 +456,31 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
             lifecycle.reconcile(con, run)
             jobs.reclaim(con, run["id"])
         jobs.kick(con, run["id"])
-        stuck = stalls(con, run, since=started_at)
+        amend.confirm_launch_deliveries(con, run)
+        signals, signals_seq = worker_signals(con, run)
+        asked, _, acts = questions.scan(con, run)
+        stuck = stalls(con, run, since=started_at, acts=acts) + signals
         changed = _snapshot(con, run) != start
         news = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=1)
         # Something already waiting on the orchestrator ends the wait at once;
         # otherwise a blocker present at the start would sit until the timeout.
         pending = first and _needs_orchestrator(con, run)
         first = False
-        if stuck or changed or news or pending or state.is_terminal(state.get_run(con, run["id"])) \
+        if asked or stuck or changed or news or pending or state.is_terminal(state.get_run(con, run["id"])) \
                 or time.time() >= deadline:
             res = status(con, run)
+            if signals:
+                with db.transaction(con):
+                    state.advance_cursor(con, run["id"], state.SIGNAL_CONSUMER, signals_seq)
             if stuck:
                 res.lines[1:1] = [f"stall: {s}" for s in stuck]
                 res.exit_code = 3
-            elif not (changed or news or pending):
+            if asked:
+                # status() already printed every recorded question; the new ones lead and set the exit.
+                res.lines = [res.lines[0], *[f"question: {q}" for q in asked],
+                             *[ln for ln in res.lines[1:] if ln.removeprefix("question: ") not in asked]]
+                res.exit_code = questions.EXIT
+            elif not (stuck or changed or news or pending):
                 res.lines.insert(1, f"wait: nothing new in {int(timeout)}s")
                 res.exit_code = 124
             return res
@@ -413,7 +525,7 @@ def worker_status(con, run: dict, dispatch_id: str) -> Result:
     res = Result()
     res.add(f"{task['id']} {task['status']} | rev {task.get('current_revision_id') or '-'} | plan p{run['plan_version']}")
     findings = con.execute("SELECT code, severity, location, summary, action FROM findings WHERE run_id=? AND task_id=? "
-                           "AND state='open' ORDER BY created_at", (run["id"], task["id"])).fetchall()
+                           "AND " + contract.TASK_WORK_FINDINGS + " ORDER BY created_at", (run["id"], task["id"])).fetchall()
     for f in findings[:8]:
         res.add(f"{f['code']} {f['severity']} {f['location'] or ''} — {f['summary'][:140]}"
                 + (f" -> {f['action'][:80]}" if f["action"] else ""))
@@ -442,9 +554,61 @@ def piggyback(con, run: dict, res: Result) -> None:
         if block:
             res.notices.extend(block)
         return
-    events = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=4)
-    if events:
-        res.notices.extend(f"· {e['summary']}" for e in events)
-        from office import db
+    from office import db
+    unread = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=200)
+    held = _held_seqs(con, run["id"])
+    shown = _notice_batch([e for e in unread if e["seq"] not in held], limit=4)
+    if shown:
+        res.notices.extend(f"· {e['summary']}" for e in shown)
         with db.transaction(con):
-            state.advance_cursor(con, run["id"], "orchestrator", events[-1]["seq"])
+            _consume(con, run["id"], unread, held | {e["seq"] for e in shown})
+            signals = [e["seq"] for e in shown if e["kind"] == state.SIGNAL_KIND]
+            if signals:
+                state.advance_cursor(con, run["id"], state.SIGNAL_CONSUMER, max(signals))
+
+
+# Kinds that mean something failed or waits on the orchestrator. Everything else is informational.
+_URGENT_KINDS = frozenset({
+    "task.blocked", "task.paused", "task.findings_queued", "task.scope_requested", "task.restack_needed",
+    "task.amend_undelivered", "submit.refused", "submit.rejected", "integration.conflict", "integration.failed",
+    "gate.unavailable", "gate.changes_required", "gate.attention", "gate.escalated", "gate.brief_defect",
+    "plan.unavailable", "plan.changes_required", "plan.attention", "plan.escalated", "plan.defect",
+    "plan.questions", "plan.contract_requested", "pr.error", "lease.revoked",
+    # convergence contract (#337)
+    "gate.recheck", "plan.recheck", "plan.intake_gap", "plan.escalation", "convergence.recheck",
+    "convergence.intake_gap", "convergence.escalation", "convergence.unavailable", "convergence.blocked",
+    "convergence.conflict"})
+_SEEN = "orchestrator:seen:"
+
+
+def _urgent(event: dict) -> bool:
+    return event["kind"] in _URGENT_KINDS or event["kind"].endswith(".failed")
+
+
+def _notice_batch(pending: list[dict], *, limit: int) -> list[dict]:
+    """The events to show: failures and blockers first, then informational notices in order,
+    `limit` in all. What does not fit stays unread for the next command."""
+    return ([e for e in pending if _urgent(e)] + [e for e in pending if not _urgent(e)])[:limit]
+
+
+def _held_seqs(con, run_id: str) -> set[int]:
+    """Events shown while an older one was still waiting: the cursor is one number, so each is
+    remembered on its own until the cursor passes it."""
+    return {int(r[0][len(_SEEN):]) for r in con.execute(
+        "SELECT consumer FROM cursors WHERE run_id=? AND consumer LIKE ?", (run_id, _SEEN + "%"))}
+
+
+def _consume(con, run_id: str, unread: list[dict], consumed: set[int]) -> None:
+    """Move the orchestrator cursor over the leading run of consumed events; remember the rest by seq."""
+    through = 0
+    for e in unread:
+        if e["seq"] not in consumed:
+            break
+        through = e["seq"]
+    if through:
+        state.advance_cursor(con, run_id, "orchestrator", through)
+        con.execute("DELETE FROM cursors WHERE run_id=? AND consumer LIKE ? AND CAST(substr(consumer, ?) AS INTEGER)<=?",
+                    (run_id, _SEEN + "%", len(_SEEN) + 1, through))
+    for seq in consumed:
+        if seq > through:
+            state.advance_cursor(con, run_id, _SEEN + str(seq), seq)

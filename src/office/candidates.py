@@ -12,11 +12,12 @@ import re
 import sqlite3
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import yaml
 
-from office import adapters, paths, routing
+from office import adapters, paths, routing, state
 
 KIND_FOR_ROLE = {
     "planner": "worker",
@@ -48,42 +49,55 @@ def _version_key(version: str) -> tuple[int, ...]:
 
 
 def resolve_aliases(rows: list[dict]) -> list[dict]:
-    """A row with `alias_family` (a regex with a `version` group over model_id) takes
-    the invocation and scores of the highest-version matching row at the same harness
-    and effort, so `opus` follows each new Opus as the catalog adds it. With no
-    match, the alias keeps its own static fields. A target without a proven
-    invocation_source inherits the alias's."""
+    """A row with `alias_family` (a regex with a `version` group over model_id) follows the
+    highest-version matching row at the same harness, so `opus` and `luna` track each new
+    model as the catalog adds it. The alias is offered at every effort that newest model
+    offers, taking its invocation and scores; an effort the alias row declares but the
+    newest model lacks keeps its own static fields. With no match, the alias keeps its own
+    static fields. A target without a proven invocation_source inherits the alias's."""
     # Non-dispatchable rows count: they are usually just unlistable by their CLI, and the
     # alias's own invocation_source stands behind the full model id as the slug.
     concrete = [r for r in rows if not r.get("alias_family")]
     out = []
+    expanded: set[tuple] = set()
     for row in rows:
         pattern = row.get("alias_family")
         if not pattern:
             out.append(row)
             continue
+        group = (row.get("model_id"), row.get("invocation_harness"), pattern)
+        if group in expanded:
+            continue
+        expanded.add(group)
+        own = {r.get("effort"): r for r in rows
+               if (r.get("model_id"), r.get("invocation_harness"), r.get("alias_family")) == group}
         best = None
         for r in concrete:
             m = re.match(pattern, r.get("model_id") or "")
-            if not m or r.get("invocation_harness") != row.get("invocation_harness") or r.get("effort") != row.get("effort"):
+            if not m or r.get("invocation_harness") != row.get("invocation_harness"):
                 continue
             key = _version_key(m.group("version"))
             if best is None or key > best[0]:
-                best = (key, r)
-        if best is None:
-            out.append(row)
-            continue
-        target = best[1]
-        resolved = dict(row)
-        resolved["invocation_model_id"] = target.get("invocation_model_id") or target["model_id"]
-        source = str(target.get("invocation_source") or "")
-        if source.startswith(("local-evidence:", "documented:")):
-            resolved["invocation_source"] = source
-        for field in _ALIAS_FIELDS:
-            if target.get(field):
-                resolved[field] = target[field]
-        resolved["alias_resolved_to"] = target["model_id"]
-        out.append(resolved)
+                best = (key, r["model_id"])
+        by_effort = {r.get("effort"): r for r in concrete
+                     if best and r.get("model_id") == best[1] and r.get("invocation_harness") == row.get("invocation_harness")}
+        for effort in dict.fromkeys([*own, *by_effort]):
+            base = own.get(effort) or {**row, "effort": effort, "effort_confidence": "mapped"}
+            target = by_effort.get(effort)
+            if target is None:
+                out.append(base)
+                continue
+            resolved = dict(base)
+            resolved["invocation_model_id"] = target.get("invocation_model_id") or target["model_id"]
+            source = str(target.get("invocation_source") or "")
+            if source.startswith(("local-evidence:", "documented:")):
+                resolved["invocation_source"] = source
+            for field in _ALIAS_FIELDS:
+                if target.get(field):
+                    resolved[field] = target[field]
+            resolved["source_effort"] = target.get("source_effort") or resolved.get("source_effort")
+            resolved["alias_resolved_to"] = target["model_id"]
+            out.append(resolved)
     return out
 
 
@@ -93,37 +107,56 @@ def role_policy(config: dict, role: str) -> dict:
 
 
 def probe_quota(adapter: dict) -> dict:
-    """Tightest remaining quota percent, or unknown. Never stores account data."""
+    """Tightest remaining quota percent, or unknown with a safe cause."""
     harness = adapter.get("id")
-    cached = _QUOTA_CACHE.get(harness)
-    if cached and time.time() - cached[0] < _QUOTA_TTL:
-        return cached[1]
-    command = (adapter.get("quota_probe") or {}).get("command")
-    result = {"status": "unknown", "tightest_remaining_percent": None}
-    shared = _shared_cache_get(harness)
-    if shared is not None and not os.environ.get("OFFICE_QUOTA_FIXTURE") and os.environ.get("OFFICE_QUOTA_PROBE") != "off":
+    fixed = os.environ.get("OFFICE_QUOTA_FIXTURE")
+    disabled = os.environ.get("OFFICE_QUOTA_PROBE") == "off"
+    shared = _shared_cache_get(harness) if not fixed and not disabled else None
+    if shared is not None:
         _QUOTA_CACHE[harness] = (time.time(), shared)
         return shared
-    fixed = os.environ.get("OFFICE_QUOTA_FIXTURE")
+    cached = _QUOTA_CACHE.get(harness)
+    if not fixed and not disabled and cached and time.time() - cached[0] < _QUOTA_TTL:
+        return cached[1]
+
+    def unknown(cause: str) -> dict:
+        return {"status": "unknown", "tightest_remaining_percent": None, "cause": cause}
+
+    command = (adapter.get("quota_probe") or {}).get("command")
+    result = unknown("no command configured")
     if fixed:
         # Test/eval fixture: {"codex": 40, "claude": null} — never a live probe.
         value = json.loads(fixed).get(harness)
-        result = {"status": "ok", "tightest_remaining_percent": float(value)} if value is not None else result
+        result = ({"status": "ok", "tightest_remaining_percent": float(value)} if value is not None
+                  else unknown("fixture returned null"))
         _QUOTA_CACHE[harness] = (time.time(), result)
         return result
-    if os.environ.get("OFFICE_QUOTA_PROBE") == "off":
-        command = None
+    if disabled:
+        result = unknown("probe disabled")
+        _QUOTA_CACHE[harness] = (time.time(), result)
+        return result
     if command:
         argv = [str(paths.resources_root() / c) if c.startswith("scripts/") else c for c in command]
         try:
             proc = subprocess.run(argv, capture_output=True, text=True, timeout=20)
-            if proc.returncode == 0:
-                data = json.loads(proc.stdout)
-                remaining = data.get("tightest_remaining_percent")
-                if remaining is not None:
-                    result = {"status": "ok", "tightest_remaining_percent": float(remaining)}
-        except (OSError, subprocess.SubprocessError, ValueError):
-            pass
+            if proc.returncode != 0:
+                result = unknown(f"command exited with code {proc.returncode}")
+            else:
+                try:
+                    data = json.loads(proc.stdout)
+                except ValueError:
+                    result = unknown("command returned invalid JSON")
+                else:
+                    if not isinstance(data, dict) or "tightest_remaining_percent" not in data:
+                        result = unknown("command response missing tightest_remaining_percent")
+                    elif data["tightest_remaining_percent"] is None:
+                        result = unknown("command returned null tightest_remaining_percent")
+                    else:
+                        result = {"status": "ok", "tightest_remaining_percent": float(data["tightest_remaining_percent"])}
+        except subprocess.TimeoutExpired:
+            result = unknown("command timed out after 20 seconds")
+        except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+            result = unknown("command could not be run or parsed")
         if result["status"] == "ok":
             _shared_cache_put(harness, result)
     _QUOTA_CACHE[harness] = (time.time(), result)
@@ -199,7 +232,8 @@ def below_family_floor(model_id: str | None, floors: dict | None) -> str | None:
 
 
 def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
-                     family_floors: dict | None = None) -> tuple[list[dict], list[dict]]:
+                     family_floors: dict | None = None,
+                     quota_snapshot: dict[str, dict] | None = None) -> tuple[list[dict], list[dict]]:
     """Return (candidates, skipped). `skipped` explains unavailable harnesses
     and rows under a model_family_floors entry."""
     kind = KIND_FOR_ROLE.get(role, "worker")
@@ -234,20 +268,38 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
             "adapter_id": adapter.get("id"),
             "adapter_hash": adapters.adapter_hash(adapter),
             "cost": _cost(row),
+            "price_fields": row.get("price_fields") or {},
+            "speed_fields": row.get("speed_fields") or {},
         }
         if kind == "vision" and vision_proven(con, cand, adapter):
             cand["capabilities"] = sorted(set(cand["capabilities"]) | {"vision"})
         cand["quota"] = {"status": "unknown", "tightest_remaining_percent": None}
         candidates.append(cand)
-    if probe and candidates:
+    if quota_snapshot is not None:
+        for c in candidates:
+            c["quota"] = quota_snapshot.get(c["adapter_id"], c["quota"])
+    elif probe and candidates:
         # One probe per harness that has a candidate, all at once.
-        from concurrent.futures import ThreadPoolExecutor
         needed = sorted({c["adapter_id"] for c in candidates})
         with ThreadPoolExecutor(max_workers=len(needed)) as pool:
             quotas = dict(zip(needed, pool.map(lambda h: probe_quota(all_adapters[h]), needed)))
         for c in candidates:
             c["quota"] = quotas[c["adapter_id"]]
     return candidates, skipped
+
+
+def probe_quota_snapshot(con: sqlite3.Connection, roles: list[str], *, family_floors: dict | None = None) -> dict[str, dict]:
+    """Probe each adapter represented in the plan's routing roles once."""
+    needed = set()
+    for role in roles:
+        built, _ = build_candidates(con, role, probe=False, family_floors=family_floors)
+        needed.update(c["adapter_id"] for c in built)
+    all_adapters = adapters.load_all()
+    needed = sorted(needed)
+    if not needed:
+        return {}
+    with ThreadPoolExecutor(max_workers=len(needed)) as pool:
+        return dict(zip(needed, pool.map(lambda h: probe_quota(all_adapters[h]), needed)))
 
 
 def _cost(row: dict) -> dict:
@@ -307,6 +359,8 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
         "adapter_id": adapter.get("id"),
         "adapter_hash": adapters.adapter_hash(adapter),
         "cost": _cost(row or {}),
+        "price_fields": (row or {}).get("price_fields") or {},
+        "speed_fields": (row or {}).get("speed_fields") or {},
         "quota": {"status": "unknown", "tightest_remaining_percent": None},
         "override": True,
     }
@@ -355,25 +409,84 @@ def protected_quota_remedy(run: dict, role: str, task_id: str | None = None) -> 
     return f"fix: {fix}; {pinned}"
 
 
+def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str, candidates: list[dict], *,
+                    task_id: str | None, dispatch_kind: str, plan_version: int | None,
+                    wave_load: dict | None = None, as_of: str | None = None, pending_explorations: int = 0) -> dict:
+    """Learner evidence and reproducibility inputs for an executor/worker request (#300).
+
+    Everything the adaptive scorer reads is computed here, so `routing.route`
+    stays offline and a recorded request replays to the same decision."""
+    from datetime import datetime, timezone
+    from office import route_learning
+    from office.util import sha256_obj
+    s = config.get("routing") or {}
+    adaptive_cfg = s.get("adaptive") or {}
+    context = {"role": role, "playbook": run.get("playbook"), "size_class": (run.get("risk") or {}).get("size_class"),
+               "gear": run.get("gear"), "dispatch_kind": dispatch_kind}
+    as_of = as_of or datetime.now(timezone.utc).isoformat()
+    route_learning.ensure_schema(con)
+    # Executor and worker dispatches are the same kind of work; they pool.
+    outcomes = route_learning.derive_outcomes(con)
+    evidence = route_learning.evidence_for(outcomes, candidates, context, as_of=as_of,
+                                           config=adaptive_cfg.get("learning"))
+    explored = con.execute("SELECT COUNT(*) FROM route_audit WHERE run_id=? AND role=? AND explored=1",
+                           (run.get("id"), role)).fetchone()[0]
+    return {
+        "context": context, "evidence": evidence, "adaptive_config": adaptive_cfg,
+        "learned_eligibility": route_learning.current_eligibility(con, role),
+        "exploration_history": route_learning.recent_exploration(con, role),
+        "run_explorations": explored + pending_explorations, "wave_load": dict(wave_load or {}),
+        "routing_seed": sha256_obj({"run": run.get("id"), "task": task_id, "role": role,
+                                    "plan_version": plan_version, "kind": dispatch_kind}),
+    }
+
+
 def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                task_id: str | None = None, override: str | None = None,
-               exclude: set[str] | None = None, probe: bool = True, exact: str | None = None) -> dict:
+               exclude: set[str] | None = None, probe: bool = True, exact: str | None = None,
+               dispatch_kind: str = "fresh", wave_load: dict | None = None, pending_explorations: int = 0,
+               quota_snapshot: dict[str, dict] | None = None,
+               quota_event_seen: set[str] | None = None) -> dict:
     """Build the request and route. Returns the routing result plus request.
-    `exact` keeps only the candidate with that route identity (harness@major/model@effort)."""
+    `exact` keeps only the candidate with that route identity (harness@major/model@effort).
+    Executor and worker requests carry the adaptive inputs (#300); `wave_load`
+    counts routes already planned for other tasks of the same wave."""
     policy_cfg = role_policy(config, role)
     # An explicit --route names its model, so it is not held to the family floor.
     floors = None if override else config.get("model_family_floors")
-    candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors)
+    candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors,
+                                           quota_snapshot=quota_snapshot)
+    seed = None if override else _preferred_seed(policy_cfg, run)
+    for entry in seed or []:
+        if not any(routing.preferred_rank(c, [entry]) is not None for c in candidates):
+            wanted = f"{entry.get('harness') + '/' if entry.get('harness') else ''}{entry.get('model_id')}" \
+                     f"{'@' + entry['effort'] if entry.get('effort') else ''}"
+            skipped.append({"candidate": wanted, "reason": "preferred_seed entry matches no candidate"})
+    if probe and os.environ.get("OFFICE_QUOTA_PROBE") != "off" and run.get("id"):
+        # One notice per call, naming every harness whose quota could not be read. A probe the
+        # operator switched off is a choice, not a failure, and says nothing.
+        seen = quota_event_seen if quota_event_seen is not None else set()
+        unknown: dict[str, str] = {}
+        for c in candidates:
+            quota = c.get("quota") or {}
+            harness = c.get("adapter_id")
+            if quota.get("status") == "unknown" and quota.get("cause") and harness not in seen:
+                unknown.setdefault(harness, quota["cause"])
+        if unknown:
+            seen.update(unknown)
+            payload = ({"harness": next(iter(unknown)), "cause": next(iter(unknown.values()))} if len(unknown) == 1
+                       else {"harnesses": unknown})
+            state.emit(con, run, "quota-probe-unknown",
+                       "Quota probe unknown for " + "; ".join(f"{h}: {why}" for h, why in unknown.items()),
+                       task_id=task_id, payload=payload)
     from office import benchmarks
     snapshot = benchmarks.apply(run, candidates)
     if exclude:
         # Entries: an exact triple, "model:<harness>/<model>" (every effort of a
-        # model that misbehaved), "harness:<name>" (a shared quota/auth wall), or
-        # "family:<name>" (a declared producer's family, for independent review).
+        # model that misbehaved), or "harness:<name>" (a shared quota/auth wall).
         def excluded(c):
             return (routing.candidate_id(c) in exclude or f"harness:{c['harness']}" in exclude
-                    or f"model:{c['harness']}/{c['invocation_model_id']}" in exclude
-                    or f"family:{model_family(c['model_id'])}" in exclude)
+                    or f"model:{c['harness']}/{c['invocation_model_id']}" in exclude)
         candidates = [c for c in candidates if not excluded(c)]
     if exact:
         candidates = [c for c in candidates if routing.candidate_id(c) == exact]
@@ -397,7 +510,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "role": role,
         "playbook": run.get("playbook"),
         "policy": policy,
-        "preferred_seed": None if override else _preferred_seed(policy_cfg, run),
+        "preferred_seed": seed,
         "cost_policy": cost_policy,
         "allow_advisory_undercut": bool(gear.get("allow_advisory_undercut", True)),
         "runs_db": str(paths.runs_db()),
@@ -407,6 +520,10 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "benchmark_snapshot": snapshot,
         "candidates": candidates,
     }
+    if role in routing.ADAPTIVE_ROLES:
+        request.update(adaptive_inputs(con, config, run, role, candidates, task_id=task_id,
+                                       dispatch_kind=dispatch_kind, plan_version=run.get("plan_version"),
+                                       wave_load=wave_load, pending_explorations=pending_explorations))
     result = routing.route(request)
     result["benchmark_snapshot"] = snapshot
     result["skipped"] = skipped
@@ -414,24 +531,41 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     return result
 
 
-def trust_report(con: sqlite3.Connection) -> list[str]:
-    """One line per candidate route of each trust-gated role, with its derived trust
-    state; non-proven routes carry the exact command a user runs to promote them."""
+def learner_priors(con: sqlite3.Connection, config: dict) -> dict[str, dict[str, dict]]:
+    """role -> evidence key -> {"prior_p"}: each installed route's benchmark prior,
+    the base the learner's eligibility posterior starts from."""
+    from office import adaptive, route_learning
+    s = adaptive.settings(config)
+    out = {}
+    for role in route_learning.ADAPTIVE_ROLES:
+        cands, _ = build_candidates(con, role, probe=False)
+        out[role] = {route_learning.candidate_key(c): {"prior_p": adaptive.benchmark_prior(c, s)[0]} for c in cands}
+    return out
+
+
+def trust_report(con: sqlite3.Connection) -> tuple[list[str], list[str]]:
+    """Return (summary, detail) for each trust-gated role. Summary is one line per role
+    with counts per trust state; detail is one line per candidate route with its derived
+    state, the approve command for non-proven routes, and a vision note for vision roles."""
     from office import routing, scoring
     scoring.ensure_trust_schema(con)
-    lines = []
+    summary, detail = [], []
     for role in sorted(routing.MUTABLE_TRUST_ROLES):
         cands, _ = build_candidates(con, role, probe=False)
         if not cands:
-            lines.append(f"trust {role}: no candidate routes")
+            summary.append(f"trust {role}: no candidate routes")
             continue
+        counts: dict[str, int] = {}
         for c in cands:
             triple = routing.candidate_id(c)
             _, state = scoring.evaluate_trust_state(con, triple)
+            counts[state] = counts.get(state, 0) + 1
             line = f"trust {role} {triple}: {state}"
             if state != "proven":
                 line += f" | office approve trust {triple} --quote \"<user's words>\""
             if KIND_FOR_ROLE.get(role) == "vision" and "vision" not in c["capabilities"]:
                 line += f" | {vision_note(con, c)}"
-            lines.append(line)
-    return lines
+            detail.append(line)
+        tally = ", ".join(f"{n} {state}" for state, n in sorted(counts.items()))
+        summary.append(f"trust {role}: {len(cands)} routes ({tally}) | per-route detail: office inspect trust")
+    return summary, detail
