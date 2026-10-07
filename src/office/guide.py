@@ -497,11 +497,12 @@ def _waiting_on(con, run: dict, task: dict) -> str:
                        "AND seq > COALESCE((SELECT seq FROM revisions WHERE id=?), 0) ORDER BY seq DESC LIMIT 1",
                        (rid, task["id"], task.get("current_revision_id"))).fetchone()
     parts = []
-    for dl in con.execute("SELECT amendment_id, dispatch_id FROM deliveries WHERE run_id=? AND task_id=? "
+    for dl in con.execute("SELECT amendment_id, dispatch_id, status FROM deliveries WHERE run_id=? AND task_id=? "
                           "AND status IN ('queued','delivered') ORDER BY created_at", (rid, task["id"])).fetchall():
         holder = dl["dispatch_id"]
         stale = holder and holder != task["current_dispatch_id"]
-        parts.append(f"{dl['amendment_id']} ack by {holder or 'next session'}"
+        why = amend.delivery_note(con, rid, task["id"], dl["amendment_id"], holder)
+        parts.append(f"{dl['amendment_id']} {dl['status']}{' (' + why + ')' if why else ''} ack by {holder or 'next session'}"
                      + (" (not the current session; it can ack it)" if stale else ""))
     if held:
         parts.insert(0, f"{held['id']} held for amendment")

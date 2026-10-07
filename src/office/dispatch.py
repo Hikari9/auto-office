@@ -8,6 +8,7 @@ injects the environment, and launches through a durable outbox job.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import re
@@ -961,7 +962,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         else:
             inter = _interactive(dispatch, kind, cwd, include_dirs, output=output)
         label = pane_label(run, dispatch, kind)
-        pane = _herdr_pane(run, cwd, label=label) if inter else None
+        pane = _herdr_pane(run, cwd, label=label, dispatch_id=dispatch["id"]) if inter else None
         if inter and not pane:
             _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
         if pane:
@@ -970,6 +971,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
                 if wait:
                     return _wait_terminal(dispatch["id"])
                 return started
+            _release_panes(run, dispatch["id"])
             if cli:
                 # Running the adapter's own argv headless would not be what the user asked for.
                 _launch_notice(run, dispatch, f"--cli agent did not start in herdr; left external. Start it by hand: {cli}")
@@ -1113,6 +1115,61 @@ def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = Tru
     return env_file
 
 
+def cwd_owner(con, run_id: str, cwd: str) -> dict | None:
+    """The dispatch of this run whose worktree holds `cwd` (the deepest worktree wins)."""
+    here, best = os.path.realpath(cwd), None
+    for r in con.execute("SELECT id, task_id, role, worktree FROM dispatches WHERE run_id=? AND worktree IS NOT NULL "
+                         "ORDER BY started_at", (run_id,)).fetchall():
+        wt = os.path.realpath(r["worktree"])
+        if (here == wt or here.startswith(wt.rstrip(os.sep) + os.sep)) and (best is None or len(wt) >= best[0]):
+            best = (len(wt), dict(r))
+    return best[1] if best else None
+
+
+def _who(dispatch_id: str, task_id: str | None = None) -> str:
+    """`D1 (T1)`: a dispatch with its task, looked up when not given."""
+    if task_id is None:
+        try:
+            con = db.connect()
+            try:
+                row = con.execute("SELECT task_id FROM dispatches WHERE id=?", (dispatch_id,)).fetchone()
+            finally:
+                con.close()
+            task_id = row["task_id"] if row else None
+        except Exception:  # a name in a notice must never fail a launch
+            task_id = None
+    return f"{dispatch_id} ({task_id})" if task_id else dispatch_id
+
+
+def _pane_mismatch(run: dict, dispatch: dict, pane: str, cwd: Path, *, check_cwd: bool) -> str | None:
+    """Why `pane` is not this dispatch's, or None. The run's layout says which dispatch the
+    pane is reserved for; herdr says where it actually is. A pane herdr cannot describe
+    (or one that reports no cwd) cannot be disproved, so only a stated mismatch refuses."""
+    me = _who(dispatch["id"], dispatch.get("task_id"))
+    holder = _reserved_by(run, pane)
+    if holder and holder != dispatch["id"]:
+        return f"pane {pane} is reserved for dispatch {_who(holder)}, not for {me}"
+    if not check_cwd:
+        return None
+    actual = (_herdr_json(["pane", "get", pane]).get("pane") or {}).get("cwd")
+    if not actual:
+        return None
+    here, want = os.path.realpath(actual), os.path.realpath(cwd)
+    if here == want or here.startswith(want.rstrip(os.sep) + os.sep):
+        return None
+    owner = None
+    try:
+        con = db.connect()
+        try:
+            owner = cwd_owner(con, run["id"], actual) if run.get("id") else None
+        finally:
+            con.close()
+    except Exception:
+        pass
+    other = f"dispatch {_who(owner['id'], owner['task_id'])}" if owner else (f"dispatch {_who(holder)}" if holder else "no dispatch of this run")
+    return f"pane {pane} is in {actual}, which belongs to {other}, not {me}'s worktree {cwd}"
+
+
 def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
                        cwd: Path, ddir: Path, *, retried: bool = False, label: str | None = None) -> dict | None:
     """Start the real harness in the pane with `herdr agent start`, hand it a
@@ -1121,6 +1178,10 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     args, herdr_kind = inter
     name = herdr_agent_name(dispatch["id"])
     worker = spec["kind"] == "worker"
+    mismatch = _pane_mismatch(run, dispatch, pane, cwd, check_cwd=False)
+    if mismatch:  # before anything is typed into it
+        _launch_notice(run, dispatch, f"{mismatch}; nothing was typed into it; running headless instead")
+        return None
     # The pane's shell does not inherit this process's environment: source the
     # dispatch identity into it first, so the agent's own `office submit` works.
     env_file = write_agent_env(run, dispatch, ddir, worker=worker)
@@ -1140,7 +1201,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         if "agent_pane_busy" in why and not retried:
             # The pane still holds an agent (a finished session herdr keeps):
             # split a fresh one and try once more before going headless (#200 B7).
-            fresh = _herdr_fresh_pane(run, cwd, pane)
+            fresh = _herdr_fresh_pane(run, cwd, pane, dispatch["id"])
             if fresh:
                 return _herdr_agent_start(run, dispatch, spec, env, inter, fresh, cwd, ddir, retried=True, label=label)
         _launch_notice(run, dispatch, _agent_start_failure(herdr_kind, pane, why))
@@ -1193,8 +1254,15 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         except Exception:  # a landing probe must never abort the launch
             return False
 
-    landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen)
-    if not landed:
+    mismatch = _pane_mismatch(run, dispatch, pane, cwd, check_cwd=True)
+    if mismatch:
+        # The pane is not the one reserved for this dispatch: typing the pointer could brief another task's agent.
+        landed = False
+        _launch_notice(run, dispatch, f"brief pointer NOT sent: {mismatch}. Nothing was typed into the pane; "
+                                      f"once it is sorted out: office prompt {dispatch['id']} -- {shlex.quote(pointer)}")
+    else:
+        landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen)
+    if not landed and not mismatch:
         # The agent is up in a pane the user can see; a second headless copy
         # would race it. Say so and leave the pane for a manual re-prompt.
         view = _pane_view(name)
@@ -1865,24 +1933,86 @@ def _herdr_json(args: list[str]) -> dict:
         return {}
 
 
-def _herdr_pane(run: dict, cwd: Path, label: str | None = None) -> str | None:
+def _herdr_pane(run: dict, cwd: Path, label: str | None = None, dispatch_id: str | None = None) -> str | None:
     """A visible Herdr pane for a dispatch, split beside the caller's own pane.
 
     The first dispatch splits the orchestrator's pane (`HERDR_PANE_ID`, or
     `OFFICE_HERDR_ANCHOR` when set) to the right, so the agent appears in the
     tab the user is watching. Later dispatches reuse a pane whose dispatch has
     ended, else stack down in that column. The caller's pane is only ever split,
-    never run in or closed. Without a caller pane, the run gets its own tab."""
-    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
-    layout = json.loads(tab_file.read_text()) if tab_file.is_file() else None
+    never run in or closed. Without a caller pane, the run gets its own tab.
+
+    Choosing the pane and recording it as reserved for `dispatch_id` is one
+    step under the run's pane lock, so two launches at once (parallel dispatch,
+    back-to-back reruns) never take the same pane or lose each other's record."""
     anchor = os.environ.get("OFFICE_HERDR_ANCHOR") or os.environ.get("HERDR_PANE_ID")
-    if layout and layout.get("mode") != "split" or (layout is None and not anchor):
-        pane = _herdr_own_tab_pane(run, cwd, tab_file, layout)
-    else:
-        pane = _herdr_split_pane(run, cwd, tab_file, layout, anchor)
+    with _pane_lock(run) as tab_file:
+        layout = _read_layout(tab_file)
+        if layout and layout.get("mode") != "split" or (layout is None and not anchor):
+            pane = _herdr_own_tab_pane(run, cwd, tab_file, layout, dispatch_id)
+        else:
+            pane = _herdr_split_pane(run, cwd, tab_file, layout, anchor, dispatch_id)
     if pane and label:
         _herdr_rename(pane, label)
     return pane
+
+
+@contextlib.contextmanager
+def _pane_lock(run: dict):
+    """Exclusive, cross-process lock on the run's pane layout (herdr-tab.json);
+    yields that file's path. A flock dies with its process."""
+    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
+    tab_file.parent.mkdir(parents=True, exist_ok=True)
+    with tab_file.with_name("herdr-tab.lock").open("a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield tab_file
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _read_layout(tab_file: Path) -> dict | None:
+    try:
+        layout = json.loads(tab_file.read_text()) if tab_file.is_file() else None
+    except (OSError, ValueError):
+        return None
+    return layout if isinstance(layout, dict) else None
+
+
+def _release_panes(run: dict, dispatch_id: str) -> None:
+    """Drop every pane reservation this dispatch holds (its launch fell back, so the pane is free)."""
+    with _pane_lock(run) as tab_file:
+        layout = _read_layout(tab_file)
+        reserved = (layout or {}).get("reserved") or {}
+        held = [p for p, holder in reserved.items() if holder == dispatch_id]
+        if held:
+            for pane in held:
+                del reserved[pane]
+            atomic_write_json(tab_file, layout)
+
+
+def _reserved_by(run: dict, pane: str) -> str | None:
+    """The dispatch this run's layout reserved `pane` for, if any."""
+    layout = _read_layout(paths.run_dir(run["id"]) / "herdr-tab.json") if run.get("id") else None
+    return ((layout or {}).get("reserved") or {}).get(pane)
+
+
+def _reserved_busy(layout: dict) -> set:
+    """Reserved panes whose dispatch is still launching or running: a
+    launch reserves its pane well before the dispatch row records it."""
+    reserved = layout.get("reserved") or {}
+    if not reserved:
+        return set()
+    con = db.connect()
+    try:
+        busy = set()
+        for pane, did in reserved.items():
+            row = con.execute("SELECT status FROM dispatches WHERE id=?", (did,)).fetchone()
+            if row is not None and row["status"] in ("launching", "running"):
+                busy.add(pane)
+        return busy
+    finally:
+        con.close()
 
 
 def _herdr_rename(pane: str, label: str) -> None:
@@ -1955,15 +2085,18 @@ def _pane_is_shell(pane: str) -> bool:
     return bool(info) and not info.get("agent")
 
 
-def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None, anchor: str | None) -> str | None:
+def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None, anchor: str | None,
+                      dispatch_id: str | None = None) -> str | None:
+    """Caller holds the pane lock."""
     layout = layout or {"mode": "split", "anchor": anchor, "panes": []}
     anchor = layout.get("anchor") or anchor
     live = [p for p in layout["panes"] if _herdr_json(["pane", "get", p])]  # the user may close panes
-    busy = _busy_panes(run)
+    busy = _busy_panes(run) | _reserved_busy(layout)
     for pane in live:
         if pane not in busy and _pane_is_shell(pane):
             subprocess.run(["herdr", "pane", "run", pane, f"cd {shlex.quote(str(cwd))}"], capture_output=True, timeout=30)
             layout["panes"] = live
+            _reserve(layout, pane, dispatch_id)
             atomic_write_json(tab_file, layout)
             return pane
     # Split the caller's pane vertically (side by side); stack further agents in that column.
@@ -1975,12 +2108,21 @@ def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None,
         return None
     layout["panes"] = live + [pane]
     layout.setdefault("tab_id", info.get("tab_id"))
+    _reserve(layout, pane, dispatch_id)
     atomic_write_json(tab_file, layout)
     return pane
 
 
-def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None) -> str | None:
-    """No caller pane to split (or a run begun before split mode): a tab owned by the run."""
+def _reserve(layout: dict, pane: str, dispatch_id: str | None) -> None:
+    if dispatch_id:
+        layout.setdefault("reserved", {})[pane] = dispatch_id
+    else:
+        layout.get("reserved", {}).pop(pane, None)  # a caller naming no dispatch takes the pane over
+
+
+def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None, dispatch_id: str | None = None) -> str | None:
+    """No caller pane to split (or a run begun before split mode): a tab owned by the run.
+    Caller holds the pane lock."""
     if tab and not _herdr_json(["tab", "get", tab["tab_id"]]):
         tab = None  # the user closed it
     if tab is None:
@@ -1993,18 +2135,22 @@ def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None) 
         if not root:
             return None
         tab = {"mode": "tab", "tab_id": (res.get("tab") or {}).get("tab_id"), "panes": [root]}
+        _reserve(tab, root, dispatch_id)
         atomic_write_json(tab_file, tab)
         return root
-    busy = _busy_panes(run)
+    busy = _busy_panes(run) | _reserved_busy(tab)
     for pane in tab["panes"]:
         if pane not in busy and _pane_is_shell(pane):
             subprocess.run(["herdr", "pane", "run", pane, f"cd {shlex.quote(str(cwd))}"], capture_output=True, timeout=30)
+            _reserve(tab, pane, dispatch_id)
+            atomic_write_json(tab_file, tab)
             return pane
     direction = "right" if len(tab["panes"]) % 2 else "down"
     res = _herdr_json(["pane", "split", "--pane", tab["panes"][-1], "--direction", direction, "--cwd", str(cwd), "--no-focus"])
     pane = (res.get("pane") or {}).get("pane_id")
     if pane:
         tab["panes"].append(pane)
+        _reserve(tab, pane, dispatch_id)
         atomic_write_json(tab_file, tab)
     return pane
 
@@ -2046,11 +2192,7 @@ def _orchestrator_pane(run: dict) -> str | None:
     pane = os.environ.get("HERDR_PANE_ID")
     if pane:
         return pane
-    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
-    try:
-        layout = json.loads(tab_file.read_text()) if tab_file.is_file() else {}
-    except (OSError, ValueError):
-        layout = {}
+    layout = _read_layout(paths.run_dir(run["id"]) / "herdr-tab.json") or {}
     return layout.get("anchor") or os.environ.get("OFFICE_HERDR_ANCHOR") or None
 
 
@@ -2231,20 +2373,21 @@ def _set_dispatch(dispatch_id: str, **cols) -> None:
         con.close()
 
 
-def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str) -> str | None:
-    """A new pane split from one herdr refused as busy, recorded in the run's layout."""
-    res = _herdr_json(["pane", "split", "--pane", busy_pane, "--direction", "down", "--cwd", str(cwd), "--no-focus"])
-    pane = (res.get("pane") or {}).get("pane_id")
-    if not pane:
-        return None
-    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
-    try:
-        layout = json.loads(tab_file.read_text()) if tab_file.is_file() else None
-    except (OSError, ValueError):
-        layout = None
-    if layout is not None:
-        layout.setdefault("panes", []).append(pane)
-        atomic_write_json(tab_file, layout)
+def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str, dispatch_id: str | None = None) -> str | None:
+    """A new pane split from one herdr refused as busy, recorded in the run's layout
+    and reserved for the dispatch in place of the busy one."""
+    with _pane_lock(run) as tab_file:
+        res = _herdr_json(["pane", "split", "--pane", busy_pane, "--direction", "down", "--cwd", str(cwd), "--no-focus"])
+        pane = (res.get("pane") or {}).get("pane_id")
+        if not pane:
+            return None
+        layout = _read_layout(tab_file)
+        if layout is not None:
+            layout.setdefault("panes", []).append(pane)
+            if dispatch_id and (layout.get("reserved") or {}).get(busy_pane) == dispatch_id:
+                del layout["reserved"][busy_pane]
+            _reserve(layout, pane, dispatch_id)
+            atomic_write_json(tab_file, layout)
     return pane
 
 
@@ -2657,15 +2800,31 @@ def _quota_wall(run: dict, d: dict) -> str | None:
 
 def job_notify_worker(con, run: dict, job: dict) -> dict:
     """Best-effort native nudge to a live Herdr-hosted worker. Delivery truth
-    stays in runs.db and rides on the worker's next office command."""
-    from office import gates
+    stays in runs.db and rides on the worker's next office command; an
+    amendment's prompt that lands is recorded delivered, and one that cannot
+    reach the worker records why it stayed queued."""
+    from office import amend, gates
     payload = job["payload"]
     d = state.get_dispatch(con, payload["dispatch_id"])
     unblock = bool(payload.get("unblock"))
+
+    def note(delivered: bool, reason: str) -> None:
+        try:  # the record is bookkeeping: failing it never undoes or skips what was sent
+            amend.record_notify(con, run, payload, delivered=delivered, reason=reason)
+        except Exception:
+            pass
+
     if not d or d.get("launcher") != "herdr" or not d.get("pane_id") or d["status"] != "running" \
             or (unblock and not gates._agent_alive(herdr_agent_name(d["id"]))):
         if unblock and d:
             _amendment_undelivered(con, run, payload, d)
+        note(False, amend.unreachable_reason(d))
+        return {"sent": False}
+    wrong = _pane_mismatch(run, d, d["pane_id"], Path(d["worktree"]), check_cwd=True) if d.get("worktree") else None
+    if wrong:  # the recorded pane is someone else's now: nothing is typed into it
+        if unblock:
+            _amendment_undelivered(con, run, payload, d)
+        note(False, f"not sent: {wrong}")
         return {"sent": False}
     text = payload.get("text", "office status has an update for you.")
     landed = submit_prompt(d["pane_id"], text, pane=d["pane_id"])
@@ -2687,6 +2846,10 @@ def job_notify_worker(con, run: dict, job: dict) -> dict:
                                dispatch_id=d["id"])
         else:
             _amendment_undelivered(con, run, payload, d)
+    pane = d["pane_id"]
+    note(landed == "landed", f"prompt landed in pane {pane}" if landed == "landed" else
+         f"prompt typed but unsubmitted in pane {pane}" if landed == "held" else
+         f"prompt sent to pane {pane} but no landed signal")
     return {"sent": True, "landed": landed}
 
 

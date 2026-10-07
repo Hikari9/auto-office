@@ -152,7 +152,12 @@ pane agent never started (the dispatch ran headless) or the prompt never landed 
 Office presses Enter for a prompt left typed but unsubmitted; a notice saying it is still unsubmitted
 means `herdr pane send-keys <pane> Enter`, not a re-prompt, which would send it twice. To message a live worker or
 reviewer yourself (an amendment nudge, a missing detail), run `office prompt <T2|dispatch> -- "<message>"`: it sends
-with `herdr agent prompt`, confirms it landed, and presses Enter for one left typed. Never use `herdr pane run` or
+with `herdr agent prompt`, confirms it landed, and presses Enter for one left typed. It reports the pane's cwd and task,
+and refuses a pane whose cwd is another task's worktree. Office reserves each dispatch's pane under a per-run lock and
+checks it (reservation, then cwd) before typing the brief pointer; a `launch` notice naming two dispatches means the
+pane was not this one's, nothing was typed, and the pointer is yours to re-prompt. An amendment's nudge that lands marks
+it delivered; one that cannot reach the worker stays queued, and `office status` and `office inspect task` say why.
+Never use `herdr pane run` or
 `pane send-text` on an agent pane; Claude takes their Enter as part of the paste and leaves the text unsubmitted.
 To relaunch a dispatch by hand, `office revoke T1`, then `office dispatch T1 --external` (plus `--as`
 for another model); it prints the `herdr pane run`, `herdr agent start`, and `herdr agent prompt` commands

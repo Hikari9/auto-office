@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from office import adaptive, candidates, contract, plans, state
+from office import adaptive, amend, candidates, contract, plans, state
 from office.result import Result
 from office.state import Usage
 from office.util import loads, short
@@ -99,6 +99,7 @@ def _task(con, run, tid) -> Result:
         lines.append(f"dispatch {d['id']} {d['role']} {d['triple']} {d['status']} {d['terminal_classification'] or ''} "
                      f"applied p{d['applied_plan_version'] or '-'} via {d['launcher'] or '-'}"
                      + (" | user override" + (f" --cli {ov['cli']}" if ov.get("cli") else "") if ov.get("by") else "")
+                     + (f" | route changed from {ov['route_changed_from']}" if ov.get("route_changed_from") else "")
                      + (f" | resumed from {d['resumed_from'] or ov.get('resumed_from')}"
                         if (d["resumed_from"] or ov.get("resumed_from")) else "")
                      + (f" | session {d['session_id']}" if d["session_id"]
@@ -115,9 +116,12 @@ def _task(con, run, tid) -> Result:
     for f in con.execute("SELECT code, gate_kind, severity, state, location, summary FROM findings WHERE run_id=? AND task_id=? "
                          "ORDER BY created_at", (run["id"], tid)).fetchall():
         lines.append(f"finding {f['code']} {f['gate_kind']} {f['severity']} {f['state']} {f['location'] or ''} {f['summary'][:100]}")
-    for dl in con.execute("SELECT amendment_id, status, target_version, delivered_count FROM deliveries WHERE run_id=? AND task_id=?",
+    for dl in con.execute("SELECT amendment_id, dispatch_id, status, target_version, delivered_count FROM deliveries WHERE run_id=? AND task_id=?",
                           (run["id"], tid)).fetchall():
-        lines.append(f"amendment {dl['amendment_id']} -> p{dl['target_version']} {dl['status']} (delivered {dl['delivered_count']}x)")
+        why = amend.delivery_note(con, run["id"], tid, dl["amendment_id"], dl["dispatch_id"])
+        count = f"carried {dl['delivered_count']}x on the worker's own commands"
+        lines.append(f"amendment {dl['amendment_id']} -> p{dl['target_version']} {dl['status']} "
+                     f"({count + '; ' + why if why else count})")
     return Result(lines=lines, data={"task": t})
 
 
