@@ -354,7 +354,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def emit(res: Result, args, ok: bool = True) -> int:
     if getattr(args, "json", False):
-        print(json.dumps({"ok": ok, "lines": res.lines, "notices": res.notices, "next": res.next, "data": res.data},
+        print(json.dumps({"ok": ok, "lines": res.lines, "notices": res.notices, "next": res.next, "data": res.data,
+                          **({"final": res.final} if res.final else {})},
                          indent=2, sort_keys=True, default=str))
         return res.exit_code
     out = list(res.lines)
@@ -363,6 +364,8 @@ def emit(res: Result, args, ok: bool = True) -> int:
     out += res.notices
     if res.next:
         out.append(f"next: {res.next}")
+    if res.final:
+        out.append(res.final)
     if out:
         print("\n".join(out))
     return res.exit_code
@@ -383,6 +386,8 @@ def emit_error(err: OfficeError, args) -> int:
         lines.append(f"preserved: {err.preserved}")
     if err.next_step:
         lines.append(f"next: {err.next_step}")
+    if err.data.get("final"):
+        lines.append(err.data["final"])
     print("\n".join(lines))
     return err.exit_code
 
@@ -420,6 +425,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _run(args, unknown)
     except OfficeError as err:
+        if args.cmd == "close":  # every office close path ends with its report line
+            from office import closeout
+            err.data.setdefault("final", closeout.done(f"stopped early ({err.category}); nothing closed or cleaned up"))
         return emit_error(err, args)
     except KeyboardInterrupt:
         return 130

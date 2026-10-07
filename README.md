@@ -9,7 +9,7 @@ The goal is simple: take a human intent and turn it into a reviewable, resumable
 - **Distribution:** `auto-office`
 - **Python package:** `office`
 - **CLI:** `office`
-- **Current release:** 3.3.2
+- **Current release:** 3.3.3
 - **State authority:** SQLite `runs.db` (WAL)
 - **Core rule:** agents decide; the runtime records, isolates, routes, verifies, and resumes
 
@@ -209,6 +209,8 @@ office land
 # Then close the run.
 office close
 ```
+
+`office close` is a cleanup sweep, not just a state change. After a real merge it fast-forwards the local base branch to `origin/<base>` (a dirty checkout of it is left alone and the user is asked), removes only the worktrees and `office/<run>/` branches Office created for the run (`git branch -d`, never `-D`), and runs `git worktree prune`. A `--handoff` close marks the PR ready and keeps everything for after the user merges. It warns (non-blocking) when the diff changes code but no CHANGELOG/README the repo keeps, and every path ends with one `office close done — <summary>` line.
 
 The important part is not the exact command sequence above; it is that the runtime keeps the legal sequence explicit. If the state changes, `next:` changes with it.
 
