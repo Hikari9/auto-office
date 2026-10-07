@@ -151,7 +151,8 @@ def test_run_checks_failing_on_a_moved_base_rebase_and_continue(env, monkeypatch
         con.close()
     assert landing["integration"]["status"] == "blocked", landing  # main has not moved: the failure stands
     _advance_main(env, bare, "MAIN_FIX", "fixed on main\n")
-    env.script(integration_reviewer=[{"reply": "VERDICT: PASS"}])
+    # #337: the rebase is a shared composition boundary (S-rebase) reviewed once by the lane reviewer.
+    env.script(convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("resume", check=0)
     con = env.con()
     try:

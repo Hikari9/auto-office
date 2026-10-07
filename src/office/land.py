@@ -358,6 +358,17 @@ def job_auto_rebase(con, run: dict, job: dict) -> dict:
     while integration.live_integrate_pids(con, run) and time.time() < deadline:
         time.sleep(1.0)
     run = state.get_run(con, run["id"])
+
+    def block(detail: str, summary: str) -> None:
+        # A manual `office land --rebase` that raced this job has already queued
+        # the next compose: that integration owns the status, so leave it.
+        with db.transaction(con):
+            if con.execute("SELECT 1 FROM outbox WHERE run_id=? AND kind='integrate' AND status IN ('queued','claimed')",
+                           (run["id"],)).fetchone():
+                return
+            integration._set_integration(con, run, status="blocked", detail=detail)
+            state.emit(con, run, "integration.failed", summary)
+
     try:
         tasks = integration.accepted_set(con, run)
         if tasks is None:
@@ -367,17 +378,20 @@ def job_auto_rebase(con, run: dict, job: dict) -> dict:
         with _land_lock(run), integration.worktree_lock(run, wait=60.0):
             res = _rebase_locked(con, run, tasks)
     except Refused as exc:
-        with db.transaction(con):
-            integration._set_integration(con, run, status="blocked",
-                                         detail=f"automatic rebase refused ({exc.category}): {exc.message[:160]}")
-            state.emit(con, run, "integration.failed", f"INTEGRATION automatic rebase refused: {exc.message[:140]}"
-                       + (f"; next: {exc.next_step}" if exc.next_step else ""))
+        block(f"automatic rebase refused ({exc.category}): {exc.message[:160]}",
+              f"INTEGRATION automatic rebase refused: {exc.message[:140]}"
+              + (f"; next: {exc.next_step}" if exc.next_step else ""))
         return {"refused": exc.category}
+    except Exception as exc:
+        # The job fails after its one attempt; without this the integration
+        # would read "pending" with nothing queued, and office resume skips it.
+        block(f"automatic rebase failed: {str(exc)[:160]}; office land --rebase retries it",
+              f"INTEGRATION automatic rebase failed: {str(exc)[:140]}")
+        raise
     if integration.compose_base(state.get_run(con, run["id"])) == integration.compose_base(run):
         # Nothing moved after all (a reset or a racing land): the failure stands.
-        with db.transaction(con):
-            integration._set_integration(con, run, status="blocked", detail=f"run checks failed; {res.lines[0]}")
-            state.emit(con, run, "integration.failed", "INTEGRATION checks failed and there was nothing to rebase onto")
+        block(f"run checks failed; {res.lines[0] if res.lines else 'nothing to rebase onto'}",
+              "INTEGRATION checks failed and there was nothing to rebase onto")
         return {"rebased": False, "lines": res.lines}
     from office import jobs
     jobs.kick(con, run["id"])

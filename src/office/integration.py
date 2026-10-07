@@ -198,7 +198,12 @@ def moved_base(con, run: dict) -> str | None:
     from office import prs
     branch = prs.settings(con, run).get("base_branch") or "main"
     repo = Path(run["repo_root"])
-    if subprocess.run(["git", "-C", str(repo), "fetch", "-q", "origin", branch], capture_output=True).returncode != 0:
+    try:  # runs inside the integrate job, under the worktree lock: never hang it on the network
+        fetched = subprocess.run(["git", "-C", str(repo), "fetch", "-q", "origin", branch], capture_output=True,
+                                 timeout=120)
+    except subprocess.TimeoutExpired:
+        return None
+    if fetched.returncode != 0:
         return None
     new = paths.git(repo, "rev-parse", f"origin/{branch}", check=False)
     old = compose_base(run)
