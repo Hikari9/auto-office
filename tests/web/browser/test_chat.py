@@ -99,12 +99,10 @@ def test_drafts_stay_with_their_exact_target(page, served):
     inspect(page, b["id"])
     assert page.input_value("[data-testid=chat-input]") == "for B"
     # A live update re-renders the composer without losing or moving the draft.
-    rev = page.evaluate("window.officeStore.state.rev")
-    with svc.lock:
-        svc.poll(force=True)
+    page.evaluate("document.querySelector('[data-testid=chat-input]').dataset.mark = 'old'")
     page.evaluate("window.officeStore.emit('delta')")
-    page.wait_for_timeout(100)
-    assert page.input_value("[data-testid=chat-input]") == "for B" and rev is not None
+    page.wait_for_function("() => !document.querySelector('[data-testid=chat-input]').dataset.mark", timeout=5000)
+    assert page.input_value("[data-testid=chat-input]") == "for B"
 
 
 def test_send_goes_only_to_the_selected_drafts_target(page, served):
@@ -115,10 +113,13 @@ def test_send_goes_only_to_the_selected_drafts_target(page, served):
     inspect(page, a["id"])
     page.fill("[data-testid=chat-input]", "only for A")
     inspect(page, b["id"])
-    page.click("[data-testid=chat-send]")  # B has no draft: nothing is sent, A's text never goes to B
-    page.wait_for_timeout(200)
-    assert sent == []
+    page.fill("[data-testid=chat-input]", "for B")
+    page.click("[data-testid=chat-send]")
+    page.wait_for_selector("[data-testid=chat-receipt][data-status=delivered]", timeout=5000)
+    assert [(s["target"]["session"], s["payload"]["text"]) for s in sent] == [(b["id"], "for B")]
+    sent.clear()
     inspect(page, a["id"])
+    assert page.input_value("[data-testid=chat-input]") == "only for A"
     page.click("[data-testid=chat-send]")
     page.wait_for_selector("[data-testid=chat-receipt][data-status=delivered]", timeout=5000)
     run = svc.snapshot_state["entities"]["runs"][a["run"]]
@@ -129,7 +130,7 @@ def test_send_goes_only_to_the_selected_drafts_target(page, served):
     assert sent[0]["payload"] == {"text": "only for A"}
     assert page.input_value("[data-testid=chat-input]") == ""
     inspect(page, b["id"])
-    assert page.locator("[data-testid=chat-receipt]").count() == 0  # receipts are per target too
+    assert page.locator("[data-testid=chat-receipt]").all_text_contents() == ["for Bdelivered"]  # receipts per target
 
 
 def test_a_target_mismatch_at_send_time_sends_nothing(page, served):
@@ -142,11 +143,13 @@ def test_a_target_mismatch_at_send_time_sends_nothing(page, served):
     # The composer for A is still on screen, but the selection has moved to B before the click lands.
     page.evaluate("""(b) => { const btn = document.querySelector('[data-testid=chat-send]');
         document.querySelector(`[data-testid=agent-node][data-id="${b}"]`).click(); btn.click(); }""", b["id"])
-    page.wait_for_timeout(200)
+    inspect(page, a["id"])
+    assert page.input_value("[data-testid=chat-input]") == "for A"  # a real send would have cleared the draft
+    assert page.locator("[data-testid=chat-receipt]").count() == 0
     assert sent == []
 
 
-@pytest.mark.parametrize("cause", ["not-capable", "stale", "disconnected", "session-stale"])
+@pytest.mark.parametrize("cause", ["not-capable", "stale", "disconnected", "session-stale", "no-state"])
 def test_composer_disabled_with_reason(page, served, cause):
     url, svc = served
     open_agents(page, url)
@@ -162,6 +165,10 @@ def test_composer_disabled_with_reason(page, served, cause):
         page.evaluate("""(id) => { window.officeStore.state.entities.agents[id].state.stale = true;
             window.officeStore.emit('delta'); }""", a["id"])
         want = "session is stale"
+    elif cause == "no-state":
+        page.evaluate("""(id) => { const a = window.officeStore.state.entities.agents[id]; delete a.state;
+            window.officeStore.state.scalars.host = null; window.officeStore.emit('delta'); }""", a["id"])
+        want = "host or run missing"
     elif cause == "stale":
         with svc.lock:
             svc.stale_after = -1
@@ -188,7 +195,8 @@ def test_pending_then_failed_from_the_real_service(page, served):
     assert "pending" in page.text_content("[data-testid=chat-receipt]")
     held[0].continue_()  # the fixture knows no Herdr pane for this session: the service refuses delivery
     page.wait_for_selector("[data-testid=chat-receipt][data-status=failed]", timeout=10000)
-    assert page.get_attribute("[data-testid=chat-receipt]", "title")
+    assert "failed" in page.text_content("[data-testid=chat-receipt]")
+    assert "no Herdr pane" in page.get_attribute("[data-testid=chat-receipt]", "title")
 
 
 def test_unknown_delivery_offers_only_confirmed_send_again_with_a_new_id(page, served):

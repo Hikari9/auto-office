@@ -74,10 +74,6 @@ def test_evidence_drawer_has_audits_provenance_override_and_history(page, served
     assert rows.first.locator("td").first.text_content() == route["audits"][0]["id"]
     assert "runs.db route_audit" in text(page, "route-provenance")
     assert route["planner_override"]["why"] in text(page, "route-override")
-    run = svc.snapshot_state["entities"]["runs"][node["run"]]
-    earlier = [d for d in run["history"] if d["task"] == node["task"]]
-    history = page.locator("[data-testid=route-history] li")
-    assert history.count() == len(earlier)
 
 
 def test_override_absent_says_none(page, served):
@@ -94,3 +90,20 @@ def test_legacy_run_shows_no_routing_audit_recorded(page, served):
     inspect_task(page, svc, lambda r: not r["available"])
     assert text(page, "routing-legacy") == "no routing audit recorded"
     assert page.locator("[data-testid=route-primary], [data-testid=routing-evidence]").count() == 0
+
+
+def test_route_history_lists_earlier_dispatches_of_the_task(page, served):
+    url, svc = served
+    open_agents(page, url)
+    e = svc.snapshot_state["entities"]
+    node = next(a for a in e["agents"].values() if a["column"] == "executors" and a.get("task")
+                and e["tasks"][a["task"]]["route"]["available"]
+                and any(d["task"] == a["task"] for d in e["runs"][a["run"]]["history"]))
+    earlier = [d for d in e["runs"][node["run"]]["history"] if d["task"] == node["task"]]
+    page.locator(f'[data-testid=agent-node][data-id="{node["id"]}"]').click()
+    page.wait_for_selector(f'[data-testid=agent-inspector][data-id="{node["id"]}"]', timeout=5000)
+    page.click("[data-testid=routing-evidence] summary")
+    items = page.locator("[data-testid=route-history] li").all_text_contents()
+    assert len(items) == len(earlier) > 0
+    for text_, d in zip(items, earlier):
+        assert f"{d['harness']}/{d['model']}@{d['effort']}" in text_ and d["started_at"] in text_

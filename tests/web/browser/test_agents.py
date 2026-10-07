@@ -95,6 +95,7 @@ def test_repository_and_state_filters(page, served):
     page.select_option("[data-testid=agents-repo]", key)
     wait_ids(page, in_repo)
     page.select_option("[data-testid=agents-repo]", "all")
+    wait_ids(page, {a["id"] for a in agents if a["column"] in COLUMNS})
     page.select_option("[data-testid=agents-state]", "terminal")
     wait_ids(page, terminal)
 
@@ -114,7 +115,8 @@ def test_node_evidence_and_telemetry_are_labelled_never_zero(page, served):
     assert insp.locator("[data-testid=ev-reply]").text_content() == "yes"
     for m in ("cpu", "ram", "context", "quota"):
         assert insp.locator(f"[data-testid=tm-{m}]").text_content() in ("unknown", "unavailable")
-    assert " 0" not in insp.locator("[data-testid=agent-telemetry]").text_content()
+    for m in ("cpu", "ram", "context", "quota"):
+        assert not insp.locator(f"[data-testid=tm-{m}]").text_content().startswith("0")
     paused = pick(page, "a => a.state.paused && !a.state.complete")
     assert "Paused: yes" in node(page, paused).text_content()
     blocked = pick(page, "a => a.state.blocked && !a.state.complete")
@@ -147,7 +149,8 @@ def test_workers_have_no_text_entry_and_offer_herdr_handoff(page, served):
         assert insp.locator("[data-testid=handoff-command]").text_content() == f"herdr agent attach office-{raw.lower()}"
     page.context.grant_permissions(["clipboard-read", "clipboard-write"])
     page.click("[data-testid=handoff-copy]")
-    assert page.evaluate("navigator.clipboard.readText()").startswith("herdr agent attach office-")
+    page.wait_for_selector("[data-testid=handoff-copy]:has-text('Copied')")
+    assert page.evaluate("navigator.clipboard.readText()") == page.text_content("[data-testid=handoff-command]")
 
 
 def test_inspector_run_history_lists_earlier_attempts(page, served):
@@ -252,6 +255,7 @@ def test_1100px_reduces_secondary_detail_and_stays_usable(page, served):
     url, _ = served
     errors = open_agents(page, url, 1100, 800)
     card = page.locator("[data-testid=agent-node]").first
+    assert card.locator(".node-telemetry").count() == 1
     assert not card.locator(".node-telemetry").is_visible()
     assert card.locator("[data-testid=node-route]").is_visible()
     insp = inspect(page, card.get_attribute("data-id"))
@@ -267,6 +271,7 @@ def test_desktop_widths_show_every_column_without_errors(page, served, size):
     errors = open_agents(page, url, *size)
     for c in COLUMNS:
         assert page.locator(f"[data-testid=role-column][data-column={c}]").is_visible()
+    assert page.locator("[data-testid=agent-node] .node-telemetry").first.is_visible()
     assert errors == []
 
 
@@ -284,3 +289,28 @@ def test_failed_route_change_is_shown_and_the_route_is_unchanged(page, served):
     assert page.locator("[data-testid=route-pending-detail]").count() == 0
     assert page.text_content("[data-testid=insp-effort]") == a["effort"]
     assert page.is_enabled("[data-testid=route-apply]")
+
+
+def test_unknown_route_change_result_unlocks_the_control(page, served):
+    url, svc = served
+    open_agents(page, url)
+    a = _live_executor(svc)
+    page.route("**/api/commands", lambda route: route.abort("connectionreset"))
+    inspect(page, a["id"])
+    page.select_option("[data-testid=route-effort]", "low" if a["effort"] != "low" else "max")
+    page.click("[data-testid=route-apply]")
+    page.wait_for_selector("[data-testid=route-failed]", timeout=5000)
+    assert "result unknown" in page.text_content("[data-testid=route-failed]")
+    assert page.locator("[data-testid=route-pending-detail]").count() == 0
+    assert page.text_content("[data-testid=insp-effort]") == a["effort"]
+    assert page.is_enabled("[data-testid=route-apply]")
+
+
+def test_filtering_out_the_selected_node_closes_the_inspector(page, served):
+    url, svc = served
+    open_agents(page, url)
+    runs = svc.snapshot_state["entities"]["runs"]
+    a = next(x for x in svc.snapshot_state["entities"]["agents"].values() if runs[x["run"]]["liveness"] == "live")
+    inspect(page, a["id"])
+    page.select_option("[data-testid=agents-state]", "terminal")
+    page.wait_for_selector("[data-testid=agent-inspector]", state="detached", timeout=5000)

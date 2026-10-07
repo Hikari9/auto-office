@@ -14,7 +14,7 @@ export const targetKey = (t) => [t.host, t.repo, t.run_id, t.session].join("|");
 export function chatTarget(state, node) {
   if (!node || node.kind !== "session" || node.column !== "orchestrators") return null;
   const run = state.entities.runs[node.run] || {};
-  return { host: (state.scalars.host || {}).id || null, repo: (run.repo && run.repo.slug) || (run.repo && run.repo.key) || null,
+  return { host: ((state.scalars || {}).host || {}).id || null, repo: (run.repo && run.repo.slug) || (run.repo && run.repo.key) || null,
     run_id: run.run_id || null, session: node.id };
 }
 
@@ -27,8 +27,11 @@ export function chatBlocked(state, status, node) {
   if (!run) return "The run is no longer in Office's data";
   const cap = run.controls && run.controls.chat_send;
   if (!cap || !cap.allowed) return `This orchestrator is not chat-capable: ${(cap && cap.reason) || "no chat control reported"}`;
-  if (node.state.stale) return "The orchestrator session is stale";
-  if (node.state.unavailable) return "The orchestrator session is unavailable";
+  const s = node.state || {};
+  if (s.stale) return "The orchestrator session is stale";
+  if (s.unavailable) return "The orchestrator session is unavailable";
+  const t = chatTarget(state, node);
+  if (!t.host || !t.run_id) return "The chat target is not fully known (host or run missing)";
   return null;
 }
 

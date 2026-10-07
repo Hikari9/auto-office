@@ -165,7 +165,7 @@ function routeControl(ctx, n, state) {
   const run = state.entities.runs[n.run] || {};
   const cap = run.controls && run.controls.change_route;
   const s = n.state || {};
-  if (n.kind !== "dispatch" || !cap || !cap.allowed || s.process === "exited" || s.complete || s.stale) return null;
+  if (n.kind !== "dispatch" || !n.harness || !cap || !cap.allowed || s.process === "exited" || s.complete || s.stale) return null;
   const draft = view.routeDraft.get(n.id) || { model: n.model, effort: n.effort };
   view.routeDraft.set(n.id, draft);
   const record = view.routePending.get(n.id);
@@ -207,7 +207,9 @@ function settlePending(ctx, state) {
     const n = state.entities.agents[id];
     const r = ctx.receipt(p.id);
     if (!n || (n.model === p.model && n.effort === p.effort)) { view.routePending.delete(id); view.routeDraft.delete(id); }
-    else if (r.status === "failed" && !p.error) p.error = r.error || "refused";
+    else if (["failed", "unknown", "checked"].includes(r.status) && !p.error) {
+      p.error = r.status === "failed" ? r.error || "refused" : `result ${r.status}${r.error ? `: ${r.error}` : ""}; check before applying again`;
+    }
   }
 }
 
@@ -258,7 +260,7 @@ export function renderAgents(base, root) {
   if (!state) { root.replaceChildren(h("p", { class: "muted", text: "Waiting for Office data…" })); return; }
   settlePending(ctx, state);
   const cols = visibleNodes(state);
-  if (view.selected && !state.entities.agents[view.selected]) view.selected = null;
+  if (view.selected && !Object.values(cols).some((l) => l.some((n) => n.id === view.selected))) view.selected = null;
   const selected = view.selected ? state.entities.agents[view.selected] : null;
   const total = Object.values(cols).reduce((n, l) => n + l.length, 0);
   const select = (testid, label, value, options, onchange) => {
