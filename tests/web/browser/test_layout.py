@@ -90,7 +90,8 @@ def test_issue_headers_do_not_overlap_and_long_text_ends_in_an_ellipsis(page, se
     assert [h["label"] for h in heads][5:8] == ["Priority", "Authorization · Auto queue", "Run / command"]
     for head, nxt in zip(heads, heads[1:]):
         assert head["right"] <= nxt["left"] + EPS, (head["label"], nxt["label"])  # boxes never overlap
-        assert head["textRight"] <= nxt["left"] + EPS, f"{head['label']} text runs into {nxt['label']}"
+        if not head["clipped"]:  # a clipped label's range still reports its full width; it ends in an ellipsis instead
+            assert head["textRight"] <= nxt["left"] + EPS, f"{head['label']} text runs into {nxt['label']}"
     assert all(h["title"] == h["label"] for h in heads)  # a label a narrower font clips ends in an ellipsis, in full as title
     assert all(h["ellipsis"] == "ellipsis" and h["overflow"] == "hidden" for h in heads if h["clipped"])
 
@@ -212,9 +213,13 @@ def test_scroll_buttons_keep_focus_at_the_end_and_through_a_rebuild(page, served
     page.wait_for_selector(f"{hint}[data-more=right]")
     right = page.locator(f"{hint} [data-testid=scroll-right]")
     right.focus()
-    while page.locator(hint).get_attribute("data-more") != "left":
+    for _ in range(8):
+        if page.locator(hint).get_attribute("data-more") == "left":
+            break
         page.keyboard.press("Enter")
         page.wait_for_timeout(150)
+    else:
+        pytest.fail("the scroll button never reached the end")
     assert page.evaluate("document.activeElement.dataset.testid") == "scroll-right"  # not dropped to <body> when it ends
     add_item(svc, "issue:focus", "Focus probe")
     page.wait_for_selector('[data-testid=alloc-row][data-id="issue:focus"]', timeout=10000)  # the surface was rebuilt
@@ -306,3 +311,13 @@ def test_agents_scroll_position_survives_a_rebuild(page, served):
     page.locator("[data-testid=agents-include-completed]").check()  # rebuilds the surface
     page.wait_for_selector("[data-testid=agents-graph]:not([data-stale])")
     assert page.evaluate(GRAPH)["scrollLeft"] == pytest.approx(before, abs=1)
+
+
+def test_agents_graph_shrinks_with_the_window_without_a_phantom_scroll(page, served):
+    url, _ = served
+    open_surface(page, url, 1440, 900, "agents", "[data-testid=agent-node]")
+    assert page.evaluate(GRAPH)["over"] <= 1
+    page.set_viewport_size({"width": 1280, "height": 800})  # the edge drawing must not keep the old, wider extent
+    page.wait_for_function("""() => { const g = document.querySelector('[data-testid=agents-graph]');
+        return g.clientWidth < 960 && g.scrollWidth <= g.clientWidth + 1; }""", timeout=5000)
+    page.wait_for_selector(f"{AGENTS_HINT}[data-more=none]", state="hidden")
