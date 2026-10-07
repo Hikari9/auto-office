@@ -23,6 +23,23 @@ from office.util import claim_alive, claim_identity, dumps, now_iso
 
 KICK_THROTTLE_SECONDS = 10
 
+# A task's pr_sync jobs run in the order they were queued: none starts while an earlier one for the
+# same task is queued (backing off included) or claimed. Evaluated against the `outbox` row it filters.
+IN_ORDER = ("(outbox.kind<>'pr_sync' OR NOT EXISTS (SELECT 1 FROM outbox e WHERE e.kind='pr_sync' "
+            "AND e.run_id=outbox.run_id AND e.status IN ('queued','claimed') "
+            "AND json_extract(e.payload_json,'$.task_id') IS json_extract(outbox.payload_json,'$.task_id') "
+            "AND (e.created_at<outbox.created_at OR (e.created_at=outbox.created_at AND e.rowid<outbox.rowid))))")
+
+
+class Defer(Exception):
+    """Raised by a handler that cannot finish yet: the job goes back to the queue, not_before `seconds`
+    from now, without spending an attempt. It re-queues behind its task's other pr_sync jobs, so the
+    work it waits for is never blocked by it."""
+
+    def __init__(self, reason: str, seconds: int = 30):
+        super().__init__(reason)
+        self.seconds = seconds
+
 
 def _handlers():
     from office import convergence, dispatch, gates, plans, prs, visual, integration
@@ -77,7 +94,7 @@ def kick(con, run_id: str | None = None) -> int:
     with db.transaction(con):
         reclaim(con, run_id)
         q = ("SELECT id, run_id FROM outbox WHERE status='queued' AND (not_before IS NULL OR not_before<=?) "
-             "AND (kicked_at IS NULL OR kicked_at<?)")
+             f"AND (kicked_at IS NULL OR kicked_at<?) AND {IN_ORDER}")
         args = [now.isoformat(), cutoff]
         if run_id:
             q += " AND run_id=?"
@@ -111,7 +128,7 @@ def run_pending(con, run_id: str | None = None, limit: int = 200) -> int:
     for _ in range(limit):
         with db.transaction(con):
             reclaim(con, run_id)
-        q = "SELECT id FROM outbox WHERE status='queued' AND (not_before IS NULL OR not_before<=?)"
+        q = f"SELECT id FROM outbox WHERE status='queued' AND (not_before IS NULL OR not_before<=?) AND {IN_ORDER}"
         args = [now_iso()]
         if run_id:
             q += " AND run_id=?"
@@ -129,9 +146,11 @@ def execute(con, job_id: str) -> int:
     claimant = claim_identity(os.getpid())  # the start time tells this process from a later one with its pid
     with db.transaction(con):
         cur = con.execute("UPDATE outbox SET status='claimed', claimed_pid=?, claimed_by=?, claimed_at=?, "
-                          "attempts=attempts+1 WHERE id=? AND status='queued'",
+                          f"attempts=attempts+1 WHERE id=? AND status='queued' AND {IN_ORDER}",
                           (os.getpid(), claimant, now_iso(), job_id))
         if cur.rowcount == 0:
+            # Behind an earlier job of its task: let the next kick start it once that one ends.
+            con.execute("UPDATE outbox SET kicked_at=NULL WHERE id=? AND status='queued'", (job_id,))
             return 0
     job = state.get_job(con, job_id)
     run = state.get_run(con, job["run_id"])
@@ -147,6 +166,13 @@ def execute(con, job_id: str) -> int:
                                 f"{run['office_version']}")
         handler = _handlers()[job["kind"]]
         result = handler(con, run, job) or {}
+    except Defer as later:
+        with db.transaction(con):
+            until = (datetime.now(timezone.utc) + timedelta(seconds=later.seconds)).isoformat()
+            con.execute("UPDATE outbox SET status='queued', attempts=attempts-1, error=?, not_before=?, "
+                        "claimed_pid=NULL, kicked_at=NULL, created_at=? WHERE id=?",
+                        (f"deferred: {later}"[:2000], until, now_iso(), job_id))
+        return 0
     except Exception as exc:  # recorded, never swallowed
         err = f"{type(exc).__name__}: {exc}"
         tb = traceback.format_exc(limit=8)
