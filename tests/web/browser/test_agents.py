@@ -80,7 +80,7 @@ def test_five_role_columns_current_topology_and_edges(page, served):
     wait_ids(page, {a["id"] for a in agents.values() if current(svc, a)})
     # The visual gate's selector: every node names its column; orchestrators are present.
     assert page.locator("[data-test=agent-node][data-role=orchestrators]").count() >= 1
-    for c in COLUMNS[1:]:
+    for c in ("executors", "visual_verifiers"):
         assert page.locator(f"[data-test=agent-node][data-role={c}]").count() >= 1, c
     # Completed agents and closed runs are hidden until asked for.
     hidden = {a["id"] for a in agents.values() if a["column"] in COLUMNS and not current(svc, a)}
@@ -167,6 +167,7 @@ def test_measured_metric_is_shown_as_value(page, served):
 def test_workers_have_no_text_entry_and_offer_herdr_handoff(page, served):
     url, _ = served
     open_agents(page, url)
+    include_completed(page)  # plan reviews in the fixture are all done
     for column in COLUMNS[1:4]:
         nid = pick(page, f"a => a.column === '{column}'")
         inspect(page, nid)
@@ -262,6 +263,8 @@ def test_route_change_absent_without_capability_and_for_orchestrators(page, serv
 def test_keyboard_moves_through_nodes_and_into_composer(page, served):
     url, _ = served
     open_agents(page, url)
+    include_completed(page)  # so the plan reviewer column is not empty
+    page.wait_for_selector("[data-testid=agent-node][data-column=plan_reviewers]")
     first = page.locator('[data-testid=role-column][data-column=orchestrators] [data-testid=agent-node]').first
     first.focus()
     page.keyboard.press("ArrowDown")

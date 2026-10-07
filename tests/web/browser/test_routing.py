@@ -27,6 +27,7 @@ def open_agents(page, url):
     page.wait_for_selector("[data-testid=issue-row]", timeout=20000)
     page.click("[data-surface=agents]")
     page.wait_for_selector("[data-testid=agent-node]", timeout=10000)
+    page.check("[data-testid=agents-include-completed]")  # these tests may target completed agents
 
 
 def inspect_task(page, svc, predicate):
