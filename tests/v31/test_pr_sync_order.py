@@ -69,8 +69,79 @@ def test_no_pr_job_is_claimed_while_an_earlier_one_for_the_task_is_queued_or_cla
     assert jobmod.execute(con, accepted["id"]) == 0
     assert jobmod.run_pending(con) == 0
     assert con.execute("SELECT COUNT(*) FROM outbox WHERE kind='pr_sync' AND status='done'").fetchone()[0] == 0
-    # Another task's jobs are not held back.
-    assert con.execute("SELECT COUNT(*) FROM outbox WHERE kind='pr_sync' AND status='queued'").fetchone()[0] == len(queued)
+
+
+def test_another_tasks_pr_jobs_are_not_held_back_by_a_backing_off_job(env, monkeypatch):
+    from test_task_prs import PLAN_STACKED
+    from test_land import SCRIPT
+    from office import jobs as jobmod
+    github(env, monkeypatch)
+    env.trust()
+    env.script(**SCRIPT)
+    start_inline(env, plan=PLAN_STACKED, extra=("--issue", "7"))
+    env.office("approve", "plan", "--quote", "go", check=0)
+    monkeypatch.setenv("OFFICE_JOBS", "manual")
+    env.office("dispatch", "T1", "T2", check=0)
+    con = env.con()
+    _drain(con)
+    by_task = {}
+    for r in con.execute("SELECT * FROM outbox WHERE kind='pr_sync' ORDER BY created_at, rowid").fetchall():
+        by_task.setdefault(json.loads(r["payload_json"])["task_id"], []).append(dict(r))
+    assert set(by_task) == {"T1", "T2"}, list(by_task)
+    # T1's first job is backing off after a failure; its later jobs wait for it, T2's do not.
+    con.execute("UPDATE outbox SET attempts=1, not_before='2999-01-01T00:00:00+00:00' WHERE id=?", (by_task["T1"][0]["id"],))
+    assert jobmod.execute(con, by_task["T1"][1]["id"]) == 0
+    assert con.execute("SELECT status FROM outbox WHERE id=?", (by_task["T1"][1]["id"],)).fetchone()[0] == "queued"
+    assert jobmod.execute(con, by_task["T2"][0]["id"]) == 0
+    assert con.execute("SELECT status FROM outbox WHERE id=?", (by_task["T2"][0]["id"],)).fetchone()[0] == "done"
+    jobmod.run_pending(con)
+    statuses = {t: [con.execute("SELECT status FROM outbox WHERE id=?", (j["id"],)).fetchone()[0] for j in js]
+                for t, js in by_task.items()}
+    assert set(statuses["T2"]) == {"done"} and set(statuses["T1"]) == {"queued"}, statuses
+
+
+def test_a_sync_stops_waiting_for_a_stuck_revision_sync(env, monkeypatch):
+    """A revision job held `claimed` by a hung process does not defer the accepted job forever."""
+    from office import jobs as jobmod, prs
+    from office.util import claim_identity
+    con, queued = _accepted_task_with_queued_pr_jobs(env, monkeypatch)
+    revision, accepted = queued[0], _job(queued, "accepted")
+    con.execute("UPDATE outbox SET status='claimed', claimed_pid=?, claimed_by=?, attempts=1 WHERE id=?",
+                (os.getpid(), claim_identity(os.getpid()), revision["id"]))
+    con.execute("UPDATE outbox SET created_at='2999-01-01T00:00:00+00:00' WHERE id=?", (revision["id"],))  # no ordering hold
+    con.execute("UPDATE outbox SET created_at='1999-01-01T00:00:00+00:00' WHERE id=?", (accepted["id"],))
+    con.execute("UPDATE outbox SET status='done' WHERE kind='pr_sync' AND status='queued' AND id<>?", (accepted["id"],))
+    for n in range(1, prs.MAX_DEFERRALS + 1):
+        con.execute("UPDATE outbox SET not_before=NULL WHERE id=?", (accepted["id"],))
+        assert jobmod.execute(con, accepted["id"]) == 0
+        row = con.execute("SELECT status, payload_json, error FROM outbox WHERE id=?", (accepted["id"],)).fetchone()
+        assert row["status"] == "queued" and json.loads(row["payload_json"])["deferrals"] == n, dict(row)
+        assert row["error"].startswith("deferred:"), dict(row)
+    con.execute("UPDATE outbox SET not_before=NULL WHERE id=?", (accepted["id"],))
+    jobmod.execute(con, accepted["id"])
+    assert con.execute("SELECT status FROM outbox WHERE id=?", (accepted["id"],)).fetchone()[0] == "done"
+    (pr,) = gh(env)["prs"]
+    assert pr["draft"] is False, pr
+
+
+def test_a_verdict_sync_fails_visibly_once_its_waiting_is_capped(env, monkeypatch):
+    from office import jobs as jobmod, prs
+    from office.util import claim_identity
+    con, queued = _accepted_task_with_queued_pr_jobs(env, monkeypatch)
+    revision, verdict = queued[0], _job(queued, "verdict")
+    con.execute("UPDATE outbox SET status='claimed', claimed_pid=?, claimed_by=?, attempts=1, created_at='2999-01-01T00:00:00+00:00' "
+                "WHERE id=?", (os.getpid(), claim_identity(os.getpid()), revision["id"]))
+    con.execute("UPDATE outbox SET created_at='1999-01-01T00:00:00+00:00', payload_json=json_set(payload_json,'$.deferrals',?) "
+                "WHERE id=?", (prs.MAX_DEFERRALS, verdict["id"]))
+    assert jobmod.execute(con, verdict["id"]) == 1
+    row = con.execute("SELECT status, attempts, error FROM outbox WHERE id=?", (verdict["id"],)).fetchone()
+    assert row["status"] == "queued" and row["attempts"] == 1 and "still pending" in row["error"], dict(row)
+    assert con.execute("SELECT COUNT(*) FROM events WHERE kind='pr.error'").fetchone()[0] == 1
+
+
+def test_pr_sync_jobs_get_enough_attempts_for_a_github_outage(env, monkeypatch):
+    con, queued = _accepted_task_with_queued_pr_jobs(env, monkeypatch)
+    assert {j["max_attempts"] for j in queued} == {5}, [j["max_attempts"] for j in queued]
 
 
 def test_the_324_order_ends_with_the_pr_ready(env, monkeypatch):
@@ -86,6 +157,8 @@ def test_the_324_order_ends_with_the_pr_ready(env, monkeypatch):
     jobmod.run_pending(con)
     assert [r["status"] for r in con.execute("SELECT status FROM outbox WHERE kind='pr_sync' ORDER BY created_at")] \
         == ["done"] * len(queued)
+    done = {j["event"]: con.execute("SELECT finished_at FROM outbox WHERE id=?", (j["id"],)).fetchone()[0] for j in queued}
+    assert done["revision"] <= done["accepted"], done  # the accepted job finished after the revision, not as a no-op
     (pr,) = gh(env)["prs"]
     assert pr["draft"] is False, pr
     assert any("accepted" in c for c in pr["comments"]), pr["comments"]
@@ -140,7 +213,7 @@ def test_a_failing_comment_or_lookup_is_not_a_success_either(env, monkeypatch):
     first = con.execute("SELECT status, error FROM outbox WHERE id=?", (queued[0]["id"],)).fetchone()
     assert first["status"] == "queued" and "gh pr list failed" in first["error"], dict(first)
     assert gh(env)["prs"] == []  # a failed lookup did not read as "no PR" and open one
-    for _ in range(3):  # the verdict and accepted comments fail for good; the jobs end failed, not done
+    for _ in range(5):  # the verdict and accepted comments fail for good; the jobs end failed, not done
         con.execute("UPDATE outbox SET not_before=NULL WHERE status='queued'")
         jobmod.run_pending(con)
     states = {j["event"]: con.execute("SELECT status FROM outbox WHERE id=?", (j["id"],)).fetchone()[0]

@@ -276,10 +276,16 @@ def pr_blocker(con, run: dict, task: dict) -> str | None:
     return None
 
 
+# A GitHub outage rides out about 15s * (1+2+3+4) of backoff; a sync waiting on a revision sync that
+# never ends stops waiting after MAX_DEFERRALS * 30s and publishes (accepted) or fails (the rest).
+PR_SYNC_ATTEMPTS = 5
+MAX_DEFERRALS = 20
+
+
 def queue(con, run: dict, task_id: str, event: str, ref: str) -> None:
     if enabled(run) and has_pr(state.get_task(con, run["id"], task_id)):
         state.enqueue(con, run, "pr_sync", {"task_id": task_id, "event": event, "ref": ref},
-                      dedup_key=f"pr_sync:{run['id'][:8]}:{task_id}:{event}:{ref}", max_attempts=2)
+                      dedup_key=f"pr_sync:{run['id'][:8]}:{task_id}:{event}:{ref}", max_attempts=PR_SYNC_ATTEMPTS)
 
 
 # ------------------------------------------------------------------ git side
@@ -369,7 +375,7 @@ def job_pr_sync(con, run: dict, job: dict) -> dict:
     if not has_pr(task):
         return {"skipped": "no file scope, no PR"}
     try:
-        return _sync(con, run, task, job["id"], p["event"], p["ref"])
+        return _sync(con, run, task, job["id"], p["event"], p["ref"], p.get("deferrals", 0))
     except jobs.Defer:
         raise
     except Exception as exc:  # GitHub trouble is a notice, never a lifecycle failure; the job retries
@@ -398,7 +404,7 @@ def _revision_pending(con, run: dict, task_id: str, job_id: str) -> bool:
     return False
 
 
-def _sync(con, run: dict, task: dict, job_id: str, event: str, ref: str) -> dict:
+def _sync(con, run: dict, task: dict, job_id: str, event: str, ref: str, deferrals: int = 0) -> dict:
     if event == "revision":
         rev, pr = _publish(con, run, task, ref)
         attempt = con.execute("SELECT COUNT(*) FROM revisions WHERE run_id=? AND task_id=?",
@@ -407,8 +413,11 @@ def _sync(con, run: dict, task: dict, job_id: str, event: str, ref: str) -> dict
             _comment(run, pr, f"office: revision {ref} pushed (attempt {attempt}, replaces attempt {attempt - 1})")
         return {"pr": pr["number"], "pushed": rev["commit_sha"]}
     pr = task.get("pr") or {}
-    if not pr.get("number") and _revision_pending(con, run, task["id"], job_id):
+    waiting = not pr.get("number") and _revision_pending(con, run, task["id"], job_id)
+    if waiting and deferrals < MAX_DEFERRALS:
         raise jobs.Defer(f"{task['id']} has no PR yet and its revision sync is still pending")
+    if waiting and event != "accepted":
+        raise RuntimeError(f"the revision sync of {task['id']} is still pending after {deferrals} deferrals")
     if event == "accepted" and not pr.get("number"):
         pr = _publish(con, run, task, ref)[1]  # the revision sync failed for good and recorded no PR
     if not pr.get("number"):

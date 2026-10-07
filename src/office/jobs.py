@@ -34,7 +34,8 @@ IN_ORDER = ("(outbox.kind<>'pr_sync' OR NOT EXISTS (SELECT 1 FROM outbox e WHERE
 class Defer(Exception):
     """Raised by a handler that cannot finish yet: the job goes back to the queue, not_before `seconds`
     from now, without spending an attempt. It re-queues behind its task's other pr_sync jobs, so the
-    work it waits for is never blocked by it."""
+    work it waits for is never blocked by it. Each deferral is counted in the job's payload `deferrals`,
+    so a handler can stop waiting."""
 
     def __init__(self, reason: str, seconds: int = 30):
         super().__init__(reason)
@@ -169,9 +170,10 @@ def execute(con, job_id: str) -> int:
     except Defer as later:
         with db.transaction(con):
             until = (datetime.now(timezone.utc) + timedelta(seconds=later.seconds)).isoformat()
+            payload = {**job["payload"], "deferrals": job["payload"].get("deferrals", 0) + 1}
             con.execute("UPDATE outbox SET status='queued', attempts=attempts-1, error=?, not_before=?, "
-                        "claimed_pid=NULL, kicked_at=NULL, created_at=? WHERE id=?",
-                        (f"deferred: {later}"[:2000], until, now_iso(), job_id))
+                        "claimed_pid=NULL, kicked_at=NULL, created_at=?, payload_json=? WHERE id=?",
+                        (f"deferred: {later}"[:2000], until, now_iso(), dumps(payload), job_id))
         return 0
     except Exception as exc:  # recorded, never swallowed
         err = f"{type(exc).__name__}: {exc}"
