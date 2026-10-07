@@ -70,20 +70,25 @@ def test_large_fixture_is_virtualized_and_scrolls_smoothly(page, served):
     assert page.locator("[data-testid=issue-row]").count() < 80  # only the visible window is in the DOM
     timing = page.evaluate("""async () => {
         const el = document.getElementById('issue-table');
-        const frames = [];
+        const frames = [], gaps = [];
         for (let i = 1; i <= 60; i += 1) {
             const t0 = performance.now();
             el.scrollTop = i * (el.scrollHeight / 60);
-            el.dispatchEvent(new Event('scroll'));
+            el.dispatchEvent(new Event('scroll'));  // the scroll handler renders synchronously
             frames.push(performance.now() - t0);
+            const shown = [...document.querySelectorAll('[data-testid=issue-row]')].map(r => +r.getAttribute('aria-rowindex') - 2);
+            const top = Math.floor(el.scrollTop / 44), bottom = Math.floor((el.scrollTop + el.clientHeight - 41) / 44);
+            const total = +el.getAttribute('aria-rowcount') - 1;
+            if (Math.min(...shown) > top || Math.max(...shown) < Math.min(bottom, total - 1)) gaps.push(i);
             await new Promise(requestAnimationFrame);
         }
         const rows = document.querySelectorAll('[data-testid=issue-row]');
-        return {worst: Math.max(...frames), rows: rows.length,
+        return {worst: Math.max(...frames), gaps, rows: rows.length,
                 last: rows[rows.length - 1].getAttribute('aria-rowindex'), total: el.getAttribute('aria-rowcount')};
     }""")
     assert timing["worst"] < 50, timing  # each scroll re-render stays well inside a frame budget
     assert timing["rows"] < 80 and timing["last"] == timing["total"]
+    assert timing["gaps"] == []  # every intermediate position has its visible rows rendered
     assert errors == []
 
 
@@ -164,7 +169,8 @@ def test_no_run_issue_offers_copyable_start_and_authorization(page, served):
     assert "--end-state e2e" in page.text_content("[data-testid=start-command]")
     queue = page.locator("[data-testid=auth-queue] option")
     disabled = queue.evaluate_all("els => els.filter(o => o.disabled).map(o => [o.value, o.title])")
-    assert [d[0] for d in disabled] == ["ask", "merge", "e2e"] and all(d[1] for d in disabled)
+    assert [d[0] for d in disabled] == ["ask", "merge", "e2e"]
+    assert all(d[1].startswith("Queued work launches with the repository default") for d in disabled)
     assert page.is_enabled("[data-testid=action-start_issue]")
     assert page.is_enabled("[data-testid=action-queue_issue]")
     assert page.is_enabled("[data-testid=action-copy_start]")
@@ -178,6 +184,7 @@ def test_not_ready_repository_disables_start_and_names_prerequisites(page, serve
     assert page.is_disabled("[data-testid=action-queue_issue]")
     why = page.text_content("[data-testid=why-start_issue]")
     assert "checkout_exists" in why and "git_repository" in why and "origin_matches" in why
+    assert page.text_content("[data-testid=why-queue_issue]") == why
     failing = page.locator("[data-testid=prerequisites] li.fail").all_text_contents()
     assert [f.split(":")[0] for f in failing] == ["checkout_exists", "git_repository", "origin_matches"]
     assert page.is_enabled("[data-testid=action-copy_start]")  # the copyable command stays available
@@ -214,7 +221,7 @@ def test_commands_carry_fresh_ids_and_show_receipts(page, served):
     page.click("[data-testid=action-start_issue]")
     page.wait_for_selector('[data-testid=receipt][data-status=completed] >> text=Start #3', timeout=10000)
     page.click("[data-testid=action-queue_issue]")
-    page.wait_for_function("() => document.querySelectorAll('[data-testid=receipt]').length >= 6", timeout=10000)
+    page.wait_for_selector('[data-testid=receipt][data-status=completed] >> text=Auto Queue #3', timeout=10000)
     assert [s["kind"] for s in sent] == ["start_issue", "queue_issue"]
     assert sent[0]["payload"]["end_state"] == "merge" and sent[0]["target"] == {"repo": "synth-org-0/repo-00", "issue": 3}
     ids = [s["id"] for s in sent]
@@ -238,8 +245,37 @@ def test_unknown_result_is_shown_and_never_retried(page, served):
     receipt = page.locator("[data-testid=receipt][data-status=unknown] >> text=Start #3")
     receipt.wait_for(timeout=10000)
     assert "result unknown, not retried" in receipt.text_content()
-    time.sleep(1.5)
+    # The same command is not offered again while its result is unknown.
+    assert page.is_disabled("[data-testid=action-start_issue]")
+    assert "unknown result" in page.text_content("[data-testid=why-start_issue]")
+    rev = page.evaluate("window.officeStore.state.rev")
+    page.evaluate("""(token) => fetch('/api/fixture/github', {method: 'POST', headers: {'Content-Type': 'application/json',
+        'X-Office-Token': token}, body: JSON.stringify({repo: 'synth-org-1/repo-01', state: 'rate_limited'})})""", svc.token)
+    page.wait_for_function("(r) => window.officeStore.state.rev > r", arg=rev, timeout=10000)
+    time.sleep(3)  # longer than the first backoff steps; nothing re-sends it
     assert len(attempts) == 1
+    assert page.locator("[data-testid=receipt][data-status=unknown] >> text=Start #3").count() == 1
+
+
+def test_a_second_click_while_pending_sends_nothing(page, served):
+    url, svc = served()
+    open_page(page, url)
+    release = []
+    seen = []
+
+    def hold(route):
+        seen.append(route.request.post_data)
+        release.append(route)
+    page.route("**/api/commands", hold)
+    row(page, "issue:repo:github.com/synth-org-0/repo-00#3").click()
+    page.click("[data-testid=action-start_issue]")
+    page.wait_for_selector("[data-testid=receipt][data-status=pending] >> text=Start #3", timeout=10000)
+    assert page.is_disabled("[data-testid=action-start_issue]")
+    page.click("[data-testid=action-start_issue]", force=True)
+    page.wait_for_timeout(300)
+    assert len(seen) == 1
+    release[0].continue_()
+    page.wait_for_selector('[data-testid=receipt][data-status=completed] >> text=Start #3', timeout=10000)
 
 
 def test_failed_command_is_shown_failed(page, served):
@@ -264,8 +300,16 @@ def test_stale_office_disables_commands_with_reason(page, served):
         svc.stale_after = -1  # every read is now older than the limit
         svc._rebuild(reuse_entities=True)
     page.wait_for_selector("[data-testid=banner-office-stale]", timeout=10000)
-    assert page.is_disabled("[data-testid=action-start_issue]")
-    assert "Office data is stale" in page.text_content("[data-testid=why-start_issue]")
+    for kind in ("start_issue", "queue_issue"):
+        assert page.is_disabled(f"[data-testid=action-{kind}]")
+        assert "Office data is stale" in page.text_content(f"[data-testid=why-{kind}]")
+    live = row(page, "issue:repo:github.com/synth-org-0/repo-00#1")
+    assert live.locator("button").is_disabled() and "Office data is stale" in live.locator("button").get_attribute("title")
+    with svc.lock:
+        svc.stale_after = 15.0
+        svc.poll(force=True)
+    page.wait_for_selector("[data-testid=banner-office-stale]", state="detached", timeout=10000)
+    assert page.is_enabled("[data-testid=action-start_issue]") and live.locator("button").is_enabled()
 
 
 def test_revoked_repository_hides_github_issues_but_keeps_office_runs(page, served):

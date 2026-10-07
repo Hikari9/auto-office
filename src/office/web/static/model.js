@@ -45,7 +45,7 @@ export function localMark(repo) {
   if (!r) return repo.runs && repo.runs.length ? ["ok", "Local runs", "known from runs.db only"] : ["off", "Local n/a", "no readiness"];
   if (r.ready) return ["ok", "Ready", "execution-ready"];
   if (!r.checkout) return ["err", "No checkout", "local repository unavailable"];
-  return ["warn", "Not ready", `failing: ${r.failing.join(", ")}`];
+  return ["warn", "Not ready", `failing: ${(r.failing || []).join(", ")}`];
 }
 
 export function repoName(repo) {
@@ -97,8 +97,9 @@ export function issueRows(state) {
   for (const r of Object.values(runs)) {
     const ref = r.issue && r.issue.ref;
     if (!ref || rows.has(ref)) continue;
-    const repo = repos[r.repo.key] || {};
-    add(ref, { id: ref, repoKey: r.repo.key, repoName: repoName(repo) || r.repo.slug || r.repo.key, number: r.issue.number,
+    const key = (r.repo && r.repo.key) || r.issue.repo;
+    const repo = repos[key] || {};
+    add(ref, { id: ref, repoKey: key, repoName: repoName(repo) || (r.repo && r.repo.slug) || key, number: r.issue.number ?? 0,
       title: null, url: r.issue.url, provenance: "office-record", runIds: [], liveRun: null, resumableRun: null });
   }
   for (const r of Object.values(runs)) {
@@ -128,7 +129,7 @@ export function issueRows(state) {
       search: `${row.repoName} #${row.number} ${row.title || ""} ${linked.map((r) => r.run_id).join(" ")}`.toLowerCase(),
     });
   }
-  out.sort((a, b) => LIVENESS_ORDER[a.liveness] - LIVENESS_ORDER[b.liveness]
+  out.sort((a, b) => (LIVENESS_ORDER[a.liveness] ?? 4) - (LIVENESS_ORDER[b.liveness] ?? 4)
     || a.repoName.localeCompare(b.repoName) || a.number - b.number);
   return out;
 }
@@ -148,7 +149,7 @@ function control(run, kind) {
 }
 
 // The actions one issue row offers, each enabled or disabled with the server's reason.
-export function issueActions(row, state) {
+export function issueActions(row, state, inFlight = () => false) {
   const office = (state.freshness && state.freshness.office) || {};
   const stale = office.state !== "live" ? `Office data is ${office.state || "unavailable"}; commands wait until it is live` : null;
   const gate = (a) => (stale && a.enabled ? off(stale) : a);
@@ -169,11 +170,17 @@ export function issueActions(row, state) {
     let why = null;
     if (!gh || gh.access === "revoked") why = "GitHub access to this repository is unavailable";
     else if (!readiness) why = "repository readiness is unknown";
-    else if (!readiness.ready) why = `repository not execution-ready: ${readiness.failing.join(", ")}`;
+    else if (!readiness.ready) why = `repository not execution-ready: ${(readiness.failing || []).join(", ")}`;
+    else if (!gh.full_name) why = "the repository's owner/name is unknown";
     const launcher = state.scalars.launcher || {};
     const startWhy = why || (launcher.available ? null : launcher.reason || "no launcher capability");
     out.list.push({ kind: "start_issue", label: "Start", ...gate(startWhy ? off(startWhy) : on()) });
     out.list.push({ kind: "queue_issue", label: "Auto Queue", ...gate(why ? off(why) : on()) });
+  }
+  for (const a of out.list) {
+    if (a.enabled && a.kind !== "copy_start" && inFlight(a.kind, a.run ? a.run.id : row.id)) {
+      Object.assign(a, off("the same command is still in flight or has an unknown result; check it before sending again"));
+    }
   }
   out.primary = out.list[0];
   return out;

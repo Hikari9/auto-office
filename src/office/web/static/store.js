@@ -5,6 +5,7 @@
 // Any gap, another epoch or a `resync` event replaces the whole state. The
 // store never decides anything itself: it only mirrors the service.
 
+const COLLECTIONS = ["repos", "issues", "prs", "runs", "tasks", "agents", "queue", "commands"];
 const BACKOFF_MS = [500, 1000, 2000, 4000, 8000, 15000];
 
 export function applyDelta(state, d) {
@@ -48,11 +49,18 @@ export class Store {
     const resume = !fresh && this.state ? `?last_event_id=${encodeURIComponent(`${this.state.epoch}:${this.state.rev}`)}` : "";
     const es = new this.EventSourceImpl(this.url + resume);
     this.es = es;
-    const full = (ev) => this.replace(JSON.parse(ev.data), ev.type);
-    es.addEventListener("snapshot", full);
-    es.addEventListener("resync", full);
-    es.addEventListener("delta", (ev) => this.delta(JSON.parse(ev.data)));
-    es.addEventListener("open", () => { if (this.state) this.setStatus("live"); });
+    const parsed = (fn) => (ev) => {
+      let data;
+      try { data = JSON.parse(ev.data); } catch { this.connect({ fresh: true }); return; }
+      fn(data, ev.type);
+    };
+    es.addEventListener("snapshot", parsed((d, type) => this.replace(d, type)));
+    es.addEventListener("resync", parsed((d, type) => this.replace(d, type)));
+    es.addEventListener("delta", parsed((d) => this.delta(d)));
+    es.addEventListener("open", () => {
+      this.attempt = 0; // a stream that came back resets the backoff
+      if (this.state) this.setStatus("live");
+    });
     es.onerror = () => {
       if (this.es !== es) return;
       es.close();
@@ -72,6 +80,8 @@ export class Store {
 
   replace(snapshot, kind) {
     if (kind === "resync") this.stats.resyncs += 1; else this.stats.snapshots += 1;
+    for (const coll of COLLECTIONS) snapshot.entities[coll] = snapshot.entities[coll] || {};
+    snapshot.scalars = snapshot.scalars || {};
     this.state = snapshot;
     this.attempt = 0;
     this.status = "live";

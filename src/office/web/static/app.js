@@ -57,6 +57,9 @@ function keep(container, build) {
   if (range) again.setSelectionRange(...range);
 }
 
+// Links from GitHub or runs.db open only when they are https URLs.
+const safeHref = (url) => { try { return new URL(url).protocol === "https:" ? url : null; } catch { return null; } };
+
 const ago = (seconds) => {
   if (seconds === null || seconds === undefined || Number.isNaN(seconds)) return "never";
   const s = Math.max(0, Math.round(seconds));
@@ -213,7 +216,7 @@ function rowIndex(id) { return visible.findIndex((r) => r.id === id); }
 function cells(r, active) {
   const p = r.progress;
   const pct = p && typeof p.value === "number" ? Math.round(p.value * 100) : null;
-  const actions = issueActions(r, store.state);
+  const actions = issueActions(r, store.state, inFlight);
   const a = actions.primary;
   const prCount = r.prs.length;
   const td = (cls, ...c) => h("div", { class: `td ${cls}`, role: "gridcell" }, ...c);
@@ -354,7 +357,7 @@ function authSelect(id, key, value, onchange, disabledWhy) {
 
 function inspectorActions(r) {
   const s = store.state;
-  const acts = issueActions(r, s);
+  const acts = issueActions(r, s, inFlight);
   const by = Object.fromEntries(acts.list.map((a) => [a.kind, a]));
   const out = [];
   if (by.copy_start) {
@@ -363,7 +366,7 @@ function inspectorActions(r) {
     out.push(h("div", { class: "action" }, h("code", { class: "copy", dataset: { testid: "start-command" }, text: cmd || "—" }),
       actionButton(by.copy_start, r, { primary: true }),
       ui.copied === r.id ? h("span", { class: "why", role: "status", text: "Copied to the clipboard" }) : null, why(by.copy_start)));
-    out.push(h("div", { class: "action" }, authSelect(r.id, "start", d.auth, (v) => { d.auth = v; renderInspector(); }),
+    out.push(h("div", { class: "action" }, authSelect(r.id, "start", d.auth, (v) => { d.auth = v; renderInspector({ force: true }); }),
       actionButton(by.start_issue, r), why(by.start_issue)));
     out.push(h("div", { class: "action" }, authSelect(r.id, "queue", QUEUE_AUTHORIZATION, () => {}, QUEUE_ONLY_WHY),
       actionButton(by.queue_issue, r), why(by.queue_issue),
@@ -371,7 +374,7 @@ function inspectorActions(r) {
     const readiness = r.repo && r.repo.readiness;
     if (readiness && !readiness.ready) {
       out.push(h("h3", { text: "Missing prerequisites" }), h("ul", { class: "prereq", dataset: { testid: "prerequisites" } },
-        readiness.prerequisites.map((p) => h("li", { class: p.ok ? "" : "fail", text: p.ok ? p.name : `${p.name}: ${p.detail || "failing"}` }))));
+        (readiness.prerequisites || []).map((p) => h("li", { class: p.ok ? "" : "fail", text: p.ok ? p.name : `${p.name}: ${p.detail || "failing"}` }))));
     }
   } else {
     out.push(h("div", { class: "action" }, acts.list.map((a, i) => actionButton(a, r, { primary: i === 0 })), acts.list.map(why)));
@@ -398,7 +401,7 @@ function runCard(run) {
 function prCard(p) {
   const gh = p.github;
   return h("div", { class: "card", dataset: { testid: "pr-card" } },
-    h("div", { class: "row" }, h("span", {}, p.url ? h("a", { href: p.url, target: "_blank", rel: "noopener noreferrer", text: `PR #${p.number}` }) : `PR #${p.number}`),
+    h("div", { class: "row" }, h("span", {}, safeHref(p.url) ? h("a", { href: safeHref(p.url), target: "_blank", rel: "noopener noreferrer", text: `PR #${p.number}` }) : `PR #${p.number}`),
       h("b", { text: p.merged ? "merged" : gh ? gh.state : "state unknown" })),
     kv("Base ← head", `${p.base || "?"} ← ${p.branch || (gh && gh.head) || "?"}`, "pr-base-head"),
     p.stacked_on ? kv("Stacked on", `task ${p.stacked_on}`, "pr-stacked") : null,
@@ -407,18 +410,22 @@ function prCard(p) {
     h("div", { class: "prov", text: `Provenance: ${p.provenance} (${p.source})${gh ? "; state from GitHub" : ""}` }));
 }
 
-function renderInspector() {
+function renderInspector({ force = false } = {}) {
   const panel = $("inspector");
   const r = ui.selected && rows.find((x) => x.id === ui.selected);
   panel.hidden = !ui.selected;
   if (!ui.selected) return;
+  // An open native <select> closes when it is replaced: leave the panel alone until it loses focus.
+  if (!force && document.activeElement && document.activeElement.tagName === "SELECT" && panel.contains(document.activeElement)
+      && panel.dataset.issue === ui.selected) return;
+  panel.dataset.issue = ui.selected;
   keep(panel, () => {
     if (!r) return [h("p", { class: "muted", text: "This issue is no longer listed." })];
     return [
       h("button", { type: "button", class: "btn close", "aria-label": "Close inspector", dataset: { key: "close" }, onclick: closeInspector }, "Close"),
       h("h2", { dataset: { testid: "inspector-title" }, text: `#${r.number} ${r.title || ""}` }),
       h("div", { class: "prov" }, `${r.repoName} · ${r.provenance === "github" ? "GitHub issue" : "known from an Office record"} `,
-        r.url ? h("a", { href: r.url, target: "_blank", rel: "noopener noreferrer", text: "open on GitHub" }) : null),
+        safeHref(r.url) ? h("a", { href: safeHref(r.url), target: "_blank", rel: "noopener noreferrer", text: "open on GitHub" }) : null),
       h("h3", { text: "Actions" }), h("div", { class: "actions", dataset: { testid: "actions" } }, inspectorActions(r)),
       h("h3", { text: `Runs (${r.runs.length})` }),
       r.runs.length ? r.runs.map(runCard) : h("p", { class: "muted", text: "No run yet." }),
@@ -431,6 +438,7 @@ function renderInspector() {
 function closeInspector() {
   const id = ui.selected;
   ui.selected = null;
+  $("inspector").dataset.issue = "";
   renderTable();
   renderInspector();
   ui.cursor = id;
@@ -439,16 +447,27 @@ function closeInspector() {
 
 // ------------------------------------------------------------------ commands
 
+// A command of this kind for this issue/run is pending or has an unknown result: no second send.
+function inFlight(kind, subject) {
+  const server = store.state ? store.state.entities.commands : {};
+  for (const l of ui.local.values()) {
+    if (l.kind !== kind || l.subject !== subject) continue;
+    const status = receiptState((server[`command:${l.id}`] || {}).status || l.status);
+    if (status === "pending" || status === "unknown") return true;
+  }
+  return false;
+}
+
 function newId() {
   if (crypto.randomUUID) return `web-${crypto.randomUUID()}`;
   const b = crypto.getRandomValues(new Uint8Array(16));
   return `web-${Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("")}`;
 }
 
-async function send(kind, target, payload, expect, label) {
+async function send(kind, subject, target, payload, expect, label) {
   const id = newId();
-  ui.local.set(id, { id, kind, status: "pending", label, error: null });
-  renderReceipts();
+  ui.local.set(id, { id, kind, subject, status: "pending", label, error: null, at: new Date().toISOString() });
+  renderAll();
   let res;
   let body = null;
   try {
@@ -467,7 +486,8 @@ async function send(kind, target, payload, expect, label) {
     // No answer: the command may or may not have run. Never retried automatically.
     Object.assign(entry, { status: "unknown", error: "no answer from the service; check the result before sending again" });
   }
-  renderReceipts();
+  if (entry.status !== "pending" && entry.status !== "accepted" && entry.status !== "running") ui.local.set(id, entry);
+  renderAll();
 }
 
 async function act(a, r) {
@@ -480,12 +500,12 @@ async function act(a, r) {
   }
   const label = `${a.label} #${r.number}`;
   if (a.kind === "start_issue") {
-    send("start_issue", { repo: r.repoName, issue: r.number },
+    send("start_issue", r.id, { repo: r.repo.github.full_name, issue: r.number },
       { end_state: draft(r.id).auth, title: r.title, new_run_confirmed: false }, { live_run: null, resumable_run: null }, label);
   } else if (a.kind === "queue_issue") {
-    send("queue_issue", { repo: r.repoName, issue: r.number }, { priority: "normal", title: r.title }, {}, label);
+    send("queue_issue", r.id, { repo: r.repo.github.full_name, issue: r.number }, { priority: "normal", title: r.title }, {}, label);
   } else {
-    send(a.kind, { run_id: a.run.run_id }, {}, {}, label);
+    send(a.kind, a.run.id, { run_id: a.run.run_id }, {}, {}, label);
   }
 }
 
@@ -496,7 +516,7 @@ function renderReceipts() {
   for (const c of Object.values(server)) merged.set(c.id, { ...c, label: `${c.kind.replace(/_/g, " ")} ${c.target ? Object.values(c.target).join(" ") : ""}` });
   for (const l of ui.local.values()) {
     const sv = merged.get(l.id);
-    merged.set(l.id, sv ? { ...sv, label: l.label } : { ...l, accepted_at: "~" });
+    merged.set(l.id, sv ? { ...sv, label: l.label } : { ...l, accepted_at: l.at });
   }
   const list = [...merged.values()].sort((a, b) => String(b.accepted_at).localeCompare(String(a.accepted_at))).slice(0, 8);
   const text = { pending: "pending", completed: "completed", failed: "failed", unknown: "result unknown, not retried" };
@@ -540,6 +560,7 @@ function init() {
   $("issue-table").addEventListener("scroll", () => renderRows(), { passive: true });
   $("issue-table").addEventListener("keydown", onTableKey);
   $("inspector").addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeInspector(); });
+  $("inspector").addEventListener("focusout", (ev) => { if (ev.target.tagName === "SELECT") schedule(); }); // catch up
   window.addEventListener("resize", () => renderRows());
   store.subscribe(schedule);
   setInterval(() => { renderHeader(); renderBanners(); }, 1000);

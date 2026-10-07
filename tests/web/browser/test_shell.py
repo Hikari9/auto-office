@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
-import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
@@ -95,6 +95,10 @@ def test_delta_keeps_focus_typed_text_selection_and_scroll(page, fx):
         target.click()
         assert target.get_attribute("aria-selected") == "true"
         page.eval_on_selector("[data-testid=issue-table]", "el => { el.scrollTop = 120; }")
+        assert page.eval_on_selector("[data-testid=issue-table]", "el => el.scrollTop") == 120
+        page.evaluate("""(id) => { window.__row = document.querySelector(`[data-testid=issue-row][data-id="${id}"]`);
+                                   window.__inspector = document.querySelector('[data-testid=inspector-title]'); }""",
+                      target_id)
         page.fill("[data-testid=issue-search]", "synth")
         page.eval_on_selector("[data-testid=issue-search]", "el => { el.focus(); el.setSelectionRange(1, 3); }")
         before = page.evaluate("({rev: window.officeStore.state.rev, ...window.officeStore.stats})")
@@ -110,6 +114,28 @@ def test_delta_keeps_focus_typed_text_selection_and_scroll(page, fx):
         selected = page.locator('[data-testid=issue-row][aria-selected="true"]')
         assert selected.count() == 1 and selected.get_attribute("data-id") == target_id
         assert page.locator("[data-testid=inspector]").is_visible()
+        # The delta really rebuilt the selected row and the inspector (new nodes), and state survived it.
+        assert page.evaluate("""(id) => document.querySelector(`[data-testid=issue-row][data-id="${id}"]`) !== window.__row
+            && document.querySelector('[data-testid=inspector-title]') !== window.__inspector""", target_id)
+
+
+def test_focused_row_survives_a_delta_and_removed_selection_is_reported(page, fx):
+    with serving(fx) as (url, _):
+        page.set_viewport_size({"width": 1440, "height": 900})
+        ready(page, url)
+        issues = fx.snapshot()["entities"]["issues"].values()
+        issue = next(i["id"] for i in issues if i["repo"] == "synth-org-1/repo-01" and not i["runs"])  # GitHub-only
+        other = "issue:repo:github.com/synth-org-1/repo-01#1"  # has a run: stays listed after revocation
+        page.click('[data-testid="repo-synth-org-1/repo-01"]')
+        page.locator(f'[data-testid=issue-row][data-id="{issue}"]').click()
+        page.locator(f'[data-testid=issue-row][data-id="{other}"]').focus()
+        page.evaluate("window.__row = document.activeElement")
+        set_github(url, fx, "synth-org-1/repo-01", "revoked")
+        page.wait_for_selector("[data-testid=banner-revoked]", timeout=10000)
+        assert page.evaluate("document.activeElement.dataset.id") == other
+        assert page.evaluate("document.activeElement !== window.__row")  # re-rendered, focus restored
+        assert page.locator(f'[data-testid=issue-row][data-id="{issue}"]').count() == 0
+        assert "no longer listed" in page.text_content("[data-testid=inspector]")
 
 
 def test_focused_inspector_control_survives_a_delta(page, fx):
@@ -121,11 +147,16 @@ def test_focused_inspector_control_survives_a_delta(page, fx):
         select = page.locator("[data-testid=auth-start]")
         select.select_option("merge")
         select.focus()
+        page.evaluate("window.__select = document.activeElement")
         rev = page.evaluate("window.officeStore.state.rev")
-        set_github(url, fx, "synth-org-1/repo-01", "revoked")
-        page.wait_for_selector("[data-testid=banner-revoked]", timeout=10000)
+        set_github(url, fx, "synth-org-0/repo-00", "rate_limited")  # the inspected issue's own repository
+        page.wait_for_selector("[data-testid=banner-rate-limited]", timeout=10000)
         assert page.evaluate("window.officeStore.state.rev") > rev
-        assert page.evaluate("document.activeElement.dataset.testid") == "auth-start"
+        # A focused <select> is not replaced (that would close an open dropdown) and keeps its value.
+        assert page.evaluate("document.activeElement === window.__select")
+        assert page.input_value("[data-testid=auth-start]") == "merge"
+        page.locator("[data-testid=issue-search]").focus()  # leaving it lets the inspector catch up
+        page.wait_for_function("() => document.querySelector('[data-testid=auth-start]') !== window.__select")
         assert page.input_value("[data-testid=auth-start]") == "merge"
         assert "--end-state merge" in page.text_content("[data-testid=start-command]")
 
@@ -136,21 +167,36 @@ def test_store_ignores_duplicates_and_resyncs_on_gap_and_epoch(page, fx):
         out = page.evaluate("""async () => {
             const s = window.officeStore, st = s.state, rev = st.rev, epoch = st.epoch;
             const empty = {upserts: {}, removes: {}, scalars: {}};
-            const dup = s.delta({epoch, rev, base_rev: rev - 1, ...empty});
+            const urls = [];
+            const Real = s.EventSourceImpl;
+            s.EventSourceImpl = class extends Real { constructor(u) { super(u); urls.push(u); } };
+            const marker = (n) => ({upserts: {runs: {[`run:marker-${n}`]: {id: n}}}, removes: {}, scalars: {}});
+            const applied0 = s.stats.applied;
+            const dup = s.delta({epoch, rev, base_rev: rev - 1, ...marker(1)});
+            const older = s.delta({epoch, rev: rev - 1, base_rev: rev - 2, ...marker(2)});
             const snaps = s.stats.snapshots;
-            const gap = s.delta({epoch, rev: rev + 5, base_rev: rev + 4, ...empty});
+            const gap = s.delta({epoch, rev: rev + 5, base_rev: rev + 4, ...marker(3)});
+            const gapApplied = Boolean(s.state.entities.runs["run:marker-3"]);
             await new Promise((r) => { const t = setInterval(() => { if (s.stats.snapshots > snaps) { clearInterval(t); r(); } }, 20); });
+            const revAfterGap = s.state.rev;
             const snaps2 = s.stats.snapshots;
-            const other = s.delta({epoch: "other", rev: s.state.rev + 1, base_rev: s.state.rev, ...empty});
+            const other = s.delta({epoch: "other", rev: s.state.rev + 1, base_rev: s.state.rev, ...marker(4)});
             await new Promise((r) => { const t = setInterval(() => { if (s.stats.snapshots > snaps2) { clearInterval(t); r(); } }, 20); });
+            const markers = Object.keys(s.state.entities.runs).filter((k) => k.startsWith("run:marker"));
+            const appliedDelta = s.stats.applied - applied0;
             const { applyDelta } = await import("/static/store.js");
             const local = {epoch: "e", rev: 3, entities: {runs: {a: 1, b: 2}}, scalars: {}, freshness: {}};
             const applied = applyDelta(local, {epoch: "e", rev: 4, base_rev: 3, upserts: {runs: {c: 3}},
                                                removes: {runs: ["a"]}, scalars: {freshness: {x: 1}, host: 2}});
-            return {dup, gap, other, applied, local, epochAfter: s.state.epoch, stats: s.stats};
+            return {dup, older, gap, other, applied, local, gapApplied, markers, appliedDelta, revAfterGap, urls,
+                    epochAfter: s.state.epoch, stats: s.stats};
         }""")
-        assert out["dup"] == "duplicate" and out["gap"] == "resync" and out["other"] == "resync"
-        assert out["stats"]["duplicates"] == 1 and out["stats"]["resyncs"] == 2
+        assert out["dup"] == "duplicate" and out["older"] == "duplicate"
+        assert out["gap"] == "resync" and out["other"] == "resync"
+        assert out["stats"]["duplicates"] == 2 and out["stats"]["resyncs"] == 2
+        assert out["gapApplied"] is False and out["markers"] == [] and out["appliedDelta"] == 0
+        assert out["revAfterGap"] == fx.rev
+        assert len(out["urls"]) == 2 and all("last_event_id" not in u for u in out["urls"])  # resync = fresh snapshot
         assert out["epochAfter"] == fx.epoch
         assert out["applied"] == "applied"
         assert out["local"] == {"epoch": "e", "rev": 4, "entities": {"runs": {"b": 2, "c": 3}},
@@ -164,6 +210,9 @@ def test_reconnects_after_restart_and_resyncs_to_the_new_epoch(page, tmp_path, m
         port = httpd.server_address[1]
         ready(page, url)
         old_epoch = page.evaluate("window.officeStore.state.epoch")
+        resyncs = page.evaluate("window.officeStore.stats.resyncs")
+        streams = []
+        page.on("request", lambda r: streams.append(r.url) if "/api/stream" in r.url else None)
     page.wait_for_selector("[data-testid=banner-disconnected]", timeout=10000)
     assert page.get_attribute("[data-testid=stream-indicator]", "data-state") in ("reconnecting", "disconnected")
     second = server.build_fixture("small", home=tmp_path / "b").start()
@@ -174,6 +223,37 @@ def test_reconnects_after_restart_and_resyncs_to_the_new_epoch(page, tmp_path, m
         assert page.get_attribute("[data-testid=stream-indicator]", "data-state") == "live"
         assert old_epoch != second.epoch
         assert page.text_content("[data-testid=rev]") == f"{second.epoch}:{second.rev}"
+        # It resumed with its last event id; the new service answered with a `resync` event.
+        assert any(f"last_event_id={old_epoch}" in u for u in streams)
+        assert page.evaluate("window.officeStore.stats.resyncs") > resyncs
+
+
+def test_backoff_resets_once_a_stream_reopens(page, fx):
+    with serving(fx, poll=False) as (url, _):
+        ready(page, url)
+        out = page.evaluate("""async () => {
+            const { Store } = await import("/static/store.js");
+            const made = [];
+            class Fake { constructor(u) { this.l = {}; made.push(this); } addEventListener(k, f) { this.l[k] = f; } close() {} }
+            const s = new Store({ EventSourceImpl: Fake });
+            s.state = {epoch: "e", rev: 1, entities: {}, scalars: {}, freshness: {}};
+            s.connect();
+            const seen = [];
+            for (let i = 0; i < 3; i += 1) {  // drop, come back, drop again: never more than one failure in a row
+                made[made.length - 1].onerror();
+                seen.push(s.status);
+                clearTimeout(s.timer);
+                s.connect();
+                made[made.length - 1].l.open();
+                seen.push(s.status);
+            }
+            made[made.length - 1].onerror(); seen.push(s.status); clearTimeout(s.timer); s.connect();
+            made[made.length - 1].onerror(); seen.push(s.status); clearTimeout(s.timer); s.connect();
+            made[made.length - 1].onerror(); seen.push(s.status); clearTimeout(s.timer);
+            return seen;
+        }""")
+        assert out[:6] == ["reconnecting", "live"] * 3
+        assert out[6:] == ["reconnecting", "reconnecting", "disconnected"]
 
 
 def test_stale_office_and_github_banners_and_reset_time(page, fx):
@@ -182,7 +262,8 @@ def test_stale_office_and_github_banners_and_reset_time(page, fx):
         set_github(url, fx, "synth-org-0/repo-00", "rate_limited")
         page.wait_for_selector("[data-testid=banner-rate-limited]", timeout=10000)
         text = page.text_content("[data-testid=banner-rate-limited]")
-        assert "synth-org-0/repo-00" in text and "resets at" in text and "(in 15m)" in text
+        assert "synth-org-0/repo-00" in text and "resets at" in text
+        assert re.search(r"\(in 1[45]m\)", text)
         assert page.get_attribute("[data-testid=github-indicator]", "data-state") == "rate_limited"
         fx.last_ok -= fx.stale_after + 5
         fx._rebuild(reuse_entities=True)
@@ -190,6 +271,7 @@ def test_stale_office_and_github_banners_and_reset_time(page, fx):
         assert page.text_content("[data-testid=office-freshness]") == "stale"
         set_github(url, fx, "synth-org-0/repo-00", "fresh")
         page.wait_for_selector("[data-testid=banner-rate-limited]", state="detached", timeout=10000)
+        assert page.get_attribute("[data-testid=github-indicator]", "data-state") == "fresh"
 
 
 def test_fixture_control_is_refused_outside_fixture_mode(fx):
@@ -240,8 +322,10 @@ def test_keyboard_reaches_rails_rows_and_actions_with_visible_focus(page, fx):
         page.keyboard.press("Escape")
         assert not page.locator("[data-testid=inspector]").is_visible()
         assert page.evaluate("document.activeElement.dataset.id") == second
+        assert page.evaluate("getComputedStyle(document.activeElement).outlineStyle") not in ("", "none")
         page.keyboard.press("Tab")  # the row's own action is next in the tab order
         assert page.evaluate("document.activeElement.dataset.key") == f"row-action:{second}"
+        assert page.evaluate("getComputedStyle(document.activeElement).outlineStyle") not in ("", "none")
         labels = page.eval_on_selector_all("button", "els => els.filter(b => !b.textContent.trim() && !b.getAttribute('aria-label')).length")
         assert labels == 0
 
@@ -251,9 +335,16 @@ def test_status_is_not_color_alone(page, fx):
         ready(page, url)
         for testid in ("office-indicator", "github-indicator"):
             assert page.text_content(f"[data-testid={testid}] .state")
+        assert page.text_content("[data-testid=office-indicator] .state") == "live"
+        assert page.text_content("[data-testid=github-indicator] .state") == "fresh"
         receipts = page.locator("[data-testid=receipt]")
-        texts = receipts.all_text_contents()
-        assert any("result unknown" in t for t in texts) and any("failed" in t for t in texts)
+        words = receipts.evaluate_all("els => els.map(e => [e.dataset.status, e.textContent.split(' · ').pop()])")
+        by_status = {st: w for st, w in words}
+        assert by_status == {"pending": "pending", "completed": "completed", "failed": "failed",
+                             "unknown": "result unknown, not retried"}
+        states = page.locator("[data-testid=issue-row]").evaluate_all(
+            "els => els.map(e => e.querySelectorAll('[role=gridcell]')[8].textContent)")
+        assert {s.split(" · ")[0] for s in states} >= {"Live run", "No run", "Resumable"}
         glyphs = page.eval_on_selector_all("[data-testid=receipt]", "els => els.map(e => getComputedStyle(e, '::before').content)")
         assert len(set(glyphs)) >= 4
 
@@ -269,16 +360,25 @@ def test_layout_at_1100_scrolls_columns_and_falls_back_below_900(page, fx):
         row = page.locator("[data-testid=issue-row]").first
         assert row.evaluate("el => getComputedStyle(el).display") == "grid"
         assert page.evaluate("document.documentElement.scrollWidth") <= 1100
+        table.evaluate("el => { el.scrollLeft = el.scrollWidth; }")
+        box = table.bounding_box()
+        head = page.locator("[role=columnheader]").last.bounding_box()
+        action = row.locator("[role=gridcell]").last.bounding_box()
+        assert head["x"] + head["width"] <= box["x"] + box["width"] + 1 and abs(head["x"] - action["x"]) < 1
         page.set_viewport_size({"width": 800, "height": 900})
-        time.sleep(0.2)
+        page.wait_for_function("() => document.documentElement.scrollWidth <= 800", timeout=5000)
         assert page.evaluate("document.documentElement.scrollWidth") <= 800
         assert page.locator(".product-rail").evaluate("el => getComputedStyle(el).flexDirection") == "row"
         assert page.locator("[data-testid=issue-row]").first.is_visible()
 
 
 def test_reduced_motion_disables_transitions(page, fx):
+    moving = """() => [...document.querySelectorAll('*')].filter(e => { const c = getComputedStyle(e);
+        return c.transitionDuration.split(',').some(d => parseFloat(d) > 0)
+            || c.animationDuration.split(',').some(d => parseFloat(d) > 0); }).length"""
     with serving(fx) as (url, _):
-        page.emulate_media(reduced_motion="reduce")
         ready(page, url)
+        assert page.evaluate(moving) > 0  # control: the UI has motion by default
+        page.emulate_media(reduced_motion="reduce")
         assert page.evaluate("matchMedia('(prefers-reduced-motion: reduce)').matches")
-        assert page.eval_on_selector(".surface", "el => getComputedStyle(el).transitionDuration") == "0s"
+        assert page.evaluate(moving) == 0
