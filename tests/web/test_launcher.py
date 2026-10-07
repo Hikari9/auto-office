@@ -47,7 +47,7 @@ def live_run(svc):
     return next(r for r in runs(svc, liveness="live") if r["office_version"] == synthetic.CURRENT_VERSION)
 
 
-def queue_issue_item(svc, item="issue:qf", number=8):
+def queue_issue_item(svc, item="issue:qf", number=7):
     write(svc, lambda con: con.execute(
         "INSERT INTO sched_items(id, kind, ref, title, priority, enqueued_at, updated_at) "
         "VALUES(?,'issue',?, 't', 'normal', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')", (item, f"{REPO}#{number}")))
@@ -78,12 +78,6 @@ def test_default_config_allows_no_fallback():
     from office import config as cfg
     default = yaml.safe_load(cfg.default_config_path().read_text(encoding="utf-8"))
     assert default["scheduler"]["orchestrator_fallbacks"] == []
-
-
-def queue_issue_item(svc, item="issue:qf", number=8):
-    write(svc, lambda con: con.execute(
-        "INSERT INTO sched_items(id, kind, ref, title, priority, enqueued_at, updated_at) "
-        "VALUES(?,'issue',?, 't', 'normal', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')", (item, f"{REPO}#{number}")))
 
 
 def machine_events(svc):

@@ -143,8 +143,8 @@ def test_queue_issue_refuses_a_duplicate_queue_item(svc):
 def test_a_url_form_queue_ref_counts_as_the_same_issue(svc):
     write(svc, lambda con: con.execute(
         "INSERT INTO sched_items(id, kind, ref, title, priority, enqueued_at, updated_at) VALUES('issue:url','issue',?,"
-        "'t','normal','2026-09-01T00:00:00Z','2026-09-01T00:00:00Z')", (f"https://github.com/{REPO.upper()}/issues/6",)))
-    assert refused(svc, cmd("cmd-tv-queue3", "queue_issue", {"repo": REPO, "issue": 6})).reason == "issue-already-queued"
+        "'t','normal','2026-09-01T00:00:00Z','2026-09-01T00:00:00Z')", (f"https://github.com/{REPO.upper()}/issues/5",)))
+    assert refused(svc, cmd("cmd-tv-queue3", "queue_issue", {"repo": REPO, "issue": 5})).reason == "issue-already-queued"
 
 
 def test_start_issue_needs_an_exact_discovered_repository(svc):

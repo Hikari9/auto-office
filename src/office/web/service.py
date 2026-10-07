@@ -939,11 +939,6 @@ class Service:
             raise CommandRefused("tier-not-editable", "target.tier must be machine or repository", http=400)
         if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_]+(\.[A-Za-z0-9_-]+)*", key):
             raise CommandRefused("bad-target", "target.key must be a dotted config key", http=400)
-        from office import configcmd
-        try:
-            configcmd._check_key(key, "user" if tier == "machine" else "repo", False)
-        except OfficeError as exc:
-            raise CommandRefused("unknown-key", exc.message) from None
         if not _known_setting(key):
             raise CommandRefused("unknown-key", f"{key} is not a configurable key")
         if tier == "machine":
