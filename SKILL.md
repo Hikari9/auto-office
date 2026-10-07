@@ -145,8 +145,10 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
   or a merge is authorized. The verdict stands; the waiver binds to the composed commit. Your host's permission
   layer may still block `--as orchestrator` as self-approval (Claude Code auto mode does): never work around
   it; ask the user and record their waiver with `--quote`.
-- If every convergence reviewer route is UNAVAILABLE you may review it as a recorded, non-independent
-  fallback: `office review L-T1:convergence --report <file>` (visual: `--inspected <every screenshot>`).
+- When no specialist reviewer returns a verdict (every route UNAVAILABLE, or the last reply INVALID_RESULT),
+  the orchestrator is authorized to review on the reviewer's behalf, recorded as degraded and non-independent:
+  `office review L-T1:convergence --report <file>` (visual: `--inspected <every screenshot>`). This is the
+  runtime's prescribed step, not self-approval: the producer was a subagent, and the landing receipt shows it.
 - **v3.1 runs** (started before #337; `office inspect run` names the contract) keep PASS | CHANGES_REQUIRED |
   PLAN_DEFECT | BRIEF_DEFECT, per-task review and plan-defect redirects (`--redirect`): follow their `next:` lines and `docs/v31-rolling-review-gates.md`.
 
