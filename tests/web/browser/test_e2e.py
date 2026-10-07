@@ -69,14 +69,19 @@ class Server:
         raise AssertionError("office web serve did not report ready")
 
     def stop(self) -> None:
-        if self.proc and self.proc.poll() is None:
-            group = os.getpgid(self.proc.pid)  # its own session: executor children go with it
-            os.killpg(group, signal.SIGTERM)
-            try:
-                self.proc.wait(15)
-            except subprocess.TimeoutExpired:
-                os.killpg(group, signal.SIGKILL)
-                self.proc.wait(5)
+        if self.proc:
+            group = self.proc.pid  # start_new_session: the leader's pid is its group; executor children go with it
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(group, sig)
+                except ProcessLookupError:
+                    break
+                try:
+                    self.proc.wait(15)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            self.proc.wait(5)
         if self.log:
             self.log.close()
             self.log = None
