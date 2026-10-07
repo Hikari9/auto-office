@@ -10,7 +10,7 @@ const APPLY_LABEL = { immediate: "applies immediately", "before-dispatch": "appl
   "future-runs": "applies to future runs", restart: "applies after restart" };
 
 const ui = { scope: "machine", repo: "", run: "", query: "", inspect: new Set(), edit: null, data: null, loadedFor: null,
-  error: null, loading: false, retryAt: 0, seen: new Set() };
+  error: null, loading: false, retryAt: 0, retryTimer: 0, seen: new Set() };
 
 export const settingsUi = ui; // inspected by browser tests
 
@@ -44,7 +44,8 @@ async function load(ctx, force = false) {
 
 // A failed read is retried on a later render, after RETRY_MS.
 function fail(ctx, message) {
-  setTimeout(ctx.rerender, RETRY_MS);
+  clearTimeout(ui.retryTimer);
+  ui.retryTimer = setTimeout(ctx.rerender, RETRY_MS);
   ui.data = null;
   ui.error = `${message}; retrying`;
   ui.loadedFor = null;
@@ -152,6 +153,7 @@ function scopePicker(ctx) {
   const set = (patch) => {
     Object.assign(ui, patch);
     // Rows of the previous scope must not be shown (or edited) under the new one.
+    clearTimeout(ui.retryTimer);
     Object.assign(ui, { edit: null, data: null, error: null, retryAt: 0 });
     ui.inspect.clear();
     load(ctx);

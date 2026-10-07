@@ -228,3 +228,25 @@ def test_keyboard_operable_and_usable_at_1100(page, served):
     settled(page, "Demote")
     assert page.evaluate("document.activeElement.dataset.testid") == "alloc-demote"
     assert errors == []
+
+
+def test_unknown_states_are_shown_not_guessed(page, served):
+    url, svc = served
+    svc.host_probe = lambda: {"cpu": {"status": "ok", "value": 37.4, "unit": "percent"},
+                              "ram": {"status": "ok", "value": 0.42, "unit": "fraction_used"}}
+    add_item(svc, "issue:odd", "issue", ref="synth-org-0/repo-00#7", title="Odd priority", priority="weird")
+    write(svc, "INSERT OR REPLACE INTO sched_state(scope, auto_mode, reason, updated_at) VALUES(?, 'bogus', 't', 'x')",
+          (f"run:{RUN}",))
+    errors = open_allocation(page, url)
+    page.wait_for_selector('[data-testid=alloc-row][data-id="issue:odd"]')
+    sel = alloc_row(page, "issue:odd").locator("[data-testid=alloc-priority]")
+    assert sel.input_value() == ""
+    assert sel.locator("option:checked").text_content() == "weird"
+    assert sel.locator("option:checked").is_disabled()
+    r = alloc_row(page, f"run:{RUN}")
+    r.locator("[data-testid=alloc-auto][data-mode=bogus]").wait_for(timeout=8000)
+    assert r.locator("[data-testid=alloc-set_auto_mode]").count() == 0
+    assert page.get_attribute("[data-testid=alloc-cpu]", "data-status") == "measured"
+    assert page.locator("[data-testid=alloc-cpu] .v").text_content() == "37%"
+    assert page.locator("[data-testid=alloc-ram] .v").text_content() == "42%"
+    assert errors == []

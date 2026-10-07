@@ -274,3 +274,27 @@ def test_keyboard_operable_and_usable_at_1100(page, served):
     assert wait_for(lambda: page.evaluate("document.activeElement.dataset.testid") == "setting-edit")
     assert svc.executor.calls == []
     assert errors == []
+
+
+def test_edits_are_refused_while_office_data_is_not_live(page, served):
+    url, svc, _ = served
+    sent = []
+    page.on("request", lambda r: sent.append(r.url) if r.url.endswith("/api/commands") else None)
+    errors = open_settings(page, url)
+    svc.stale_after = -1  # every read is now older than the limit: Office data is stale
+    con = sqlite3.connect(svc.db_path, timeout=30)  # a change makes the service publish the new freshness
+    con.execute("INSERT INTO sched_state(scope, auto_mode, reason, updated_at) VALUES('global', 'on', 't', 'x')")
+    con.commit()
+    con.close()
+    page.wait_for_selector("[data-testid=office-freshness]:has-text('stale')", timeout=8000)
+    q = setting(page, "intake.authorization")
+    q.locator("[data-testid=setting-inspect]").click()
+    q.locator("[data-testid=setting-edit][data-tier=machine]").click()
+    save = q.locator("[data-testid=setting-save]")
+    assert save.is_disabled()
+    assert "not live" in save.get_attribute("title")
+    q.locator("[data-testid=setting-input]").fill("pr")
+    q.locator("[data-testid=setting-input]").press("Enter")
+    page.wait_for_timeout(300)
+    assert sent == [] and svc.executor.calls == []
+    assert errors == []
