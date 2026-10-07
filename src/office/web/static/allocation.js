@@ -87,6 +87,13 @@ function markers(ctx, e) {
   if (e.projected) out.push(ctx.h("span", { class: "pill term", dataset: { testid: "alloc-terminal" }, text: "terminal-started" }));
   if (e.demoted_seq !== null && e.demoted_seq !== undefined) out.push(ctx.h("span", { class: "pill warn", text: "demoted" }));
   if (e.paused) out.push(ctx.h("span", { class: "pill warn", text: "paused" }));
+  // Orchestrator launch history of this item: the latest reroute or hold, from Office events.
+  const n = ((ctx.state.scalars || {}).orchestrator_notices || []).find((x) => x.item === e.id || x.command === `queue-admit:${e.id}`);
+  if (n && n.kind === "queue.orchestrator_fallback") {
+    out.push(ctx.h("span", { class: "pill warn", title: n.summary, dataset: { testid: "alloc-fallback" }, text: `rerouted to ${n.harness} (${n.from} quota)` }));
+  } else if (n && n.kind === "queue.orchestrator_held") {
+    out.push(ctx.h("span", { class: "pill warn", title: n.summary, dataset: { testid: "alloc-held" }, text: `launch waits: ${n.reason}` }));
+  }
   return out;
 }
 

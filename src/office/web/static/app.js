@@ -143,6 +143,13 @@ function renderBanners() {
     if (repos("unauthenticated").length) out.push(banner("err", "banner-unauthenticated", "GitHub sign-in failed", "The GitHub token was rejected (HTTP 401)."));
     const stale = repos("stale");
     if (stale.length) out.push(banner("warn", "banner-github-stale", "GitHub data stale", `${stale.join(", ")}: the last refresh failed; showing the previous fetch.`));
+    // Reroutes and held launches stay inspectable on their Allocation row; the banner shows the last hour's.
+    const recent = (s.scalars.orchestrator_notices || []).filter((n) => now() - isoSeconds(n.at) < 3600).slice(0, 3);
+    for (const n of recent) {
+      const fell = n.kind === "queue.orchestrator_fallback";
+      out.push(banner(fell ? "info" : "warn", fell ? "banner-orchestrator-fallback" : "banner-orchestrator-held",
+        fell ? `Orchestrator rerouted to ${n.harness}` : "Queued launch waiting", n.summary));
+    }
     if (g.state === "disabled") out.push(banner("info", "banner-github-disabled", "GitHub not connected", g.reason || "no GitHub client; issues come from Office records only"));
   }
   $("banners").replaceChildren(...out);
