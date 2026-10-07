@@ -143,8 +143,8 @@ judgment.
 - The planner owns architecture, task boundaries, ownership envelopes, dependencies, shared
   interfaces, and acceptance and test seams.
 - `scope:` is an ownership envelope: the module or domain directories a task owns plus their tests
-  (for example `src/billing/**, tests/billing/**`). Name an exact file only at a collision point or a
-  cross-task dependency.
+  (for example `src/billing/**, tests/billing/**`; `src/billing/` means the same as `src/billing/**`). Name an
+  exact file only at a collision point or a cross-task dependency.
 - `shared:` lists append-only registries several tasks must extend (auth or gate manifests, endpoint or
   grant lists, exhaustive policy maps, shared mocks). They are merged at compose and never count as
   double ownership.

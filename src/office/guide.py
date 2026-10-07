@@ -98,7 +98,11 @@ def next_action(con, run: dict) -> str:
         return f'ask the user (native question tool) for authorization of r{run["requirements_version"]}, then office approve plan --quote "<user\'s words>"'
     for e in run.get("envelope") or []:
         if e.get("needs_authorization"):
-            return f'new authority entry {e["id"]} ({e["action"]}) needs authorization: ask the user (native question tool), then office approve {e["id"]} --quote "<words>"'
+            from office import authority
+            drop = ("" if authority.plan_names(con, run, e["action"])
+                    else f'; the plan no longer names it: office decline {e["id"]} --reason "<why>" drops it')
+            return (f'new authority entry {e["id"]} ({e["action"]}) needs authorization: ask the user (native question '
+                    f'tool), then office approve {e["id"]} --quote "<words>"{drop}')
     tasks = state.tasks(con, run["id"])
     c = _counts(tasks)
     for status in ("blocked", "paused"):
@@ -239,6 +243,7 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
         with db.transaction(con):
             state.consume_events(con, run["id"], events)
     res.next = next_action(con, run)
+    _record_pending(con, run, _pending_digest(con, run, res.next))
     res.data = {"run_id": run["id"], "phase": run["phase"], "office_version": run["office_version"],
                 "requirements_version": run["requirements_version"], "plan_version": run["plan_version"],
                 "tasks": {t["id"]: t["status"] for t in tasks}, "plan_review": {k: v for k, v in rs.items() if k != "open_defects"},
@@ -430,16 +435,53 @@ def worker_signals(con, run: dict) -> tuple[list[str], int]:
     return out, last
 
 
-def _needs_orchestrator(con, run: dict) -> bool:
-    if any(t["status"] in ("paused", "blocked", "changes_required") for t in state.tasks(con, run["id"])):
-        return True
-    return not next_action(con, state.get_run(con, run["id"])).startswith(("exceptions only", "no action"))
+PENDING_CONSUMER = "orchestrator-pending"  # one row per run: the pending item the orchestrator was last shown
+
+
+def _pending_digest(con, run: dict, nxt: str | None = None) -> int:
+    """A number naming what waits on the orchestrator right now (0: nothing). It changes when the
+    item does and stays put while the same item stays pending. Fits a cursor row (48 bits)."""
+    import hashlib
+    tasks = state.tasks(con, run["id"])
+    blocked = [(t["id"], t["status"], t.get("pause_reason")) for t in tasks
+               if t["status"] in ("paused", "blocked", "changes_required")]
+    nxt = next_action(con, state.get_run(con, run["id"])) if nxt is None else nxt
+    if not blocked and nxt.startswith(("exceptions only", "no action")):
+        return 0
+    return int.from_bytes(hashlib.sha256(repr((blocked, nxt)).encode()).digest()[:6], "big") or 1
+
+
+def _reported_pending(con, run_id: str) -> int:
+    row = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer=?", (run_id, PENDING_CONSUMER)).fetchone()
+    return row[0] if row else 0
+
+
+def _record_pending(con, run: dict, digest: int) -> None:
+    """The orchestrator was shown this pending item: `office wait` no longer ends for it."""
+    from office import db
+    from office.util import now_iso
+    if digest == _reported_pending(con, run["id"]):
+        return
+    with db.transaction(con):
+        con.execute("INSERT INTO cursors(run_id, consumer, last_seq, updated_at) VALUES(?,?,?,?) "
+                    "ON CONFLICT(run_id, consumer) DO UPDATE SET last_seq=excluded.last_seq, updated_at=excluded.updated_at",
+                    (run["id"], PENDING_CONSUMER, digest, now_iso()))
+
+
+def _actionable_news(con, run: dict) -> bool:
+    """An unread orchestrator event that failed or blocks something. Informational events wait for the
+    next status; they never end `office wait` alone."""
+    held = _held_seqs(con, run["id"])
+    return any(_urgent(e) and e["seq"] not in held
+               for e in state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=200))
 
 
 def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
     """Block until something needs the orchestrator, then print status.
-    Exit 0: a task, phase, plan or requirements change, or a new orchestrator
-    event. Exit 3: a stall (work marked in progress that nothing can advance).
+    Exit 0: a task, phase, plan or requirements change, a new actionable orchestrator
+    event (informational ones alone never end it), or a pending item the orchestrator
+    has not been shown yet (an unchanged one already shown keeps it blocking).
+    Exit 3: a stall (work marked in progress that nothing can advance).
     Exit 5: an agent is waiting on a question (a `question:` line names it and
     the `office answer` command). Exit 124: timeout with nothing new. A watcher
     keys on the exit code, never on matching status text."""
@@ -449,7 +491,6 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
     start = _snapshot(con, run)
     started_at = now_iso()  # only a job that fails while waiting is news
     deadline = time.time() + timeout
-    first = True
     while True:
         dispatch.reap_orphans(con, run)
         with db.transaction(con):
@@ -461,11 +502,11 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         asked, _, acts = questions.scan(con, run)
         stuck = stalls(con, run, since=started_at, acts=acts) + signals
         changed = _snapshot(con, run) != start
-        news = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=1)
-        # Something already waiting on the orchestrator ends the wait at once;
-        # otherwise a blocker present at the start would sit until the timeout.
-        pending = first and _needs_orchestrator(con, run)
-        first = False
+        news = _actionable_news(con, run)
+        # A pending item the orchestrator has not been shown ends the wait at once; the same
+        # item shown already (status or an earlier wait) stays pending until the timeout (#296, #329).
+        digest = _pending_digest(con, run)
+        pending = digest != 0 and digest != _reported_pending(con, run["id"])
         if asked or stuck or changed or news or pending or state.is_terminal(state.get_run(con, run["id"])) \
                 or time.time() >= deadline:
             res = status(con, run)

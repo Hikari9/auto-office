@@ -381,7 +381,8 @@ def _envelope_changes(con, run: dict, parsed) -> list[str]:
     for a in parsed.requirements.get("named_actions") or []:
         key = (a["action"], tuple(a.get("preconditions") or []))
         if key not in old:
-            entry = {"id": f"X{len(envelope) + 1}", **a, "needs_authorization": True}
+            top = max((int(e["id"][1:]) for e in envelope if re.fullmatch(r"X\d+", e.get("id") or "")), default=0)
+            entry = {"id": f"X{top + 1}", **a, "needs_authorization": True}
             envelope.append(entry)
             flagged.append(entry["id"])
     if flagged:

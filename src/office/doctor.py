@@ -92,6 +92,7 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
             res.add(f"worktree setup: `{setup}` runs under /bin/sh, but {', '.join(missing)} "
                     f"{'is' if len(missing) == 1 else 'are'} not on PATH; every new worktree's setup would exit 127 "
                     "(command not found). Install it or fix worktree.setup")
+        problems += _stale_active_pointers(res, paths.primary_checkout(ident[1]), fix)
         for leg in legacy.legacy_runs(paths.primary_checkout(ident[1])):
             if leg.active:
                 have = legacy.retained_runtime(leg.plugin_commit, materialize=fix)
@@ -247,6 +248,23 @@ def _probe_all(con) -> list[str]:
         r = conformance.probe_vision(con, run, cand, adapter)
         out.append(f"probe {r['triple']}: {r['result']} ({r['detail']})")
     return out or ["no visual-capable routes installed"]
+
+
+def _stale_active_pointers(res: Result, primary: Path, fix: bool) -> int:
+    """Report `.office/active/<run>` pointers whose run is missing or terminal; `--fix` removes them
+    (a pointer is a projection, never the run). Returns the number still outstanding."""
+    from office import hooks
+    con = db.connect()
+    try:
+        stale = hooks.stale_pointers(con, primary)
+    finally:
+        con.close()
+    for pointer, why in stale:
+        if fix:
+            pointer.unlink(missing_ok=True)
+        res.add(f"active run pointer {pointer.name[:8]}: stale ({why})" + (" - removed" if fix else f" in {pointer.parent}"
+                                                                              "; office doctor --fix removes it"))
+    return 0 if fix else len(stale)
 
 
 _SH_BUILTINS = {"cd", "export", "set", "unset", "test", "[", "true", "false", "echo", "printf", ":", ".", "source",

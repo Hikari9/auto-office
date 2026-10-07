@@ -71,7 +71,15 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 - Check suites share a host-wide cap (`verification.check_concurrency`). A quota wall blocks the worker
   without a relaunch; rerun after the reset or with `--as`.
 - To wait on the run, use `office wait`: exit 0 means act, 3 means a stall to resolve, 5 means an agent
-  asked a question, 124 means nothing new. Key on the exit code, never on matching status text.
+  asked a question, 124 means nothing new. Key on the exit code, never on matching status text. Exit 0
+  is for what you have not been shown (a new actionable event, a task or phase change, a pending item
+  first seen); an unchanged pending item `office status` or an earlier wait already showed keeps it
+  blocking, and informational events alone never end it.
+- An authority entry (`X3`) the plan no longer names, still waiting on authorization, is not the user's
+  to approve: `office decline X3 --reason "<why>"` drops it on the record and it stops being pending.
+- A worktree `setup` command that exits 127 (command not found) stops the dispatch before the executor
+  starts and blocks the task with the command, the log, and `office doctor`; fix the tool or
+  `worktree.setup`, then `office rerun <task> --fresh`. Other setup failures only post a notice.
 - Exit 5 prints a `question:` line: dispatch, pane, question, options, and the answer command. Decide it
   yourself when it is planning, scope, ordering, or test detail: amend the contract first if the answer
   changes it, then `office answer <task|dispatch> <n>` (a number presses that option in a selection
@@ -98,7 +106,7 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
   refused as lease-lost, superseded-dispatch, or task-paused is done: never prompt it to retry.
 - Before submitting a plan inline, run the same four lenses (`skills/office-submit`) over it and write what they
   surface into tasks' `accept:` criteria. Plan the seams, not the internals: `scope:` is an ownership envelope
-  (module or domain dirs plus their tests); name exact files only where tasks collide or depend. Append-only
+  (module or domain dirs plus their tests; a trailing `/` means `dir/**`); name exact files only where tasks collide or depend. Append-only
   registries several tasks touch (gate manifests, endpoint/grant lists, policy maps, shared mocks) go under each
   task's `shared:`. Tasks that must land together share a `lane:`; lanes sharing an outcome, a `converge:`.
 - Ordinary amendments (decomposition, ordering, acceptance detail, tests) are yours:
