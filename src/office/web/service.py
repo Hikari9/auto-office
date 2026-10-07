@@ -39,7 +39,7 @@ from office.web.observer import Observer
 log = logging.getLogger("office.web")
 
 KINDS = ("start_issue", "queue_issue", "resume_run", "attach_run", "pause", "resume", "set_priority", "demote",
-         "set_auto_mode", "change_route", "approve_plan", "chat_send", "settings_set", "settings_unset")
+         "set_auto_mode", "change_route", "chat_send", "settings_set", "settings_unset")
 COLLECTIONS = ("repos", "issues", "prs", "runs", "tasks", "agents", "queue", "commands")
 COMMAND_ID = re.compile(r"[A-Za-z0-9_.:-]{8,128}")
 STALE_AFTER = 15.0
@@ -360,10 +360,12 @@ class Service:
         gh = self.github.snapshot() if self.github else {"repos": [], "issues": [], "pulls": [], "github_checks": []}
         self._link_launches(ws["runs"])
         launcher_reason = self.launcher.unavailable()
+        awaiting_plan = self.observer.read(_awaiting_plan_authorization)
         ent: dict[str, dict] = {c: {} for c in COLLECTIONS}
         for r in ws["runs"]:
             run = {k: v for k, v in r.items() if k not in ("tasks", "agents")}
             run["controls"] = caps.for_run(r, self.resolver, launcher_reason=launcher_reason)
+            run["awaiting_plan_authorization"] = r["run_id"] in awaiting_plan
             run["launch"] = next(({"command": cid, "pane": l["pane"], "provenance": "web-launch"}
                                   for cid, l in self.launches.items() if l.get("run") == r["run_id"]), None)
             ent["runs"][r["id"]] = run
@@ -771,20 +773,6 @@ class Service:
         args = ["--run", run["run_id"], "amend", "route", str(did), "--as", route, "--quote", quote, "--restart"]
         return lambda: self.executor.run(args, self._checkout_of(run))
 
-    def _v_approve_plan(self, cmd):
-        run = self._live_run(cmd, "approve_plan")
-        quote = (cmd.payload.get("quote") or "").strip()
-        if len(re.sub(r"\s+", "", quote)) < 2:
-            raise CommandRefused("quote-required", "plan approval records the user's typed words (payload.quote)",
-                                 http=400)
-        awaiting = self.observer.read(lambda s: _awaits_plan_authorization(s, run["run_id"]))
-        if not awaiting:
-            raise CommandRefused("not-awaiting-plan-authorization", "Office is not waiting for plan authorization")
-        self._expect(cmd, {"requirements_version": awaiting["requirements_version"],
-                           "plan_version": awaiting["plan_version"]})
-        args = ["--run", run["run_id"], "approve", "plan", "--quote", quote]
-        return lambda: self.executor.run(args, self._checkout_of(run))
-
     def _v_chat_send(self, cmd):
         text = cmd.payload.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > chat.MAX_TEXT:
@@ -916,14 +904,19 @@ def _queue_rows(snap, conf: dict) -> tuple[list[dict], list[dict], str]:
     return rows, active, auto
 
 
-def _awaits_plan_authorization(snap, run_id: str) -> dict | None:
-    """The run has a plan and no active plan authorization for its requirements version."""
-    run = snap.rows("SELECT phase, plan_version, requirements_version FROM runs WHERE id=?", (run_id,))
-    if not run or not run[0]["plan_version"] or run[0]["phase"] in ("closed", "abandoned"):
-        return None
-    authorized = snap.rows("SELECT 1 FROM authorizations WHERE run_id=? AND kind='plan' AND revoked_at IS NULL "
-                           "AND requirements_version=?", (run_id, run[0]["requirements_version"]))
-    return None if authorized else dict(run[0])
+def _awaiting_plan_authorization(snap) -> set[str]:
+    """Runs with a plan and no active plan authorization for their requirements version.
+
+    The browser has no plan-authorization path: these runs show the copyable
+    `office approve plan --quote` command for the user to run.
+    """
+    if not snap.has("runs", "plan_version") or not snap.has("authorizations"):
+        return set()
+    return {r["id"] for r in snap.rows(
+        "SELECT id FROM runs r WHERE plan_version IS NOT NULL AND plan_version != '' "
+        "AND phase NOT IN ('closed', 'abandoned') AND NOT EXISTS (SELECT 1 FROM authorizations a "
+        "WHERE a.run_id=r.id AND a.kind='plan' AND a.revoked_at IS NULL "
+        "AND a.requirements_version=r.requirements_version)")}
 
 
 def _diff(prev: dict | None, snap: dict) -> dict:

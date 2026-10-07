@@ -100,8 +100,8 @@ h1 { margin: 0; font-size: 23px; font-weight: 780; }
 .table-wrap { position: relative; flex: 1; min-width: 0; display: flex; background: var(--panel);
   border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
 .table { flex: 1; overflow: auto; min-width: 0; }
-.thead, .tr { display: grid; min-width: 1400px;
-  grid-template-columns: 130px minmax(220px, 1fr) 110px 96px 130px 64px 104px 104px 96px 120px 96px 130px; }
+.thead, .tr { display: grid; min-width: 1640px;
+  grid-template-columns: 130px minmax(220px, 1fr) 110px 150px 130px 64px 160px 260px 96px 120px 96px 130px; }
 .thead { position: sticky; top: 0; z-index: 2; height: 40px; background: var(--head); align-items: center;
   border-bottom: 1px solid var(--line); }
 .th { padding: 0 10px; font-size: 9px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: #828da0;
@@ -186,3 +186,16 @@ code.copy { display: block; padding: 6px 8px; background: #080a0e; border: 1px s
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.pill.filter { cursor: pointer; }
+.pill.filter[aria-pressed=true] { color: var(--blue); border-color: var(--blue); }
+.pill.filter .n { color: var(--muted); }
+.td.phasecell { display: flex; flex-direction: column; justify-content: center; }
+.td.auth { display: flex; align-items: center; gap: 6px; }
+.td.auth select.auth { flex: 1; min-width: 0; }
+.td.command { display: flex; align-items: center; gap: 6px; }
+.td.command code.cmd { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px; color: var(--text-2); }
+select.auth { max-width: 100%; font-size: 11px; background: #0d1118; color: var(--text-2); border: 1px solid var(--line); border-radius: 6px; }
+.btn.sm { padding: 2px 8px; font-size: 11px; }
+.plan-auth { display: grid; gap: 6px; margin: 6px 0; }

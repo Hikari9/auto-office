@@ -8,6 +8,8 @@ export const AUTHORIZATIONS = [
   { value: "merge", label: "Merge to main" },
   { value: "e2e", label: "Production" },
 ];
+// The browser has no plan-authorization path: the user runs this with their own words.
+export const PLAN_APPROVAL_COMMAND = 'office approve plan --quote "<words>"';
 export const QUEUE_AUTHORIZATION = "preview";
 export const QUEUE_ONLY_WHY = "Queued work launches with the repository default (Preview only); a per-issue override is not supported by this service";
 const END_STATE_LABELS = { preview: "Preview only", ask: "PR / no merge", merge: "Merge to main", e2e: "Production",
@@ -83,8 +85,47 @@ function checksText(prs) {
 }
 
 // Every issue row: GitHub's open issues plus issues known only from an Office run record.
+// The task line under a run's phase: plan authorization, else the first unfinished task.
+const SETTLED = new Set(["accepted", "cancelled"]);
+function phaseDetail(run, tasks) {
+  if (!run) return "No run yet";
+  if (run.awaiting_plan_authorization) return "Awaiting plan authorization";
+  if (!tasks || !tasks.length) return run.liveness === "terminal" ? "Run closed" : "No tasks recorded";
+  const current = tasks.find((t) => t.current_dispatch && !SETTLED.has(t.status)) || tasks.find((t) => !SETTLED.has(t.status));
+  if (!current) return `All ${tasks.length} tasks settled`;
+  return `${current.task_id} ${String(current.status || "unknown").replace(/_/g, " ")}${current.title ? ` · ${current.title}` : ""}`;
+}
+
+const ATTENTION_TASK = new Set(["paused", "failed", "blocked", "needs_attention", "stopped"]);
+function needsAttention(run, tasks) {
+  if (!run || run.liveness === "terminal") return false;
+  return run.liveness === "resumable" || Boolean(run.awaiting_plan_authorization)
+    || (tasks || []).some((t) => ATTENTION_TASK.has(t.status));
+}
+
+// The Issues filter chips: which rows each shows.
+export const FILTERS = [
+  { value: "open", label: "Open + running", test: (r) => r.liveness !== "terminal" },
+  { value: "incoming", label: "Incoming", test: (r) => !r.run },
+  { value: "attention", label: "Needs attention", test: (r) => r.attention },
+  { value: "done", label: "Done", test: (r) => r.liveness === "terminal" },
+];
+
+// Issue-kind queue entries by their `owner/repo#number` ref.
+function queuedIssues(queue) {
+  const out = new Map();
+  for (const e of Object.values(queue)) if (e.kind === "issue" && e.ref) out.set(String(e.ref).toLowerCase(), e);
+  return out;
+}
+
 export function issueRows(state) {
-  const { issues = {}, runs = {}, repos = {}, prs = {}, queue = {} } = state.entities;
+  const { issues = {}, runs = {}, repos = {}, prs = {}, queue = {}, tasks = {} } = state.entities;
+  const tasksByRun = new Map();
+  for (const t of Object.values(tasks)) {
+    if (!tasksByRun.has(t.run)) tasksByRun.set(t.run, []);
+    tasksByRun.get(t.run).push(t);
+  }
+  const issueQueue = queuedIssues(queue);
   const rows = new Map();
   const add = (id, base) => {
     if (!rows.has(id)) rows.set(id, base);
@@ -116,10 +157,14 @@ export function issueRows(state) {
     const linkedPrs = prsFor(linked, prs);
     const q = primary ? queue[primary.id] : null;
     const repo = repos[row.repoKey] || null;
+    const runTasks = primary ? tasksByRun.get(primary.id) || [] : null;
     out.push({
       ...row, repo, runs: linked, run: primary, prs: linkedPrs, queue: q,
       liveness: primary ? primary.liveness : "none",
       phase: primary ? primary.phase : "Incoming",
+      phaseDetail: phaseDetail(primary, runTasks),
+      attention: needsAttention(primary, runTasks),
+      queued: primary ? null : issueQueue.get(`${row.repoName}#${row.number}`.toLowerCase()) || null,
       owner: primary && primary.owner && primary.owner.kind === "session" ? `${primary.owner.harness} orchestrator` : "No owner",
       progress: primary ? primary.progress : null,
       priority: q ? q.priority : null,
@@ -175,7 +220,8 @@ export function issueActions(row, state, inFlight = () => false) {
     const launcher = state.scalars.launcher || {};
     const startWhy = why || (launcher.available ? null : launcher.reason || "no launcher capability");
     out.list.push({ kind: "start_issue", label: "Start", ...gate(startWhy ? off(startWhy) : on()) });
-    out.list.push({ kind: "queue_issue", label: "Auto Queue", ...gate(why ? off(why) : on()) });
+    const queued = row.queued ? off(`already in the Auto Queue (${row.queued.decision || "waiting"})`) : null;
+    out.list.push({ kind: "queue_issue", label: "Auto Queue", ...gate(why ? off(why) : queued || on()) });
   }
   for (const a of out.list) {
     if (a.enabled && a.kind !== "copy_start" && inFlight(a.kind, a.run ? a.run.id : row.id)) {

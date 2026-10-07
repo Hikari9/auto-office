@@ -17,8 +17,8 @@
 .alloc-last { margin: 4px 0 8px; color: var(--muted); font-size: 12px; }
 .alloc-tables { display: grid; gap: 16px; }
 .atable { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
-.arow { display: grid; min-width: 1080px; align-items: center; border-bottom: 1px solid var(--line-2);
-  grid-template-columns: 28px minmax(160px, 2fr) minmax(120px, 1.2fr) 78px 96px 92px minmax(110px, 1fr) minmax(100px, 1fr) 68px minmax(120px, 1.3fr) 150px; }
+.arow { display: grid; min-width: 1000px; align-items: center; border-bottom: 1px solid var(--line-2);
+  grid-template-columns: 28px minmax(140px, 2fr) minmax(100px, 1.2fr) 78px 96px 92px minmax(96px, 1fr) minmax(84px, 1fr) 68px minmax(100px, 1.3fr) 170px; }
 .arow:last-child { border-bottom: 0; }
 .arow.head { background: var(--head); color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .03em; }
 .arow .c { padding: 6px 8px; min-width: 0; overflow-wrap: anywhere; }

@@ -250,3 +250,22 @@ def test_unknown_states_are_shown_not_guessed(page, served):
     assert page.locator("[data-testid=alloc-cpu] .v").text_content() == "37%"
     assert page.locator("[data-testid=alloc-ram] .v").text_content() == "42%"
     assert errors == []
+
+
+def test_controls_column_is_not_clipped_at_1440(page, served):
+    url, svc = served
+    errors = open_allocation(page, url, 1440, 900)
+    clipped = page.evaluate("""() => [...document.querySelectorAll('[data-testid=alloc-row]')].flatMap(row => {
+        const table = row.closest('.atable').getBoundingClientRect();
+        const cell = row.lastElementChild.getBoundingClientRect();
+        const ctl = [...row.lastElementChild.querySelectorAll('button, select')].map(b => b.getBoundingClientRect());
+        const overflow = cell.right > table.right + 0.5 || ctl.some(b => b.right > cell.right + 0.5 || b.right > table.right + 0.5);
+        return overflow ? [row.dataset.id] : [];
+    })""")
+    assert clipped == []
+    # Every table, controls column included, fits the surface: nothing is cut off at the viewport edge.
+    assert page.evaluate("""() => { const s = document.getElementById('surface-allocation');
+        const right = s.getBoundingClientRect().right;
+        return s.scrollWidth <= s.clientWidth && [...document.querySelectorAll('.atable')].every(t =>
+            t.scrollWidth <= t.clientWidth && t.getBoundingClientRect().right <= right + 0.5); }""")
+    assert errors == []

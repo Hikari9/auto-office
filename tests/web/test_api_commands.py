@@ -8,6 +8,7 @@ import pytest
 from office import db
 from office.web import server, synthetic
 from office.web.executor import Executor
+from office.web.capabilities import RUN_KINDS
 from office.web.service import KINDS, Command, CommandRefused
 
 REPO = "synth-org-0/repo-00"
@@ -309,18 +310,24 @@ def test_change_route_needs_a_current_dispatch_on_the_same_harness(svc):
                                               f"{harness}/m@high", "--quote", "use m", "--restart"]
 
 
-def test_approve_plan_only_while_office_awaits_plan_authorization(svc):
+def test_approve_plan_is_refused_as_an_unknown_kind(svc):
     run = live_run(svc)
-    err = refused(svc, cmd("cmd-plan-0001", "approve_plan", {"run_id": run["run_id"]}, {"quote": " "}))
-    assert err.reason == "quote-required"
-    svc.submit(cmd("cmd-plan-0002", "approve_plan", {"run_id": run["run_id"]}, {"quote": "yes, go ahead"}), wait=True)
-    assert svc.executor.calls[-1]["args"] == ["--run", run["run_id"], "approve", "plan", "--quote", "yes, go ahead"]
+    with pytest.raises(CommandRefused) as info:
+        cmd("cmd-plan-0001", "approve_plan", {"run_id": run["run_id"]}, {"quote": "yes, go ahead"})
+    assert (info.value.reason, info.value.http) == ("unknown-kind", 400)
+    assert svc.executor.calls == []
+    assert "approve_plan" not in RUN_KINDS
+    assert "approve_plan" not in svc.snapshot()["entities"]["runs"][run["id"]]["controls"]
+
+
+def test_runs_awaiting_plan_authorization_are_flagged_for_the_cli_hint(svc):
+    run = live_run(svc)
+    assert svc.snapshot()["entities"]["runs"][run["id"]]["awaiting_plan_authorization"] is True
     write(svc, lambda con: con.execute(
         "INSERT INTO authorizations(id, run_id, kind, target, requirements_version, authorized_by, quote, created_at) "
         "VALUES('Z1', ?, 'plan', 'requirements', 1, 'user', 'yes', 't')", (run["run_id"],)))
-    err = refused(svc, cmd("cmd-plan-0003", "approve_plan", {"run_id": run["run_id"]}, {"quote": "again"}))
-    assert err.reason == "not-awaiting-plan-authorization"
-    assert len(svc.executor.calls) == 1
+    svc.poll()
+    assert svc.snapshot()["entities"]["runs"][run["id"]]["awaiting_plan_authorization"] is False
 
 
 def test_settings_commands_run_office_config(svc):
