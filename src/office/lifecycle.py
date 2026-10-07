@@ -263,6 +263,11 @@ def reconcile(con, run: dict) -> list[str]:
         if gates.evaluate_acceptance(con, run, t["id"]):
             notes.append(f"{t['id']} accepted (no gate required by policy)")
     jobs.reclaim(con, run["id"])
+    # A gate left open after its job failed has no owner and never finishes:
+    # settle it the way a failed job does now (#404).
+    for g, job in gates.orphaned_gates(con, run):
+        jobs.on_permanent_failure(con, run, job, job.get("error") or "worker process died")
+        notes.append(f"{g['task_id']} {g['kind']} gate {g['id']}: its job had failed; gate settled")
     return notes
 
 

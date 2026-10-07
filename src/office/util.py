@@ -65,6 +65,11 @@ def atomic_write_json(path: Path, obj: Any) -> None:
     atomic_write_text(path, json.dumps(obj, indent=2, sort_keys=True, default=str) + "\n")
 
 
+# Process liveness is tri-state. "Could not tell" is never "dead": a claim is
+# reclaimed, and work run again, only on proof that its owner is gone.
+ALIVE, DEAD, UNKNOWN = "alive", "dead", "unknown"
+
+
 def pid_alive(pid: int | None) -> bool:
     if not pid or pid <= 0:
         return False
@@ -75,9 +80,24 @@ def pid_alive(pid: int | None) -> bool:
     return True
 
 
+def pid_state(pid: int | None) -> str:
+    """ALIVE, DEAD (no such process) or UNKNOWN (the probe itself failed)."""
+    if not pid or pid <= 0:
+        return DEAD
+    try:
+        os.kill(pid, 0)
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return DEAD
+        return ALIVE if exc.errno == errno.EPERM else UNKNOWN
+    return ALIVE
+
+
 def process_start(pid: int | None) -> str | None:
     """The process's start time as `ps` reports it, or None. With the pid it
-    names one process: a pid reused by another process has another start."""
+    names one process: a pid reused by another process has another start.
+    None means only that it could not be read (no such process, or `ps`
+    failed or is not allowed here), never which of those."""
     if not pid or pid <= 0:
         return None
     import subprocess
@@ -97,14 +117,32 @@ def _claim_start(claimed_by: str | None) -> str | None:
     return (claimed_by or "").partition("@")[2] or None
 
 
-def claim_alive(pid: int | None, claimed_by: str | None) -> bool:
-    """Whether a job claimant may still be running. A claim with no recorded
-    start time (an older Office) counts as alive whenever the pid is, so
-    nothing is reaped on a guess; one with a start time must match it."""
-    if not pid_alive(pid):
-        return False
+def claim_liveness(pid: int | None, claimed_by: str | None) -> tuple[str, str]:
+    """(ALIVE | DEAD | UNKNOWN, why) for a job claimant known only by pid and
+    `claimed_by`. A claim with no recorded start time (an older Office) is
+    alive whenever the pid is, so nothing is reaped on a guess. A start time
+    that cannot be read now is UNKNOWN, not a mismatch: `ps` can fail or be
+    denied (an agent sandbox) while the claimant runs on (#403, #404)."""
+    state = pid_state(pid)
+    if state == DEAD:
+        return DEAD, f"pid {pid} no longer exists"
+    if state == UNKNOWN:
+        return UNKNOWN, f"pid {pid} could not be probed"
     start = _claim_start(claimed_by)
-    return start is None or process_start(pid) == start
+    if start is None:
+        return ALIVE, f"pid {pid} is alive (the claim records no start time)"
+    now = process_start(pid)
+    if now is None:
+        return UNKNOWN, f"pid {pid} is alive but its start time could not be read"
+    if now == start:
+        return ALIVE, f"pid {pid} is the claimant"
+    return DEAD, f"pid {pid} is now another process (started {now}, the claimant started {start})"
+
+
+def claim_alive(pid: int | None, claimed_by: str | None) -> bool:
+    """Whether a job claimant may still be running: anything but proof of
+    death counts (see `claim_liveness`)."""
+    return claim_liveness(pid, claimed_by)[0] != DEAD
 
 
 def process_is(pid: int | None, start: str | None) -> bool:

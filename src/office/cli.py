@@ -345,6 +345,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--office-managed", action="store_true")
     s = sp.add_parser("_job", add_help=False)
     s.add_argument("job_id")
+    s.add_argument("--attempt", dest="job_attempt", default=None)
     s = sp.add_parser("_supervise", add_help=False)
     s.add_argument("dispatch_id")
     return p
@@ -465,7 +466,7 @@ def _run(args, unknown) -> int:
     cwd = Path.cwd()
     if cmd == "_job":
         from office import jobs
-        return jobs.main_job(args.job_id)
+        return jobs.main_job(args.job_id, args.job_attempt)
     if cmd == "_supervise":
         from office import dispatch
         return dispatch.supervise(args.dispatch_id)

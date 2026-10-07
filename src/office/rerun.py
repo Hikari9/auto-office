@@ -79,9 +79,13 @@ def agent_activity(d: dict) -> dict | None:
             "text": text, "status": status}
 
 
-def _set_resumed_from(con, dispatch_id: str, parent: str) -> None:
+def _set_resumed_from(con, dispatch_id: str, parent: str, session: str | None = None) -> None:
+    """Link a resumed dispatch to its parent. It continues the parent's harness
+    session (the resume argv names it), so it records that id too: a later
+    resume of this dispatch then still finds a session to continue."""
     try:
-        con.execute("UPDATE dispatches SET resumed_from=? WHERE id=?", (parent, dispatch_id))
+        con.execute("UPDATE dispatches SET resumed_from=?, session_id=COALESCE(session_id, ?) WHERE id=?",
+                    (parent, session, dispatch_id))
     except sqlite3.OperationalError:
         # An older schema without the column: keep the link where inspect finds it.
         row = con.execute("SELECT override_json FROM dispatches WHERE id=?", (dispatch_id,)).fetchone()
@@ -183,7 +187,9 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
     extra = None
     if resume:
         why = None
-        session = parent.get("session_id")
+        # An id never seen live (herdr reported none, the banner scrolled away)
+        # may still be proven by the session's own transcript (#406).
+        session = parent.get("session_id") or dispatch.backfill_session(con, run, parent)
         adapter = adapters.load_all().get(parent.get("adapter_id") or parent.get("harness") or "")
         argv = None
         if not session:
@@ -234,7 +240,7 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         if restack:
             state.emit(con, run, "task.restacked", f"{tid} {restack['line']}", task_id=tid, dispatch_id=did)
         if resume:
-            _set_resumed_from(con, did, parent["id"])
+            _set_resumed_from(con, did, parent["id"], session)
         state.emit(con, run, "task.rerun", f"{tid} rerun {'--resume from ' + parent['id'] if resume else '--fresh'} "
                    f"as {did}", task_id=tid, dispatch_id=did)
     jobs.kick(con, run["id"])

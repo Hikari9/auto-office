@@ -34,21 +34,38 @@ def _counts(tasks: list[dict]) -> dict:
     return out
 
 
+def unaccepted_dependencies(task: dict, by_id: dict) -> list[str]:
+    """`depends:` is an acceptance barrier (#405): every dependency of `task`
+    that is not accepted yet, as "T1 submitted". A submitted, checking,
+    changes-required or blocked dependency still holds its dependents. The one
+    readiness rule `office status`, `resume` and `wait` all print `next:` from.
+    (Building on an unaccepted task stays an explicit choice: `office dispatch
+    T1 T2` stacks T2 to start when T1 is accepted.)"""
+    out = []
+    for dep in task["depends"]:
+        d = by_id.get(dep)
+        if not d or d["status"] != "accepted":
+            out.append(f"{dep} {d['status'] if d else 'unknown'}")
+    return out
+
+
 def ready_tasks(con, run: dict) -> list[str]:
     tasks = state.tasks(con, run["id"])
     by_id = {t["id"]: t for t in tasks}
-    ready = []
+    return [t["id"] for t in tasks if t["status"] == "planned" and not unaccepted_dependencies(t, by_id)]
+
+
+def held_by_dependencies(con, run: dict) -> list[str]:
+    """Planned tasks a dependency still holds, as "T2 waits for T1 (submitted)"."""
+    tasks = state.tasks(con, run["id"])
+    by_id = {t["id"]: t for t in tasks}
+    out = []
     for t in tasks:
-        if t["status"] != "planned":
-            continue
-        ok = True
-        for dep in t["depends"]:
-            d = by_id.get(dep)
-            if not d or d["status"] not in ("accepted", "submitted", "changes_required") or not d.get("current_revision_id"):
-                ok = False
-        if ok:
-            ready.append(t["id"])
-    return ready
+        deps = unaccepted_dependencies(t, by_id) if t["status"] == "planned" else []
+        if deps:
+            out.append(f"{t['id']} waits for {', '.join(d.split()[0] for d in deps)} to be accepted "
+                       f"({'; '.join(deps)})")
+    return out
 
 
 def next_action(con, run: dict) -> str:
@@ -118,6 +135,11 @@ def next_action(con, run: dict) -> str:
             # Findings wait for the orchestrator's choice (R8); nothing relaunches on its own.
             return f"findings on {t['id']} wait for you: office rerun {t['id']} --resume | --fresh"
     for t in tasks:
+        if t["status"] == "changes_required":
+            # Its live worker has the findings; the repair path stays the next action.
+            return (f"no action; {t['id']}'s worker is fixing its findings (if it stops: "
+                    f"office rerun {t['id']} --resume | --fresh)")
+    for t in tasks:
         if t["status"] == "submitted":
             stale = gates_mod.stale_dependency(con, run, t)
             if stale:
@@ -127,7 +149,8 @@ def next_action(con, run: dict) -> str:
         return "choose execution strategy; office dispatch " + " ".join(ready) + (" --parallel" if len(ready) > 1 else "")
     live = [t for t in tasks if t["status"] not in ("accepted", "cancelled", "planned")]
     if live:
-        return "exceptions only; office status"
+        held = held_by_dependencies(con, run)
+        return "exceptions only; office status" + (f" ({held[0]})" if held else "")
     if contract.is_convergence(run):
         from office import convergence
         nxt = convergence.next_action(con, run, dispositions=True)
@@ -184,7 +207,11 @@ def _plan_next_convergence(con, run: dict, rs: dict) -> str | None:
         codes = ", ".join(f["code"] for f in rs["blocking"][:4])
         held = plans.held_tasks(con, run)
         ready = [t for t in ready_tasks(con, run) if t not in held]
-        return (f"plan RECHECK ({codes}): {revise}; the same reviewer reviews it"
+        from office import gates as gates_mod
+        who = gates_mod.resume_blocker(con, run, state.get_dispatch(con, plans.recheck_reviewer(con, run) or ""), "reviewer")
+        return (f"plan RECHECK ({codes}): {revise}; "
+                + ("the same reviewer reviews it" if who is None else f"a fresh reviewer on the same route reviews it "
+                   f"(the last reviewer cannot be resumed: {who})")
                 + (f"; unaffected work may start: office dispatch {' '.join(ready)}" if ready else ""))
     return None
 
@@ -272,11 +299,11 @@ def stalls(con, run: dict, since: str = "", acts: dict | None = None) -> list[st
     for g in con.execute("SELECT * FROM gates WHERE run_id=? AND status IN ('queued','running')", (run["id"],)).fetchall():
         if gates_mod.superseded_integration_gate(con, run, g):
             continue
-        # Each gate is advanced by its own job or reviewer, not by unrelated work in the run.
-        job = gates_mod.owning_jobs(con, run, g)
-        reviewer = con.execute("SELECT 1 FROM dispatches WHERE gate_id=? AND ended_at IS NULL", (g["id"],)).fetchone()
-        if not job and not reviewer:
-            out.append(f"{g['task_id'] or 'plan'} {g['kind']} gate {g['id']} is {g['status']} but no job is queued or running")
+        # Each gate is advanced by its own job or reviewer, not by unrelated work in the run,
+        # judged by the ownership truth reclaim uses: a live or unknown owner is no stall (#404).
+        owner, detail = gates_mod.owner_state(con, run, g)
+        if owner in ("none", "dead"):
+            out.append(f"{g['task_id'] or 'plan'} {g['kind']} gate {g['id']} is {g['status']} but {detail}")
     for j in con.execute("SELECT kind, error FROM outbox WHERE run_id=? AND status='failed' AND finished_at > ?",
                          (run["id"], since)).fetchall():
         out.append(f"job {j['kind']} failed: {(j['error'] or '')[:120]}")
@@ -506,9 +533,12 @@ def _waiting_on(con, run: dict, task: dict) -> str:
     if held:
         parts.insert(0, f"{held['id']} held for amendment")
     if task.get("current_revision_id"):
-        for g in con.execute("SELECT kind, status FROM gates WHERE revision_id=? AND status IN ('queued','running','waiting')",
+        from office import gates as gates_mod
+        for g in con.execute("SELECT * FROM gates WHERE revision_id=? AND status IN ('queued','running','waiting')",
                              (task["current_revision_id"],)).fetchall():
-            parts.append(f"{g['kind']} {g['status']}")
+            owner = gates_mod.owner_state(con, run, g) if g["status"] == "running" else ("", "")
+            # An owner whose liveness cannot be read is shown, never reclaimed.
+            parts.append(f"{g['kind']} {g['status']}" + (f" ({owner[1]})" if owner[0] == "unknown" else ""))
         if task["status"] == "submitted" and not parts:
             from office import gates
             stale = gates.stale_dependency(con, run, task)

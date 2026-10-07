@@ -30,7 +30,7 @@ except ImportError:  # not POSIX: a pane's terminal mode cannot be read
 from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
-from office.util import (atomic_write_json, claim_alive, claim_signalable, dumps, now_iso, parse_iso, pid_alive,
+from office.util import (atomic_write_json, claim_signalable, dumps, now_iso, parse_iso, pid_alive,
                          process_is, process_start, sha256_obj, short, loads)
 
 LEASE_TTL_SECONDS = 4 * 3600
@@ -561,7 +561,7 @@ def _close_orphaned_gate(con, run: dict, gate_id: str | None, why: str) -> None:
     if gate is None:
         return
     for job in gates.owning_jobs(con, run, gate):
-        if job["status"] == "queued" or claim_alive(job["claimed_pid"], job["claimed_by"]):
+        if job["status"] == "queued" or jobs.claim_live(job):
             return  # the gate's own job may still run or retry the review
     gates.mark_unavailable(con, run, gate_id, why)
 
@@ -585,7 +585,7 @@ def _fence_integrate_jobs(con, run: dict, reason: str) -> list[str]:
     """Stop and cancel the integrate jobs that own the integration reviews, so
     ending a reviewer cannot make a live job start a fallback or retry."""
     with db.transaction(con):
-        jobs_ = [dict(r) for r in con.execute("SELECT id, status, claimed_pid, claimed_by FROM outbox WHERE run_id=? "
+        jobs_ = [dict(r) for r in con.execute("SELECT * FROM outbox WHERE run_id=? "
                                               "AND kind='integrate' AND status IN ('queued','claimed')",
                                               (run["id"],)).fetchall()]
         for j in jobs_:
@@ -593,14 +593,14 @@ def _fence_integrate_jobs(con, run: dict, reason: str) -> list[str]:
                         "WHERE id=?", (f"revoked: {reason}"[:200], now_iso(), j["id"]))
     unstopped = []
     for j in jobs_:
-        if j["status"] != "claimed" or not claim_alive(j["claimed_pid"], j["claimed_by"]):
+        if j["status"] != "claimed" or not jobs.claim_live(j):
             continue
         if not claim_signalable(j["claimed_pid"], j["claimed_by"]):
             unstopped.append(f"{j['id']} (pid {j['claimed_pid']})")  # no start time: the pid may be reused
             continue
         _killpg(j["claimed_pid"])
         deadline = time.time() + 5
-        while claim_alive(j["claimed_pid"], j["claimed_by"]) and time.time() < deadline:
+        while jobs.claim_live(j) and time.time() < deadline:
             time.sleep(0.05)
     return [j["id"] for j in jobs_], unstopped
 
@@ -1158,17 +1158,13 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     if not session:
         session = _started_session(proc.stdout) or _capture_session(name)
         if session:
-            _record_session(run, dispatch, session, source="herdr")
-    if not session:
-        # Not a launch failure: the agent runs. Recorded where `office inspect` shows it.
-        con = db.connect()
-        try:
-            with db.transaction(con):
-                state.emit(con, run, "launch.session", f"{dispatch.get('task_id') or dispatch['id']}: herdr reported "
-                           f"no session id for {name}; office rerun --resume will refuse it", audience="runtime",
-                           task_id=dispatch.get("task_id"), dispatch_id=dispatch["id"])
-        finally:
-            con.close()
+            session = _record_session(run, dispatch, session, source="herdr")
+    if not session and not dispatch.get("resumed_from"):
+        # Herdr often reports none for codex (#406), while codex prints it in
+        # its startup banner: read it there, before any prompt is sent.
+        found = _banner_session(pane, adapters.load_all().get(dispatch.get("adapter_id") or ""), ddir / "shell-ready")
+        if found:
+            session = _record_session(run, dispatch, found, source="output")
     _pane_ledger(run, dispatch, pane, agent=name, kind=herdr_kind, worktree=cwd, session_id=session)
     # A long brief pasted as the prompt does not land; a one-line pointer does.
     if worker and spec.get("resume_findings") is not None:
@@ -1211,6 +1207,20 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
                                           f"re-prompt it: office prompt {dispatch['id']} -- {shlex.quote(pointer)}")
     spec["prompt_landed"] = landed
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    if not session and landed and not dispatch.get("resumed_from"):
+        # The session's own transcript now records the prompt naming this brief.
+        session = _transcript_session(run, dispatch, spec, herdr_kind, cwd, since=sent_at)
+    if not session:
+        # Not a launch failure: the agent runs. Recorded where `office inspect` shows it.
+        con = db.connect()
+        try:
+            with db.transaction(con):
+                state.emit(con, run, "launch.session", f"{dispatch.get('task_id') or dispatch['id']}: no session id "
+                           f"was reported by herdr, the agent's startup banner or its transcript for {name}; "
+                           "office rerun --resume will refuse it", audience="runtime",
+                           task_id=dispatch.get("task_id"), dispatch_id=dispatch["id"])
+        finally:
+            con.close()
     log = open(ddir / "supervisor.log", "ab")
     try:
         watcher = subprocess.Popen(frontdoor.current_argv()[0] + ["_supervise", dispatch["id"]], cwd=str(cwd),
@@ -2081,6 +2091,119 @@ def _pane_ledger(run: dict, dispatch: dict, pane: str, *, agent: str | None = No
         fh.write(json.dumps(row) + "\n")
 
 
+# A harness's startup header block opens and closes with a rule line: dashes
+# (`codex exec`'s stream) or a box edge (codex's interactive banner, whose
+# lines sit between box sides). Session ids are read only inside one (#406).
+_ANSI_SEQ = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_HEADER_RULE = re.compile(r"-{8,}|[╭┌][─━].*[─━][╮┐]|[╰└][─━].*[─━][╯┘]")
+
+
+def _header_rule(line: str) -> bool:
+    return bool(_HEADER_RULE.fullmatch(line))
+
+
+def _header_text(line: str) -> str:
+    """A header line without the box sides an interactive banner draws."""
+    if len(line) >= 2 and line[0] in "│┃" and line[-1] in "│┃":
+        return line[1:-1].strip()
+    return line
+
+
+def banner_session(text: str | None, pattern, after: str | None = None) -> str | None:
+    """The session id a pane's startup screen shows inside a header block, by
+    the adapter's `session.output_pattern`. With `after`, only the screen below
+    the last occurrence of that text counts (this dispatch's own setup line, so
+    a banner left in a reused pane by an earlier agent is never read). One id
+    or none: two different ids on the screen are ambiguous, so neither is taken."""
+    if not text or pattern is None:
+        return None
+    lines = [_ANSI_SEQ.sub("", raw).strip() for raw in text.splitlines()]
+    if after:
+        # The setup line may wrap at the pane's width: find it with the line breaks removed.
+        flat, ends = "", []
+        for line in lines:
+            flat += line
+            ends.append(len(flat))
+        at = flat.rfind(after)
+        if at < 0:
+            return None
+        end = at + len(after)
+        lines = lines[next(i for i, e in enumerate(ends) if e >= end) + 1:]
+    found, inside = set(), False
+    for line in lines:
+        if _header_rule(line):
+            inside = not inside
+            continue
+        if inside:
+            match = pattern.match(_header_text(line))
+            if match:
+                found.add(match.group(1))
+    return found.pop() if len(found) == 1 else None
+
+
+def _banner_session(pane: str, adapter: dict | None, marker: Path) -> str | None:
+    """The session id in a just-started pane agent's banner, polled briefly
+    (the banner draws a moment after `agent start`). Read before any prompt is
+    sent, below this dispatch's own setup line: nothing an agent says counts."""
+    pattern = adapters.session_output_pattern(adapter)
+    if pattern is None:
+        return None
+    deadline = time.time() + float(os.environ.get("OFFICE_HERDR_SESSION_WAIT", "2"))
+    while True:
+        try:
+            proc = subprocess.run(["herdr", "pane", "read", pane, "--source", "visible", "--lines", "60"],
+                                  capture_output=True, text=True, timeout=10)
+            text = proc.stdout if proc.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            text = None
+        found = banner_session(text, pattern, after=str(marker))
+        if found or time.time() >= deadline:
+            return found
+        time.sleep(0.5)
+
+
+def _transcript_session(run: dict, dispatch: dict, spec: dict, harness: str | None, cwd: Path, *,
+                        since=None, con=None) -> str | None:
+    """Record the id from the harness's own transcript of the session that was
+    sent this dispatch's brief path, when the adapter declares that source.
+    With `con`, it is recorded through that connection (its caller may hold
+    the write lock); else through a connection of its own."""
+    from office import transcripts
+    adapter = adapters.load_all().get(dispatch.get("adapter_id") or dispatch.get("harness") or "")
+    if "transcript" not in (adapters.session_spec(adapter).get("sources") or []):
+        return None
+    harness = dispatch.get("harness") or harness
+    try:
+        found = transcripts.session_id(harness, marker=spec.get("prompt_file") or "",
+                                       cwd=_session_cwd(spec, harness, cwd),
+                                       since=since or dispatch.get("launched_at") or dispatch.get("started_at"))
+    except Exception:  # a session probe never fails a launch
+        return None
+    if not found:
+        return None
+    if con is None:
+        return _record_session(run, dispatch, found, source="transcript")
+    outcome = record_session(con, run, dispatch["id"], found, harness=dispatch.get("harness"), source="transcript")
+    if outcome in ("set", "same"):
+        return found
+    return state.get_dispatch(con, dispatch["id"]).get("session_id") if outcome == "mismatch" else None
+
+
+def backfill_session(con, run: dict, d: dict) -> str | None:
+    """A dispatch's session id: the recorded one, else one its own transcript
+    still proves (an id herdr and the banner never showed live). Never a guess:
+    None when no trustworthy source has it."""
+    if not d or d.get("session_id"):
+        return (d or {}).get("session_id")
+    try:
+        spec = json.loads((paths.run_dir(run["id"]) / "dispatches" / d["id"] / "launch.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not spec.get("prompt_file"):
+        return None
+    return _transcript_session(run, d, spec, d.get("harness"), Path(spec.get("cwd") or "."), con=con)
+
+
 def _capture_session(name: str) -> str | None:
     """The harness session id herdr detected for the agent (`agent_session.value`),
     polled briefly: detection lags `agent start` by a moment."""
@@ -2187,7 +2310,7 @@ class _SessionSniffer:
         *lines, self.buffer = self.buffer.split(b"\n")
         for raw in lines:
             line = self._ANSI.sub("", raw.decode("utf-8", "replace")).strip()
-            if re.fullmatch(r"-{8,}", line):
+            if _header_rule(line):
                 self.rules += 1
                 if self.rules >= 2:  # the header block is closed: the prompt follows
                     return self._stop("the header block closed without a session id line")
@@ -2196,7 +2319,7 @@ class _SessionSniffer:
                 if self.lead > self.BANNER_LINES:  # no header block opens this stream
                     return self._stop("no header block opened the stream")
             else:
-                found = self.pattern.match(line)
+                found = self.pattern.match(_header_text(line))
                 if found:
                     self._record(found.group(1))
                     return self._stop()
@@ -2213,10 +2336,15 @@ class _SessionSniffer:
                     _note(self.log_path, f"office: could not record session id {session}: {exc!r}")
 
 
-def _record_session(run: dict, dispatch: dict, session: str, *, source: str) -> None:
+def _record_session(run: dict, dispatch: dict, session: str, *, source: str) -> str | None:
+    """Record `session` for the dispatch; the id now recorded for it, or None
+    when `session` was not usable (malformed, another harness's)."""
     con = db.connect()
     try:
-        record_session(con, run, dispatch["id"], session, harness=dispatch.get("harness"), source=source)
+        outcome = record_session(con, run, dispatch["id"], session, harness=dispatch.get("harness"), source=source)
+        if outcome in ("set", "same"):
+            return session
+        return state.get_dispatch(con, dispatch["id"]).get("session_id") if outcome == "mismatch" else None
     finally:
         con.close()
 

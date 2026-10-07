@@ -206,6 +206,41 @@ def final_reply(harness: str | None, *, marker: str, cwd: str | Path | None = No
     return None
 
 
+_UUID = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
+
+
+def _transcript_session(path: Path) -> str | None:
+    """The session id a transcript records for itself: codex's `session_meta`
+    payload id (its file name ends with the same id), claude's `sessionId`."""
+    for row in _jsonl(path):
+        payload = row.get("payload") or {}
+        if row.get("type") == "session_meta" and isinstance(payload.get("id"), str):
+            return payload["id"]
+        if isinstance(row.get("sessionId"), str):
+            return row["sessionId"]
+    found = _UUID.search(path.stem)
+    return found.group(0) if found and path.stem.startswith("rollout-") else None
+
+
+def session_id(harness: str | None, *, marker: str, cwd: str | Path | None = None, since=None) -> str | None:
+    """The harness session id of the one session that was sent `marker` (the
+    dispatch's brief path) as a user prompt in `cwd`, read from that session's
+    own transcript metadata (#406). Never taken from conversation text; None
+    when no transcript, or more than one session, matches."""
+    if not marker:
+        return None
+    t = _epoch(since)
+    h = (harness or "").lower()
+    files: list[Path] = []
+    if h in ("claude", ""):
+        files += _claude_candidates(cwd, t)
+    if h in ("codex", ""):
+        files += _codex_candidates(t)
+    found = {_transcript_session(f) for f in files if _mentions(f, marker) and _prompted(f, marker, cwd)}
+    found.discard(None)
+    return found.pop() if len(found) == 1 else None
+
+
 def prompt_seen(harness: str | None, *, marker: str, cwd: str | Path | None = None, since=None) -> bool:
     """True once the session that was sent `marker` (the brief path) has logged
     it as a user prompt. That is the harness's own record that the prompt

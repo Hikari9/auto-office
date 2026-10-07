@@ -65,6 +65,19 @@ short-lived `office _job <id>` per runnable row; the job claims it atomically, w
 its result in a second transaction. A claim whose process is dead is reclaimed by the next
 `office` command (`status`, `resume`, or any command that enqueues). Nothing stays running.
 
+One job never has two attempts doing its work (#403, #404). `office _job` holds an exclusive
+flock on `jobs/<id>.lock` from before the claim until the attempt is settled; its worker and every
+check command it runs inherit the lock, so a replacement cannot start while any of them lives.
+Each claim carries a fresh `claim_token`, and every transaction an attempt opens first proves it
+still holds that claim: an attempt that lost it commits nothing (its result is a
+`job.stale_attempt` audit event). Liveness is alive, dead or unknown; only proof of death (a
+free lock, or for an older runtime's claim a gone or reused pid) reclaims, never an unreadable
+`ps`. A dead worker's claim is retried while attempts remain, else the job fails and its gate
+becomes UNAVAILABLE (a checks gate blocks its task, and `office resume` re-runs it). The
+supervisor records how its worker ended (exit code or signal, stderr tail) in the job log and
+the `job.retry` / `job.failed` event. A gate takes the first terminal result recorded for it; a
+later one is a `gate.duplicate_result` audit event and changes nothing.
+
 ## 3. Version identity and pinning
 
 `office --version` is exact: a wheel reports `3.1.0`; a source checkout reports
