@@ -158,10 +158,22 @@ characters of `[A-Za-z0-9_.:-]`).
 3. A repeated `id` with the same request returns the first receipt with `replayed: true` (HTTP 200) and never
    executes again. The same `id` with a different request gets `idempotency-conflict`.
 4. A receipt is recorded through T2's `commands.record` before anything runs.
-5. The exact target is re-validated against a fresh observer read. On failure the receipt becomes `failed` with a
+5. The exact target is re-validated against a fresh observer read, with checks chosen per kind rather than one
+   combined gate:
+   - issue kinds (`start_issue`, `queue_issue`): repository + issue identity (a known open issue) and execution
+     readiness, plus no live run (start) or no existing queue item for the issue (queue);
+   - run kinds (`resume_run`, `attach_run`): a non-terminal run and its capability;
+   - scheduler kinds (`pause`, `resume`, `set_priority`, `demote`, `set_auto_mode`): an existing queue item or run
+     plus runtime capability, never GitHub readiness;
+   - `change_route`: the current live dispatch;
+   - `chat_send`: the active orchestrator binding with a live agent on that pane;
+   - settings kinds: a known key and an editable tier.
+
+   T9 completes and tests the full table. On failure the receipt becomes `failed` with a
    named reason, and the API returns 409 with that reason and the receipt. Reasons include `run-missing`,
    `run-terminal`, `capability-missing`, `dispatch-not-current`, `harness-mismatch`,
-   `not-awaiting-plan-authorization`, `binding-ended`, `agent-not-live`, `repo-not-ready`, `issue-has-live-run`,
+   `not-awaiting-plan-authorization`, `binding-ended`, `agent-not-live`, `repo-not-ready`, `repo-unknown`,
+   `issue-unknown`, `issue-already-queued`, `item-missing`, `unknown-key`, `issue-has-live-run`,
    `issue-has-resumable-run`, `launcher-unavailable` and `expectation-failed`. `expect` keys (for example `phase`,
    `liveness`, `dispatch_id`, `route`, `plan_version`) must equal the freshly read values.
 6. It executes in the background (HTTP 202) and the receipt ends `completed`, `failed` or `unknown`.
@@ -181,9 +193,11 @@ Exit 0 maps to `completed`, an Office refusal exit (1 to 63) maps to `failed`, a
 | `set_priority` | as above | `level` | `office queue priority` |
 | `set_auto_mode` | `{[run_id]}` | `mode: on/off` | `office queue auto` |
 | `change_route` | `{run_id, dispatch_id}` | `route` (same harness), `quote` | `office amend route <D> --as … --quote … --restart` |
-| `approve_plan` | `{run_id}` | `quote` (the user's typed words) | `office approve plan --quote …`, only while Office awaits plan authorization |
 | `chat_send` | `{host, run_id, session}` | `text`, `resend_of` | `dispatch.submit_prompt` to the orchestrator's pane |
 | `settings_set` / `settings_unset` | `{tier: machine/repository, key[, repo/run_id]}` | `value` | `office config --user/--repo …` in that checkout |
+
+Plan authorization is not a web command: the browser shows the copyable `office approve plan --quote "<words>"`
+command for the user to run.
 
 `start_issue` is refused when the issue has a live run (attach to it instead). When the issue has a resumable run it
 is refused unless `payload.new_run_confirmed` is true and the runtime allows a new run.
