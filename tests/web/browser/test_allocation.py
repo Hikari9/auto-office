@@ -233,7 +233,7 @@ def test_keyboard_operable_and_usable_at_1100(page, served):
 def test_unknown_states_are_shown_not_guessed(page, served):
     url, svc = served
     svc.host_probe = lambda: {"cpu": {"status": "ok", "value": 37.4, "unit": "percent"},
-                              "ram": {"status": "ok", "value": 0.42, "unit": "fraction_used"}}
+                              "ram": {"status": "ok", "value": 0.42, "unit": "fraction_used"}}  # hostmetrics vocabulary
     add_item(svc, "issue:odd", "issue", ref="synth-org-0/repo-00#7", title="Odd priority", priority="weird")
     write(svc, "INSERT OR REPLACE INTO sched_state(scope, auto_mode, reason, updated_at) VALUES(?, 'bogus', 't', 'x')",
           (f"run:{RUN}",))

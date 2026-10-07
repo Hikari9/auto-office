@@ -114,6 +114,12 @@ def orchestrator_route(conf: dict, quota: dict | None, available: Callable[[str]
             "reason": f"{reason} and no allowed fallback (scheduler.orchestrator_fallbacks) has known quota"}
 
 
+def _host_telemetry(host: dict) -> dict:
+    """hostmetrics reports a taken sample as `ok`; the web vocabulary calls it `measured`."""
+    return {name: {**m, "status": "measured"} if isinstance(m, dict) and m.get("status") == "ok" else m
+            for name, m in host.items()}
+
+
 class CommandRefused(Exception):
     """A command refused before or at validation; `reason` is a stable name."""
 
@@ -483,7 +489,7 @@ class Service:
         for c in command_rows:
             ent["commands"][f"command:{c['id']}"] = _receipt_view(c)
         scalars = {
-            "host": {"id": identity.host(self.host_id), "telemetry": host},
+            "host": {"id": identity.host(self.host_id), "telemetry": _host_telemetry(host)},
             "scheduler": {"active": plan["active"], "host": plan["host"], "auto_mode": auto},
             "fixture": self.fixture,
             "launcher": {"available": launcher_reason is None, "reason": launcher_reason},

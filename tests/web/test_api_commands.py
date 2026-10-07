@@ -489,3 +489,12 @@ def test_settings_need_a_known_key(svc):
                            {"value": 1}))
     assert err.reason == "unknown-key"
     assert svc.executor.calls == []
+
+
+def test_hostmetrics_ok_sample_projects_as_measured(svc):
+    svc.host_probe = lambda: {"cpu": {"status": "ok", "value": 0.62, "unit": "load_per_core", "source": "loadavg"},
+                              "ram": {"status": "unavailable", "value": None, "unit": "fraction_used"}}
+    svc.poll(force=True)
+    tel = svc.snapshot()["scalars"]["host"]["telemetry"]
+    assert tel["cpu"] == {"status": "measured", "value": 0.62, "unit": "load_per_core", "source": "loadavg"}
+    assert tel["ram"]["status"] == "unavailable"

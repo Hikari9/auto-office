@@ -220,12 +220,14 @@ function renderKpis() {
     && a.state.process !== "exited").length;
   const cpu = ((s.scalars.host || {}).telemetry || {}).cpu || {};
   const measured = cpu.status === "measured" && typeof cpu.value === "number";
+  const perCore = cpu.unit === "load_per_core";
   const kpi = (tone, value, label, testid) => h("div", { class: `kpi ${tone}`, dataset: { testid } },
     h("div", { class: "v", text: value }), h("div", { class: "l", text: label }));
   $("kpis").replaceChildren(
     kpi("", String(running), running ? "Running issues" : "No active runs", "kpi-running"),
     kpi("green", String(agents), "Active agents", "kpi-agents"),
-    kpi("purple", measured ? `${Math.round(cpu.value)}%` : "—", measured ? "CPU load" : "CPU telemetry unavailable", "kpi-cpu"));
+    kpi("purple", measured ? `${Math.round(perCore ? cpu.value * 100 : cpu.value)}%` : "—",
+      measured ? (perCore ? "CPU load (per core)" : "CPU load") : "CPU telemetry unavailable", "kpi-cpu"));
 }
 
 // ------------------------------------------------------------------ table

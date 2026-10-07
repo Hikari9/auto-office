@@ -75,6 +75,10 @@ def test_shell_layout_rails_and_freshness_without_external_requests(page, fx):
         assert "ago" in page.text_content("[data-testid=office-age]")
         assert "ago" in page.text_content("[data-testid=github-age]")
         assert page.locator("[data-testid=kpi-cpu]").text_content().endswith("CPU telemetry unavailable")
+        fx.host_probe = lambda: {"cpu": {"status": "ok", "value": 0.62, "unit": "load_per_core"}}
+        fx.poll(force=True)
+        page.wait_for_function("document.querySelector('[data-testid=kpi-cpu] .v').textContent === '62%'")
+        assert page.text_content("[data-testid=kpi-cpu] .l") == "CPU load (per core)"
         page.click("text=Agents")
         assert page.locator("[data-testid=surface-agents]").is_visible()  # Agents is a real surface since T7
         assert not page.locator("[data-testid=surface-issues]").is_visible()

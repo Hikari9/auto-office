@@ -141,7 +141,7 @@ function table(ctx, title, testid, entries, offset, empty) {
 
 function sample(ctx, name, s, pressure) {
   const h = ctx.h;
-  const measured = s && (s.status === "ok" || s.status === "measured") && typeof s.value === "number";
+  const measured = s && s.status === "measured" && typeof s.value === "number";
   const value = !measured ? `${name} unavailable`
     : String(s.unit).startsWith("fraction") ? `${Math.round(s.value * 100)}%`
       : s.unit === "percent" ? `${Math.round(s.value)}%` : `${s.value} ${s.unit || ""}`.trim();
