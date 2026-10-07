@@ -511,6 +511,9 @@ def _reply_text(d: dict, ddir: Path, output: Path) -> str:
         return output.read_text(encoding="utf-8", errors="replace")
     if d.get("launcher") in ("herdr", "external"):
         return ""
+    last_message = output.with_name("last-message.txt")
+    if last_message.is_file() and last_message.stat().st_size:
+        return last_message.read_text(encoding="utf-8", errors="replace")
     return _log_text(d, ddir)
 
 
@@ -531,6 +534,12 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
     name = dispatch_mod.herdr_agent_name(d["id"])
     errors = parsed.errors or ["no reply file"]
     text = ""
+    if d.get("launcher") in ("sync", "process", "process-fallback"):
+        log = Path(d.get("log_path") or ddir / "output.log")
+        return text, parsed, (f"reviewer {d['id']} ({d.get('triple')}) left no valid reply file: "
+                              f"{'; '.join(errors[:3])}; no re-prompt was possible because the session was headless "
+                              f"({d['launcher']}). Inspect {log}, {output}, {output.with_name('last-message.txt')} "
+                              f"and {ddir / 'reply.invalid-*.txt'}; rerun the review or waive the gate")
     for n in range(1, limit + 1):
         if d.get("launcher") != "herdr" or not _agent_alive(name):
             break  # no live session to ask: the orchestrator decides (never a substitute)

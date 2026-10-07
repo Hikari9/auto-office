@@ -237,6 +237,7 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
             deny = read_scope.write_denials(cwd, output) if kind in read_scope.READER_KINDS else []
             arg = arg.replace("{write_deny}", "".join("," + r for r in deny))
         arg = (arg.replace("{model}", model).replace("{effort}", mapped_effort or "")
+               .replace("{last_message}", str(Path(output).with_name("last-message.txt") if output else Path(cwd) / "last-message.txt"))
                .replace("{cwd_toml}", toml_path(cwd))
                .replace("{sandbox_dir_toml}", toml_path(sandbox_dir))
                .replace("{sandbox_dir}", str(sandbox_dir))
