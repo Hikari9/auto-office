@@ -76,7 +76,7 @@ def test_shell_layout_rails_and_freshness_without_external_requests(page, fx):
         assert "ago" in page.text_content("[data-testid=github-age]")
         assert page.locator("[data-testid=kpi-cpu]").text_content().endswith("CPU telemetry unavailable")
         page.click("text=Agents")
-        assert page.locator("[data-testid=surface-other]").is_visible()
+        assert page.locator("[data-testid=surface-agents]").is_visible()  # Agents is a real surface since T7
         assert not page.locator("[data-testid=surface-issues]").is_visible()
         page.click(".product-rail >> text=Issues")
         assert page.locator("[data-testid=surface-issues]").is_visible()
