@@ -97,3 +97,11 @@ def test_every_test_starts_outside_the_repository_and_its_primary_checkout():
     cwd = Path.cwd().resolve()
     assert ROOT not in (cwd, *cwd.parents)
     assert paths.repo_identity(cwd) is None
+
+
+def test_the_suite_parses_yaml_with_libyaml_when_it_can():
+    """tests/conftest.py swaps in the C loader for the session (the suite is several times slower without it)."""
+    import yaml
+    if not getattr(yaml, "__with_libyaml__", False):
+        pytest.skip("PyYAML built without libyaml")
+    assert yaml.safe_load.__name__ == "<lambda>"
