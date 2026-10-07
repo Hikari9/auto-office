@@ -863,11 +863,12 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
                 # Every retry and every new worktree fails the same way: the executor would start
                 # with no dependencies and burn its session finding that out.
                 text = worktree_setup.stop_text(setup, dispatch["task_id"])
-                _end_dispatch(con, run, dispatch, "setup_failed", "worktree setup command not found", stop=False)
+                # Blocked first: ending the dispatch otherwise relaunches a task still `launching`.
                 with db.transaction(con):
                     state.update_task(con, run["id"], dispatch["task_id"], status="blocked", pause_reason=text)
                     state.emit(con, run, "task.blocked", f"{dispatch['task_id']} {text}", task_id=dispatch["task_id"],
                                dispatch_id=dispatch["id"])
+                _end_dispatch(con, run, dispatch, "setup_failed", "worktree setup command not found", stop=False)
                 return {"dispatch_id": dispatch["id"], "stopped": "worktree-setup-failed"}
             if setup["exit"] != 0:
                 _launch_notice(run, dispatch, worktree_setup.failure_text(setup))

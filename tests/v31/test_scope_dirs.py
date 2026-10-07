@@ -71,3 +71,10 @@ def test_a_task_scoped_to_a_directory_submits_its_nested_files(env):
     sha = con.execute("SELECT commit_sha FROM revisions WHERE task_id='T1'").fetchone()[0]
     changed = env.git("diff", "--name-only", f"{sha}^", sha).split()
     assert changed == ["pkg/a.py", "pkg/sub/b.py"], changed
+
+
+def test_a_glob_entry_ending_in_a_slash_is_left_as_written():
+    """Only a plain directory name is rewritten: `*/` must not become a repo-wide `*/**`."""
+    for entry in ("*/", "src/*/", "a?/", "x[ab]/"):
+        assert _scope(PLAN_ONE.replace("scope: calc.py", f"scope: {entry}")) == [entry]
+        assert not planfile.path_in_scope("a/b.py", [entry]), entry

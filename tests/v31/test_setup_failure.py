@@ -48,14 +48,18 @@ def test_command_not_found_stops_the_dispatch_before_the_executor_starts(env):
     reason = task["pause_reason"]
     assert "office-no-such-tool --install" in reason and "exited 127" in reason, reason
     assert "office doctor" in reason and "not started" in reason, reason
-    d = _rows(env, "SELECT status, terminal_classification, ended_at FROM dispatches WHERE kind='executor'")[0]
+    dispatches = _rows(env, "SELECT status, terminal_classification, ended_at FROM dispatches WHERE kind='executor'")
+    assert len(dispatches) == 1, dispatches  # stopped at once: no relaunch of a failure that repeats
+    d = dispatches[0]
     assert d["ended_at"] and d["terminal_classification"] == "setup_failed" and d["status"] == "failed", d
+    assert not _rows(env, "SELECT 1 FROM events WHERE kind='task.relaunch'")
     # No agent was launched: neither the brief nor a launch record exists.
     ddir = next(env.state.glob("**/dispatches/*"))
     assert not (ddir / "brief.md").exists() and not (ddir / "launch.json").exists()
     assert json.loads((ddir / "setup.json").read_text())["exit"] == 127
-    assert [e for e in _rows(env, "SELECT summary FROM events WHERE kind='task.blocked'")
-            if "office-no-such-tool" in e["summary"] or "setup" in e["summary"]]
+    blocked = [e["summary"] for e in _rows(env, "SELECT summary FROM events WHERE kind='task.blocked'")]
+    assert len(blocked) == 1 and "office-no-such-tool --install" in blocked[0] and "was not started" in blocked[0], blocked
+    assert "start a new run" in reason  # worktree.setup is pinned to the run
 
 
 def test_other_setup_failures_still_launch_with_the_notice(env):
@@ -116,7 +120,9 @@ def test_doctor_reports_pointers_whose_run_is_missing_or_terminal(env):
     assert f"active run pointer deadbeef: stale (run missing)" in out, out
     assert "active run pointer feedface: stale (run closed)" in out, out
     assert f"active run pointer {live[:8]}" not in out
-    assert code == 1
+    from office import doctor, hooks
+    con = env.con()
+    assert len(hooks.stale_pointers(con, env.repo)) == 2
     assert ghost.exists() and ended.exists()  # reporting alone removes nothing
     code, out = env.office("doctor", "--fix")
     assert "stale (run missing) - removed" in out, out
@@ -150,3 +156,69 @@ def test_session_start_says_nothing_when_every_pointer_is_stale(env):
     con.commit()
     _pointer(env, live)
     assert _hook(env) == ""
+
+
+def test_doctor_counts_a_stale_pointer_as_a_problem_until_fixed(env):
+    from office import doctor
+    from office.result import Result
+    start_inline(env)
+    _pointer(env, GHOST)
+    assert doctor._stale_active_pointers(Result(), env.repo, fix=False) == 1
+    assert doctor._stale_active_pointers(Result(), env.repo, fix=True) == 0
+    assert doctor._stale_active_pointers(Result(), env.repo, fix=False) == 0
+
+
+def test_doctor_fix_touches_only_pointers(env, tmp_path):
+    """A stray file, a symlink, or a symlinked `active` directory is not a pointer and is never removed."""
+    start_inline(env)
+    active = env.repo / ".office" / "active"
+    stray = active / "notes.txt"
+    stray.write_text("mine\n")
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "deadbeef-00000000000000000000000000000001").write_text("keep\n")
+    (active / "feedface-22222222222222222222222222222222").symlink_to(victim / "deadbeef-00000000000000000000000000000001")
+    env.office("doctor", "--fix")
+    assert stray.exists() and (victim / "deadbeef-00000000000000000000000000000001").exists()
+    real = active
+    moved = env.repo / ".office" / "active-real"
+    real.rename(moved)
+    real.symlink_to(victim)
+    env.office("doctor", "--fix")
+    assert (victim / "deadbeef-00000000000000000000000000000001").exists()
+
+
+def test_doctor_does_not_believe_a_missing_run_in_an_empty_db(env):
+    """An empty runs.db is more likely another data home than a repository without runs."""
+    from office import doctor
+    from office.result import Result
+    start_inline(env)
+    live, = _run_ids(env)
+    con = env.con()
+    con.execute("DELETE FROM runs")
+    con.commit()
+    assert (env.repo / ".office" / "active" / live).exists()
+    res = Result()
+    assert doctor._stale_active_pointers(res, env.repo, fix=True) == 1
+    assert (env.repo / ".office" / "active" / live).exists() and "left alone" in res.lines[0], res.lines
+
+
+def test_session_start_keeps_a_legacy_run_and_fails_open_on_an_unreadable_db(env):
+    start_inline(env)
+    live, = _run_ids(env)
+    for p in (env.repo / ".office" / "sessions").glob("*.json"):
+        p.unlink()
+    legacy = env.tmp / "legacy-run"
+    legacy.mkdir()
+    (legacy / "state.json").write_text(json.dumps({"phase": "executing"}))
+    refs = env.repo / ".office" / "runs"
+    refs.mkdir()
+    (refs / "abcd1234.ref").write_text(str(legacy))
+    _pointer(env, GHOST)
+    out = _hook(env)
+    assert "2 active Office runs here" in out, out  # the live run and the legacy one; the ghost is ignored
+    (env.data / "runs.db").write_bytes(b"not a database")
+    out = _hook(env)
+    assert "3 active Office runs here" in out, out  # unverifiable: every pointer is kept
+    (env.repo / ".office" / "active" / live).write_text("closed\tgoal\n")
+    assert "2 active Office runs here" in _hook(env)  # a pointer that says closed is ignored without the db

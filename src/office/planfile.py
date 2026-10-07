@@ -83,10 +83,10 @@ def _split_list(value: str) -> list[str]:
 
 
 def normalize_scope(entry: str) -> str:
-    """A scope entry ending in `/` names a directory: it means `dir/**` (#334)."""
+    """A scope entry ending in `/` names a directory: it means `dir/**` (#334). A glob entry is left as written."""
     mark = SHARED if entry.startswith(SHARED) else ""
     body = entry[len(mark):]
-    return f"{mark}{body}**" if body.endswith("/") else entry
+    return f"{mark}{body}**" if body.endswith("/") and not re.search(r"[*?\[]", body) else entry
 
 
 def parse(text: str) -> ParsedPlan:
@@ -331,8 +331,7 @@ def scopes_overlap(a: list[str], b: list[str]) -> bool:
         for pb in b:
             if is_shared(pa) and is_shared(pb):
                 continue  # both append to a shared registry; compose resolves it
-            la = literal_prefix(normalize_scope(pa.lstrip(SHARED)))
-            lb = literal_prefix(normalize_scope(pb.lstrip(SHARED)))
+            la, lb = literal_prefix(pa.lstrip(SHARED)), literal_prefix(pb.lstrip(SHARED))
             if la.startswith(lb) or lb.startswith(la):
                 return True
     return False

@@ -194,3 +194,75 @@ def test_new_amendment_entries_never_reuse_a_dropped_id(env):
     with con:
         flagged = amend._envelope_changes(con, run, parsed)
     assert flagged == ["X4"], flagged
+
+
+# ---- what the orchestrator was actually shown
+
+@pytest.mark.approved
+def test_events_shown_while_an_older_one_is_held_do_not_end_wait_again(env):
+    """Piggyback shows urgent events ahead of an older informational one and remembers each by seq."""
+    _go(env)
+    _emit(env, "dispatch", "fyi, older")
+    for n in range(4):
+        _emit(env, "gate.attention", f"urgent {n}")
+    code, out = env.office("inspect", "run", check=0)
+    assert all(f"urgent {n}" in out for n in range(4)), out
+    code, out = _wait(env)
+    assert code == 124, out
+
+
+@pytest.mark.approved
+def test_an_actionable_event_behind_a_backlog_of_informational_ones_still_ends_wait(env):
+    _go(env)
+    for n in range(210):
+        _emit(env, "dispatch", f"fyi {n}")
+    _emit(env, "task.paused", "T1 needs you")
+    code, out = _wait(env)
+    assert code == 0 and "T1 needs you" in out, out  # urgent first, not the 6 oldest
+
+
+@pytest.mark.approved
+def test_the_session_start_hook_does_not_count_as_showing_the_pending_item(env):
+    """The hook cuts status to a byte budget: a pending item it may have cut off is still new to `wait`."""
+    import subprocess
+    import sys
+    _go(env)
+    _set_envelope(env, [ENTRY])
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    con.execute("INSERT OR REPLACE INTO session_bindings(harness, session_id, run_id, bound_at, bound_by) "
+                "VALUES('claude','s1',?,'2026-01-01','test')", (run_id,))
+    con.commit()
+    sessions = env.repo / ".office" / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / "claude-s1.json").write_text(json.dumps({"run_id": run_id}))
+    payload = json.dumps({"session_id": "s1", "cwd": str(env.repo), "source": "startup"})
+    proc = subprocess.run([sys.executable, "-m", "office", "hook", "SessionStart", "--harness", "claude", "--office-managed"],
+                          input=payload, capture_output=True, text=True, cwd=env.repo)
+    assert proc.returncode == 0 and "X1" in proc.stdout, (proc.stdout, proc.stderr)
+    code, out = _wait(env)
+    assert code == 0 and "X1" in out, out
+
+
+# ---- entry ids and the plan key
+
+@pytest.mark.approved
+def test_declining_the_highest_entry_never_frees_its_id(env):
+    from office import amend, state
+    _go(env)
+    _set_envelope(env, [{**ENTRY, "needs_authorization": False}, {**ENTRY, "id": "X2", "action": "second"}])
+    env.office("decline", "X2", "--reason", "gone", check=0)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    parsed = SimpleNamespace(requirements={"named_actions": [{"action": "third", "preconditions": []}]})
+    with con:
+        assert amend._envelope_changes(con, run, parsed) == ["X3"]
+
+
+def test_an_entry_whose_preconditions_the_plan_changed_can_be_declined(env):
+    """amend keys entries on (action, preconditions): the plan naming the action under other
+    preconditions is a different entry, so the old one has left the plan."""
+    approved_run(env, plan=PLAN_ACTION, executor=[{}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    _set_envelope(env, [{**ENTRY, "preconditions": ["old precondition"]}])
+    code, out = env.office("decline", "X1", "--reason", "preconditions changed", check=0)
+    assert "dropped" in out and _envelope(env) == [], out

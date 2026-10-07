@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import uuid
 from pathlib import Path
 
@@ -112,11 +113,14 @@ def _envelope_entry(con, run, entry_id, quote) -> Result:
     return Result(lines=[f"{entry_id} ({hit[0]['action']}) authorized"], next="exceptions only; office status")
 
 
-def plan_names(con, run: dict, action: str) -> bool:
-    """Whether the current plan still names this action under its requirements."""
+def plan_names(con, run: dict, entry: dict) -> bool:
+    """Whether the current plan still names this envelope entry: the same action with the same
+    preconditions, the key `amend` uses to tell a new entry from an old one."""
     from office import planfile
     plan = state.current_plan(con, run["id"])
-    return bool(plan) and any(a["action"] == action for a in planfile.parse(plan["body"]).requirements.get("named_actions") or [])
+    key = (entry.get("action"), tuple(entry.get("preconditions") or []))
+    return bool(plan) and any((a["action"], tuple(a.get("preconditions") or [])) == key
+                              for a in planfile.parse(plan["body"]).requirements.get("named_actions") or [])
 
 
 def decline_entry(con, run: dict, entry_id: str, reason: str | None) -> Result:
@@ -138,9 +142,9 @@ def decline_entry(con, run: dict, entry_id: str, reason: str | None) -> Result:
         if not hit.get("needs_authorization"):
             raise Refused("entry-authorized", f"{entry_id} ({hit['action']}) is authorized; an authorized entry stays",
                           next_step="office status")
-        if plan_names(con, run, hit["action"]):
+        if plan_names(con, run, hit):
             raise Refused("entry-in-plan", f"{entry_id} ({hit['action']}) is still named by the plan",
-                          next_step=f'remove it from the plan (office amend plan --contract -- "drop {hit["action"]}"), '
+                          next_step=f"remove it from the plan (office amend plan --contract -- {shlex.quote('drop ' + hit['action'])}), "
                                     f'or ask the user to authorize it: office approve {entry_id} --quote "<words>"')
         state.update_run(con, run["id"], envelope=[e for e in envelope if e is not hit])
         con.execute("INSERT INTO authorizations(id, run_id, kind, target, requirements_version, envelope_json, authorized_by, "

@@ -374,6 +374,14 @@ def contract_from_planner(con, run: dict, amendment_id: str | None, changes: dic
             state.update_task(con, run["id"], t["id"], status=gates.derive_status(con, run, t), pause_reason=None)
 
 
+def _next_entry_number(con, run: dict, envelope: list[dict]) -> int:
+    """One past every entry id this run ever had: a declined or replaced id is never reused, so a
+    recorded approval or decline of `X3` always names one action."""
+    used = [e.get("id") for e in envelope] + [r[0] for r in con.execute(
+        "SELECT target FROM authorizations WHERE run_id=? AND kind IN ('envelope-entry','envelope-decline')", (run["id"],))]
+    return max((int(i[1:]) for i in used if re.fullmatch(r"X\d+", i or "")), default=0) + 1
+
+
 def _envelope_changes(con, run: dict, parsed) -> list[str]:
     old = {(e.get("action"), tuple(e.get("preconditions") or [])) for e in (run.get("envelope") or [])}
     flagged = []
@@ -381,8 +389,7 @@ def _envelope_changes(con, run: dict, parsed) -> list[str]:
     for a in parsed.requirements.get("named_actions") or []:
         key = (a["action"], tuple(a.get("preconditions") or []))
         if key not in old:
-            top = max((int(e["id"][1:]) for e in envelope if re.fullmatch(r"X\d+", e.get("id") or "")), default=0)
-            entry = {"id": f"X{top + 1}", **a, "needs_authorization": True}
+            entry = {"id": f"X{_next_entry_number(con, run, envelope)}", **a, "needs_authorization": True}
             envelope.append(entry)
             flagged.append(entry["id"])
     if flagged:

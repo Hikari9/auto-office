@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -50,19 +52,48 @@ def test_a_touch_without_a_size_change_is_still_a_write(guard, tmp_path):
     assert guard.office_dir_snapshot(tmp_path) != before
 
 
-def test_suite_leaves_the_real_office_dir_alone(env):
-    """An Office run in the fixture repository writes its `.office/` there, never here."""
-    from conftest import PLAN_ONE, start_inline
-    before = Path(ROOT / ".office").exists()
-    start_inline(env, plan=PLAN_ONE, gear="direct+review")
-    env.office("status", check=0)
-    assert (env.repo / ".office").exists()
-    assert Path(ROOT / ".office").exists() == before
-
-
 def test_a_patched_pathlib_is_no_false_alarm(guard, tmp_path, monkeypatch):
     """The check runs while a test's own monkeypatches may still be active (test_self_review_ledger
     patches Path.exists to True): an absent `.office/` stays absent."""
     monkeypatch.setattr(Path, "exists", lambda self: True)
     monkeypatch.setattr(Path, "is_dir", lambda self: True)
     assert guard.office_dir_snapshot(tmp_path) is None
+
+
+def test_check_fails_the_test_that_created_or_wrote_the_dir(guard, tmp_path):
+    before = guard.office_dir_snapshot(tmp_path)
+    guard.check_office_dir(tmp_path, before, "t::quiet")  # nothing changed: no failure
+    (tmp_path / ".office").mkdir()
+    with pytest.raises(pytest.fail.Exception, match=r"t::made created the real repository's .*\.office"):
+        guard.check_office_dir(tmp_path, before, "t::made")
+    before = guard.office_dir_snapshot(tmp_path)
+    (tmp_path / ".office" / "x").write_text("a")
+    with pytest.raises(pytest.fail.Exception, match=r"t::wrote wrote the real repository's"):
+        guard.check_office_dir(tmp_path, before, "t::wrote")
+
+
+def test_the_autouse_fixture_is_wired_to_the_check(tmp_path):
+    """A copy of the suite's conftest in a scratch repository: a test that writes that repository's
+    `.office/` errors at teardown naming itself, and one that does not passes. Never touches the real repo."""
+    scratch = tmp_path / "repo"
+    (scratch / "tests").mkdir(parents=True)
+    (scratch / "tests" / "conftest.py").write_text((ROOT / "tests" / "conftest.py").read_text())
+    (scratch / "tests" / "test_leak.py").write_text(
+        "from pathlib import Path\n"
+        "ROOT = Path(__file__).resolve().parents[1]\n"
+        "def test_leaks():\n    (ROOT / '.office').mkdir()\n    (ROOT / '.office' / 'plan').write_text('x')\n"
+        "def test_quiet():\n    pass\n")
+    proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:xdist", str(scratch / "tests")],
+                          capture_output=True, text=True, cwd=tmp_path)
+    out = proc.stdout + proc.stderr
+    assert "2 passed" in out and "1 error" in out, out  # the leaking test itself passed; its teardown errors
+    assert "test_leak.py::test_leaks created the real repository's" in out, out
+
+
+def test_every_test_starts_outside_the_repository_and_its_primary_checkout():
+    """A command that falls back to the working directory finds no repository, instead of this one
+    (or the primary checkout a linked worktree belongs to)."""
+    from office import paths
+    cwd = Path.cwd().resolve()
+    assert ROOT not in (cwd, *cwd.parents)
+    assert paths.repo_identity(cwd) is None

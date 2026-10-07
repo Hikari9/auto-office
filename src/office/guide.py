@@ -99,7 +99,7 @@ def next_action(con, run: dict) -> str:
     for e in run.get("envelope") or []:
         if e.get("needs_authorization"):
             from office import authority
-            drop = ("" if authority.plan_names(con, run, e["action"])
+            drop = ("" if authority.plan_names(con, run, e)
                     else f'; the plan no longer names it: office decline {e["id"]} --reason "<why>" drops it')
             return (f'new authority entry {e["id"]} ({e["action"]}) needs authorization: ask the user (native question '
                     f'tool), then office approve {e["id"]} --quote "<words>"{drop}')
@@ -193,7 +193,9 @@ def _plan_next_convergence(con, run: dict, rs: dict) -> str | None:
     return None
 
 
-def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> Result:
+def status(con, run: dict, *, resumed: bool = False, verbose: bool = False, record: bool = True) -> Result:
+    """`record`: this output reaches the orchestrator whole, so the pending item counts as shown (the
+    session-start hook cuts it to a byte budget and passes False)."""
     worker = os.environ.get("OFFICE_DISPATCH_ID")
     if worker:
         return worker_status(con, run, worker)
@@ -235,15 +237,11 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     from office import questions
     for q in questions.recorded(con, run):
         res.add(f"question: {q}")
-    events = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=6)
-    for e in events:
+    for e in _show_events(con, run, limit=6):
         res.add(f"· {e['summary']}")
-    if events:
-        from office import db
-        with db.transaction(con):
-            state.consume_events(con, run["id"], events)
     res.next = next_action(con, run)
-    _record_pending(con, run, _pending_digest(con, run, res.next))
+    if record:
+        _record_pending(con, run, _pending_digest(con, run, res.next))
     res.data = {"run_id": run["id"], "phase": run["phase"], "office_version": run["office_version"],
                 "requirements_version": run["requirements_version"], "plan_version": run["plan_version"],
                 "tasks": {t["id"]: t["status"] for t in tasks}, "plan_review": {k: v for k, v in rs.items() if k != "open_defects"},
@@ -468,12 +466,21 @@ def _record_pending(con, run: dict, digest: int) -> None:
                     (run["id"], PENDING_CONSUMER, digest, now_iso()))
 
 
+def _unread_urgent(con, run_id: str) -> list[dict]:
+    """Every unread orchestrator event that failed or blocks something, however many informational ones precede it."""
+    row = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer='orchestrator'", (run_id,)).fetchone()
+    kinds = sorted(_URGENT_KINDS)
+    return [dict(r) for r in con.execute(
+        f"SELECT * FROM events WHERE run_id=? AND seq>? AND audience='orchestrator' "
+        f"AND (kind IN ({','.join('?' * len(kinds))}) OR kind LIKE '%.failed') ORDER BY seq",
+        (run_id, row[0] if row else 0, *kinds))]
+
+
 def _actionable_news(con, run: dict) -> bool:
-    """An unread orchestrator event that failed or blocks something. Informational events wait for the
-    next status; they never end `office wait` alone."""
+    """An unread, unshown actionable event. Informational events wait for the next status; they never
+    end `office wait` alone."""
     held = _held_seqs(con, run["id"])
-    return any(_urgent(e) and e["seq"] not in held
-               for e in state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=200))
+    return any(e["seq"] not in held for e in _unread_urgent(con, run["id"]))
 
 
 def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
@@ -596,17 +603,8 @@ def piggyback(con, run: dict, res: Result) -> None:
         if block:
             res.notices.extend(block)
         return
-    from office import db
-    unread = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=200)
-    held = _held_seqs(con, run["id"])
-    shown = _notice_batch([e for e in unread if e["seq"] not in held], limit=4)
-    if shown:
-        res.notices.extend(f"· {e['summary']}" for e in shown)
-        with db.transaction(con):
-            _consume(con, run["id"], unread, held | {e["seq"] for e in shown})
-            signals = [e["seq"] for e in shown if e["kind"] == state.SIGNAL_KIND]
-            if signals:
-                state.advance_cursor(con, run["id"], state.SIGNAL_CONSUMER, max(signals))
+    shown = _show_events(con, run, limit=4)
+    res.notices.extend(f"· {e['summary']}" for e in shown)
 
 
 # Kinds that mean something failed or waits on the orchestrator. Everything else is informational.
@@ -654,3 +652,22 @@ def _consume(con, run_id: str, unread: list[dict], consumed: set[int]) -> None:
     for seq in consumed:
         if seq > through:
             state.advance_cursor(con, run_id, _SEEN + str(seq), seq)
+
+
+def _show_events(con, run: dict, *, limit: int) -> list[dict]:
+    """The unread orchestrator events to show now (failures and blockers first, `limit` in all), marked
+    read. What does not fit stays unread for the next command."""
+    from office import db
+    unread = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=200)
+    seen = {e["seq"] for e in unread}
+    unread += [e for e in _unread_urgent(con, run["id"]) if e["seq"] not in seen]
+    unread.sort(key=lambda e: e["seq"])
+    held = _held_seqs(con, run["id"])
+    shown = _notice_batch([e for e in unread if e["seq"] not in held], limit=limit)
+    if shown:
+        with db.transaction(con):
+            _consume(con, run["id"], unread, held | {e["seq"] for e in shown})
+            signals = [e["seq"] for e in shown if e["kind"] == state.SIGNAL_KIND]
+            if signals:
+                state.advance_cursor(con, run["id"], state.SIGNAL_CONSUMER, max(signals))
+    return shown

@@ -145,8 +145,9 @@ def stop_text(result: dict, task_id: str) -> str:
     """Why a dispatch stops before its executor starts, naming the failing command and the doctor check."""
     note = tail(Path(result["log"]), 1)
     return (f"worktree setup `{result['command']}` exited 127 (command not found){': ' + note if note else ''}; the executor "
-            f"was not started. Install the missing tool or fix worktree.setup (office doctor checks it), then office rerun "
-            f"{task_id} --fresh; log {result['log']}")
+            f"was not started. worktree.setup is pinned when a run starts: install the missing tool, then office rerun "
+            f"{task_id} --fresh; or fix worktree.setup in .auto-office/config.yaml and start a new run (office doctor "
+            f"checks the current config); log {result['log']}")
 
 
 def record(run: dict, kind: str, result: dict, *, task_id: str | None = None, dispatch_id: str | None = None) -> None:

@@ -14,13 +14,32 @@ _SCRUBBED_PREFIXES = ("OFFICE_", "HERDR_", "AUTO_OFFICE_")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def office_dir_snapshot(root: Path):
+@pytest.fixture(scope="session", autouse=True)
+def _libyaml_safe_load():
+    """Parse YAML with libyaml for the whole session.
+
+    Office loads the catalog, config and adapter YAML many times per command, and
+    pure-Python PyYAML made that most of every `office start`. The C loader
+    returns identical data.
+    """
+    if not getattr(yaml, "__with_libyaml__", False):
+        yield
+        return
+    original = yaml.safe_load
+    yaml.safe_load = lambda stream: yaml.load(stream, Loader=yaml.CSafeLoader)
+    try:
+        yield
+    finally:
+        yaml.safe_load = original
+
+
+def office_dir_snapshot(root):
     """What the repository's `.office/` holds: None when absent, else every entry's size and mtime.
     A test that creates or writes it compares unequal."""
     # os-level calls only: a test may patch pathlib while this runs around it.
     base = os.path.join(root, ".office")
     try:
-        os.lstat(base)
+        top_stat = os.lstat(base)
     except FileNotFoundError:
         return None
     entries = []
@@ -31,7 +50,32 @@ def office_dir_snapshot(root: Path):
             except OSError:
                 continue
             entries.append((os.path.relpath(os.path.join(top, name), root), st.st_size, st.st_mtime_ns))
-    return (os.lstat(base).st_mtime_ns, *sorted(entries))
+    return (top_stat.st_mtime_ns, *sorted(entries))
+
+
+def check_office_dir(root, before, nodeid: str) -> None:
+    """Fail `nodeid` when `root/.office` is not as `before` (a snapshot) left it."""
+    if office_dir_snapshot(root) != before:
+        pytest.fail(f"{nodeid} {'created' if before is None else 'wrote'} the real repository's "
+                    f"{Path(root) / '.office'}; point it at a temporary repository (the `env` fixture) and a temporary "
+                    "OFFICE_STATE_HOME", pytrace=False)
+
+
+@pytest.fixture(autouse=True)
+def _real_repo_office_dir_untouched(request):
+    """A test never creates or writes the real repository's `.office/` (plans, sessions, hook state).
+    Office state belongs in the test's own repository and state home; a leak there is the test's bug."""
+    before = office_dir_snapshot(REPO_ROOT)
+    yield
+    check_office_dir(REPO_ROOT, before, request.node.nodeid)
+
+
+@pytest.fixture(autouse=True)
+def _cwd_outside_the_real_repo(tmp_path_factory, monkeypatch):
+    """Run every test from an empty directory outside the repository. A command that falls back to
+    the working directory then resolves no repository at all, instead of the real one (and the
+    primary checkout this worktree belongs to)."""
+    monkeypatch.chdir(tmp_path_factory.mktemp("cwd"))
 
 
 @pytest.fixture(autouse=True)
@@ -46,19 +90,6 @@ def _clean_office_identity(request, monkeypatch):
     if "v31" not in Path(str(request.fspath)).parts:
         monkeypatch.setenv("OFFICE_PINNED_LEGACY", "1")
     yield
-
-
-@pytest.fixture(autouse=True)
-def _real_repo_office_dir_untouched(request):
-    """A test never creates or writes the real repository's `.office/` (plans, sessions, hook state).
-    Office state belongs in the test's own repository and state home; a leak there is the test's bug."""
-    before = office_dir_snapshot(REPO_ROOT)
-    yield
-    after = office_dir_snapshot(REPO_ROOT)
-    if after != before:
-        pytest.fail(f"{request.node.nodeid} {'created' if before is None else 'wrote'} the real repository's "
-                    f"{REPO_ROOT / '.office'}; point it at a temporary repository (the `env` fixture) and a temporary "
-                    "OFFICE_STATE_HOME", pytrace=False)
 
 
 # Tiers: the default run is unit-only. integration, legacy and slow are

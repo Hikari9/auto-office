@@ -252,19 +252,28 @@ def _probe_all(con) -> list[str]:
 
 def _stale_active_pointers(res: Result, primary: Path, fix: bool) -> int:
     """Report `.office/active/<run>` pointers whose run is missing or terminal; `--fix` removes them
-    (a pointer is a projection, never the run). Returns the number still outstanding."""
+    (a pointer is a projection, never the run). A missing run is only believed when runs.db holds some
+    run at all: an empty db is more likely another data home than a repository with no runs.
+    Returns the number still outstanding."""
     from office import hooks
     con = db.connect()
     try:
         stale = hooks.stale_pointers(con, primary)
+        known = con.execute("SELECT EXISTS(SELECT 1 FROM runs)").fetchone()[0]
     finally:
         con.close()
+    left = 0
     for pointer, why in stale:
-        if fix:
+        removable = fix and (why != "run missing" or known)
+        if removable:
             pointer.unlink(missing_ok=True)
-        res.add(f"active run pointer {pointer.name[:8]}: stale ({why})" + (" - removed" if fix else f" in {pointer.parent}"
-                                                                              "; office doctor --fix removes it"))
-    return 0 if fix else len(stale)
+        else:
+            left += 1
+        res.add(f"active run pointer {pointer.name[:8]}: stale ({why})"
+                + (" - removed" if removable else f" in {pointer.parent}; "
+                   + ("office doctor --fix removes it" if known or why != "run missing" else
+                      "runs.db holds no runs (another data home?), so it is left alone")))
+    return left
 
 
 _SH_BUILTINS = {"cd", "export", "set", "unset", "test", "[", "true", "false", "echo", "printf", ":", ".", "source",
