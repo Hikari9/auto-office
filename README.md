@@ -551,6 +551,37 @@ office doctor --probe-vision
 
 ---
 
+## Web UI
+
+A local workstation over every Auto Office run on this machine: Issues, Agents, Allocation and Settings.
+
+```bash
+office web serve                  # foreground, http://127.0.0.1:8765/
+office web start                  # background daemon; pid file under <state home>/web/
+office web status                 # running?, URL and pid
+office web stop
+office web serve --fixture small  # demo on a synthetic workspace (or --fixture large)
+```
+
+`--port` changes the port. `--host` accepts loopback only (`127.0.0.1`, `localhost`, `::1`). The fixture demo uses a temp Office home with fake GitHub, launcher and executor, shows a `FIXTURE MODE` marker, and never touches your runs.db or GitHub.
+
+What it can do:
+
+- Show GitHub issues joined to Office runs, PRs, phase, weighted task progress, gates and freshness, with filter chips (Open + running, Incoming, Needs attention, Done).
+- Start, Auto Queue, Resume or Attach an issue's orchestrator in a Herdr pane. Every issue without a run also shows its copyable `office start ...` command.
+- Pause, resume, reprioritize and demote scheduler work, toggle auto mode, change a running agent's model and effort (same harness), and chat with an orchestrator.
+- Edit machine and repository settings through `office config`, with the source of every effective value.
+
+What it cannot do:
+
+- Merge, land, deploy, or open a shell. There is no such command kind.
+- Authorize a plan. When Office waits for plan authorization, the UI shows the copyable `office approve plan --quote "<words>"` command for you to run in a terminal.
+- Show CPU, RAM, quota or progress it did not measure. Unknown values are shown as unavailable.
+
+Security model: the server binds loopback only, checks the `Host` header (DNS rebinding) and `Origin`, and requires a per-process random token on every POST. runs.db stays the lifecycle authority and GitHub stays the issue and PR authority. The browser holds no authoritative state, and every web mutation runs the `office` CLI and is recorded as a receipt in runs.db. See [docs/web-ui.md](docs/web-ui.md).
+
+---
+
 ## Command map
 
 ```text

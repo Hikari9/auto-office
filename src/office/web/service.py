@@ -766,6 +766,13 @@ class Service:
 
     def _v_queue_issue(self, cmd: Command):
         repo, number, _ = self._issue_target(cmd)
+        ref = f"{repo}#{number}"
+        queued = self.observer.read(lambda s: s.rows(
+            "SELECT id FROM sched_items WHERE kind='issue' AND lower(ref)=lower(?)", (ref,))
+            if s.has("sched_items") else [])
+        if queued:
+            raise CommandRefused("already-queued", f"{ref} is already queue item {queued[0]['id']}",
+                                 data={"item": queued[0]["id"]})
         priority = cmd.payload.get("priority") or "normal"
         if priority not in scheduler.PRIORITY_WEIGHTS:
             raise CommandRefused("bad-payload", "payload.priority must be urgent, high, normal or low", http=400)
@@ -914,6 +921,8 @@ class Service:
             raise CommandRefused("tier-not-editable", "target.tier must be machine or repository", http=400)
         if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_]+(\.[A-Za-z0-9_-]+)*", key):
             raise CommandRefused("bad-target", "target.key must be a dotted config key", http=400)
+        if not _known_setting(key):
+            raise CommandRefused("unknown-setting", f"{key} is not a configurable key", http=400)
         if tier == "machine":
             return tier, self.state_home
         run = self._run(cmd.target) if cmd.target.get("run_id") else None
@@ -960,6 +969,20 @@ class Service:
 
 
 # ------------------------------------------------------------------ helpers
+
+def _known_setting(key: str) -> bool:
+    """A key the shipped default config defines, or an entry of a map it ships empty (e.g. web.checkouts.<repo>)."""
+    from office import config as cfg
+    node: Any = {k: v for k, v in (cfg.load_yaml(cfg.default_config_path()) or {}).items()
+                 if k not in cfg.NON_CONFIGURABLE_KEYS}
+    for part in key.split("."):
+        if not isinstance(node, dict):
+            return False
+        if part not in node:
+            return node == {}
+        node = node[part]
+    return True
+
 
 def _probe_quota(conf: dict) -> dict:
     """Known quota of the orchestrator route and its fallbacks, from each adapter's quota probe."""

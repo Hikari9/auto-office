@@ -228,6 +228,18 @@ def _write_run(con, rng, i: int, spec: dict, repos: list, runs_dir: Path, prs: l
             reply.write_text("VERDICT: PASS\n", encoding="utf-8")
             specials["awaiting_ingestion"] = did
         if k == 0:
+            # Visual verification of the first task: running, reply written awaiting ingestion, or done.
+            visual = "done" if terminal else ("running", "awaiting", "done")[i % 3]
+            did = f"D{counts['dispatches']:07d}"
+            insert_dispatch(con, did, run_id, role="browser_verifier" if i % 2 else "visual_reviewer", task_id=tid,
+                            status="done" if visual == "done" else "running", ended=visual == "done", at=at + 4,
+                            route=ROUTES[0])
+            counts["dispatches"] += 1
+            if visual == "awaiting":
+                reply = state_dir / "dispatches" / did / "reply.txt"
+                reply.parent.mkdir(parents=True, exist_ok=True)
+                reply.write_text("VERDICT: PASS\n", encoding="utf-8")
+                specials.setdefault("visual_awaiting_ingestion", did)
             did = f"D{counts['dispatches']:07d}"
             insert_dispatch(con, did, run_id, role="plan_reviewer", status="done", ended=True, at=at,
                             route=ROUTES[1])
