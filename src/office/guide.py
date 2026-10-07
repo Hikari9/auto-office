@@ -501,7 +501,7 @@ def _waiting_on(con, run: dict, task: dict) -> str:
                           "AND status IN ('queued','delivered') ORDER BY created_at", (rid, task["id"])).fetchall():
         holder = dl["dispatch_id"]
         stale = holder and holder != task["current_dispatch_id"]
-        why = amend.delivery_note(con, rid, task["id"], dl["amendment_id"], holder)
+        why = amend.delivery_note(con, rid, task["id"], dl["amendment_id"], holder, dl["status"])
         parts.append(f"{dl['amendment_id']} {dl['status']}{' (' + why + ')' if why else ''} ack by {holder or 'next session'}"
                      + (" (not the current session; it can ack it)" if stale else ""))
     if held:

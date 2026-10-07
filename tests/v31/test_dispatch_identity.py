@@ -411,6 +411,30 @@ def test_office_prompt_allows_a_pane_in_the_same_tasks_worktree_held_by_another_
     assert "task T1" in prompting.prompt(light.con, light.run, "D1", "hello").lines[0] and sent == ["hello"]
 
 
+def test_a_reservation_of_a_dispatch_with_no_row_does_not_hold_the_pane(light):
+    from office import dispatch
+    assert dispatch._reserved_busy({"reserved": {"w1:p9": "D9"}}) == set()
+    assert dispatch._reserved_busy({"reserved": {"w1:p9": "D1"}}) == {"w1:p9"}
+
+
+def test_the_deepest_worktree_owns_a_cwd_inside_nested_worktrees(light):
+    from office import dispatch
+    inner = light.wt("D1") / "nested"
+    light.con.execute("INSERT INTO dispatches(id, run_id, role, task_id, status, worktree, started_at) "
+                      "VALUES('D5','r-ident','executor','T5','running',?,'2026-01-01')", (str(inner),))
+    assert dispatch.cwd_owner(light.con, light.run["id"], str(inner / "src"))["id"] == "D5"
+    assert dispatch.cwd_owner(light.con, light.run["id"], str(light.wt("D1")))["id"] == "D1"
+
+
+def test_a_pane_in_no_dispatchs_worktree_is_not_blamed_on_the_dispatch_itself(light, monkeypatch):
+    from office import dispatch
+    notices, typed = _start_stubs(light, monkeypatch)
+    pane = dispatch._herdr_pane(light.run, light.wt("D1"), dispatch_id="D1")
+    monkeypatch.setenv("FAKE_HERDR_CWD_LIE", "/tmp")
+    assert _start(light, "D1", pane)["prompt_landed"] is False
+    assert "no dispatch worktree of this run" in notices[0] and "belongs to dispatch D1" not in notices[0], notices
+
+
 # ------------------------------------------------------------------ integration tier: real launches
 
 

@@ -118,7 +118,7 @@ def _task(con, run, tid) -> Result:
         lines.append(f"finding {f['code']} {f['gate_kind']} {f['severity']} {f['state']} {f['location'] or ''} {f['summary'][:100]}")
     for dl in con.execute("SELECT amendment_id, dispatch_id, status, target_version, delivered_count FROM deliveries WHERE run_id=? AND task_id=?",
                           (run["id"], tid)).fetchall():
-        why = amend.delivery_note(con, run["id"], tid, dl["amendment_id"], dl["dispatch_id"])
+        why = amend.delivery_note(con, run["id"], tid, dl["amendment_id"], dl["dispatch_id"], dl["status"])
         count = f"carried {dl['delivered_count']}x on the worker's own commands"
         lines.append(f"amendment {dl['amendment_id']} -> p{dl['target_version']} {dl['status']} "
                      f"({count + '; ' + why if why else count})")

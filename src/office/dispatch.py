@@ -1166,7 +1166,7 @@ def _pane_mismatch(run: dict, dispatch: dict, pane: str, cwd: Path, *, check_cwd
             con.close()
     except Exception:
         pass
-    other = f"dispatch {_who(owner['id'], owner['task_id'])}" if owner else (f"dispatch {_who(holder)}" if holder else "no dispatch of this run")
+    other = f"dispatch {_who(owner['id'], owner['task_id'])}" if owner else "no dispatch worktree of this run"
     return f"pane {pane} is in {actual}, which belongs to {other}, not {me}'s worktree {cwd}"
 
 

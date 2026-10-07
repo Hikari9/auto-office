@@ -497,7 +497,7 @@ def record_notify(con, run: dict, payload: dict, *, delivered: bool, reason: str
     with db.transaction(con):
         held = con.execute("SELECT status FROM deliveries WHERE run_id=? AND task_id=? AND dispatch_id=? AND amendment_id=? "
                            "AND status IN ('queued','delivered')", (run["id"], tid, did, amendment_id)).fetchone()
-        if held is None:
+        if held is None or (held["status"] == "delivered" and not delivered):  # a failure is no news once delivered
             return
         if delivered:
             con.execute("UPDATE deliveries SET status='delivered', delivered_at=COALESCE(delivered_at, ?) "
@@ -508,11 +508,14 @@ def record_notify(con, run: dict, payload: dict, *, delivered: bool, reason: str
                    payload={"amendment_id": amendment_id, "delivered": delivered, "reason": reason})
 
 
-def delivery_note(con, run_id: str, task_id: str, amendment_id: str, dispatch_id: str | None) -> str:
-    """The latest recorded outcome of notifying the dispatch that holds this amendment, or ""."""
+def delivery_note(con, run_id: str, task_id: str, amendment_id: str, dispatch_id: str | None, status: str = "queued") -> str:
+    """The latest recorded outcome of notifying the dispatch that holds this amendment, or "".
+    Once the delivery is delivered (by a landed prompt or the worker's own command) a note that
+    says it was not is stale and not shown."""
     row = con.execute("SELECT payload_json FROM events WHERE run_id=? AND task_id=? AND kind='amendment.notify' "
-                      "AND dispatch_id IS ? AND json_extract(payload_json, '$.amendment_id')=? ORDER BY seq DESC LIMIT 1",
-                      (run_id, task_id, dispatch_id, amendment_id)).fetchone()
+                      "AND dispatch_id IS ? AND json_extract(payload_json, '$.amendment_id')=? "
+                      "AND (? = 'queued' OR json_extract(payload_json, '$.delivered')=1) ORDER BY seq DESC LIMIT 1",
+                      (run_id, task_id, dispatch_id, amendment_id, status)).fetchone()
     return (json.loads(row["payload_json"]).get("reason") or "") if row else ""
 
 

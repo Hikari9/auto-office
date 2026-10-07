@@ -214,3 +214,52 @@ def test_unit_a_landed_prompt_never_revives_a_delivery_that_is_no_longer_waiting
     dispatch.job_notify_worker(bare, {"id": "r1"}, _job())
     assert bare.execute("SELECT status FROM deliveries").fetchone()["status"] == status
     assert bare.execute("SELECT count(*) FROM events WHERE kind='amendment.notify'").fetchone()[0] == 0
+
+
+def test_unit_a_failed_nudge_after_the_delivery_was_delivered_adds_no_failure_note(bare, monkeypatch):
+    from office import amend, dispatch
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **k: "landed")
+    dispatch.job_notify_worker(bare, {"id": "r1"}, _job())
+    bare.execute("UPDATE dispatches SET launcher='process' WHERE id='D1'")
+    dispatch.job_notify_worker(bare, {"id": "r1"}, _job())
+    assert amend.delivery_note(bare, "r1", "T1", "A1", "D1") == "prompt landed in pane p1"
+
+
+def test_unit_a_stale_failure_note_is_not_shown_once_the_worker_took_the_delivery_itself(bare, monkeypatch):
+    from office import amend, dispatch
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **k: "held")
+    dispatch.job_notify_worker(bare, {"id": "r1"}, _job())
+    assert "typed but unsubmitted" in amend.delivery_note(bare, "r1", "T1", "A1", "D1")
+    bare.execute("UPDATE deliveries SET status='delivered'")  # the worker's own `office status` carried it
+    assert amend.delivery_note(bare, "r1", "T1", "A1", "D1", "delivered") == ""
+
+
+def test_unit_unreachable_reasons(bare):
+    from office import amend
+    assert amend.unreachable_reason(None) == "dispatch not found"
+    assert amend.unreachable_reason({"launcher": "herdr", "pane_id": "p1", "status": "exited"}) == "dispatch is exited, not running"
+    assert amend.unreachable_reason({"launcher": "herdr", "pane_id": "p1", "status": "running"}) == "agent not alive in pane p1"
+
+
+@pytest.mark.parametrize("unblock", [False, True])
+def test_unit_a_pane_herdr_places_in_another_tasks_worktree_gets_no_amendment_text(bare, tmp_path, monkeypatch, unblock):
+    import test_dispatch_identity as ident
+    from office import amend, dispatch, gates
+    (tmp_path / "bin").mkdir()
+    state = ident.install_fake(tmp_path / "bin", tmp_path, monkeypatch, delay="0")
+    t1, t2 = tmp_path / "wt" / "T1", tmp_path / "wt" / "T2"
+    bare.execute("UPDATE dispatches SET worktree=? WHERE id='D1'", (str(t1),))
+    bare.execute("INSERT INTO dispatches(id, run_id, role, task_id, status, worktree, started_at) "
+                 "VALUES('D2','r1','executor','T2','running',?,'2026-01-02')", (str(t2),))
+    ident.pane_state(state, "p1", cwd=str(t2))  # herdr says D1's recorded pane sits in T2's worktree
+    undelivered = []
+    monkeypatch.setattr(gates, "_agent_alive", lambda name: True)
+    monkeypatch.setattr(dispatch, "_amendment_undelivered", lambda *a: undelivered.append(a))
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **k: pytest.fail("typed into another task's pane"))
+    job = _job()
+    job["payload"]["unblock"] = unblock
+    assert dispatch.job_notify_worker(bare, {"id": "r1"}, job) == {"sent": False}
+    note = amend.delivery_note(bare, "r1", "T1", "A1", "D1")
+    assert note.startswith("not sent: pane p1 is in ") and "dispatch D2 (T2)" in note, note
+    assert bool(undelivered) is unblock  # a blocked worker's blocker stays, with its notice
+
