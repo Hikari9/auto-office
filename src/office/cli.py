@@ -31,6 +31,8 @@ Auto Office {ver}
   office submit                     planner/executor: submit your plan or your work
   office amend <scope> -- "<delta>" change the plan (scope: plan, T2, or T2,T3)
   office amend <scope> --no-review --reason "<why>" -- "<delta>"   ordinary amendment, no plan review
+  office amend route <task> --as <harness>/<model>[@effort] --quote "<words>" [--restart]
+                                    re-record a live dispatch's model (same harness); --restart relaunches it
   office ack <amendment-id>         worker: record that you applied a delivered amendment
   office rerun <task> --resume|--fresh [--reroute]
                                     after a worker ends: continue its session, or start a new one with the findings
@@ -205,7 +207,11 @@ def _parser() -> argparse.ArgumentParser:
                    help="orchestrator veto: an ordinary amendment queues no plan review (needs --reason)")
     s.add_argument("--reason", help="why plan review is vetoed (with --no-review)")
     s.add_argument("--requirements", action="store_true", help="a user-originated requirements change")
-    s.add_argument("--quote", help="the user's words (requirements changes, defect redirects)")
+    s.add_argument("--quote", help="the user's words (requirements changes, defect redirects, route changes)")
+    s.add_argument("--as", dest="route_as", metavar="HARNESS/MODEL[@EFFORT]",
+                   help="amend route: the live dispatch's new model/effort (same harness)")
+    s.add_argument("--restart", action="store_true",
+                   help="amend route: interrupt the agent and relaunch it on the new route")
     s.add_argument("--drop-criterion", action="append", default=[], metavar="TEXT",
                    help="requirements: remove the frozen done criterion this names")
     s.add_argument("--add-criterion", action="append", default=[], metavar="TEXT",
@@ -577,6 +583,11 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return submit.submit(con, run, cwd=cwd, plan_path=args.plan, redirect=_redirect(args),
                              request_scope=args.request_scope,
                              reason=" ".join(args.reason or []).strip())
+    if cmd == "amend" and args.scope == "route":
+        from office import routechange
+        rest = [*(args.delta or []), *[u for u in unknown if u != "--"]]
+        return routechange.change_route(con, run, rest[0] if len(rest) == 1 else None, args.route_as, args.quote,
+                                        restart=args.restart)
     if cmd == "amend":
         from office import amend
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()
