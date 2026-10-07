@@ -352,6 +352,8 @@ def test_failed_start_snapshots_and_names_a_codex_hook_trust_screen(env, monkeyp
     spec = json.loads((ddir / "launch.json").read_text())
     assert spec["failed_herdr_screen"] == "Codex 'Hooks need review'"
     assert spec["failed_herdr_pane"] in " ".join(events)
+    from office import dispatch
+    assert spec["failed_herdr_pane"] in dispatch._busy_panes(run)
 
 
 def test_busy_pane_never_settles_as_done(env, monkeypatch):

@@ -1154,6 +1154,19 @@ def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pa
     spec["failed_herdr_snapshot"] = str(tail) if view else None
     spec["failed_herdr_screen"] = screen
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    # A pane can still contain the blocked harness TUI even though Herdr never
+    # registered an agent. Reserve it for the rest of the run so a concurrent
+    # dispatch cannot recycle it and destroy the evidence/recovery surface.
+    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
+    try:
+        layout = json.loads(tab_file.read_text()) if tab_file.is_file() else {}
+        failed = list(layout.get("failed_panes") or [])
+        if pane not in failed:
+            failed.append(pane)
+            layout["failed_panes"] = failed
+            atomic_write_json(tab_file, layout)
+    except (OSError, ValueError):
+        pass
     observed = (f"; pane {pane} is waiting on {screen}" if screen
                 else f"; pane {pane} snapshot saved to {tail}" if view
                 else f"; pane {pane} could not be read")
@@ -1962,10 +1975,17 @@ def relabel_task_panes(run: dict, task_id: str) -> None:
 def _busy_panes(run: dict) -> set:
     con = db.connect()
     try:
-        return {r["pane_id"] for r in con.execute("SELECT pane_id FROM dispatches WHERE run_id=? AND launcher='herdr' "
+        busy = {r["pane_id"] for r in con.execute("SELECT pane_id FROM dispatches WHERE run_id=? AND launcher='herdr' "
                                                   "AND status IN ('launching','running')", (run["id"],)).fetchall()}
     finally:
         con.close()
+    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
+    try:
+        layout = json.loads(tab_file.read_text()) if tab_file.is_file() else {}
+        busy.update(layout.get("failed_panes") or [])
+    except (OSError, ValueError):
+        pass
+    return busy
 
 
 def _pane_is_shell(pane: str) -> bool:
