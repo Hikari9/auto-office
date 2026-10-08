@@ -86,7 +86,11 @@ A task's `scope:` under convergence-v1: the module or domain directories it owns
 _Avoid_: file list, write list
 
 **Hard seam**:
-Requirements, authority, ownership, dependency, interface, or acceptance. A repair or plan revision that moves one is never APPROVED cleanup.
+Requirements, authority, ownership, dependency, interface, or acceptance. A reviewer never answers APPROVED for a repair that moves one. It does not reopen a closed plan review (#418).
+
+**Initial plan review**:
+The one plan-review cycle a run's gear funds, open from the first submit until APPROVED, its round cap (3 unless the user set `office start --plan-review-rounds N`), or a waiver closes it. RECHECK revisions iterate inside it. Once closed, later amendments belong to the planner/orchestrator and are never reviewed again; at the cap the orchestrator owns the remaining findings and records a disposition for each. Only the user reopens review (`office review plan --quote ...`, a user-requested cycle).
+_Avoid_: re-review, plan rereview
 
 **Lane**:
 An ownership/composition lane: tasks joined by `depends` or sharing a `lane:` name, composed together once all are accepted. The unit of convergence review. Id `L-<lane name or first task>`.
@@ -100,10 +104,10 @@ The one independent review of a lane's or shared scope's composed commit, funded
 _Avoid_: code review (unqualified), integration review
 
 **Substantive round**:
-A completed review in the current cycle. Each RECHECK sequence stops after 3; the user then chooses `escalate`, `continue`, `waive` or `stop` (`office decide`). Reviewer failures, malformed replies, capture retries and evidence recovery spend no round.
+A completed review in the current cycle. Each RECHECK sequence stops after 3. For a lane the user then chooses `escalate`, `continue`, `waive` or `stop` (`office decide`); for plan review the cycle closes and the orchestrator owns the findings. Reviewer failures, malformed replies, capture retries and evidence recovery spend no round.
 
 **Disposition**:
-The recorded outcome of a non-blocking finding: `fixed`, `dismissed`, `follow-up`, or `fix` (route an APPROVED cleanup repair that is not re-reviewed unless it moves a hard seam). Landing and close wait until every APPROVED finding has one.
+The recorded outcome of a non-blocking finding, or of a plan finding the orchestrator owns after plan review's round cap: `fixed`, `dismissed`, `follow-up`, or `fix` (route an APPROVED cleanup repair; a lane repair that moves a hard seam is reviewed again). Landing and close wait until every such finding has one.
 
 **Waiver** (landing-authority bound):
 Acceptance of an unmet required convergence or visual review. Only landing authority grants one: the user, or the orchestrator when the user delegated landing (end state `merge`/`e2e` or a recorded merge authorization). It keeps the underlying verdict, binds to the scope's composed commit, and appears on the archive receipt.

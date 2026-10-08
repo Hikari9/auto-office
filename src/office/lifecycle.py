@@ -37,7 +37,8 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
           sets: list[str] | None = None, harness: str | None = None, session: str | None = None,
           base: str | None = None, planner: str | None = None, issue: str | None = None,
           no_prs: bool = False, end_state: str | None = None, deploy: dict | None = None,
-          benchmark_refresh: bool = False, from_run: str | None = None) -> Result:
+          benchmark_refresh: bool = False, from_run: str | None = None,
+          plan_review_rounds: int | None = None) -> Result:
     source = None
     if from_run:
         # #337: moving old work onto the current review contract is an explicit,
@@ -79,6 +80,15 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         gates = cfg.resolve_gates(gear, risk["high"], config)
     except ValueError as exc:
         raise Usage("bad-config", f"config is invalid: {exc}", next_step="fix review.contract, then retry")
+    if plan_review_rounds is not None:
+        # The user's intake choice (#418): the initial plan review's round cap,
+        # pinned for the run's life. Config never stands in for it.
+        if not gates["plan_review"]:
+            raise Usage("no-plan-review", f"gear {gear} funds no plan review, so it has no rounds to set",
+                        next_step="drop --plan-review-rounds, or pick a gear that funds plan review")
+        from office import plans
+        gates["plan_review_max_rounds"] = plans.check_round_cap(plan_review_rounds)
+        gates["plan_review_rounds_by"] = "user"
     base_sha = paths.git(top, "rev-parse", base or "HEAD")
     run_id = new_run_id()
     sdir = paths.run_dir(run_id)
@@ -88,7 +98,7 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
     exact = version.current()
     ver = version.release_line(exact)  # the run is pinned to MAJOR.MINOR; plugin_commit keeps the exact creator
     planner_mode = planner or ("dedicated" if gates["dedicated_planner"] else "inline")
-    plan_review = {"required": bool(gates["plan_review"]), "ended": False}
+    plan_review = {"required": bool(gates["plan_review"]), "ended": False, "lifecycle": "initial"}
     frozen = {"goal": goal.strip(), "done_criteria": [], "blast_radius": blast_radius,
               "non_goals": [], "named_actions": []}
     if source:
@@ -139,6 +149,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                         "VALUES(?,?,?,?,?,?)", (run_id, 1, dumps(frozen), "start", None, now))
             run = state.get_run(con, run_id)
             state.emit(con, run, "run.started", f"run started: {goal.strip()[:80]}")
+            if gates.get("plan_review_rounds_by") == "user":
+                state.emit(con, run, "plan.review_rounds", f"the user set the initial plan review to at most "
+                           f"{gates['plan_review_max_rounds']} substantive round(s)",
+                           payload={"max_rounds": gates["plan_review_max_rounds"]})
             if source:
                 from office import contract
                 state.emit(con, run, "run.derived", f"derived from run {short(source['id'])} "
@@ -233,6 +247,7 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
                 from office import convergence, plans
                 convergence.retry_blocked(con, state.get_run(con, run["id"]))
                 current = state.get_run(con, run["id"])
+                # Retries only a round of an open cycle; a closed one stays closed (plans.can_auto_queue).
                 if (current.get("plan_review") or {}).get("status") in ("unavailable", "attention") and current["plan_version"]:
                     plans.queue_plan_review(con, current, current["plan_version"])
     jobs.kick(con, run["id"])

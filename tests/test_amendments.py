@@ -381,7 +381,7 @@ def test_a_reason_without_no_review_is_a_usage_error(veto_env):
 def test_no_review_is_refused_for_contract_and_requirements_amendments(veto_env, extra, scope):
     _start(veto_env, approved=True)
     code, out = _veto(veto_env, *extra, scope=scope)
-    assert code != 0 and "always get review" in out and "next:" in out, (code, out)
+    assert code != 0 and "ordinary amendment only" in out and "next:" in out, (code, out)
     assert _plan_version(veto_env) == 1
     assert len(_plan_gates(veto_env)) == 1
     assert not _rows(veto_env, "SELECT 1 FROM events WHERE kind IN ('plan.review_skipped','requirements.changed')")

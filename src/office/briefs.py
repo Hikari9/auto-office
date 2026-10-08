@@ -520,13 +520,14 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
 
 
 def plan_review_brief(run: dict, plan: dict, requirements: dict, open_defects: list[dict], rereview: bool,
-                      carried: list[dict] | None = None, round_no: int | None = None) -> str:
+                      carried: list[dict] | None = None, round_no: int | None = None,
+                      max_rounds: int | None = None) -> str:
     if contract.is_convergence(run):
         out = [
             "ROLE independent plan reviewer. Change nothing except your reply file. You did not write this plan.",
             f"GOAL {run['goal']}",
             f"PLAN p{plan['version']}" + (" (revised; re-review)" if rereview else "")
-            + (f" | ROUND {round_no} of {contract.MAX_ROUNDS} substantive rounds" if round_no else ""),
+            + (f" | ROUND {round_no} of {max_rounds or contract.MAX_ROUNDS} substantive rounds" if round_no else ""),
             "REQUIREMENTS (frozen):",
         ]
         for k in ("done_criteria", "blast_radius", "non_goals", "named_actions"):

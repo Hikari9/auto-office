@@ -115,10 +115,10 @@ continue with the installed runtime. A failed or offline check is informational 
   registries several tasks touch (gate manifests, endpoint/grant lists, policy maps, shared mocks) go under each
   task's `shared:`. Tasks that must land together share a `lane:`; lanes sharing an outcome, a `converge:`.
 - Ordinary amendments (decomposition, ordering, acceptance detail, tests) are yours:
-  `office amend <T2|plan> -- "<delta>"`. When review of one adds nothing (a wording fix, a reorder
-  that moves no seam), veto it: `office amend plan --no-review --reason "doc-only wording" -- "<delta>"`
-  makes the next plan version and queues no plan review (the reason is recorded; a review already
-  running is untouched). Contract and requirements amendments always get review.
+  `office amend <T2|plan> -- "<delta>"`. Plan review reviews the initial plan only: once it closes
+  (APPROVED, its round cap, or a waiver), no amendment of any kind is reviewed again; you own them.
+  While it is still open, a revision is its next round; to skip that for a trivial one:
+  `office amend plan --no-review --reason "doc-only wording" -- "<delta>"`.
   Scope, interfaces, ownership, and authority are contract amendments: `office amend <scope> --contract -- "<request>"`. Requirements change only on the
   user's words: `office amend requirements --quote "<words>" -- "<change>"`.
 - A paused or blocked task names its blocker and what was preserved: resolve it, or take the decision to the user.
@@ -135,14 +135,19 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
   review), RECHECK (producers repair blocking findings; the same reviewer rechecks) or INTAKE_GAP (ask the user
   the missing decision now). UNAVAILABLE and other runtime failures are not verdicts: `office resume`, no round spent.
 - Plan RECHECK holds only the tasks its blocking findings name: revise `PLAN.md`, then
-  `office amend plan --contract -- "<what changed>"`; dispatch unaffected work meanwhile.
+  `office amend plan --contract -- "<what changed>"`; dispatch unaffected work meanwhile. At the plan
+  round cap (3, or the user's `office start --plan-review-rounds N`) plan review closes unapproved and
+  you own the findings: fix each in the plan or accept it, then `office disposition plan:<code>
+  fixed|dismissed|follow-up -- "<rationale>"`. Do not ask the user just because the rounds ran out;
+  a fix that changes requirements or authority still needs them. Another plan review happens only when
+  the user asks: `office review plan --quote "<words>" [--rounds N]`.
 - A task is accepted on its own checks. Once a lane's tasks (joined by `depends` or `lane:`) are all
   accepted, Office composes them and runs one convergence review, plus a visual review for user-visible
   acceptance; lanes sharing a boundary then get one shared-scope review. `office inspect convergence`.
 - Findings never relaunch anything on their own. A RECHECK routes every blocking finding to its owning
   tasks at once: run `office rerun <task> --resume|--fresh` for each, in parallel.
-- After 3 RECHECK rounds nothing runs. Ask the user at once with the remaining findings, attempts, risk
-  and your recommendation, then `office decide <scope|plan> escalate|continue|waive|stop --quote "<words>"`.
+- After 3 lane RECHECK rounds nothing runs. Ask the user at once with the remaining findings, attempts, risk
+  and your recommendation, then `office decide <scope> escalate|continue|waive|stop --quote "<words>"`.
 - Before landing, give each APPROVED finding a disposition: `office disposition <scope>:<code>
   fix|fixed|dismissed|follow-up -- "<note>"` (`fix` reopens the owner for a repair without re-review).
 - Only landing authority waives a required review: the user (`office approve waive L-T1:convergence|visual --quote

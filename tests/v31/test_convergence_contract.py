@@ -380,7 +380,7 @@ PLAN_GEAR = "express"
 
 def test_plan_approved_with_findings_dispatches_and_tracks_them(env):
     """1: plan APPROVED with a non-blocking finding is dispatch-safe; the finding is tracked
-    until dispositioned; a cleanup revision that moves no seam gets no re-review."""
+    until dispositioned; a later revision gets no re-review (#418)."""
     _start(env, gear=PLAN_GEAR, approve=False,
            plan_reviewer=[{"reply": APPROVED.replace("NEXT", "FINDING P1 | low | non-blocking | T1 | wording | tidy\nNEXT")}])
     rs = _run_row(env)["plan_review"]
@@ -389,7 +389,7 @@ def test_plan_approved_with_findings_dispatches_and_tracks_them(env):
     env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"reply": APPROVED}])
     env.write_plan(PLAN_ONE.replace("# Plan", "# Plan (tidied)"))
     code, out = env.office("submit")
-    assert code == 0 and "APPROVED cleanup" in out, out
+    assert code == 0 and "plan review closed" in out, out
     assert len(_gates(env, "plan_review")) == 1
     env.office("dispatch", "T1", check=0)
     assert any("plan:P1" in b for b in [_status(env)["next"]])
@@ -421,25 +421,24 @@ def test_plan_recheck_holds_only_the_affected_task_and_rechecks_with_the_same_re
     env.office("dispatch", "T2", check=0)
 
 
-def test_plan_round_cap_escalates_and_never_becomes_an_intake_gap(env):
-    """5 (plan), 15, 40-43."""
+def test_plan_round_cap_closes_review_for_the_orchestrator_and_never_becomes_an_intake_gap(env):
+    """5 (plan), 15 with #418: at the cap plan review closes unapproved; the orchestrator owns
+    the findings. No fourth review, no operator decision, no INTAKE_GAP."""
     blocking = recheck("FINDING P1 | medium | blocking | plan | ordering is unsafe | split T1", nxt="escalate")
     _start(env, gear=PLAN_GEAR, approve=False, plan_reviewer=[{"reply": blocking}])
     for i in range(3):
         env.write_plan(PLAN_ONE.replace("- add() returns the sum", f"- add() returns the sum (rev {i})"))
         env.office("amend", "plan", "--contract", "--", f"rev {i}", check=None)
     rs = _run_row(env)["plan_review"]
-    assert rs["status"] == "escalated", rs
+    assert rs["status"] == "budget_exhausted_orchestrator_owned" and rs["ended"], rs
     assert len([g for g in _gates(env, "plan_review") if g["review_status"] == "COMPLETED"]) == 3
-    esc = rs["escalation"]
-    assert esc["recommendation"] == "escalate" and len(esc["choices"]) == 4 and len(esc["attempts"]) == 3
+    assert [g["verdict"] for g in _gates(env, "plan_review")] == ["RECHECK"] * 3, "the verdict is not falsified"
+    out = rs["outstanding"]
+    assert out["owner"] == "orchestrator" and out["remaining"][0]["code"] == "P1" and len(out["attempts"]) == 3
     assert not rs.get("intake_gap")
-    assert "office decide plan" in _status(env)["next"]
-    env.office("decide", "plan", "continue", "--quote", "keep going", check=0)
-    env.write_plan(PLAN_ONE.replace("- add() returns the sum", "- add() returns the sum (rev 9)"))
-    env.office("amend", "plan", "--contract", "--", "rev 9", check=0)
-    last = _gates(env, "plan_review")[-1]
-    assert last["cycle"] == 2 and last["round"] == 1
+    assert "office disposition plan:" in _status(env)["next"]
+    code, msg = env.office("decide", "plan", "continue", "--quote", "keep going")
+    assert code == 4 and "plan-review-not-decided" in msg, msg
 
 
 def test_plan_intake_gap_holds_named_scope_before_the_cap(env):

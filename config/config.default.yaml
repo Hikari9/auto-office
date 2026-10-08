@@ -152,15 +152,18 @@ roles:
 #   convergence-v1: APPROVED | RECHECK | INTAKE_GAP; executors self-review and
 #     run checks; one independent convergence review per ownership/composition
 #     lane (plus one per shared composition boundary); 3 substantive rounds per
-#     RECHECK sequence, then the operator decides.
+#     RECHECK sequence, then the operator decides (lanes) or the orchestrator
+#     owns the findings (plan review, which reviews the initial plan only, #418).
 #   v3.1: PASS | CHANGES_REQUIRED | PLAN_DEFECT | BRIEF_DEFECT | UNAVAILABLE,
 #     rolling plan review and per-task independent review.
 review:
   contract: convergence-v1
 # Gear presets. Under convergence-v1, `independent_code_review` funds the lane
-# convergence review (a hard landing gate) and `plan_review` funds plan review;
-# the round ceiling is always 3 and the *_max_rounds keys below apply only to
-# runs pinned to the v3.1 contract.
+# convergence review (a hard landing gate) and `plan_review` funds the initial
+# plan review. The round ceiling defaults to 3 and the *_max_rounds keys below
+# apply only to runs pinned to the v3.1 contract. Only the user changes a run's
+# plan-review cap, at intake (`office start --plan-review-rounds N`); config
+# never stands in for that choice.
 gear_presets:
   direct:
     dedicated_planner: false

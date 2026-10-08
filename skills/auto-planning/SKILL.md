@@ -7,7 +7,7 @@ description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use t
 
 > **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
 > role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
-> `convergence-v1` runs (`docs/review-convergence.md`): contract the seams, not the internals (`scope:` is an ownership envelope; `lane:`, `converge:`); plan review answers APPROVED | RECHECK | INTAKE_GAP and PLAN DEFECT is only root-cause metadata.
+> `convergence-v1` runs (`docs/review-convergence.md`): contract the seams, not the internals (`scope:` is an ownership envelope; `lane:`, `converge:`); plan review answers APPROVED | RECHECK | INTAKE_GAP and PLAN DEFECT is only root-cause metadata. Plan review reviews the initial plan only: once it closes, your later revisions are not reviewed again (#418), so make each one as carefully as the first.
 
 Receive the pinned run envelope and the orchestrator's provisional intent. Own **what** up to freeze, then **how**: run `skills/auto-intake/SKILL.md`'s interview directly with the user, reshape goal/scope/done-criteria/blast-radius/named-actions/non-goals when repository evidence contradicts the provisional framing, then freeze the five fields.
 
