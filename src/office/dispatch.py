@@ -502,7 +502,9 @@ def revoke(con, run: dict, target: str, reason: str) -> Result:
     return _revoke_task(con, run, task_id, reason)
 
 
-def _revoke_task(con, run: dict, task_id: str, reason: str) -> Result:
+def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = None) -> Result:
+    """Revoke the task's lease and stop its live dispatches; `only` (a revoked
+    dispatch id) stops that one and leaves any other live session alone."""
     with db.transaction(con):
         task = state.get_task(con, run["id"], task_id)
         if task is None:
@@ -514,10 +516,13 @@ def _revoke_task(con, run: dict, task_id: str, reason: str) -> Result:
     live = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE run_id=? AND task_id=? AND ended_at IS NULL "
                                          "AND status IN ('launching', 'running')", (run["id"], task_id)).fetchall()]
     notes: list[str] = []
-    stopped = [d["id"] for d in live if stop_dispatch(run, d, notes=notes)]
+    others = [d["id"] for d in live if only and d["id"] != only]
+    stopped = [d["id"] for d in live if (not only or d["id"] == only) and stop_dispatch(run, d, notes=notes)]
     lines = [f"{task_id} lease revoked | later submits from its holder are rejected"]
     if stopped:
         lines.append(f"stopped {', '.join(stopped)} (SIGTERM)")
+    if others:
+        lines.append(f"left running: {', '.join(others)} (not the dispatch named; office revoke {task_id} ends them too)")
     lines += notes
     return Result(lines=lines, next=f"office dispatch {task_id} to relaunch")
 
@@ -589,7 +594,7 @@ def revoke_dispatch(con, run: dict, d: dict, reason: str) -> Result:
             why = "ended" if not live else f"not {d['task_id']}'s current dispatch ({task and task.get('current_dispatch_id')})"
             return Result(lines=[f"{d['id']} is {why}; nothing revoked"],
                           next=f"office revoke {d['task_id']} to revoke the task itself")
-        return _revoke_task(con, run, d["task_id"], reason)
+        return _revoke_task(con, run, d["task_id"], reason, only=d["id"])
     notes: list[str] = []
     ended = _end_dispatch(con, run, d, "revoked", f"revoked: {reason}", notes=notes)
     line = f"{d['id']} {'ended' if ended else 'had already ended'} ({reason})"
@@ -2935,6 +2940,16 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
                        f"({wall}); not relaunching into the same quota. After it resets: office rerun {task['id']} "
                        f"--fresh; work is preserved in its worktree", task_id=task["id"])
             return
+        from office import questions
+        asked = _ended_on_question(run, d)
+        if asked:
+            # A worker that stopped to ask needs an answer, not the same brief again: a
+            # relaunch asks the same question (run 330605a8 relaunched one twice).
+            state.update_task(con, run["id"], task["id"], status="blocked",
+                              pause_reason=questions.ENDED_PREFIX + asked["question"][:200])
+            state.emit(con, run, "task.blocked", f"{task['id']} worker ended on a question; answer it: "
+                       f"{questions.answer_command(d, asked)}; work is preserved in its worktree", task_id=task["id"])
+            return
         retries = con.execute("SELECT COUNT(*) FROM dispatches d WHERE d.run_id=? AND d.task_id=? AND d.terminal_classification "
                               "IS NOT NULL AND NOT EXISTS (SELECT 1 FROM revisions r WHERE r.dispatch_id=d.id)",
                               (run["id"], task["id"])).fetchone()[0]
@@ -2948,6 +2963,20 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
                           pause_reason=f"worker ended ({d['terminal_classification']}) without submitting")
         state.emit(con, run, "task.blocked", f"{task['id']} worker ended without submitting "
                    f"({d['terminal_classification']}); work is preserved in its worktree", task_id=task["id"])
+
+
+def _ended_on_question(run: dict, d: dict) -> dict | None:
+    """The question a worker's final message ended on, saved where `office wait`
+    finds it (question.json), or None."""
+    from office import gates, questions
+    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    try:
+        q = questions.final_question(gates._log_text(d, ddir))
+    except OSError:
+        return None
+    if q:
+        atomic_write_json(ddir / "question.json", q)
+    return q
 
 
 def _quota_wall(run: dict, d: dict) -> str | None:

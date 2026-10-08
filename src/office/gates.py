@@ -1195,7 +1195,20 @@ def worker_live(con, dispatch_id: str | None) -> bool:
         return False
     if d.get("launcher") in ("herdr", "external"):
         return True
-    return bool(d.get("pid") and pid_alive(d["pid"]))
+    if d.get("pid"):
+        return pid_alive(d["pid"])
+    # Still launching (worktree setup, a Herdr start, a headless fallback): no pid
+    # yet, but its launch job is about to start an agent in the task worktree. A
+    # second session started now would run beside it.
+    return d["status"] == "launching" and _launch_pending(con, d)
+
+
+def _launch_pending(con, d: dict) -> bool:
+    job = con.execute("SELECT * FROM outbox WHERE run_id=? AND kind='launch_agent' AND dedup_key=?",
+                      (d["run_id"], f"launch:{d['id']}")).fetchone()
+    if job is None:
+        return False
+    return job["status"] == "queued" or (job["status"] == "claimed" and jobs.claim_live(job))
 
 
 def deliver_findings(con, run: dict, task: dict, gate: dict) -> None:

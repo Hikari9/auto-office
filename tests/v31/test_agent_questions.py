@@ -72,3 +72,36 @@ def test_answer_rejects_an_option_that_does_not_exist(env, monkeypatch):
     with pytest.raises(questions.Refused) as err:
         questions.answer(con, run, "T1", "9")
     assert err.value.category == "no-option"
+
+
+ENDED_ON_QUESTION = (
+    "`pnpm typecheck` fails, and the fix needs one line outside my SCOPE.\n\n"
+    "**Question for the orchestrator (Q1):** may I add `personAliasGuid?: string;` to src/http/oauth.ts?\n\n"
+    "TASK=T1 COMMIT=31d0a33 PUSHED=yes CHECKS=fail (typecheck) SUBMIT=not attempted "
+    "NEXT=Answer Q1: approve the one-line addition, or say how the seam should move.\n")
+
+
+def test_final_question_reads_the_closing_next_step():
+    q = questions.final_question(ENDED_ON_QUESTION)
+    assert q["kind"] == "text" and q["ended"] and q["question"].startswith("Question for the orchestrator (Q1)")
+    assert questions.final_question("Done.\nTASK=T1 CHECKS=pass SUBMIT=submitted NEXT=none\n") is None
+    assert questions.final_question("Checks are green; I stopped before submit.\n") is None
+    assert questions.final_question("Should T1 also own tests/auth?\n")["question"] == "Should T1 also own tests/auth?"
+
+
+@pytest.mark.approved
+def test_a_headless_worker_that_ended_on_a_question_is_a_question_not_a_relaunch(env):
+    # Run 330605a8: three headless sessions in a row asked the same scope question and were
+    # each reported as "ended (success) without submitting; relaunching".
+    from conftest import approved_run, task_row
+    approved_run(env, executor=[{"raw": ENDED_ON_QUESTION}] * 3)
+    env.office("dispatch", "T1", check=0)
+    con = env.con()
+    assert con.execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1' AND role='executor'").fetchone()[0] == 1
+    t = task_row(env)
+    assert t["status"] == "blocked" and t["pause_reason"].startswith(questions.ENDED_PREFIX), t
+    code, out = env.office("wait", "--timeout", "1")
+    assert code == questions.EXIT, out
+    assert "question: T1" in out and "Q1" in out and "office amend T1" in out and "office rerun T1" in out, out
+    code, out = env.office("status")
+    assert "question: T1" in out, out

@@ -610,3 +610,19 @@ def test_office_submit_skill_reads_the_tier_and_no_longer_requires_four_subagent
     assert "3-round cap" in step and "fix-diff re-review" in step
     assert "four `Agent` subagents" not in step.replace(deep.split("\n\n")[0], "")
     assert "You cannot lower it" in step
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+def test_a_restack_only_fix_round_is_work_not_a_stop(env):
+    # #331, run f00446ac T5: `office rerun --resume` after a dependency moved opened a fix
+    # round with only the restack to do, and preflight stopped it as having no work.
+    wenv, wt, d = _dispatched(env)
+    from office import paths
+    pkt = paths.run_dir(d["run_id"]) / "dispatches" / d["id"] / "packet.json"
+    data = json.loads(pkt.read_text())
+    data["fix_of"] = "R1"
+    data["restack"] = {"merged": [{"task": "T0", "revision": "R6"}], "conflict": None}
+    pkt.write_text(json.dumps(data))
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert "no open findings or amendments" not in out and "restack: this round brings" in out and "T0 R6" in out, out

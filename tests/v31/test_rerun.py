@@ -203,3 +203,51 @@ def test_rerun_keeps_its_route_unless_rerouted_and_refuses_on_live_quota(env, mo
     candidates._QUOTA_CACHE.clear()
     code, out = env.office("rerun", "T1", "--fresh", env={**EXTERNAL, "OFFICE_QUOTA_FIXTURE": json.dumps({harness: 90})})
     assert code == 0 and f"on {triple} (original route)" in out, out
+
+
+def _launching(env, monkeypatch):
+    """A second session for T1 whose launch job is still queued (no pid yet), as
+    `office amend --contract` leaves while it relaunches the task to ack."""
+    from office import db, dispatch, state
+    monkeypatch.setenv("OFFICE_JOBS", "manual")
+    con = env.con()
+    run = _run(con)
+    with db.transaction(con):
+        did = dispatch.request_launch(con, run, "T1", role="executor")
+    return con, run, did
+
+
+@pytest.mark.approved
+def test_rerun_refuses_while_a_launch_for_the_task_is_pending(env, monkeypatch):
+    # Run 330605a8: amend --contract launched an ack session; rerun --resume started a
+    # second one beside it in the same worktree because the first had no pid yet.
+    _setup(env, monkeypatch, session=None)
+    con, run, did = _launching(env, monkeypatch)
+    from office import gates, rerun
+    assert gates.worker_live(con, did)
+    with pytest.raises(rerun.Refused) as err:
+        rerun.rerun(con, run, "T1", resume=False, fresh=True)
+    assert "still has a live worker" in err.value.message and did in err.value.message
+    # Once its launch job is gone (failed or finished without a process), it no longer holds the task.
+    con.execute("UPDATE outbox SET status='failed' WHERE dedup_key=?", (f"launch:{did}",))
+    con.commit()
+    assert not gates.worker_live(con, did)
+
+
+@pytest.mark.approved
+def test_revoking_one_dispatch_stops_only_that_dispatch(env, monkeypatch):
+    # Run 330605a8: `office revoke <dispatch>` also killed the task's other live session.
+    _setup(env, monkeypatch, session=None)
+    con, run, first = _launching(env, monkeypatch)
+    con.execute("UPDATE dispatches SET status='running', launcher='external' WHERE id=?", (first,))
+    con.commit()
+    from office import db, dispatch
+    with db.transaction(con):
+        second = dispatch.request_launch(con, run, "T1", role="executor")
+    con.execute("UPDATE dispatches SET status='running', launcher='external' WHERE id=?", (second,))
+    con.commit()
+    stopped = []
+    monkeypatch.setattr(dispatch, "stop_dispatch", lambda run, d, notes=None: stopped.append(d["id"]) or True)
+    res = dispatch.revoke(con, run, second, "test")
+    assert stopped == [second], stopped
+    assert any(first in ln and "left running" in ln for ln in res.lines), res.lines
