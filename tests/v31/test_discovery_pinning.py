@@ -155,3 +155,25 @@ def test_missing_pinned_legacy_runtime_is_an_actionable_blocker(env):
     assert "not available on this machine" in out and "next:" in out
     code, out = env.office("raw", "state-load", "--state-dir", str(sdir))
     assert code == 5 and "blocked" in out
+
+
+def test_session_binding_does_not_cross_into_another_repository_with_its_own_run(env):
+    # One orchestrator session drove runs in two repositories; starting the second
+    # rebound the session there. Inside the first repository, its own run wins.
+    env.office("start", "here", "--planner", "inline", check=0)
+    env.office("start", "elsewhere", "--planner", "inline", check=0)
+    con = env.con()
+    con.execute("DELETE FROM session_bindings")
+    here, there = [r[0] for r in con.execute("SELECT id FROM runs ORDER BY created_at")]
+    sess = {"OFFICE_SESSION": "sess-x", "OFFICE_HARNESS": "claude", "HERDR_PANE_ID": ""}
+    code, out = env.office("resume", there[:8], env=sess)
+    assert code == 0, out
+    con.execute("UPDATE runs SET git_common_dir=? WHERE id=?", (str(env.repo.parent / "other-repo" / ".git"), there))
+    con.commit()
+    code, data = env.ojson("status", env=sess)
+    assert data["data"]["run_id"] == here, data
+    # With no active run of its own in this repository, the binding still applies.
+    con.execute("UPDATE runs SET phase='closed' WHERE id=?", (here,))
+    con.commit()
+    code, data = env.ojson("status", env=sess)
+    assert data["data"]["run_id"] == there, data

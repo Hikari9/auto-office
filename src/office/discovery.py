@@ -244,12 +244,14 @@ def resolve(con, *, run_arg: str | None = None, state_dir: str | None = None,
     if found:
         _end_stale_bindings(con, keys, found[0], found[1])
         return Target(run=found[0], source=source, dispatch=found[1])
-    # 4. session binding
+    # 4. session binding. One session may drive runs in several repositories, and
+    # starting a run there rebinds it: inside another repository that has its own
+    # active run, the binding does not cross over (that repository's run wins).
+    ident = paths.repo_identity(cwd)
     run = bound_run(con, keys)
-    if run:
+    if run and not _binding_crosses_repo(con, run, ident):
         return Target(run=run, source="session")
     # 5. sole active run in this repository
-    ident = paths.repo_identity(cwd)
     if ident is None:
         raise NoRun("no-repository", "not inside a git repository and no run was named",
                     next_step="office list, then office resume <run>")
@@ -265,6 +267,21 @@ def resolve(con, *, run_arg: str | None = None, state_dir: str | None = None,
     raise NoRun("ambiguous-run", f"{total} active Office runs in this repository; none is bound to this session",
                 next_step="office resume <id> to bind one, or pass --run <id>",
                 data={"candidates": listing})
+
+
+def _binding_crosses_repo(con, run: dict, ident) -> bool:
+    """The session's bound run lives in another repository than the cwd, and the
+    cwd's repository has an active run of its own."""
+    if ident is None or not run.get("git_common_dir"):
+        return False
+    try:
+        same = Path(run["git_common_dir"]).resolve() == Path(ident[1]).resolve()
+    except OSError:
+        same = str(run["git_common_dir"]) == str(ident[1])
+    if same:
+        return False
+    runs, legacy_active = active_in_repo(con, ident[1])
+    return bool(runs or legacy_active)
 
 
 def _legacy_by_id(con, run_arg: str, cwd) -> legacy.LegacyRun | None:
