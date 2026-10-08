@@ -941,8 +941,13 @@ def undispositioned(con, run: dict) -> list[dict]:
 def close_blockers(con, run: dict) -> list[str]:
     out = []
     pr = (state.get_run(con, run["id"]).get("plan_review") or {})
-    if pr.get("status") in ("recheck", "escalated", "intake_gap") and not pr.get("ended"):
+    if pr.get("status") in ("recheck", "intake_gap") and not pr.get("ended"):
         out.append(f"plan review is {pr['status']}")
+    from office import plans
+    owned = [f["code"] for f in plans.blocking_findings(con, run) if f["code"] != "INTAKE_GAP"]
+    if plans.owns_outstanding(state.get_run(con, run["id"])) and owned:
+        out.append(f"{len(owned)} plan finding(s) the orchestrator owns await a disposition (office disposition "
+                   f"plan:<code> ...): {', '.join(owned[:4])}")
     for s in summary(con, run):
         if s["status"] not in CONVERGED:
             out.append(f"{s['id']} convergence {s['status']}")
@@ -1110,17 +1115,21 @@ def waive(con, run: dict, spec: str, *, actor: str, quote: str | None, reason: s
 
 
 def decide(con, run: dict, scope_id: str, choice: str, *, quote: str | None, reason: str | None = None) -> Result:
-    """The operator's choice at the round cap (#337): escalate | continue | waive | stop."""
+    """The operator's choice at a lane's round cap (#337): escalate | continue | waive | stop. Plan review has
+    none: at its cap the orchestrator owns the findings (#418)."""
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-decide", "a worker cannot decide an escalation")
+    if scope_id.lower() == "plan":
+        raise Refused("plan-review-not-decided", "plan review has no operator decision (#418): at its round cap it "
+                      "closes and the orchestrator owns the remaining findings", scope="plan",
+                      next_step='office disposition plan:<code> fixed|dismissed|follow-up -- "<rationale>"; for '
+                                'another independent review the user asks: office review plan --quote "<words>"')
     choice = choice.lower()
     if choice not in contract.ESCALATION_CHOICES:
         raise Usage("bad-choice", f"choose one of {', '.join(contract.ESCALATION_CHOICES)}")
     if not quote or len(re.sub(r"\s+", "", quote)) < 2:
         raise Usage("user-quote-required", "the round-cap decision is the user's; record their words",
                     next_step=f'office decide {scope_id} {choice} --quote "<user\'s words>"')
-    if scope_id.lower() == "plan":
-        return _decide_plan(con, run, choice, quote, reason)
     if choice == "waive":
         res = Result()
         scope = find_scope(con, run, scope_id)
@@ -1180,39 +1189,6 @@ def decide(con, run: dict, scope_id: str, choice: str, *, quote: str | None, rea
     hint = (f"; for a stronger producer: office rerun <task> --fresh --reroute" if choice == "escalate" else "")
     return Result(lines=[f"{scope['id']}: {choice} recorded (cycle {cycle})" + hint],
                   next="exceptions only; office status")
-
-
-def _decide_plan(con, run: dict, choice: str, quote: str, reason: str | None) -> Result:
-    from office import authority, plans
-    if choice == "waive":
-        return authority.approve(con, run, "waive", quote, ["plan-review"])
-    with db.transaction(con):
-        run = state.get_run(con, run["id"])
-        pr = dict(run.get("plan_review") or {})
-        if pr.get("status") not in ("escalated", "stopped"):
-            raise Refused("no-decision-pending", f"plan review is {pr.get('status') or 'pending'}; nothing waits on an "
-                          "operator decision", next_step="office status")
-        con.execute("INSERT INTO authorizations(id, run_id, kind, target, requirements_version, authorized_by, quote, "
-                    "created_at) VALUES(?,?,?,?,?,?,?,?)", ("Z" + uuid.uuid4().hex[:8], run["id"], "decision",
-                                                            f"plan:{choice}", run["requirements_version"], "user",
-                                                            quote.strip(), now_iso()))
-        if choice == "stop":
-            pr["status"] = "stopped"
-            state.update_run(con, run["id"], plan_review=pr)
-            state.emit(con, run, "plan.stopped", "plan review stopped by the operator; held tasks stay held")
-            return Result(lines=["plan review stopped; held tasks stay held"], next="office status")
-        pr.update({"status": "recheck", "cycle": int(pr.get("cycle") or 1) + 1, "escalation": None,
-                   "decision": choice})
-        if choice == "escalate":
-            last = [g for g in plans.plan_gates(con, run["id"]) if g.get("route")]
-            if last:
-                pr["exclude_route"] = last[-1]["route"]
-        state.update_run(con, run["id"], plan_review=pr)
-        state.emit(con, run, "plan.decided", f"plan review: operator chose {choice}; a new bounded cycle of up to "
-                   f"{contract.MAX_ROUNDS} rounds reviews the next revision")
-    return Result(lines=[f"plan: {choice} recorded; revise the plan and submit it for the next cycle"
-                         + ("; the next review excludes the earlier reviewer route" if choice == "escalate" else "")],
-                  next="revise the plan, then office amend plan --contract -- \"<what changed>\" (or office submit)")
 
 
 FALLBACK_STATUSES = (contract.UNAVAILABLE, contract.INVALID_RESULT)
@@ -1295,10 +1271,16 @@ def disposition(con, run: dict, spec: str, how: str, note: str) -> Result:
     if how != "fix" and len(re.sub(r"\s+", "", note or "")) < 2:
         raise Usage("note-required", "say what was done (the fix, why dismissed, or the follow-up issue)")
     with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        from office import plans
+        # A plan review closed at its round cap leaves its blocking findings to the orchestrator (#418).
+        owned = scope_id.lower() == "plan" and plans.owns_outstanding(run)
+        states = ("nonblocking", "open") if owned else ("nonblocking",)
         rows = [dict(r) for r in con.execute(
-            "SELECT * FROM findings WHERE run_id=? AND contract=? AND state='nonblocking' AND (scope=? OR (? = 'plan' AND "
-            f"gate_kind='plan_review')) AND code IN ({','.join('?' * len(codes))})",
-            (run["id"], contract.CONVERGENCE, scope_id, scope_id.lower(), *codes)).fetchall()]
+            f"SELECT * FROM findings WHERE run_id=? AND contract=? AND state IN ({','.join('?' * len(states))}) AND "
+            "(scope=? OR (? = 'plan' AND gate_kind='plan_review')) "
+            f"AND code IN ({','.join('?' * len(codes))})",
+            (run["id"], contract.CONVERGENCE, *states, scope_id, scope_id.lower(), *codes)).fetchall()]
         if not rows:
             raise Usage("unknown-finding", f"no non-blocking finding {spec}", next_step="office inspect convergence")
         if how == "fix" and any(r["gate_kind"] == "plan_review" for r in rows):
@@ -1306,6 +1288,14 @@ def disposition(con, run: dict, spec: str, how: str, note: str) -> Result:
         con.execute(f"UPDATE findings SET disposition=?, disposition_note=?, disposition_by=?, disposition_at=? "
                     f"WHERE id IN ({','.join('?' * len(rows))})",
                     (how, (note or "").strip() or None, "orchestrator", now_iso(), *[r["id"] for r in rows]))
+        held = [r["id"] for r in rows if r["state"] == "open"]
+        if held:
+            # The orchestrator's disposition, not a reviewer's resolution: the
+            # finding stops holding work and its blocking verdict stays recorded.
+            con.execute(f"UPDATE findings SET state='nonblocking', updated_at=? WHERE id IN ({','.join('?' * len(held))})",
+                        (now_iso(), *held))
+            if not plans.blocking_findings(con, run):
+                plans._unpause_plan_holds(con, run)
         reopened = []
         if how == "fix":
             for tid in sorted({r["task_id"] for r in rows if r.get("task_id")}, key=_tid_key):

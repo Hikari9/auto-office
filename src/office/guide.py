@@ -178,13 +178,22 @@ def next_action(con, run: dict) -> str:
 
 
 def _plan_next_convergence(con, run: dict, rs: dict) -> str | None:
-    """The plan-review step under the convergence contract (#337), or None."""
-    if not rs["required"] or rs["ended"]:
+    """The plan-review step under the convergence contract (#337, #418), or None."""
+    if not rs["required"]:
         return None
     st = rs["status"]
     dedicated = run.get("planner_mode") == "dedicated"
     revise = ('have the planner revise it: office amend plan --contract -- "<the findings>"' if dedicated
               else f'revise {planpath.rel(run)}, then office amend plan --contract -- "<what changed>"')
+    owned = [f for f in rs["blocking"] if f["code"] != "INTAKE_GAP"]
+    if st == plans.OWNED and owned:
+        last = (rs.get("history") or [{}])[-1]
+        return (f"plan review closed unapproved after {last.get('rounds')}/{last.get('max_rounds')} rounds; you own "
+                f"{', '.join(f['code'] for f in owned[:4])} (office inspect run): fix each in the plan ({revise}; it "
+                "is not re-reviewed) or accept it, then office disposition plan:<code> fixed|dismissed|follow-up -- "
+                '"<rationale>". A fix that changes requirements or authority still needs the user')
+    if rs["ended"]:
+        return None
     if st == "unavailable":
         return ("plan review is UNAVAILABLE (runtime status, not a verdict; no round spent): office resume retries "
                 'the reviewer chain, or the user may waive: office approve waive plan-review --quote "<words>"')
@@ -193,12 +202,6 @@ def _plan_next_convergence(con, run: dict, rs: dict) -> str | None:
                 "or office resume")
     if rs["pending"] or rs["first_verdict"] is None:
         return "no action; plan review is running"
-    if st == "escalated":
-        esc = rs.get("escalation") or {}
-        return (f"plan review spent {contract.MAX_ROUNDS} RECHECK rounds: ask the user now (native question tool), "
-                f"showing the remaining findings, attempts and risk (office inspect run) and your recommendation "
-                f"({(esc.get('recommendation') or '')[:100]}); then office decide plan escalate|continue|waive|stop "
-                "--quote \"<user's words>\"")
     if st == "intake_gap":
         gap = rs.get("intake_gap") or {}
         return (f"plan INTAKE_GAP: ask the user (native question tool): {gap.get('decision')} (affects "
@@ -245,8 +248,10 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
         res.add(" | ".join(parts))
     rs = plans.review_state(con, run)
     if rs["required"]:
-        pr = "plan review " + ("ended (" + (rs["ended_reason"] or "") + ")" if rs["ended"] else
+        pr = "plan review " + ("closed (" + (rs["ended_reason"] or "") + ")" if rs["ended"] else
                                (_plan_review_live(con, run) if rs["pending"] else (rs["last_verdict"] or "pending")))
+        if rs.get("lifecycle") and not rs["ended"]:
+            pr += f" | {rs['lifecycle']} review, round {rs['rounds_used']}/{rs['max_rounds']}"
         res.add(pr)
     for t in tasks:
         if t["status"] in ("paused", "blocked"):
@@ -605,7 +610,7 @@ _URGENT_KINDS = frozenset({
     "plan.unavailable", "plan.changes_required", "plan.attention", "plan.escalated", "plan.defect",
     "plan.questions", "plan.contract_requested", "pr.error", "lease.revoked",
     # convergence contract (#337)
-    "gate.recheck", "plan.recheck", "plan.intake_gap", "plan.escalation", "convergence.recheck",
+    "gate.recheck", "plan.recheck", "plan.intake_gap", "plan.budget_exhausted", "convergence.recheck",
     "convergence.intake_gap", "convergence.escalation", "convergence.unavailable", "convergence.blocked",
     "convergence.conflict"})
 _SEEN = "orchestrator:seen:"

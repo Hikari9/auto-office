@@ -24,6 +24,7 @@ three-round ceiling and every user-owned decision surfaced at once.
 | Rollback | Set `review.contract: v3.1`. It affects runs started afterwards only. A started run is never reinterpreted. |
 | Moving old work to the current contract | `office start --from-run <run>` (below). Never an in-place rewrite. |
 | Stored verdicts | Never rewritten. A `v3.1` verdict is displayed with its label, for example `PASS (v3.1)`. |
+| Initial-only plan review (#418) | Ships in Auto Office 3.4. A run on the 3.3 line keeps 3.3's plan-review behavior until `office upgrade` moves it. The upgrade is refused while its plan review waits on an `office decide plan` choice, was stopped by one, or re-reviews after APPROVED; finish or waive that on 3.3 first. Review history is carried unchanged. |
 
 `office start --from-run <run> ["<goal>"]` creates a new run under the current contract that carries
 the old run's frozen requirements and puts the old plan's body at the new run's `PLAN.md` path as a
@@ -37,11 +38,12 @@ old run gets an appended `run.successor` event and is otherwise untouched. Revie
 ## 2. Lifecycle
 
 ```text
-office start ──> plan ──> plan review ───────────────────────────────┐
-                    ^        │ APPROVED: dispatch; findings -> disposition (no re-review)
+office start ──> plan ──> initial plan review ───────────────────────┐
+                    ^        │ APPROVED: review closes; dispatch; findings -> disposition
                     │        │ RECHECK: revise; named tasks (+dependants) held; same reviewer
                     │        │ INTAKE_GAP: ask the user; affected tasks held
-                    └────────┘ (3 substantive rounds, then office decide plan ...)
+                    └────────┘ (3 substantive rounds, then review closes and the
+                               orchestrator owns the findings; never reopened by an amendment)
                                                                         │
           approve plan ──> dispatch tasks (parallel / stacked) <────────┘
                                │
@@ -104,6 +106,10 @@ A finding whose repair would move a hard seam is never `APPROVED` cleanup. The r
 
 Hard seams: `requirements`, `authority`, `ownership`, `dependency`, `interface`, `acceptance`.
 
+A hard seam shapes a reviewer's verdict. It does not decide when plan review runs: a plan revision
+that moves one after plan review closed is owned by the planner/orchestrator and is not reviewed
+again (#418).
+
 `PLAN_DEFECT` and `BRIEF_DEFECT` are not verdicts in this contract. They survive only as optional
 `root-cause:` metadata on a finding (useful classes: `requirement-contradiction`,
 `false-contract-assumption`, `unsafe-or-unauthorized-action`, `double-scope-ownership`).
@@ -157,30 +163,64 @@ judgment.
 
 ### Plan review
 
-Plan review runs when the gear funds it (`plan_review`). `office approve waive plan-review --quote
-"<words>"` still waives it.
+Plan review reviews the initial execution plan. Reviewer-requested corrections may iterate within
+that initial review. Once the initial review closes, later amendments are owned by the
+planner/orchestrator and do not automatically reopen plan review. A user may explicitly request
+another review.
+
+It runs when the gear funds it (`plan_review`). `office approve waive plan-review --quote "<words>"`
+still waives it.
 
 | Verdict | Effect |
 |---|---|
-| `APPROVED` | Plan review ends; every eligible executor may fan out. Findings stay tracked until fixed or dispositioned. |
+| `APPROVED` | Plan review closes; every eligible executor may fan out. Findings stay tracked until fixed or dispositioned, with no re-review. |
 | `RECHECK` | The planner (or the inline orchestrator) revises. Tasks named by blocking findings, and their dependants, are held; a plan-wide finding holds every task. Unaffected work may start. The same reviewer reviews the revision. |
-| `INTAKE_GAP` | Ask the user at once. Tasks the gap affects are held. Record the answer (`office amend requirements --quote ...`), revise the plan; a fresh cycle reviews it. |
+| `INTAKE_GAP` | Ask the user at once. Tasks the gap affects are held. Record the answer (`office amend requirements --quote ...`), revise the plan; a fresh round budget reviews it. |
 
 To submit a revision: a dedicated planner is told `office amend plan --contract -- "<the findings>"`;
 inline, edit `PLAN.md`, then `office amend plan --contract -- "<what changed>"`.
 
-After `APPROVED`, a plan revision that moves no hard seam is APPROVED cleanup and is not re-reviewed.
-A revision that moves one reopens plan review in a new cycle. For the plan, a hard-seam move is a task
-added or removed, or a change to a task's `scope`, `depends`, `interfaces`, `accept`, `lane`,
-`converge` or visual applicability, or a new requirements version. Checks, titles, routes and visual
-details are not seams.
+**The cycle.** The initial review is one cycle. It is open from the first submit until it closes,
+and only an open cycle queues a reviewer. Every revision submitted while it is open (a RECHECK fix, an
+INTAKE_GAP answer, an ordinary or contract amendment) is reviewed as its next round. The cycle closes
+on `APPROVED`, at its round cap, or on a waiver. A closed cycle stays closed: no amendment of any kind
+(ordinary, contract, requirements), task boundary, `office resume`, reconcile pass, or late reviewer
+result reopens it. A round still queued when the cycle closes is cancelled; if its reviewer answers
+later, the result is kept as audit evidence (`plan.late_result`) and applied to nothing.
 
-The orchestrator may veto review of an ordinary amendment: `office amend plan --no-review --reason "doc-only
-wording" -- "<delta>"` creates plan p+1 and queues no plan-review gate for it. The reason is required and is
-recorded in a `plan.review_skipped` event. Use it when review adds nothing, such as a typo or wording fix, a
-reordering that moves no seam, or a note to a worker. A gate already queued or running for an earlier version is
-left alone. The veto applies only to ordinary amendments: a contract amendment (`--contract`) or a requirements
-amendment is always reviewed, and `--no-review` on either is refused.
+**The round cap.** 3 substantive rounds by default. The user may choose another cap (1 to 10) for a
+run at intake: `office start ... --plan-review-rounds N`. It is pinned in the run's gate policy
+(`gates_json.plan_review_max_rounds`, with `plan_review_rounds_by: user`) and a `plan.review_rounds`
+event, and survives `office resume`. Repository or user config cannot set it.
+
+**At the cap.** A `RECHECK` on the last round closes the cycle unapproved
+(`budget_exhausted_orchestrator_owned`). The RECHECK verdict is stored as given; no APPROVED receipt is
+written. No further reviewer runs and the user is not asked merely because the rounds ran out. The
+orchestrator owns the outstanding findings (listed in `plan_review.outstanding` and `office status`):
+it fixes each in the plan (not re-reviewed) or accepts it, and records why with
+`office disposition plan:<P-id> fixed|dismissed|follow-up -- "<rationale>"`. Tasks the findings name
+stay held until their findings are dispositioned. A fix that changes requirements or authority still
+needs the user, as always. `office decide plan` no longer exists.
+
+**After the cycle closes.** The planner/orchestrator owns every later revision: scope, ownership,
+dependencies, interfaces, acceptance, lanes, `converge`, visual applicability, tasks added or removed,
+and the plan that follows an authorized requirements change. Those amendments still version the plan
+and tasks, deliver deltas, pause and restack dependants, and re-run checks as before; they just get no
+plan reviewer. Authority is unchanged: requirements change only with the user's quote and a new
+authorization, and an ordinary amendment that adds an external, irreversible or destructive action is
+refused as a contract-level change.
+
+**Another review, on request.** Only the user reopens plan review:
+`office review plan --quote "<user's words>" [--rounds N]` (default 3). It opens a new bounded cycle on
+the current plan, recorded as user-requested (an authorization row `plan:review` with the quote, a
+`plan.review_requested` event, `lifecycle: user-requested`). RECHECK iterates inside it like the
+initial cycle, and it closes the same way. `plan_review.history` lists every closed cycle with its
+lifecycle, outcome, rounds and cap.
+
+`office amend plan --no-review --reason "<why>" -- "<delta>"` stays for an ordinary amendment made
+while the cycle is open: it creates plan p+1 and queues no plan-review round for it, recorded in a
+`plan.review_skipped` event. It is refused for contract and requirements amendments. After the cycle
+closes it is never needed.
 
 Plan findings are dispositioned with `office disposition plan:<P-id> fixed|dismissed|follow-up --
 "<note>"`. `fix` is refused for plan findings: the planner fixes them in the plan, then you record
@@ -240,8 +280,8 @@ On `RECHECK`:
 
 A substantive round is a completed review (`COMPLETED`, with a verdict) in the current cycle. Each
 RECHECK sequence (plan, each lane or shared scope convergence review, each visual review) is capped at
-3 substantive rounds. The cap is not configurable; the old `*_max_rounds` config keys apply only to
-`v3.1` runs.
+3 substantive rounds. Config cannot change it; the old `*_max_rounds` config keys apply only to
+`v3.1` runs. Only the plan review's cap has a user override (section 5, Plan review).
 
 These never spend a round:
 
@@ -253,21 +293,23 @@ These never spend a round:
 
 ## 9. The round cap and operator decisions
 
+This section is about lanes and shared scopes. Plan review has no operator decision: at its cap the
+orchestrator owns the findings (section 5, Plan review).
+
 After the third `RECHECK` in a cycle nothing runs automatically. The orchestrator asks the user right
-away (native question tool), showing `office inspect convergence <scope>` (or `office inspect run` for
-the plan): remaining findings, their materiality, the attempts so far, landing risk, and its own
-recommendation. It records the answer:
+away (native question tool), showing `office inspect convergence <scope>`: remaining findings, their
+materiality, the attempts so far, landing risk, and its own recommendation. It records the answer:
 
 ```text
-office decide <scope|plan> escalate|continue|waive|stop --quote "<user's words>" [--reason "<why>"]
+office decide <scope> escalate|continue|waive|stop --quote "<user's words>" [--reason "<why>"]
 ```
 
 | Choice | Effect |
 |---|---|
-| `escalate` | A new bounded cycle that excludes the earlier reviewer routes (for the plan, the last reviewer route). For a stronger producer, also `office rerun <task> --fresh --reroute`. |
+| `escalate` | A new bounded cycle that excludes the earlier reviewer routes. For a stronger producer, also `office rerun <task> --fresh --reroute`. |
 | `continue` | A new bounded cycle on the same routes. |
-| `waive` | Land despite the unmet gate. Needs landing authority (section 11); for a lane it records a user waiver of each unmet gate. For the plan it is `office approve waive plan-review`. |
-| `stop` | Pause the lane: its tasks are paused and nothing from it lands. For the plan, held tasks stay held. |
+| `waive` | Land despite the unmet gate. Needs landing authority (section 11); it records a user waiver of each unmet gate. |
+| `stop` | Pause the lane: its tasks are paused and nothing from it lands. |
 
 Round exhaustion is never turned into `INTAKE_GAP`. `office decide` is refused for workers and needs
 the user's quote.
@@ -278,7 +320,8 @@ requirements|plan ...`), then `office decide <lane> continue --quote "<user's wo
 ## 10. APPROVED findings and dispositions
 
 Findings that remain on an `APPROVED` review are non-blocking. Landing and close are blocked until
-each has a disposition:
+each has a disposition. The same command records the orchestrator's disposition of a blocking plan
+finding left when plan review closed at its round cap; that releases the tasks it held:
 
 ```text
 office disposition <scope>:<code>[,<code>] fix|fixed|dismissed|follow-up -- "<note>"
@@ -349,12 +392,14 @@ fallback reviewer grants no waiver or landing authority.
 
 ```text
 office start "<goal>" [--from-run <run>]          new run; --from-run carries an old run's requirements + plan draft
+office start "<goal>" --plan-review-rounds N      the user's cap for the initial plan review (default 3)
 office inspect convergence [scope]                lanes, shared scopes, gates, findings, escalations
 office inspect run                                shows the run's review contract
 office amend plan --contract -- "<what changed>"  submit a plan revision after RECHECK or INTAKE_GAP
-office amend plan --no-review --reason "<why>" -- "<delta>"   ordinary amendment, no plan review (never with --contract)
+office amend plan --no-review --reason "<why>" -- "<delta>"   while plan review is open: ordinary amendment, not reviewed
 office rerun <task> --resume|--fresh [--reroute]  run a routed repair (RECHECK or disposition fix)
-office decide <scope|plan> escalate|continue|waive|stop --quote "<user's words>" [--reason "<why>"]
+office decide <scope> escalate|continue|waive|stop --quote "<user's words>" [--reason "<why>"]   (lanes only)
+office review plan --quote "<user's words>" [--rounds N]   the user's request for another plan review
 office disposition <scope>:<code>[,<code>] fix|fixed|dismissed|follow-up -- "<note>"
 office approve waive <scope>:convergence|visual --quote "<user's words>" --reason "<why>"
 office approve waive <scope>:convergence|visual --as orchestrator --reason "<why>"   (delegated landing only)
@@ -373,7 +418,7 @@ Runs pinned to `v3.1` keep these semantics; Office never converts them.
 | Independent code review | Per task, on each reviewed revision | Per lane and shared scope, on the composed commit |
 | Visual review | Per task | Per lane |
 | Integration review | At a real boundary (dependent output, shared file or interface) | None; covered by shared scopes |
-| Plan review | Rolling: after `CHANGES_REQUIRED`, dispatch while the amendment is re-reviewed; a defect blocks its scope until cleared | `RECHECK` holds only named tasks; same reviewer; APPROVED cleanup is not re-reviewed |
+| Plan review | Rolling: after `CHANGES_REQUIRED`, dispatch while the amendment is re-reviewed; a defect blocks its scope until cleared | Initial plan only: `RECHECK` holds only named tasks; same reviewer; once closed, no amendment is re-reviewed |
 | Requirement problems | `PLAN_DEFECT` + `office amend plan --contract --redirect ...` / `office submit --redirect ...` | `INTAKE_GAP` + `office amend requirements --quote ...` |
-| Round budget | Gear `*_max_rounds` | 3 substantive rounds per RECHECK sequence, then `office decide` |
+| Round budget | Gear `*_max_rounds` | 3 substantive rounds per RECHECK sequence, then `office decide` (lanes) or orchestrator-owned findings (plan; cap user-overridable) |
 | Waivers | `office approve waive T2:<gate> --quote ...` (user) | Lane gates; landing authority; bound to the composed commit |

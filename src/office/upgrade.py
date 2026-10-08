@@ -21,7 +21,30 @@ from office.util import dumps, loads, now_iso, short
 # needs none: every 3.2 column is nullable and additive. 3.2 -> 3.3 needs none
 # either: schema v5 is additive, and a run keeps the review contract pinned in
 # its gates_json (none recorded = v3.1), so an upgraded run is never converted.
+# 3.3 -> 3.4 needs none: no stored review record changes meaning, and a closed
+# plan review simply stays closed. A run mid-way through a plan-review state
+# 3.4 no longer has is refused instead (`_plan_review_blocker`).
 MIGRATIONS: dict[tuple[str, str], object] = {}
+
+
+def _plan_review_blocker(con, run: dict, dest: str) -> str | None:
+    """Why `run` cannot cross onto `dest` yet, or None (#418). From 3.4, plan
+    review is initial-only and its round cap leaves findings to the
+    orchestrator, so a 3.3 run waiting on an operator plan decision, stopped by
+    one, or re-reviewing after APPROVED finishes that on its own line first."""
+    from office import contract, plans
+    if version.release_key(dest) < version.release_key("3.4") or not contract.is_convergence(run):
+        return None
+    pr = run.get("plan_review") or {}
+    if pr.get("ended") or not pr.get("required"):
+        return None
+    reopened = any(g.get("verdict") == "APPROVED" and g.get("review_status") == contract.COMPLETED
+                   for g in plans.plan_gates(con, run["id"]))
+    if pr.get("status") in ("escalated", "stopped"):
+        return f"its plan review is {pr['status']} at the round cap (office decide plan ...)"
+    if reopened:
+        return "its plan review reopened after APPROVED and has not closed"
+    return None
 
 
 def _prior_lines(con, run_id: str) -> set[str]:
@@ -60,6 +83,11 @@ def upgrade(con, run: dict, *, to: str | None = None, apply: bool = False) -> Re
     if not version.same_line(dest, version.current()):
         # Only the destination runtime may commit the run to its line.
         frontdoor.ensure_runtime({**run, "office_version": dest})
+    pending = _plan_review_blocker(con, run, dest)
+    if pending:
+        raise Refused("plan-review-mid-cycle", f"run {rid} cannot move to {dest} yet: {pending}",
+                      scope=f"run {rid}", preserved="all run state; nothing was changed",
+                      next_step=f"finish or waive that plan review on {src} (office status), then office upgrade {rid}")
     live = blockers(con, run["id"])
     if live:
         raise Refused("live-dispatches", f"run {rid} has {len(live)} live dispatch(es) or job(s); upgrade would strand them",

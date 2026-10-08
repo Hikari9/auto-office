@@ -31,6 +31,7 @@ Auto Office {ver}
   office submit                     planner/executor: submit your plan or your work
   office amend <scope> -- "<delta>" change the plan (scope: plan, T2, or T2,T3)
   office amend <scope> --no-review --reason "<why>" -- "<delta>"   ordinary amendment, no plan review
+                                    (only matters while plan review is open; a closed review never reopens)
   office amend route <task> --as <harness>/<model>[@effort] --quote "<words>" [--restart]
                                     re-record a live dispatch's model (same harness); --restart relaunches it
   office ack <amendment-id>         worker: record that you applied a delivered amendment
@@ -48,10 +49,13 @@ Auto Office {ver}
 
   office list                       runs in this repository (--all for every run)
   office inspect [run|task|gate|evidence|events|route|learner|trust|convergence] [id]
-  office decide <lane|plan> escalate|continue|waive|stop --quote "<user's words>"
-                                    the user's choice once a review spent its 3 RECHECK rounds
+  office decide <lane> escalate|continue|waive|stop --quote "<user's words>"
+                                    the user's choice once a lane review spent its 3 RECHECK rounds
   office disposition <scope>:<F-id> fix|fixed|dismissed|follow-up -- "<note>"
-                                    close a non-blocking (APPROVED) finding; fix routes it, no re-review
+                                    close a non-blocking (APPROVED) finding, or a plan finding the orchestrator
+                                    owns after plan review's round cap; fix routes it, no re-review
+  office review plan --quote "<user's words>" [--rounds N]
+                                    the user's explicit request for another plan review (a new bounded cycle)
   office config [<key> [<value>]]   read or set preferences like git config (--list, --unset, --edit, --repo)
   office queue list|add|pause|resume|priority|demote|auto
                                     the machine-level scheduler queue (--run <id> [--task T] for a run)
@@ -93,12 +97,16 @@ Checks (task `checks:` and the run-level `checks:` under Requirements):
   the run's PLAN.md first, then office amend <T> --contract; an amendment whose
   PLAN.md does not change the named task is refused.
 
-Plan review (convergence-v1 runs): APPROVED dispatches at once; its findings are
-fixed or dispositioned (office disposition plan:P<n> ...) with no re-review unless a
-revision moves a hard seam. RECHECK holds only the tasks its blocking findings name:
-revise the plan and submit again for the same reviewer (3 rounds, then office decide
-plan ...). INTAKE_GAP names a user decision: ask the user, record it with office amend
-requirements --quote ..., then revise the plan.
+Plan review (convergence-v1 runs) reviews the initial plan only. RECHECK holds only
+the tasks its blocking findings name: revise the plan and submit again for the same
+reviewer. APPROVED dispatches at once and closes plan review; its findings are fixed
+or dispositioned (office disposition plan:P<n> ...) with no re-review. At the round
+cap (3, or the user's office start --plan-review-rounds N) a RECHECK closes plan
+review unapproved: the orchestrator owns the remaining findings, fixes each in the
+plan or accepts it, and records office disposition plan:P<n> fixed|dismissed|follow-up
+-- "<rationale>". Once closed, no amendment is reviewed again; only the user reopens
+it (office review plan --quote ...). INTAKE_GAP names a user decision: ask the user,
+record it with office amend requirements --quote ..., then revise the plan.
 
 Runs pinned to the v3.1 review contract only:
 Plan defects (PLAN_DEFECT): trace each to the requirement or assumption behind it.
@@ -167,6 +175,9 @@ def _parser() -> argparse.ArgumentParser:
                    help="the user's intake answer: how far to go after the task PRs")
     for step in ("preview", "prod", "verify"):
         s.add_argument(f"--deploy-{step}", metavar="CMD", help=f"the user-confirmed {step} command")
+    s.add_argument("--plan-review-rounds", type=int, metavar="N",
+                   help="the user's intake choice: at most N substantive rounds for the initial plan review "
+                        "(default 3)")
     s.add_argument("--from-run", metavar="RUN",
                    help="start a new run carrying an earlier run's requirements and plan draft (e.g. to move "
                         "v3.1 work onto the current review contract); the earlier run is not changed")
@@ -207,7 +218,8 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("delta", nargs="*")
     s.add_argument("--contract", action="store_true", help="a contract amendment (planner-owned)")
     s.add_argument("--no-review", action="store_true",
-                   help="orchestrator veto: an ordinary amendment queues no plan review (needs --reason)")
+                   help="orchestrator veto while plan review is open: an ordinary amendment queues no plan review "
+                        "(needs --reason); once plan review closes no amendment is reviewed")
     s.add_argument("--reason", help="why plan review is vetoed (with --no-review)")
     s.add_argument("--requirements", action="store_true", help="a user-originated requirements change")
     s.add_argument("--quote", help="the user's words (requirements changes, defect redirects, route changes)")
@@ -310,7 +322,7 @@ def _parser() -> argparse.ArgumentParser:
     # Convergence contract (#337): the operator's round-cap decision, finding
     # dispositions, and the orchestrator's degraded fallback review.
     s = sp.add_parser("decide", parents=[common])
-    s.add_argument("scope", help="a lane (L-T1), shared scope (S-T1+T3), or plan")
+    s.add_argument("scope", help="a lane (L-T1) or shared scope (S-T1+T3)")
     s.add_argument("choice", choices=("escalate", "continue", "waive", "stop"))
     s.add_argument("--quote", help="the user's own words")
     s.add_argument("--reason", help="waive: why the unmet gate is accepted")
@@ -319,8 +331,10 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("how", choices=("fix", "fixed", "dismissed", "follow-up"))
     s.add_argument("note", nargs="*")
     s = sp.add_parser("review", parents=[common])
-    s.add_argument("target", help="<scope>:convergence|visual")
-    s.add_argument("--report", required=True, help="your review, in the reviewer reply format")
+    s.add_argument("target", help="<scope>:convergence|visual, or plan (the user's request for another plan review)")
+    s.add_argument("--report", help="<scope>:<kind>: your review, in the reviewer reply format")
+    s.add_argument("--quote", help="plan: the user's own words asking for another plan review")
+    s.add_argument("--rounds", type=int, help="plan: at most this many substantive rounds (default 3)")
     s.add_argument("--inspected", nargs="*", default=[], help="visual: every screenshot you inspected")
     s = sp.add_parser("revoke", parents=[common])
     s.add_argument("task", help="a task id, a dispatch id, or `integration` (its reviews)")
@@ -485,6 +499,7 @@ def _run(args, unknown) -> int:
                               harness=args.harness, session=args.session, base=args.base, planner=args.planner,
                               issue=args.issue, no_prs=args.no_prs, end_state=args.end_state,
                               benchmark_refresh=args.benchmark_refresh, from_run=args.from_run,
+                              plan_review_rounds=args.plan_review_rounds,
                               deploy={k: v for k in ("preview", "prod", "verify")
                                       if (v := getattr(args, f"deploy_{k}"))})
         return emit(res, args)
@@ -652,8 +667,15 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         from office import convergence
         note = " ".join([*(args.note or []), *[u for u in unknown if u != "--"]]).strip()
         return convergence.disposition(con, run, args.finding, args.how, note)
+    if cmd == "review" and args.target.lower() == "plan":
+        from office import plans
+        return plans.request_review(con, run, args.quote, args.rounds)
     if cmd == "review":
         from office import convergence
+        if not args.report:
+            from office.state import Usage
+            raise Usage("missing-report", "a fallback review needs --report",
+                        next_step="office review <scope>:convergence|visual --report <file>")
         return convergence.fallback_review(con, run, args.target, Path(args.report).expanduser(),
                                            inspected=args.inspected)
     if cmd == "revoke":

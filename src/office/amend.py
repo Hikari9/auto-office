@@ -37,7 +37,8 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
     `drop_criteria`/`add_criteria` edit the frozen done criteria (requirements only). A requirements
     amendment that only adds criteria is not delivered to live tasks; naming tasks as the scope
     (`office amend T1,T2 --requirements ...`) forces delivery to those.
-    `no_review` (with a `reason`) is the orchestrator's veto of plan review for an ordinary amendment."""
+    `no_review` (with a `reason`) is the orchestrator's veto of plan review for an ordinary amendment. It
+    matters only while a plan-review cycle is open: once it closes, no amendment is reviewed (#418)."""
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-amend", "workers do not amend the plan; report the problem in your submission",
                       next_step="office submit")
@@ -61,8 +62,9 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
         if not reason or not reason.strip():
             raise Usage("no-review-needs-reason", "--no-review needs a reason the run's record keeps", next_step=NO_REVIEW_FORM)
         if contract or requirements or scope == "requirements":
-            raise Refused("no-review-ordinary-only", "plan review cannot be vetoed for a contract or requirements amendment; "
-                          "those always get review", scope=scope, preserved="plan unchanged",
+            raise Refused("no-review-ordinary-only", "--no-review vetoes review of an ordinary amendment only; a contract "
+                          "or requirements revision follows the plan-review cycle (reviewed while it is open, never "
+                          "after it closes)", scope=scope, preserved="plan unchanged",
                           next_step="rerun without --no-review (office amend --help)")
     if requirements or scope == "requirements":
         to = [] if scope == "requirements" else _scope_ids(con, run, scope)
@@ -215,7 +217,7 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
             # version is left to finish.
             state.emit(con, run, "plan.review_skipped", f"plan p{version}: review vetoed by the orchestrator: {veto_reason}")
         elif contract.is_convergence(run):
-            rereview = plans.review_after_revision(con, run, current["tasks"], parsed.tasks, version)
+            rereview = plans.review_after_revision(con, run, version)
             rereview = rereview if "queued" in rereview else None
         elif plans.review_required(run) and not plans.plan_review_ended(con, run):
             rereview = plans.queue_plan_review(con, run, version)
@@ -293,7 +295,6 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
             redirect_lines = redirect_mod.record(con, run, redirect)
             run = state.get_run(con, run["id"])
         version = run["plan_version"] + 1
-        prev_tasks = (state.current_plan(con, run["id"]) or {}).get("tasks")
         amendment_id = _record(con, run, "contract", scope_ids, delta, run["plan_version"], version)
         con.execute("INSERT INTO plans(run_id, version, kind, body, tasks_json, requirements_json, created_by, created_at, "
                     "content_hash, parent_version, amendment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -309,7 +310,7 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
         flagged = _envelope_changes(con, run, parsed)
         from office import contract
         if contract.is_convergence(run):
-            plans.review_after_revision(con, run, prev_tasks, parsed.tasks, version)
+            plans.review_after_revision(con, run, version)
         elif plans.review_required(run):
             plans.queue_plan_review(con, run, version, escalated=plans.plan_review_ended(con, run))
         state.emit(con, run, "plan.amended", f"plan p{version} ({amendment_id}, contract)", audience="runtime")

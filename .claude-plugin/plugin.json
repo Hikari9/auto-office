@@ -1,6 +1,6 @@
 {
   "name": "auto-office",
-  "version": "3.3.4",
+  "version": "3.4.0",
   "description": "Auto Office 3.2: one `office` CLI over a single transactional runs.db authority. Adaptive harness/model/effort routing, one-submit verification with independent code and visual review, rolling plan review, durable amendments, version-pinned runs, and human merge-to-main.",
   "author": {
     "name": "auto-office"

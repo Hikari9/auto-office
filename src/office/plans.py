@@ -1,16 +1,23 @@
 """Plans, plan review, and the dispatch barrier.
 
-Convergence contract (#337, office.contract):
+Convergence contract (#337, office.contract), plan-review lifecycle (#418):
 
-  APPROVED    dispatch-safe: plan review ends and every eligible executor may
+  Plan review reviews the initial plan. The cycle is open from the first
+  submit until it closes; only an open cycle queues a reviewer
+  (`can_auto_queue`). Once closed, no amendment, resume or late result
+  reopens it: the planner/orchestrator owns every later revision. Only the
+  user reopens review, explicitly (`office review plan --quote ...`), as a
+  new bounded cycle recorded as user-requested.
+
+  APPROVED    dispatch-safe: the cycle closes and every eligible executor may
               fan out. Its findings stay tracked until the orchestrator or
-              planner fixes or dispositions them; that cleanup gets no new
-              review unless it moves a hard seam (requirements, ownership,
-              dependency, interface, acceptance), which reopens review.
+              planner fixes or dispositions them, without another review.
   RECHECK     the planner revises; tasks the blocking findings name (and their
               dependants) wait, plan-wide findings hold every task, and the
-              same reviewer (when available) reviews the revision. Three
-              substantive rounds, then the operator decides (office decide plan).
+              same reviewer (when available) reviews the revision. At the
+              round cap (3 substantive rounds unless the user chose another
+              at start) the cycle closes unapproved: the orchestrator owns the
+              outstanding findings and records a disposition for each.
   INTAKE_GAP  the named user decision is asked at once; what it affects waits.
   Reviewer unavailability or an unreadable reply is runtime status, never a
   verdict, and spends no round.
@@ -28,6 +35,8 @@ v3.1 contract — fork after the first plan-review verdict
 """
 from __future__ import annotations
 
+import os
+import re
 import uuid
 from pathlib import Path
 
@@ -86,7 +95,6 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
             run = state.get_run(con, run["id"])
         new_version = (run["plan_version"] or 0) + 1
         kind = "initial" if new_version == 1 else "contract"
-        prev_tasks = (current or {}).get("tasks") if current else None
         _apply_requirements(con, run, parsed.requirements, submitter)
         run = state.get_run(con, run["id"])
         con.execute("INSERT INTO plans(run_id, version, kind, body, tasks_json, requirements_json, created_by, created_at, "
@@ -117,8 +125,7 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
                        payload={"questions": parsed.questions})
             res.add(f"plan p{new_version} submitted with {len(parsed.questions)} question(s) for the user")
         elif contract.is_convergence(run):
-            res.add(f"plan p{new_version} submitted | " + review_after_revision(con, run, prev_tasks, parsed.tasks,
-                                                                               new_version))
+            res.add(f"plan p{new_version} submitted | " + review_after_revision(con, run, new_version))
         elif review_required(run) and (not plan_review_ended(con, run) or new_version > 1):
             # After plan review has ended, only contract revisions get a delta review (Q14).
             queue_plan_review(con, run, new_version, escalated=plan_review_ended(con, run))
@@ -463,7 +470,8 @@ def job_plan_review(con, run: dict, job: dict) -> dict:
     rereview = gate["round"] > 1 or len(plan_gates(con, run["id"])) > 1
     if contract.is_convergence(run):
         carried = [f for f in blocking_findings(con, run) if f["code"] != "INTAKE_GAP"]
-        brief = briefs.plan_review_brief(run, plan, req["frozen"], [], rereview, carried=carried, round_no=gate["round"])
+        brief = briefs.plan_review_brief(run, plan, req["frozen"], [], rereview, carried=carried, round_no=gate["round"],
+                                         max_rounds=round_cap(run))
     else:
         brief = briefs.plan_review_brief(run, plan, req["frozen"], open_defects(con, run["id"]), rereview)
     outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
@@ -480,6 +488,15 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gate_id,)).fetchone())
     if gate_engine._already_decided(con, run, gate, outcome):
         return  # one round, one result (#403)
+    if contract.is_convergence(run) and gate["status"] == "cancelled":
+        # The cycle closed (or was waived) while this round ran: its result is
+        # kept as audit evidence and reopens nothing (#418).
+        state.emit(con, run, "plan.late_result", f"plan-review round {gate['id']} on p{gate['plan_version']} was "
+                   f"cancelled ({gate.get('stale_reason') or 'closed'}); its "
+                   f"{outcome.get('verdict') or outcome.get('status') or 'result'} was not applied", audience="runtime",
+                   payload={"gate": gate["id"], "verdict": outcome.get("verdict"), "status": outcome.get("status"),
+                            "summary": (outcome.get("summary") or "")[:500], "route": outcome.get("route")})
+        return
     if contract.is_convergence(run):
         _ingest_convergence(con, run, gate_id, outcome)
         return
@@ -603,6 +620,20 @@ def unpause_cleared(con, run: dict) -> None:
 
 PLAN_SCOPE = "plan"
 
+# How a plan-review cycle opened (#418): at the first submit, or by the user's
+# explicit `office review plan` once an earlier cycle closed.
+INITIAL = "initial"
+USER_REQUESTED = "user-requested"
+
+# How a cycle closed. Every outcome is final: only the user reopens review.
+APPROVED = "approved"
+OWNED = "budget_exhausted_orchestrator_owned"
+WAIVED = "waived"
+
+# The bounds a user-chosen round cap must fall in (`office start
+# --plan-review-rounds`, `office review plan --rounds`).
+ROUND_CAP_LIMIT = 10
+
 
 def _pr(run: dict) -> dict:
     return dict(run.get("plan_review") or {})
@@ -610,6 +641,48 @@ def _pr(run: dict) -> dict:
 
 def _cycle(run: dict) -> int:
     return int(_pr(run).get("cycle") or 1)
+
+
+def round_cap(run: dict) -> int:
+    """Substantive rounds the current cycle may spend: a user-requested cycle's
+    own budget, else the run's pinned initial cap (3 unless the user chose
+    another at office start)."""
+    return int(_pr(run).get("max_rounds") or (run.get("gates") or {}).get("plan_review_max_rounds")
+               or contract.MAX_ROUNDS)
+
+
+def check_round_cap(rounds: int) -> int:
+    if not 1 <= int(rounds) <= ROUND_CAP_LIMIT:
+        raise Usage("bad-rounds", f"plan-review rounds must be 1 to {ROUND_CAP_LIMIT} (got {rounds})")
+    return int(rounds)
+
+
+def can_auto_queue(run: dict) -> bool:
+    """The one rule for queueing a plan reviewer (#418): the run funds plan
+    review and its current cycle is open. The initial cycle opens with the
+    run; once a cycle closes, no amendment, resume or late result reopens it.
+    Only the user's explicit `office review plan` opens another."""
+    return review_required(run) and not _pr(run).get("ended")
+
+
+def owns_outstanding(run: dict) -> bool:
+    """Whether the last cycle closed at its round cap, unapproved, leaving its
+    blocking findings to the orchestrator."""
+    return _pr(run).get("status") == OWNED
+
+
+def close_cycle(con, run: dict, pr: dict, outcome: str, reason: str) -> dict:
+    """Close the open cycle for good. A round still queued or running for it is
+    cancelled; a result it returns later is kept as audit evidence and applied
+    to nothing (`plan.late_result`). Caller holds the tx and saves `pr`."""
+    capped = {**run, "plan_review": pr}
+    pr.update({"ended": True, "ended_reason": reason, "status": outcome})
+    pr.setdefault("history", []).append({
+        "cycle": _cycle(capped), "lifecycle": pr.get("lifecycle") or INITIAL, "outcome": outcome,
+        "rounds": substantive_rounds(con, capped), "max_rounds": round_cap(capped), "at": now_iso()})
+    con.execute("UPDATE gates SET status='cancelled', stale_reason=? WHERE run_id=? AND kind='plan_review' "
+                "AND status IN ('queued','running')", (f"plan review closed ({outcome})", run["id"]))
+    return pr
 
 
 def _cycle_gates(con, run: dict) -> list[dict]:
@@ -658,12 +731,18 @@ def _review_state_convergence(con, run: dict) -> dict:
     done = [g for g in gates if g["status"] == "done"]
     completed = [g for g in done if g.get("review_status") == contract.COMPLETED]
     pr = _pr(run)
+    history = pr.get("history") or []
     return {
         "contract": contract.CONVERGENCE,
         "required": review_required(run),
         "ended": bool(pr.get("ended")),
         "ended_reason": pr.get("ended_reason"),
         "status": pr.get("status") or ("pending" if review_required(run) else "not-required"),
+        "lifecycle": pr.get("lifecycle") or INITIAL,
+        "initial": next((h for h in history if h.get("lifecycle") == INITIAL), None),
+        "history": history,
+        "max_rounds": round_cap(run),
+        "rounds_by": (run.get("gates") or {}).get("plan_review_rounds_by") or "default",
         "first_verdict": completed[0]["verdict"] if completed else None,
         "first_version": completed[0]["plan_version"] if completed else None,
         "last_verdict": completed[-1]["verdict"] if completed else None,
@@ -677,68 +756,71 @@ def _review_state_convergence(con, run: dict) -> dict:
             "SELECT * FROM findings WHERE run_id=? AND gate_kind='plan_review' AND state='nonblocking' AND "
             "disposition IS NULL ORDER BY created_at", (run["id"],)).fetchall()],
         "intake_gap": pr.get("intake_gap"),
-        "escalation": pr.get("escalation"),
+        "outstanding": pr.get("outstanding"),
     }
 
 
-def _hard_seam_changes(prev: list[dict] | None, new: list[dict]) -> list[str]:
-    """Which hard seams a plan revision moved: tasks added or removed, or a task's
-    ownership envelope, dependencies, interfaces, acceptance, lane, shared
-    boundary, or visual applicability. Checks, titles, routes and visual details
-    are not seams."""
-    if prev is None:
-        return ["initial plan"]
-    old = {t["id"]: t for t in prev}
-    out = []
-    for t in new:
-        o = old.pop(t["id"], None)
-        if o is None:
-            out.append(f"{t['id']} added")
-            continue
-        for key, label in (("scope", "ownership"), ("depends", "dependency"), ("interfaces", "interface"),
-                           ("accept", "acceptance"), ("lane", "lane"), ("converge", "shared boundary")):
-            if (o.get(key) or None) != (t.get(key) or None):
-                out.append(f"{t['id']} {label}")
-        if bool((o.get("visual") or {}).get("none")) != bool((t.get("visual") or {}).get("none")) \
-                or bool(o.get("visual")) != bool(t.get("visual")):
-            out.append(f"{t['id']} visual applicability")
-    out += [f"{tid} removed" for tid in old]
-    return out
-
-
-def review_after_revision(con, run: dict, prev_tasks: list[dict] | None, new_tasks: list[dict], version: int) -> str:
-    """Decide what a plan revision needs under the convergence contract. Caller
-    holds the tx. Returns a short line for the submitter."""
+def review_after_revision(con, run: dict, version: int) -> str:
+    """What a plan revision gets under the convergence contract. Caller holds
+    the tx. Returns a short line for the submitter. Only an open cycle reviews
+    it (`can_auto_queue`); after the cycle closes, the planner/orchestrator owns
+    every revision, whatever it changes (#418)."""
     run = state.get_run(con, run["id"])
     if not review_required(run):
         state.emit(con, run, "plan.ready", f"PLAN READY p{version} (no plan review funded by this gear)")
         return "no plan review funded"
     pr = _pr(run)
-    if pr.get("ended_reason") == "waived by the user":
-        state.emit(con, run, "plan.ready", f"PLAN READY p{version} (plan review waived)")
-        return "plan review waived"
-    seams = _hard_seam_changes(prev_tasks, new_tasks)
-    if pr.get("reviewed_requirements") and pr["reviewed_requirements"] != run["requirements_version"]:
-        seams.append(f"requirements r{pr['reviewed_requirements']} -> r{run['requirements_version']}")
-    if pr.get("ended") and not seams:
-        state.emit(con, run, "plan.cleanup", f"plan p{version}: APPROVED cleanup moves no hard seam; no re-review",
-                   audience="runtime")
-        return "APPROVED cleanup (no hard seam moved; no re-review)"
-    if pr.get("status") == "escalated":
-        return "the plan review is at its round cap; the operator decides (office decide plan ...)"
     if pr.get("ended"):
-        # A hard-seam change after APPROVED is a contract amendment: a new review cycle.
-        pr.update({"ended": False, "ended_reason": None, "status": "pending", "cycle": _cycle(run) + 1,
-                   "reason": "hard seam moved after APPROVED: " + ", ".join(seams[:4])})
-        state.update_run(con, run["id"], plan_review=pr)
-        state.emit(con, run, "plan.rereview", f"plan p{version} moves a hard seam ({', '.join(seams[:3])}); "
-                   "it is reviewed again before affected work proceeds")
-    elif pr.get("intake_gap") and not pr.get("intake_answered"):
-        # The user's decision arrived as this revision: a fresh cycle reviews it.
+        state.emit(con, run, "plan.review_closed", f"plan p{version}: plan review is closed "
+                   f"({pr.get('ended_reason') or pr.get('status')}); the planner/orchestrator owns this revision, "
+                   "no re-review", audience="runtime")
+        return "plan review closed (owned by the planner/orchestrator; no re-review)"
+    if pr.get("intake_gap") and not pr.get("intake_answered"):
+        # The user's decision arrived as this revision: a fresh round budget reviews it.
         pr.update({"cycle": _cycle(run) + 1, "intake_answered": True})
         state.update_run(con, run["id"], plan_review=pr)
     gid = queue_plan_review(con, state.get_run(con, run["id"]), version)
     return "plan-review queued" if gid else "plan review not queued"
+
+
+def request_review(con, run: dict, quote: str | None, rounds: int | None = None) -> Result:
+    """The user's explicit request for another plan review after a cycle closed
+    (#418): a new bounded cycle, recorded as user-requested with their words.
+    It is the only way plan review reopens."""
+    if os.environ.get("OFFICE_DISPATCH_ID"):
+        raise Refused("worker-cannot-request-review", "only the user requests another plan review")
+    if not contract.is_convergence(run):
+        raise Refused("legacy-contract", f"this run keeps the {contract.of(run)} review contract; it has no "
+                      "user-requested plan review", next_step="office status")
+    if not quote or len(re.sub(r"\s+", "", quote)) < 2:
+        raise Usage("user-quote-required", "another plan review is the user's request; record their words",
+                    next_step='office review plan --quote "<user\'s words>" [--rounds N]')
+    rounds = check_round_cap(rounds or contract.MAX_ROUNDS)
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        if not run["plan_version"]:
+            raise Refused("no-plan", "there is no plan to review", next_step="office submit the plan first")
+        pr = _pr(run)
+        if review_required(run) and not pr.get("ended"):
+            raise Refused("plan-review-open", f"plan review is already open ({pr.get('status') or 'pending'}, "
+                          f"cycle {_cycle(run)})", scope="plan", next_step="office status")
+        con.execute("INSERT INTO authorizations(id, run_id, kind, target, requirements_version, authorized_by, quote, "
+                    "created_at) VALUES(?,?,?,?,?,?,?,?)", ("Z" + uuid.uuid4().hex[:8], run["id"], "decision",
+                                                            "plan:review", run["requirements_version"], "user",
+                                                            quote.strip(), now_iso()))
+        cycle = _cycle(run) + (1 if plan_gates(con, run["id"]) else 0)
+        version = run["plan_version"]
+        pr.update({"required": True, "ended": False, "ended_reason": None, "status": "pending", "cycle": cycle,
+                   "lifecycle": USER_REQUESTED, "max_rounds": rounds, "outstanding": None,
+                   "requested": {"quote": quote.strip(), "plan_version": version, "at": now_iso()}})
+        state.update_run(con, run["id"], plan_review=pr)
+        run = state.get_run(con, run["id"])
+        queue_plan_review(con, run, version)
+        state.emit(con, run, "plan.review_requested", f"user-requested plan review of p{version}: cycle {cycle}, "
+                   f"up to {rounds} substantive round(s)", payload={"quote": quote.strip(), "rounds": rounds})
+    jobs.kick(con, run["id"])
+    return Result(lines=[f"plan review requested by the user: p{version}, cycle {cycle}, up to {rounds} round(s)"],
+                  next="no action; the verdict returns here (office status)")
 
 
 def recheck_reviewer(con, run: dict) -> str | None:
@@ -749,14 +831,14 @@ def recheck_reviewer(con, run: dict) -> str | None:
 
 def _queue_convergence_review(con, run: dict, plan_version: int, *, exclude: list[str] | None = None) -> str | None:
     run = state.get_run(con, run["id"])
+    if not can_auto_queue(run):
+        return None  # the cycle is closed: only the user reopens plan review (#418)
     gates = plan_gates(con, run["id"])
     if any(g["plan_version"] == plan_version and g["status"] in ("queued", "running") for g in gates):
         return None
     pr = _pr(run)
-    if pr.get("status") in ("escalated", "stopped"):
-        return None
     rounds = substantive_rounds(con, run)
-    if rounds >= contract.MAX_ROUNDS:
+    if rounds >= round_cap(run):
         return None
     payload = {"exclude": list(exclude or [])}
     # Same reviewer across a RECHECK sequence when it is still available (#337).
@@ -765,8 +847,6 @@ def _queue_convergence_review(con, run: dict, plan_version: int, *, exclude: lis
         payload["resume_from"] = prev
         from office import gates as gate_engine
         gate_engine.recheck_continuity(con, run, prev)  # a fallback is announced before the round runs
-    elif pr.get("exclude_route") and pr["exclude_route"] not in payload["exclude"]:
-        payload["exclude"].append(pr["exclude_route"])  # an operator-chosen technical escalation
     gate_id = "G" + uuid.uuid4().hex[:8]
     con.execute("INSERT INTO gates(id, run_id, subject, plan_version, kind, input_key, status, round, escalated, created_at, "
                 "contract, cycle) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -884,14 +964,15 @@ def _ingest_convergence(con, run: dict, gate_id: str, outcome: dict) -> None:
             con.execute("UPDATE findings SET state='resolved', updated_at=? WHERE id=?", (now_iso(), row["id"]))
     pr.pop("intake_gap", None)
     pr.pop("intake_answered", None)
-    pr["reviewed_requirements"] = run["requirements_version"]
     pr["reviewer"] = reviewer
     nonblocking = [f for f in parsed.findings if not f.get("blocking")]
+    label = " (user-requested review)" if pr.get("lifecycle") == USER_REQUESTED else ""
     if verdict == "APPROVED":
-        pr.update({"ended": True, "ended_reason": f"APPROVED on {v}", "status": "approved", "escalation": None})
+        close_cycle(con, run, pr, APPROVED, f"APPROVED on {v}{label}")
+        pr["outstanding"] = None
         state.update_run(con, run["id"], plan_review=pr)
         _unpause_plan_holds(con, run)
-        state.emit(con, run, "plan.approved", f"PLAN APPROVED {v}: dispatch-safe"
+        state.emit(con, run, "plan.approved", f"PLAN APPROVED {v}{label}: dispatch-safe; plan review is closed"
                    + (f"; {len(nonblocking)} non-blocking finding(s) to fix or disposition (no re-review): "
                       + ", ".join(f["code"] for f in nonblocking) if nonblocking else "")
                    + (f"; reviewer recommends: {parsed.next_action[:160]}" if parsed.next_action else ""),
@@ -908,40 +989,38 @@ def _ingest_convergence(con, run: dict, gate_id: str, outcome: dict) -> None:
                    payload={"decision": parsed.decision, "why": parsed.why, "affects": parsed.affects})
         return
     blocking = [f for f in parsed.findings if f.get("blocking")]
-    rounds = substantive_rounds(con, run)
-    if rounds >= contract.MAX_ROUNDS:
-        pr.update({"status": "escalated", "escalation": _escalation_summary(con, run, blocking, parsed)})
+    rounds, cap = substantive_rounds(con, run), round_cap(run)
+    if rounds >= cap:
+        # #418: the cycle closes unapproved. The verdict stays RECHECK; the
+        # orchestrator owns the findings and records a disposition for each.
+        pr["outstanding"] = _outstanding(con, run, blocking, parsed)
+        close_cycle(con, run, pr, OWNED, f"round budget spent ({rounds}/{cap}) with RECHECK on {v}{label}")
         state.update_run(con, run["id"], plan_review=pr)
-        paused = _pause_affected(con, run, blocking, "plan review at its round cap")
-        state.emit(con, run, "plan.escalation", f"PLAN RECHECK {v} after {rounds} substantive rounds: the operator "
-                   f"decides now (office decide plan escalate|continue|waive|stop); recommendation: "
-                   f"{pr['escalation']['recommendation']}" + (f"; paused {', '.join(paused)}" if paused else ""),
-                   payload=pr["escalation"])
+        paused = _pause_affected(con, run, blocking, "plan findings await the orchestrator's disposition")
+        state.emit(con, run, "plan.budget_exhausted", f"PLAN RECHECK {v} after {rounds}/{cap} substantive rounds: "
+                   "plan review is closed, unapproved; the orchestrator owns "
+                   + ", ".join(f["code"] for f in blocking) + " (fix each in the plan or accept it, then record a "
+                   "disposition)" + (f"; paused {', '.join(paused)}" if paused else ""),
+                   payload=pr["outstanding"])
         return
     pr["status"] = "recheck"
     state.update_run(con, run["id"], plan_review=pr)
     paused = _pause_affected(con, run, blocking, "plan recheck")
     from office import gates as gate_engine
     who = gate_engine.recheck_continuity(con, run, reviewer)
-    state.emit(con, run, "plan.recheck", f"PLAN RECHECK {v} (round {rounds}/{contract.MAX_ROUNDS}): "
+    state.emit(con, run, "plan.recheck", f"PLAN RECHECK {v} (round {rounds}/{cap}){label}: "
                + "; ".join(f"{f['code']} {f.get('location') or ''} {f['summary'][:80]}" for f in blocking[:4])
                + (f"; paused {', '.join(paused)}" if paused else "") + f"; next round: {who}",
                payload={"findings": parsed.findings, "next_action": parsed.next_action})
 
 
-def _escalation_summary(con, run: dict, blocking: list[dict], parsed) -> dict:
-    """What the operator sees at the plan round cap (#337 escalation)."""
-    history = [{"round": g["round"], "plan_version": g["plan_version"], "verdict": g["verdict"],
-                "summary": (g.get("summary") or "")[:160]} for g in _cycle_gates(con, run)
-               if g.get("review_status") == contract.COMPLETED]
-    material = [f for f in blocking if (f.get("level") or f.get("severity")) in ("high", "medium")]
+def _outstanding(con, run: dict, blocking: list[dict], parsed) -> dict:
+    """What the orchestrator owns once a cycle closes at its round cap (#418)."""
     return {
-        "scope": PLAN_SCOPE,
+        "owner": "orchestrator",
         "remaining": [{k: f.get(k) for k in ("code", "level", "location", "summary", "seam")} for f in blocking],
-        "materiality": f"{len(material)} of {len(blocking)} blocking finding(s) are high or medium",
-        "attempts": history,
-        "risk": "dispatch stays held for the tasks these findings name until the plan is approved or the gate is waived",
-        "recommendation": parsed.next_action or ("continue: one more bounded revision cycle" if len(blocking) <= 2
-                                                  else "escalate: a different reviewer or planner"),
-        "choices": contract.round_cap_choices(PLAN_SCOPE),
+        "attempts": [{"round": g["round"], "plan_version": g["plan_version"], "verdict": g["verdict"],
+                      "summary": (g.get("summary") or "")[:160]} for g in _cycle_gates(con, run)
+                     if g.get("review_status") == contract.COMPLETED],
+        "reviewer_next": parsed.next_action,
     }

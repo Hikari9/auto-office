@@ -301,8 +301,9 @@ APPROVED | RECHECK | INTAKE_GAP
 - `INTAKE_GAP`: a missing or conflicting user-owned decision; the orchestrator asks the user at once.
 - Severity (`high | medium | low`) is separate from blocking, and runtime status (`COMPLETED | UNAVAILABLE | EVIDENCE_BLOCKED | INVALID_RESULT`) is separate from both. An unavailable reviewer walks the fallback chain and never counts as a pass or a round.
 - A repair that would move a hard seam (requirements, authority, ownership, dependency, interface, acceptance) is never APPROVED cleanup.
+- Plan review reviews the initial plan only (#418). RECHECK revisions iterate inside that initial review, capped at 3 substantive rounds unless the user sets `office start --plan-review-rounds N`. Once it closes (APPROVED, the cap, or a waiver), later amendments belong to the planner/orchestrator and are never reviewed again; at the cap the orchestrator owns the remaining findings and records a disposition for each. Only the user reopens it: `office review plan --quote "<words>"`.
 
-Review happens per ownership/composition **lane** (tasks joined by `depends` or a shared `lane:`), on the composed result, and once more per **shared scope** where lanes share a `converge:` name, an interface, a `shared:` registry, or changed files. Each RECHECK sequence stops after 3 substantive rounds; the user then chooses `escalate`, `continue`, `waive`, or `stop` (`office decide`). Required reviews are hard landing gates that only landing authority can waive, and the waiver keeps the underlying verdict on the receipt.
+Review happens per ownership/composition **lane** (tasks joined by `depends` or a shared `lane:`), on the composed result, and once more per **shared scope** where lanes share a `converge:` name, an interface, a `shared:` registry, or changed files. Each lane RECHECK sequence stops after 3 substantive rounds; the user then chooses `escalate`, `continue`, `waive`, or `stop` (`office decide`). Required reviews are hard landing gates that only landing authority can waive, and the waiver keeps the underlying verdict on the receipt.
 
 Each run is pinned to the review contract it started with. Runs started before #337 stay on the `v3.1` contract (`PASS | CHANGES_REQUIRED | PLAN_DEFECT | BRIEF_DEFECT | UNAVAILABLE`, per-task review, rolling plan review); `review.contract` in config picks the default for future runs only, and `office start --from-run <run>` moves old work onto the current contract as a new run.
 
@@ -615,7 +616,8 @@ office close                          finish after acceptance + landing/handoff
 
 office inspect run|plan|task|gate|evidence|events|route|convergence [id]
 office approve plan|merge|trust|waive|visual ... --quote "<user words>"
-office decide <scope|plan> escalate|continue|waive|stop --quote "<user words>"
+office decide <scope> escalate|continue|waive|stop --quote "<user words>"
+office review plan --quote "<user words>" [--rounds N]   the user's request for another plan review
 office disposition <scope>:<code> fix|fixed|dismissed|follow-up -- "<note>"
 office review <scope>:convergence|visual --report <file>   degraded fallback review
 office benchmarks brief|submit ...
