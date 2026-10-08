@@ -1552,7 +1552,8 @@ def _await_agent_ui(name: str, pane: str, timeout: float, *, answer_trust: bool,
                 if time.time() >= deadline:
                     return "trust"
             else:
-                _confirm_trust(pane, lambda: _pane_view(name), herdr, text)
+                if not _confirm_trust(pane, lambda: _pane_view(name), herdr, text):
+                    return "trust"  # no trust option could be selected
                 answered = True
         elif _agent_up(pane, name):
             return "ready"
@@ -2014,7 +2015,7 @@ def _reserve_pane(run: dict, pane: str, dispatch_id: str) -> None:
     f = paths.run_dir(run["id"]) / "herdr-reservations.json"
     try:
         held = json.loads(f.read_text()) if f.is_file() else {}
-    except ValueError:
+    except (OSError, ValueError):
         held = {}
     held[pane] = dispatch_id
     atomic_write_json(f, held)
