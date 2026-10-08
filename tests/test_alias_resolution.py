@@ -61,3 +61,13 @@ def test_default_reviewer_seeds_resolve_to_catalog_candidates():
     for role in ("plan_reviewer", "code_reviewer"):
         lead = roles[role]["preferred_seed"][0]
         assert any(routing.preferred_rank(r, [lead]) == 0 for r in rows), role
+
+
+def test_shipped_catalog_has_unique_model_harness_effort_rows():
+    """A stale evidence-only row must not duplicate a scored routing candidate."""
+    import yaml
+    from office import paths
+
+    seed = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8"))
+    keys = [(r["model_id"], r["invocation_harness"], r["effort"]) for r in seed["models"]]
+    assert len(keys) == len(set(keys)), "duplicate catalog model/harness/effort rows"

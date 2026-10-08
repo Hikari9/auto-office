@@ -798,28 +798,6 @@ models:
     source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-5-6-luna', release_url: 'https://artificialanalysis.ai/models/releases/gpt-5-6-luna', fetched_at: '2026-09-27T14:56:16Z', page_title: GPT-5.6 Luna (max)}
     content_hash: 9830786db6fe24df6fad7a9742db0cc21f1a01b4faf752e0fcf99341845108d8
     supersession_metadata: {supersedes: null, superseded_by: gpt-6-luna, reason: deprecated-by-vendor-per-artificial-analysis-model-page}
-  - model_id: gpt-6-luna
-    invocation_model_id: gpt-6-luna
-    invocation_harness: codex
-    invocation_source: 'local-evidence:codex debug models --bundled'
-    # Added from run ce26b2fa (2026-09-23): codex 0.156.1 lists slug
-    # `gpt-6-luna` (efforts low..max) and a pane launch with
-    # `-m gpt-6-luna -c model_reasoning_effort=xhigh` bannered "GPT-6-Luna
-    # xhigh" and completed a verified executor task. No public benchmark row
-    # was fetched yet, so source fields are null rather than guessed.
-    dispatchable: true
-    source_identifier:
-    source_name: local-evidence
-    effort: xhigh
-    source_effort: xhigh
-    effort_confidence: exact
-    benchmark_indexes: {}
-    price_fields:
-    speed_fields:
-    release_date:
-    source_snapshot_metadata:
-    content_hash:
-    supersession_metadata:
   - model_id: gpt-5.6-luna
     invocation_model_id: gpt-5.6-luna
     invocation_harness: codex
@@ -1201,6 +1179,10 @@ models:
     invocation_model_id: gpt-6-luna
     invocation_harness: codex
     invocation_source: local-evidence:codex debug models --bundled
+    # Verified codex dispatch from run ce26b2fa (2026-09-23): codex 0.156.1
+    # listed gpt-6-luna at xhigh, and a pinned pane bannered GPT-6-Luna
+    # xhigh before completing a verified executor task. Consolidated from
+    # the former benchmark-empty duplicate row; no evidence was discarded.
     dispatchable: true
     source_identifier: gpt-6-luna-xhigh
     source_name: artificial-analysis
@@ -1480,10 +1462,10 @@ models:
     source_effort: max
     effort_confidence: exact
     benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 52}
-    price_fields:
-    speed_fields:
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 10.0, currency: USD, as_of: '2026-10-08'}
+    speed_fields: {output_tok_per_s: 55.2, ttft_ms: 326940}
     release_date: '2026-09'
-    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-sol', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-sol', fetched_at: '2026-09-30T18:20:04Z', page_title: 'GPT-6.1 Sol (max)'}
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-sol', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-sol', fetched_at: '2026-09-30T18:20:04Z', metrics_as_of: '2026-10-08', metrics_context: 'AA first-party API performance; not local CLI conformance', page_title: 'GPT-6.1 Sol (max)'}
     content_hash:
     supersession_metadata:
   - model_id: gpt-6-1-sol
@@ -1497,10 +1479,10 @@ models:
     source_effort: xhigh
     effort_confidence: exact
     benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 51}
-    price_fields:
-    speed_fields:
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 10.0, currency: USD, as_of: '2026-10-08'}
+    speed_fields: {output_tok_per_s: 53.3, ttft_ms: 148300}
     release_date: '2026-09'
-    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-sol-xhigh', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-sol', fetched_at: '2026-09-30T18:20:04Z', page_title: 'GPT-6.1 Sol (xhigh)'}
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-sol-xhigh', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-sol', fetched_at: '2026-09-30T18:20:04Z', metrics_as_of: '2026-10-08', metrics_context: 'AA first-party API performance; not local CLI conformance', page_title: 'GPT-6.1 Sol (xhigh)'}
     content_hash:
     supersession_metadata:
   - model_id: gpt-6-1-sol
@@ -1514,10 +1496,10 @@ models:
     source_effort: high
     effort_confidence: exact
     benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 50}
-    price_fields:
-    speed_fields:
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 10.0, currency: USD, as_of: '2026-10-08'}
+    speed_fields: {output_tok_per_s: 51.7, ttft_ms: 59310}
     release_date: '2026-09'
-    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-sol-high', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-sol', fetched_at: '2026-09-30T18:20:04Z', page_title: 'GPT-6.1 Sol (high)'}
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-sol-high', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-sol', fetched_at: '2026-09-30T18:20:04Z', metrics_as_of: '2026-10-08', metrics_context: 'AA first-party API performance; not local CLI conformance', page_title: 'GPT-6.1 Sol (high)'}
     content_hash:
     supersession_metadata:
   - model_id: gpt-6-1-sol
@@ -1531,10 +1513,10 @@ models:
     source_effort: medium
     effort_confidence: exact
     benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 48}
-    price_fields:
-    speed_fields:
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 10.0, currency: USD, as_of: '2026-10-08'}
+    speed_fields: {output_tok_per_s: 50.0, ttft_ms: 6430}
     release_date: '2026-09'
-    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-sol-medium', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-sol', fetched_at: '2026-09-30T18:20:04Z', page_title: 'GPT-6.1 Sol (medium)'}
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-sol-medium', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-sol', fetched_at: '2026-09-30T18:20:04Z', metrics_as_of: '2026-10-08', metrics_context: 'AA first-party API performance; not local CLI conformance', page_title: 'GPT-6.1 Sol (medium)'}
     content_hash:
     supersession_metadata:
   - model_id: gpt-6-1-sol
@@ -1548,10 +1530,10 @@ models:
     source_effort: low
     effort_confidence: exact
     benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 42}
-    price_fields:
-    speed_fields:
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 10.0, currency: USD, as_of: '2026-10-08'}
+    speed_fields: {output_tok_per_s: 48.8, ttft_ms: 3190}
     release_date: '2026-09'
-    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-sol-low', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-sol', fetched_at: '2026-09-30T18:20:04Z', page_title: 'GPT-6.1 Sol (low)'}
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-sol-low', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-sol', fetched_at: '2026-09-30T18:20:04Z', metrics_as_of: '2026-10-08', metrics_context: 'AA first-party API performance; not local CLI conformance', page_title: 'GPT-6.1 Sol (low)'}
     content_hash:
     supersession_metadata:
   - model_id: gemini-3.7-flash
