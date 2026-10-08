@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 from office import scoring, task_descriptors
 
-LEARNER_VERSION = "route-learner-1"
+LEARNER_VERSION = "route-learner-2-task"
 
 ADAPTIVE_ROLES = ("executor", "worker")
 

@@ -3,77 +3,328 @@
   "title": "Adaptive routing decision (#300)",
   "description": "The audit record `route_audit.disclosure_json` holds for an executor/worker routing decision: every qualifying candidate with its score components, the slate, the seeded close-call draw, exploration, the planner's choice and, for a dispatch, what ran and why.",
   "type": "object",
-  "required": ["policy_version", "learner_version", "cost_policy", "weights", "competitive_band", "context",
-               "evidence_digest", "numeric_order", "clincher", "exploration", "candidates", "slate"],
+  "required": [
+    "policy_version",
+    "learner_version",
+    "cost_policy",
+    "weights",
+    "competitive_band",
+    "context",
+    "evidence_digest",
+    "numeric_order",
+    "clincher",
+    "exploration",
+    "candidates",
+    "slate"
+  ],
   "properties": {
-    "policy_version": {"type": "string"},
-    "learner_version": {"type": "string"},
-    "decision_hash": {"type": "string"},
-    "phase": {"enum": ["plan", "dispatch", "reroute"]},
-    "task_id": {"type": ["string", "null"]},
-    "role": {"enum": ["executor", "worker"]},
-    "cost_policy": {"type": "string"},
-    "weights": {"type": "object", "additionalProperties": {"type": "number"}},
-    "competitive_band": {"type": "number"},
-    "budget_ceiling_usd": {"type": ["number", "null"]},
-    "cost_scale_usd": {"type": "number"},
-    "context": {"type": "object"},
-    "evidence_as_of": {"type": ["string", "null"]},
-    "evidence_digest": {"type": "string"},
-    "numeric_order": {"type": "array", "items": {"type": "string"}},
-    "preferred_seed": {"type": ["array", "null"]},
-    "aliases": {"type": "object"},
+    "policy_version": {
+      "type": "string"
+    },
+    "learner_version": {
+      "type": "string"
+    },
+    "decision_hash": {
+      "type": "string"
+    },
+    "phase": {
+      "enum": [
+        "plan",
+        "dispatch",
+        "reroute"
+      ]
+    },
+    "task_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "role": {
+      "enum": [
+        "executor",
+        "worker"
+      ]
+    },
+    "cost_policy": {
+      "type": "string"
+    },
+    "weights": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number"
+      }
+    },
+    "competitive_band": {
+      "type": "number"
+    },
+    "budget_ceiling_usd": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "cost_scale_usd": {
+      "type": "number"
+    },
+    "context": {
+      "type": "object"
+    },
+    "evidence_as_of": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "evidence_digest": {
+      "type": "string"
+    },
+    "numeric_order": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "preferred_seed": {
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "aliases": {
+      "type": "object"
+    },
     "clincher": {
       "type": "object",
-      "required": ["used", "band", "seed"],
+      "required": [
+        "used",
+        "band",
+        "seed"
+      ],
       "properties": {
-        "used": {"type": "boolean"},
-        "band": {"type": "array", "items": {"type": "string"}},
-        "seed": {"type": "string"},
-        "draw": {"type": "number"},
-        "picked": {"type": "string"}
+        "used": {
+          "type": "boolean"
+        },
+        "band": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "seed": {
+          "type": "string"
+        },
+        "draw": {
+          "type": "number"
+        },
+        "picked": {
+          "type": "string"
+        }
       }
     },
     "exploration": {
       "type": "object",
-      "required": ["active", "rate", "picked"],
+      "required": [
+        "active",
+        "rate",
+        "picked"
+      ],
       "properties": {
-        "active": {"type": "boolean"},
-        "rate": {"type": "number"},
-        "picked": {"type": ["string", "null"]},
-        "eligible": {"type": "array", "items": {"type": "string"}},
-        "draw": {"type": "number"},
-        "blocked": {"type": "string"}
+        "active": {
+          "type": "boolean"
+        },
+        "rate": {
+          "type": "number"
+        },
+        "picked": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "eligible": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "draw": {
+          "type": "number"
+        },
+        "blocked": {
+          "type": "string"
+        }
       }
     },
-    "spread": {"type": "object"},
+    "spread": {
+      "type": "object"
+    },
     "candidates": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["route", "label", "effort", "benchmark", "local", "p_success", "cost_to_success",
-                     "time_to_success_seconds", "quota", "preference", "components", "contributions", "utility",
-                     "rank", "in_competitive_band", "eligibility"],
+        "required": [
+          "route",
+          "label",
+          "effort",
+          "benchmark",
+          "local",
+          "p_success",
+          "cost_to_success",
+          "time_to_success_seconds",
+          "quota",
+          "preference",
+          "components",
+          "contributions",
+          "utility",
+          "rank",
+          "in_competitive_band",
+          "eligibility"
+        ],
         "properties": {
-          "route": {"type": "string"},
-          "label": {"type": "string"},
-          "effort": {"type": ["string", "null"]},
-          "benchmark": {"type": "object", "required": ["prior_p", "source", "authority"]},
-          "local": {"type": "object", "required": ["n_effective", "n_raw", "runs"]},
-          "p_success": {"type": "number", "minimum": 0, "maximum": 1},
-          "p_interval_90": {"type": "array", "items": {"type": "number"}},
-          "cost_to_success": {"type": ["number", "null"]},
-          "cost_basis": {"enum": ["prior", "local", "blended", "unknown"]},
-          "time_to_success_seconds": {"type": ["number", "null"]},
-          "quota": {"type": "object", "required": ["score", "state"]},
-          "preference": {"type": "object", "required": ["score", "seed_rank"]},
-          "components": {"type": "object"},
-          "contributions": {"type": "object"},
-          "utility": {"type": "number"},
-          "rank": {"type": "integer", "minimum": 1},
-          "in_competitive_band": {"type": "boolean"},
-          "gap_to_best": {"type": "number"},
-          "eligibility": {"type": "object", "required": ["source"]}
+          "route": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "effort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "benchmark": {
+            "type": "object",
+            "required": [
+              "prior_p",
+              "source",
+              "authority"
+            ],
+            "properties": {
+              "prior_p": {
+                "type": "number"
+              },
+              "source": {
+                "type": "string"
+              },
+              "authority": {
+                "type": "number"
+              },
+              "task_fit": {
+                "type": "object"
+              }
+            }
+          },
+          "local": {
+            "type": "object",
+            "required": [
+              "n_effective",
+              "n_raw",
+              "runs"
+            ]
+          },
+          "p_success": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "p_interval_90": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "cost_to_success": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cost_basis": {
+            "enum": [
+              "prior",
+              "local",
+              "blended",
+              "unknown"
+            ]
+          },
+          "time_to_success_seconds": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "quota": {
+            "type": "object",
+            "required": [
+              "score",
+              "state"
+            ]
+          },
+          "preference": {
+            "type": "object",
+            "required": [
+              "score",
+              "seed_rank"
+            ]
+          },
+          "components": {
+            "type": "object"
+          },
+          "contributions": {
+            "type": "object"
+          },
+          "utility": {
+            "type": "number"
+          },
+          "rank": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "in_competitive_band": {
+            "type": "boolean"
+          },
+          "gap_to_best": {
+            "type": "number"
+          },
+          "eligibility": {
+            "type": "object",
+            "required": [
+              "source"
+            ]
+          },
+          "pricing": {
+            "type": "object",
+            "properties": {
+              "tier": {
+                "enum": [
+                  "flat",
+                  "standard",
+                  "above-threshold",
+                  "unknown-conservative"
+                ]
+              },
+              "estimated_input_tokens": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "threshold": {
+                "type": "integer"
+              },
+              "source_as_of": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "tier"
+            ]
+          }
         }
       }
     },
@@ -82,38 +333,174 @@
       "maxItems": 3,
       "items": {
         "type": "object",
-        "required": ["rank", "route", "label", "reason", "strength", "weakness"],
+        "required": [
+          "rank",
+          "route",
+          "label",
+          "reason",
+          "strength",
+          "weakness"
+        ],
         "properties": {
-          "rank": {"enum": ["PRIMARY", "FALLBACK 1", "FALLBACK 2"]},
-          "route": {"type": "string"},
-          "label": {"type": "string"},
-          "reason": {"type": "string"},
-          "strength": {"type": "string"},
-          "weakness": {"type": "string"}
+          "rank": {
+            "enum": [
+              "PRIMARY",
+              "FALLBACK 1",
+              "FALLBACK 2"
+            ]
+          },
+          "route": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "strength": {
+            "type": "string"
+          },
+          "weakness": {
+            "type": "string"
+          }
         }
       }
     },
     "planner": {
       "type": "object",
       "properties": {
-        "chooser": {"enum": ["router", "planner"]},
-        "primary": {"type": ["string", "null"]},
-        "fallbacks": {"type": "array", "items": {"type": "string"}},
-        "override": {"type": "boolean"},
-        "departs_from_ranking": {"type": "boolean"},
-        "gap_to_best": {"type": "number"},
-        "why": {"type": ["string", "null"]},
-        "planner_error": {"type": "string"}
+        "chooser": {
+          "enum": [
+            "router",
+            "planner"
+          ]
+        },
+        "primary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fallbacks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "override": {
+          "type": "boolean"
+        },
+        "departs_from_ranking": {
+          "type": "boolean"
+        },
+        "gap_to_best": {
+          "type": "number"
+        },
+        "why": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planner_error": {
+          "type": "string"
+        }
       }
     },
     "dispatch": {
       "type": "object",
       "properties": {
-        "source": {"enum": ["plan", "router", "reroute", "override"]},
-        "dispatched": {"type": "string"},
-        "fallbacks_taken": {"type": "array", "items": {"type": "object", "required": ["route", "reason"]}},
-        "planned_audit_id": {"type": ["string", "null"]}
+        "source": {
+          "enum": [
+            "plan",
+            "router",
+            "reroute",
+            "override"
+          ]
+        },
+        "dispatched": {
+          "type": "string"
+        },
+        "fallbacks_taken": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "route",
+              "reason"
+            ]
+          }
+        },
+        "planned_audit_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
+    },
+    "task_descriptor": {
+      "type": "object",
+      "properties": {
+        "domain": {
+          "enum": [
+            "ui",
+            "backend",
+            "data",
+            "infrastructure",
+            "mixed"
+          ]
+        },
+        "work": {
+          "enum": [
+            "mechanical",
+            "implementation",
+            "architecture"
+          ]
+        },
+        "modality": {
+          "enum": [
+            "code",
+            "visual",
+            "browser",
+            "multimodal"
+          ]
+        },
+        "quality": {
+          "enum": [
+            "objective",
+            "taste",
+            "mixed"
+          ]
+        },
+        "bounds": {
+          "enum": [
+            "bounded",
+            "open"
+          ]
+        },
+        "task_size": {
+          "enum": [
+            "S",
+            "M",
+            "L",
+            "XL"
+          ]
+        },
+        "estimated_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "estimated_output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "descriptor_version": {
+      "type": "string"
     }
   }
 }

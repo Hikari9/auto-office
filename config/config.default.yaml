@@ -58,6 +58,10 @@ routing:
       size_mismatch_weight: 0.75
       fix_kind_weight: 0.75
       stale_harness_major_weight: 0.25
+      # #415: compare settled episodes by explicitly frozen per-task descriptors.
+      descriptor_domain_mismatch_weight: 0.60
+      descriptor_modality_mismatch_weight: 0.75
+      descriptor_unknown_weight: 0.75
 # Legacy 3.0 exploration policy (scripts/). Executor/worker exploration (#300)
 # reads routing.adaptive.exploration.
 exploration:
