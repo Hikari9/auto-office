@@ -687,3 +687,55 @@ def test_an_abandoned_pane_held_by_another_dispatch_is_kept(env, monkeypatch):
     assert res["launcher"] == "process-fallback"
     assert not any(c[:2] == ["pane", "close"] for c in _calls(state_file))
     assert "herdr pane read" in _launch_events(env, run)[0]
+
+
+def test_trust_is_confirmed_only_on_a_settled_frame(monkeypatch):
+    # Review F3: a frame read before the redraw must not drive Enter.
+    from office import dispatch
+    monkeypatch.setenv("OFFICE_HERDR_KEY_SETTLE", "0.3")
+    dialog = "Quick safety check: Is this a project you created or one you trust?\n{}\n Enter to confirm"
+    no = dialog.format("❯ No, exit\n  Yes, I trust this folder")
+    yes = dialog.format("  No, exit\n❯ Yes, I trust this folder")
+    frames2 = iter([no, yes, yes])
+    sent2 = []
+    assert dispatch._confirm_trust("w1:p1", lambda: next(frames2, yes), lambda *a: sent2.append(a[-1]), None)
+    assert sent2 == ["down", "Enter"]
+    # A single trust frame followed by a different selection is never confirmed.
+    frames3 = iter([yes, no, no, no, no, no, no, no, no, no, no, no, no, no])
+    sent3 = []
+    dispatch._confirm_trust("w1:p1", lambda: next(frames3, no), lambda *a: sent3.append(a[-1]), None)
+    assert sent3[:1] != ["Enter"], sent3
+
+
+def test_answer_startup_trust_reads_the_screen_and_flat_status(monkeypatch):
+    # Review F4 (scrollback keeps the answered dialog) and F5 (a flat `agent get` result).
+    from office import dispatch
+    old = "Quick safety check: Is this a project you created or one you trust?\n  No, exit\n❯ Yes, I trust this folder"
+    monkeypatch.setattr(dispatch, "_pane_read", lambda pane: old + "\n\n> ")  # scrollback still holds it
+    screens = iter(["Quick safety check ... one you trust?\n❯ Yes, I trust this folder",
+                    "Quick safety check ... one you trust?\n❯ Yes, I trust this folder"])
+    monkeypatch.setattr(dispatch, "_pane_visible", lambda pane: next(screens, "> composer"))
+    monkeypatch.setattr(dispatch, "_herdr_quiet", lambda *a: None)
+    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {"name": "x", "status": "idle"})
+    assert dispatch._answer_startup_trust("w1:p1", "x", timeout=2)
+
+
+def test_trust_dialog_detection_ignores_styling_and_accepts_yes_options():
+    # Review F7 and F6.
+    from office import dispatch
+    assert dispatch._trust_dialog("Trust\x1b[1m this folder\x1b[0m?")
+    assert dispatch._trust_selected("Yes, continue")
+    assert not dispatch._trust_selected("Yes, but don't trust")
+
+
+@pytest.mark.approved
+def test_an_abandoned_pane_is_dropped_from_the_layout(env, monkeypatch):
+    # Review F1: a closed pane left in herdr-tab.json is split from later and fails.
+    monkeypatch.setenv("FAKE_HERDR_START_FAIL", "1")
+    monkeypatch.setenv("FAKE_HERDR_PANE_READ", "some screen")
+    state_file, run, d, ddir, res = launch_in_herdr(env, monkeypatch)
+    from office import paths
+    pane = spec_pane(ddir)
+    assert ["pane", "close", pane] in _calls(state_file)
+    layout = json.loads((paths.run_dir(run["id"]) / "herdr-tab.json").read_text())
+    assert pane not in layout["panes"], layout

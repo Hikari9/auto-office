@@ -36,7 +36,8 @@ def test_codex_interactive_launch_pre_trusts_its_cwd(tmp_path):
 
 @pytest.mark.approved
 def test_trust_dialog_on_an_office_dir_is_answered_before_the_prompt(env, monkeypatch):
-    state_file, run, d, ddir, res = _launch(env, monkeypatch, reads=[TRUST, BUSY])
+    # Enter is pressed only once a second, fresh frame still shows the trust option selected.
+    state_file, run, d, ddir, res = _launch(env, monkeypatch, reads=[TRUST, TRUST, BUSY])
     assert res["prompt_landed"] is True
     calls = _calls(state_file)
     enter = next(i for i, c in enumerate(calls) if c[:2] == ["pane", "send-keys"] and c[-1] == "Enter")

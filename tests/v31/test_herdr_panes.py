@@ -306,3 +306,48 @@ def test_a_pane_picked_for_a_launching_dispatch_is_not_handed_to_a_parallel_laun
     first = dispatch._herdr_pane(run, env.repo, dispatch_id=d["id"])
     assert dispatch._herdr_pane(run, env.repo, dispatch_id="Dother") != first
     assert first in dispatch._busy_panes(run)
+
+
+def test_own_tab_mode_never_splits_from_a_closed_pane(env, monkeypatch):
+    # Review F1: own-tab layouts were not filtered for live panes.
+    state = _fake(env, monkeypatch)
+    state.write_text(json.dumps({"calls": [], "n": 0, "closed": ["w1:p19"]}))
+    from office import dispatch, paths
+    run = _run(env)
+    (paths.run_dir(run["id"]) / "herdr-tab.json").write_text(json.dumps({"tab_id": "w1:tD", "panes": ["w1:p18", "w1:p19"]}))
+    monkeypatch.setattr(dispatch, "_busy_panes", lambda _run: {"w1:p18"})
+    dispatch._herdr_pane(run, env.repo)
+    split = [c for c in _calls(state) if c[:2] == ["pane", "split"]][-1]
+    assert split[split.index("--pane") + 1] == "w1:p18", split
+
+
+def test_a_fresh_pane_after_agent_pane_busy_is_reserved(env, monkeypatch):
+    # Review F2: the retry pane must be reserved like a picked one.
+    _fake(env, monkeypatch)
+    from office import dispatch, paths
+    run = _run(env)
+    pane = dispatch._herdr_fresh_pane(run, env.repo, "w1:p5", dispatch_id="Dabc")
+    held = json.loads((paths.run_dir(run["id"]) / "herdr-reservations.json").read_text())
+    assert held.get(pane) == "Dabc", held
+
+
+def test_the_cosmetic_rename_runs_outside_the_pane_lock(env, monkeypatch):
+    # Review F9: a slow rename must not hold every parallel launch.
+    import fcntl
+    _fake(env, monkeypatch)
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
+    from office import dispatch, paths
+    run = _run(env)
+    free = []
+
+    def rename(pane, label):
+        with open(paths.run_dir(run["id"]) / "herdr-tab.lock", "a+") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                free.append(True)
+                fcntl.flock(fh, fcntl.LOCK_UN)
+            except OSError:
+                free.append(False)
+    monkeypatch.setattr(dispatch, "_herdr_rename", rename)
+    dispatch._herdr_pane(run, env.repo, label="T1 executor D1")
+    assert free == [True]
