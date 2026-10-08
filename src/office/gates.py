@@ -1206,6 +1206,16 @@ def worker_live(con, dispatch_id: str | None) -> bool:
     return d["status"] == "launching" and _launch_pending(con, d)
 
 
+def live_task_session(con, run_id: str, task_id: str) -> str | None:
+    """Any live or launching session of the task, current or not (one session per
+    worktree): its dispatch id, or None (review F1, F9)."""
+    for r in con.execute("SELECT id FROM dispatches WHERE run_id=? AND task_id=? AND ended_at IS NULL "
+                         "AND status IN ('launching','running') ORDER BY started_at DESC", (run_id, task_id)):
+        if worker_live(con, r[0]):
+            return r[0]
+    return None
+
+
 def _launch_pending(con, d: dict) -> bool:
     job = con.execute("SELECT * FROM outbox WHERE run_id=? AND kind='launch_agent' AND dedup_key=?",
                       (d["run_id"], f"launch:{d['id']}")).fetchone()

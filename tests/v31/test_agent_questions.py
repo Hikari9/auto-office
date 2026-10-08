@@ -105,3 +105,32 @@ def test_a_headless_worker_that_ended_on_a_question_is_a_question_not_a_relaunch
     assert "question: T1" in out and "Q1" in out and "office amend T1" in out and "office rerun T1" in out, out
     code, out = env.office("status")
     assert "question: T1" in out, out
+
+
+def test_final_question_reports_the_latest_question_and_ignores_bare_ids():
+    # Review F5: an earlier, answered question in the log is not the one asked now.
+    log = ("Question (Q1): may I touch a.ts?\nAnswered: yes.\n...work...\n"
+           "Question (Q2): may I also touch b.ts?\nTASK=T1 SUBMIT=not attempted NEXT=Answer Q2\n")
+    assert questions.final_question(log)["question"].startswith("Question (Q2)")
+    # Review F8: a NEXT that only mentions a question id does not ask anything.
+    assert questions.final_question("Stopped.\nTASK=T1 SUBMIT=not attempted NEXT=rerun checks; Q1 was resolved\n") is None
+    # Review F10: one fingerprint rule for live and ended questions.
+    q = questions.final_question(log)
+    assert q["fingerprint"] == questions.fingerprint(q)
+
+
+def test_only_a_cleanly_ended_executor_can_end_on_a_question():
+    # Review F3 (planners have no amend/rerun answer path) and F6 (a crash is not a question).
+    from office import dispatch
+    assert dispatch._may_end_on_question({"role": "executor", "terminal_classification": "success"})
+    assert not dispatch._may_end_on_question({"role": "planner", "terminal_classification": "success"})
+    assert not dispatch._may_end_on_question({"role": "executor", "terminal_classification": "nonzero"})
+
+
+@pytest.mark.approved
+def test_a_crashed_worker_whose_last_line_is_a_question_is_still_relaunched(env):
+    from conftest import approved_run, task_row
+    approved_run(env, executor=[{"raw": "Does the fixture need a DB?", "exit": 3}] * 4)
+    env.office("dispatch", "T1", check=0)
+    t = task_row(env)
+    assert not (t["pause_reason"] or "").startswith(questions.ENDED_PREFIX), t

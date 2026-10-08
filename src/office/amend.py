@@ -480,11 +480,20 @@ def confirm_launch_deliveries(con, run: dict) -> int:
     session started are in its brief; a later one reaches it by its own prompt. Returns how many changed."""
     import json
     n = 0
-    for r in con.execute("SELECT dl.id, dl.dispatch_id FROM deliveries dl JOIN dispatches d ON d.id=dl.dispatch_id "
-                         "WHERE dl.run_id=? AND dl.status='queued' AND d.status='running' AND d.ended_at IS NULL "
-                         "AND dl.created_at<=d.started_at", (run["id"],)).fetchall():
+    for r in con.execute("SELECT dl.id, dl.dispatch_id, dl.created_at <= d.started_at AS early FROM deliveries dl "
+                         "JOIN dispatches d ON d.id=dl.dispatch_id WHERE dl.run_id=? AND dl.status='queued' "
+                         "AND d.status='running' AND d.ended_at IS NULL", (run["id"],)).fetchall():
+        ddir = paths.run_dir(run["id"]) / "dispatches" / r["dispatch_id"]
         try:
-            spec = json.loads((paths.run_dir(run["id"]) / "dispatches" / r["dispatch_id"] / "launch.json").read_text())
+            # The brief records what it carried: an amendment made while the session was
+            # still launching is in it too (review F7). Older dispatches fall back to time.
+            carried = json.loads((ddir / "brief-deliveries.json").read_text())
+        except (OSError, ValueError):
+            carried = None
+        if not (r["id"] in carried if isinstance(carried, list) else r["early"]):
+            continue
+        try:
+            spec = json.loads((ddir / "launch.json").read_text())
         except (OSError, ValueError):
             continue
         if isinstance(spec, dict) and spec.get("prompt_landed"):

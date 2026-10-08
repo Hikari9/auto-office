@@ -251,3 +251,71 @@ def test_revoking_one_dispatch_stops_only_that_dispatch(env, monkeypatch):
     res = dispatch.revoke(con, run, second, "test")
     assert stopped == [second], stopped
     assert any(first in ln and "left running" in ln for ln in res.lines), res.lines
+
+
+@pytest.mark.approved
+def test_rerun_refuses_while_a_non_current_session_of_the_task_is_live(env, monkeypatch):
+    # Review F1/F9: revoking the current dispatch can leave an older one running; rerun must not
+    # start a third session beside it.
+    _setup(env, monkeypatch, session=None)
+    con, run, older = _launching(env, monkeypatch)
+    from office import db, dispatch, rerun
+    with db.transaction(con):
+        current = dispatch.request_launch(con, run, "T1", role="executor")
+    con.execute("UPDATE dispatches SET status='exited', ended_at=started_at, terminal_classification='success' "
+                "WHERE id=?", (current,))
+    con.commit()
+    with pytest.raises(rerun.Refused) as err:
+        rerun.rerun(con, run, "T1", resume=False, fresh=True)
+    assert older in err.value.message
+
+
+@pytest.mark.approved
+def test_revoking_a_task_cancels_a_launch_that_has_not_started(env, monkeypatch):
+    # Review F2: the remedy rerun names (office revoke) must be able to end a pending launch.
+    _setup(env, monkeypatch, session=None)
+    con, run, did = _launching(env, monkeypatch)
+    from office import dispatch, gates, state
+    res = dispatch.revoke(con, run, "T1", "test")
+    assert any("cancelled" in ln and did in ln for ln in res.lines), res.lines
+    assert not gates.worker_live(con, did) and state.get_dispatch(con, did)["status"] == "cancelled"
+    job = con.execute("SELECT status FROM outbox WHERE dedup_key=?", (f"launch:{did}",)).fetchone()
+    assert job["status"] == "failed"
+
+
+@pytest.mark.approved
+def test_a_launch_revoked_during_setup_starts_no_agent(env, monkeypatch):
+    # Review F2: a claimed launch job re-checks the dispatch before it starts the agent.
+    _setup(env, monkeypatch, session=None)
+    con, run, did = _launching(env, monkeypatch)
+    from office import dispatch, state, worktree_setup
+
+    def setup_then_revoked(*a, **kw):
+        con.execute("UPDATE dispatches SET status='cancelled', ended_at=started_at WHERE id=?", (did,))
+        con.commit()
+        return None
+    monkeypatch.setattr(worktree_setup, "prepare", setup_then_revoked)
+    launched = []
+    monkeypatch.setattr(dispatch, "launch", lambda *a, **kw: launched.append(a) or {})
+    job = {"kind": "launch_agent", "payload": {"dispatch_id": did, "task_id": "T1", "role": "executor"}}
+    out = dispatch.job_launch_agent(con, run, job)
+    assert out.get("skipped") == "cancelled" and not launched, out
+
+
+@pytest.mark.approved
+def test_an_amendment_made_while_launching_is_confirmed_from_the_brief(env, monkeypatch):
+    # Review F7: a delivery created after the dispatch started but carried by its brief is confirmed.
+    import json as _json
+    _setup(env, monkeypatch, session=None)
+    con, run, did = _launching(env, monkeypatch)
+    from office import amend, paths
+    con.execute("INSERT INTO deliveries(id, run_id, amendment_id, task_id, dispatch_id, target_version, status, content, "
+                "created_at) VALUES('dl1', ?, 'A9', 'T1', ?, 9, 'queued', 'x', '2999-01-01T00:00:00+00:00')",
+                (run["id"], did))
+    con.execute("UPDATE dispatches SET status='running' WHERE id=?", (did,))
+    con.commit()
+    ddir = paths.run_dir(run["id"]) / "dispatches" / did
+    ddir.mkdir(parents=True, exist_ok=True)
+    (ddir / "launch.json").write_text(_json.dumps({"prompt_landed": True}))
+    (ddir / "brief-deliveries.json").write_text(_json.dumps(["dl1"]))
+    assert amend.confirm_launch_deliveries(con, run) == 1

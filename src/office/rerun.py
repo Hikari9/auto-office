@@ -176,8 +176,9 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         raise Usage("unknown-task", f"no task {tid}")
     if task["status"] in ("accepted", "cancelled"):
         raise Refused("task-done", f"{tid} is {task['status']}; nothing to rerun", scope=tid)
-    if gates.worker_live(con, task.get("current_dispatch_id")):
-        raise Refused("worker-live", f"{tid} still has a live worker ({task['current_dispatch_id']})", scope=tid,
+    live = gates.live_task_session(con, run["id"], tid)
+    if live:
+        raise Refused("worker-live", f"{tid} still has a live worker ({live})", scope=tid,
                       next_step=f'office prompt {tid} -- "<message>" to reach it (an amendment already tells it to '
                                 f"resubmit), or office revoke {tid} to end it first")
     parent = _last_ended_executor(con, run, tid)

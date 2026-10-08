@@ -520,14 +520,38 @@ def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = N
                                          "AND status IN ('launching', 'running')", (run["id"], task_id)).fetchall()]
     notes: list[str] = []
     others = [d["id"] for d in live if only and d["id"] != only]
-    stopped = [d["id"] for d in live if (not only or d["id"] == only) and stop_dispatch(run, d, notes=notes)]
+    targets = [d for d in live if not only or d["id"] == only]
+    cancelled = [d["id"] for d in targets if _cancel_pending_launch(con, run, d, reason)]
+    stopped = [d["id"] for d in targets if d["id"] not in cancelled and stop_dispatch(run, d, notes=notes)]
     lines = [f"{task_id} lease revoked | later submits from its holder are rejected"]
     if stopped:
         lines.append(f"stopped {', '.join(stopped)} (SIGTERM)")
+    if cancelled:
+        lines.append(f"cancelled {', '.join(cancelled)} before its agent started")
     if others:
-        lines.append(f"left running: {', '.join(others)} (not the dispatch named; office revoke {task_id} ends them too)")
+        lines.append(f"left running: {', '.join(others)} (not the dispatch named; its lease is revoked too, so its "
+                     f"submits are rejected; office revoke {task_id} ends it, and office rerun refuses until it ends)")
     lines += notes
     return Result(lines=lines, next=f"office dispatch {task_id} to relaunch")
+
+
+def _cancel_pending_launch(con, run: dict, d: dict, reason: str) -> bool:
+    """End a dispatch whose agent has not started yet (launching, no launcher or pid):
+    fail its launch job and record the end, so neither worker_live nor the job keeps
+    it alive. A claimed job sees the end before it launches (job_launch_agent)."""
+    if d["status"] != "launching" or d.get("launcher") or d.get("pid"):
+        return False
+    with db.transaction(con):
+        con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, max_attempts=attempts "
+                    "WHERE run_id=? AND kind='launch_agent' AND dedup_key=? AND status IN ('queued','claimed')",
+                    (f"revoked: {reason}"[:200], now_iso(), run["id"], f"launch:{d['id']}"))
+        ended = con.execute("UPDATE dispatches SET status='cancelled', terminal_classification='revoked', ended_at=? "
+                            "WHERE id=? AND ended_at IS NULL", (now_iso(), d["id"])).rowcount
+        if ended:
+            state.emit(con, run, "dispatch.ended", f"{d.get('task_id') or d['role']} {d['role']} ended: revoked before "
+                       "its agent started", audience="runtime", task_id=d.get("task_id"), dispatch_id=d["id"],
+                       payload={"exit_code": None, "signal": None, "classification": "revoked"})
+    return bool(ended)
 
 
 def _end_dispatch(con, run: dict, d: dict, classification: str, why: str, *, stop: bool = True,
@@ -888,9 +912,17 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     atomic_write_json(ddir / "packet.json", packet)
     brief = briefs.worker_brief(con, run, packet, setup=setup)
     (ddir / "brief.md").write_text(brief, encoding="utf-8")
+    # The deliveries this brief carries: they are confirmed once its prompt lands (review F7).
+    carried = [r[0] for r in con.execute("SELECT id FROM deliveries WHERE run_id=? AND dispatch_id=? "
+                                         "AND status IN ('queued','delivered')", (run["id"], dispatch["id"]))]
+    atomic_write_json(ddir / "brief-deliveries.json", carried)
     with db.transaction(con):
         con.execute("UPDATE dispatches SET packet_hash=?, packet_path=?, log_path=? WHERE id=?",
                     (packet["packet_hash"], str(ddir / "packet.json"), str(ddir / "output.log"), dispatch["id"]))
+    current = state.get_dispatch(con, dispatch["id"])
+    if current["status"] != "launching":
+        # Revoked while its worktree was being set up (review F2): start nothing.
+        return {"skipped": current["status"]}
     launcher = launch(run, dispatch, "worker", ddir, cwd=wt, cli=payload.get("cli"),
                       external=bool(payload.get("external")), resume=payload.get("resume"))
     return {"dispatch_id": dispatch["id"], **launcher}
@@ -2944,7 +2976,9 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
                        f"--fresh; work is preserved in its worktree", task_id=task["id"])
             return
         from office import questions
-        asked = _ended_on_question(run, d)
+        # Only an executor that ended cleanly stopped to ask: a crashed or killed worker's last
+        # line is narration, and a planner question has no amend/rerun path (review F3, F6).
+        asked = _ended_on_question(run, d) if _may_end_on_question(d) else None
         if asked:
             # A worker that stopped to ask needs an answer, not the same brief again: a
             # relaunch asks the same question (run 330605a8 relaunched one twice).
@@ -2968,13 +3002,21 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
                    f"({d['terminal_classification']}); work is preserved in its worktree", task_id=task["id"])
 
 
+def _may_end_on_question(d: dict) -> bool:
+    return d.get("role") == "executor" and d.get("terminal_classification") == "success"
+
+
 def _ended_on_question(run: dict, d: dict) -> dict | None:
     """The question a worker's final message ended on, saved where `office wait`
     finds it (question.json), or None."""
-    from office import gates, questions
+    from office import questions
     ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    log = Path(d.get("log_path") or ddir / "output.log")
     try:
-        q = questions.final_question(gates._log_text(d, ddir))
+        with open(log, "rb") as fh:  # only the final message matters: read the tail
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(fh.tell() - 16384, 0))
+            q = questions.final_question(fh.read().decode("utf-8", errors="replace"))
     except OSError:
         return None
     if q:
