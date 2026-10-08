@@ -480,7 +480,15 @@ def preflight(con, run: dict, cwd: Path) -> Result:
         rows = con.execute("SELECT code, severity, location, summary FROM findings WHERE run_id=? AND task_id=? "
                            "AND " + contract.TASK_WORK_FINDINGS + " ORDER BY created_at", (run["id"], task["id"])).fetchall()
         res.lines += [f"finding: {r['code']} [{r['severity']}] {r['location'] or ''} {r['summary']}" for r in rows]
-        if not rows and not amendments:
+        restack = packet.get("restack") or {}
+        if restack.get("merged") or restack.get("conflict"):
+            # A restack-only round (`office rerun` after a dependency moved) is work of its own:
+            # the merged dependency must be built, checked and resubmitted (#331).
+            res.lines.append("restack: this round brings the worktree onto "
+                             + ", ".join(f"{m['task']} {m['revision']}" for m in restack.get("merged") or [])
+                             + ("; resolve the merge conflict first" if restack.get("conflict") else "")
+                             + "; rerun the checks and resubmit")
+        elif not rows and not amendments:
             stop.append(f"findings: fix round for {packet['fix_of']} but no open findings or amendments are recorded; "
                         f"the orchestrator resolves it with: office amend {task['id']} -- \"<what to fix>\" (delivered "
                         f"to this session), or office revoke {task['id']} then office rerun {task['id']} --fresh once "

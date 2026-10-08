@@ -146,6 +146,45 @@ def parse(text: str | None, *, status: str | None = None, busy: bool | None = No
     return q
 
 
+# A worker's closing status line names its next step: `... SUBMIT=not attempted NEXT=Answer Q1 ...`.
+_NEXT = re.compile(r"\bNEXT=(.+)$")
+_ASKS = re.compile(r"^\W*(?:answer|approve|authori[sz]e|confirm|decide|choose|tell me)\b|\bQ\d+\b", re.I)
+_QUESTION_LINE = re.compile(r"\bQ\d+\b|\bquestion\b", re.I)
+ENDED_PREFIX = "worker ended on a question: "
+
+
+def final_question(text: str | None) -> dict | None:
+    """The question a headless worker ended its run on, from its final message:
+    a closing `NEXT=` that asks the orchestrator to answer, approve or decide,
+    or a last line that is a question. None for any other ending."""
+    lines = [ln.strip() for ln in _clean(text or "") if ln.strip()]
+    if not lines:
+        return None
+    nxt = next((m.group(1).strip() for ln in reversed(lines[-6:]) if (m := _NEXT.search(ln))), None)
+    if not ((nxt and _ASKS.search(nxt)) or lines[-1].endswith("?")):
+        return None
+    asked = next((ln for ln in lines if "?" in ln and _QUESTION_LINE.search(ln)), None) \
+        or next((ln for ln in reversed(lines) if ln.endswith("?")), None) or nxt or lines[-1]
+    q = {"kind": "text", "question": _line(re.sub(r"[*_`]+", "", asked), MAX_QUESTION), "options": [], "ended": True}
+    q["fingerprint"] = hashlib.sha256(json.dumps([q["kind"], q["question"], []]).encode()).hexdigest()
+    return q
+
+
+def _ended_question_dispatches(con, run: dict) -> list[tuple[dict, dict]]:
+    """(dispatch, question) for tasks blocked because their worker ended on a question."""
+    out = []
+    for t in con.execute("SELECT id, current_dispatch_id FROM tasks WHERE run_id=? AND status='blocked' "
+                         "AND pause_reason LIKE ?", (run["id"], ENDED_PREFIX + "%")).fetchall():
+        d = state.get_dispatch(con, t["current_dispatch_id"]) if t["current_dispatch_id"] else None
+        f = paths.run_dir(run["id"]) / "dispatches" / (d or {}).get("id", "-") / "question.json"
+        if d and f.is_file():
+            try:
+                out.append((d, json.loads(f.read_text())))
+            except ValueError:
+                continue
+    return out
+
+
 def _repeat_s() -> float:
     try:
         return float(os.environ.get("OFFICE_QUESTION_REPEAT_S", state.SIGNAL_REPEAT_S))
@@ -165,6 +204,11 @@ def _who(d: dict) -> str:
 
 def answer_command(d: dict, q: dict) -> str:
     target = d["id"]
+    if q.get("ended"):
+        # The session has ended: the answer travels as an amendment into the next session.
+        t = d.get("task_id") or target
+        return (f'office amend {t} --contract -- "<delta>" if the answer changes scope or acceptance, else '
+                f'office amend {t} --no-review --reason "answer" -- "<answer>"; then office rerun {t} --resume|--fresh')
     if q["kind"] == "select" and q["options"]:
         return f'office answer {target} <1-{len(q["options"])}> (or office answer {target} -- "<text>")'
     return f'office answer {target} -- "<text>"'
@@ -193,8 +237,9 @@ def _record(con, run: dict, d: dict, q: dict, act: dict) -> bool:
         age = (parse_iso(now_iso()) - parse_iso(last["created_at"])).total_seconds()
         if p.get("fingerprint") == q["fingerprint"] and age < _repeat_s():
             return False
-    tail = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "question.txt"
-    atomic_write_text(tail, "\n".join(_clean(act.get("text") or "")[-TAIL_LINES:]) + "\n")
+    if act.get("text") is not None:
+        tail = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "question.txt"
+        atomic_write_text(tail, "\n".join(_clean(act.get("text") or "")[-TAIL_LINES:]) + "\n")
     with db.transaction(con):
         state.emit(con, run, EVENT, f"{_who(d)} asked: {q['question'][:160]}", audience="runtime",
                    task_id=d.get("task_id"), dispatch_id=d["id"], payload=q)
@@ -225,6 +270,11 @@ def scan(con, run: dict) -> tuple[list[str], list[str], dict]:
         every.append(text)
         if _record(con, run, d, q, act):
             new.append(text)
+    for d, q in _ended_question_dispatches(con, run):
+        text = line(d, q)
+        every.append(text)
+        if _record(con, run, d, q, {"text": None}):
+            new.append(text)
     return new, every, acts
 
 
@@ -236,6 +286,7 @@ def recorded(con, run: dict) -> list[str]:
         last = _last(con, run["id"], d["id"])
         if last and last["kind"] == EVENT:
             out.append(line(d, json.loads(last["payload_json"] or "{}")))
+    out += [line(d, q) for d, q in _ended_question_dispatches(con, run)]
     return out
 
 
