@@ -183,8 +183,7 @@ def score(candidates: list[dict], request: dict, s: dict) -> list[dict]:
     """Inspectable score rows for the qualifying `candidates` (input order kept)."""
     from office.routing import candidate_id
     evidence = (request.get("evidence") or {}).get("routes") or {}
-    descriptor = ((request.get("context") or (request.get("evidence") or {}).get("context") or {})
-                  .get("task_descriptor") or {})
+    descriptor = _task_descriptor(request)
     reserve = float((request.get("policy") or {}).get("quota_reserve_percent", 5.0))
     k = float(((request.get("evidence") or {}).get("pooling") or {}).get(
         "prior_strength", route_learning.DEFAULTS["prior_strength"]))
@@ -329,8 +328,8 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
         "policy_version": POLICY_VERSION, "learner_version": route_learning.LEARNER_VERSION,
         "cost_policy": policy, "weights": weights, "competitive_band": band, "budget_ceiling_usd": ceiling,
         "cost_scale_usd": s["cost_scale_usd"],
-        **({"task_descriptor": (request.get("context") or {}).get("task_descriptor"),
-            "descriptor_version": task_descriptors.VERSION} if (request.get("context") or {}).get("task_descriptor") else {}),
+        **({"task_descriptor": _task_descriptor(request),
+            "descriptor_version": task_descriptors.VERSION} if _task_descriptor(request) else {}),
         "context": (request.get("evidence") or {}).get("context") or request.get("context") or {},
         "evidence_as_of": (request.get("evidence") or {}).get("as_of"),
         "evidence_digest": sha256_obj((request.get("evidence") or {}).get("routes") or {}),
@@ -340,6 +339,12 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
         "candidates": rows, "slate": slate,
     }
     return {"rows": rows, "rejected": rejected, "slate": slate, "audit": audit, "by_id": by_id}
+
+
+def _task_descriptor(request: dict) -> dict:
+    """The task descriptor scoring used: request context first, else the evidence context."""
+    return ((request.get("context") or (request.get("evidence") or {}).get("context") or {})
+            .get("task_descriptor") or {})
 
 
 def _dedupe(candidates: list[dict]) -> tuple[list[dict], dict[str, str]]:

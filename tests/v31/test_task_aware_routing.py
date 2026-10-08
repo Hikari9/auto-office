@@ -96,7 +96,7 @@ def test_descriptor_mismatch_discounts_without_hard_filter():
 def test_long_context_spend_never_uses_short_history():
     c = candidate(tiered=True)
     key = route_learning.candidate_key(c)
-    past = {"run_id": "R1", "task_id": "T1", "role": "worker", "route": key,
+    past = {"run_id": "R1", "task_id": "T1", "dispatch_id": "D1", "role": "worker", "route": key,
             "harness_major": "2", "playbook": "Change", "kind": "fresh",
             "success": True, "attribution": "route", "learn_weight": 1.0,
             "attempts": 1, "review_rounds": 0, "money_actual": 0.01,
