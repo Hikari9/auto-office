@@ -95,3 +95,25 @@ def test_executor_brief_explains_shared_entries_and_asks_for_a_structured_report
     assert "SHARED (+)" in brief and "FINAL REPORT" in brief and "mutation" in brief, brief
     plain = briefs.executor_brief(None, {}, {**packet, "scope": ["a.py"]})
     assert "SHARED (+)" not in plain
+
+
+def test_directory_scope_entries_own_their_tree():
+    # #334: `src/auth/` (and bare `src/auth`) cover the files inside them.
+    assert planfile.path_in_scope("src/auth/rock-user-resolver.ts", ["src/auth/"])
+    assert planfile.path_in_scope("tests/auth/x/y.test.ts", ["tests/auth"])
+    assert planfile.path_in_scope("src/reg/a.ts", ["+src/reg/"])
+    assert not planfile.path_in_scope("src/authz/x.ts", ["src/auth/"])
+    assert not planfile.path_in_scope("src/authz.ts", ["src/auth"])
+
+
+def test_scope_and_shared_entries_with_notes_are_plan_errors():
+    # #416: a note riding on an entry made it a literal that never matched, so the
+    # executor's submit was refused for the very file the amendment granted.
+    plan = planfile.parse(PLAN_TWO.replace(
+        "scope: calc.py\n",
+        "scope: calc.py, vitest.config.ts (A3: only to append the include)\n"
+        "shared: pnpm-lock.yaml (A4: shared with T2; T1 edits only its importer)\n"))
+    bad = [e for e in plan.errors if "not a path or glob" in e]
+    assert len(bad) == 3, plan.errors
+    assert any("vitest.config.ts (A3" in e for e in bad) and all("accept:" in e for e in bad)
+    assert not planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py, src/a/**, +x.md\n")).errors

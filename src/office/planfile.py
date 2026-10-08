@@ -234,6 +234,11 @@ def _validate(plan: ParsedPlan) -> None:
     for t in plan.tasks:
         if not t["scope"] and not t.get("scope_none"):
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `scope:` (paths this task may write)")
+        for entry in t["scope"]:
+            if not _path_like(entry.lstrip(SHARED)):
+                # Each entry is matched as one path or glob: a note after it never matches (#416).
+                plan.errors.append(f"{t['id']} (line {t['line']}): scope/shared entry {entry!r} is not a path or glob; "
+                                   "list bare paths and put limits (e.g. 'only the importer entry') in `accept:`")
         if not t["accept"]:
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `accept:` criteria")
         if t["checks"] is None:
@@ -314,6 +319,15 @@ def is_shared(pattern: str) -> bool:
     return pattern.startswith(SHARED)
 
 
+_NOT_PATH = re.compile(r"[\s()`]")
+
+
+def _path_like(entry: str) -> bool:
+    """A scope or shared entry is one path or glob. Whitespace, parentheses and
+    backticks mean prose rode along with it (`x.csv (append-only: ...)`)."""
+    return bool(entry) and not _NOT_PATH.search(entry)
+
+
 def literal_prefix(pattern: str) -> str:
     m = re.search(r"[*?\[]", pattern)
     return pattern[: m.start()] if m else pattern
@@ -347,5 +361,8 @@ def path_in_scope(path: str, scope: list[str]) -> bool:
             if path == pattern[:-3] or path.startswith(pattern[:-2]):
                 return True
         if fnmatch.fnmatch(path, pattern) or path == pattern:
+            return True
+        # A plain directory entry (`src/auth/` or `src/auth`) owns everything under it (#334).
+        if pattern and not re.search(r"[*?\[]", pattern) and path.startswith(pattern.rstrip("/") + "/"):
             return True
     return False
