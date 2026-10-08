@@ -87,3 +87,17 @@ def test_haiku_alias_preserves_concrete_effort_dispatch_gate():
              if r["model_id"] == "haiku" and r["effort"] == "medium"]
     assert row["alias_resolved_to"] == "claude-haiku-5-5"
     assert row["dispatchable"] is False
+
+def test_all_disabled_shipped_concrete_efforts_keep_aliases_disabled():
+    rows = candidates.catalog_rows()
+    concrete = {
+        (r["invocation_harness"], r["model_id"], r["effort"]): r
+        for r in rows if not r.get("alias_family")
+    }
+    for alias in rows:
+        target = alias.get("alias_resolved_to")
+        if not target:
+            continue
+        original = concrete.get((alias["invocation_harness"], target, alias["effort"]))
+        if original and original.get("dispatchable") is False:
+            assert alias.get("dispatchable") is False, (alias["model_id"], alias["effort"])

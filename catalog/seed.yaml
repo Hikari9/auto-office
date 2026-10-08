@@ -1,9 +1,10 @@
 schema_version: 3
 kind: shipped-seed-catalog
 notes: >-
-  Identity-only cold-start rows for model names explicitly present in the v3 specification.
-  Benchmark indexes, prices, speed, and release dates are intentionally unknown until refreshed
-  from authoritative sources. These rows do not prove local harness support.
+  The active routing catalog contains version-following spec aliases and concrete
+  model/effort rows with version-pinned benchmark snapshots from cited sources.
+  Unavailable index, price, speed, or release fields remain null, never inferred.
+  Benchmark metadata and documented model IDs do not prove local harness support.
 
   `model_id` is the spec's canonical name; `invocation_model_id` is the slug the named harness
   actually accepts on the command line. They are not interchangeable — the spec name `luna` is
