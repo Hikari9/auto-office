@@ -73,6 +73,10 @@ def test_failed_codex_start_names_the_screen(tmp_path, monkeypatch, screen, time
             if timeout:
                 raise subprocess.TimeoutExpired(argv, 120)
             return subprocess.CompletedProcess(argv, 1, "startup timeout", "")
+        if argv[1:3] == ["pane", "close"]:
+            return subprocess.CompletedProcess(argv, 0, "{}", "")
+        if argv[1:3] == ["pane", "get"]:
+            return subprocess.CompletedProcess(argv, 1, '{"error":{"code":"pane_not_found"}}', "")
         assert argv[1:3] == ["pane", "read"]
         return subprocess.CompletedProcess(argv, 0, screen, "")
 
@@ -82,7 +86,10 @@ def test_failed_codex_start_names_the_screen(tmp_path, monkeypatch, screen, time
                                        tmp_path, tmp_path) is None
     assert screen.rstrip("?") in notices[0] and "w1:p1" in notices[0]
     assert "headless" in notices[0]
-    assert len(calls) == 2  # no keys sent; hook trust remains the user's decision
+    # No keys sent (hook trust and updates remain the user's decision; this cwd is not
+    # Office's), and the abandoned pane is closed once its screen is saved.
+    assert not any(c[1:3] == ["pane", "send-keys"] for c in calls), calls
+    assert ["herdr", "pane", "close", "w1:p1"] in calls and "closed" in notices[0]
 
 
 def test_unreadable_startup_screen_keeps_original_failure(monkeypatch):

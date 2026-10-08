@@ -98,6 +98,10 @@ skill.
 ## Safety
 
 - Refuses to run at all without `$HERDR_PANE_ID` set — there is no "sweep everything" mode.
+- Outside this sweep, close a pane only by an id Office or the ledger names (a launch notice's
+  `pane wA:p4`, `office dismiss`). Never pick panes by matching screen text such as "Trust this
+  folder": your own pane's scrollback holds every notice you have read, so a text match selects
+  your own pane too. Never close `$HERDR_PANE_ID` (the caller's own pane) by any route.
 - Never derives candidates from `herdr pane list`/`agent list` directly; those also list the
   user's own panes and other sessions'.
 - A pane that moved (its live `session_id` no longer matches the ledger's) is treated as `unknown`

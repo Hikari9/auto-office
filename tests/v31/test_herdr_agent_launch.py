@@ -30,12 +30,43 @@ elif args[:2] == ["pane", "run"] and " && touch " in args[3]:
     if drop != "deaf" and data["shell_runs"] > int(drop):
         open(shlex.split(args[3])[-1], "w").close()
         data.setdefault("pane_lines", []).append("$ " + args[3])
+elif args[:2] == ["agent", "start"] and os.environ.get("FAKE_HERDR_TRUST_DIALOG"):
+    # Claude on a folder it does not trust yet: herdr registers the agent, sees it
+    # blocked and gives up; the dialog preselects "No, exit".
+    code = 1
+    result = {{"error": {{"code": "agent_not_ready", "message": "agent is blocked during startup"}}}}
+    data.setdefault("pane_agents", {{}})[args[args.index("--pane") + 1]] = args[2]
+    data["dialog"], data["cursor"] = True, 0
+elif args[:2] == ["pane", "read"] and data.get("dialog"):
+    rows = ["No, exit", "Yes, I trust this folder"]
+    print("Accessing workspace:\n Quick safety check: Is this a project you created or one you trust?\n"
+          + "\n".join(("❯ " if i == data["cursor"] else "  ") + r for i, r in enumerate(rows))
+          + "\n Enter to confirm · Esc to cancel")
+    json.dump(data, open(state, "w"))
+    sys.exit(0)
+elif args[:2] == ["pane", "send-keys"] and data.get("dialog"):
+    key = args[3]
+    if key == "down":
+        data["cursor"] = 1
+    elif key == "up":
+        data["cursor"] = 0
+    elif key == "Enter":
+        data["dialog"] = False
+        data["answer"] = ["no", "yes"][data["cursor"]]
+elif args[:2] == ["agent", "get"] and data.get("dialog"):
+    result = {{"agent": {{"name": args[2], "agent_status": "blocked"}}}}
 elif args[:2] == ["agent", "start"] and os.environ.get("FAKE_HERDR_START_FAIL"):
     code = 1
     result = {{"error": {{"code": "invalid_agent_name"}}}}
 elif args[:2] == ["agent", "start"] and not os.environ.get("FAKE_HERDR_NO_AGENT"):
     # herdr sees the agent in its pane once it has started.
     data.setdefault("pane_agents", {{}})[args[args.index("--pane") + 1]] = args[2]
+elif args[:2] == ["pane", "close"]:
+    data.setdefault("closed", []).append(args[2])
+elif args[:2] == ["pane", "get"] and args[2] in data.get("closed", []):
+    json.dump(data, open(state, "w"))
+    print(json.dumps({{"error": {{"code": "pane_not_found"}}}}))
+    sys.exit(1)
 elif args[:2] == ["pane", "get"]:
     result = {{"pane": {{"pane_id": args[2], "agent": data.get("pane_agents", {{}}).get(args[2])}}}}
 elif args[:2] == ["pane", "read"]:
@@ -303,6 +334,10 @@ def launch_in_herdr(env, monkeypatch, *, gets=(), reads=(), adapter="agy", model
     return state_file, run, d, ddir, res
 
 
+def spec_pane(ddir):
+    return json.loads((ddir / "launch.json").read_text())["failed_herdr_pane"]
+
+
 def _launch_events(env, run):
     con = env.con()
     try:
@@ -354,8 +389,10 @@ def test_failed_start_snapshots_and_names_a_codex_hook_trust_screen(env, monkeyp
     events = _launch_events(env, run)
     assert len(events) == 1
     assert "Codex 'Hooks need review'" in events[0]
-    assert "herdr pane read" in events[0]
     assert "do not auto-approve trust" in events[0]
+    # The abandoned pane is closed once its screen is saved; recovery reads the snapshot (D2).
+    assert ["pane", "close", spec_pane(ddir)] in _calls(state_file)
+    assert "abandoned pane is closed" in events[0] and str(ddir / "pane-tail.txt") in events[0]
     assert "Hooks need review" in (ddir / "pane-tail.txt").read_text()
     spec = json.loads((ddir / "launch.json").read_text())
     assert spec["failed_herdr_screen"] == "Codex 'Hooks need review'"
@@ -603,3 +640,50 @@ def test_line_editor_probe_reads_the_pane_terminal_mode(monkeypatch):
     finally:
         os.close(master)
         os.close(slave)
+
+
+@pytest.mark.approved
+def test_claude_folder_trust_on_an_office_worktree_is_answered_and_the_agent_launches(env, monkeypatch):
+    # Run 330605a8: every Claude dispatch stopped on "Quick safety check ... trust this folder",
+    # herdr agent start failed with agent_not_ready, and Office fell back to headless.
+    monkeypatch.setenv("FAKE_HERDR_TRUST_DIALOG", "1")
+    state_file, run, d, ddir, res = launch_in_herdr(env, monkeypatch, gets=["idle"], reads=[BUSY], adapter="claude",
+                                                    model="fake-model", effort="high", owned_cwd=True)
+    assert res["launcher"] == "herdr" and res["prompt_landed"] is True, res
+    data = json.loads(state_file.read_text())
+    assert data["answer"] == "yes", data  # the trust option, never the preselected "No, exit"
+    keys = [c[3] for c in data["calls"] if c[:2] == ["pane", "send-keys"]]
+    assert keys == ["down", "Enter"], keys
+    assert _launch_events(env, run) == []
+
+
+@pytest.mark.approved
+def test_claude_folder_trust_outside_office_dirs_is_not_answered(env, monkeypatch):
+    monkeypatch.setenv("FAKE_HERDR_TRUST_DIALOG", "1")
+    state_file, run, d, ddir, res = launch_in_herdr(env, monkeypatch, gets=["idle"], reads=[BUSY], adapter="claude",
+                                                    model="fake-model", effort="high")
+    assert res["launcher"] == "process-fallback", res
+    assert not any(c[:2] == ["pane", "send-keys"] for c in _calls(state_file))
+    events = _launch_events(env, run)
+    assert len(events) == 1 and "folder-trust" in events[0], events
+
+
+def test_trust_selection_never_confirms_a_decline():
+    from office import dispatch
+    assert dispatch._trust_selected("Yes, I trust this folder")
+    assert dispatch._trust_selected("Trust and continue")
+    assert not dispatch._trust_selected("No, exit")
+    assert not dispatch._trust_selected("Continue without trusting (hooks won't run)")
+    assert dispatch._selected_option("  Yes, I trust this folder\n❯ No, exit\n Enter to confirm") == "No, exit"
+
+
+@pytest.mark.approved
+def test_an_abandoned_pane_held_by_another_dispatch_is_kept(env, monkeypatch):
+    monkeypatch.setenv("FAKE_HERDR_START_FAIL", "1")
+    monkeypatch.setenv("FAKE_HERDR_PANE_READ", "some screen")
+    from office import dispatch
+    monkeypatch.setattr(dispatch, "_reserved_panes", lambda run, ids: {"w1:p101"})
+    state_file, run, d, ddir, res = launch_in_herdr(env, monkeypatch)
+    assert res["launcher"] == "process-fallback"
+    assert not any(c[:2] == ["pane", "close"] for c in _calls(state_file))
+    assert "herdr pane read" in _launch_events(env, run)[0]

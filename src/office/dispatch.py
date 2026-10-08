@@ -8,6 +8,7 @@ injects the environment, and launches through a durable outbox job.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import re
@@ -40,14 +41,18 @@ IDENTITY_ENV = ("OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE
                 "OFFICE_SESSION", "OFFICE_HARNESS", "OFFICE_VERSION", "OFFICE_FRONT_DOOR_HOPS")
 PLANNER_TASK = "P1"
 
-# Startup screens that can make `herdr agent start` time out before Herdr has
-# registered an agent. These are diagnostic only: Office never answers a trust
-# or authority prompt on the orchestrator's behalf (#399).
+# Startup screens that can hold a harness before Herdr sees it ready. Office
+# answers only a folder-trust dialog, and only for a directory it created for
+# the run (`_office_owned`); hook trust, imports and updates stay the user's (#399).
+TRUST_SCREEN = "folder-trust 'Trust this folder'"
 _STARTUP_SCREEN_MARKERS = (
     ("hooks need review", "Codex 'Hooks need review'"),
-    ("trust this folder", "folder-trust"),
+    ("trust this folder", TRUST_SCREEN),
+    # Claude Code: "Quick safety check: Is this a project you created or one you trust?"
+    ("quick safety check", TRUST_SCREEN),
+    ("is this a project you created or one you trust", TRUST_SCREEN),
     ("allow external claude.md file imports", "Claude external-import approval"),
-    ("update available", "update prompt"),
+    ("update available", "'Update available' prompt"),
 )
 
 
@@ -971,7 +976,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         else:
             inter = _interactive(dispatch, kind, cwd, include_dirs, output=output)
         label = pane_label(run, dispatch, kind)
-        pane = _herdr_pane(run, cwd, label=label) if inter else None
+        pane = _herdr_pane(run, cwd, label=label, dispatch_id=dispatch["id"]) if inter else None
         if inter and not pane:
             _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
         if pane:
@@ -1124,7 +1129,7 @@ def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = Tru
 
 
 def _startup_screen(text: str | None) -> str | None:
-    low = (text or "").lower()
+    low = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text or "").lower()
     return next((label for marker, label in _STARTUP_SCREEN_MARKERS if marker in low), None)
 
 
@@ -1132,9 +1137,10 @@ def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pa
                            failure: str, why: str) -> None:
     """Preserve failed-pane evidence and hand recovery back to the orchestrator.
 
-    The automatic workaround remains the existing headless fallback. The pane
-    is kept so the orchestrator can inspect the actual blocker and choose a
-    safe next route instead of abandoning the Office run (#399).
+    The automatic workaround remains the existing headless fallback. The
+    pane's last screen is saved to pane-tail.txt (#399); the pane itself, now
+    abandoned, is closed when Office can prove it opened it for this dispatch
+    and no other dispatch holds it.
     """
     # No agent is registered, so read the pane itself. Only the last screen
     # counts: older scrollback may mention any of the markers.
@@ -1146,14 +1152,47 @@ def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pa
     spec["failed_herdr_pane"] = pane
     spec["failed_herdr_snapshot"] = str(tail) if view else None
     spec["failed_herdr_screen"] = screen
+    closed = bool(view) and _close_abandoned_pane(run, dispatch, pane)
+    spec["failed_herdr_pane_closed"] = closed
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
-    observed = (f"; pane {pane} is waiting on {screen}" if screen
+    observed = (f"; pane {pane} was waiting on {screen}" if screen
                 else f"; pane {pane} snapshot saved to {tail}" if view
                 else f"; pane {pane} could not be read")
-    recovery = (f"orchestrator recovery: inspect it with `herdr pane read {pane}`; do not auto-approve trust, "
+    if closed:
+        observed += f"; the abandoned pane is closed (its last screen is in {tail})"
+    inspect = f"read {tail}" if closed else f"inspect it with `herdr pane read {pane}`"
+    recovery = (f"orchestrator recovery: {inspect}; do not auto-approve trust, "
                 "credentials, or user-authority prompts; resolve a safe runtime blocker or choose another route, "
                 "then follow `office status` / `office resume` instead of abandoning the run")
     _launch_notice(run, dispatch, f"{failure} ({why}){observed}; running headless instead. {recovery}")
+
+
+def _close_abandoned_pane(run: dict, dispatch: dict, pane: str) -> bool:
+    """Close the pane a failed Herdr start left behind once its dispatch runs
+    headless. Never the caller's pane or the layout anchor, never a pane another
+    open dispatch records or has reserved. False when it was kept."""
+    if not pane or pane in (os.environ.get("HERDR_PANE_ID"), os.environ.get("OFFICE_HERDR_ANCHOR")):
+        return False
+    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
+    try:
+        layout = json.loads(tab_file.read_text()) if tab_file.is_file() else {}
+    except (OSError, ValueError):
+        layout = {}
+    if pane == layout.get("anchor"):
+        return False
+    con = db.connect()
+    try:
+        held = con.execute("SELECT 1 FROM dispatches WHERE pane_id=? AND id<>? AND ended_at IS NULL "
+                           "AND status IN ('launching','running')", (pane, dispatch["id"])).fetchone()
+        open_ids = {r["id"] for r in con.execute("SELECT id FROM dispatches WHERE run_id=? AND id<>? AND ended_at IS NULL "
+                                                 "AND status IN ('launching','running')",
+                                                 (run["id"], dispatch["id"])).fetchall()}
+    finally:
+        con.close()
+    if held or pane in _reserved_panes(run, open_ids):
+        return False
+    _herdr_quiet("pane", "close", pane)
+    return not _pane_exists(pane)
 
 
 def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
@@ -1178,6 +1217,11 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     except (OSError, subprocess.SubprocessError) as exc:
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, "herdr agent start failed", str(exc))
         return None
+    if proc.returncode != 0 and _office_owned(run, cwd) and "agent_not_ready" in (proc.stdout or "") + (proc.stderr or "") \
+            and _answer_startup_trust(pane, name, _land_timeout()):
+        # The harness opened Office's own worktree on its folder-trust dialog and Herdr
+        # stopped waiting; the dialog is answered and the agent is up (330605a8).
+        proc = subprocess.CompletedProcess(proc.args, 0, "", "")
     if proc.returncode != 0:
         why = (proc.stdout or proc.stderr or "").strip()[:200]
         if "agent_pane_busy" in why and not retried:
@@ -1243,7 +1287,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
                                           f"{pane}); submit it: herdr pane send-keys {pane} Enter")
         else:
             screen = _startup_screen(view)
-            title = "folder-trust dialog" if screen == "Trust this folder" else f"'{screen}' screen"
+            title = "folder-trust dialog" if screen == TRUST_SCREEN else f"{screen} screen"
             why = (f" the {title} holds the composer; review or skip it in the pane and"
                    if screen else "")
             _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
@@ -1427,7 +1471,7 @@ def herdr_agent_name(dispatch_id: str) -> str:
 # Codex opens a folder it has not been told to trust on a "Trust this folder?"
 # dialog. Until it is answered the composer is empty, so a prompt sent then is
 # lost while `agent prompt` succeeds and `agent get` can read `working`.
-TRUST_DIALOG_MARKERS = ("trust this folder",)
+TRUST_DIALOG_MARKERS = ("trust this folder", "quick safety check", "is this a project you created or one you trust")
 # The ctx figure in a Claude status line ("ctx: 12k · $0.03"): it rises from
 # 0k once a prompt reaches the model, which is a landed signal in a pane too
 # narrow to show the busy footer.
@@ -1437,16 +1481,6 @@ _CTX_RE = re.compile(r"\bctx:\s*(\d+(?:\.\d+)?)\s*k\b", re.I)
 def _trust_dialog(text: str | None) -> bool:
     low = (text or "").lower()
     return any(m in low for m in TRUST_DIALOG_MARKERS)
-
-
-def _startup_screen(text: str | None) -> str | None:
-    low = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text or "").lower()
-    for marker, title in (("hooks need review", "Hooks need review"),
-                          ("trust this folder", "Trust this folder"),
-                          ("update available", "Update available")):
-        if marker in low:
-            return title
-    return None
 
 
 def _ctx_k(text: str | None) -> float | None:
@@ -1518,12 +1552,68 @@ def _await_agent_ui(name: str, pane: str, timeout: float, *, answer_trust: bool,
                 if time.time() >= deadline:
                     return "trust"
             else:
-                herdr("pane", "send-keys", pane, "Enter")
+                _confirm_trust(pane, lambda: _pane_view(name), herdr, text)
                 answered = True
         elif _agent_up(pane, name):
             return "ready"
         if time.time() >= deadline:
             return "down"
+        time.sleep(1)
+
+
+# The selected option of a startup dialog: Claude "❯ Yes, I trust this folder",
+# codex "> 1. Trust and continue".
+_CURSOR = re.compile(r"^\s*[❯›>▸▶]\s*(?:\d+[.)]\s*)?(\S.*?)\s*$")
+_DECLINE = re.compile(r"\b(?:no|exit|quit|cancel|skip|without|don'?t|do not)\b", re.I)
+
+
+def _selected_option(text: str | None) -> str | None:
+    lines = [ln for ln in re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text or "").splitlines()[-40:]]
+    picked = [m.group(1) for ln in lines if (m := _CURSOR.match(ln))]
+    return picked[-1] if picked else None
+
+
+def _trust_selected(option: str | None) -> bool:
+    return bool(option) and "trust" in option.lower() and not _DECLINE.search(option)
+
+
+def _confirm_trust(pane: str, read, herdr, text: str | None = None) -> bool:
+    """Move a folder-trust dialog's selection onto its trust option and confirm it.
+    Current Claude Code preselects "No, exit", so a bare Enter would quit the
+    agent; Enter is pressed only once the selected option is the trust one.
+    `text` is a screen the caller already read."""
+    for key in ("down", "down", "up", "up", "up", None):
+        text = read() if text is None else text
+        if not _trust_dialog(text):
+            return False
+        option = _selected_option(text)
+        if _trust_selected(option):
+            herdr("pane", "send-keys", pane, "Enter")
+            return True
+        if key is None or option is None:
+            return False
+        herdr("pane", "send-keys", pane, key)
+        text = None
+        time.sleep(float(os.environ.get("OFFICE_HERDR_KEY_DELAY", "1")) / 4)
+    return False
+
+
+def _answer_startup_trust(pane: str, name: str, timeout: float) -> bool:
+    """`herdr agent start` gave up on an agent held by a folder-trust dialog
+    (`agent_not_ready`): answer it, then wait until Herdr reports the agent
+    ready. True when the agent is up past the dialog."""
+    read = lambda: "\n".join(_pane_read(pane).splitlines()[-40:])  # noqa: E731
+    if not _confirm_trust(pane, read, _herdr_quiet):
+        return False
+    deadline = time.time() + timeout
+    while True:
+        res = _herdr_json(["agent", "get", name])
+        agent = res.get("agent") or {}
+        status = agent.get("status") or agent.get("agent_status")
+        if status in ("idle", "working", "done") and not _trust_dialog(read()):
+            return True
+        if time.time() >= deadline:
+            return False
         time.sleep(1)
 
 
@@ -1735,9 +1825,8 @@ def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = 
     if got == "trust":
         # The dialog came up after the prompt was sent (a slow start): answer
         # it if Office may, then send the pointer again.
-        if not answer_trust or not _trust_dialog(_pane_view(name)):
+        if not answer_trust or not _confirm_trust(pane, lambda: _pane_view(name), herdr, _pane_view(name)):
             return False
-        herdr("pane", "send-keys", pane, "Enter")
         if _await_agent_ui(name, pane, timeout, answer_trust=False, herdr=herdr) != "ready":
             return False
         herdr("agent", "prompt", name, pointer)
@@ -1902,7 +1991,46 @@ def _herdr_json(args: list[str]) -> dict:
         return {}
 
 
-def _herdr_pane(run: dict, cwd: Path, label: str | None = None) -> str | None:
+def _herdr_pane(run: dict, cwd: Path, label: str | None = None, dispatch_id: str | None = None) -> str | None:
+    """Pick (or open) a pane under the run's pane lock and reserve it for
+    `dispatch_id`. Launch jobs run in parallel, and a dispatch records its pane
+    only once its agent has started: without the lock and the reservation two
+    launches took the same idle pane, and one's setup line never ran because the
+    other's agent already held the pane (run f00446ac)."""
+    run_dir = paths.run_dir(run["id"])
+    run_dir.mkdir(parents=True, exist_ok=True)
+    with open(run_dir / "herdr-tab.lock", "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            pane = _herdr_pick_pane(run, cwd, label)
+            if pane and dispatch_id:
+                _reserve_pane(run, pane, dispatch_id)
+            return pane
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _reserve_pane(run: dict, pane: str, dispatch_id: str) -> None:
+    f = paths.run_dir(run["id"]) / "herdr-reservations.json"
+    try:
+        held = json.loads(f.read_text()) if f.is_file() else {}
+    except ValueError:
+        held = {}
+    held[pane] = dispatch_id
+    atomic_write_json(f, held)
+
+
+def _reserved_panes(run: dict, open_ids: set) -> set:
+    """Panes reserved for a dispatch that has not ended."""
+    f = paths.run_dir(run["id"]) / "herdr-reservations.json"
+    try:
+        held = json.loads(f.read_text()) if f.is_file() else {}
+    except (OSError, ValueError):
+        return set()
+    return {pane for pane, did in held.items() if did in open_ids}
+
+
+def _herdr_pick_pane(run: dict, cwd: Path, label: str | None = None) -> str | None:
     """A visible Herdr pane for a dispatch, split beside the caller's own pane.
 
     The first dispatch splits the orchestrator's pane (`HERDR_PANE_ID`, or
@@ -1980,8 +2108,11 @@ def _busy_panes(run: dict) -> set:
     try:
         busy = {r["pane_id"] for r in con.execute("SELECT pane_id FROM dispatches WHERE run_id=? AND launcher='herdr' "
                                                   "AND status IN ('launching','running')", (run["id"],)).fetchall()}
+        open_ids = {r["id"] for r in con.execute("SELECT id FROM dispatches WHERE run_id=? AND ended_at IS NULL "
+                                                 "AND status IN ('launching','running')", (run["id"],)).fetchall()}
     finally:
         con.close()
+    busy |= _reserved_panes(run, open_ids)
     # A failed startup can leave the harness TUI alive in a pane even though
     # Herdr never registered an agent. Each dispatch records that pane in its
     # own launch.json; derive reservations from those per-dispatch records so
