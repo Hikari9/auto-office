@@ -6,10 +6,10 @@ notes: >-
   adapter-attributed failure quarantines the route regardless. Add a route only with a
   maintainer grant on record; run history alone does not qualify (outcome labels were not
   recorded before 3.1, so no route had labelled evidence at the 5-success threshold).
-recorded_at: '2026-09-28'
-granted_by: Rico Tiongson (techteam@favor.church)
   Prior trust grants for retired models are preserved only in the historical
   archive so reintroducing a retired row cannot reactivate prior trust.
+recorded_at: '2026-09-28'
+granted_by: Rico Tiongson (techteam@favor.church)
 routes:
   - triple: claude@2/claude-sonnet-5-5@high
     target_state: proven

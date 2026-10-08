@@ -71,3 +71,19 @@ def test_shipped_catalog_has_unique_model_harness_effort_rows():
     seed = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8"))
     keys = [(r["model_id"], r["invocation_harness"], r["effort"]) for r in seed["models"]]
     assert len(keys) == len(set(keys)), "duplicate catalog model/harness/effort rows"
+
+def test_alias_does_not_reenable_non_dispatchable_target():
+    # Alias routing cannot launder a benchmark-only route into a runnable one.
+    rows = [_alias(effort="medium"),
+            _concrete("gpt-6-luna", "medium", 29, dispatchable=False)]
+    [resolved] = [r for r in candidates.resolve_aliases(rows)
+                  if r["model_id"] == "luna"]
+    assert resolved["invocation_model_id"] == "gpt-6-luna"
+    assert resolved["dispatchable"] is False
+
+
+def test_haiku_alias_preserves_concrete_effort_dispatch_gate():
+    [row] = [r for r in candidates.catalog_rows()
+             if r["model_id"] == "haiku" and r["effort"] == "medium"]
+    assert row["alias_resolved_to"] == "claude-haiku-5-5"
+    assert row["dispatchable"] is False

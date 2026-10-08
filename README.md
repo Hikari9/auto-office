@@ -469,6 +469,8 @@ For example, executor and code-review routes currently require a score of at lea
 
 Routing itself stays offline. `catalog/seed.yaml` contains the known model/harness/effort rows, invocation provenance, benchmark scores, and available cost metadata. Every run pins the catalog it started with.
 
+Legacy inactive benchmarks are kept in [`catalog/archive/legacy-nonrouting-2026-10-08.yaml`](catalog/archive/legacy-nonrouting-2026-10-08.yaml), outside the active routing catalog. Their historical scores and trust-grant evidence remain inspectable without granting route eligibility. Official model IDs and maintainer-reported model availability alone do not prove that every local harness/effort setting pins the intended model. Disabled concrete rows also disable any dynamic family alias resolving to them.
+
 ### Optional one-shot refresh
 
 Intake does not ask about this. The user opts in to filling **missing** benchmark scores for the current run by explicitly invoking the `auto-update-benchmarks` skill, which runs:
