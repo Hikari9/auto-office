@@ -58,8 +58,36 @@ def loopback_host(host: str) -> str:
 
 
 class _Server(ThreadingHTTPServer):
+    """Closing the server also closes its open client connections. Otherwise a
+    browser reuses an idle keep-alive socket after a restart on the same port,
+    and the old handler thread answers it from the stopped service."""
     daemon_threads = True
     allow_reuse_address = True
+
+    def __init__(self, *args, **kwargs):
+        self._conns: set[socket.socket] = set()
+        self._conns_lock = threading.Lock()
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        with self._conns_lock:
+            self._conns.add(request)
+        super().process_request(request, client_address)
+
+    def shutdown_request(self, request):
+        with self._conns_lock:
+            self._conns.discard(request)
+        super().shutdown_request(request)
+
+    def server_close(self):
+        super().server_close()
+        with self._conns_lock:
+            conns, self._conns = list(self._conns), set()
+        for conn in conns:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
 
 class _Server6(_Server):

@@ -69,7 +69,7 @@ elif args[:2] == ["pane", "get"] and args[2] in data.get("closed", []):
     sys.exit(1)
 elif args[:2] == ["pane", "get"]:
     result = {{"pane": {{"pane_id": args[2], "agent": data.get("pane_agents", {{}}).get(args[2])}}}}
-elif args[:2] == ["pane", "read"]:
+elif args[:2] == ["pane", "read"] and ("FAKE_HERDR_PANE_READ" in os.environ or "content" in data):
     print(os.environ.get("FAKE_HERDR_PANE_READ", data.get("content", "")))
     json.dump(data, open(state, "w"))
     sys.exit(0)
