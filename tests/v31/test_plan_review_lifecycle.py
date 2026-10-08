@@ -271,6 +271,8 @@ def test_user_requested_review_is_explicit_bounded_and_labelled(env):
     assert code == 2 and "user-quote-required" in out, out
     code, out = _o(env, "review", "plan", "--quote", "x", extra_env={"OFFICE_DISPATCH_ID": "D1"})
     assert code != 0 and "worker-cannot-request-review" in out, out
+    code, out = _o(env, "review", "plan", "--quote", "again please", "--rounds", "0")
+    assert code == 2 and "1 to 10" in out, out
     _o(env, "review", "plan", "--quote", "please review the plan again", "--rounds", "2", check=0)
     pr = _run(env)["plan_review"]
     assert pr["lifecycle"] == "user-requested" and pr["max_rounds"] == 2 and pr["cycle"] == 2 and not pr["ended"]

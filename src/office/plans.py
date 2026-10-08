@@ -795,7 +795,7 @@ def request_review(con, run: dict, quote: str | None, rounds: int | None = None)
     if not quote or len(re.sub(r"\s+", "", quote)) < 2:
         raise Usage("user-quote-required", "another plan review is the user's request; record their words",
                     next_step='office review plan --quote "<user\'s words>" [--rounds N]')
-    rounds = check_round_cap(rounds or contract.MAX_ROUNDS)
+    rounds = check_round_cap(contract.MAX_ROUNDS if rounds is None else rounds)
     with db.transaction(con):
         run = state.get_run(con, run["id"])
         if not run["plan_version"]:
