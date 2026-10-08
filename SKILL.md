@@ -75,9 +75,11 @@ continue with the installed runtime. A failed or offline check is informational 
   fallback it took and why; when every planned route is out, it stops: `office dispatch <task> --reroute`.
 - A dispatch failure is a recovery checkpoint, not permission to abandon the Office run. Inspect the launch
   notice and `office inspect task <T> --verbose`; when Office names a failed Herdr pane, read it yourself with
-  `herdr pane read <pane>` (and use the saved `pane-tail.txt`) to identify a startup dialog, dead harness, quota,
-  or other runtime blocker. Resolve only safe implementation/runtime details inside your authority; never approve
-  trust, credentials, irreversible actions, or user authority on the user's behalf. Then keep Office moving via
+  `herdr pane read <pane>` (or the saved `pane-tail.txt` once Office has closed the abandoned pane) to identify a
+  startup dialog, dead harness, quota, or other runtime blocker. Office itself answers a folder-trust dialog for
+  the worktrees and dispatch directories it created; never approve hook trust, other directories, credentials,
+  irreversible actions, or user authority on the user's behalf. Close a pane only by the id Office names, never by
+  matching screen text, and never your own pane (`$HERDR_PANE_ID`). Then keep Office moving via
   the printed `next:` step: re-prompt a live pane, `office resume`, `office rerun <task> --resume|--fresh`,
   `office dispatch <task> --reroute`, or the documented external/manual launch. Stop or abandon only when those
   recovery paths are exhausted or a genuine user decision is required.

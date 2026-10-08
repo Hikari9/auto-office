@@ -240,6 +240,9 @@ survivor that flagged itself `reusable` or `compactable` instead of closing it.
 - Use `--current`, an explicit pane ID, or a unique agent name. Do not rely on another client's focused pane.
 - Parse IDs from JSON responses. Do not derive them from sidebar order or examples.
 - Do not close workspaces, tabs, panes, or sessions you did not create unless the user explicitly asked.
+- Close panes by the ids Office or the ledger names, never by matching screen text: the orchestrator's
+  own scrollback contains the same words ("Trust this folder") and a text match closes it. Never close
+  `$HERDR_PANE_ID`, your own pane.
 - Never run `herdr server stop` from an active session unless the user explicitly intends to stop the server and its pane processes.
 - Never kill the main Herdr process. Use named test sessions for experiments that need an isolated server.
 - CLI server errors are JSON on stderr with exit status 1. CLI syntax errors exit with status 2.

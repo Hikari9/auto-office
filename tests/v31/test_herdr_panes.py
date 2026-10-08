@@ -293,3 +293,16 @@ def test_label_refreshed_when_pr_lands_before_pane_id_is_recorded(env, monkeypat
         dispatch._herdr_agent_start(run, d, {"kind": "worker"}, {}, (["x"], "claude"), "w1:p101", env.repo,
                                     env.tmp, label="T3 executor PR#261 D4f2a")
     assert not any(c[:3] == ["herdr", "pane", "rename"] for c in calls)
+
+
+def test_a_pane_picked_for_a_launching_dispatch_is_not_handed_to_a_parallel_launch(env, monkeypatch):
+    # Run f00446ac: a T1 executor and a plan reviewer launched together got the same
+    # idle pane; the reviewer's agent took it and T1's setup line never ran.
+    from test_herdr_agent_launch import _live_dispatch
+    run, d = _live_dispatch(env, monkeypatch)
+    _fake(env, monkeypatch)
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
+    from office import dispatch
+    first = dispatch._herdr_pane(run, env.repo, dispatch_id=d["id"])
+    assert dispatch._herdr_pane(run, env.repo, dispatch_id="Dother") != first
+    assert first in dispatch._busy_panes(run)
