@@ -179,7 +179,16 @@ def _matrix(audit: dict) -> list[str]:
                  f"{audit.get('cost_policy')}, as of {(audit.get('evidence_as_of') or '')[:16]})",
              f"{'#':>2} {'route':<38} {'p(ok)':>6} {'local n':>7} {'bench':>5} {'$/task':>7} {'min':>6} "
              f"{'quota':>9} {'pref':>4} {'util':>6}  band"]
+    if audit.get("task_descriptor"):
+        lines.append("task descriptor: " + json.dumps(audit["task_descriptor"], sort_keys=True))
     for r in rows:
+        if (r.get("benchmark") or {}).get("task_fit"):
+            fit = r["benchmark"]["task_fit"]
+            if fit.get("applied"):
+                lines.append(f"  {r['route']} calibrated task fit: " +
+                             ", ".join(f"{x['dimension']} ({x['benchmark']} {x['version']})" for x in fit["applied"]))
+        if (r.get("pricing") or {}).get("tier") not in (None, "flat"):
+            lines.append(f"  {r['route']} pricing tier: {r['pricing']['tier']}")
         cost = f"{r['cost_to_success']:.2f}" if r.get("cost_to_success") is not None else "?"
         mins = f"{r['time_to_success_seconds'] / 60:.0f}" if r.get("time_to_success_seconds") is not None else "?"
         pref = "" if r["preference"]["seed_rank"] is None else f"#{r['preference']['seed_rank'] + 1}"
