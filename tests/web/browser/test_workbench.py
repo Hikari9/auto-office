@@ -59,6 +59,13 @@ def test_read_only_run_cannot_show_a_live_composer(page, web_url):
 
 def test_mobile_sidebar_and_legacy_controls(page, web_url):
     open_workbench(page, web_url, width=390, height=844)
+    assert 'ww-inspector-hidden' in (page.locator('#ww').get_attribute('class') or '')
+    assert page.locator('#ww-overlay').is_hidden()
+    page.locator('#ww-inspector-toggle').click()
+    assert page.locator('#ww-inspector').is_visible()
+    assert page.locator('#ww-overlay').is_visible()
+    page.locator('#ww-overlay').click(position={'x':10,'y':400})
+    assert 'ww-inspector-hidden' in (page.locator('#ww').get_attribute('class') or '')
     page.locator('#ww-mobile-menu').click()
     assert 'ww-sidebar-open' in (page.locator('#ww').get_attribute('class') or '')
     page.locator('#ww-overlay').click(position={'x':370,'y':400})

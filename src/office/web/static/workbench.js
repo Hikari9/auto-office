@@ -12,7 +12,7 @@ const MODE_KEY = 'office-workbench-mode';
 const $ = (id) => document.getElementById(id);
 const state = {
   runId: null, view: 'run', query: '', expanded: new Set(), inspector: 'overview',
-  showInspector: true, showSidebar: false, palette: false, activity: new Map(),
+  showInspector: !matchMedia('(max-width:1100px)').matches, showSidebar: false, palette: false, activity: new Map(),
   drafts: new Map(), localSends: new Map(), pending: new Set(), updatePending: false,
   activitySequence: 0, runScroll: new Map(), activeAgent: null, issueQuery: '',
 };
@@ -64,7 +64,7 @@ function titleFor(run) {
 }
 function statusFor(run) {
   const tasks = run.tasks || [];
-  if (run.liveness === 'terminal') return ['Complete', 'done'];
+  if (run.liveness === 'terminal') return [run.phase === 'abandoned' ? 'Abandoned' : 'Closed', run.phase === 'abandoned' ? 'warn' : 'quiet'];
   if (run.awaiting_plan_authorization || tasks.some(t => ['blocked','failed','needs_attention','paused'].includes(t.status))) return ['Needs input', 'warn'];
   if (run.liveness === 'resumable') return ['Resumable', 'quiet'];
   return run.liveness === 'live' ? ['Live', 'live'] : ['Unknown', 'quiet'];
@@ -148,6 +148,8 @@ function mount() {
     else if(ev.key==='Escape'&&state.showSidebar){state.showSidebar=false;draw();}
   });
   store?.subscribe?.(()=>{chooseRun();schedule();fetchActivity();});
+  const narrow = matchMedia('(max-width:1100px)');
+  narrow.addEventListener('change',(event)=>{if(event.matches)state.showInspector=false;draw();});
   window.addEventListener('hashchange',()=>{const id=new URLSearchParams(location.hash.slice(1)).get('run');if(id&&id!==state.runId)selectRun(id);});
   chooseRun();draw();fetchActivity();
 }
