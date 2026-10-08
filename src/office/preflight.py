@@ -484,10 +484,11 @@ def preflight(con, run: dict, cwd: Path) -> Result:
         if restack.get("merged") or restack.get("conflict"):
             # A restack-only round (`office rerun` after a dependency moved) is work of its own:
             # the merged dependency must be built, checked and resubmitted (#331).
-            res.lines.append("restack: this round brings the worktree onto "
-                             + ", ".join(f"{m['task']} {m['revision']}" for m in restack.get("merged") or [])
-                             + ("; resolve the merge conflict first" if restack.get("conflict") else "")
-                             + "; rerun the checks and resubmit")
+            merged = ", ".join(f"{m['task']} {m['revision']}" for m in restack.get("merged") or [])
+            res.lines.append("restack: "
+                             + (f"this round brings the worktree onto {merged}; " if merged else "")
+                             + ("resolve the merge conflict first; " if restack.get("conflict") else "")
+                             + "rerun the checks and resubmit")
         elif not rows and not amendments:
             stop.append(f"findings: fix round for {packet['fix_of']} but no open findings or amendments are recorded; "
                         f"the orchestrator resolves it with: office amend {task['id']} -- \"<what to fix>\" (delivered "
