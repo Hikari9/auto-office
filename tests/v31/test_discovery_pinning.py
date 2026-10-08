@@ -169,11 +169,47 @@ def test_session_binding_does_not_cross_into_another_repository_with_its_own_run
     code, out = env.office("resume", there[:8], env=sess)
     assert code == 0, out
     con.execute("UPDATE runs SET git_common_dir=? WHERE id=?", (str(env.repo.parent / "other-repo" / ".git"), there))
+    # The rebinding came from `office start` in the other repository.
+    con.execute("UPDATE session_bindings SET bound_by='start'")
     con.commit()
     code, data = env.ojson("status", env=sess)
     assert data["data"]["run_id"] == here, data
+    assert any(there[:8] in n and "another repository" in n for n in data["notices"]), data
     # With no active run of its own in this repository, the binding still applies.
     con.execute("UPDATE runs SET phase='closed' WHERE id=?", (here,))
     con.commit()
     code, data = env.ojson("status", env=sess)
     assert data["data"]["run_id"] == there, data
+
+
+def test_an_explicit_resume_binding_still_wins_across_repositories_with_a_note(env):
+    # Review F2: `office resume <run>` is an explicit choice; it is honored, and the
+    # output says this repository has its own run.
+    env.office("start", "here", "--planner", "inline", check=0)
+    env.office("start", "elsewhere", "--planner", "inline", check=0)
+    con = env.con()
+    con.execute("DELETE FROM session_bindings")
+    here, there = [r[0] for r in con.execute("SELECT id FROM runs ORDER BY created_at")]
+    sess = {"OFFICE_SESSION": "sess-y", "OFFICE_HARNESS": "claude", "HERDR_PANE_ID": ""}
+    assert env.office("resume", there[:8], env=sess)[0] == 0
+    con.execute("UPDATE runs SET git_common_dir=? WHERE id=?", (str(env.repo.parent / "other-repo" / ".git"), there))
+    con.commit()
+    code, data = env.ojson("status", env=sess)
+    assert data["data"]["run_id"] == there, data
+    assert any("office resume" in n and "its own active run" in n for n in data["notices"]), data
+
+
+def test_a_skipped_cross_repo_binding_is_named_when_this_repository_is_ambiguous(env):
+    # Review F6: the ambiguity error must not claim nothing is bound.
+    for goal in ("a", "b", "c"):
+        env.office("start", goal, "--planner", "inline", check=0)
+    con = env.con()
+    con.execute("DELETE FROM session_bindings")
+    ids = [r[0] for r in con.execute("SELECT id FROM runs ORDER BY created_at")]
+    sess = {"OFFICE_SESSION": "sess-z", "OFFICE_HARNESS": "claude", "HERDR_PANE_ID": ""}
+    assert env.office("resume", ids[2][:8], env=sess)[0] == 0
+    con.execute("UPDATE runs SET git_common_dir=? WHERE id=?", (str(env.repo.parent / "other-repo" / ".git"), ids[2]))
+    con.execute("UPDATE session_bindings SET bound_by='start'")
+    con.commit()
+    code, out = env.office("status", env=sess)
+    assert "ambiguous" in out and "none is bound" not in out and ids[2][:8] in out, out

@@ -26,6 +26,7 @@ class Target:
     legacy: legacy.LegacyRun | None = None
     source: str = ""
     dispatch: dict | None = None  # the executor dispatch a task-worktree cwd names
+    note: str = ""  # shown with the command's output when resolution skipped or crossed a binding
 
 
 def session_keys(harness: str | None = None, session: str | None = None) -> list[tuple[str, str]]:
@@ -78,14 +79,19 @@ def binding_file(primary: Path, harness: str, session: str) -> Path:
 
 
 def bound_run(con, keys: list[tuple[str, str]]) -> dict | None:
+    return _binding(con, keys)[0]
+
+
+def _binding(con, keys: list[tuple[str, str]]) -> tuple[dict | None, str | None]:
+    """(bound active run, how it was bound: 'start' | 'resume' | ...)."""
     for harness, session in keys:
-        row = con.execute("SELECT run_id FROM session_bindings WHERE harness=? AND session_id=? AND ended_at IS NULL",
-                          (harness, session)).fetchone()
+        row = con.execute("SELECT run_id, bound_by FROM session_bindings WHERE harness=? AND session_id=? "
+                          "AND ended_at IS NULL", (harness, session)).fetchone()
         if row:
             run = get_run(con, row[0])
             if run and run["phase"] not in TERMINAL_PHASES:
-                return run
-    return None
+                return run, row[1]
+    return None, None
 
 
 OPEN_DISPATCH = ("launching", "running")
@@ -245,40 +251,66 @@ def resolve(con, *, run_arg: str | None = None, state_dir: str | None = None,
         _end_stale_bindings(con, keys, found[0], found[1])
         return Target(run=found[0], source=source, dispatch=found[1])
     # 4. session binding. One session may drive runs in several repositories, and
-    # starting a run there rebinds it: inside another repository that has its own
-    # active run, the binding does not cross over (that repository's run wins).
-    ident = paths.repo_identity(cwd)
-    run = bound_run(con, keys)
-    if run and not _binding_crosses_repo(con, run, ident):
-        return Target(run=run, source="session")
+    # `office start` there rebinds it. Inside the bound run's own checkout the binding
+    # wins without a git call. Elsewhere, an explicit `office resume` binding still
+    # wins (with a note when this repository has its own run); a binding `office start`
+    # made in another repository yields to this repository's active run.
+    run, bound_by = _binding(con, keys)
+    ident = None
+    skipped = None
+    if run is not None:
+        if _under_checkout(run, cwd):
+            return Target(run=run, source="session")
+        ident = paths.repo_identity(cwd)
+        crosses = _binding_crosses_repo(con, run, ident)
+        if not crosses:
+            return Target(run=run, source="session")
+        if bound_by == "resume":
+            return Target(run=run, source="session",
+                          note=f"note: run {short(run['id'])} is bound to this session by office resume and lives in "
+                               "another repository; this repository has its own active run (pass --run to choose)")
+        skipped = run
     # 5. sole active run in this repository
+    if ident is None:
+        ident = paths.repo_identity(cwd)
     if ident is None:
         raise NoRun("no-repository", "not inside a git repository and no run was named",
                     next_step="office list, then office resume <run>")
     runs, legacy_active = active_in_repo(con, ident[1])
     total = len(runs) + len(legacy_active)
+    note = (f"note: this session's run {short(skipped['id'])} is in another repository; using this repository's "
+            f"run (office resume {short(skipped['id'])} or --run to choose)") if skipped else ""
     if total == 1:
-        return Target(run=runs[0], source="sole-active") if runs else Target(legacy=legacy_active[0], source="sole-active")
+        return (Target(run=runs[0], source="sole-active", note=note) if runs
+                else Target(legacy=legacy_active[0], source="sole-active", note=note))
     if total == 0:
         raise NoRun("no-active-run", "no active Office run in this repository",
                     next_step='office start "<goal>"')
     listing = [f"{short(r['id'])}  {r['phase']:<10} {r['goal'][:60]}" for r in runs]
     listing += [f"{short(r.run_id)}  {r.phase:<10} {r.goal[:60]} (3.0 legacy)" for r in legacy_active]
-    raise NoRun("ambiguous-run", f"{total} active Office runs in this repository; none is bound to this session",
+    why = (f"this session's run {short(skipped['id'])} is in another repository" if skipped
+           else "none is bound to this session")
+    raise NoRun("ambiguous-run", f"{total} active Office runs in this repository; {why}",
                 next_step="office resume <id> to bind one, or pass --run <id>",
                 data={"candidates": listing})
 
 
-def _binding_crosses_repo(con, run: dict, ident) -> bool:
-    """The session's bound run lives in another repository than the cwd, and the
-    cwd's repository has an active run of its own."""
-    if ident is None or not run.get("git_common_dir"):
+def _under_checkout(run: dict, cwd: Path | None) -> bool:
+    """The cwd sits in the bound run's primary checkout (no git call needed)."""
+    if not run.get("git_common_dir"):
         return False
     try:
-        same = Path(run["git_common_dir"]).resolve() == Path(ident[1]).resolve()
+        here = (cwd or Path.cwd()).resolve()
+        root = paths.primary_checkout(Path(run["git_common_dir"])).resolve()
     except OSError:
-        same = str(run["git_common_dir"]) == str(ident[1])
-    if same:
+        return False
+    return here == root or root in here.parents
+
+
+def _binding_crosses_repo(con, run: dict, ident) -> bool:
+    """The session's bound run lives in another repository than the cwd, and the
+    cwd's repository has an active run of its own. Same string rule as active_in_repo."""
+    if ident is None or not run.get("git_common_dir") or str(run["git_common_dir"]) == str(ident[1]):
         return False
     runs, legacy_active = active_in_repo(con, ident[1])
     return bool(runs or legacy_active)
