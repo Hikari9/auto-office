@@ -30,10 +30,10 @@ from __future__ import annotations
 import hashlib
 import math
 
-from office import route_learning
+from office import route_learning, task_descriptors
 from office.util import sha256_obj
 
-POLICY_VERSION = "adaptive-1"
+POLICY_VERSION = "adaptive-2-task"
 
 # Calibration defaults. Coefficients are provisional and replayable; config
 # (`routing.adaptive`) overrides them. None of them is a hard gate except the
@@ -120,28 +120,35 @@ def benchmark_prior(c: dict, s: dict) -> tuple[float, str]:
     return min(max(p, 0.15), 0.92), f"{pri['benchmark_index']} = {score:g}"
 
 
-def _attempt_cost_prior(c: dict, s: dict) -> float | None:
-    price = c.get("price_fields") or {}
-    cost = c.get("cost") or {}
-    out = price.get("output_per_mtok", cost.get("output_per_mtok", cost.get("money_estimate")))
-    inp = price.get("input_per_mtok", cost.get("input_per_mtok"))
-    if not isinstance(out, (int, float)):
+def _attempt_cost_prior(c: dict, s: dict, descriptor: dict | None = None) -> float | None:
+    price, cost = c.get("price_fields") or {}, c.get("cost") or {}
+    tier = task_descriptors.price_tier(price, descriptor)
+    is_tiered = type(price.get("prompt_token_threshold")) is int
+    out = tier.get("output_per_mtok") if is_tiered else price.get(
+        "output_per_mtok", cost.get("output_per_mtok", cost.get("money_estimate")))
+    inp = tier.get("input_per_mtok") if is_tiered else price.get("input_per_mtok", cost.get("input_per_mtok"))
+    if type(out) not in (int, float):
         return None
     pri = s["priors"]
     mult = pri["effort_token_multiplier"].get(c.get("effort") or "medium", 1.0)
-    base = float(out) * pri["output_mtok_per_attempt"] + (float(inp) if isinstance(inp, (int, float)) else 0.0) \
-        * pri["input_mtok_per_attempt"]
-    return base * mult
+    d = descriptor or {}
+    input_tokens = d.get("estimated_input_tokens")
+    output_tokens = d.get("estimated_output_tokens")
+    input_mtok = input_tokens / 1e6 if type(input_tokens) is int else pri["input_mtok_per_attempt"] * mult
+    output_mtok = output_tokens / 1e6 if type(output_tokens) is int else pri["output_mtok_per_attempt"] * mult
+    return float(out) * output_mtok + (float(inp) if type(inp) in (float, int) else 0.0) * input_mtok
 
 
-def _attempt_wall_prior(c: dict, s: dict) -> float | None:
+def _attempt_wall_prior(c: dict, s: dict, descriptor: dict | None = None) -> float | None:
     speed = c.get("speed_fields") or (c.get("cost") or {}).get("speed_fields") or {}
     tps, ttft = speed.get("output_tok_per_s"), speed.get("ttft_ms")
     if not isinstance(tps, (int, float)) or tps <= 0:
         return None
     pri = s["priors"]
     mult = pri["effort_token_multiplier"].get(c.get("effort") or "medium", 1.0)
-    return (float(ttft or 0) / 1000.0) + pri["output_mtok_per_attempt"] * 1e6 * mult / float(tps)
+    expected = (descriptor or {}).get("estimated_output_tokens")
+    tokens = expected if type(expected) is int else pri["output_mtok_per_attempt"] * 1e6 * mult
+    return (float(ttft or 0) / 1000.0) + tokens / float(tps)
 
 
 def _shrink(prior: float | None, local: float | None, k: float, n: float) -> tuple[float | None, str]:
@@ -176,6 +183,7 @@ def score(candidates: list[dict], request: dict, s: dict) -> list[dict]:
     """Inspectable score rows for the qualifying `candidates` (input order kept)."""
     from office.routing import candidate_id
     evidence = (request.get("evidence") or {}).get("routes") or {}
+    descriptor = _task_descriptor(request)
     reserve = float((request.get("policy") or {}).get("quota_reserve_percent", 5.0))
     k = float(((request.get("evidence") or {}).get("pooling") or {}).get(
         "prior_strength", route_learning.DEFAULTS["prior_strength"]))
@@ -185,11 +193,19 @@ def score(candidates: list[dict], request: dict, s: dict) -> list[dict]:
         ev = evidence.get(route_learning.candidate_key(c)) or {}
         n = float(ev.get("n_effective") or 0.0)
         p0, p0_source = benchmark_prior(c, s)
+        fit = task_descriptors.benchmark_fit(c, descriptor) if descriptor else None
+        if fit and fit["applied"]:
+            p0 = task_descriptors.apply_fit(p0, fit)
+            p0_source += "; calibrated task benchmarks"
         k_eff = k if p0_source != "no pinned benchmark score; neutral prior" else k / 2
         p, lo, hi = route_learning.beta_bounds(float(ev.get("successes") or 0), float(ev.get("failures") or 0), p0, k_eff)
         rounds, rounds_basis = _shrink(pri["review_rounds_prior"], ev.get("review_rounds_mean"), k_eff, n)
-        cost, cost_basis = _shrink(_attempt_cost_prior(c, s), ev.get("money_actual_median"), k_eff, n)
-        wall, wall_basis = _shrink(_attempt_wall_prior(c, s), ev.get("wall_seconds_median"), k_eff, n)
+        tier = task_descriptors.price_tier(c.get("price_fields") or {}, descriptor)
+        # No prompt estimate: preserve the conservative published tier rather than
+        # substitute spend measured from unknown (often short) context episodes.
+        local_money = None if tier["tier"] == "unknown-conservative" else ev.get("money_actual_median")
+        cost, cost_basis = _shrink(_attempt_cost_prior(c, s, descriptor), local_money, k_eff, n)
+        wall, wall_basis = _shrink(_attempt_wall_prior(c, s, descriptor), ev.get("wall_seconds_median"), k_eff, n)
         per_episode, _ = _shrink(pri["attempts_prior"], ev.get("attempts_mean"), k_eff, n)
         attempts = per_episode / max(p, 0.05)
         rework = 1.0 + pri["rework_per_review_round"] * (rounds or 0.0)
@@ -199,7 +215,8 @@ def score(candidates: list[dict], request: dict, s: dict) -> list[dict]:
             "route": candidate_id(c), "label": label(c), "evidence_key": route_learning.candidate_key(c),
             "effort": c.get("effort"),
             "benchmark": {"prior_p": round(p0, 4), "source": p0_source,
-                          "authority": round(k_eff / (k_eff + n), 3) if (k_eff + n) else 1.0},
+                          "authority": round(k_eff / (k_eff + n), 3) if (k_eff + n) else 1.0,
+                          **({"task_fit": fit} if fit else {})},
             "local": {"n_effective": round(n, 3), "n_raw": ev.get("n_raw", 0), "runs": ev.get("runs", 0),
                       "successes": ev.get("successes", 0), "failures": ev.get("failures", 0),
                       "failure_attribution": ev.get("failure_attribution") or {},
@@ -207,6 +224,7 @@ def score(candidates: list[dict], request: dict, s: dict) -> list[dict]:
             "p_success": round(p, 4), "p_interval_90": [round(lo, 4), round(hi, 4)],
             "review_rounds": round(rounds, 3) if rounds is not None else None, "review_rounds_basis": rounds_basis,
             "attempt_cost": round(cost, 5) if cost is not None else None, "cost_basis": cost_basis,
+            "pricing": tier,
             "attempt_wall_seconds": round(wall, 1) if wall is not None else None, "wall_basis": wall_basis,
             "expected_attempts": round(attempts, 3),
             "cost_to_success": round(cost * rework * attempts, 5) if cost is not None else None,
@@ -310,6 +328,8 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
         "policy_version": POLICY_VERSION, "learner_version": route_learning.LEARNER_VERSION,
         "cost_policy": policy, "weights": weights, "competitive_band": band, "budget_ceiling_usd": ceiling,
         "cost_scale_usd": s["cost_scale_usd"],
+        **({"task_descriptor": _task_descriptor(request),
+            "descriptor_version": task_descriptors.VERSION} if _task_descriptor(request) else {}),
         "context": (request.get("evidence") or {}).get("context") or request.get("context") or {},
         "evidence_as_of": (request.get("evidence") or {}).get("as_of"),
         "evidence_digest": sha256_obj((request.get("evidence") or {}).get("routes") or {}),
@@ -319,6 +339,12 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
         "candidates": rows, "slate": slate,
     }
     return {"rows": rows, "rejected": rejected, "slate": slate, "audit": audit, "by_id": by_id}
+
+
+def _task_descriptor(request: dict) -> dict:
+    """The task descriptor scoring used: request context first, else the evidence context."""
+    return ((request.get("context") or (request.get("evidence") or {}).get("context") or {})
+            .get("task_descriptor") or {})
 
 
 def _dedupe(candidates: list[dict]) -> tuple[list[dict], dict[str, str]]:

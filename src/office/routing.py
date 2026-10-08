@@ -540,6 +540,8 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
             }
             break
     decision_hash = sha256_obj({"role": role, "playbook": playbook, "policy": policy, "selected": cid,
+                                **({"task_descriptor": (request.get("context") or {}).get("task_descriptor")}
+                                   if (request.get("context") or {}).get("task_descriptor") else {}),
                                 "slate": [e["route"] for e in rec["slate"]],
                                 "inputs": [{k: r[k] for k in ("route", "p_success", "cost_to_success",
                                                               "time_to_success_seconds", "quota", "preference",

@@ -33,6 +33,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from office import task_descriptors
+
 TASK_HEADING = re.compile(r"^###\s+(T\d+)\s*[:.\-–]\s*(.+?)\s*$")
 SECTION = re.compile(r"^##\s+(.+?)\s*$")
 KEYVAL = re.compile(r"^([A-Za-z_][A-Za-z_ ]*?)\s*:\s*(.*)$")
@@ -102,7 +104,7 @@ def parse(text: str) -> ParsedPlan:
         m = TASK_HEADING.match(line)
         if m:
             task = {"id": m.group(1), "title": m.group(2), "scope": [], "depends": [], "interfaces": [],
-                    "accept": [], "checks": None, "visual": None, "notes": [], "line": lineno}
+                    "accept": [], "checks": None, "visual": None, "descriptor": {}, "notes": [], "line": lineno}
             plan.tasks.append(task)
             section = "tasks"
             list_key, in_visual = None, False
@@ -156,6 +158,11 @@ def parse(text: str) -> ParsedPlan:
                 else:
                     task["visual"] = {"url": value} if value else {}
                     in_visual = True
+            elif key in task_descriptors.PLAN_KEYS:
+                try:
+                    task["descriptor"][key] = task_descriptors.parse_field(key, value)
+                except ValueError as exc:
+                    plan.errors.append(f"{task['id']} (line {lineno}): {exc}")
             elif key == "route":
                 # The planner's executor route: primary, then fallbacks (#300).
                 task["route"] = _split_list(value)

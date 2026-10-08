@@ -7,6 +7,8 @@ from jsonschema import Draft202012Validator
 
 from conftest import PLAN_ONE, ROOT, start_inline
 
+from office import adaptive, route_learning
+
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 PRIMARY, FB1, FB2 = "claude/claude-opus-5-5@medium", "codex/gpt-6-astra@low", "claude/claude-opus-5-5@high"
 PLANNED = PLAN_ONE.replace("visual: none", f"visual: none\nroute: {PRIMARY}, {FB1}, {FB2}", 1)
@@ -80,7 +82,7 @@ def test_inspect_route_json_carries_the_complete_audit(env):
     assert audit["rejected"]
     assert all({"candidate", "stage", "reason"} <= set(item) for item in audit["rejected"])
     code, out = env.office("inspect", "route", "T1")
-    assert out.count("PRIMARY") == 1 and "evidence (adaptive-1" in out, out
+    assert out.count("PRIMARY") == 1 and f"evidence ({adaptive.POLICY_VERSION}" in out, out
 
 
 def test_legacy_single_route_records_stay_readable(env):
@@ -109,4 +111,4 @@ def test_learner_refresh_runs_inside_close_and_inspect_learner_reads(env, phase)
         lifecycle._learn(con, run)
     assert not con.execute("SELECT 1 FROM events WHERE kind='learner.refresh_failed'").fetchone()
     code, out = env.office("inspect", "learner")
-    assert code == 0 and out.startswith("learner route-learner-1"), out
+    assert code == 0 and out.startswith(f"learner {route_learning.LEARNER_VERSION}"), out

@@ -421,6 +421,9 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
          version.current(), "launching", worktree, branch, base or (prior or {}).get("base_commit") or run["base_sha"],
          lease["id"], cand["harness"], cand.get("invocation_model_id"), cand.get("effort"), cand.get("adapter_id"),
          applied, dumps(_route_payload(decision))))
+    if task.get("descriptor"):
+        con.execute("UPDATE dispatches SET descriptor_json=? WHERE id=?",
+                    (dumps(task["descriptor"]), dispatch_id))
     if decision.get("override") or decision.get("launch"):
         con.execute("UPDATE dispatches SET override_json=? WHERE id=?",
                     (dumps({"by": "user", "declared": bool(decision.get("override")), "triple": routing.candidate_id(cand),

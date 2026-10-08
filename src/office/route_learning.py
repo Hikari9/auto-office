@@ -21,9 +21,9 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
-from office import scoring
+from office import scoring, task_descriptors
 
-LEARNER_VERSION = "route-learner-1"
+LEARNER_VERSION = "route-learner-2-task"
 
 ADAPTIVE_ROLES = ("executor", "worker")
 
@@ -62,6 +62,9 @@ DEFAULTS = {
     "fix_kind_weight": 0.75,          # fresh vs fix dispatch mismatch
     "stale_harness_major_weight": 0.25,
     "half_life_days": 120.0,
+    "descriptor_domain_mismatch_weight": 0.60,
+    "descriptor_modality_mismatch_weight": 0.75,
+    "descriptor_unknown_weight": 0.75,
 }
 
 
@@ -115,7 +118,7 @@ def derive_outcomes(con: sqlite3.Connection) -> list[dict]:
     rows = con.execute(
         "SELECT d.id, d.run_id, d.role, d.task_id, d.triple, d.harness, d.model, d.effort, d.started_at, d.ended_at, "
         f"{opt('terminal_classification')}, {opt('exit_code')}, d.outcome, d.attribution, {opt('stall_kind')}, "
-        "d.money_actual FROM dispatches d WHERE d.role IN ('executor','worker') AND d.ended_at IS NOT NULL "
+        f"d.money_actual, {opt('descriptor_json')} FROM dispatches d WHERE d.role IN ('executor','worker') AND d.ended_at IS NOT NULL "
         "ORDER BY d.ended_at, d.id").fetchall()
     if not rows:
         return []
@@ -169,7 +172,7 @@ def derive_outcomes(con: sqlite3.Connection) -> list[dict]:
 
     out = []
     for (did, run_id, role, task_id, triple, harness, model, effort, started, ended, term, exit_code, outcome,
-         attribution, stall, money) in rows:
+         attribution, stall, money, descriptor_raw) in rows:
         t_h, t_major, t_model, t_effort = _split_triple(triple or "")
         harness, model, effort = harness or t_h, model or t_model, effort or t_effort
         if not harness or not model:
@@ -199,8 +202,14 @@ def derive_outcomes(con: sqlite3.Connection) -> list[dict]:
         s, e = _ts(started), _ts(ended)
         wall = (e - s).total_seconds() if s and e and e >= s else None
         weight = 1.0 if success else ATTRIBUTION_WEIGHT[attr] * (0.5 + 0.5 * conf)
+        try:
+            descriptor = json.loads(descriptor_raw or "{}")
+            descriptor = descriptor if isinstance(descriptor, dict) else {}
+        except (TypeError, ValueError):
+            descriptor = {}
         out.append({
             "dispatch_id": did, "run_id": run_id, "task_id": task_id, "role": role,
+            "descriptor": descriptor,
             "route": route_key(harness, model, effort), "harness_major": t_major,
             "playbook": run.get("playbook"), "size_class": run.get("size_class"),
             "kind": "fix" if len(starts.get((run_id, task_id), [])) > 1 and
@@ -281,6 +290,7 @@ def episodes(outcomes: list[dict]) -> list[dict]:
             "run_id": run_id, "task_id": task_id, "route": route, "role": last["role"],
             "harness_major": last.get("harness_major"), "playbook": last.get("playbook"),
             "size_class": last.get("size_class"), "kind": rows[0].get("kind"),
+            "descriptor": last.get("descriptor") if all(o.get("descriptor") == last.get("descriptor") for o in rows) else {},
             "success": success, "attribution": attr, "attribution_confidence": conf,
             "attribution_provenance": prov, "learn_weight": round(weight, 4),
             "attempts": len(rows), "review_rounds": sum(o["review_rounds"] for o in rows),
@@ -302,6 +312,15 @@ def comparability(outcome: dict, context: dict, cfg: dict) -> float:
         w *= cfg["size_mismatch_weight"]
     if context.get("dispatch_kind") and outcome.get("kind") and outcome["kind"] != context["dispatch_kind"]:
         w *= cfg["fix_kind_weight"]
+    current, past = context.get("task_descriptor") or {}, outcome.get("descriptor") or {}
+    if current:
+        if not past:
+            w *= cfg["descriptor_unknown_weight"]
+        else:
+            if current.get("domain") and past.get("domain") and current["domain"] != past["domain"]:
+                w *= cfg["descriptor_domain_mismatch_weight"]
+            if current.get("modality") and past.get("modality") and current["modality"] != past["modality"]:
+                w *= cfg["descriptor_modality_mismatch_weight"]
     return w
 
 
@@ -319,6 +338,8 @@ def evidence_for(outcomes: list[dict], candidates: list[dict], context: dict, *,
     want = {}
     for c in candidates:
         want.setdefault(candidate_key(c), scoring.harness_major(c.get("harness_version")))
+    thresholds = {candidate_key(c): (c.get("price_fields") or {}).get("prompt_token_threshold")
+                  for c in candidates}
     stats = {}
     eps = episodes(outcomes)
     for key, major in want.items():
@@ -353,6 +374,12 @@ def evidence_for(outcomes: list[dict], candidates: list[dict], context: dict, *,
             if o.get("wall_seconds"):
                 walls.append(o["wall_seconds"] / o["attempts"])
             if o.get("money_actual") is not None:
+                threshold = thresholds.get(key)
+                if type(threshold) is int and threshold > 0:
+                    now_bucket = task_descriptors.bucket(context.get("task_descriptor"), threshold)
+                    past_bucket = task_descriptors.bucket(o.get("descriptor"), threshold)
+                    if now_bucket is None or now_bucket != past_bucket:
+                        continue
                 money.append(o["money_actual"] / o["attempts"])
         stats[key] = {
             "n_raw": raw, "n_effective": round(n, 3), "successes": round(s, 3), "failures": round(f, 3),
