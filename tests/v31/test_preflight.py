@@ -626,3 +626,23 @@ def test_a_restack_only_fix_round_is_work_not_a_stop(env):
     pkt.write_text(json.dumps(data))
     code, out = env.office("preflight", cwd=wt, env=wenv)
     assert "no open findings or amendments" not in out and "restack: this round brings" in out and "T0 R6" in out, out
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+def test_an_unresolved_restack_conflict_is_a_fix_not_ready(env):
+    # Review F4: Office's restack merge conflicted and was aborted; submitting now would ship
+    # work built on the superseded dependency.
+    wenv, wt, d = _dispatched(env)
+    from office import paths
+    import subprocess as sp
+    side = sp.run(["git", "-C", str(wt), "commit-tree", "HEAD^{tree}", "-m", "dep"], capture_output=True, text=True,
+                  env={**__import__("os").environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.test",
+                       "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.test"}).stdout.strip()
+    pkt = paths.run_dir(d["run_id"]) / "dispatches" / d["id"] / "packet.json"
+    data = json.loads(pkt.read_text())
+    data["fix_of"] = "R1"
+    data["restack"] = {"merged": [], "conflict": {"task": "T0", "revision": "R6", "commit": side}}
+    pkt.write_text(json.dumps(data))
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert "PREFLIGHT ready" not in out and f"git merge {side}" in out, out

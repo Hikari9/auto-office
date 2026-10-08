@@ -23,6 +23,7 @@ import json
 import os
 import posixpath
 import re
+import subprocess
 from pathlib import Path, PurePosixPath
 
 from office import contract, briefs, db, discovery, paths, planfile, state, submit
@@ -481,6 +482,14 @@ def preflight(con, run: dict, cwd: Path) -> Result:
                            "AND " + contract.TASK_WORK_FINDINGS + " ORDER BY created_at", (run["id"], task["id"])).fetchall()
         res.lines += [f"finding: {r['code']} [{r['severity']}] {r['location'] or ''} {r['summary']}" for r in rows]
         restack = packet.get("restack") or {}
+        conflict = restack.get("conflict") or {}
+        if conflict.get("commit") and subprocess.run(
+                ["git", "-C", str(wt), "merge-base", "--is-ancestor", conflict["commit"], "HEAD"],
+                capture_output=True).returncode != 0:
+            # Office's restack merge conflicted and was aborted; until the worker makes that
+            # merge, submitting would ship work built on the superseded dependency (review F4).
+            fix.append(f"restack: merge {conflict.get('task')} {conflict.get('revision')} into this worktree first "
+                       f"(git merge {conflict['commit']}); Office's merge conflicted. Resolve, commit, rerun the checks")
         if restack.get("merged") or restack.get("conflict"):
             # A restack-only round (`office rerun` after a dependency moved) is work of its own:
             # the merged dependency must be built, checked and resubmitted (#331).
