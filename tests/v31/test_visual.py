@@ -17,9 +17,9 @@ import pytest as _pytest  # noqa: E402
 pytestmark = [_pytest.mark.integration, _pytest.mark.review_contract("v3.1")]
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="module", autouse=True)
 def _shared_browser():
-    """One Chromium per worker process, reused by every capture in this module (each capture still gets
+    """One Chromium per module, reused by every capture in it (each capture still gets
     its own browser context). Production leaves the hook unset and launches its own browser."""
     if find_spec("playwright") is None:
         yield

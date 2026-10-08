@@ -476,9 +476,12 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             # reviewer is substituted: the same session is asked to rewrite the
             # file with the exact errors (R11). Results come only from the file
             # (R13), never from pane or transcript text.
+            # Read before re-prompting: the loop moves an unreadable reply aside to reply.invalid-N.txt,
+            # and a headless reply may have come from the harness log rather than the file (#399).
+            replied = bool(text.strip())
             text, parsed, attention = _reprompt_until_valid(con, run, d, ddir, output, parsed,
                                                             plan_review=plan_review, visual=visual)
-            never_replied = not (output.is_file() and output.stat().st_size > 0)
+            never_replied = not replied and not (output.is_file() and output.stat().st_size > 0)
             if attention and never_replied and convergence and not pinned:
                 # Every re-prompt came back empty: the reviewer never worked (a
                 # quota wall the harness did not report, a brief that never
