@@ -2197,6 +2197,15 @@ def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None,
             layout["panes"] = live
             atomic_write_json(tab_file, layout)
             return pane
+    if not live and anchor and not _herdr_json(["pane", "get", anchor]):
+        # The recorded anchor is gone (the orchestrator's pane was closed): split from the
+        # caller's pane instead, else give the run its own tab. Splitting a gone pane failed
+        # every later launch into headless.
+        caller = os.environ.get("OFFICE_HERDR_ANCHOR") or os.environ.get("HERDR_PANE_ID")
+        if caller and caller != anchor and _herdr_json(["pane", "get", caller]):
+            anchor = layout["anchor"] = caller
+        else:
+            return _herdr_own_tab_pane(run, cwd, tab_file, None)
     # Split the caller's pane vertically (side by side); stack further agents in that column.
     target, direction = (live[-1], "down") if live else (anchor, "right")
     res = _herdr_json(["pane", "split", "--pane", target, "--direction", direction, "--cwd", str(cwd), "--no-focus"])

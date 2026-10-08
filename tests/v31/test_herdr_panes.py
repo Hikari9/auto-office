@@ -351,3 +351,29 @@ def test_the_cosmetic_rename_runs_outside_the_pane_lock(env, monkeypatch):
     monkeypatch.setattr(dispatch, "_herdr_rename", rename)
     dispatch._herdr_pane(run, env.repo, label="T1 executor D1")
     assert free == [True]
+
+
+def test_a_gone_anchor_pane_is_replaced_by_the_callers_pane(env, monkeypatch):
+    # The orchestrator's original pane was closed; every split from it failed and each
+    # later launch ran headless ("no herdr pane could be opened").
+    state = _fake(env, monkeypatch)
+    state.write_text(json.dumps({"calls": [], "n": 0, "closed": ["w1:pOld", "w1:p30"]}))
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:pNew")
+    from office import dispatch, paths
+    run = _run(env)
+    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
+    tab_file.write_text(json.dumps({"mode": "split", "anchor": "w1:pOld", "panes": ["w1:p30"], "tab_id": "w1:t1"}))
+    assert dispatch._herdr_pane(run, env.repo) == "w1:p101"
+    split = [c for c in _calls(state) if c[:2] == ["pane", "split"]][-1]
+    assert split[split.index("--pane") + 1] == "w1:pNew", split
+    assert json.loads(tab_file.read_text())["anchor"] == "w1:pNew"
+
+
+def test_a_gone_anchor_without_a_caller_pane_falls_back_to_an_own_tab(env, monkeypatch):
+    state = _fake(env, monkeypatch)
+    state.write_text(json.dumps({"calls": [], "n": 0, "closed": ["w1:pOld"]}))
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    from office import dispatch, paths
+    run = _run(env)
+    (paths.run_dir(run["id"]) / "herdr-tab.json").write_text(json.dumps({"mode": "split", "anchor": "w1:pOld", "panes": []}))
+    assert dispatch._herdr_pane(run, env.repo) == "w1:p900"
