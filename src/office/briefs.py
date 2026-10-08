@@ -48,10 +48,10 @@ deploy_verify: <command that exits 0 when the deploy is healthy>   (recommended)
 
 ## Tasks
 ### T1: <title>
-scope: <ownership envelope: paths/globs this task may write>, <more>   (bare paths only; a dir/ entry owns its tree)
+scope: <ownership envelope: paths/globs this task may write>, <more>
 shared: <append-only registry files other tasks also edit>   (optional; e.g. an auth gate manifest)
-        (scope:/shared: entries are bare paths or globs: no notes or parentheses; put limits such as
-         "only the importer entry" in accept:)
+Each scope:/shared: entry is a path or glob with no note attached; a `dir/` entry owns its tree.
+Put limits such as "only the importer entry" in accept:.
 depends: none | T<n>, T<m>
 interfaces: <what it provides or consumes>   (optional)
 lane: <name>          (optional; tasks with one lane converge together; default: tasks joined by depends)

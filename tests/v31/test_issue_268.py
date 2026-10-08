@@ -101,7 +101,11 @@ def test_directory_scope_entries_own_their_tree():
     # #334: `src/auth/` (and bare `src/auth`) cover the files inside them.
     assert planfile.path_in_scope("src/auth/rock-user-resolver.ts", ["src/auth/"])
     assert planfile.path_in_scope("tests/auth/x/y.test.ts", ["tests/auth"])
-    assert planfile.path_in_scope("src/reg/a.ts", ["+src/reg/"])
+    # Review F4: brackets in a directory entry are path characters (Next.js dynamic routes).
+    assert planfile.path_in_scope("src/app/[slug]/page.tsx", ["src/app/[slug]/"])
+    assert planfile.path_in_scope("src/app/(dash)/x/page.tsx", ["src/app/(dash)"])
+    # Review F3: a shared entry never owns a tree through the directory rule.
+    assert not planfile.path_in_scope("src/reg/a.ts", ["+src/reg/"])
     assert not planfile.path_in_scope("src/authz/x.ts", ["src/auth/"])
     assert not planfile.path_in_scope("src/authz.ts", ["src/auth"])
 
@@ -117,3 +121,31 @@ def test_scope_and_shared_entries_with_notes_are_plan_errors():
     assert len(bad) == 3, plan.errors
     assert any("vitest.config.ts (A3" in e for e in bad) and all("accept:" in e for e in bad)
     assert not planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py, src/a/**, +x.md\n")).errors
+
+
+def test_entry_validation_allows_route_groups_and_rejects_shared_trees_and_colons():
+    ok = planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py, src/app/(dashboard)/**, src/app/[slug]/\n"))
+    assert not ok.errors, ok.errors  # review F1
+    bad = planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py, vitest.config.ts:append-only\nshared: src/reg/\n"))
+    assert any("vitest.config.ts:append-only" in e for e in bad.errors), bad.errors  # review F10
+    assert any("'+src/reg/' is a directory" in e for e in bad.errors), bad.errors  # review F3
+
+
+def test_an_entry_the_accepted_plan_already_had_is_a_warning_on_revision():
+    # Review F5: a run accepted before entry validation can still be amended.
+    text = PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: pnpm-lock.yaml (A4: shared)\n")
+    first = planfile.parse(text)
+    assert first.errors
+    prev = [{"id": "T1", "scope": ["calc.py", "+pnpm-lock.yaml (A4: shared)"]}]
+    again = planfile.parse(text)
+    planfile.grandfather_entries(again, prev)
+    assert not again.errors and any("already had it" in w for w in again.warnings), (again.errors, again.warnings)
+    added = planfile.parse(text.replace("scope: calc.py\n", "scope: calc.py, x.ts (new note)\n"))
+    planfile.grandfather_entries(added, prev)
+    assert any("x.ts (new" in e for e in added.errors), added.errors
+
+
+def test_planner_template_allows_globs_and_has_no_trailing_note_style():
+    # Review F9.
+    line = next(ln for ln in briefs.PLAN_FORMAT.splitlines() if ln.startswith("scope:"))
+    assert "bare paths only" not in line and "paths/globs" in line

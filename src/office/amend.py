@@ -283,6 +283,7 @@ def _contract(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
 def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dict | None = None,
                          plan_path: Path | None = None) -> Result:
     parsed = planfile.parse(text)
+    planfile.grandfather_entries(parsed, (state.current_plan(con, run["id"]) or {}).get("tasks"))
     if parsed.errors:
         raise Refused("plan-invalid", "plan has problems: " + "; ".join(parsed.errors[:5]),
                       next_step=f"fix {planpath.rel(run)}, then retry the amendment")

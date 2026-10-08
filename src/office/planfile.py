@@ -242,10 +242,10 @@ def _validate(plan: ParsedPlan) -> None:
         if not t["scope"] and not t.get("scope_none"):
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `scope:` (paths this task may write)")
         for entry in t["scope"]:
-            if not _path_like(entry.lstrip(SHARED)):
+            problem = _entry_problem(entry)
+            if problem:
                 # Each entry is matched as one path or glob: a note after it never matches (#416).
-                plan.errors.append(f"{t['id']} (line {t['line']}): scope/shared entry {entry!r} is not a path or glob; "
-                                   "list bare paths and put limits (e.g. 'only the importer entry') in `accept:`")
+                plan.errors.append(f"{t['id']} (line {t['line']}): {ENTRY_ERROR} {entry!r} {problem}")
         if not t["accept"]:
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `accept:` criteria")
         if t["checks"] is None:
@@ -326,13 +326,39 @@ def is_shared(pattern: str) -> bool:
     return pattern.startswith(SHARED)
 
 
-_NOT_PATH = re.compile(r"[\s()`]")
+ENTRY_ERROR = "scope/shared entry"
+# Whitespace, backticks and a colon mean prose rode along with the path
+# (`x.csv (append-only: ...)`). Parentheses and brackets alone are path
+# characters (Next.js route groups `(app)`, dynamic segments `[slug]`).
+_NOT_PATH = re.compile(r"[\s`:]")
 
 
-def _path_like(entry: str) -> bool:
-    """A scope or shared entry is one path or glob. Whitespace, parentheses and
-    backticks mean prose rode along with it (`x.csv (append-only: ...)`)."""
-    return bool(entry) and not _NOT_PATH.search(entry)
+def _entry_problem(entry: str) -> str | None:
+    """Why a scope or shared entry is not one path or glob, or None."""
+    bare = entry.lstrip(SHARED)
+    if not bare or _NOT_PATH.search(bare) or bare.count("(") != bare.count(")") or bare.count("[") != bare.count("]"):
+        return ("is not a path or glob; list bare paths or globs (no notes) and put limits "
+                "(e.g. 'only the importer entry') in `accept:`")
+    if is_shared(entry) and (bare.endswith("/") or bare.endswith("/**")):
+        # Shared entries skip overlap and lease checks: only append-only registry files may be shared.
+        return "is a directory; `shared:` lists append-only registry files, not trees (put a tree in `scope:`)"
+    return None
+
+
+def grandfather_entries(parsed: "ParsedPlan", prev_tasks: list[dict] | None) -> None:
+    """A revision of an accepted plan keeps an entry the earlier version already
+    had: its entry error becomes a warning, so a run accepted before entry
+    validation can still be amended. New or changed entries stay errors."""
+    prev = {t["id"]: set(t.get("scope") or []) for t in prev_tasks or []}
+    kept = []
+    for err in parsed.errors:
+        m = re.match(r"(\S+) \(line \d+\): " + re.escape(ENTRY_ERROR) + r" ('.*?'|\".*?\") ", err)
+        entry = m and m.group(2)[1:-1]
+        if m and entry in prev.get(m.group(1), ()):
+            parsed.warnings.append(err + " (kept: the accepted plan already had it)")
+        else:
+            kept.append(err)
+    parsed.errors[:] = kept
 
 
 def literal_prefix(pattern: str) -> str:
@@ -362,14 +388,17 @@ def _parallel_overlaps(tasks: list[dict]):
 
 def path_in_scope(path: str, scope: list[str]) -> bool:
     import fnmatch
-    for pattern in scope:
-        pattern = pattern.lstrip(SHARED)
+    for raw in scope:
+        pattern = raw.lstrip(SHARED)
         if pattern.endswith("/**"):
             if path == pattern[:-3] or path.startswith(pattern[:-2]):
                 return True
         if fnmatch.fnmatch(path, pattern) or path == pattern:
             return True
-        # A plain directory entry (`src/auth/` or `src/auth`) owns everything under it (#334).
-        if pattern and not re.search(r"[*?\[]", pattern) and path.startswith(pattern.rstrip("/") + "/"):
+        # A directory entry (`src/auth/`, `src/auth`, `src/app/[slug]/`) owns everything under it,
+        # compared literally so brackets are path characters, not a glob class (#334). Shared
+        # entries keep plain matching: a shared tree would skip the overlap check.
+        if pattern and not is_shared(raw) and not re.search(r"[*?]", pattern) \
+                and path.startswith(pattern.rstrip("/") + "/"):
             return True
     return False
