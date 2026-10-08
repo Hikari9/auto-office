@@ -97,3 +97,19 @@ def test_a_delta_naming_a_standalone_action_is_refused_as_contract_level(env):
     _running(env)
     code, out = env.office("amend", "plan", "--", "then send email to the team", env=EXTERNAL)
     assert code == 4 and "contract-level-change" in out, out
+
+
+@pytest.mark.parametrize("text", [
+    "re-run root test and build, then send READY-FOR-LIVE again", "send the report to the orchestrator",
+    "send it back for review", "send READY_FOR_REVIEW when done",
+])
+def test_authority_terms_ignore_a_send_to_the_orchestrator(text):
+    # A no-review amendment telling a worker to report back was refused as an authority change.
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is None, text
+
+
+@pytest.mark.parametrize("text", ["send SMS to members", "send the invitations", "send a newsletter"])
+def test_authority_terms_still_match_external_sends(text):
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is not None, text

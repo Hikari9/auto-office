@@ -22,8 +22,12 @@ from office.util import dumps, now_iso, sha256_bytes
 # is one part of a hyphen/underscore compound identifier (`send-keys`, `send_keys`,
 # `release-notes`) names a thing, not the action, so it does not count; `--prod` and
 # `force-push` still do.
+# `send` followed by an all-caps compound protocol word (`send READY-FOR-LIVE`), `it`/`back`,
+# or a report/status/summary/reply/review is a message to the orchestrator, not an external action.
+_SEND = (r"send(?!\s+(?:(?-i:[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+)\b|it\b|back\b"
+         r"|(?:the|a|an|your)\s+(?:report|result|status|summary|reply|review)\b))")
 AUTHORITY_TERMS = re.compile(
-    r"\b(?<!\w-)(?:deploy|production|prod|publish|release|send|email|notify users|delete|drop table|truncate|"
+    r"\b(?<!\w-)(?:deploy|production|prod|publish|release|" + _SEND + r"|email|notify users|delete|drop table|truncate|"
     r"force.?push|merge (?:to|into) main|migrat(?:e|ion) (?:prod|production)|payment|charge|"
     r"rotate (?:key|secret)|credentials?)\b(?!-\w)", re.I)
 
