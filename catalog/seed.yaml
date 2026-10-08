@@ -51,6 +51,23 @@ models:
     source_snapshot_metadata: {kind: normative-seed-preference, notes: v3.1 visual-review preference 2}
     content_hash:
     supersession_metadata:
+  - model_id: haiku
+    alias_family: '^claude-haiku-(?P<version>\d+(?:-\d+)*)$'
+    invocation_model_id: claude-haiku-5-5
+    invocation_harness: claude
+    invocation_source: 'documented: Anthropic model id claude-haiku-5-5; local Claude CLI conformance not yet recorded'
+    source_identifier: claude-haiku-5-5-medium
+    source_name: shipped-seed
+    effort: medium
+    source_effort: Medium Effort
+    effort_confidence: mapped
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 34}
+    price_fields:
+    speed_fields:
+    release_date:
+    source_snapshot_metadata: {kind: normative-seed-preference, notes: 'Haiku 5.5 medium is Anthropic default; alias may enter routing but mutable roles still require trust'}
+    content_hash:
+    supersession_metadata:
   - model_id: opus
     alias_family: '^claude-opus-(?P<version>\d+(?:-\d+)*)$'
     invocation_model_id: claude-opus-5-5
@@ -440,6 +457,91 @@ models:
     release_date: '2026-06'
     source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-sonnet-5-non-reasoning', release_url: 'https://artificialanalysis.ai/models/releases/claude-sonnet-5', fetched_at: '2026-09-27T14:55:09Z', page_title: 'Claude Sonnet 5 (Non-reasoning, High Effort)', score_estimated_by_source: true}
     content_hash: f1c99ecb154e020882e1bf1833ef0c65dfd922c4b42d9ef9fa2cbddf29063e7e
+    supersession_metadata:
+  - model_id: claude-haiku-5-5
+    invocation_model_id: claude-haiku-5-5
+    invocation_harness: claude
+    invocation_source: 'documented: official Anthropic model id; local Claude CLI model/effort conformance not yet recorded'
+    dispatchable: false
+    source_identifier: claude-haiku-5-5
+    source_name: artificial-analysis+anthropic
+    effort: max
+    source_effort: Max Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 43}
+    price_fields: {input_per_mtok: 0.1, output_per_mtok: 0.5, currency: USD, as_of: '2026-10-07', prompt_token_threshold: 100000, above_threshold_input_per_mtok: 0.5, above_threshold_output_per_mtok: 2.5, cache_read_per_mtok: 0.01, above_threshold_cache_read_per_mtok: 0.05, cache_write_5m_per_mtok: 0.125, above_threshold_cache_write_5m_per_mtok: 0.625, cache_write_1h_per_mtok: 0.2, above_threshold_cache_write_1h_per_mtok: 1.0}
+    speed_fields:
+    release_date: '2026-10-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark+vendor-pricing, url: 'https://artificialanalysis.ai/models/claude-haiku-5-5', release_url: 'https://artificialanalysis.ai/models/releases/claude-haiku-5-5', pricing_url: 'https://platform.claude.com/docs/en/models/haiku-5-5/overview', fetched_at: '2026-10-08T01:03:19Z', notes: 'Anthropic applies the higher input/output/cache tier when prompt input exceeds 100k tokens; same text tokenizes about 30% larger than Haiku 4.5'}
+    content_hash:
+    supersession_metadata:
+  - model_id: claude-haiku-5-5
+    invocation_model_id: claude-haiku-5-5
+    invocation_harness: claude
+    invocation_source: 'documented: official Anthropic model id; local Claude CLI model/effort conformance not yet recorded'
+    dispatchable: false
+    source_identifier: claude-haiku-5-5-xhigh
+    source_name: artificial-analysis+anthropic
+    effort: xhigh
+    source_effort: Xhigh Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 41}
+    price_fields: {input_per_mtok: 0.1, output_per_mtok: 0.5, currency: USD, as_of: '2026-10-07', prompt_token_threshold: 100000, above_threshold_input_per_mtok: 0.5, above_threshold_output_per_mtok: 2.5, cache_read_per_mtok: 0.01, above_threshold_cache_read_per_mtok: 0.05, cache_write_5m_per_mtok: 0.125, above_threshold_cache_write_5m_per_mtok: 0.625, cache_write_1h_per_mtok: 0.2, above_threshold_cache_write_1h_per_mtok: 1.0}
+    speed_fields:
+    release_date: '2026-10-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark+vendor-pricing, url: 'https://artificialanalysis.ai/models/claude-haiku-5-5-xhigh', release_url: 'https://artificialanalysis.ai/models/releases/claude-haiku-5-5', pricing_url: 'https://platform.claude.com/docs/en/models/haiku-5-5/overview', fetched_at: '2026-10-08T01:03:19Z', notes: 'Anthropic applies the higher input/output/cache tier when prompt input exceeds 100k tokens; same text tokenizes about 30% larger than Haiku 4.5'}
+    content_hash:
+    supersession_metadata:
+  - model_id: claude-haiku-5-5
+    invocation_model_id: claude-haiku-5-5
+    invocation_harness: claude
+    invocation_source: 'documented: official Anthropic model id; local Claude CLI model/effort conformance not yet recorded'
+    dispatchable: false
+    source_identifier: claude-haiku-5-5-high
+    source_name: artificial-analysis+anthropic
+    effort: high
+    source_effort: High Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 38}
+    price_fields: {input_per_mtok: 0.1, output_per_mtok: 0.5, currency: USD, as_of: '2026-10-07', prompt_token_threshold: 100000, above_threshold_input_per_mtok: 0.5, above_threshold_output_per_mtok: 2.5, cache_read_per_mtok: 0.01, above_threshold_cache_read_per_mtok: 0.05, cache_write_5m_per_mtok: 0.125, above_threshold_cache_write_5m_per_mtok: 0.625, cache_write_1h_per_mtok: 0.2, above_threshold_cache_write_1h_per_mtok: 1.0}
+    speed_fields:
+    release_date: '2026-10-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark+vendor-pricing, url: 'https://artificialanalysis.ai/models/claude-haiku-5-5-high', release_url: 'https://artificialanalysis.ai/models/releases/claude-haiku-5-5', pricing_url: 'https://platform.claude.com/docs/en/models/haiku-5-5/overview', fetched_at: '2026-10-08T01:03:19Z', notes: 'Anthropic applies the higher input/output/cache tier when prompt input exceeds 100k tokens; same text tokenizes about 30% larger than Haiku 4.5'}
+    content_hash:
+    supersession_metadata:
+  - model_id: claude-haiku-5-5
+    invocation_model_id: claude-haiku-5-5
+    invocation_harness: claude
+    invocation_source: 'documented: official Anthropic model id; local Claude CLI model/effort conformance not yet recorded'
+    dispatchable: false
+    source_identifier: claude-haiku-5-5-medium
+    source_name: artificial-analysis+anthropic
+    effort: medium
+    source_effort: Medium Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 34}
+    price_fields: {input_per_mtok: 0.1, output_per_mtok: 0.5, currency: USD, as_of: '2026-10-07', prompt_token_threshold: 100000, above_threshold_input_per_mtok: 0.5, above_threshold_output_per_mtok: 2.5, cache_read_per_mtok: 0.01, above_threshold_cache_read_per_mtok: 0.05, cache_write_5m_per_mtok: 0.125, above_threshold_cache_write_5m_per_mtok: 0.625, cache_write_1h_per_mtok: 0.2, above_threshold_cache_write_1h_per_mtok: 1.0}
+    speed_fields:
+    release_date: '2026-10-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark+vendor-pricing, url: 'https://artificialanalysis.ai/models/claude-haiku-5-5-medium', release_url: 'https://artificialanalysis.ai/models/releases/claude-haiku-5-5', pricing_url: 'https://platform.claude.com/docs/en/models/haiku-5-5/overview', fetched_at: '2026-10-08T01:03:19Z', notes: 'Anthropic applies the higher input/output/cache tier when prompt input exceeds 100k tokens; same text tokenizes about 30% larger than Haiku 4.5'}
+    content_hash:
+    supersession_metadata:
+  - model_id: claude-haiku-5-5
+    invocation_model_id: claude-haiku-5-5
+    invocation_harness: claude
+    invocation_source: 'documented: official Anthropic model id; local Claude CLI model/effort conformance not yet recorded'
+    dispatchable: false
+    source_identifier: claude-haiku-5-5-low
+    source_name: artificial-analysis+anthropic
+    effort: low
+    source_effort: Low Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 29}
+    price_fields: {input_per_mtok: 0.1, output_per_mtok: 0.5, currency: USD, as_of: '2026-10-07', prompt_token_threshold: 100000, above_threshold_input_per_mtok: 0.5, above_threshold_output_per_mtok: 2.5, cache_read_per_mtok: 0.01, above_threshold_cache_read_per_mtok: 0.05, cache_write_5m_per_mtok: 0.125, above_threshold_cache_write_5m_per_mtok: 0.625, cache_write_1h_per_mtok: 0.2, above_threshold_cache_write_1h_per_mtok: 1.0}
+    speed_fields:
+    release_date: '2026-10-07'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark+vendor-pricing, url: 'https://artificialanalysis.ai/models/claude-haiku-5-5-low', release_url: 'https://artificialanalysis.ai/models/releases/claude-haiku-5-5', pricing_url: 'https://platform.claude.com/docs/en/models/haiku-5-5/overview', fetched_at: '2026-10-08T01:03:19Z', notes: 'Anthropic applies the higher input/output/cache tier when prompt input exceeds 100k tokens; same text tokenizes about 30% larger than Haiku 4.5'}
+    content_hash:
     supersession_metadata:
   - model_id: claude-haiku-4-5-20251001
     invocation_model_id:
