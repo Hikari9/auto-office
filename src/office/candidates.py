@@ -55,8 +55,8 @@ def resolve_aliases(rows: list[dict]) -> list[dict]:
     offers, taking its invocation and scores; an effort the alias row declares but the
     newest model lacks keeps its own static fields. With no match, the alias keeps its own
     static fields. A target without a proven invocation_source inherits the alias's."""
-    # Non-dispatchable rows count: they are usually just unlistable by their CLI, and the
-    # alias's own invocation_source stands behind the full model id as the slug.
+    # Disabled concrete rows may identify the newest model and supply benchmark
+    # fields, but they must not make dynamic family aliases dispatchable.
     concrete = [r for r in rows if not r.get("alias_family")]
     out = []
     expanded: set[tuple] = set()
@@ -88,6 +88,8 @@ def resolve_aliases(rows: list[dict]) -> list[dict]:
                 out.append(base)
                 continue
             resolved = dict(base)
+            if target.get("dispatchable") is False:
+                resolved["dispatchable"] = False
             resolved["invocation_model_id"] = target.get("invocation_model_id") or target["model_id"]
             source = str(target.get("invocation_source") or "")
             if source.startswith(("local-evidence:", "documented:")):

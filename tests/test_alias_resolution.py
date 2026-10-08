@@ -61,3 +61,43 @@ def test_default_reviewer_seeds_resolve_to_catalog_candidates():
     for role in ("plan_reviewer", "code_reviewer"):
         lead = roles[role]["preferred_seed"][0]
         assert any(routing.preferred_rank(r, [lead]) == 0 for r in rows), role
+
+
+def test_shipped_catalog_has_unique_model_harness_effort_rows():
+    """A stale evidence-only row must not duplicate a scored routing candidate."""
+    import yaml
+    from office import paths
+
+    seed = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8"))
+    keys = [(r["model_id"], r["invocation_harness"], r["effort"]) for r in seed["models"]]
+    assert len(keys) == len(set(keys)), "duplicate catalog model/harness/effort rows"
+
+def test_alias_does_not_reenable_non_dispatchable_target():
+    # Alias routing cannot launder a benchmark-only route into a runnable one.
+    rows = [_alias(effort="medium"),
+            _concrete("gpt-6-luna", "medium", 29, dispatchable=False)]
+    [resolved] = [r for r in candidates.resolve_aliases(rows)
+                  if r["model_id"] == "luna"]
+    assert resolved["invocation_model_id"] == "gpt-6-luna"
+    assert resolved["dispatchable"] is False
+
+
+def test_haiku_alias_preserves_concrete_effort_dispatch_gate():
+    [row] = [r for r in candidates.catalog_rows()
+             if r["model_id"] == "haiku" and r["effort"] == "medium"]
+    assert row["alias_resolved_to"] == "claude-haiku-5-5"
+    assert row["dispatchable"] is False
+
+def test_all_disabled_shipped_concrete_efforts_keep_aliases_disabled():
+    rows = candidates.catalog_rows()
+    concrete = {
+        (r["invocation_harness"], r["model_id"], r["effort"]): r
+        for r in rows if not r.get("alias_family")
+    }
+    for alias in rows:
+        target = alias.get("alias_resolved_to")
+        if not target:
+            continue
+        original = concrete.get((alias["invocation_harness"], target, alias["effort"]))
+        if original and original.get("dispatchable") is False:
+            assert alias.get("dispatchable") is False, (alias["model_id"], alias["effort"])
