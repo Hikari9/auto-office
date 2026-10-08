@@ -226,6 +226,8 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_
                 (run["id"], p["id"], p["title"], "executor", dumps(p["scope"]), dumps(p["depends"]),
                  dumps(p["interfaces"]), dumps(p["accept"]), dumps(checks), dumps(p["visual"]) if p["visual"] else None,
                  "planned", plan_version, plan_version, plan_version, now, now))
+            if p.get("descriptor"):
+                state.update_task(con, run["id"], p["id"], descriptor=p["descriptor"])
             changes["added"].append(p["id"])
             continue
         contract = (cur["scope"] != p["scope"] or (cur["interfaces"] or []) != p["interfaces"])
@@ -237,7 +239,7 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_
                        and cur["status"] == "accepted" and cur["accepted_revision_id"]
                        and cur["accepted_revision_id"] == cur["current_revision_id"])
         fields = dict(title=p["title"], scope=p["scope"], depends=p["depends"], interfaces=p["interfaces"],
-                      accept=p["accept"], checks=checks, visual=p["visual"])
+                      accept=p["accept"], checks=checks, visual=p["visual"], descriptor=p.get("descriptor") or {})
         if contract:
             fields["contract_version"] = plan_version
             changes["contract"].append(p["id"])

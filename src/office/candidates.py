@@ -41,7 +41,7 @@ def catalog_rows() -> list[dict]:
     return resolve_aliases(list(data.get("models") or []))
 
 
-_ALIAS_FIELDS = ("benchmark_indexes", "price_fields", "speed_fields", "release_date")
+_ALIAS_FIELDS = ("benchmark_indexes", "task_benchmarks", "price_fields", "speed_fields", "release_date")
 
 
 def _version_key(version: str) -> tuple[int, ...]:
@@ -264,6 +264,7 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
             "invocation_source": row.get("invocation_source"),
             "effort": row.get("effort"),
             "benchmark_indexes": row.get("benchmark_indexes") or {},
+            "task_benchmarks": row.get("task_benchmarks") or [],
             "capabilities": sorted(set(adapter.get("capabilities") or [])),
             "adapter_id": adapter.get("id"),
             "adapter_hash": adapters.adapter_hash(adapter),
@@ -355,6 +356,7 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
         "invocation_source": "user-override",
         "effort": effort or (row or {}).get("effort") or "none",
         "benchmark_indexes": (row or {}).get("benchmark_indexes") or {},
+        "task_benchmarks": (row or {}).get("task_benchmarks") or [],
         "capabilities": sorted(set(adapter.get("capabilities") or [])),
         "adapter_id": adapter.get("id"),
         "adapter_hash": adapters.adapter_hash(adapter),
@@ -423,6 +425,9 @@ def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str,
     adaptive_cfg = s.get("adaptive") or {}
     context = {"role": role, "playbook": run.get("playbook"), "size_class": (run.get("risk") or {}).get("size_class"),
                "gear": run.get("gear"), "dispatch_kind": dispatch_kind}
+    task = state.get_task(con, run["id"], task_id) if task_id and run.get("id") else None
+    if (task or {}).get("descriptor"):
+        context["task_descriptor"] = task["descriptor"]
     as_of = as_of or datetime.now(timezone.utc).isoformat()
     route_learning.ensure_schema(con)
     # Executor and worker dispatches are the same kind of work; they pool.
