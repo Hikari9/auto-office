@@ -700,10 +700,11 @@ def _run(args, unknown) -> int:
             notice = bugwatch.lifecycle_attempt(run["id"], cmd, "completed")
             if notice:
                 res.notices.append(notice)
-        elif bugwatch.armed(con, run["id"]):
+        else:
             # Observe worker/subagent events without requiring any special agent hook.
             try:
-                bugwatch.capture(con, run["id"])
+                if bugwatch.armed(con, run["id"]):
+                    bugwatch.capture(con, run["id"])
                 bugwatch.start_reporter()
             except Exception:
                 res.notices.append("self-improve audit unavailable; retry on next command")

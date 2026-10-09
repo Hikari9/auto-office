@@ -35,13 +35,15 @@ REDACTIONS = (
     (re.compile(r"https?://\S+"), "[redacted-url]"),
     (re.compile(r"(?<!\w)(?:/Users/|/home/|/tmp/|/private/|[A-Z]:\\\\)[^\s,:;]+"), "[redacted-path]"),
     (re.compile(r"(?i)\b(?:token|password|secret|apikey|api_key|authorization)\s*[:=]\s*\S+"), "[redacted-field]"),
+    (re.compile(r'''(?i)["'](?:token|password|secret|apikey|api_key|authorization)["']\s*:\s*["'][^"']*["']'''), "[redacted-field]"),
     (re.compile(r"\b[0-9a-f]{32,}\b", re.I), "[redacted-identifier]"),
+    (re.compile(r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b", re.I), "[redacted-identifier]"),
 )
 
 
 def sanitize(value: str) -> str:
     """Deterministic, conservative public capsule; NEVER publish unfiltered raw logs."""
-    text = str(value)[:1800].replace("\x00", " ")
+    text = str(value).replace("\x00", " ")
     for pattern, substitute in REDACTIONS:
         text = pattern.sub(substitute, text)
     return text.replace("Hikari9/auto-office", "Auto-Office").strip()[:800]
@@ -66,6 +68,7 @@ def _record(con, run_id: str, kind: str, summary: str, origin: str) -> None:
     con.execute("INSERT INTO self_improve_incidents(fingerprint,run_id,kind,summary,origin,status,created_at,updated_at) "
                 "VALUES(?,?,?,?,?,'pending',?,?) ON CONFLICT(fingerprint) DO UPDATE SET "
                 "occurrences=occurrences+1,updated_at=excluded.updated_at,"
+                "report_json=CASE WHEN status='suspected' THEN NULL ELSE report_json END,"
                 "status=CASE WHEN status='suspected' THEN 'pending' ELSE status END",
                 (key, run_id,kind,text,origin,now_iso(),now_iso()))
 
@@ -140,16 +143,16 @@ def start_reporter() -> None:
     """Best effort wake-up. Worker also resumes on the next Office invocation."""
     if os.environ.get(SELF_ENV):
         return
-    from office import frontdoor
-    argv, extra = frontdoor.current_argv()
-    env = dict(os.environ)
-    env.update(extra)
-    env[SELF_ENV] = "1"
     try:
+        from office import frontdoor
+        argv, extra = frontdoor.current_argv()
+        env = dict(os.environ)
+        env.update(extra)
+        env[SELF_ENV] = "1"
         subprocess.Popen([*argv,"_self_improve"], env=env, stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True, close_fds=True)
-    except OSError:
+    except Exception:
         pass
 
 
@@ -162,7 +165,9 @@ def _route(con):
     for c in rows:
         adapter = adapters_by_id.get(c["adapter_id"])
         money = (c.get("cost") or {}).get("money_estimate")
-        if (adapter and money is not None and money <= 15 and
+        # Only Claude currently supplies an enforceable tool-free investigator.
+        # General reviewer profiles can read private state and call installed MCPs.
+        if (adapter and adapter.get("id") == "claude" and money is not None and money <= 15 and
                 adapters.profile(adapter,"reviewer") and (c.get("invocation_source") or "").startswith(("documented:","local-evidence:"))):
             usable.append((money,c["effort"] not in ("low","medium"),c,adapter))
     if not usable:
@@ -178,7 +183,13 @@ def investigate(con, incident: dict) -> dict:
     with tempfile.TemporaryDirectory(prefix="office-investigate-") as scratch:
         root = Path(scratch)
         output = root / "answer.json"
-        argv,prof = adapters.build_argv(adapter,"reviewer",model=c["invocation_model_id"],
+        isolated = {**adapter, "office_profiles": {"reviewer": {
+            "argv": ["-p", "--bare", "--model", "{model}", "--effort", "{effort}",
+                     "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                     "--setting-sources", "", "--settings", '{"disableAllHooks":true}',
+                     "--disable-slash-commands", "--no-session-persistence", "--output-format", "text"],
+            "prompt": "stdin", "output": "stdout"}}}
+        argv,prof = adapters.build_argv(isolated,"reviewer",model=c["invocation_model_id"],
                                         effort=c["effort"],cwd=root,output=output)
         prompt = ("You are a cheap read-only incident investigator for Auto-Office. "
                   "No code changes, commits, PRs, network writes, or GitHub operations. "
@@ -191,8 +202,9 @@ def investigate(con, incident: dict) -> dict:
         args = argv + ([prompt] if prof.get("prompt")=="argv" else
                        [prof.get("prompt_flag","--prompt=")+prompt] if prof.get("prompt")=="argv-bound" else [])
         # Isolated cwd, no repository contents/credentials or Office run authority.
-        env = {k:v for k,v in os.environ.items() if k not in ("GH_TOKEN","GITHUB_TOKEN","OFFICE_RUN_ID",
-               "OFFICE_TASK_ID","OFFICE_DISPATCH_ID","OFFICE_ROLE","OFFICE_STATE_DIR")}
+        env = {k:v for k,v in os.environ.items() if k in (
+            "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR",
+            "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")}
         proc = subprocess.run(args,input=prompt if prof.get("prompt")=="stdin" else None,
                               cwd=root,env=env,capture_output=True,text=True,timeout=180)
         if proc.returncode:
@@ -224,9 +236,10 @@ def publish(incident: dict, report: dict) -> str:
     title = "[Auto-Office bug] " + report["title"][:95]
     fingerprint = incident["fingerprint"]
     marker = f"<!-- auto-self-improve:{fingerprint} -->"
-    items = json.loads(_gh("issue","list","--repo",REPO,"--state","all",
-                           "--limit","1000","--json","title,body,url"))
-    existing = next((it.get("url") for it in items if marker in (it.get("body") or "")
+    pages = json.loads(_gh("api", "--paginate", "--slurp",
+                           f"repos/{REPO}/issues?state=all&per_page=100"))
+    items = [item for page in pages for item in page if "pull_request" not in item]
+    existing = next((it.get("html_url") for it in items if marker in (it.get("body") or "")
                      or it.get("title","").casefold()==title.casefold()),None)
     if existing:
         return existing
@@ -293,6 +306,8 @@ def worker(*, once: bool = False) -> int:
                     _process(con,incident)
                 if once:
                     return 0
+                if _due(con):
+                    continue
                 wait = con.execute("SELECT MIN(next_retry_at) FROM self_improve_incidents "
                                    "WHERE status IN ('pending','ready','retry')").fetchone()[0]
                 if not wait:

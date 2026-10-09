@@ -40,6 +40,10 @@ def test_redaction_removes_private_identifiers():
     public=bugwatch.sanitize(raw)
     for private in ("/Users", "rico", "topsecret", "me@", "https://secret"):
         assert private not in public
+    assert "private value" not in bugwatch.sanitize('{"token": "private value"}')
+    # Redact before truncating, including credentials that cross the old input cutoff.
+    public = bugwatch.sanitize("x " * 880 + "token=private-value")
+    assert "private" not in public
 
 
 def test_nonblocking_attempt_and_persistent_failure(env, monkeypatch):
@@ -86,8 +90,9 @@ def test_issue_only_publisher_deduplicates_and_redacts(env,monkeypatch):
             "actual":"launch fails","evidence":"dispatch error captured","reproduction":"intermittent"}
     def fake(*args):
         calls.append(args)
-        if args[0:2]==("issue","list"):
-            return "[]"
+        if args[0]=="api":
+            assert "--paginate" in args and "--slurp" in args
+            return "[[]]"
         assert args[0:2]==("issue","create")
         assert "--repo" in args and "Hikari9/auto-office" in args
         assert "--body-file" in args and "--title" in args
@@ -99,8 +104,8 @@ def test_issue_only_publisher_deduplicates_and_redacts(env,monkeypatch):
     assert bugwatch.publish(incident,report).endswith("/999")
     assert len(calls)==2 and not any("pr" in c or "push" in c for call in calls for c in call)
     calls.clear()
-    monkeypatch.setattr(bugwatch,"_gh",lambda *a:json.dumps([{"title":"different",
-                    "body":"<!-- auto-self-improve:"+"a"*64+" -->", "url":"https://github.com/Hikari9/auto-office/issues/999"}]))
+    monkeypatch.setattr(bugwatch,"_gh",lambda *a:json.dumps([[{"title":"different",
+                    "body":"<!-- auto-self-improve:"+"a"*64+" -->", "html_url":"https://github.com/Hikari9/auto-office/issues/999"}]]))
     assert bugwatch.publish(incident,report).endswith("/999")
 
 
@@ -115,3 +120,62 @@ def test_pruneable_details_not_needed_for_retry(env):
         assert bugwatch._due(con) and bugwatch._due(con)[0]["summary"]=="crashed subprocess"
     finally:
         con.close()
+
+
+def test_repeat_weak_incident_is_reinvestigated(env, monkeypatch):
+    con = env.con()
+    try:
+        bugwatch._record(con, "r", "job.failed", "relay crashed", "event:1")
+        reports = iter([
+            {"confidence": "weak", "title": "unclear"},
+            {"confidence": "strong", "title": "relay defect"},
+        ])
+        monkeypatch.setattr(bugwatch, "investigate", lambda *a: next(reports))
+        monkeypatch.setattr(bugwatch, "publish", lambda *a: "issue-url")
+        bugwatch._process(con, dict(con.execute("SELECT * FROM self_improve_incidents").fetchone()))
+        bugwatch._record(con, "r", "job.failed", "relay crashed", "event:2")
+        row = dict(con.execute("SELECT * FROM self_improve_incidents").fetchone())
+        assert row["report_json"] is None
+        bugwatch._process(con, row)
+        assert con.execute("SELECT status FROM self_improve_incidents").fetchone()[0] == "filed"
+    finally:
+        con.close()
+
+
+def test_worker_drains_more_than_one_batch(env, monkeypatch):
+    con = env.con()
+    for i in range(23):
+        bugwatch._record(con, "r", "job.failed", f"relay {i} crashed", "event:1")
+    monkeypatch.setattr(bugwatch, "investigate", lambda *a: {"confidence": "none"})
+    assert bugwatch.worker() == 0
+    assert con.execute("SELECT COUNT(*) FROM self_improve_incidents WHERE status='dismissed'").fetchone()[0] == 23
+    con.close()
+
+
+def test_reporter_launch_failures_are_nonblocking(monkeypatch):
+    from office import frontdoor
+    monkeypatch.setattr(frontdoor, "current_argv", lambda: (_ for _ in ()).throw(ValueError("bad runtime")))
+    bugwatch.start_reporter()
+
+
+def test_investigator_has_no_tools_or_inherited_authority(env, monkeypatch):
+    from office import adapters
+    adapter = adapters.load_all()["claude"]
+    monkeypatch.setattr(bugwatch, "_route", lambda con: (
+        {"invocation_model_id": "test-model", "effort": "low"}, adapter))
+    monkeypatch.setenv("GH_TOKEN", "private-token")
+    monkeypatch.setenv("OFFICE_STATE_HOME", "/private/state")
+    monkeypatch.setenv("DATABASE_URL", "private-database")
+    def run(argv, **kwargs):
+        assert argv[argv.index("--tools") + 1] == ""
+        assert "--strict-mcp-config" in argv
+        assert "--bare" in argv
+        assert "--add-dir" not in argv
+        assert "--disable-slash-commands" in argv
+        assert "disableAllHooks" in argv[argv.index("--settings") + 1]
+        assert not {"GH_TOKEN", "OFFICE_STATE_HOME", "DATABASE_URL"} & kwargs["env"].keys()
+        return type("Proc", (), {"returncode": 0, "stdout": json.dumps({
+            "confidence": "strong", "title": "relay defect", "actual": "crashed", "evidence": "observed error"})})()
+    monkeypatch.setattr(bugwatch.subprocess, "run", run)
+    assert bugwatch.investigate(None, {"kind": "job.failed", "summary": "relay crashed",
+                                      "origin": "event:1", "occurrences": 1})["confidence"] == "strong"

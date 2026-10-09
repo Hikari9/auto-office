@@ -24,6 +24,9 @@ Only Auto-Office-owned defects are candidates. A cheaper read-only investigator 
 reports, and the runtime creates or reuses GitHub issues in `Hikari9/auto-office`; it never fixes a
 bug or opens a PR. Reports are persisted outside run-prune detail, and GitHub/model failures retry
 without blocking landing. The CLI reports filed, pending, retry and suspected counts.
+Investigation currently requires an installed budget-qualified Claude model with API authentication.
+It runs in bare mode with tools, MCP servers, hooks, skills and automatic context disabled;
+unavailable routes retain incidents for retry. Deduplication scans all open and closed issues.
 
 ## The lifecycle at a glance
 
