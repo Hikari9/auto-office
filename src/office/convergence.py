@@ -1096,7 +1096,7 @@ def summary(con, run: dict) -> list[dict]:
                     "triggers": s.get("triggers") or [], "covered_by": st.get("covered_by"),
                     "status": status, "round": st.get("round") or 1, "cycle": st.get("cycle") or 1,
                     "detail": st.get("detail"), "commit": st.get("commit"), "escalation": st.get("escalation"),
-                    "intake_gap": st.get("intake_gap"), "fallback_available": st.get("fallback_available")})
+                    "intake_gap": st.get("intake_gap"), "fallback_available": fallback_gate(con, run, s["id"]) is not None})
     return out
 
 

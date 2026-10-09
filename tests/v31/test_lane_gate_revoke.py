@@ -135,6 +135,8 @@ def test_the_hint_and_the_review_agree_on_the_current_cycle(env, tmp_path):
     """One predicate: a gate of an earlier cycle is neither hinted nor accepted by `office review`."""
     _unavailable_lane(env)
     assert "office review L-T1:convergence --report" in _status(env)["next"]
+    from office import convergence
+    assert convergence.summary(env.con(), _run_row(env))[0]["fallback_available"]
     con = env.con()
     row = con.execute("SELECT id, landing_json FROM runs").fetchone()
     landing = json.loads(row["landing_json"])
@@ -142,6 +144,8 @@ def test_the_hint_and_the_review_agree_on_the_current_cycle(env, tmp_path):
     con.execute("UPDATE runs SET landing_json=? WHERE id=?", (json.dumps(landing), row["id"]))
     con.commit()
     assert "no specialist reviewer returned a verdict" not in (_status(env).get("next") or "")
+    from office import convergence
+    assert not convergence.summary(env.con(), _run_row(env))[0]["fallback_available"]
     report = tmp_path / "r.txt"
     report.write_text(APPROVED)
     code, out = env.office("review", "L-T1:convergence", "--report", str(report))
