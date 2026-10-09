@@ -388,13 +388,22 @@ def _base_for(con, run: dict, task: dict, graph: dict, stack_after: str | None) 
 # ------------------------------------------------------------------ launch request
 
 def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | None = None,
-                   base: str | None = None, extra: dict | None = None, fix_of: str | None = None) -> str:
+                   base: str | None = None, extra: dict | None = None, fix_of: str | None = None,
+                   replaces: str | None = None) -> str:
     """Create the dispatch row, lease and launch job. Caller holds the tx.
 
     Routing for executors happens before the transaction; planner and fix
     rounds route here from pinned state because they have no orchestrator turn.
     """
     task = state.get_task(con, run["id"], task_id)
+    if role == "executor":
+        from office import gates
+        live = gates.live_task_session(con, run["id"], task_id, exclude=replaces)
+        if live:
+            # One session per worktree: amend, rerun and relaunch all come through here.
+            raise Refused("worker-live", f"{task_id} still has a live worker ({live})", scope=task_id,
+                          next_step=f'office prompt {task_id} -- "<message>" to reach it, or office revoke {task_id} '
+                                    "to end it first")
     prior = None
     if task.get("current_dispatch_id"):
         prior = state.get_dispatch(con, task["current_dispatch_id"])
@@ -520,14 +529,54 @@ def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = N
                                          "AND status IN ('launching', 'running')", (run["id"], task_id)).fetchall()]
     notes: list[str] = []
     others = [d["id"] for d in live if only and d["id"] != only]
-    stopped = [d["id"] for d in live if (not only or d["id"] == only) and stop_dispatch(run, d, notes=notes)]
+    targets = [d for d in live if not only or d["id"] == only]
+    cancelled = [d["id"] for d in targets if _cancel_pending_launch(con, run, d, reason)]
+    # Re-read: a launch may have recorded its launcher and pid since the snapshot.
+    fresh = [state.get_dispatch(con, d["id"]) for d in targets if d["id"] not in cancelled]
+    stopped = [d["id"] for d in fresh if stop_dispatch(run, d, notes=notes)]
+    starting = [d["id"] for d in fresh if d["id"] not in stopped and d["status"] == "launching" and not d.get("launcher")]
     lines = [f"{task_id} lease revoked | later submits from its holder are rejected"]
     if stopped:
         lines.append(f"stopped {', '.join(stopped)} (SIGTERM)")
+    if cancelled:
+        lines.append(f"cancelled {', '.join(cancelled)} before its agent started")
+    if starting:
+        lines.append(f"{', '.join(starting)} is starting its agent now; it is tracked once up: office revoke "
+                     f"{task_id} again to stop it")
     if others:
-        lines.append(f"left running: {', '.join(others)} (not the dispatch named; office revoke {task_id} ends them too)")
+        lines.append(f"left running: {', '.join(others)} (not the dispatch named; its lease is revoked too, so its "
+                     f"submits are rejected; office revoke {task_id} ends it, and office rerun refuses until it ends)")
     lines += notes
     return Result(lines=lines, next=f"office dispatch {task_id} to relaunch")
+
+
+def _cancel_pending_launch(con, run: dict, d: dict, reason: str) -> bool:
+    """End a dispatch whose launch job has not been picked up yet: fail the queued job
+    and record the end in one transaction. A claimed job may already be starting the
+    agent, and cancelling under it would leave an agent nothing tracks; it is left to
+    finish its launch (it is then tracked, and a second revoke stops it)."""
+    if d["status"] != "launching" or d.get("launcher") or d.get("pid"):
+        return False
+    key = (run["id"], f"launch:{d['id']}")
+    with db.transaction(con):
+        if not con.execute("SELECT 1 FROM outbox WHERE run_id=? AND kind='launch_agent' AND dedup_key=? "
+                           "AND status='queued'", key).fetchone():
+            return False
+        # Guarded on the row as it is now, not the caller's snapshot: a launch that recorded
+        # its launcher or pid meanwhile is running and is stopped, not cancelled.
+        ended = con.execute("UPDATE dispatches SET status='cancelled', terminal_classification='revoked', ended_at=? "
+                            "WHERE id=? AND ended_at IS NULL AND status='launching' AND launcher IS NULL AND pid IS NULL",
+                            (now_iso(), d["id"])).rowcount
+        if not ended:
+            return False
+        con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, max_attempts=attempts "
+                    "WHERE run_id=? AND kind='launch_agent' AND dedup_key=? AND status='queued'",
+                    (f"revoked: {reason}"[:200], now_iso(), *key))
+        if ended:
+            state.emit(con, run, "dispatch.ended", f"{d.get('task_id') or d['role']} {d['role']} ended: revoked before "
+                       "its agent started", audience="runtime", task_id=d.get("task_id"), dispatch_id=d["id"],
+                       payload={"exit_code": None, "signal": None, "classification": "revoked"})
+    return bool(ended)
 
 
 def _end_dispatch(con, run: dict, d: dict, classification: str, why: str, *, stop: bool = True,
@@ -886,11 +935,18 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     packet = build_packet(con, run, dispatch, role, payload)
     state.check_packet(run, packet)
     atomic_write_json(ddir / "packet.json", packet)
-    brief = briefs.worker_brief(con, run, packet, setup=setup)
+    carried: list = []
+    brief = briefs.worker_brief(con, run, packet, setup=setup, carried=carried)
     (ddir / "brief.md").write_text(brief, encoding="utf-8")
+    # The deliveries this brief rendered: they are confirmed once its prompt lands.
+    atomic_write_json(ddir / "brief-deliveries.json", carried)
     with db.transaction(con):
         con.execute("UPDATE dispatches SET packet_hash=?, packet_path=?, log_path=? WHERE id=?",
                     (packet["packet_hash"], str(ddir / "packet.json"), str(ddir / "output.log"), dispatch["id"]))
+    current = state.get_dispatch(con, dispatch["id"])
+    if current["status"] != "launching":
+        # Revoked while its worktree was being set up (review F2): start nothing.
+        return {"skipped": current["status"]}
     launcher = launch(run, dispatch, "worker", ddir, cwd=wt, cli=payload.get("cli"),
                       external=bool(payload.get("external")), resume=payload.get("resume"))
     return {"dispatch_id": dispatch["id"], **launcher}
@@ -3052,7 +3108,9 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
                        f"--fresh; work is preserved in its worktree", task_id=task["id"])
             return
         from office import questions
-        asked = _ended_on_question(run, d)
+        # Only an executor that ended cleanly stopped to ask: a crashed or killed worker's last
+        # line is narration, and a planner question has no amend/rerun path (review F3, F6).
+        asked = _ended_on_question(run, d) if _may_end_on_question(d) else None
         if asked:
             # A worker that stopped to ask needs an answer, not the same brief again: a
             # relaunch asks the same question (run 330605a8 relaunched one twice).
@@ -3076,13 +3134,25 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
                    f"({d['terminal_classification']}); work is preserved in its worktree", task_id=task["id"])
 
 
+def _may_end_on_question(d: dict) -> bool:
+    return d.get("role") == "executor" and d.get("terminal_classification") == "success"
+
+
 def _ended_on_question(run: dict, d: dict) -> dict | None:
     """The question a worker's final message ended on, saved where `office wait`
     finds it (question.json), or None."""
-    from office import gates, questions
+    from office import questions
     ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    from office import gates
     try:
-        q = questions.final_question(gates._log_text(d, ddir))
+        with open(gates.log_path(d, ddir), "rb") as fh:  # only the final message matters: read the tail
+            fh.seek(0, os.SEEK_END)
+            start = max(fh.tell() - 16384, 0)
+            fh.seek(start)
+            tail = fh.read().decode("utf-8", errors="replace")
+        if start:
+            tail = tail.split("\n", 1)[-1]  # the first line is cut mid-line
+        q = questions.final_question(tail)
     except OSError:
         return None
     if q:

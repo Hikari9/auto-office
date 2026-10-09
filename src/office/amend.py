@@ -22,8 +22,16 @@ from office.util import dumps, now_iso, sha256_bytes
 # is one part of a hyphen/underscore compound identifier (`send-keys`, `send_keys`,
 # `release-notes`) names a thing, not the action, so it does not count; `--prod` and
 # `force-push` still do.
+# A `send` addressed to the orchestrator is a report, not an external action: `send <it | the
+# report/result/status/summary/reply/review> [back] to the orchestrator/Office`, or an all-caps
+# compound protocol word (`send READY-FOR-LIVE again`) with no other recipient in the clause.
+# Anything sent to anyone else (`send it to all members`, `send NEWSLETTER_2026 to members`) counts.
+_OFFICE_NAME = r"(?:the\s+)?(?:orchestrator|office)\b"
+_TO_OFFICE = r"to\s+" + _OFFICE_NAME
+_SEND = (r"send(?!\s+(?:(?:it|(?:the|a|an|your)\s+(?:report|result|status|summary|reply|review))(?:\s+back)?\s+"
+         + _TO_OFFICE + r"|(?-i:[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+)\b(?![^.;\n]*\bto\s+(?!" + _OFFICE_NAME + r"))))")
 AUTHORITY_TERMS = re.compile(
-    r"\b(?<!\w-)(?:deploy|production|prod|publish|release|send|email|notify users|delete|drop table|truncate|"
+    r"\b(?<!\w-)(?:deploy|production|prod|publish|release|" + _SEND + r"|email|notify users|delete|drop table|truncate|"
     r"force.?push|merge (?:to|into) main|migrat(?:e|ion) (?:prod|production)|payment|charge|"
     r"rotate (?:key|secret)|credentials?)\b(?!-\w)", re.I)
 
@@ -480,11 +488,20 @@ def confirm_launch_deliveries(con, run: dict) -> int:
     session started are in its brief; a later one reaches it by its own prompt. Returns how many changed."""
     import json
     n = 0
-    for r in con.execute("SELECT dl.id, dl.dispatch_id FROM deliveries dl JOIN dispatches d ON d.id=dl.dispatch_id "
-                         "WHERE dl.run_id=? AND dl.status='queued' AND d.status='running' AND d.ended_at IS NULL "
-                         "AND dl.created_at<=d.started_at", (run["id"],)).fetchall():
+    for r in con.execute("SELECT dl.id, dl.dispatch_id, dl.created_at <= d.started_at AS early FROM deliveries dl "
+                         "JOIN dispatches d ON d.id=dl.dispatch_id WHERE dl.run_id=? AND dl.status='queued' "
+                         "AND d.status='running' AND d.ended_at IS NULL", (run["id"],)).fetchall():
+        ddir = paths.run_dir(run["id"]) / "dispatches" / r["dispatch_id"]
         try:
-            spec = json.loads((paths.run_dir(run["id"]) / "dispatches" / r["dispatch_id"] / "launch.json").read_text())
+            # The brief records what it carried: an amendment made while the session was
+            # still launching is in it too (review F7). Older dispatches fall back to time.
+            carried = json.loads((ddir / "brief-deliveries.json").read_text())
+        except (OSError, ValueError):
+            carried = None
+        if not (r["id"] in carried if isinstance(carried, list) else r["early"]):
+            continue
+        try:
+            spec = json.loads((ddir / "launch.json").read_text())
         except (OSError, ValueError):
             continue
         if isinstance(spec, dict) and spec.get("prompt_landed"):

@@ -138,12 +138,14 @@ def test_only_a_delivery_in_the_brief_is_confirmed_by_the_launch_prompt(env):
     con.execute("UPDATE dispatches SET launcher='herdr', pane_id='p1', status='running' WHERE id=?", (second,))
     con.execute("UPDATE deliveries SET created_at='2999-01-01T00:00:00+00:00'")  # recorded after the brief was written
     con.commit()
+    (ddir / "brief-deliveries.json").write_text("[]")  # ... so the brief does not carry it
     spec = json.loads((ddir / "launch.json").read_text())
     spec["prompt_landed"] = True
     (ddir / "launch.json").write_text(json.dumps(spec))
     env.office("status", check=0, env=EXTERNAL)
     assert [r["status"] for r in _deliveries(env)] == ["queued"]
     (ddir / "launch.json").unlink()  # no record of the prompt: nothing is confirmed, and nothing crashes
+    (ddir / "brief-deliveries.json").unlink()
     con.execute("UPDATE deliveries SET created_at='2000-01-01T00:00:00+00:00'")
     con.commit()
     env.office("status", check=0, env=EXTERNAL)

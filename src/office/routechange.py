@@ -166,7 +166,7 @@ def _relaunch(con, run: dict, task: dict, d: dict, cand: dict) -> tuple[str, str
                 "selected": routing.candidate_id(cand)}
     extra = {"resume": resume} if resume else None
     new = dispatch.request_launch(con, run, task["id"], role="executor", decision=decision, extra=extra,
-                                  base=d.get("base_commit"))
+                                  base=d.get("base_commit"), replaces=d["id"])
     if resume:
         rerun._set_resumed_from(con, new, d["id"])
         return new, f"resuming session {resume['session_id']}"
