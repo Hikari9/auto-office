@@ -231,7 +231,9 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
             raise discovery.refuse_executor_binding(by_session[0], by_session[1], "this session")
     with db.transaction(con):
         if not worker:
-            discovery.bind(con, run, keys, "resume")
+            # Only `office resume <run>` is an explicit choice that wins across repositories;
+            # a bare resume binds by cwd and yields like an `office start` binding.
+            discovery.bind(con, run, keys, "resume" if target.source == "flag" else "resume-cwd")
         reconcile(con, run)
         if not worker:
             # An explicit resume is the retry for an integration that failed on

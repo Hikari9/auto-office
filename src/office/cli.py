@@ -575,9 +575,14 @@ def _run(args, unknown) -> int:
     try:
         target = _target(con, args)
         if target.legacy is not None:
-            return emit(_legacy_result(target), args)
+            res = _legacy_result(target)
+            if target.note:
+                res.notices.append(target.note)
+            return emit(res, args)
         run = target.run
         res = _dispatch_command(con, run, args, unknown, cwd, target)
+        if target.note:
+            res.notices.append(target.note)
         if cmd not in ("status", "resume", "preflight"):
             from office import guide, state
             guide.piggyback(con, state.get_run(con, run["id"]), res)

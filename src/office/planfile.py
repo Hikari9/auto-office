@@ -71,6 +71,10 @@ class ParsedPlan:
     run_checks: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Structured scope problems, so a revision can keep what the accepted plan already had:
+    # (task id, entry, error text) and (task a, task b, shared entry, error text).
+    entry_problems: list[tuple] = field(default_factory=list)
+    pair_problems: list[tuple] = field(default_factory=list)
 
 
 def _is_no_check(value: str) -> bool:
@@ -242,10 +246,12 @@ def _validate(plan: ParsedPlan) -> None:
         if not t["scope"] and not t.get("scope_none"):
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `scope:` (paths this task may write)")
         for entry in t["scope"]:
-            if not _path_like(entry.lstrip(SHARED)):
+            problem = _entry_problem(entry)
+            if problem:
                 # Each entry is matched as one path or glob: a note after it never matches (#416).
-                plan.errors.append(f"{t['id']} (line {t['line']}): scope/shared entry {entry!r} is not a path or glob; "
-                                   "list bare paths and put limits (e.g. 'only the importer entry') in `accept:`")
+                err = f"{t['id']} (line {t['line']}): {ENTRY_ERROR} {entry!r} {problem}"
+                plan.errors.append(err)
+                plan.entry_problems.append((t["id"], entry, err))
         if not t["accept"]:
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `accept:` criteria")
         if t["checks"] is None:
@@ -265,6 +271,11 @@ def _validate(plan: ParsedPlan) -> None:
     end = r.get("end_state")
     if end and end not in END_STATES:
         plan.errors.append(f"requirements end_state must be one of {', '.join(END_STATES)}")
+    for a, b, entry in _unordered_shared_trees(plan.tasks):
+        err = (f"{a} and {b} may run in parallel but share the directory {entry.lstrip(SHARED)!r}; a shared directory "
+               f"is allowed only for tasks ordered by `depends` (add `depends: {a}` to {b}, or share files)")
+        plan.errors.append(err)
+        plan.pair_problems.append((a, b, entry, err))
     for a, b in _parallel_overlaps(plan.tasks):
         plan.warnings.append(f"{a} and {b} may run in parallel but their scopes overlap; leases will serialize them")
 
@@ -326,25 +337,80 @@ def is_shared(pattern: str) -> bool:
     return pattern.startswith(SHARED)
 
 
-_NOT_PATH = re.compile(r"[\s()`]")
+ENTRY_ERROR = "scope/shared entry"
+# Whitespace, backticks and a colon mean prose rode along with the path
+# (`x.csv (append-only: ...)`). Parentheses and brackets alone are path
+# characters (Next.js route groups `(app)`, dynamic segments `[slug]`).
+_NOT_PATH = re.compile(r"[\s`:]")
 
 
-def _path_like(entry: str) -> bool:
-    """A scope or shared entry is one path or glob. Whitespace, parentheses and
-    backticks mean prose rode along with it (`x.csv (append-only: ...)`)."""
-    return bool(entry) and not _NOT_PATH.search(entry)
+def _entry_problem(entry: str) -> str | None:
+    """Why a scope or shared entry is not one path or glob, or None."""
+    bare = entry.lstrip(SHARED)
+    if not bare or _NOT_PATH.search(bare) or bare.count("(") != bare.count(")") or bare.count("[") != bare.count("]") \
+            or re.search(r"[^/][(\[]", bare):
+        # Brackets are path characters only as whole segments (`(group)/`, `[slug]/`);
+        # `x.csv(A3)` is a note glued to a path.
+        return ("is not a path or glob; list bare paths or globs (no notes) and put limits "
+                "(e.g. 'only the importer entry') in `accept:`")
+    return None
+
+
+def shared_tree(entry: str) -> bool:
+    """A `shared:` entry naming a directory rather than registry files: a trailing `/`, a
+    `**`, or a last segment with no file suffix (`src/reg`, `src/*`). A file glob such as
+    `locales/*.json` names append-only files and stays parallel-safe."""
+    bare = entry.lstrip(SHARED)
+    last = bare.rstrip("/").rsplit("/", 1)[-1]
+    # A root-level suffixless name (`Makefile`, `Dockerfile`) is a file, not a directory.
+    return is_shared(entry) and (bare.endswith("/") or "**" in bare
+                                 or ("." not in last and "/" in bare.rstrip("/")))
+
+
+def _unordered_shared_trees(tasks: list[dict]):
+    """(a, b, entry) for each pair of tasks that could run at once while one shares a
+    directory the other also lists or overlaps. A shared file is append-only and may be
+    edited in parallel; a shared directory may be shared only by tasks a `depends` path
+    orders, so its editors never run together."""
+    graph = {t["id"]: t["depends"] for t in tasks}
+    for i, a in enumerate(tasks):
+        for b in tasks[i + 1:]:
+            if a["id"] in ancestors(graph, b["id"]) or b["id"] in ancestors(graph, a["id"]):
+                continue
+            for x, y in ((a, b), (b, a)):
+                hit = next((e for e in x["scope"] if shared_tree(e) and scopes_overlap([e], y["scope"])), None)
+                if hit:
+                    yield a["id"], b["id"], hit
+                    break
+
+
+def grandfather_entries(parsed: "ParsedPlan", prev_tasks: list[dict] | None) -> None:
+    """A revision of an accepted plan keeps an entry the earlier version already
+    had: its entry error becomes a warning, so a run accepted before entry
+    validation can still be amended. New or changed entries stay errors."""
+    prev = {t["id"]: set(t.get("scope") or []) for t in prev_tasks or []}
+    old = {err for tid, entry, err in parsed.entry_problems if entry in prev.get(tid, ())}
+    try:
+        before = {frozenset((a, b)) for a, b, _ in _unordered_shared_trees(
+            [{"id": t["id"], "depends": t.get("depends") or [], "scope": t.get("scope") or []} for t in prev_tasks or []])}
+    except (KeyError, TypeError):
+        before = set()
+    old |= {err for a, b, _, err in parsed.pair_problems if frozenset((a, b)) in before}
+    for err in [e for e in parsed.errors if e in old]:
+        parsed.warnings.append(err + " (kept: the accepted plan already had it)")
+    parsed.errors[:] = [e for e in parsed.errors if e not in old]
 
 
 def literal_prefix(pattern: str) -> str:
-    m = re.search(r"[*?\[]", pattern)
+    m = re.search(r"[*?]", pattern)  # brackets are path characters in scope entries
     return pattern[: m.start()] if m else pattern
 
 
 def scopes_overlap(a: list[str], b: list[str]) -> bool:
     for pa in a:
         for pb in b:
-            if is_shared(pa) and is_shared(pb):
-                continue  # both append to a shared registry; compose resolves it
+            if is_shared(pa) and is_shared(pb) and not (shared_tree(pa) or shared_tree(pb)):
+                continue  # both append to a shared registry file; compose resolves it
             la, lb = literal_prefix(pa.lstrip(SHARED)), literal_prefix(pb.lstrip(SHARED))
             if la.startswith(lb) or lb.startswith(la):
                 return True
@@ -362,14 +428,20 @@ def _parallel_overlaps(tasks: list[dict]):
 
 def path_in_scope(path: str, scope: list[str]) -> bool:
     import fnmatch
-    for pattern in scope:
-        pattern = pattern.lstrip(SHARED)
+    for raw in scope:
+        pattern = raw.lstrip(SHARED)
         if pattern.endswith("/**"):
             if path == pattern[:-3] or path.startswith(pattern[:-2]):
                 return True
-        if fnmatch.fnmatch(path, pattern) or path == pattern:
+        # Brackets are path characters (`[slug]`), never a glob class.
+        literal = re.sub(r"[\[\]]", lambda m: "[[]" if m.group() == "[" else "[]]", pattern)
+        if fnmatch.fnmatchcase(path, literal) or path == pattern:
             return True
-        # A plain directory entry (`src/auth/` or `src/auth`) owns everything under it (#334).
-        if pattern and not re.search(r"[*?\[]", pattern) and path.startswith(pattern.rstrip("/") + "/"):
+        # A directory entry (`src/auth/`, `src/auth`, `src/app/[slug]/`) owns everything under it,
+        # compared literally so brackets are path characters, not a glob class (#334). A shared
+        # directory is valid only for tasks ordered by `depends` (plan validation), and it
+        # counts in the overlap check, so its tasks never hold leases together.
+        if pattern and not re.search(r"[*?]", pattern) \
+                and path.startswith(pattern.rstrip("/") + "/"):
             return True
     return False

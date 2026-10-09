@@ -169,11 +169,91 @@ def test_session_binding_does_not_cross_into_another_repository_with_its_own_run
     code, out = env.office("resume", there[:8], env=sess)
     assert code == 0, out
     con.execute("UPDATE runs SET git_common_dir=? WHERE id=?", (str(env.repo.parent / "other-repo" / ".git"), there))
+    # The rebinding came from `office start` in the other repository.
+    con.execute("UPDATE session_bindings SET bound_by='start'")
     con.commit()
     code, data = env.ojson("status", env=sess)
     assert data["data"]["run_id"] == here, data
+    assert any(there[:8] in n and "another repository" in n for n in data["notices"]), data
     # With no active run of its own in this repository, the binding still applies.
     con.execute("UPDATE runs SET phase='closed' WHERE id=?", (here,))
     con.commit()
     code, data = env.ojson("status", env=sess)
     assert data["data"]["run_id"] == there, data
+
+
+def test_an_explicit_resume_binding_still_wins_across_repositories_with_a_note(env):
+    # Review F2: `office resume <run>` is an explicit choice; it is honored, and the
+    # output says this repository has its own run.
+    env.office("start", "here", "--planner", "inline", check=0)
+    env.office("start", "elsewhere", "--planner", "inline", check=0)
+    con = env.con()
+    con.execute("DELETE FROM session_bindings")
+    here, there = [r[0] for r in con.execute("SELECT id FROM runs ORDER BY created_at")]
+    sess = {"OFFICE_SESSION": "sess-y", "OFFICE_HARNESS": "claude", "HERDR_PANE_ID": ""}
+    assert env.office("resume", there[:8], env=sess)[0] == 0
+    con.execute("UPDATE runs SET git_common_dir=? WHERE id=?", (str(env.repo.parent / "other-repo" / ".git"), there))
+    con.commit()
+    code, data = env.ojson("status", env=sess)
+    assert data["data"]["run_id"] == there, data
+    assert any("office resume" in n and "its own active run" in n for n in data["notices"]), data
+
+
+def test_a_skipped_cross_repo_binding_is_named_when_this_repository_is_ambiguous(env):
+    # Review F6: the ambiguity error must not claim nothing is bound.
+    for goal in ("a", "b", "c"):
+        env.office("start", goal, "--planner", "inline", check=0)
+    con = env.con()
+    con.execute("DELETE FROM session_bindings")
+    ids = [r[0] for r in con.execute("SELECT id FROM runs ORDER BY created_at")]
+    sess = {"OFFICE_SESSION": "sess-z", "OFFICE_HARNESS": "claude", "HERDR_PANE_ID": ""}
+    assert env.office("resume", ids[2][:8], env=sess)[0] == 0
+    con.execute("UPDATE runs SET git_common_dir=? WHERE id=?", (str(env.repo.parent / "other-repo" / ".git"), ids[2]))
+    con.execute("UPDATE session_bindings SET bound_by='start'")
+    con.commit()
+    code, out = env.office("status", env=sess)
+    assert "ambiguous" in out and "none is bound" not in out and ids[2][:8] in out, out
+
+
+def test_a_bare_resume_binding_yields_like_a_start_binding(env):
+    # Review #447 F6: only `office resume <run>` is an explicit cross-repository choice.
+    env.office("start", "here", "--planner", "inline", check=0)
+    env.office("start", "elsewhere", "--planner", "inline", check=0)
+    con = env.con()
+    con.execute("DELETE FROM session_bindings")
+    here, there = [r[0] for r in con.execute("SELECT id FROM runs ORDER BY created_at")]
+    con.execute("UPDATE runs SET phase='closed' WHERE id=?", (here,))
+    con.commit()
+    sess = {"OFFICE_SESSION": "sess-b", "OFFICE_HARNESS": "claude", "HERDR_PANE_ID": ""}
+    assert env.office("resume", env=sess)[0] == 0  # bare: resolves to the sole active run
+    assert con.execute("SELECT bound_by FROM session_bindings WHERE session_id='sess-b'").fetchone()[0] == "resume-cwd"
+
+
+def test_a_nested_repository_inside_the_bound_checkout_is_not_the_bound_repo(env, tmp_path):
+    # Review #447 F7.
+    from office import discovery
+    run = {"git_common_dir": str(env.repo / ".git")}
+    nested = env.repo / "vendor" / "lib"
+    (nested / ".git").mkdir(parents=True)
+    assert discovery._under_checkout(run, env.repo / "src") is True
+    assert discovery._under_checkout(run, nested / "x") is False
+
+
+def test_a_skipped_binding_note_is_shown_for_a_legacy_run_too(env, monkeypatch, capsys):
+    # Review #447 F11: the legacy branch returned before the note was added.
+    from office import cli, discovery, legacy
+    monkeypatch.setattr(discovery, "resolve", lambda *a, **kw: discovery.Target(legacy=object(), source="sole-active",
+                                                                              note="note: skipped binding"))
+    monkeypatch.setattr(legacy, "guidance", lambda leg: ("legacy run", "office legacy"))
+    cli.main(["status"])
+    assert "note: skipped binding" in capsys.readouterr().out
+
+
+def test_an_edited_plan_draft_keeps_entries_the_accepted_plan_had():
+    # Review #447 F5: ordinary amendments with an edited draft were not grandfathered.
+    from conftest import PLAN_TWO
+    from office import amend, planfile
+    text = PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: pnpm-lock.yaml (A4: shared)\n")
+    current = {"content_hash": "other", "tasks": planfile.parse(text).tasks, "body": text}
+    new_text, parsed = amend._next_plan_text(current, text + "\n", ["T1"], "x")
+    assert not parsed.errors

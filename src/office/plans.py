@@ -57,6 +57,7 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
         raise Usage("no-plan-file", f"no plan at {plan_path}", next_step=f"write {plan_path}, then office submit")
     text = planfile.strip_generated(plan_path.read_text(encoding="utf-8"))
     parsed = planfile.parse(text)
+    planfile.grandfather_entries(parsed, (state.current_plan(con, run["id"]) or {}).get("tasks"))
     if parsed.errors:
         raise Refused("plan-invalid", "plan has problems: " + "; ".join(parsed.errors[:6]),
                       scope="plan", preserved=f"{plan_path} is unchanged",
