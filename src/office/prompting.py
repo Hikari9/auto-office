@@ -29,6 +29,26 @@ def _resolve(con, run: dict, target: str) -> dict:
     return state.get_dispatch(con, task["current_dispatch_id"])
 
 
+def _pane_identity(con, run: dict, d: dict, who: str, pane: str) -> str:
+    """What herdr says the pane is in, and whose task that is. A pane in another task's
+    worktree is refused: the text would brief the wrong agent."""
+    holder = dispatch._reserved_by(run, pane)
+    if holder and holder != d["id"]:
+        raise Refused("pane-mismatch", f"pane {pane} of {d['id']} ({who}) is reserved for dispatch {holder}; not prompting it",
+                      scope=who, next_step=f"herdr pane read {pane}; office status")
+    cwd = (dispatch._herdr_json(["pane", "get", pane]).get("pane") or {}).get("cwd")
+    if not cwd:
+        return "cwd not reported by herdr"
+    owner = dispatch.cwd_owner(con, run["id"], cwd)
+    owner_task = owner and owner.get("task_id")
+    shown = dispatch.printable(cwd)
+    if owner_task and owner_task != d.get("task_id"):
+        raise Refused("pane-mismatch", f"pane {pane} of {d['id']} ({who}) is in {shown}, which belongs to {owner_task} "
+                      f"(dispatch {owner['id']}); not prompting it", scope=who,
+                      next_step=f"herdr pane read {pane}; office status")
+    return f"cwd {shown}" + (f", task {owner_task}" if owner_task else ", no task of this run")
+
+
 def prompt(con, run: dict, target: str | None, text: str) -> Result:
     if not target or not text.strip():
         raise Usage("prompt-usage", "name the task or dispatch and the message",
@@ -48,6 +68,7 @@ def prompt(con, run: dict, target: str | None, text: str) -> Result:
         raise Refused("dispatch-ended", f"{d['id']} ({who}) has no live agent; nothing is listening in its pane",
                       scope=who, next_step=nxt)
     pane = d["pane_id"]
+    where = _pane_identity(con, run, d, who, pane)
     got = dispatch.submit_prompt(pane, text, pane=pane)
     outcome = {"landed": "landed", "held": "typed but unsubmitted"}.get(got, "sent, not confirmed")
     with db.transaction(con):
@@ -57,7 +78,7 @@ def prompt(con, run: dict, target: str | None, text: str) -> Result:
         raise Refused("prompt-held", f"the prompt is typed but unsubmitted in pane {pane} after Office's Enters",
                       scope=who, next_step=f"herdr pane send-keys {pane} Enter (never send the text again)")
     if got == "landed":
-        return Result(lines=[f"{who} {d['id']}: prompt landed in pane {pane}"], next="office status")
-    return Result(lines=[f"{who} {d['id']}: prompt sent to pane {pane}; no landed signal and nothing left in the "
-                         "composer (a busy agent may have queued it)"],
+        return Result(lines=[f"{who} {d['id']}: prompt landed in pane {pane} ({where})"], next="office status")
+    return Result(lines=[f"{who} {d['id']}: prompt sent to pane {pane} ({where}); no landed signal and nothing left "
+                         "in the composer (a busy agent may have queued it)"],
                   next=f"herdr pane read {pane}, then office status")
