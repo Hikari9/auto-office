@@ -69,7 +69,8 @@ At lifecycle intake, run `office update --check`; if it reports an update, offer
   recorded route on redispatch and rerun and never swaps it silently.
 - When the user names a model, dispatch with `--as <harness>/<model>[@effort]` (`--cli "<argv>"` for an exact command, `--external` to
   only print how to start it). `--review-as` pins the reviewer of the task (v3.1) or lane (convergence-v1). A reviewer is always a
-  fresh session, never the executor's, though it may share the executor's model.
+  fresh session, never the executor's, though it may share the executor's model. `office rerun <task> --resume|--fresh [--as <route>] [--review-as <route>]` relaunches on a named route; `--resume` needs the route it ran on.
+- Route and config changes reach a live run only on opt-in: `office config --run <id> --apply-routing --quote "<words>"` re-pins that run from the current config files.
 - A dispatch failure is a recovery checkpoint, not permission to abandon the run: read the launch notice, `office inspect task <T> --verbose`
   and any pane Office names, then follow the printed `next:` (re-prompt, `office resume`, `office rerun <task> --resume|--fresh`,
   `office dispatch <task> --reroute`). Never approve hook trust, other directories, credentials, irreversible actions or user authority for
@@ -85,7 +86,7 @@ At lifecycle intake, run `office update --check`; if it reports an update, offer
   files, never pane text. A bad reply re-prompts the same reviewer (no round spent); after three it needs you.
 - Never run commands inside a task worktree yourself; reproduce a check in a scratch copy. A stalled executor, quota wall, host-load timeout
   or headless worker is handled as `docs/orchestrator-reference.md` says, via `office wait`, `office prompt` and the printed `next:`.
-
+- An executor that cannot finish stops with `office raise --kind question|blocker|scope-request [--path P] -- "<text>"`, not `submit`; its task stays blocked. Answer with `office answer <task> -- "<text>"`. Grant a scope-request only by `office amend <scope> --contract`, which also unblocks it.
 - Executors simplify (behavior-preserving, in SCOPE), self-review on four lenses at a depth Office sets from the run's
   gear and risk (`inline`, `single`, or `deep`; an unset blast radius is never `inline`), record every finding in
   `OFFICE_SELF_REVIEW.md` (severity as found; low findings are fixed but do not trigger a re-review; a medium or high fix
@@ -127,11 +128,11 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
   outcome the runtime names, get one integrated review (#422); `office inspect convergence` states why it was required or skipped.
 - Findings never relaunch anything on their own. A RECHECK routes every blocking finding to its owning tasks at once: `office rerun <task>
   --resume|--fresh` for each, in parallel. Before landing, give each APPROVED finding a disposition: `office disposition <scope>:<code>
-  fix|fixed|dismissed|follow-up -- "<note>"` (`fix` reopens the owner without re-review).
+  fix|fixed|dismissed|follow-up -- "<note>"` (`fix` reopens the owner without re-review). Only the user dismisses a blocking finding: `dismissed --quote "<words>"`.
 - At the lane round cap (3 by default; `office start --review-rounds N` or `review.max_rounds`, pinned per run) nothing runs and review does
   not stay blocked. Choose one: waive and accept the residual risk with a substantive reason, `office waive <scope> --reason "<why the open
   findings are acceptable>"`, or escalate to the user with the findings, attempts, risk and your recommendation, then `office decide <scope>
-  escalate|continue|waive|stop --quote "<words>"`. A waiver never becomes APPROVED (the verdict stays RECHECK and the receipt records the
+  escalate|continue|waive|stop|review --quote "<words>"` (`review` runs another round of the composed lane without reopening accepted tasks). A stuck lane review is cancelled with `office revoke <scope>:convergence|visual`. A waiver never becomes APPROVED (the verdict stays RECHECK and the receipt records the
   reason, findings, composed commit and your session) and is not landing authority: landing still needs the user's authorization.
 - Outside the cap, only landing authority waives a required review: the user (`office approve waive L-T1:convergence|visual --quote "<words>"
   --reason "<why>"`), or you (`--as orchestrator --reason "<why>"`) only when the end state is merge/e2e or a merge is authorized. If your
