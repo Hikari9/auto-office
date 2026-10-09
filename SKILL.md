@@ -78,6 +78,8 @@ At lifecycle intake, run `office update --check`; if it reports an update, offer
   Exit 5 prints a `question:` line. Decide planning, scope, ordering and test detail yourself (amend the contract first if the answer
   changes it), then `office answer <task|dispatch> <n>` or `-- "<text>"`. Take it to the user (native question tool) only when it hints at
   requirements, authority, or an irreversible or external action; never answer those on your own.
+- `office status` makes one `herdr agent list` call and prints a `blocker:` line for a live pane dispatch herdr reports `blocked` with no
+  recorded question. Run `office wait` to record it; status itself records nothing.
 - Executors push their task branch as they work and submit; the runtime pushes the accepted revision to the task's draft PR (stacked on its
   parent's), posts review results, and marks it ready on acceptance. Reviewers are dispatched and read by the runtime, only from their reply
   files, never pane text. A bad reply re-prompts the same reviewer (no round spent); after three it needs you.
