@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 import yaml
+from hypothesis import given, strategies as st
 
 from conftest import PLAN_TWO, approved_run
 from office import db, queuecmd, scheduler
@@ -49,13 +50,6 @@ def test_no_recommended_concurrency_without_calibration():
     assert "recommend" not in flat and "concurrency" not in flat
 
 
-@pytest.mark.parametrize("which", ["cpu", "ram"])
-def test_measured_pressure_gates_admission(which):
-    host = {**HOST_OK, which: {"status": "ok", "value": 0.95}}
-    e = by_id(plan([item("a")], host=host))["a"]
-    assert e["decision"] == "hold" and f"{which} pressure" in e["reason"]
-
-
 def test_unmeasured_host_does_not_gate_and_says_so():
     res = plan([item("a")], host=UNMEASURED)
     e = by_id(res)["a"]
@@ -90,9 +84,100 @@ def test_paused_work_goes_to_the_end_and_is_held():
     assert by_id(res)["p"]["decision"] == "hold" and by_id(res)["p"]["reason"] == "paused by operator"
 
 
-def test_paused_auto_mode_holds():
-    e = by_id(plan([item("a", auto_mode="paused")]))["a"]
-    assert e["decision"] == "hold" and e["reason"] == "auto mode paused"
+# --- admission properties ---------------------------------------------------
+
+_PRIORITIES = st.sampled_from(["urgent", "high", "normal", "low", None])
+_items = st.lists(
+    st.fixed_dictionaries({
+        "priority": _PRIORITIES, "hours": st.integers(min_value=0, max_value=200), "blocks": st.integers(min_value=0, max_value=3),
+        "protected": st.booleans(), "paused": st.booleans(), "demoted_seq": st.one_of(st.none(), st.integers(min_value=1, max_value=5)),
+        "auto_mode": st.sampled_from(["on", "paused", "off"]), "provider": st.sampled_from([None, "codex", "claude"]),
+    }), max_size=7).map(lambda rows: [item(f"i{n}", **{**row}) for n, row in enumerate(rows)])
+_sample = st.one_of(st.just({"status": "unavailable", "value": None}),
+                    st.builds(lambda v: {"status": "ok", "value": v}, st.floats(min_value=0, max_value=1)))
+_hosts = st.fixed_dictionaries({"cpu": _sample, "ram": _sample})
+_quotas = st.dictionaries(st.sampled_from(["codex", "claude"]),
+                          st.builds(lambda r: {"remaining_percent": r}, st.integers(min_value=0, max_value=100)))
+_caps = st.one_of(st.none(), st.integers(min_value=0, max_value=4))
+_active = st.lists(st.sampled_from(["running", "idle", "paused"]), max_size=4).map(
+    lambda states: [{"id": f"a{n}", "state": state} for n, state in enumerate(states)])
+
+
+def _conf(cap):
+    return {"scheduler": {**CONFIG["scheduler"], "max_active_runs": cap}, "quota": {"reserve_percent": 5}}
+
+
+def _admitted(res):
+    return [e for e in res["entries"] if e["decision"] == "admit"]
+
+
+@given(items=_items, active=_active, host=_hosts, quota=_quotas, cap=_caps)
+def test_every_item_gets_one_decision_and_a_reason_and_none_is_lost(items, active, host, quota, cap):
+    res = plan(items, active=active, host=host, quota=quota, config=_conf(cap))
+    assert sorted(e["id"] for e in res["entries"]) == sorted(i["id"] for i in items)
+    assert all(e["decision"] in ("admit", "hold") and e["reason"] for e in res["entries"])
+
+
+@given(items=_items, active=_active, host=_hosts, quota=_quotas, cap=st.integers(min_value=0, max_value=4))
+def test_admission_never_exceeds_max_active_runs_except_for_the_protected_orchestrator(items, active, host, quota, cap):
+    res = plan(items, active=active, host=host, quota=quota, config=_conf(cap))
+    running = sum(1 for a in active if a["state"] == "running")
+    ordinary = [e for e in _admitted(res) if not e.get("protected")]
+    assert len(ordinary) <= max(0, cap - running)
+
+
+@given(items=_items, active=_active, host=_hosts, quota=_quotas, cap=_caps)
+def test_a_paused_item_is_never_admitted_and_a_protected_one_always_is(items, active, host, quota, cap):
+    for e in plan(items, active=active, host=host, quota=quota, config=_conf(cap))["entries"]:
+        if e.get("paused"):
+            assert e["decision"] == "hold" and e["reason"] == "paused by operator"
+        elif e.get("protected"):
+            assert e["decision"] == "admit"
+
+
+@given(items=_items, active=_active, host=_hosts, quota=_quotas, cap=_caps)
+def test_measured_pressure_auto_mode_and_exhausted_quota_each_hold_ordinary_work(items, active, host, quota, cap):
+    res = plan(items, active=active, host=host, quota=quota, config=_conf(cap))
+    pressure = any(h["status"] == "ok" and h["value"] >= 0.9 for h in host.values())
+    for e in res["entries"]:
+        if e.get("paused") or e.get("protected"):
+            continue
+        exhausted = (quota.get(e.get("provider")) or {}).get("remaining_percent", 100) <= 5
+        if pressure or exhausted or e.get("auto_mode", "on") != "on":
+            assert e["decision"] == "hold", e
+
+
+@given(items=_items)
+def test_unmeasured_host_and_unknown_quota_never_gate_ordinary_work(items):
+    """Absent evidence is reported as absent; it does not stop work the operator has not held."""
+    res = plan(items, host=UNMEASURED, quota={}, config=_conf(None))
+    for e in res["entries"]:
+        if not e.get("paused") and e.get("auto_mode", "on") == "on":
+            assert e["decision"] == "admit", e
+        assert e["quota"] == "unknown"
+
+
+@given(items=_items)
+def test_ready_order_puts_paused_last_then_demoted_and_otherwise_the_highest_score_first(items):
+    entries = plan(items)["entries"]
+    klass = [2 if e.get("paused") else 1 if e.get("demoted_seq") is not None else 0 for e in entries]
+    assert klass == sorted(klass)
+    plain = [e["score"]["total"] for e in entries if not e.get("paused") and e.get("demoted_seq") is None]
+    assert plain == sorted(plain, reverse=True)
+
+
+@given(priority=_PRIORITIES, hours=st.integers(min_value=0, max_value=100), older_by=st.integers(min_value=1, max_value=100))
+def test_an_older_item_never_ranks_behind_an_otherwise_identical_younger_one(priority, hours, older_by):
+    res = plan([item("young", priority=priority, hours=hours), item("old", priority=priority, hours=hours + older_by)])
+    assert [e["id"] for e in res["entries"]] == ["old", "young"]
+
+
+@given(items=_items, host=_hosts)
+def test_planning_leaves_its_inputs_alone(items, host):
+    import copy
+    before = copy.deepcopy((items, host))
+    plan(items, host=host)
+    assert (items, host) == before
 
 
 # --- pause semantics against runs.db ----------------------------------------

@@ -19,7 +19,9 @@ dependencies = [
 # Deterministic browser capture for visual gates. Without it the visual gate
 # reports CAPTURE_BLOCKED instead of passing.
 visual = ["playwright>=1.40"]
-test = ["pytest>=8", "pytest-xdist>=3"]
+test = ["pytest>=8", "pytest-xdist>=3", "hypothesis>=6.100"]
+# Mutation testing is a periodic audit of the core-logic tests, not part of the gate: see docs/mutation-testing.md.
+mutation = ["mutmut>=3.2,<4"]
 
 [project.scripts]
 office = "office.cli:main"
@@ -61,3 +63,12 @@ markers = [
     "integration: needs a repo, subprocess, fake harness or browser; deselected by default, run with --all or -m integration",
     "legacy: tests the 3.0 scripts/ surface; deselected by default, run with --all or -m legacy",
 ]
+
+# Mutation testing (mutmut 3) audits whether the core-logic tests notice a changed behaviour. It is scoped to
+# deterministic policy modules and run by hand (docs/mutation-testing.md), never by the validate gate.
+[tool.mutmut]
+source_paths = ["src/office/scoring.py"]
+also_copy = ["src", "tests", "config", "schemas", "catalog", "adapters", "skills", "docs", "scripts", "SKILL.md", "VERSION", "plugin.json"]
+pytest_add_cli_args = ["-p", "no:cacheprovider", "-q"]
+pytest_add_cli_args_test_selection = ["tests/v31/test_scoring_properties.py"]
+max_children = 2

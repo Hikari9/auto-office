@@ -14,3 +14,7 @@ graft/
 
 # Local review/PR worktrees (git worktree add .worktrees/<name>): never committed
 .worktrees/
+
+# Hypothesis example cache and mutmut working copy: local only
+.hypothesis/
+mutants/
