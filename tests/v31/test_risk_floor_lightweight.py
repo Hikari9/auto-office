@@ -318,3 +318,15 @@ def test_reclassification_history_is_kept(env):
     hist = _run_row(env)["risk"]["history"]
     assert [h["classification"] for h in hist] == ["low", "elevated"], hist
     assert risk.summary(_run_row(env))["history"] == hist
+
+
+def test_planner_raise_marks_integration_risk():
+    # #420 x #422: a plan raising risk to irreversible or production is integration risk; size is not.
+    from office import config as config_mod, risk as risk_mod
+    base = config_mod.resolve_risk({}, None, None, False)
+    assert base["integration"] is False
+    for req in ({"irreversible": True}, {"blast_radius": "production"}):
+        out = risk_mod.planner_reclassify(base, req)
+        assert out and out["integration"] is True, out
+    out = risk_mod.planner_reclassify(base, {"size_class": "XL"})
+    assert out and out["high"] and not out["integration"], out

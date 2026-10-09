@@ -227,8 +227,10 @@ def resolve_risk(config: dict, blast_radius: str | None, size_class: str | None,
     high_size = set(signals.get("high_size_class") or ["L", "XL"])
     high = bool(irreversible) or blast_radius in high_blast or size_class in high_size
     from office import risk
+    # `integration` (#422) is the part of `high` that is integration risk: size is not.
     return {"blast_radius": blast_radius, "size_class": size_class,
             "irreversible": bool(irreversible), "high": high,
+            "integration": bool(irreversible) or blast_radius in high_blast,
             **risk.classify(blast_radius, size_class, bool(irreversible), high)}
 
 
@@ -302,6 +304,8 @@ def resolve_gates(gear: str, risk, config: dict) -> dict:
         gates["convergence_max_rounds"] = contract.check_round_cap(
             (config.get("review") or {}).get("max_rounds", contract.MAX_ROUNDS))
         gates["visual_review_max_rounds"] = gates["convergence_max_rounds"]  # one cap for every lane gate
+        # #422: integrated-review triggers apply only to runs that pinned them at start.
+        gates["integrated_review"] = contract.INTEGRATED_REVIEW
     return gates
 
 
