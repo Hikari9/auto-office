@@ -328,6 +328,12 @@ def route(request: dict) -> dict:
                     eligibility[cid].update(source="learned", event_id=event.get("event_id"))
                     nxt.append(c)
                     continue
+                if trust_state == "valid-unverified" and cid == request.get("declared_route"):
+                    # The user declared this route (--as, amend route): their authority covers
+                    # unverified trust, and later stages still apply. Quarantine is never lifted.
+                    eligibility[cid]["source"] = "declared"
+                    nxt.append(c)
+                    continue
                 if trust_state != "proven" and not override_applies(cid, 2):
                     rejected.append({
                         "candidate": cid,

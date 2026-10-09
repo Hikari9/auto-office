@@ -133,16 +133,16 @@ def test_a_first_dispatch_with_as_records_the_deviation_and_stays_declared(env):
     assert code == 0 and _triple(env) == CODEX and len(_events(env)) == 1, out
 
 
-def _unverified(monkeypatch, triple):
+def _trust(monkeypatch, triple, trust_state="valid-unverified"):
     from office import scoring
     real = scoring.evaluate_trust_state
     monkeypatch.setattr(scoring, "evaluate_trust_state",
-                        lambda con, cid: (0, "valid-unverified") if cid == triple else real(con, cid))
+                        lambda con, cid: (0, trust_state) if cid == triple else real(con, cid))
 
 
 def test_a_redispatch_follows_a_declared_unverified_route_on_the_users_authority(env, monkeypatch):
     _approve(env)
-    _unverified(monkeypatch, CODEX)
+    _trust(monkeypatch, CODEX)
     code, out = env.office("dispatch", "T1", "--as", "codex/gpt-6-astra@low", env=EXTERNAL)
     assert code == 0, out
     env.office("revoke", "T1", env=EXTERNAL, check=0)
@@ -152,13 +152,33 @@ def test_a_redispatch_follows_a_declared_unverified_route_on_the_users_authority
     assert _task_route(env)["declared"] is True
 
 
-def test_a_declared_unverified_route_still_stops_on_other_rejections(env, monkeypatch):
+def test_a_declared_unverified_route_still_stops_on_quota(env, monkeypatch):
     _approve(env)
-    _unverified(monkeypatch, CODEX)
+    _trust(monkeypatch, CODEX)
     env.office("amend", "route", "T1", "--as", "codex/gpt-6-astra@low", "--quote", "use astra here", check=0)
-    monkeypatch.setattr("office.routing.MUTABLE_TRUST_ROLES", set())  # trust passes, quota then rejects it
     code, out = env.office("dispatch", "T1", env=_quota(env, codex=1))
-    assert code != 0 and "every planned route is unavailable" in out, out
+    assert code != 0 and "every planned route is unavailable" in out and "quota" in out, out
+    assert "adapter trust" not in out, out  # trust passed; the later quota stage stopped it
+
+
+def test_a_declared_quarantined_route_is_never_launched(env, monkeypatch):
+    _approve(env)
+    _trust(monkeypatch, CODEX, "quarantined")
+    env.office("amend", "route", "T1", "--as", "codex/gpt-6-astra@low", "--quote", "use astra here", check=0)
+    code, out = env.office("dispatch", "T1", env=_quota(env))
+    assert code != 0 and "quarantined" in out, out
+    assert env.con().execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == 0
+
+
+def test_a_recorded_unverified_route_gets_no_declared_pass(env, monkeypatch):
+    _approve(env)
+    env.office("dispatch", "T1", env=_quota(env), check=0)
+    primary = _triple(env)
+    assert _task_route(env).get("declared") is not True
+    env.office("revoke", "T1", env=EXTERNAL, check=0)
+    _trust(monkeypatch, primary)
+    code, out = env.office("dispatch", "T1", env=_quota(env))
+    assert code == 0 and _triple(env) != primary, out  # fell back: only a declared route passes unverified trust
 
 
 def test_a_task_between_rounds_can_be_rerouted_and_rerun_follows_it(env):

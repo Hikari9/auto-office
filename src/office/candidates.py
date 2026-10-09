@@ -531,8 +531,9 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                exclude: set[str] | None = None, probe: bool = True, exact: str | None = None,
                dispatch_kind: str = "fresh", wave_load: dict | None = None, pending_explorations: int = 0,
                quota_snapshot: dict[str, dict] | None = None,
-               quota_event_seen: set[str] | None = None) -> dict:
+               quota_event_seen: set[str] | None = None, declared: str | None = None) -> dict:
     """Build the request and route. Returns the routing result plus request.
+    `declared` is a user-declared route identity that passes unverified adapter trust.
     `exact` keeps only the candidate with that route identity (harness@major/model@effort).
     Executor and worker requests carry the adaptive inputs (#300); `wave_load`
     counts routes already planned for other tasks of the same wave."""
@@ -605,6 +606,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "benchmark_snapshot": snapshot,
         "candidates": candidates,
     }
+    if declared:
+        request["declared_route"] = declared
     if role in routing.ADAPTIVE_ROLES:
         request.update(adaptive_inputs(con, config, run, role, candidates, task_id=task_id,
                                        dispatch_kind=dispatch_kind, plan_version=run.get("plan_version"),

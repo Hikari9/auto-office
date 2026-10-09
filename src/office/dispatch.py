@@ -239,9 +239,10 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     planned slate (`--route`, `--reroute`, a pre-#300 plan) the fresh decision stands."""
     tid = task["id"]
     kind = "fix" if task.get("current_dispatch_id") else "fresh"
-    fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
-                                  dispatch_kind=kind)
     planned = None if (override or reroute) else _effective_slate(con, run, task)
+    declared = planned["primary"] if planned and planned.get("chooser") == "declared" else None
+    fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
+                                  dispatch_kind=kind, declared=declared)
     if reroute and fresh.get("status") == "selected":
         fresh["route_source"], fresh["route_note"] = "reroute", "rerouted from current evidence"
     if not planned:
@@ -257,9 +258,6 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
         taken.append({"route": rid, "reason": reasons.get(rid) or "no longer a candidate (harness unavailable, "
                                                                  "excluded, or removed from the catalog)"})
     else:
-        held = _declared_past_trust(task, planned, fresh)
-        if held:
-            return held
         return {"status": "slate_exhausted", "selected": None, "rejected": fresh.get("rejected") or [],
                 "skipped": fresh.get("skipped") or [], "fallbacks_taken": taken, "fresh_status": fresh.get("status"),
                 "request": fresh.get("request"), "routing": fresh.get("routing")}
@@ -279,26 +277,6 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
             "planned": planned,
             "decision_hash": sha256_obj({"planned": planned.get("decision_hash"), "fresh": fresh.get("decision_hash"),
                                          "dispatched": rid, "fallbacks_taken": taken})}
-
-
-def _declared_past_trust(task: dict, planned: dict, fresh: dict) -> dict | None:
-    """A declared route that routing rejected only at adapter trust (stage 2).
-    The user's `--as` or `office amend route` already granted the authority that
-    stage asks for, so a re-dispatch runs it as `--as` would. Any other rejection
-    (quota, capability, availability) still stops it: a declared route is never
-    swapped silently."""
-    if planned.get("chooser") != "declared":
-        return None
-    rid = planned["primary"]
-    stages = {r.get("stage") for r in fresh.get("rejected") or [] if r.get("candidate") == rid}
-    if stages != {2}:
-        return None
-    reason = "declared route; user authority covers adapter trust"
-    return {**fresh, "status": "selected", "selected": rid, "candidate": state.recorded_route(task)["candidate"],
-            "override": True, "selection_disclosure": {"triple": rid, "reason": reason, "override": True},
-            "route_source": "declared", "fallbacks_taken": [], "planned": planned,
-            "decision_hash": sha256_obj({"planned": planned.get("decision_hash"), "fresh": fresh.get("decision_hash"),
-                                         "dispatched": rid, "declared": True})}
 
 
 def _effective_slate(con, run: dict, task: dict) -> dict | None:
