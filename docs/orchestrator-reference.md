@@ -92,6 +92,11 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
   `office close --handoff <pr-url>`. `office close --abandon "<reason>"` stops early; nothing is deleted until `office prune -f`.
 - Landed through a PR Office did not open: `office close --landed-externally <merged-pr-url>`; if that merge lacks an accepted
   revision, ask the user and add `--quote "<words>"`.
+- Deploys run in a fresh checkout of the landed commit. Each deploy and verify step reports its cwd (`deploy ok: <cmd> (cwd <path>)`),
+  and a failure names the same cwd, so a path a command expects is checked against that checkout.
+- `office land --detect` warns when a deploy command names a repo path the fresh checkout lacks (gitignored or untracked, e.g. `.env`
+  or `myaccount/.env` passed to a sourced script). Fix it by listing the path under `deploy.env_files` in the config: Office copies each
+  listed file into the deploy checkout with its mode preserved, never stages or commits it, and refuses an entry outside the repo.
 
 ## Historical material
 

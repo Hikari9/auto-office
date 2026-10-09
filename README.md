@@ -609,8 +609,10 @@ office wait                           wait until the run has something actionabl
 office dispatch <task>... [--parallel]
 office answer <task|dispatch> <n> | -- "<text>"   answer the question a pane agent is waiting on (wait exits 5)
 office prompt <task|dispatch> -- "<message>"
+office raise [--kind question|blocker|scope-request] [--path P] -- "<text>"   executor: stop for a decision without submitting
 office submit                         planner/executor: submit a plan or work
-office rerun <task> --resume|--fresh  run a routed repair (RECHECK or disposition fix)
+office revoke <task|dispatch|integration|<scope>:convergence|visual>   end a task's session, or cancel a running lane review
+office rerun <task> --resume|--fresh [--as <harness>/<model>[@effort]] [--review-as <route>]   run a routed repair on a named route
 office amend <scope> -- "<delta>"     ordinary, --contract, or requirements amendment
 office amend <T> --add-check|--add-accept|--set ...   edit the task contract (enforced, audited)
 office ack <amendment-id>             worker: confirm delivered amendment is applied
@@ -619,9 +621,10 @@ office close                          finish after acceptance + landing/handoff
 
 office inspect run|plan|task|gate|evidence|events|route|convergence [id]
 office approve plan|merge|trust|waive|visual ... --quote "<user words>"
-office decide <scope> escalate|continue|waive|stop --quote "<user words>"
+office decide <scope> escalate|continue|waive|stop|review --quote "<user words>"
 office review plan --quote "<user words>" [--rounds N]   the user's request for another plan review
-office disposition <scope>:<code> fix|fixed|dismissed|follow-up -- "<note>"
+office disposition <scope>:<code> fix|fixed|dismissed|follow-up -- "<note>"   dismissed of a blocking finding: --quote "<user words>"
+office config --run <id> --apply-routing --quote "<user words>"   re-pin a run's roles and routing from config
 office review <scope>:convergence|visual --report <file>   degraded fallback review
 office benchmarks brief|submit ...
 office list
