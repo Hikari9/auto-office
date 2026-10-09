@@ -635,8 +635,7 @@ def _deploy(con, run: dict, target: str, deploy: dict, cwd: Path, res: Result, r
 # ------------------------------------------------- deploy environment files
 
 def env_files(config: dict) -> list[str]:
-    """The `deploy.env_files` entries of a config: repo-relative paths of ignored files
-    a deploy needs. Anything else configured there is ignored here and refused when copied."""
+    """The `deploy.env_files` entries of a config: repo-relative paths of ignored files a deploy needs."""
     listed = (config.get("deploy") or {}).get("env_files") or []
     return [str(e) for e in (listed if isinstance(listed, list) else [listed])]
 
