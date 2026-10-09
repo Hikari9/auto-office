@@ -704,7 +704,7 @@ def test_trust_is_confirmed_only_on_a_settled_frame(monkeypatch):
     frames3 = iter([yes, no, no, no, no, no, no, no, no, no, no, no, no, no])
     sent3 = []
     dispatch._confirm_trust("w1:p1", lambda: next(frames3, no), lambda *a: sent3.append(a[-1]), None)
-    assert sent3[:1] != ["Enter"], sent3
+    assert "Enter" not in sent3, sent3  # review #448 F8: never, not just first
 
 
 def test_answer_startup_trust_reads_the_screen_and_flat_status(monkeypatch):
@@ -739,3 +739,50 @@ def test_an_abandoned_pane_is_dropped_from_the_layout(env, monkeypatch):
     assert ["pane", "close", pane] in _calls(state_file)
     layout = json.loads((paths.run_dir(run["id"]) / "herdr-tab.json").read_text())
     assert pane not in layout["panes"], layout
+
+
+def test_a_blank_or_failed_frame_never_ends_the_trust_confirmation(monkeypatch):
+    # Review #448 F1/F3: a half-redrawn or unreadable frame is read again.
+    from office import dispatch
+    monkeypatch.setenv("OFFICE_HERDR_KEY_SETTLE", "1")
+    dialog = "Quick safety check: Is this a project you created or one you trust?\n{}\n Enter to confirm"
+    no = dialog.format("❯ No, exit\n  Yes, I trust this folder")
+    yes = dialog.format("  No, exit\n❯ Yes, I trust this folder")
+    frames = iter([no, "", yes, "", yes])
+    sent = []
+    assert dispatch._confirm_trust("w1:p1", lambda: next(frames, yes), lambda *a: sent.append(a[-1]), None)
+    assert sent == ["down", "Enter"], sent
+
+
+def test_settling_follows_the_key_delay(monkeypatch):
+    # Review #448 F7: with OFFICE_HERDR_KEY_DELAY=0 a key that moves nothing costs no wait.
+    import time as _t
+    from office import dispatch
+    monkeypatch.delenv("OFFICE_HERDR_KEY_SETTLE", raising=False)
+    monkeypatch.setenv("OFFICE_HERDR_KEY_DELAY", "0")
+    frame = "Trust this folder?\n❯ No, exit\n  Yes, I trust this folder"
+    start = _t.time()
+    dispatch._settled(lambda: frame, "No, exit")
+    assert _t.time() - start < 0.5
+
+
+def test_only_trust_or_plain_proceed_options_are_confirmed_and_osc_is_stripped():
+    # Review #448 F4 and F9.
+    from office import dispatch
+    assert not dispatch._trust_selected("Yes, use this MCP server")
+    assert not dispatch._trust_selected("Yes, I accept")
+    assert dispatch._trust_selected("Yes, proceed")
+    assert dispatch._trust_dialog("\x1b]8;;https://x\x07Trust this folder\x1b]8;;\x07?")
+
+
+@pytest.mark.approved
+def test_closing_an_abandoned_pane_drops_its_reservation(env, monkeypatch):
+    # Review #448 F6.
+    monkeypatch.setenv("FAKE_HERDR_START_FAIL", "1")
+    monkeypatch.setenv("FAKE_HERDR_PANE_READ", "some screen")
+    state_file, run, d, ddir, res = launch_in_herdr(env, monkeypatch)
+    from office import paths
+    pane = spec_pane(ddir)
+    f = paths.run_dir(run["id"]) / "herdr-reservations.json"
+    held = json.loads(f.read_text()) if f.is_file() else {}
+    assert pane not in held, held

@@ -15,10 +15,20 @@ result = {{}}
 if args[:2] == ["pane", "split"]:
     data["n"] += 1
     result = {{"pane": {{"pane_id": "w1:p%d" % (100 + data["n"]), "tab_id": "w1:t1"}}}}
+elif args[:2] == ["pane", "get"] and os.environ.get("FAKE_HERDR_GET_DOWN"):
+    json.dump(data, open(state, "w"))
+    sys.stderr.write("server unavailable")  # transient: not pane_not_found
+    sys.exit(1)
+elif args[:2] == ["pane", "get"] and args[2] in data["closed"]:
+    json.dump(data, open(state, "w"))
+    print(json.dumps({{"error": {{"code": "pane_not_found"}}}}))  # what herdr says for a closed pane
+    sys.exit(1)
 elif args[:2] == ["pane", "get"]:
-    result = {{}} if args[2] in data["closed"] else {{"pane": {{"pane_id": args[2]}}}}
+    result = {{"pane": {{"pane_id": args[2]}}}}
 elif args[:2] == ["tab", "get"]:
     result = {{"tab": {{"tab_id": args[2]}}}}
+elif args[:2] == ["tab", "close"]:
+    data.setdefault("tabs_closed", []).append(args[2])
 elif args[:2] == ["tab", "create"]:
     result = {{"tab": {{"tab_id": "w1:t9"}}, "root_pane": {{"pane_id": "w1:p900"}}}}
 json.dump(data, open(state, "w"))
@@ -377,3 +387,40 @@ def test_a_gone_anchor_without_a_caller_pane_falls_back_to_an_own_tab(env, monke
     run = _run(env)
     (paths.run_dir(run["id"]) / "herdr-tab.json").write_text(json.dumps({"mode": "split", "anchor": "w1:pOld", "panes": []}))
     assert dispatch._herdr_pane(run, env.repo) == "w1:p900"
+
+
+def test_an_unreachable_herdr_never_replaces_the_split_layout(env, monkeypatch):
+    # Review #448 F2: a transient `pane get` failure is not a closed anchor.
+    state = _fake(env, monkeypatch)
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
+    monkeypatch.setenv("FAKE_HERDR_GET_DOWN", "1")
+    from office import dispatch, paths
+    run = _run(env)
+    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
+    tab_file.write_text(json.dumps({"mode": "split", "anchor": "w1:pQ", "panes": [], "tab_id": "w1:t1"}))
+    dispatch._herdr_pane(run, env.repo)
+    assert json.loads(tab_file.read_text())["mode"] == "split"
+    assert not any(c[:2] == ["tab", "create"] for c in _calls(state))
+
+
+def test_an_own_tab_that_outlived_its_panes_is_still_closed_at_the_end(env, monkeypatch):
+    # Review #448 F5.
+    state = _fake(env, monkeypatch)
+    state.write_text(json.dumps({"calls": [], "n": 0, "closed": ["w1:p18"]}))
+    from office import dispatch, paths
+    run = _run(env)
+    (paths.run_dir(run["id"]) / "herdr-tab.json").write_text(json.dumps({"mode": "tab", "tab_id": "w1:tD", "panes": ["w1:p18"]}))
+    assert dispatch._herdr_pane(run, env.repo) == "w1:p900"
+    dispatch.close_herdr_tab(run)
+    assert set(json.loads(state.read_text())["tabs_closed"]) == {"w1:tD", "w1:t9"}
+
+
+def test_reusing_a_pane_runs_no_herdr_command_under_the_lock(env, monkeypatch):
+    # Prior #434 F9: the setup line cds; the pick only reads.
+    state = _fake(env, monkeypatch)
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
+    from office import dispatch
+    run = _run(env)
+    first = dispatch._herdr_pane(run, env.repo)
+    assert dispatch._herdr_pane(run, env.repo) == first
+    assert not any(c[:2] == ["pane", "run"] for c in _calls(state))
