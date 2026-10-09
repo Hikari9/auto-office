@@ -22,6 +22,7 @@ HUB_LINE_BUDGET = 190
 # 3.1: each 3.0 spoke carries a three-line banner pointing 3.1 runs at the office CLI;
 # the per-spoke budgets below grew by exactly those lines.
 SKILL_LINE_BUDGETS = {
+    'skills/auto-office-lean/SKILL.md': 60,
     'skills/agy-cli/SKILL.md': 46,
     'skills/auto-adapter/SKILL.md': 21,
     'skills/auto-closeout/SKILL.md': 67,
