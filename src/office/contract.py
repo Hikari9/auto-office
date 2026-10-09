@@ -49,9 +49,16 @@ MAX_ROUNDS = 3
 # A finding whose repair would cross one of these seams is never APPROVED cleanup.
 HARD_SEAMS = ("requirements", "authority", "ownership", "dependency", "interface", "acceptance")
 
-# Reviewer independence recorded on a review gate.
+# Reviewer independence recorded on a review gate. `independent-orchestrator`
+# (#423) is the orchestrator reviewing as the fallback when it did not produce
+# the work; `degraded-orchestrator` is the pre-#423 record of the same fallback.
 INDEPENDENT = "independent"
 DEGRADED = "degraded-orchestrator"
+INDEPENDENT_ORCHESTRATOR = "independent-orchestrator"
+
+# The configurable convergence-review round cap (#423): default MAX_ROUNDS,
+# pinned per run in `gates_json.convergence_max_rounds` at `office start`.
+ROUND_CAP_LIMIT = 10
 
 # Operator choices once a RECHECK sequence spends MAX_ROUNDS.
 ESCALATION_CHOICES = ("escalate", "continue", "waive", "stop")
@@ -71,6 +78,43 @@ def of(run: dict | None) -> str:
 
 def is_convergence(run: dict | None) -> bool:
     return of(run) == CONVERGENCE
+
+
+def round_cap(run: dict | None) -> int:
+    """The substantive-round cap of this run's convergence reviews. A run
+    started before #423 has no pinned cap and keeps MAX_ROUNDS."""
+    pinned = ((run or {}).get("gates") or {}).get("convergence_max_rounds")
+    return int(pinned) if pinned else MAX_ROUNDS
+
+
+def has_cap_waiver(run: dict | None) -> bool:
+    """Only runs that pinned a cap at start (#423) get the orchestrator's
+    cap waiver; older convergence-v1 runs keep the user-only `office decide`."""
+    return is_convergence(run) and bool(((run or {}).get("gates") or {}).get("convergence_max_rounds"))
+
+
+def check_round_cap(rounds) -> int:
+    from office.state import Usage
+    try:
+        n = int(rounds)
+    except (TypeError, ValueError):
+        n = 0
+    if not 1 <= n <= ROUND_CAP_LIMIT:
+        raise Usage("bad-rounds", f"review rounds must be 1 to {ROUND_CAP_LIMIT} (got {rounds})")
+    return n
+
+
+_TRIVIAL_REASONS = {"ok", "okay", "n/a", "na", "none", "fine", "lgtm", "ship it", "done", "waive", "waived",
+                    "because", "risk accepted", "accepted", "x", "test", "tbd", "todo", "skip"}
+
+
+def substantive_reason(text: str | None) -> bool:
+    """A cap waiver's rationale must say something durable: at least four words
+    and twenty characters, and not a placeholder."""
+    t = " ".join((text or "").split())
+    if t.lower().strip(".!") in _TRIVIAL_REASONS:
+        return False
+    return len(t.split()) >= 4 and len(t.replace(" ", "")) >= 20
 
 
 def default_for(config: dict) -> str:

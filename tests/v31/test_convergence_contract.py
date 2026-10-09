@@ -469,7 +469,8 @@ def test_reviewer_failures_walk_the_fallback_chain_without_spending_a_round(env)
 
 def test_exhausted_specialists_allow_a_degraded_orchestrator_review(env, tmp_path):
     """12, 13, 33, 34: every route failing is UNAVAILABLE status (not a verdict); the
-    orchestrator may then review, recorded as degraded and non-independent; a worker cannot."""
+    orchestrator may then review, recorded as degraded when its identity or a producer's is unknown
+    (#423 fails closed); a worker cannot."""
     _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"exit": 1}])
     env.office("dispatch", "T1", check=0)
     gate = _gates(env, "convergence_review")[0]
@@ -488,7 +489,7 @@ def test_exhausted_specialists_allow_a_degraded_orchestrator_review(env, tmp_pat
     from office import convergence
     con = env.con()
     receipt = convergence.receipt(con, _run_row(env))
-    assert receipt["degraded"] == ["L-T1:convergence_review"]
+    assert receipt["degraded"] == ["L-T1:convergence_review"] and receipt["orchestrator_reviews"] == []
 
 
 # ------------------------------------------------------------------ waivers (14, 35-39)

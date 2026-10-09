@@ -11,8 +11,8 @@ convergence and visual review, waivers, dispositions, operator decisions, receip
 `CONVERGENCE_REVIEW_FORMAT`, `CONVERGENCE_PLAN_REVIEW_FORMAT`, planner and executor guidance).
 
 The design in one sentence: executors build and self-check inside an ownership envelope, and
-independent review happens once per ownership/composition lane on the composed result, with a hard
-three-round ceiling and every user-owned decision surfaced at once.
+independent review happens once per ownership/composition lane on the composed result, with a round
+ceiling (three by default) and every user-owned decision surfaced at once.
 
 ## 1. Contract pinning, compatibility, and rollback
 
@@ -61,7 +61,7 @@ office start ──> plan ──> initial plan review ────────�
                                │ RECHECK: all blocking findings -> owning tasks at once
                                │          -> office rerun each (parallel) -> recompose -> same reviewer
                                │ INTAKE_GAP: ask the user -> office decide <lane> continue
-                               │ (3 substantive rounds, then office decide <lane> ...)
+                               │ (round cap, then office waive <lane> --reason ... or office decide <lane> ...)
                                │
          lanes that share converge:/interface/shared:/files ──> shared scope S-... reviewed once
                                │
@@ -280,8 +280,12 @@ On `RECHECK`:
 
 A substantive round is a completed review (`COMPLETED`, with a verdict) in the current cycle. Each
 RECHECK sequence (plan, each lane or shared scope convergence review, each visual review) is capped at
-3 substantive rounds. Config cannot change it; the old `*_max_rounds` config keys apply only to
-`v3.1` runs. Only the plan review's cap has a user override (section 5, Plan review).
+3 substantive rounds by default. The lane, shared-scope and visual cap is configurable (#423): `review.max_rounds`
+(1 to 10) in config, or `office start ... --review-rounds N`. It is pinned in the run's gate policy
+(`gates_json.convergence_max_rounds`) when the run starts, so it survives `office resume` and recovery; round
+accounting itself lives in the run database. A run started before #423 has no pinned cap and keeps 3. The old
+`*_max_rounds` config keys apply only to `v3.1` runs. The plan review's cap has its own user override (section 5,
+Plan review).
 
 These never spend a round:
 
@@ -296,9 +300,27 @@ These never spend a round:
 This section is about lanes and shared scopes. Plan review has no operator decision: at its cap the
 orchestrator owns the findings (section 5, Plan review).
 
-After the third `RECHECK` in a cycle nothing runs automatically. The orchestrator asks the user right
-away (native question tool), showing `office inspect convergence <scope>`: remaining findings, their
-materiality, the attempts so far, landing risk, and its own recommendation. It records the answer:
+After the capped `RECHECK` in a cycle (the third by default) nothing runs automatically and review does not
+stay blocked. The scope is `escalated` and the `next:` line offers two outcomes.
+
+**Waive (orchestrator, #423).** The orchestrator accepts the residual risk:
+
+```text
+office waive <scope> --reason "<why the open findings are acceptable>"
+```
+
+The reason must be substantive (at least four words, twenty characters, not a placeholder such as `ok` or
+`ship it`) or the command is refused. It works only on a scope that spent its cap, never from a dispatched
+agent, and only on runs that pinned a cap at start. The reviewer verdict stays `RECHECK`; it is never rewritten to
+`APPROVED`. Each waived gate gets a receipt bound to the scope, the gate kind and the composed commit that records
+the reason, the underlying verdict, the unresolved findings (code, level, location, owners), the round and cap, and
+the orchestrator session that exercised it. A recomposition voids it. The receipt appears in the archive receipt
+(`convergence.waivers`) and in the lines `office land` prints. It is not landing authority and needs none
+(section 11): landing still needs the user's authorization, from intake (`end_state: merge|e2e`) or later.
+
+**Escalate to the user.** The orchestrator asks the user right away (native question tool), showing
+`office inspect convergence <scope>`: remaining findings, their materiality, the attempts so far, landing risk,
+and its own recommendation. It records the answer:
 
 ```text
 office decide <scope> escalate|continue|waive|stop --quote "<user's words>" [--reason "<why>"]
@@ -339,13 +361,15 @@ office disposition <scope>:<code>[,<code>] fix|fixed|dismissed|follow-up -- "<no
 
 ## 11. Waivers and landing authority
 
-Required convergence and visual reviews are hard landing gates. Waiver authority is landing authority
-for the run, never a role.
+Required convergence and visual reviews are hard landing gates. Outside the round cap, waiver authority is
+landing authority for the run, never a role. The round-cap waiver of section 9 is the one exception: the
+orchestrator exercises it without landing authority, and it never grants any.
 
 | Actor | Holds waiver authority | Command |
 |---|---|---|
 | User | Always | `office approve waive L-T1:convergence\|visual --quote "<user's words>" --reason "<why>"` |
 | Orchestrator | Only when landing was delegated: intake end state `merge` or `e2e`, or a recorded `office approve merge` | `office approve waive L-T1:convergence --as orchestrator --reason "<why>"` |
+| Orchestrator, at the round cap only (#423) | Needs no landing authority; is not landing authority | `office waive L-T1 --reason "<why>"` |
 | Planner, executor, reviewer dispatch | Never | refused |
 
 A waiver:
@@ -353,7 +377,8 @@ A waiver:
 - keeps the underlying verdict or status (`RECHECK`, `UNAVAILABLE`, ...); it never rewrites it;
 - is bound to the scope, the gate kind and the scope's composed commit. A recomposition voids it unless
   it is renewed;
-- appears in the archive receipt under `convergence.waivers`, with the underlying verdict and reason.
+- appears in the archive receipt under `convergence.waivers`, with the underlying verdict, reason, scope, commit,
+  acting session and (for a cap waiver) the unresolved findings, and in the `WAIVED ...` lines of `office land`.
 
 Under `convergence-v1`, `office approve waive T2:code_review|visual` and `office approve visual` are
 refused: code and visual review are lane gates. Task `checks` waivers are unchanged.
@@ -368,8 +393,14 @@ office review <scope>:convergence --report <file>
 office review <scope>:visual --report <file> --inspected <every screenshot>
 ```
 
-The report uses the reviewer reply format. The review is recorded with independence
-`degraded-orchestrator` and shown on receipts. For visual, every screenshot of the capture must be
+Specialist reviewers come first; the fallback is available only after every route failed or returned no
+readable reply. The report uses the reviewer reply format. Independence means a different agent or session from
+the producer (#423). It fails closed: the review is recorded as `independent-orchestrator` only when this session's
+harness session id (`OFFICE_SESSION`) is known and every producer dispatch of the scope has a recorded, different
+session id. The same id is refused (`self-review-prohibited`). An unknown identity or an unrecorded producer
+session records `degraded-orchestrator`. The ids come from the environment and are not proof against a hostile
+session. Runs started before #423 record the
+fallback as `degraded-orchestrator`. Either is shown on receipts. For visual, every screenshot of the capture must be
 listed in `--inspected`; otherwise no visual verdict is recorded and the gate stays blocked for a
 capable reviewer (`office resume`) or a waiver.
 
@@ -398,6 +429,8 @@ office inspect run                                shows the run's review contrac
 office amend plan --contract -- "<what changed>"  submit a plan revision after RECHECK or INTAKE_GAP
 office amend plan --no-review --reason "<why>" -- "<delta>"   while plan review is open: ordinary amendment, not reviewed
 office rerun <task> --resume|--fresh [--reroute]  run a routed repair (RECHECK or disposition fix)
+office start "<goal>" --review-rounds N          the lane/shared/visual round cap (default 3; config review.max_rounds)
+office waive <scope> --reason "<why>"             at the round cap: the orchestrator accepts residual risk (not landing authority)
 office decide <scope> escalate|continue|waive|stop --quote "<user's words>" [--reason "<why>"]   (lanes only)
 office review plan --quote "<user's words>" [--rounds N]   the user's request for another plan review
 office disposition <scope>:<code>[,<code>] fix|fixed|dismissed|follow-up -- "<note>"
@@ -420,5 +453,5 @@ Runs pinned to `v3.1` keep these semantics; Office never converts them.
 | Integration review | At a real boundary (dependent output, shared file or interface) | None; covered by shared scopes |
 | Plan review | Rolling: after `CHANGES_REQUIRED`, dispatch while the amendment is re-reviewed; a defect blocks its scope until cleared | Initial plan only: `RECHECK` holds only named tasks; same reviewer; once closed, no amendment is re-reviewed |
 | Requirement problems | `PLAN_DEFECT` + `office amend plan --contract --redirect ...` / `office submit --redirect ...` | `INTAKE_GAP` + `office amend requirements --quote ...` |
-| Round budget | Gear `*_max_rounds` | 3 substantive rounds per RECHECK sequence, then `office decide` (lanes) or orchestrator-owned findings (plan; cap user-overridable) |
+| Round budget | Gear `*_max_rounds` | 3 substantive rounds per RECHECK sequence (lane cap configurable), then `office waive` or `office decide` (lanes) or orchestrator-owned findings (plan; cap user-overridable) |
 | Waivers | `office approve waive T2:<gate> --quote ...` (user) | Lane gates; landing authority; bound to the composed commit |

@@ -138,7 +138,7 @@ def _tree(repo: Path, commit: str) -> str:
 
 
 def _land_preview(con, run: dict, snap: dict, deploy: dict) -> Result:
-    res = Result()
+    res = Result(lines=_waivers(con, run))
     commit = snap["commit"]
     tree = _tree(Path(run["repo_root"]), commit)
     if _deployed(con, run, "preview", tree):
@@ -156,7 +156,7 @@ def _land_preview(con, run: dict, snap: dict, deploy: dict) -> Result:
 
 
 def _land_merge(con, run: dict, mode: str, snap: dict, deploy: dict, *, redeploy: bool, mark_deployed: bool) -> Result:
-    res = Result()
+    res = Result(lines=_waivers(con, run))
     if not prs.enabled(run) and not any(prs.has_pr(t) for t in integration.accepted_set(con, run) or []):
         # PRs are off and no accepted task has file scope: nothing to merge or deploy.
         res.add("nothing to merge: no accepted task has a PR (all have no file scope)")
@@ -448,8 +448,13 @@ def _rebase_locked(con, run: dict, tasks: list[dict]) -> Result:
 
 # ------------------------------------------------------------------ ask
 
+def _waivers(con, run: dict) -> list[str]:
+    from office import convergence
+    return convergence.waiver_lines(con, run)
+
+
 def _ask(con, run: dict) -> Result:
-    lines = ["integration verified; the task PRs are ready:"]
+    lines = _waivers(con, run) + ["integration verified; the task PRs are ready:"]
     for t in integration._topo(integration.accepted_set(con, run) or []):
         if not prs.has_pr(t):
             continue
