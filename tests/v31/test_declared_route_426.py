@@ -117,3 +117,33 @@ def test_a_sticky_rerun_keeps_the_recorded_route_and_adds_no_change(env):
     run = state.get_run(con, con.execute("SELECT run_id FROM tasks WHERE id='T1'").fetchone()[0])
     assert state.recorded_route(state.get_task(con, run["id"], "T1")) == before
     assert _events(env) == []
+
+
+def test_a_first_dispatch_with_as_records_the_deviation_and_stays_declared(env):
+    _approve(env)
+    code, out = env.office("dispatch", "T1", "--as", "codex/gpt-6-astra@low", env=EXTERNAL)
+    assert code == 0, out
+    (event,) = _events(env)
+    assert (event["before"], event["after"], event["kind"], event["actor"]) == (
+        "claude@1/claude-opus-5-5@medium", CODEX, "override", "user")
+    assert event["reason"] and event["at"] and event["task_id"] == "T1"
+    assert _task_route(env)["declared"] is True
+    env.office("revoke", "T1", env=EXTERNAL, check=0)
+    code, out = env.office("dispatch", "T1", env=_quota(env))
+    assert code == 0 and _triple(env) == CODEX and len(_events(env)) == 1, out
+
+
+def test_a_task_between_rounds_can_be_rerouted_and_rerun_follows_it(env):
+    _approve(env)
+    env.office("dispatch", "T1", env=_quota(env), check=0)
+    con = env.con()
+    con.execute("UPDATE dispatches SET status='ended', ended_at='2026-10-09T00:00:00+00:00' WHERE task_id='T1'")
+    con.execute("UPDATE tasks SET status='changes_required' WHERE id='T1'")
+    con.commit()
+    code, out = env.office("amend", "route", "T1", "--as", "codex/gpt-6-astra@low", "--quote", "next round on astra")
+    assert code == 0, out
+    (event,) = _events(env)
+    assert event["before"] == "claude@1/claude-opus-5-5@medium" and event["after"] == CODEX and event["actor"] == "user"
+    code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
+    assert code == 0, out
+    assert _triple(env) == CODEX and len(_events(env)) == 1

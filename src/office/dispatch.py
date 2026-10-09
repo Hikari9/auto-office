@@ -347,7 +347,8 @@ def _route_payload(decision: dict) -> dict:
     for key in ("override", "launch", "benchmark_snapshot", "route_source", "fallbacks_taken", "audit_id"):
         if decision.get(key):
             out[key] = decision[key]
-    if (decision.get("planned") or {}).get("chooser") == "declared" or decision.get("declared"):
+    if (decision.get("planned") or {}).get("chooser") == "declared" or decision.get("declared") \
+            or decision.get("override"):
         out["declared"] = True  # a deliberate route survives the next dispatch of the task
     return out
 
@@ -374,7 +375,7 @@ def note_route(con, run: dict, task: dict, decision: dict) -> None:
         before = recorded or ((state.task_dispatches(con, run["id"], tid) or [{}])[-1].get("triple"))
         change = (before, "reroute", "rerouted from current evidence", "orchestrator")
     elif source == "override":
-        before = recorded
+        before = recorded or (_planned_slate(con, run, tid) or {}).get("primary")
         change = (before, "override", (decision.get("selection_disclosure") or {}).get("reason") or "route override",
                   "user")
     else:

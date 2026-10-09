@@ -18,7 +18,7 @@ from office.util import dumps, loads, now_iso
 
 USAGE = 'office amend route <task|dispatch> --as <harness>/<model>[@effort] --quote "<user\'s words>" [--restart]'
 LIVE = ("launching", "running")
-PENDING = ("planned", "queued")  # no agent yet: a route change declares the route dispatch will run
+PENDING = ("planned", "queued", "changes_required")  # no live agent: a route change declares the route the next dispatch/rerun runs
 
 
 def change_route(con, run: dict, target: str | None, as_route: str | None, quote: str | None, *,
