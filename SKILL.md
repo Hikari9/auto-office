@@ -134,7 +134,7 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
   fix|fixed|dismissed|follow-up -- "<note>"` (`fix` reopens the owner for a repair without re-review).
 - Only landing authority waives a required review: the user (`office approve waive L-T1:convergence|visual --quote
   "<words>" --reason "<why>"`), or you (`--as orchestrator --reason "<why>"`) only when the end state is merge/e2e
-  or a merge is authorized. The verdict stands; the waiver binds to the composed commit. Your host's permission
+  or a merge is authorized. The verdict stands; the waiver binds to the composed tree. Your host's permission
   layer may still block `--as orchestrator` as self-approval (Claude Code auto mode does): never work around
   it; ask the user and record their waiver with `--quote`.
 - A reviewer that cannot finish (every route UNAVAILABLE, a usage limit, or no usable reply) is a runtime status,

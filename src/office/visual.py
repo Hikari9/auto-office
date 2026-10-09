@@ -69,11 +69,14 @@ def viewports(spec: dict) -> list[tuple[str, int, int]]:
 
 
 def states(spec: dict) -> list[dict]:
-    """'default; menu-open = click [data-test=menu] -> expect nav.open'"""
+    """'default; menu-open@mobile = click [data-test=menu] -> expect nav.open'
+
+    `name@mobile,tablet` limits a state to those viewports (`viewports` is None for every one)."""
     raw = spec.get("states") or "default"
     out = []
     for item in [s.strip() for s in raw.split(";") if s.strip()]:
         name, _, actions = item.partition("=")
+        name, _, only = name.partition("@")
         steps, expect = [], None
         actions = actions.strip()
         if "->" in actions:
@@ -82,8 +85,16 @@ def states(spec: dict) -> list[dict]:
         for step in [a.strip() for a in actions.split(",") if a.strip()]:
             verb, _, arg = step.partition(" ")
             steps.append({"verb": verb.lower(), "arg": arg.strip()})
-        out.append({"name": name.strip() or "default", "steps": steps, "expect": expect})
+        only_viewports = [v.strip().lower() for v in re.split(r"[,|]", only) if v.strip()]
+        out.append({"name": name.strip() or "default", "steps": steps, "expect": expect,
+                    "viewports": only_viewports or None})
     return out
+
+
+def state_applies(state_: dict, viewport: str) -> bool:
+    """Whether a state is captured at a viewport: `@mobile` also covers mobile-portrait and mobile-landscape."""
+    only = state_.get("viewports")
+    return not only or any(viewport.lower() == v or viewport.lower().startswith(v + "-") for v in only)
 
 
 def reference_path(run: dict, task: dict, worktree: Path | None = None) -> Path | None:
@@ -148,6 +159,21 @@ def capture_backend_missing() -> str | None:
     return None
 
 
+def state_problems(spec: dict) -> list[str]:
+    """A state limited to a viewport the block never captures, or a viewport left with no state, can
+    never produce its frames: found at plan submit, not after capture."""
+    names = [v[0] for v in viewports(spec)]
+    problems = []
+    for st in states(spec):
+        for only in st["viewports"] or []:
+            if not any(n.lower() == only or n.lower().startswith(only + "-") for n in names):
+                problems.append(f"visual state '{st['name']}@{only}' names a viewport the block does not capture "
+                                f"(viewports: {', '.join(names)})")
+    problems += [f"visual viewport {n} has no state to capture (every state is limited to other viewports)"
+                 for n in names if not any(state_applies(st, n) for st in states(spec))]
+    return problems
+
+
 def preflight(tasks: list[dict]) -> tuple[list[str], list[str]]:
     """(errors, warnings) for visual blocks the capture step could never
     satisfy. Found at plan submit, not after an executor has done the work (#211)."""
@@ -165,6 +191,11 @@ def preflight(tasks: list[dict]) -> tuple[list[str], list[str]]:
             if problem and problem.startswith("not reachable"):
                 errors.append(f"{t['id']}: visual url {url} is {problem} and the block has no `start:`; add "
                               "`start: <command that serves the app from the worktree>`, or start the server first")
+    for t in tasks:
+        spec = t.get("visual") or {}
+        if spec.get("none") or not spec.get("url"):
+            continue
+        errors += [f"{t['id']}: {problem}" for problem in state_problems(spec)]
     if any(not (t.get("visual") or {}).get("none") and (t.get("visual") or {}).get("url") for t in tasks):
         missing = capture_backend_missing()
         if missing:
@@ -380,6 +411,35 @@ _PROBE_JS = """
 """
 
 
+# A failure of a scripted state (its click or wait could not run, its expected element never appeared): the
+# script may be wrong as easily as the product, so the lane's vision reviewer judges it rather than a fixed rule.
+INTERACTION = "interaction"
+
+# Known framework dev overlays: development tooling drawn over the page, not product UI.
+DEV_OVERLAYS = ("nextjs-portal", "#__next-build-watcher")
+_HIDE_OVERLAYS_JS = """
+(() => {
+  const css = %s.join(',') + '{display:none!important}';
+  // A constructed stylesheet is not subject to the page's CSP (an inline <style> is), so it goes first.
+  try {
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(css);
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+    return;
+  } catch (e) {}
+  const inject = () => {
+    if (document.getElementById('__office_hide_dev_overlays')) return;
+    const style = document.createElement('style');
+    style.id = '__office_hide_dev_overlays';
+    style.textContent = css;
+    (document.head || document.documentElement).appendChild(style);
+  };
+  try { inject(); } catch (e) {}
+  document.addEventListener('DOMContentLoaded', inject);
+})();
+""" % json.dumps(list(DEV_OVERLAYS))
+
+
 # Test hook: a browser a test session launched once and shares across captures. None in production,
 # so every real capture launches and closes its own browser.
 _shared_browser = None
@@ -408,9 +468,11 @@ def _playwright_capture(url: str, spec: dict, evdir: Path, ref: Path | None) -> 
 def _capture_frames(browser, url: str, spec: dict, evdir: Path, ref: Path | None) -> dict:
     selectors = [s.strip() for s in (spec.get("selectors") or "").split(",") if s.strip()]
     frames = []
-    env = {"browser": browser.version, "engine": "chromium"}
+    env = {"browser": browser.version, "engine": "chromium", "dev_overlays_hidden": list(DEV_OVERLAYS)}
     for vname, w, h in viewports(spec):
         for st in states(spec):
+            if not state_applies(st, vname):
+                continue
             frame = {"viewport": f"{vname} {w}x{h}", "state": st["name"], "failures": []}
             frame.update(_capture_one(browser, url, w, h, st, selectors, evdir, f"{vname}-{st['name']}", spec))
             if ref is not None and not frame.get("invalid"):
@@ -430,6 +492,7 @@ def _capture_frames(browser, url: str, spec: dict, evdir: Path, ref: Path | None
 def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference=False) -> dict:
     from playwright.sync_api import Error as PWError
     ctx = browser.new_context(viewport={"width": w, "height": h}, device_scale_factor=1)
+    ctx.add_init_script(_HIDE_OVERLAYS_JS)
     page = ctx.new_page()
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)[:200]))
@@ -468,14 +531,16 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
                     return {"invalid": f"reference cannot reach state {st['name']}: {str(exc)[:100]}"}
                 return {"failures": [{"location": f"{target} @ {w}x{h} state {st['name']}",
                                       "summary": f"interaction '{step['verb']} {target}' failed: {str(exc).splitlines()[0][:120]}",
-                                      "action": "the intended interaction must work", "measurement": "method: dom"}]}
+                                      "action": "the intended interaction must work", "measurement": "method: dom",
+                                      "source": INTERACTION}]}
             page.wait_for_timeout(400)
         if st.get("expect") and page.query_selector(st["expect"]) is None:
             if reference:
                 return {"invalid": f"reference is not in state {st['name']}"}
             return {"failures": [{"location": f"{st['expect']} @ {w}x{h}",
                                   "summary": f"state '{st['name']}' did not produce {st['expect']} after its interaction",
-                                  "action": "fix the interaction so the intended state appears", "measurement": "method: dom"}]}
+                                  "action": "fix the interaction so the intended state appears", "measurement": "method: dom",
+                                  "source": INTERACTION}]}
         page.wait_for_timeout(300)
         shot = evdir / f"{name}.png"
         page.screenshot(path=str(shot), full_page=True)
