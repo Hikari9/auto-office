@@ -83,7 +83,23 @@ function titleFor(run) {
   return issue?.title || run.goal || `Run ${shortRun(run.run_id)}`;
 }
 // The Office snapshot keeps tasks in entities.tasks, not inside each run object.
-const tasksFor = (run) => Object.values(store?.state?.entities?.tasks || {}).filter(task => task.run === run.id);
+// Rebuild once per Office snapshot revision; sorting hundreds of runs must not
+// rescan the entire tasks collection for each status comparison or sidebar row.
+let taskCache = {revision: null, collection: null, byRun: new Map()};
+function tasksFor(run) {
+  const snapshot = store?.state;
+  const collection = snapshot?.entities?.tasks;
+  if (taskCache.collection !== collection || taskCache.revision !== snapshot?.rev) {
+    const byRun = new Map();
+    for (const task of Object.values(collection || {})) {
+      if (!task?.run) continue;
+      if (!byRun.has(task.run)) byRun.set(task.run, []);
+      byRun.get(task.run).push(task);
+    }
+    taskCache = {revision: snapshot?.rev, collection, byRun};
+  }
+  return taskCache.byRun.get(run.id) || [];
+}
 function statusFor(run) {
   const tasks = tasksFor(run);
   if (run.liveness === 'terminal') return [run.phase === 'abandoned' ? 'Abandoned' : 'Closed', run.phase === 'abandoned' ? 'warn' : 'quiet'];
