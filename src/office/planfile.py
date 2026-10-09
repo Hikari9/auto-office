@@ -138,6 +138,9 @@ def parse(text: str) -> ParsedPlan:
         in_visual = False
         if task is not None:
             list_key = key if (not value and key in LIST_KEYS) else None
+            if key in ("scope", "shared"):
+                for e in _split_list(value):
+                    task.setdefault("entry_lines", {})[(SHARED + e.lstrip(SHARED)) if key == "shared" else e] = lineno
             if key == "scope":
                 task["scope"] = _split_list(value) + [s for s in task["scope"] if is_shared(s)]
                 task["scope_none"] = _is_no_check(value)  # `none`: no file scope (a comment or issue edit)
@@ -264,7 +267,8 @@ def _validate(plan: ParsedPlan) -> None:
             problem = _entry_problem(entry)
             if problem:
                 # Each entry is matched as one path or glob: a note after it never matches (#416).
-                err = f"{t['id']} (line {t['line']}): {ENTRY_ERROR} {entry!r} {problem}"
+                line = (t.get("entry_lines") or {}).get(entry, t["line"])  # the scope:/shared: line itself
+                err = f"{t['id']} (line {line}): {ENTRY_ERROR} {entry!r} {problem}"
                 plan.errors.append(err)
                 plan.entry_problems.append((t["id"], entry, err))
         if not t["accept"]:
@@ -304,6 +308,8 @@ def _validate(plan: ParsedPlan) -> None:
         plan.pair_problems.append((a, b, entry, err))
     for a, b in _parallel_overlaps(plan.tasks):
         plan.warnings.append(f"{a} and {b} may run in parallel but their scopes overlap; leases will serialize them")
+    for t in plan.tasks:
+        t.pop("entry_lines", None)  # only for messages; stored tasks keep their shape
 
 
 def end_state_problems(end: str | None, deploy: dict, repo=None) -> tuple[list[str], list[str]]:
@@ -383,23 +389,40 @@ def _entry_problem(entry: str) -> str | None:
     """Why a scope or shared entry is not one path or glob, or None."""
     bare = entry.lstrip(SHARED)
     if not bare or _NOT_PATH.search(bare) or bare.count("(") != bare.count(")") or bare.count("[") != bare.count("]") \
-            or re.search(r"[^/][(\[]", bare):
-        # Brackets are path characters only as whole segments (`(group)/`, `[slug]/`);
-        # `x.csv(A3)` is a note glued to a path.
+            or re.search(r"[^/\[()][(\[]", bare):
+        # Brackets are path characters when they open a segment or follow another bracket
+        # (`(group)/`, `[slug]/`, `[[...slug]]`, `(..)(..)photo`); `x.csv(A3)` is a note.
         return ("is not a path or glob; list bare paths or globs (no notes) and put limits "
                 "(e.g. 'only the importer entry') in `accept:`")
     return None
+
+
+_FILE_NAME = re.compile(r"(?i)^(?:[a-z0-9_-]*file|license|licence|readme|changelog|codeowners|notice|authors|owners)$")
+_DOT_DIRS = {".github", ".gitlab", ".vscode", ".idea", ".husky", ".changeset", ".devcontainer", ".circleci", ".config",
+             ".storybook", ".cargo", ".yarn", ".turbo", ".next", ".claude", ".codex", ".office"}
+
+
+def entry_is_dir(bare: str) -> bool:
+    """Whether a scope or shared entry (without `+`) names a directory. Without the
+    filesystem this is a naming rule that errs toward directory, the safe side for
+    sharing: a trailing `/` or `**`; a dot-directory (`.github`) or `*.d` name; any
+    suffixless name except conventional files (`Makefile`, `Dockerfile`, `LICENSE`).
+    `*.json` globs and suffixed names are files."""
+    if bare.endswith("/") or "**" in bare:
+        return True
+    last = bare.rsplit("/", 1)[-1]
+    if last.startswith("."):
+        return last.lower() in _DOT_DIRS or last.endswith(".d")
+    if "." in last:
+        return last.endswith(".d")
+    return not _FILE_NAME.match(last)
 
 
 def shared_tree(entry: str) -> bool:
     """A `shared:` entry naming a directory rather than registry files: a trailing `/`, a
     `**`, or a last segment with no file suffix (`src/reg`, `src/*`). A file glob such as
     `locales/*.json` names append-only files and stays parallel-safe."""
-    bare = entry.lstrip(SHARED)
-    last = bare.rstrip("/").rsplit("/", 1)[-1]
-    # A root-level suffixless name (`Makefile`, `Dockerfile`) is a file, not a directory.
-    return is_shared(entry) and (bare.endswith("/") or "**" in bare
-                                 or ("." not in last and "/" in bare.rstrip("/")))
+    return is_shared(entry) and entry_is_dir(entry.lstrip(SHARED))
 
 
 def _unordered_shared_trees(tasks: list[dict]):
@@ -412,11 +435,12 @@ def _unordered_shared_trees(tasks: list[dict]):
         for b in tasks[i + 1:]:
             if a["id"] in ancestors(graph, b["id"]) or b["id"] in ancestors(graph, a["id"]):
                 continue
+            seen = set()
             for x, y in ((a, b), (b, a)):
-                hit = next((e for e in x["scope"] if shared_tree(e) and scopes_overlap([e], y["scope"])), None)
-                if hit:
-                    yield a["id"], b["id"], hit
-                    break
+                for e in x["scope"]:
+                    if e not in seen and shared_tree(e) and scopes_overlap([e], y["scope"]):
+                        seen.add(e)
+                        yield a["id"], b["id"], e
 
 
 def grandfather_entries(parsed: "ParsedPlan", prev_tasks: list[dict] | None) -> None:
@@ -426,11 +450,11 @@ def grandfather_entries(parsed: "ParsedPlan", prev_tasks: list[dict] | None) -> 
     prev = {t["id"]: set(t.get("scope") or []) for t in prev_tasks or []}
     old = {err for tid, entry, err in parsed.entry_problems if entry in prev.get(tid, ())}
     try:
-        before = {frozenset((a, b)) for a, b, _ in _unordered_shared_trees(
+        before = {(frozenset((a, b)), e) for a, b, e in _unordered_shared_trees(
             [{"id": t["id"], "depends": t.get("depends") or [], "scope": t.get("scope") or []} for t in prev_tasks or []])}
     except (KeyError, TypeError):
         before = set()
-    old |= {err for a, b, _, err in parsed.pair_problems if frozenset((a, b)) in before}
+    old |= {err for a, b, e, err in parsed.pair_problems if (frozenset((a, b)), e) in before}
     for err in [e for e in parsed.errors if e in old]:
         parsed.warnings.append(err + " (kept: the accepted plan already had it)")
     parsed.errors[:] = [e for e in parsed.errors if e not in old]
@@ -476,7 +500,7 @@ def path_in_scope(path: str, scope: list[str]) -> bool:
         # compared literally so brackets are path characters, not a glob class (#334). A shared
         # directory is valid only for tasks ordered by `depends` (plan validation), and it
         # counts in the overlap check, so its tasks never hold leases together.
-        if pattern and not re.search(r"[*?]", pattern) \
+        if pattern and not re.search(r"[*?]", pattern) and (not is_shared(raw) or shared_tree(raw)) \
                 and path.startswith(pattern.rstrip("/") + "/"):
             return True
     return False
