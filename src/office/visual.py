@@ -23,6 +23,7 @@ import signal
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -37,6 +38,7 @@ PRESENTATION = ("*.css", "*.scss", "*.sass", "*.less", "*.html", "*.htm", "*.jsx
                 "*.ttf", "*.otf", "*.liquid", "*.hbs", "*.ejs", "*.erb", "*.lava", "*.njk", "*.twig")
 UI_WORDS = re.compile(r"\b(ui|layout|responsive|mobile|desktop|viewport|on.?screen|visual(ly)?|prototype|pixel|css|"
                       r"styling|button|click|tap|menu|modal|navbar|navigation|hover|dark mode|breakpoint)\b", re.I)
+ALLOWED_VERBS = frozenset({"click", "hover", "type", "wait", "scroll", "navigate"})
 
 
 # ------------------------------------------------------------------ applicability
@@ -165,6 +167,11 @@ def preflight(tasks: list[dict]) -> tuple[list[str], list[str]]:
             if problem and problem.startswith("not reachable"):
                 errors.append(f"{t['id']}: visual url {url} is {problem} and the block has no `start:`; add "
                               "`start: <command that serves the app from the worktree>`, or start the server first")
+        for st in states(spec):
+            for step in st.get("steps") or []:
+                verb = step.get("verb", "")
+                if verb and verb not in ALLOWED_VERBS:
+                    errors.append(f"{t['id']}: visual state '{st['name']}' uses unknown verb '{verb}'")
     if any(not (t.get("visual") or {}).get("none") and (t.get("visual") or {}).get("url") for t in tasks):
         missing = capture_backend_missing()
         if missing:
@@ -410,9 +417,17 @@ def _capture_frames(browser, url: str, spec: dict, evdir: Path, ref: Path | None
     frames = []
     env = {"browser": browser.version, "engine": "chromium"}
     for vname, w, h in viewports(spec):
+        default_shot_hash = None
         for st in states(spec):
             frame = {"viewport": f"{vname} {w}x{h}", "state": st["name"], "failures": []}
             frame.update(_capture_one(browser, url, w, h, st, selectors, evdir, f"{vname}-{st['name']}", spec))
+            shot_path = frame.get("screenshot")
+            shot_hash = sha256_file(Path(shot_path)) if shot_path and Path(shot_path).is_file() else None
+            if st["name"] == "default":
+                default_shot_hash = shot_hash
+            elif default_shot_hash and shot_hash == default_shot_hash and not frame.get("invalid"):
+                frame["cause"] = "capture"
+                frame["invalid"] = f"state '{st['name']}' screenshot identical to default"
             if ref is not None and not frame.get("invalid"):
                 if ref.suffix.lower() in (".html", ".htm"):
                     r = _capture_one(browser, ref.as_uri(), w, h, st, selectors, evdir, f"ref-{vname}-{st['name']}", spec,
@@ -435,12 +450,18 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
     page.on("pageerror", lambda e: errors.append(str(e)[:200]))
     out: dict = {}
     try:
+        target_url = url
+        for step in st["steps"]:
+            if step["verb"] == "navigate":
+                target_url = urllib.parse.urljoin(url, step["arg"])
+                break
         try:
-            resp = page.goto(url, wait_until="networkidle", timeout=45000)
+            resp = page.goto(target_url, wait_until="networkidle", timeout=45000)
         except PWError as exc:
             return {"invalid": f"page did not settle at {w}x{h}: {str(exc)[:120]}"}
+        out["url"] = page.url or target_url
         if resp is not None and resp.status >= 400 and not reference:
-            out["failures"] = [{"location": f"{url} @ {w}x{h}", "summary": f"page returned HTTP {resp.status}",
+            out["failures"] = [{"location": f"{target_url} @ {w}x{h}", "summary": f"page returned HTTP {resp.status}",
                                 "action": "the route must load", "measurement": "method: http"}]
         try:
             page.evaluate("document.fonts ? document.fonts.ready.then(() => true) : true")
@@ -450,7 +471,18 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
         if auth and not reference and page.query_selector(auth) is None:
             return {"invalid": f"wrong authenticated state: {auth} not present at {w}x{h}"}
         for step in st["steps"]:
+            if step["verb"] == "navigate":
+                continue
             target = step["arg"]
+            if step["verb"] in ("click", "hover", "type"):
+                sel = target.partition(" ")[0] if step["verb"] == "type" else target
+                try:
+                    if page.query_selector(sel) is None:
+                        return {"cause": "spec",
+                                "invalid": f"selector '{sel}' absent from page in state '{st['name']}'"}
+                except PWError as exc:
+                    return {"cause": "spec",
+                            "invalid": f"selector '{sel}' query failed in state '{st['name']}': {str(exc)[:120]}"}
             try:
                 if step["verb"] == "click":
                     page.click(target, timeout=8000)
@@ -466,8 +498,10 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
             except PWError as exc:
                 if reference:
                     return {"invalid": f"reference cannot reach state {st['name']}: {str(exc)[:100]}"}
+                lines = str(exc).splitlines()
+                err_line = lines[0][:120] if lines else str(exc)[:120]
                 return {"failures": [{"location": f"{target} @ {w}x{h} state {st['name']}",
-                                      "summary": f"interaction '{step['verb']} {target}' failed: {str(exc).splitlines()[0][:120]}",
+                                      "summary": f"interaction '{step['verb']} {target}' failed: {err_line}",
                                       "action": "the intended interaction must work", "measurement": "method: dom"}]}
             page.wait_for_timeout(400)
         if st.get("expect") and page.query_selector(st["expect"]) is None:
