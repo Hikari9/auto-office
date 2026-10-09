@@ -368,7 +368,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--rounds", type=int, help="plan: at most this many substantive rounds (default 3)")
     s.add_argument("--inspected", nargs="*", default=[], help="visual: every screenshot you inspected")
     s = sp.add_parser("revoke", parents=[common])
-    s.add_argument("task", help="a task id, a dispatch id, or `integration` (its reviews)")
+    s.add_argument("task", help="a task id, a dispatch id, `integration` (its reviews), or <scope>:convergence|visual (a lane review)")
     s.add_argument("--reason", default="orchestrator revoke")
     s = sp.add_parser("rerun", parents=[common])
     s.add_argument("task")
@@ -723,6 +723,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return convergence.fallback_review(con, run, args.target, Path(args.report).expanduser(),
                                            inspected=args.inspected)
     if cmd == "revoke":
+        if re.fullmatch(r"[LS]-[\w+.-]+:\w+", args.task):  # a lane gate: <scope>:<convergence|visual>
+            from office import convergence
+            return convergence.revoke_lane_gate(con, run, args.task, args.reason)
         from office import dispatch
         return dispatch.revoke(con, run, args.task, args.reason)
     if cmd == "rerun":
