@@ -296,3 +296,11 @@ def test_suffixless_and_dot_directories_below_the_root_are_directories(entry):
 ])
 def test_review_492_file_and_directory_probes(entry, is_dir):
     assert planfile.shared_tree(entry) is is_dir
+
+
+@pytest.mark.parametrize("entry", ["+.vercel", "+.terraform", "+.astro", "+.netlify", "+.aws", "+.tox", "+.output",
+                                   "+.pytest_cache", "+src/.generated"])
+def test_unlisted_dot_directories_are_directories(entry):
+    # a071c74 re-verify item 3: an extensionless dot-name is a directory unless it is a known dotfile.
+    assert planfile.shared_tree(entry)
+    assert planfile.path_in_scope(entry.lstrip("+") + "/project.json", [entry])

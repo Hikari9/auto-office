@@ -406,20 +406,25 @@ _ROOT_DOC_FILES = {"readme", "license", "licence", "copying", "authors", "change
                    "owners", "contributors", "version", "history"}
 # Suffixless names that are files at any depth (`docs/CODEOWNERS`, `.github/CODEOWNERS`).
 _ANYWHERE_FILES = {"codeowners"}
-# Dot-names that are directories; any other dot-name (`.npmignore`, `.flake8`, `.gitkeep`) is a file.
-_DOT_DIRS = {".github", ".gitlab", ".vscode", ".idea", ".husky", ".changeset", ".devcontainer", ".circleci", ".config",
-             ".storybook", ".cargo", ".yarn", ".turbo", ".next", ".claude", ".codex", ".office", ".well-known",
-             ".vitepress", ".vuepress", ".docusaurus", ".svelte-kit", ".nuxt", ".expo", ".git", ".venv", ".cache",
-             ".gradle", ".mvn", ".bundle", ".devbox", ".direnv", ".hooks", ".githooks", ".ci", ".buildkite",
-             ".gitea", ".forgejo", ".azuredevops", ".tekton", ".dagger", ".docker", ".k8s", ".helm", ".ssh"}
+# Extensionless dot-names that are files; any other extensionless dot-name (`.vercel`, `.terraform`,
+# `src/.generated`) is a directory, the safe side. Names ending in `rc` or `ignore` are files too.
+_DOT_FILES = {".gitignore", ".gitattributes", ".gitmodules", ".gitkeep", ".keep", ".npmignore", ".npmrc", ".yarnrc",
+              ".nvmrc", ".node-version", ".python-version", ".ruby-version", ".tool-versions", ".editorconfig",
+              ".prettierrc", ".prettierignore", ".eslintrc", ".eslintignore", ".eslintcache", ".stylelintrc", ".babelrc",
+              ".browserslistrc", ".dockerignore", ".env", ".envrc", ".mailmap", ".htaccess", ".markdownlint",
+              ".mocharc", ".swcrc", ".vercelignore", ".coveragerc", ".flake8", ".pylintrc", ".nojekyll", ".bashrc",
+              ".zshrc", ".profile", ".clang-format", ".clang-tidy", ".gcloudignore", ".slugignore", ".helmignore",
+              ".yamllint", ".hadolint", ".shellcheckrc", ".pre-commit-config", ".lintstagedrc", ".huskyrc",
+              ".commitlintrc", ".releaserc", ".czrc", ".npmrc", ".pnpmfile", ".watchmanconfig", ".flowconfig",
+              ".buckconfig", ".bazelrc", ".bazelversion", ".terraform-version", ".sdkmanrc", ".jshintrc", ".jscsrc"}
 
 
 def entry_is_dir(bare: str) -> bool:
     """Whether a scope or shared entry (without `+`) names a directory. Without the
-    filesystem this is a naming rule: a trailing `/` or `**`, a `*.d` name, a known
-    dot-directory (`.github`, `public/.well-known`), and any suffixless name except known
+    filesystem this is a naming rule: a trailing `/` or `**`, a `*.d` name, an extensionless
+    dot-name that is not a known dotfile (`.github`, `.vercel`), and any suffixless name except known
     build files (`Makefile`, `src/Makefile`), `CODEOWNERS`, and root-level docs in any case
-    (`README`, `Readme`, `LICENSE`). Other dot-names (`.npmignore`, `.flake8`), `*.json`
+    (`README`, `Readme`, `LICENSE`). Known dotfiles (`.npmignore`, `.flake8`), `*.json`
     globs and suffixed names are files. `docs/README` is a directory."""
     if bare.endswith("/") or "**" in bare:
         return True
@@ -428,7 +433,9 @@ def entry_is_dir(bare: str) -> bool:
     if last.endswith(".d"):
         return True
     if last.startswith("."):
-        return low in _DOT_DIRS
+        if "." in last[1:]:
+            return False  # .env.local, .eslintrc.json
+        return not (low in _DOT_FILES or low.endswith("rc") or low.endswith("ignore"))
     if "." in last:
         return False
     if low in _BUILD_FILES or low in _ANYWHERE_FILES:

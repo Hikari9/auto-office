@@ -161,3 +161,32 @@ def test_a_done_note_after_the_orchestrator_is_exempt():
     from office.amend import AUTHORITY_TERMS
     assert AUTHORITY_TERMS.search("send the status to the orchestrator (done)") is None
     assert AUTHORITY_TERMS.search("send the status to the orchestrator and to nobody else") is not None
+
+
+_TO_ORCH = "send the report to the orchestrator"
+
+
+@pytest.mark.parametrize("text", [
+    # a071c74 re-verify item 1: an audience after punctuation
+    "send the report to the office: parents and staff", "send it to the office (done). parents too",
+    "send it to the office: parents too", "send it to the office; and to parents", "send it to the office. Members too",
+    "send READY-FOR-LIVE: all members",
+    # item 2: a recipient after a next-action verb
+    _TO_ORCH + " and update members", _TO_ORCH + " and then push it to all members",
+    _TO_ORCH + " and continue to all members", _TO_ORCH + " and check with parents",
+    _TO_ORCH + " and test it on members", _TO_ORCH + " then run it past parents",
+])
+def test_every_clause_after_the_orchestrator_is_checked(text):
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is not None, text
+
+
+@pytest.mark.parametrize("tail", [
+    # item 4: ordinary report-back lines
+    " and request review", " and keep going", " and start T2", " and move on to T2", " and open the PR",
+    " and report back", " and await instructions", " and mark T1 done", " and do nothing else",
+    " after tests pass", " once tests pass", " if tests fail", ", stop",
+])
+def test_ordinary_next_steps_after_a_report_are_exempt(tail):
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(_TO_ORCH + tail) is None, tail

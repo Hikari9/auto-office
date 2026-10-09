@@ -191,12 +191,14 @@ _ASK_WORD = r"(?:answer|approv(?:e|al)|authori[sz](?:e|ation)|confirm(?:ation)?|
 # Waiting on a question id asks too; applying an answer or decision already given does not.
 _WAITING = r"(?:await(?:ing|s)?|wait(?:ing|s)?\s+(?:on|for)|needs?|blocked\s+(?:on|until|by)|pending)"
 _QID = r"\bQ\d+\b"
-_NEEDED = r"(?:an?\s+)?(?:answer|approval|decision|confirmation|reply|choice)"
+_NEEDED = r"(?:(?:an?|your|the|a\s+final)\s+)?(?:answer|approval|decision|confirmation|reply|choice)"
 _ASKS = re.compile("|".join([
     r"^\W*" + _ASK_WORD + r"\b",                                                   # "Answer Q1 ..."
     r"\bplease\s+" + _ASK_WORD + r"\b[^;]*" + _QID,                                # "please answer Q1"
     _QID + r"[^;]*\bplease\s+" + _ASK_WORD + r"\b",                                # "Q1: please answer"
-    r"\b(?:should|can|could|must|will|would)\s+(?:\w+\s+)?" + _ASK_WORD + r"\b[^;]*" + _QID,  # "can you answer Q1"
+    # second person or the orchestrator as subject; a worker's own plan ("will confirm Q1 fix") is not an ask
+    r"\b(?:can|could|would|will)\s+you\s+" + _ASK_WORD + r"\b[^;]*" + _QID,  # "can you answer Q1"
+    r"\b(?:you|orchestrator|office|user)\s+(?:should|can|could|must|will|would)\s+" + _ASK_WORD + r"\b[^;]*" + _QID,
     r"\b(?:to|get|need|needs|request(?:ing|s|ed)?|requires?)\s+" + _NEEDED + r"\b[^;]*" + _QID,  # "get approval for Q3"
     r"\b(?:orchestrator|office|you|user)\s+to\s+" + _ASK_WORD + r"\b[^;]*" + _QID,  # "orchestrator to answer Q1"
     _QID + r"[^;]*\b(?:needs?|requires?|" + _WAITING + r"|awaiting)\s+" + _NEEDED + r"\b",  # "Q1 is awaiting a decision"
@@ -204,8 +206,8 @@ _ASKS = re.compile("|".join([
 ]), re.I)
 # A negated need or wait reports progress ("no longer waiting on Q1", "Q1 doesn't need an answer",
 # "nothing pending on Q1", "need nothing on Q1"); it is removed before matching.
-_NEGATED = re.compile(r"\b(?:no\s+longer|not|no|nothing|doesn'?t|does\s+not|don'?t|do\s+not|isn'?t|is\s+not)\s+"
-                      r"(?:\w+\s+)?(?:" + _WAITING + r"|need|needs)\b|\b(?:needs?|" + _WAITING + r")\s+nothing\b",
+_NEGATED = re.compile(r"\b(?:no\s+longer|not(?!\s+only\b)|no|nothing|doesn'?t|does\s+not|don'?t|do\s+not|isn'?t"
+                      r"|is\s+not)\s+(?:\w+\s+)?(?:" + _WAITING + r"|need|needs|requires?)\b|\b(?:needs?|" + _WAITING + r")\s+nothing\b",
                       re.I)
 _QUESTION_LINE = re.compile(r"\bQ\d+\b|\bquestion\b", re.I)
 ENDED_PREFIX = "worker ended on a question: "

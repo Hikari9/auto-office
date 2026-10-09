@@ -261,3 +261,15 @@ def test_ask_forms_tied_to_a_question_id_and_negated_waits(nxt, asks):
 def test_review_492_ask_and_negation_probes(nxt, asks):
     q = questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={nxt}\n")
     assert bool(q) is asks, (nxt, q)
+
+
+@pytest.mark.parametrize("nxt,asks", [
+    # a071c74 re-verify item 5: a worker's own plan is not an ask
+    ("will confirm Q1 fix with tests, then submit", False),
+    # item 6
+    ("Q1 does not require approval", False), ("Q1 awaits your decision", True),
+    ("not only waiting on Q1 but also Q2", True),
+])
+def test_reverify_ask_probes(nxt, asks):
+    q = questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={nxt}\n")
+    assert bool(q) is asks, (nxt, q)
