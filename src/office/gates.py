@@ -574,6 +574,11 @@ def _reply_text(d: dict, ddir: Path, output: Path) -> str:
     return _log_text(d, ddir)
 
 
+def log_path(d: dict, ddir: Path) -> Path:
+    """The harness's own output log for a dispatch."""
+    return Path(d.get("log_path") or ddir / "output.log")
+
+
 def _log_text(d: dict, ddir: Path, *, pane: bool = False) -> str:
     """The harness's own output log. With `pane`, a herdr pane agent's pane
     text is appended (saved once to pane-tail.txt): a quota or auth wall the
@@ -581,7 +586,7 @@ def _log_text(d: dict, ddir: Path, *, pane: bool = False) -> str:
     also holds the agent's own work, so only a caller that knows the agent
     never replied asks for it; the reply and wall checks elsewhere read the
     log alone."""
-    log = Path(d.get("log_path") or ddir / "output.log")
+    log = log_path(d, ddir)
     text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
     if not pane:
         return text

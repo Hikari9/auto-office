@@ -22,10 +22,14 @@ from office.util import dumps, now_iso, sha256_bytes
 # is one part of a hyphen/underscore compound identifier (`send-keys`, `send_keys`,
 # `release-notes`) names a thing, not the action, so it does not count; `--prod` and
 # `force-push` still do.
-# `send` followed by an all-caps compound protocol word (`send READY-FOR-LIVE`), `it`/`back`,
-# or a report/status/summary/reply/review is a message to the orchestrator, not an external action.
-_SEND = (r"send(?!\s+(?:(?-i:[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+)\b|it\b|back\b"
-         r"|(?:the|a|an|your)\s+(?:report|result|status|summary|reply|review)\b))")
+# A `send` addressed to the orchestrator is a report, not an external action: `send <it | the
+# report/result/status/summary/reply/review> [back] to the orchestrator/Office`, or an all-caps
+# compound protocol word (`send READY-FOR-LIVE again`) with no other recipient in the clause.
+# Anything sent to anyone else (`send it to all members`, `send NEWSLETTER_2026 to members`) counts.
+_OFFICE_NAME = r"(?:the\s+)?(?:orchestrator|office)\b"
+_TO_OFFICE = r"to\s+" + _OFFICE_NAME
+_SEND = (r"send(?!\s+(?:(?:it|(?:the|a|an|your)\s+(?:report|result|status|summary|reply|review))(?:\s+back)?\s+"
+         + _TO_OFFICE + r"|(?-i:[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+)\b(?![^.;\n]*\bto\s+(?!" + _OFFICE_NAME + r"))))")
 AUTHORITY_TERMS = re.compile(
     r"\b(?<!\w-)(?:deploy|production|prod|publish|release|" + _SEND + r"|email|notify users|delete|drop table|truncate|"
     r"force.?push|merge (?:to|into) main|migrat(?:e|ion) (?:prod|production)|payment|charge|"

@@ -39,6 +39,27 @@ def _git(wt: Path, *args: str) -> str:
     return paths.git(wt, *args, check=False)
 
 
+def _restack_unmerged(run: dict, wt: Path, restack: dict, res) -> list[str]:
+    """Fix items for dependencies Office's restack could not merge (its merge conflicted and
+    was aborted), whether or not this is a fix round: every one still missing from HEAD."""
+    conflict = restack.get("conflict") or {}
+    if not conflict.get("commit"):
+        return []
+    from office import gates
+    head = _git(wt, "rev-parse", "HEAD")
+    out = []
+    for dep in restack.get("unmerged") or [conflict]:
+        sha = dep.get("commit") or ""
+        if subprocess.run(["git", "-C", str(wt), "cat-file", "-e", f"{sha}^{{commit}}"], capture_output=True).returncode:
+            res.lines.append(f"restack: dependency commit {sha[:12]} ({dep.get('task')} {dep.get('revision')}) is not in "
+                             "this repository; ask the orchestrator")
+            continue
+        if not head or not gates._is_ancestor(run, sha, head):
+            out.append(f"restack: merge {dep.get('task')} {dep.get('revision')} into this worktree (git merge {sha}); "
+                       "Office's restack conflicted. Resolve, commit, rerun the checks")
+    return out
+
+
 def _packet(run: dict, d: dict) -> dict:
     try:
         return json.loads((paths.run_dir(run["id"]) / "dispatches" / d["id"] / "packet.json").read_text())
@@ -477,19 +498,12 @@ def preflight(con, run: dict, cwd: Path) -> Result:
         else:
             fix.append(f"amendment: {a['amendment_id']} is delivered to you but not acknowledged: apply it, then "
                        f"office ack {a['amendment_id']}")
+    fix += _restack_unmerged(run, wt, packet.get("restack") or {}, res)
     if packet.get("fix_of"):
         rows = con.execute("SELECT code, severity, location, summary FROM findings WHERE run_id=? AND task_id=? "
                            "AND " + contract.TASK_WORK_FINDINGS + " ORDER BY created_at", (run["id"], task["id"])).fetchall()
         res.lines += [f"finding: {r['code']} [{r['severity']}] {r['location'] or ''} {r['summary']}" for r in rows]
         restack = packet.get("restack") or {}
-        conflict = restack.get("conflict") or {}
-        if conflict.get("commit") and subprocess.run(
-                ["git", "-C", str(wt), "merge-base", "--is-ancestor", conflict["commit"], "HEAD"],
-                capture_output=True).returncode != 0:
-            # Office's restack merge conflicted and was aborted; until the worker makes that
-            # merge, submitting would ship work built on the superseded dependency (review F4).
-            fix.append(f"restack: merge {conflict.get('task')} {conflict.get('revision')} into this worktree first "
-                       f"(git merge {conflict['commit']}); Office's merge conflicted. Resolve, commit, rerun the checks")
         if restack.get("merged") or restack.get("conflict"):
             # A restack-only round (`office rerun` after a dependency moved) is work of its own:
             # the merged dependency must be built, checked and resubmitted (#331).

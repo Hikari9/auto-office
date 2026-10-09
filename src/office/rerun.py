@@ -123,13 +123,16 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
         return None
     env = {**os.environ, **paths.commit_identity_env(wt)}
     merged = []
-    for dep, rev_id, sha in pending:
+    for i, (dep, rev_id, sha) in enumerate(pending):
         proc = subprocess.run(["git", "-C", str(wt), "merge", "--no-edit", "-m",
                                f"office: restack {task['id']} onto {dep} {rev_id}\n\n{paths.office_trailer(run['id'])}", sha],
                               capture_output=True, text=True, env=env)
         if proc.returncode != 0:
             subprocess.run(["git", "-C", str(wt), "merge", "--abort"], capture_output=True)
+            # Every dependency still to merge, the conflicting one first: the executor makes all of them.
+            unmerged = [{"task": t, "revision": r, "commit": c} for t, r, c in pending[i:]]
             return {"base": None, "merged": merged, "conflict": {"task": dep, "revision": rev_id, "commit": sha},
+                    "unmerged": unmerged,
                     "line": f"restack onto {dep} {rev_id} conflicts; the executor merges {sha[:7]} first"}
         merged.append({"task": dep, "revision": rev_id, "commit": sha})
     base = merged[-1]["commit"] if len(task["depends"]) == 1 else None

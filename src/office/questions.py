@@ -148,9 +148,12 @@ def parse(text: str | None, *, status: str | None = None, busy: bool | None = No
 
 # A worker's closing status line names its next step: `... SUBMIT=not attempted NEXT=Answer Q1 ...`.
 _NEXT = re.compile(r"\bNEXT=(.+)$")
-# Only a NEXT that opens with a request to the orchestrator asks it something; a bare
-# question id elsewhere ("Q1 was resolved by the brief") does not.
-_ASKS = re.compile(r"^\W*(?:answer|approve|authori[sz]e|confirm|decide|choose|tell me)\b", re.I)
+# A NEXT asks the orchestrator something when it opens with a request (answer, approve,
+# decide...) or names a question id together with an answer/approval/decision ("await
+# orchestrator answer to Q1", "need approval on Q1"). A bare id ("Q1 was resolved") does not.
+_ASK_WORD = r"(?:answer|approv(?:e|al)|authori[sz](?:e|ation)|confirm(?:ation)?|decid(?:e|ing)|decision|choose|choice|tell me|reply)"
+_ASKS = re.compile(r"^\W*" + _ASK_WORD + r"\b|\b" + _ASK_WORD + r"\b[^;]*\bQ\d+\b|\bQ\d+\b[^;]*\b" + _ASK_WORD + r"\b",
+                   re.I)
 _QUESTION_LINE = re.compile(r"\bQ\d+\b|\bquestion\b", re.I)
 ENDED_PREFIX = "worker ended on a question: "
 

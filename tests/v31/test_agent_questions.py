@@ -134,3 +134,35 @@ def test_a_crashed_worker_whose_last_line_is_a_question_is_still_relaunched(env)
     env.office("dispatch", "T1", check=0)
     t = task_row(env)
     assert not (t["pause_reason"] or "").startswith(questions.ENDED_PREFIX), t
+
+
+def test_a_next_naming_a_question_with_an_answer_or_approval_still_asks():
+    # Review #446 F7.
+    assert questions.final_question("Stopped.\nTASK=T1 SUBMIT=not attempted NEXT=await orchestrator answer to Q1\n")
+    assert questions.final_question("Stopped.\nTASK=T1 SUBMIT=not attempted NEXT=need approval on Q1\n")
+    assert questions.final_question("Stopped.\nTASK=T1 SUBMIT=not attempted NEXT=rerun checks; Q1 was resolved\n") is None
+
+
+@pytest.mark.approved
+def test_a_tail_cut_mid_line_never_supplies_the_question(env):
+    # Review #446 F9: the first line of a partial tail is a fragment.
+    from conftest import approved_run
+    from office import dispatch, paths, state
+    approved_run(env)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    ddir = paths.run_dir(run["id"]) / "dispatches" / "Dcut"
+    ddir.mkdir(parents=True, exist_ok=True)
+    tail = "TASK=T1 SUBMIT=not attempted NEXT=Answer Q1 about b.ts\n"
+    line = "Question (Q9): an old question that is cut?\n"
+    body = "x" * 20000 + "\n" + line + "y\n" * ((16384 - len(tail) - 10) // 2) + tail
+    (ddir / "output.log").write_text(body)
+    q = dispatch._ended_on_question(run, {"id": "Dcut", "log_path": str(ddir / "output.log")})
+    assert q and q["question"].startswith("Answer Q1"), q  # never the cut "...is cut?" fragment
+
+
+def test_the_brief_reports_exactly_the_deliveries_it_renders():
+    # Review #446 F8: brief-deliveries.json comes from the brief's own query.
+    import inspect
+    from office import briefs
+    assert "carried" in inspect.signature(briefs.worker_brief).parameters

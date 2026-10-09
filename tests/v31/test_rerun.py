@@ -239,12 +239,13 @@ def test_revoking_one_dispatch_stops_only_that_dispatch(env, monkeypatch):
     # Run 330605a8: `office revoke <dispatch>` also killed the task's other live session.
     _setup(env, monkeypatch, session=None)
     con, run, first = _launching(env, monkeypatch)
-    con.execute("UPDATE dispatches SET status='running', launcher='external' WHERE id=?", (first,))
-    con.commit()
     from office import db, dispatch
+    # Two live sessions can no longer be requested; build the state the bug left behind.
+    con.execute("UPDATE outbox SET status='done' WHERE dedup_key=?", (f"launch:{first}",))
+    con.commit()
     with db.transaction(con):
         second = dispatch.request_launch(con, run, "T1", role="executor")
-    con.execute("UPDATE dispatches SET status='running', launcher='external' WHERE id=?", (second,))
+    con.execute("UPDATE dispatches SET status='running', launcher='external' WHERE id IN (?,?)", (first, second))
     con.commit()
     stopped = []
     monkeypatch.setattr(dispatch, "stop_dispatch", lambda run, d, notes=None: stopped.append(d["id"]) or True)
@@ -260,8 +261,12 @@ def test_rerun_refuses_while_a_non_current_session_of_the_task_is_live(env, monk
     _setup(env, monkeypatch, session=None)
     con, run, older = _launching(env, monkeypatch)
     from office import db, dispatch, rerun
+    # Two sessions can no longer be requested; build the state an older bug left behind.
+    con.execute("UPDATE outbox SET status='done' WHERE dedup_key=?", (f"launch:{older}",))
+    con.commit()
     with db.transaction(con):
         current = dispatch.request_launch(con, run, "T1", role="executor")
+    con.execute("UPDATE outbox SET status='queued' WHERE dedup_key=?", (f"launch:{older}",))
     con.execute("UPDATE dispatches SET status='exited', ended_at=started_at, terminal_classification='success' "
                 "WHERE id=?", (current,))
     con.commit()
@@ -319,3 +324,42 @@ def test_an_amendment_made_while_launching_is_confirmed_from_the_brief(env, monk
     (ddir / "launch.json").write_text(_json.dumps({"prompt_landed": True}))
     (ddir / "brief-deliveries.json").write_text(_json.dumps(["dl1"]))
     assert amend.confirm_launch_deliveries(con, run) == 1
+
+
+@pytest.mark.approved
+def test_revoke_leaves_a_claimed_launch_to_finish_instead_of_orphaning_its_agent(env, monkeypatch):
+    # Review #446 F2/F3: cancelling under a launch job that is already starting the agent left
+    # an agent nothing tracked.
+    _setup(env, monkeypatch, session=None)
+    con, run, did = _launching(env, monkeypatch)
+    con.execute("UPDATE outbox SET status='claimed' WHERE dedup_key=?", (f"launch:{did}",))
+    con.commit()
+    from office import dispatch, state
+    res = dispatch.revoke(con, run, "T1", "test")
+    assert state.get_dispatch(con, did)["status"] == "launching", res.lines
+    assert any(did in ln and "starting its agent" in ln for ln in res.lines), res.lines
+
+
+@pytest.mark.approved
+def test_cancel_never_ends_a_dispatch_that_recorded_its_launch_since_the_snapshot(env, monkeypatch):
+    _setup(env, monkeypatch, session=None)
+    con, run, did = _launching(env, monkeypatch)
+    from office import dispatch, state
+    stale = state.get_dispatch(con, did)
+    con.execute("UPDATE dispatches SET status='running', launcher='process', pid=1 WHERE id=?", (did,))
+    con.commit()
+    assert dispatch._cancel_pending_launch(con, run, stale, "test") is False
+    assert state.get_dispatch(con, did)["status"] == "running"
+    assert con.execute("SELECT status FROM outbox WHERE dedup_key=?", (f"launch:{did}",)).fetchone()[0] == "queued"
+
+
+@pytest.mark.approved
+def test_request_launch_refuses_a_second_executor_session(env, monkeypatch):
+    # Review #446 F4: amend and auto-relaunch reach request_launch directly.
+    _setup(env, monkeypatch, session=None)
+    con, run, did = _launching(env, monkeypatch)
+    from office import db, dispatch
+    with pytest.raises(dispatch.Refused) as err:
+        with db.transaction(con):
+            dispatch.request_launch(con, run, "T1", role="executor")
+    assert did in err.value.message
