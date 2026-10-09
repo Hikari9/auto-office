@@ -73,6 +73,7 @@ Auto Office {ver}
   office prune [--run <id>]         show finished runs that office prune -f would remove
 
 Global flags: --run <id>, --json, --verbose. Every command ends with `next:`.
+Principles: MANIFESTO.md. Operating contract: SKILL.md and docs/review-convergence.md.
 """
 
 SUBMIT_HELP = """\

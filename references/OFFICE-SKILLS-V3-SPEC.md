@@ -1,5 +1,7 @@
 # office-skills v3 — Adaptive Office Runtime Specification
 
+> **Historical, reference-only (3.0 era).** This document explains where rules came from. It is not current operational policy: where it disagrees, `MANIFESTO.md`, then the runtime and `docs/review-convergence.md`, then the active skills win. In particular, plan review is initial-only (#418), independent review is per lane plus a risk- or shared-outcome-triggered integrated review (#337, #422), and a round-cap waiver never becomes APPROVED and is not landing authority (#423).
+
 **Status:** Proposed rewrite  
 **Scope:** `auto-office` v3  
 **Supersedes:** the design intent of the existing v3 Wayfinder map if this document is ratified  
