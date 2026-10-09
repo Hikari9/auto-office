@@ -105,6 +105,11 @@ def test_issue_only_publisher_deduplicates_and_redacts(env,monkeypatch):
         return "https://github.com/Hikari9/auto-office/issues/999\n"
     monkeypatch.setattr(bugwatch,"_gh",fake)
     assert bugwatch.publish(incident,report).endswith("/999")
+    assert len(calls)==2 and not any("pr" in c or "push" in c for call in calls for c in call)
+    calls.clear()
+    monkeypatch.setattr(bugwatch,"_gh",lambda *a:json.dumps([[{"title":"different",
+                    "body":"<!-- auto-self-improve:"+"a"*64+" -->", "html_url":"https://github.com/Hikari9/auto-office/issues/999"}]]))
+    assert bugwatch.publish(incident,report).endswith("/999")
 
 
 def test_dedup_searches_later_pages_and_ignores_pull_requests(monkeypatch):
@@ -118,11 +123,6 @@ def test_dedup_searches_later_pages_and_ignores_pull_requests(monkeypatch):
         ])
     monkeypatch.setattr(bugwatch, "_gh", gh)
     assert bugwatch.publish({"fingerprint": fingerprint}, {"title": "defect"}) == "closed-issue-url"
-    assert len(calls)==2 and not any("pr" in c or "push" in c for call in calls for c in call)
-    calls.clear()
-    monkeypatch.setattr(bugwatch,"_gh",lambda *a:json.dumps([[{"title":"different",
-                    "body":"<!-- auto-self-improve:"+"a"*64+" -->", "html_url":"https://github.com/Hikari9/auto-office/issues/999"}]]))
-    assert bugwatch.publish(incident,report).endswith("/999")
 
 
 def test_pruneable_details_not_needed_for_retry(env):
