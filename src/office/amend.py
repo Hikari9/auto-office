@@ -7,6 +7,8 @@ A newer amendment supersedes an older unapplied one.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import re
 import uuid
@@ -76,11 +78,34 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
                           "or requirements revision follows the plan-review cycle (reviewed while it is open, never "
                           "after it closes)", scope=scope, preserved="plan unchanged",
                           next_step="rerun without --no-review (office amend --help)")
+    if (requirements or scope == "requirements") and any((edits or {}).values()):
+        raise Usage("edits-are-not-requirements", "structured contract edits are not a requirements change; "
+                    "amend the task contract and the requirements separately", next_step=EDIT_FORM)
     if requirements or scope == "requirements":
         to = [] if scope == "requirements" else _scope_ids(con, run, scope)
         return _requirements_change(con, run, delta, quote, drop_criteria or [], add_criteria or [], to)
-    scope_ids = _scope_ids(con, run, scope)
     plan_path = _orchestrator_plan_path(con, run, cwd)
+    with _draft_lock(plan_path if any((edits or {}).values()) else None):
+        return _amend_plan(con, run, scope, delta, contract, redirect, plan_path, no_review, reason, edits)
+
+
+@contextlib.contextmanager
+def _draft_lock(plan_path: Path | None):
+    """Serialize amendments that rewrite the plan draft, so a second one reads the first one's edit
+    instead of overwriting it with a stale copy."""
+    if plan_path is None:
+        yield
+        return
+    with open(plan_path.parent / ".amend.lock", "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _amend_plan(con, run, scope, delta, contract, redirect, plan_path, no_review, reason, edits) -> Result:
+    scope_ids = _scope_ids(con, run, scope)
     plan_text = planfile.strip_generated(plan_path.read_text(encoding="utf-8")) if plan_path else None
     edits = {k: v for k, v in (edits or {}).items() if v}
     original = plan_path.read_text(encoding="utf-8") if plan_path and edits else None
@@ -359,6 +384,7 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
                     (run["id"], version, "contract", text, dumps(parsed.tasks), dumps(parsed.requirements), author,
                      now_iso(), sha256_bytes(text.encode()), run["plan_version"], amendment_id))
         before = _snapshot(con, run)
+        prior_graph = {t["id"]: t["depends"] for t in state.tasks(con, run["id"])}
         sync = plans.sync_tasks(con, run, parsed.tasks, version)
         _audit(con, run, amendment_id, before, version, delta)
         _sync_leases(con, run, sync["contract"])
@@ -367,12 +393,12 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
         plans.apply_run_checks(con, run, parsed.run_checks)
         run = state.get_run(con, run["id"])
         affected = set(scope_ids) | set(sync["contract"]) | set(sync["acceptance"])
-        # A changed scope or interface reaches the work built on it: its dependants are reopened too.
-        graph = {t["id"]: t["depends"] for t in state.tasks(con, run["id"])}
-        for tid in sync["contract"]:
-            affected |= planfile.dependants(graph, tid)
+        ripple = _ripple(con, run, prior_graph, sync)
+        affected -= set(ripple)
         affected = sorted(affected)
         _deliver(con, run, amendment_id, affected, delta.strip(), version)
+        _deliver(con, run, amendment_id, ripple, f"{delta.strip()} (a task you build on changed its contract)", version,
+                 hold=ripple)
         flagged = _envelope_changes(con, run, parsed)
         from office import contract
         if contract.is_convergence(run):
@@ -430,10 +456,26 @@ def _require_contract_edit(con, run: dict, scope_ids: list[str], delta: str, tex
                       f'office amend {",".join(changed)} --contract -- "<summary>"')
 
 
-def contract_from_planner(con, run: dict, amendment_id: str | None, changes: dict, version: int) -> None:
+def _ripple(con, run: dict, prior_graph: dict, sync: dict) -> list[str]:
+    """The tasks built on one whose scope or interface just changed: dependants in the old plan or the new one
+    (an edit that drops the edge still changed what the dependant built on), minus the changed tasks. Caller holds tx."""
+    graph = {t["id"]: t["depends"] for t in state.tasks(con, run["id"])}
+    out: set[str] = set()
+    for tid in sync["contract"]:
+        out |= planfile.dependants(graph, tid) | planfile.dependants(prior_graph, tid)
+    return sorted(out - set(sync["contract"]) - set(sync["acceptance"]) - set(sync["cancelled"]))
+
+
+def contract_from_planner(con, run: dict, amendment_id: str | None, changes: dict, version: int,
+                          prior_graph: dict | None = None) -> None:
     """Deliver a planner-submitted contract revision. Caller holds tx."""
+    aid = amendment_id or "P" + str(version)
     affected = sorted(set(changes.get("contract", [])) | set(changes.get("acceptance", [])))
-    _deliver(con, run, amendment_id or "P" + str(version), affected, f"plan p{version} contract revision", version)
+    _deliver(con, run, aid, affected, f"plan p{version} contract revision", version)
+    ripple = _ripple(con, run, prior_graph or {}, changes)
+    _deliver(con, run, aid, ripple, f"plan p{version} contract revision (a task you build on changed its contract)",
+             version, hold=ripple)
+    _sync_leases(con, run, changes.get("contract", []))
     for t in state.tasks(con, run["id"]):
         if t["status"] == "paused" and (t.get("pause_reason") or "").startswith("contract amendment"):
             from office import gates
@@ -534,9 +576,12 @@ def _record(con, run, klass, scope_ids, delta, from_v, to_v) -> str:
     return amendment_id
 
 
-def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, target_version: int) -> list[str]:
+def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, target_version: int,
+             hold: list[str] = ()) -> list[str]:
     """Queue one combined delta per affected dispatched task and supersede older
-    unapplied ones. Caller holds tx."""
+    unapplied ones. A task in `hold` is built on a task being redone: it gets the delta and is reopened, but no
+    executor is relaunched until the orchestrator reruns it (office rerun), after the dependency is accepted again.
+    Caller holds tx."""
     from office import dispatch, gates
     targets = []
     for tid in task_ids:
@@ -571,6 +616,13 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
         elif task["status"] in ("planned",):
             # Nothing has run: the first session starts from the current contract.
             con.execute("UPDATE deliveries SET status='superseded', superseded_by='relaunch' WHERE id=?", (did,))
+        elif tid in hold:
+            if task["status"] != "accepted":
+                state.update_task(con, run["id"], tid, status="changes_required",
+                                  pause_reason=f"waiting for the amended task(s) it depends on ({amendment_id})")
+            else:
+                state.update_task(con, run["id"], tid, pause_reason=f"amended by {amendment_id}; rerun after its "
+                                  "dependency is accepted again")
         else:
             # The worker is gone. The relaunched session starts from the current contract, but an ordinary
             # delta is not in the contract and a reopened task has no findings: hand the delivery to the new

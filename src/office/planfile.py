@@ -495,7 +495,9 @@ def edit_task(text: str, task_id: str, *, add_accept=(), drop_accept=(), add_che
     for key, value in (set_fields or {}).items():
         if key not in EDIT_SET_KEYS:
             raise ValueError(f"cannot set {key!r}; settable keys are {', '.join(EDIT_SET_KEYS)}")
-        edits[key] = [f"{key}: {value.strip() or 'none'}"]
+        if not value.strip():
+            raise ValueError(f"--set {key} needs a value; write `none` to clear it")
+        edits[key] = [f"{key}: {value.strip()}"]
     block = lines[start + 1:end]
     for key, new in edits.items():
         out, i, placed = [], 0, False
