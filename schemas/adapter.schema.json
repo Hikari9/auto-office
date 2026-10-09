@@ -38,6 +38,19 @@
     "model_source": {
       "type": "object"
     },
+    "preflight": {
+      "type": "object",
+      "properties": {
+        "model_check": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "auth_check": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
     "effort_mapping": {
       "type": "object"
     },

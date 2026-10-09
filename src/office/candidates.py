@@ -431,13 +431,30 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
     }
 
 
-def declared_decision(text: str, *, flag: str = "--as") -> dict:
-    """A routing decision for a user-declared `harness/model[@effort]`."""
-    from office.state import Usage
+def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
+                      config: dict | None = None) -> dict:
+    """A routing decision for a user-declared `harness/model[@effort]`.
+
+    A user override bypasses the registry, trust and floors, but not what the
+    harness can do: with `role`, the declared route must satisfy that role's
+    `required_capabilities` (the same gate routed candidates clear at selection),
+    so a builder-only harness is never dispatched as a planner or reviewer."""
+    from office.state import Refused, Usage
     want = parse_route_override(text)
     if not want["harness"] or not want["model_id"]:
         raise Usage("invalid-override", f"{flag} {text!r}: expected <harness>/<model>[@effort]")
     cand = declared_candidate(want["harness"], want["model_id"], want["effort"])
+    if role:
+        required = set(role_policy(config or {}, role).get("required_capabilities") or [])
+        missing = sorted(required - set(cand.get("capabilities") or []))
+        if missing:
+            raise Refused(
+                "capability-missing",
+                f"{flag} {text!r}: {want['harness']} declares capabilities {cand.get('capabilities') or []}, "
+                f"which lacks {missing} that role {role} requires",
+                scope=role,
+                next_step=f"use a route whose harness declares {', '.join(missing)} for {role}",
+            )
     triple = routing.candidate_id(cand)
     return {"status": "selected", "selected": triple, "candidate": cand, "override": True,
             "selection_disclosure": {"triple": triple, "reason": f"user override ({flag} {text})", "override": True},
@@ -514,8 +531,9 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                exclude: set[str] | None = None, probe: bool = True, exact: str | None = None,
                dispatch_kind: str = "fresh", wave_load: dict | None = None, pending_explorations: int = 0,
                quota_snapshot: dict[str, dict] | None = None,
-               quota_event_seen: set[str] | None = None) -> dict:
+               quota_event_seen: set[str] | None = None, declared: str | None = None) -> dict:
     """Build the request and route. Returns the routing result plus request.
+    `declared` is a user-declared route identity that passes unverified adapter trust.
     `exact` keeps only the candidate with that route identity (harness@major/model@effort).
     Executor and worker requests carry the adaptive inputs (#300); `wave_load`
     counts routes already planned for other tasks of the same wave."""
@@ -588,6 +606,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "benchmark_snapshot": snapshot,
         "candidates": candidates,
     }
+    if declared:
+        request["declared_route"] = declared
     if role in routing.ADAPTIVE_ROLES:
         request.update(adaptive_inputs(con, config, run, role, candidates, task_id=task_id,
                                        dispatch_kind=dispatch_kind, plan_version=run.get("plan_version"),

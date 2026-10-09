@@ -435,7 +435,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                 decision = candidates.route_role(con, state.pinned_config(run), run, role,
                                                  task_id=gate.get("task_id"), exclude=excluded)
         elif pinned:
-            decision = candidates.declared_decision(pinned["as"], flag="--review-as")
+            decision = candidates.declared_decision(pinned["as"], flag="--review-as", role=role,
+                                                    config=state.pinned_config(run))
             decision["launch"] = {k: pinned[k] for k in ("cli", "external") if pinned.get(k)}
         else:
             decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),

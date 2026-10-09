@@ -37,7 +37,7 @@ and up to two fallbacks, each with a reason, one strength and one weakness.
 - **Dispatch:** re-checks live quota, trust and learned eligibility, runs the planned primary, and falls back in
   the recorded order only when fresh evidence rules a route out, naming why. It never runs an unplanned route: an
   exhausted slate stops, and `office dispatch <task> --reroute` routes from current evidence.
-- **Rerun and effective route (#426):** the task records the route it runs; a rerun or redispatch keeps it, and `office rerun <task> --fresh --reroute` routes again. Any swap logs a `route.changed` event (old, new, reason, actor, time); `office amend route <task> --as <h>/<m>[@e] --quote ".."` declares a pending task's route (no fallback) or re-records a live one. See `protocol/routing.md`.
+- **Rerun and effective route (#426):** the task records the route it runs; a rerun or redispatch keeps it, and `office rerun <task> --fresh --reroute` routes again. Any swap logs a `route.changed` event (old, new, reason, actor, time); `office amend route <task> --as <h>/<m>[@e] --quote ".."` declares a pending task's route (no fallback; redispatch waives only unverified adapter trust; quarantine and every later routing stage, floors included, still apply, unlike a first `--as`) or re-records a live one. See `protocol/routing.md`.
 - **Learner:** attributes failures (route, plan, environment, reviewer, mixed, unknown) before learning, decays
   stale evidence, and changes learned eligibility only after maturity plus a held-out replay. It cannot change
   success definitions, attribution rules, factual gates or trust acts.
