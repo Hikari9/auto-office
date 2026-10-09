@@ -397,25 +397,40 @@ def _entry_problem(entry: str) -> str | None:
     return None
 
 
-_FILE_NAME = re.compile(r"(?i)^(?:[a-z0-9_-]*file|license|licence|readme|changelog|codeowners|notice|authors|owners)$")
-_DOT_DIRS = {".github", ".gitlab", ".vscode", ".idea", ".husky", ".changeset", ".devcontainer", ".circleci", ".config",
-             ".storybook", ".cargo", ".yarn", ".turbo", ".next", ".claude", ".codex", ".office"}
+# Suffixless names that are conventionally files wherever they sit.
+_BUILD_FILES = {"makefile", "gnumakefile", "dockerfile", "containerfile", "procfile", "jenkinsfile", "gemfile",
+                "rakefile", "brewfile", "vagrantfile", "justfile", "podfile", "fastfile", "appfile", "caddyfile",
+                "pipfile", "snakefile", "earthfile", "tiltfile", "taskfile"}
+# Root-level, all-caps suffixless names that are conventionally files (README, LICENSE, ...).
+_ROOT_DOC_FILES = {"README", "LICENSE", "LICENCE", "COPYING", "AUTHORS", "CHANGELOG", "NOTICE", "CODEOWNERS",
+                   "OWNERS", "CONTRIBUTORS", "VERSION", "HISTORY"}
+# Dot-names that are files (dotfiles); any other dot-name is treated as a directory.
+_DOT_FILES = {".gitignore", ".gitattributes", ".gitmodules", ".npmrc", ".yarnrc", ".nvmrc", ".node-version",
+              ".python-version", ".ruby-version", ".tool-versions", ".editorconfig", ".prettierrc", ".prettierignore",
+              ".eslintrc", ".eslintignore", ".stylelintrc", ".babelrc", ".browserslistrc", ".dockerignore", ".env",
+              ".envrc", ".mailmap", ".htaccess", ".markdownlint", ".mocharc", ".swcrc", ".vercelignore"}
 
 
 def entry_is_dir(bare: str) -> bool:
     """Whether a scope or shared entry (without `+`) names a directory. Without the
     filesystem this is a naming rule that errs toward directory, the safe side for
-    sharing: a trailing `/` or `**`; a dot-directory (`.github`) or `*.d` name; any
-    suffixless name except conventional files (`Makefile`, `Dockerfile`, `LICENSE`).
-    `*.json` globs and suffixed names are files."""
+    sharing (a shared directory must be ordered; a shared file may run in parallel):
+    a trailing `/` or `**`, a `*.d` name, any dot-name that is not a known dotfile
+    (`.github`, `public/.well-known`), and any suffixless name except known build files
+    (`Makefile`, `docker/Dockerfile`) and root-level all-caps docs (`README`, `LICENSE`).
+    `*.json` globs and other suffixed names are files."""
     if bare.endswith("/") or "**" in bare:
         return True
     last = bare.rsplit("/", 1)[-1]
     if last.startswith("."):
-        return last.lower() in _DOT_DIRS or last.endswith(".d")
+        if "." in last[1:]:
+            return last.endswith(".d")  # .env.local, .eslintrc.json
+        return last.lower() not in _DOT_FILES
     if "." in last:
         return last.endswith(".d")
-    return not _FILE_NAME.match(last)
+    if last.lower() in _BUILD_FILES:
+        return False
+    return not ("/" not in bare and last in _ROOT_DOC_FILES)
 
 
 def shared_tree(entry: str) -> bool:

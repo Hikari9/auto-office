@@ -277,3 +277,10 @@ def test_an_entry_error_cites_its_own_line():
     line = next(i for i, ln in enumerate(text.splitlines(), start=1) if ln.startswith("shared: vitest"))
     plan = planfile.parse(text)
     assert any(f"(line {line})" in e and "vitest.config.ts (note)" in e for e in plan.errors), plan.errors
+
+
+@pytest.mark.parametrize("entry", ["+src/profile", "+content/authors", "+docs/changelog", "+public/.well-known"])
+def test_suffixless_and_dot_directories_below_the_root_are_directories(entry):
+    # R4-4: these are real directories; classing them as files took their contents out of scope.
+    assert planfile.shared_tree(entry)
+    assert planfile.path_in_scope(entry.lstrip("+") + "/a.md", [entry])

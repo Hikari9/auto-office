@@ -237,3 +237,14 @@ def test_applying_an_answer_is_not_asking_but_waiting_on_one_is():
         assert questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={done}\n") is None, done
     for ask in ("waiting on Q1", "blocked until Q1 is resolved"):
         assert questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={ask}\n"), ask
+
+
+@pytest.mark.parametrize("nxt,asks", [
+    ("please answer Q1 so I can continue", True), ("orchestrator to answer Q1", True),
+    ("Q1 needs an answer", True), ("get approval for Q3", True),
+    ("no longer waiting on Q1, implement and submit", False),
+])
+def test_ask_forms_tied_to_a_question_id_and_negated_waits(nxt, asks):
+    # R4-3.
+    q = questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={nxt}\n")
+    assert bool(q) is asks, (nxt, q)

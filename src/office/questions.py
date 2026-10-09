@@ -190,9 +190,25 @@ _NEXT = re.compile(r"\bNEXT=(.+)$")
 _ASK_WORD = r"(?:answer|approv(?:e|al)|authori[sz](?:e|ation)|confirm(?:ation)?|decid(?:e|ing)|decision|choose|choice|tell me|reply)"
 # Waiting on a question id asks too; applying an answer or decision already given does not.
 _WAITING = r"(?:await(?:ing|s)?|wait(?:ing|s)?\s+(?:on|for)|needs?|blocked\s+(?:on|until|by)|pending)"
-_ASKS = re.compile(r"^\W*" + _ASK_WORD + r"\b|\b" + _WAITING + r"\b[^;]*\bQ\d+\b", re.I)
+_QID = r"\bQ\d+\b"
+_NEEDED = r"(?:an?\s+)?(?:answer|approval|decision|confirmation|reply|choice)"
+_ASKS = re.compile("|".join([
+    r"^\W*" + _ASK_WORD + r"\b",                                                   # "Answer Q1 ..."
+    r"\bplease\s+" + _ASK_WORD + r"\b[^;]*" + _QID,                                # "please answer Q1"
+    r"\b(?:to|get|need|needs|request|requires?)\s+" + _NEEDED + r"\b[^;]*" + _QID,  # "get approval for Q3"
+    r"\b(?:orchestrator|office|you|user)\s+to\s+" + _ASK_WORD + r"\b[^;]*" + _QID,  # "orchestrator to answer Q1"
+    _QID + r"[^;]*\b(?:needs?|requires?|awaits?|waiting\s+(?:on|for))\s+" + _NEEDED + r"\b",  # "Q1 needs an answer"
+    r"\b" + _WAITING + r"\b[^;]*" + _QID,                                           # "waiting on Q1"
+]), re.I)
+# "no longer waiting on Q1", "not blocked on Q2": a negated wait reports progress.
+_NEGATED = re.compile(r"\b(?:no\s+longer|not|no)\s+(?:\w+\s+)?" + _WAITING + r"\b", re.I)
 _QUESTION_LINE = re.compile(r"\bQ\d+\b|\bquestion\b", re.I)
 ENDED_PREFIX = "worker ended on a question: "
+
+
+def _asks(nxt: str | None) -> bool:
+    """Whether a closing NEXT asks the orchestrator something; a negated wait is removed first."""
+    return bool(nxt) and bool(_ASKS.search(_NEGATED.sub(" ", nxt)))
 
 
 def final_question(text: str | None) -> dict | None:
@@ -203,7 +219,7 @@ def final_question(text: str | None) -> dict | None:
     if not lines:
         return None
     nxt = next((m.group(1).strip() for ln in reversed(lines[-6:]) if (m := _NEXT.search(ln))), None)
-    if not ((nxt and _ASKS.search(nxt)) or lines[-1].endswith("?")):
+    if not (_asks(nxt) or lines[-1].endswith("?")):
         return None
     # The latest question wins: a log can echo the prompt or an earlier, answered turn.
     asked = next((ln for ln in reversed(lines) if "?" in ln and _QUESTION_LINE.search(ln)), None) \

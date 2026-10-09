@@ -123,3 +123,20 @@ def test_authority_terms_ignore_a_send_to_the_orchestrator(text):
 def test_authority_terms_still_match_external_sends(text):
     from office.amend import AUTHORITY_TERMS
     assert AUTHORITY_TERMS.search(text) is not None, text
+
+
+@pytest.mark.parametrize("text", [
+    "send the status to the orchestrator.", "send it to the orchestrator and stop", "send READY-FOR-LIVE and stop",
+    "send the report to the orchestrator, then run tests and merge", "send the summary to the orchestrator: done",
+])
+def test_a_report_to_the_orchestrator_followed_by_a_next_step_is_exempt(text):
+    # R4-1: sentence ends and new actions after the orchestrator are not other recipients.
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is None, text
+
+
+@pytest.mark.parametrize("text", ["send the report to the office for parents", "send it to the office, members too"])
+def test_an_audience_after_the_office_still_counts(text):
+    # R4-2.
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is not None, text

@@ -30,10 +30,16 @@ from office.util import dumps, loads, now_iso, sha256_bytes
 #   or an all-caps compound protocol word (`send READY-FOR-LIVE again`) whose clause names no
 #   recipient or channel (no to/out/via/over/through/by, no address).
 # Anything else (`send it to all members`, `send NEWSLETTER_2026 out tonight`) counts.
-_CLAUSE_END = r"(?=\s*(?:$|[.;,\n)]|(?:for|when|after|once|before|then|again|now|if)\b))"
-_OFFICE_ONLY = r"(?:the\s+)?(?:orchestrator|office)(?![\w@.-])" + _CLAUSE_END
+# Words that name an audience, not a next action ("and stop" is an action, "and members" is not).
+_AUDIENCE = (r"(?:to|the|all|every\w*|members?|parents?|families|staff|team|users?|customers?|people|volunteers"
+             r"|subscribers|guests|leaders|everyone|anyone)\b")
+# What may follow the orchestrator/Office as recipient: the end of the sentence, a new action
+# (`and stop`, `, then run tests`), or a purpose that is not an audience (`for review`).
+_TAIL_OK = (r"(?=\s*(?:$|[.;:!?\n]|,?\s*(?:and\s+then|then|and|&)\s+(?!" + _AUDIENCE + r")[a-z]+\b"
+            r"|\s+(?:for\s+(?:review|approval|sign-?off|checking|the\s+record)|when\s+done|once\s+done|again|now)\b))")
+_OFFICE_ONLY = r"(?:the\s+)?(?:orchestrator|office)(?![\w@-])" + _TAIL_OK
 _TO_OFFICE = r"to\s+" + _OFFICE_ONLY
-_NO_OTHER = r"(?![^.;\n]*\b(?:and|&|plus|also)\b)(?![^.;\n]*@)"
+_NO_OTHER = r"(?![^.;\n]*@)(?![^.;\n]*\b(?:and|&|plus|also)\s+" + _AUDIENCE + r")"
 _SEND = (r"send(?!\s+(?:(?:it|(?:the|a|an|your)\s+(?:report|result|status|summary|reply|review))(?:\s+back)?\s+"
          + _TO_OFFICE + _NO_OTHER + r"|(?-i:[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+)\b"
          r"(?![^.;\n]*\b(?:out|via|over|through|by|email|sms|text)\b)(?![^.;\n]*\bto\s+(?!" + _OFFICE_ONLY + r"))"
