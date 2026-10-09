@@ -150,6 +150,23 @@ def capture_backend_missing() -> str | None:
     return None
 
 
+def validate_navigate(base_url: str, arg: str, allow_remote_preview: bool = False, reference: bool = False) -> tuple[str | None, str | None]:
+    target = urllib.parse.urljoin(base_url, arg)
+    parsed = urllib.parse.urlsplit(target)
+    if reference:
+        base_parsed = urllib.parse.urlsplit(base_url)
+        if parsed.scheme != base_parsed.scheme or parsed.netloc != base_parsed.netloc:
+            return None, f"navigate leaves reference origin: {target}"
+        return target, None
+    if parsed.scheme.lower() in ("file", "data", "javascript"):
+        return None, f"navigate target {target} scheme {parsed.scheme}: is forbidden"
+    if parsed.scheme.lower() not in ("http", "https"):
+        return None, f"navigate target {target} is not an http(s) url"
+    if not LOCAL_ORIGIN.match(target) and not allow_remote_preview:
+        return None, f"navigate target {target} is not a local/test origin"
+    return target, None
+
+
 def preflight(tasks: list[dict]) -> tuple[list[str], list[str]]:
     """(errors, warnings) for visual blocks the capture step could never
     satisfy. Found at plan submit, not after an executor has done the work (#211)."""
@@ -159,7 +176,8 @@ def preflight(tasks: list[dict]) -> tuple[list[str], list[str]]:
         url = spec.get("url")
         if spec.get("none") or not url:
             continue
-        if not LOCAL_ORIGIN.match(url) and not spec.get("allow_remote_preview"):
+        allow_remote = bool(spec.get("allow_remote_preview"))
+        if not LOCAL_ORIGIN.match(url) and not allow_remote:
             errors.append(f"{t['id']}: visual url {url} is not a local/test origin; capture only runs against local "
                           "servers (serve it locally with `start:`, or set `allow_remote_preview: yes` for a preview)")
         elif not spec.get("start"):
@@ -172,6 +190,10 @@ def preflight(tasks: list[dict]) -> tuple[list[str], list[str]]:
                 verb = step.get("verb", "")
                 if verb and verb not in ALLOWED_VERBS:
                     errors.append(f"{t['id']}: visual state '{st['name']}' uses unknown verb '{verb}'")
+                elif verb == "navigate":
+                    _, err = validate_navigate(url, step.get("arg", ""), allow_remote_preview=allow_remote)
+                    if err:
+                        errors.append(f"{t['id']}: visual state '{st['name']}' invalid navigate: {err}")
     if any(not (t.get("visual") or {}).get("none") and (t.get("visual") or {}).get("url") for t in tasks):
         missing = capture_backend_missing()
         if missing:
@@ -453,7 +475,13 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
         target_url = url
         for step in st["steps"]:
             if step["verb"] == "navigate":
-                target_url = urllib.parse.urljoin(url, step["arg"])
+                target_url, nav_err = validate_navigate(
+                    url, step["arg"],
+                    allow_remote_preview=bool(spec.get("allow_remote_preview")),
+                    reference=reference,
+                )
+                if nav_err:
+                    return {"cause": "spec", "invalid": f"state '{st['name']}' invalid navigate: {nav_err}"}
                 break
         try:
             resp = page.goto(target_url, wait_until="networkidle", timeout=45000)

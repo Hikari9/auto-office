@@ -747,7 +747,7 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
                                        f"{task['id']}: {'; '.join(_failure_text(f) for f in capture)}")
             spec = [f for f in problems if f["cause"] == "spec"]
             if spec:
-                return _visual_blocked(con, run, gate, "COMPARABLE",
+                return _visual_blocked(con, run, gate, SPEC_DEFECT,
                                        f"{task['id']} visual spec defect, not a product failure: "
                                        f"{'; '.join(_failure_text(f) for f in spec)}; the planner corrects the visual: "
                                        "block (amend the plan), or the gate is waived", status=contract.UNAVAILABLE)
@@ -1172,6 +1172,11 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
             if waiting:
                 return (f"{sid} RECHECK repairs wait for you, run them in parallel: "
                         + " ; ".join(f"office rerun {t} --resume|--fresh" for t in waiting))
+        spec_gate = spec_defect_gate(con, run, sid)
+        if spec_gate:
+            return (f"{sid}: amend the plan visual: block (office amend <task> -- \"<fix the visual: block>\"), then office "
+                    f"resume re-runs the capture; the capture reported: {(spec_gate.get('summary') or '')[:300]}; or waive "
+                    "with landing authority (the degraded fallback review does not apply to a plan defect)")
         fb = fallback_gate(con, run, sid)  # the predicate `office review --report` applies
         if fb:
             kind = "visual" if fb["kind"] == "visual" else "convergence"
@@ -1540,6 +1545,9 @@ def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:
     """`office revoke <scope>:<kind>`: cancel a running lane review (#453). Its queued or claimed
     review job is failed and stopped, its reviewer dispatches end, and the gate closes UNAVAILABLE
     with the scope settled, so waive and the fallback review see an ordinary unavailable gate."""
+    # Environment markers are advisory (a worker could unset them), as for waive and decide.
+    if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
+        raise Refused("worker-cannot-revoke", "a producer, planner or reviewer cannot revoke a lane review; the orchestrator does")
     from office import dispatch
     from office.util import claim_signalable
     m = re.fullmatch(r"([LS]-[\w+.-]+):(\w+)", spec.strip())
@@ -1595,26 +1603,37 @@ def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:
 
 
 FALLBACK_STATUSES = (contract.UNAVAILABLE, contract.INVALID_RESULT)
+SPEC_DEFECT = "SPEC_DEFECT"  # a visual gate's evidence state: the plan's visual block cannot be captured (#454)
 # Scope states in which the current composition's review is the one in play (not held, repairing or recomposing).
 FALLBACK_SCOPE_STATUSES = ("reviewing", "unavailable", "attention", "evidence_blocked")
+
+
+def _unreviewed_gates(con, run: dict, scope_id: str) -> list[dict]:
+    """This cycle's done gates of the scope's current composition that no specialist reviewer
+    returned a verdict for and that no waiver covers."""
+    run = state.get_run(con, run["id"])
+    st = scope_state(run, scope_id)
+    commit = st.get("commit")
+    if not commit or st.get("status") not in FALLBACK_SCOPE_STATUSES:
+        return []
+    cycle = int(st.get("cycle") or 1)
+    return [g for g in _latest(con, run, scope_id, commit).values()
+            if g["status"] == "done" and g.get("review_status") in FALLBACK_STATUSES
+            and int(g.get("cycle") or 1) == cycle and not _satisfied(con, run, scope_id, g, commit)]
 
 
 def fallback_gate(con, run: dict, scope_id: str, kind: str | None = None) -> dict | None:
     """The gate the orchestrator may review in a specialist's place: this cycle's gate of
     the scope's current composition that no specialist reviewer returned a verdict for
-    (every route failed, or the last reply was unparseable) and that no waiver covers.
+    (every route failed, or the last reply was unparseable) and that no waiver covers. A
+    visual gate closed on a spec defect is the plan's to fix, never a fallback.
     The `next:` hint and `office review --report` both ask this (#453)."""
-    run = state.get_run(con, run["id"])
-    st = scope_state(run, scope_id)
-    commit = st.get("commit")
-    if not commit or st.get("status") not in FALLBACK_SCOPE_STATUSES:
-        return None
-    cycle = int(st.get("cycle") or 1)
-    for k, g in _latest(con, run, scope_id, commit).items():
-        if ((kind is None or k == kind) and g["status"] == "done" and g.get("review_status") in FALLBACK_STATUSES
-                and int(g.get("cycle") or 1) == cycle and not _satisfied(con, run, scope_id, g, commit)):
-            return g
-    return None
+    return next((g for g in _unreviewed_gates(con, run, scope_id)
+                 if (kind is None or g["kind"] == kind) and g.get("evidence_status") != SPEC_DEFECT), None)
+
+
+def spec_defect_gate(con, run: dict, scope_id: str) -> dict | None:
+    return next((g for g in _unreviewed_gates(con, run, scope_id) if g.get("evidence_status") == SPEC_DEFECT), None)
 
 
 def fallback_review(con, run: dict, spec: str, report: Path, *, inspected: list[str]) -> Result:

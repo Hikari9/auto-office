@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from conftest import PLAN_ONE
 
 from test_adaptive_dispatch import EXTERNAL, _approve, _quota
@@ -105,3 +107,21 @@ def test_apply_routing_refuses_a_run_with_no_repo_on_record(env):
     code, out = env.office("config", "--run", rid[:8], "--apply-routing", "--quote", "x", env=EXTERNAL)
     assert code != 0 and "its repo config cannot be read" in out, out
     assert _seed(_run(env)) == before
+
+
+@pytest.mark.parametrize("worker_env", [
+    {"OFFICE_DISPATCH_ID": "D1", "OFFICE_ROLE": "executor"},
+    {"OFFICE_DISPATCH_ID": "D1"},
+    {"OFFICE_ROLE": "executor"},
+])
+def test_a_worker_cannot_apply_routing_even_with_a_quote(env, worker_env):
+    _approve(env, plan=PLAN_ONE)
+    env.office("config", "roles.executor.preferred_seed", SEED, env=EXTERNAL, check=0)
+    pinned_before = _seed(_run(env))
+    assert pinned_before != [{"model_id": "gpt-6-astra", "harness": "codex", "effort": "low"}]
+    rid = _run(env)["id"]
+    code, out = env.office("config", "--run", rid[:8], "--apply-routing", "--quote", "ok",
+                           env={**EXTERNAL, **worker_env})
+    assert code != 0 and "worker-cannot-apply-routing" in out, out
+    assert _seed(_run(env)) == pinned_before
+    assert env.con().execute("SELECT COUNT(*) FROM events WHERE kind='run.routing_applied'").fetchone()[0] == 0

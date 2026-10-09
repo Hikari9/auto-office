@@ -17,6 +17,7 @@ recorded is still in force; a revoke, a newer dispatch, an amendment or a resubm
 from __future__ import annotations
 
 import hashlib
+import os
 import shlex
 from pathlib import Path
 
@@ -197,6 +198,14 @@ def _message(r: dict, answer: str) -> str:
     return text + "You are unblocked: continue the task and office submit when it is done."
 
 
+def refuse_worker() -> None:
+    """Answering is the orchestrator's authority: a dispatched worker (OFFICE_DISPATCH_ID or OFFICE_ROLE set)
+    cannot answer its own raise or any other. Checked before anything is read or written."""
+    if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
+        raise Refused("worker-cannot-answer", "a worker cannot answer a raise or a question; the orchestrator does",
+                      next_step="stop and wait for the orchestrator's answer")
+
+
 def answer(con, run: dict, d: dict, text: str) -> Result | None:
     """Answer the open raises of dispatch `d`: deliver the text to its worker, mark the raises answered and
     lift the block. None when `d` has no open raise (the caller answers a pane question instead).
@@ -204,6 +213,7 @@ def answer(con, run: dict, d: dict, text: str) -> Result | None:
     A live pane takes the answer as a prompt; a headless or external worker has it queued for its next
     office command, and the result says so. A worker that already ended gets no delivery: the answer is
     recorded, the task stays blocked for `office rerun`, and the next session's brief carries the answer."""
+    refuse_worker()
     opened = open_raises(con, run, dispatch_id=d["id"])
     if not opened:
         return None

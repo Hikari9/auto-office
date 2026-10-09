@@ -66,6 +66,8 @@ Auto Office {ver}
   office review plan --quote "<user's words>" [--rounds N]
                                     the user's explicit request for another plan review (a new bounded cycle)
   office config [<key> [<value>]]   read or set preferences like git config (--list, --unset, --edit, --repo)
+  office config --run <id> --apply-routing --quote "<user's words>"
+                                    re-pin one run's roles and routing from the current config files
   office queue list|add|pause|resume|priority|demote|auto
                                     the machine-level scheduler queue (--run <id> [--task T] for a run)
   office web start|stop|status|serve [--port N] [--fixture small|large]
