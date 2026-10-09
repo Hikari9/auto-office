@@ -623,7 +623,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
             with db.transaction(con):
                 lifecycle.reconcile(con, run)
             jobs.kick(con, run["id"])
-        return guide.status(con, run, verbose=args.verbose)
+        return guide.status(con, run, verbose=args.verbose, probe_panes=True)
     if cmd == "wait":
         from office import guide
         return guide.wait(con, run, timeout=args.timeout, poll=args.poll)
