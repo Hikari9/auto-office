@@ -13,7 +13,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, plans, state
+from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import pid_alive, sha256_obj
@@ -238,6 +238,8 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         if resume or fresh or reroute or as_model or cli or external:
             raise Usage("rerun-mode", "--review re-runs only the reviewer and takes none of --resume, --fresh, "
                         "--reroute, --as, --cli, --external", next_step="office rerun plan --review [--review-as <route>]")
+        from office import plans
+
         with db.transaction(con):
             gid = plans.rerun_review(con, run, pin=pin)
         jobs.kick(con, run["id"])
