@@ -511,6 +511,28 @@ def test_a_waiver_recorded_against_a_commit_before_trees_still_binds_that_commit
     assert not convergence.waiver_for(con, RUN, "L-T1", "visual", "commit-2", "tree-a")
 
 
+def test_a_waiver_finds_the_tree_of_a_commit_in_the_repository_when_none_was_recorded(con, tmp_path):
+    import subprocess
+
+    from office import convergence
+    git = lambda *a: subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", *a],  # noqa: E731
+                                    check=True, capture_output=True, text=True).stdout.strip()
+    git("init", "-q", "-b", "main")
+    (tmp_path / "f").write_text("x")
+    git("add", "f")
+    git("commit", "-qm", "one")
+    first, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+    git("commit", "-q", "--allow-empty", "-m", "same tree, new commit")
+    second = git("rev-parse", "HEAD")
+    run = {"id": "run-1", "repo_root": str(tmp_path)}
+    _waive_row(con, convergence.waiver_target("L-T1", "visual", tree))
+    assert convergence._tree(run, "L-T1", second) == tree
+    assert convergence.waiver_for(con, run, "L-T1", "visual", first) and convergence.waiver_for(con, run, "L-T1", "visual", second)
+    (tmp_path / "f").write_text("y")
+    git("commit", "-qam", "other tree")
+    assert not convergence.waiver_for(con, run, "L-T1", "visual", git("rev-parse", "HEAD"))
+
+
 def _escalate(env):
     adds = [GOOD_ADD + f"# r{i}\n" for i in range(6)]
     _start(env, executor=[{"write": {"calc.py": a}, "submit": True} for a in adds],
@@ -565,3 +587,4 @@ def test_a_waiver_carries_to_a_recomposition_with_an_identical_tree_and_not_to_a
     _reopen(env)
     env.office("rerun", "T1", "--fresh", check=0)
     assert _scope(env)["tree"] != waived_tree and _scope(env)["status"] != "waived"
+    assert len([c for c in env.calls() if c["role"] == "convergence_reviewer"]) == reviewer_calls + 1, "different content is reviewed"
