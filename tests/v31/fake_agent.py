@@ -125,7 +125,7 @@ def _comply_with_self_review(cwd, env, writes, err):
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         err.write(proc.stdout)
         return proc.stdout.strip()
-    git("add", "--", *[w for w in writes if w.endswith(".py")])  # the in-scope source; other writes stay pending
+    git("add", "--", *writes)  # all of it: in-scope work left uncommitted is not covered by the ledger
     if subprocess.run(["git", "commit", "-qm", "work", "--allow-empty"], cwd=str(cwd), env=env,
                       capture_output=True).returncode:  # no identity configured: use a stand-in
         git("-c", "user.email=a@b", "-c", "user.name=w", "commit", "-qm", "work", "--allow-empty")

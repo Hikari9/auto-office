@@ -91,7 +91,10 @@ At lifecycle intake, run `office update --check`; if it reports an update, offer
   `OFFICE_SELF_REVIEW.md` (severity as found; low findings are fixed but do not trigger a re-review; a medium or high fix
   that changes behavior gets one fix-diff re-review and names its test plus `mutation=failed`; 3-round cap;
   `contract-conflict` stops with the ACCEPT line quoted; submit consumes the file), then `office preflight`, which
-  refuses a missing, stale, or open ledger. `office submit` refuses substantive in-scope work with no ledger naming the HEAD it submits (convergence runs; v3.1-pinned runs keep ledger-less submits), records the ledger digest or a typed exemption (`empty`, `read-only`, or an inline-tier `--self-review-exempt trivial|mechanical`) on the revision, and an exemption never weakens independent review. Each ends with one `TASK=... SUBMIT=... NEXT=...` line (saved in `pane-final.txt`); act on its `NEXT=`. A worker
+  refuses a missing, stale, or open ledger. `office submit` refuses substantive in-scope work with no ledger naming the HEAD it submits
+  (convergence runs; v3.1-pinned runs keep ledger-less submits), records the ledger digest or a typed exemption (`empty`, `read-only`, or
+  an inline-tier `--self-review-exempt trivial|mechanical`) on the revision, and an exemption never weakens independent review. Each ends
+  with one `TASK=... SUBMIT=... NEXT=...` line (saved in `pane-final.txt`); act on its `NEXT=`. A worker
   refused as lease-lost, superseded-dispatch, or task-paused is done: never prompt it to retry.
 - Before submitting a plan inline, run the same four lenses over it and put what they surface in tasks' `accept:` criteria. Plan seams, not
   internals (`scope:` is an ownership envelope; `shared:`, `lane:`, `converge:`, `accept_needs:`, `integration_risk: high`): see
