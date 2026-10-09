@@ -23,8 +23,8 @@ Auto Office {ver}
   office start "<goal>"             create a run; queues the planner when policy requires one
   office resume [run]               bind this session to a run and show where it stands
   office status                     what matters now, ending with the next legal action
-  office wait [--timeout S]         block until something needs you (exit 0), a stall (3), an agent's
-                                    question (5), or timeout (124)
+  office wait [--timeout S]         block until something new needs you (exit 0), a stall (3), an agent's
+                                    question (5), or timeout (124); what you were shown already never ends it
   office dispatch <task>... [--parallel]
                                     launch tasks (routing, worktrees, leases are automatic)
   office preflight                  executor: read-only checks before submit (ready|fix|wait|stop)
@@ -53,6 +53,8 @@ Auto Office {ver}
 
   office list                       runs in this repository (--all for every run)
   office inspect [run|task|gate|evidence|events|route|learner|trust|convergence] [id]
+  office decline <X#> --reason "<why>"
+                                    drop an unauthorized authority entry whose action left the plan
   office decide <lane|plan> escalate|continue|waive|stop --quote "<user's words>"
                                     the user's choice once a review spent its 3 RECHECK rounds
   office disposition <scope>:<F-id> fix|fixed|dismissed|follow-up -- "<note>"
@@ -324,6 +326,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--reason", dest="waive_reason", help="waive: why the unmet gate is accepted (required)")
     # Convergence contract (#337): the operator's round-cap decision, finding
     # dispositions, and the orchestrator's degraded fallback review.
+    s = sp.add_parser("decline", parents=[common])
+    s.add_argument("entry", help="the authority entry id (X3) shown as needing authorization")
+    s.add_argument("--reason", help="why the action left the plan")
     s = sp.add_parser("decide", parents=[common])
     s.add_argument("scope", help="a lane (L-T1), shared scope (S-T1+T3), or plan")
     s.add_argument("choice", choices=("escalate", "continue", "waive", "stop"))
@@ -676,6 +681,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         from office import authority
         return authority.approve(con, run, args.target, args.quote, args.extra, root_cause=args.root_cause,
                                  by=args.by, report=args.report, actor=args.actor, reason=args.waive_reason)
+    if cmd == "decline":
+        from office import authority
+        return authority.decline_entry(con, run, args.entry, args.reason)
     if cmd == "decide":
         from office import convergence
         return convergence.decide(con, run, args.scope, args.choice, quote=args.quote, reason=args.reason)

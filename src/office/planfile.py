@@ -82,6 +82,13 @@ def _split_list(value: str) -> list[str]:
     return [v.strip() for v in re.split(r"[,;]", value) if v.strip()]
 
 
+def normalize_scope(entry: str) -> str:
+    """A scope entry ending in `/` names a directory: it means `dir/**` (#334). A glob entry is left as written."""
+    mark = SHARED if entry.startswith(SHARED) else ""
+    body = entry[len(mark):]
+    return f"{mark}{body}**" if body.endswith("/") and not re.search(r"[*?\[]", body) else entry
+
+
 def parse(text: str) -> ParsedPlan:
     text = strip_generated(text)
     plan = ParsedPlan()
@@ -131,10 +138,10 @@ def parse(text: str) -> ParsedPlan:
         if task is not None:
             list_key = key if (not value and key in LIST_KEYS) else None
             if key == "scope":
-                task["scope"] = _split_list(value) + [s for s in task["scope"] if is_shared(s)]
+                task["scope"] = [normalize_scope(p) for p in _split_list(value)] + [s for s in task["scope"] if is_shared(s)]
                 task["scope_none"] = _is_no_check(value)  # `none`: no file scope (a comment or issue edit)
             elif key == "shared":
-                task["scope"] += [SHARED + p.lstrip(SHARED) for p in _split_list(value)]
+                task["scope"] += [SHARED + normalize_scope(p.lstrip(SHARED)) for p in _split_list(value)]
             elif key == "depends":
                 task["depends"] = _split_list(value)
             elif key == "interfaces":
@@ -342,7 +349,7 @@ def _parallel_overlaps(tasks: list[dict]):
 def path_in_scope(path: str, scope: list[str]) -> bool:
     import fnmatch
     for pattern in scope:
-        pattern = pattern.lstrip(SHARED)
+        pattern = normalize_scope(pattern.lstrip(SHARED))
         if pattern.endswith("/**"):
             if path == pattern[:-3] or path.startswith(pattern[:-2]):
                 return True

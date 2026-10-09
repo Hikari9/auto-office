@@ -11,7 +11,9 @@ bound to the scope's composed commit.
 """
 from __future__ import annotations
 
+import os
 import re
+import shlex
 import uuid
 from pathlib import Path
 
@@ -109,6 +111,50 @@ def _envelope_entry(con, run, entry_id, quote) -> Result:
                     "VALUES(?,?,?,?,?,?,?,?)", ("Z" + uuid.uuid4().hex[:8], run["id"], "envelope-entry", entry_id,
                                                 run["requirements_version"], "user", quote.strip(), now_iso()))
     return Result(lines=[f"{entry_id} ({hit[0]['action']}) authorized"], next="exceptions only; office status")
+
+
+def plan_names(con, run: dict, entry: dict) -> bool:
+    """Whether the current plan still names this envelope entry: the same action with the same
+    preconditions, the key `amend` uses to tell a new entry from an old one."""
+    from office import planfile
+    plan = state.current_plan(con, run["id"])
+    key = (entry.get("action"), tuple(entry.get("preconditions") or []))
+    return bool(plan) and any((a["action"], tuple(a.get("preconditions") or [])) == key
+                              for a in planfile.parse(plan["body"]).requirements.get("named_actions") or [])
+
+
+def decline_entry(con, run: dict, entry_id: str, reason: str | None) -> Result:
+    """Drop an authority entry nobody authorized once the plan no longer names its action. It grants
+    nothing, so the orchestrator may record it; the dropped entry stays on the authorization record."""
+    from office import guide
+    entry_id = entry_id.upper()
+    if os.environ.get("OFFICE_DISPATCH_ID"):
+        raise Refused("worker-cannot-decline", "a worker cannot change the authority envelope")
+    if not reason or not reason.strip():
+        raise Usage("reason-required", "recording a declined entry needs the reason",
+                    next_step=f'office decline {entry_id} --reason "<why the action left the plan>"')
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        envelope = list(run.get("envelope") or [])
+        hit = next((e for e in envelope if e.get("id") == entry_id), None)
+        if hit is None:
+            raise Usage("unknown-entry", f"no authority entry {entry_id}", next_step="office inspect run")
+        if not hit.get("needs_authorization"):
+            raise Refused("entry-authorized", f"{entry_id} ({hit['action']}) is authorized; an authorized entry stays",
+                          next_step="office status")
+        if plan_names(con, run, hit):
+            raise Refused("entry-in-plan", f"{entry_id} ({hit['action']}) is still named by the plan",
+                          next_step=f"remove it from the plan (office amend plan --contract -- {shlex.quote('drop ' + hit['action'])}), "
+                                    f'or ask the user to authorize it: office approve {entry_id} --quote "<words>"')
+        state.update_run(con, run["id"], envelope=[e for e in envelope if e is not hit])
+        con.execute("INSERT INTO authorizations(id, run_id, kind, target, requirements_version, envelope_json, authorized_by, "
+                    "quote, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    ("Z" + uuid.uuid4().hex[:8], run["id"], "envelope-decline", entry_id, run["requirements_version"],
+                     dumps(hit), "orchestrator", reason.strip(), now_iso()))
+        state.emit(con, run, "authority.envelope_decline", f"{entry_id} ({hit['action']}) declined: {reason.strip()[:120]}",
+                   audience="runtime")
+    return Result(lines=[f"{entry_id} ({hit['action']}) dropped from the authority envelope (recorded)"],
+                  next=guide.next_action(con, state.get_run(con, run["id"])))
 
 
 def _trust(con, run, triple: str, quote: str) -> Result:

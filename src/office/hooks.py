@@ -24,6 +24,7 @@ EVENT_ALIASES = {
     "PreCompress": "compact.pre",
 }
 DENY_CAPABLE = {"claude", "gemini"}
+POINTER_NAME = re.compile(r"[A-Za-z0-9_-]+")  # a run id; a file with a dot is something else
 
 
 def _primary_checkout(start: Path) -> Path | None:
@@ -63,17 +64,30 @@ def _session_files(primary: Path, harness: str, session: str | None) -> list[Pat
     return out
 
 
-def _active_runs(primary: Path) -> list[tuple[str, str]]:
-    """(run id, phase) from the fast-path projection and legacy pointers."""
-    out = []
+TERMINAL_PHASES = ("closed", "abandoned")
+
+
+def active_pointers(primary: Path) -> list[Path]:
+    """The fast-path pointers `.office/active/<run id>`, one per run office last projected as active.
+    Only regular files named like a run id (no dots), in a real directory: nothing else there is a pointer."""
     active = primary / ".office" / "active"
-    if active.is_dir():
-        for p in active.iterdir():
-            try:
-                phase = p.read_text().split("\t", 1)[0].strip()
-            except OSError:
-                phase = "?"
-            out.append((p.name, phase))
+    if active.is_symlink() or not active.is_dir():
+        return []
+    return sorted(p for p in active.iterdir() if POINTER_NAME.fullmatch(p.name) and p.is_file() and not p.is_symlink())
+
+
+def _active_runs(primary: Path, *, verify: bool = False) -> list[tuple[str, str]]:
+    """(run id, phase) from the fast-path projection and legacy pointers. A pointer that says its run
+    ended is not active; with `verify`, neither is one whose run runs.db lacks or has ended."""
+    pointers = []
+    for p in active_pointers(primary):
+        try:
+            phase = p.read_text().split("\t", 1)[0].strip()
+        except OSError:
+            phase = "?"
+        if phase not in TERMINAL_PHASES:
+            pointers.append((p.name, phase))
+    out = _verified(pointers) if verify else pointers
     refs = primary / ".office" / "runs"
     if refs.is_dir():
         for ref in refs.glob("*.ref"):
@@ -82,8 +96,43 @@ def _active_runs(primary: Path) -> list[tuple[str, str]]:
                 phase = json.loads(state_json.read_text()).get("phase", "?")
             except (OSError, ValueError):
                 continue
-            if phase not in ("closed", "abandoned"):
+            if phase not in TERMINAL_PHASES:
                 out.append((ref.stem, phase))
+    return out
+
+
+def _verified(pointers: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """The pointed-at runs runs.db still has as active (phase from the db). Stdlib only, read-only, a
+    short timeout: this runs in a hook. An unreadable db keeps them all."""
+    if not pointers:
+        return pointers
+    try:
+        import sqlite3
+        from office import paths
+        db_path = paths.runs_db()
+        if not db_path.exists():
+            return []  # no runs in this data home: nothing is active here
+        con = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
+        try:
+            marks = ",".join("?" * len(pointers))
+            phases = dict(con.execute(f"SELECT id, phase FROM runs WHERE id IN ({marks})", [p[0] for p in pointers]))
+        finally:
+            con.close()
+    except Exception:  # fail open: an unreadable db must not hide a real run
+        return pointers
+    return [(rid, phases[rid]) for rid, _ in pointers if rid in phases and phases[rid] not in TERMINAL_PHASES]
+
+
+def stale_pointers(con, primary: Path) -> list[tuple[Path, str]]:
+    """(pointer, why) for each active-run pointer whose run is missing from runs.db or already terminal."""
+    from office import state
+    out = []
+    for p in active_pointers(primary):
+        run = state.get_run(con, p.name)
+        if run is None:
+            out.append((p, "run missing"))
+        elif state.is_terminal(run):
+            out.append((p, f"run {run['phase']}"))
     return out
 
 
@@ -135,10 +184,11 @@ def main(argv: list[str]) -> int:
     worker = bool(os.environ.get("OFFICE_DISPATCH_ID"))
     if not bound_files and not worker:
         if event == "session.start" and not _disabled(primary):
-            if len(runs) == 1:
-                _say(harness, event, f"Active Office run {runs[0][0][:8]} (phase {runs[0][1]}). office resume to bind.")
-            else:
-                _say(harness, event, f"{len(runs)} active Office runs here. office list, then office resume <id> to bind.")
+            live = _active_runs(primary, verify=True)
+            if len(live) == 1:
+                _say(harness, event, f"Active Office run {live[0][0][:8]} (phase {live[0][1]}). office resume to bind.")
+            elif live:
+                _say(harness, event, f"{len(live)} active Office runs here. office list, then office resume <id> to bind.")
         return 0
     if _disabled(primary):
         return 0
@@ -176,7 +226,7 @@ def _bound(event: str, harness: str, payload: dict, bound_files: list[Path], wor
         if event == "session.start":
             source = payload.get("source", "startup")
             if source in ("resume", "compact", "startup"):
-                res = guide.status(con, run)
+                res = guide.status(con, run, record=False)
                 lines = res.lines[:10] + ([f"next: {res.next}"] if res.next else []) + ["office status --verbose"]
                 _say(harness, event, _budget(lines))
             return 0
