@@ -1,5 +1,7 @@
 # Auto Office v3 — Runtime Contracts and Interface Specifications
 
+> **Historical, reference-only (3.0 era).** This document explains where rules came from. It is not current operational policy: where it disagrees, `MANIFESTO.md`, then the runtime and `docs/review-convergence.md`, then the active skills win. In particular, plan review is initial-only (#418), independent review is per lane plus a risk- or shared-outcome-triggered integrated review (#337, #422), and a round-cap waiver never becomes APPROVED and is not landing authority (#423).
+
 ## 1. Overview and Architecture of Shared Contracts
 
 Auto Office v3 transitions from a single-threaded orchestrator running scripted conventions into a multi-project, portable, event-driven control plane supervising concurrent planner, executor, and reviewer families.

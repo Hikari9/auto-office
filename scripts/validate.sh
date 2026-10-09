@@ -57,6 +57,7 @@ if [ "${VALIDATE_BUILD:-0}" = "1" ]; then
   rm -rf dist
   python3 -m build --wheel
   python3 -m zipfile -l dist/*.whl | grep -q office/_resources/config/config.default.yaml
+  python3 -m zipfile -l dist/*.whl | grep -q office/_resources/docs/orchestrator-reference.md
 fi
 
 echo "== Validation passed"
