@@ -20,10 +20,10 @@ from typing import Any, Callable
 
 import yaml
 
-from office import candidates, paths
+from office import candidates, db, paths, state
 from office import config as cfg
 from office.result import Result
-from office.state import OfficeError
+from office.state import OfficeError, Refused
 
 SEED_KEY = re.compile(r"^roles\.([^.]+)\.preferred_seed$")
 ROUTE_SPEC = re.compile(r"^(?:(?P<harness>[A-Za-z0-9_.-]+)/)?(?P<model>[A-Za-z0-9_.-]+)(?:@(?P<effort>[a-z]+))?$")
@@ -398,6 +398,61 @@ def _unset(key: str, tier: str, cwd: Path) -> Result:
 
 def _applies_next() -> str:
     return "new runs pick this up; a running run keeps the policy it pinned (office start)"
+
+
+# ------------------------------------------------------------------ a run's routing (#308)
+
+def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
+    """Re-pin a run's `roles` and `routing` from the current config files: the one
+    opt-in that moves a running run off the values it pinned at start. Later
+    dispatches route from the re-pinned policy; the drift notice then has nothing
+    left to report for those blocks. `quote` is the user's words authorizing it."""
+    if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
+        raise Refused("worker-cannot-apply-routing", "a worker cannot re-pin a run's routing; the orchestrator does, on the user's words")
+    if not run_arg:
+        raise _usage("--apply-routing needs --run <id>", next_step="office list shows run ids")
+    run = state.find_run(con, run_arg)
+    if run is None:
+        raise _usage(f"no run {run_arg!r}", next_step="office list shows run ids")
+    if not (quote or "").strip():
+        raise _usage('--apply-routing records the user\'s words (--quote "<words>")',
+                     next_step=f"office config --run {run['id'][:8]} --apply-routing --quote \"<words>\"")
+    if state.is_terminal(run):
+        raise Refused("run-terminal", f"run is {run['phase']}; its routing is no longer used")
+    root = Path(run["repo_root"]) if run.get("repo_root") else None
+    if root is None or not root.is_dir():
+        raise OfficeError("repo-missing", f"run {run['id'][:8]}'s repository ({root or 'unrecorded'}) is gone; its repo config cannot be read",
+                          next_step="restore the repository, then retry")
+    repo = root
+    files = cfg.read_files(repo)
+    try:
+        live, _ = cfg.resolve(repo, files=files)
+    except ValueError as exc:
+        raise OfficeError("bad-config", f"config is invalid: {exc}", next_step="fix the config files, then retry")
+    policy = dict(run.get("policy") or {})
+    blocks = ("roles", "routing")
+    changed = [b for b in blocks if policy.get(b) != live.get(b)]
+    short = run["id"][:8]
+    if not changed:
+        return Result(lines=[f"run {short} already routes from the current config files; nothing changed"])
+    policy.update({b: live.get(b) for b in blocks})
+    recorded = policy.get(cfg.FILE_BLOCKS_KEY)
+    if recorded is not None:
+        # The drift baseline for roles follows the re-pin, so a later edit still reads as drift.
+        now = cfg.file_blocks(repo, files)
+        for tier in ("user", "repo"):
+            base = {k: v for k, v in (recorded.get(tier) or {}).items() if k != "roles"}
+            if "roles" in now.get(tier, {}):
+                base["roles"] = now[tier]["roles"]
+            recorded[tier] = base
+    with db.transaction(con):
+        state.update_run(con, run["id"], policy=policy)
+        state.emit(con, run, "run.routing_applied",
+                   f"run {short} re-pinned {' and '.join(changed)} from the config files",
+                   payload={"quote": quote.strip(), "changed": changed})
+    return Result(lines=[f"run {short} re-pinned {' and '.join(changed)} from the config files (\"{quote.strip()}\")"],
+                  next="later dispatches of this run route from the re-pinned policy",
+                  data={"run": run["id"], "changed": changed})
 
 
 # ------------------------------------------------------------------ office setup

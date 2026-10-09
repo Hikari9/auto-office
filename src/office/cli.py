@@ -39,7 +39,8 @@ Auto Office {ver}
                                     declare a pending task's route, or re-record a live dispatch's model
                                     (same harness); --restart relaunches it
   office ack <amendment-id>         worker: record that you applied a delivered amendment
-  office rerun <task> --resume|--fresh [--reroute]
+  office rerun <task> --resume|--fresh [--reroute | --as <harness>/<model>[@effort] [--cli ARGV | --external]]
+                                    [--review-as <harness>/<model>[@effort] [--review-cli ARGV | --review-external]]
                                     after a worker ends: continue its session, or start a new one with the findings
   office prompt <task|dispatch> -- "<message>"
                                     message a live pane agent and confirm it was submitted (never herdr pane run)
@@ -65,6 +66,8 @@ Auto Office {ver}
   office review plan --quote "<user's words>" [--rounds N]
                                     the user's explicit request for another plan review (a new bounded cycle)
   office config [<key> [<value>]]   read or set preferences like git config (--list, --unset, --edit, --repo)
+  office config --run <id> --apply-routing --quote "<user's words>"
+                                    re-pin one run's roles and routing from the current config files
   office queue list|add|pause|resume|priority|demote|auto
                                     the machine-level scheduler queue (--run <id> [--task T] for a run)
   office web start|stop|status|serve [--port N] [--fixture small|large]
@@ -324,6 +327,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--path", action="store_true", help="print the config file path(s)")
     s.add_argument("--show-origin", dest="origin", action="store_true")
     s.add_argument("--force", action="store_true", help="set a key the shipped config does not define")
+    s.add_argument("--apply-routing", action="store_true",
+                   help="with --run: re-pin roles and routing from the current config files into that run")
+    s.add_argument("--quote", help="with --apply-routing: the user's words authorizing the re-pin")
     s = sp.add_parser("queue", parents=[common])
     s.add_argument("action", choices=["list", "add", "pause", "resume", "priority", "demote", "auto"])
     s.add_argument("target", nargs="?", help="queue item id, issue ref (add), priority (priority) or on|off|status (auto)")
@@ -404,6 +410,16 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--fresh", action="store_true", help="start a new session with the open findings in its brief")
     s.add_argument("--reroute", action="store_true",
                    help="with --fresh: route from current evidence instead of keeping the original route")
+    s.add_argument("--as", dest="as_model", metavar="HARNESS/MODEL[@EFFORT]",
+                   help="run on this route (a user override, as dispatch --as); --resume needs the same harness, model and effort")
+    s.add_argument("--cli", metavar="ARGV", help="with --as: start exactly this agent argv in a herdr pane")
+    s.add_argument("--external", action="store_true",
+                   help="prepare the rerun and print how to start it; launch nothing")
+    s.add_argument("--review-as", metavar="HARNESS/MODEL[@EFFORT]",
+                   help="pin the code reviewer for this task (as dispatch --review-as)")
+    s.add_argument("--review-cli", metavar="ARGV", help="with --review-as: start exactly this reviewer argv in herdr")
+    s.add_argument("--review-external", action="store_true",
+                   help="with --review-as: you start the reviewer; Office reads its review file")
     s = sp.add_parser("prompt", parents=[common])
     s.add_argument("target", nargs="?")
     s.add_argument("message", nargs="*")
@@ -590,6 +606,15 @@ def _run(args, unknown) -> int:
             return emit(prune.force(con, only) if args.force else prune.dry_run(con, only), args)
         finally:
             con.close()
+    if cmd == "config" and args.apply_routing:
+        from office import configcmd
+        if args.key or args.value or args.unset or args.list_ or args.edit or args.path:
+            raise OfficeError("usage", "--apply-routing re-pins a run; it takes only --run and --quote", exit_code=2)
+        con = _con()
+        try:
+            return emit(configcmd.apply_run_routing(con, getattr(args, "run_arg", None), args.quote), args)
+        finally:
+            con.close()
     if cmd == "config":
         from office import configcmd
         return emit(configcmd.config(key=args.key, value=args.value, tier=args.tier, unset=args.unset, list_=args.list_,
@@ -764,7 +789,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return dispatch.revoke(con, run, args.task, args.reason)
     if cmd == "rerun":
         from office import rerun
-        return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh, reroute=args.reroute)
+        return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh, reroute=args.reroute,
+                           as_model=args.as_model, cli=args.cli, external=args.external, review_as=args.review_as,
+                           review_cli=args.review_cli, review_external=args.review_external)
     if cmd == "dismiss":
         from office import rerun
         return rerun.dismiss(con, run, args.target, all_=args.dismiss_all)
