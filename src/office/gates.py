@@ -1211,11 +1211,17 @@ def worker_live(con, dispatch_id: str | None) -> bool:
     return d["status"] == "launching" and _launch_pending(con, d)
 
 
-def live_task_session(con, run_id: str, task_id: str) -> str | None:
+def live_task_session(con, run_id: str, task_id: str, exclude: str | None = None) -> str | None:
     """Any live or launching session of the task, current or not (one session per
-    worktree): its dispatch id, or None (review F1, F9)."""
-    for r in con.execute("SELECT id FROM dispatches WHERE run_id=? AND task_id=? AND ended_at IS NULL "
-                         "AND status IN ('launching','running') ORDER BY started_at DESC", (run_id, task_id)):
+    worktree): its dispatch id, or None. `exclude` is a session the caller is replacing
+    and ends itself (a route restart). An external session whose lease was revoked is
+    not counted: Office cannot stop it, the fence already rejects its submits, and the
+    person who started it stops it."""
+    for r in con.execute("SELECT d.id, d.launcher, l.revoked_at FROM dispatches d LEFT JOIN leases l ON l.id=d.lease_id "
+                         "WHERE d.run_id=? AND d.task_id=? AND d.ended_at IS NULL AND d.status IN ('launching','running') "
+                         "ORDER BY d.started_at DESC", (run_id, task_id)):
+        if r[0] == exclude or (r[1] == "external" and r[2]):
+            continue
         if worker_live(con, r[0]):
             return r[0]
     return None

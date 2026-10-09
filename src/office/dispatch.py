@@ -388,7 +388,8 @@ def _base_for(con, run: dict, task: dict, graph: dict, stack_after: str | None) 
 # ------------------------------------------------------------------ launch request
 
 def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | None = None,
-                   base: str | None = None, extra: dict | None = None, fix_of: str | None = None) -> str:
+                   base: str | None = None, extra: dict | None = None, fix_of: str | None = None,
+                   replaces: str | None = None) -> str:
     """Create the dispatch row, lease and launch job. Caller holds the tx.
 
     Routing for executors happens before the transaction; planner and fix
@@ -397,7 +398,7 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
     task = state.get_task(con, run["id"], task_id)
     if role == "executor":
         from office import gates
-        live = gates.live_task_session(con, run["id"], task_id)
+        live = gates.live_task_session(con, run["id"], task_id, exclude=replaces)
         if live:
             # One session per worktree: amend, rerun and relaunch all come through here.
             raise Refused("worker-live", f"{task_id} still has a live worker ({live})", scope=task_id,
