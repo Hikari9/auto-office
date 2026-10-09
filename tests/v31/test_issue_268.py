@@ -101,6 +101,10 @@ def test_directory_scope_entries_own_their_tree():
     # #334: `src/auth/` (and bare `src/auth`) cover the files inside them.
     assert planfile.path_in_scope("src/auth/rock-user-resolver.ts", ["src/auth/"])
     assert planfile.path_in_scope("tests/auth/x/y.test.ts", ["tests/auth"])
+    # Review F4: brackets in a directory entry are path characters (Next.js dynamic routes).
+    assert planfile.path_in_scope("src/app/[slug]/page.tsx", ["src/app/[slug]/"])
+    assert planfile.path_in_scope("src/app/(dash)/x/page.tsx", ["src/app/(dash)"])
+    # A shared directory owns its tree (plan validation allows it only for ordered tasks).
     assert planfile.path_in_scope("src/reg/a.ts", ["+src/reg/"])
     assert not planfile.path_in_scope("src/authz/x.ts", ["src/auth/"])
     assert not planfile.path_in_scope("src/authz.ts", ["src/auth"])
@@ -117,3 +121,114 @@ def test_scope_and_shared_entries_with_notes_are_plan_errors():
     assert len(bad) == 3, plan.errors
     assert any("vitest.config.ts (A3" in e for e in bad) and all("accept:" in e for e in bad)
     assert not planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py, src/a/**, +x.md\n")).errors
+
+
+def test_entry_validation_allows_route_groups_and_rejects_shared_trees_and_colons():
+    ok = planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py, src/app/(dashboard)/**, src/app/[slug]/\n"))
+    assert not ok.errors, ok.errors  # review F1
+    bad = planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py, vitest.config.ts:append-only\n"))
+    assert any("vitest.config.ts:append-only" in e for e in bad.errors), bad.errors  # review F10
+
+
+def test_an_entry_the_accepted_plan_already_had_is_a_warning_on_revision():
+    # Review F5: a run accepted before entry validation can still be amended.
+    text = PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: pnpm-lock.yaml (A4: shared)\n")
+    first = planfile.parse(text)
+    assert first.errors
+    prev = [{"id": "T1", "scope": ["calc.py", "+pnpm-lock.yaml (A4: shared)"]}]
+    again = planfile.parse(text)
+    planfile.grandfather_entries(again, prev)
+    assert not again.errors and any("already had it" in w for w in again.warnings), (again.errors, again.warnings)
+    added = planfile.parse(text.replace("scope: calc.py\n", "scope: calc.py, x.ts (new note)\n"))
+    planfile.grandfather_entries(added, prev)
+    assert any("x.ts (new" in e for e in added.errors), added.errors
+
+
+def test_planner_template_allows_globs_and_has_no_trailing_note_style():
+    # Review F9.
+    line = next(ln for ln in briefs.PLAN_FORMAT.splitlines() if ln.startswith("scope:"))
+    assert "bare paths only" not in line and "paths/globs" in line
+
+
+SHARED_TREE = PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: src/reg/\n").replace(
+    "scope: mul.py\n", "scope: mul.py\nshared: src/reg/\n")
+
+
+def test_a_shared_directory_between_sequential_tasks_is_accepted():
+    # User decision: a shared directory is fine when its tasks never run in parallel.
+    plan = planfile.parse(SHARED_TREE.replace("scope: mul.py\nshared: src/reg/\ndepends: none",
+                                              "scope: mul.py\nshared: src/reg/\ndepends: T1"))
+    deps = {t["id"]: t["depends"] for t in plan.tasks}
+    assert deps == {"T1": [], "T2": ["T1"]}, deps
+    assert not plan.errors, plan.errors
+
+
+def test_a_shared_directory_between_parallel_tasks_is_a_plan_error():
+    plan = planfile.parse(SHARED_TREE)
+    errs = [e for e in plan.errors if "share the directory" in e]
+    assert len(errs) == 1 and "T1 and T2" in errs[0] and "'src/reg/'" in errs[0], plan.errors
+    # An exclusive path inside the shared tree is the same conflict.
+    mixed = planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: src/reg/\n").replace(
+        "scope: mul.py\n", "scope: mul.py, src/reg/x.ts\n"))
+    assert any("share the directory" in e for e in mixed.errors), mixed.errors
+    # Shared files keep today's append-only parallel behaviour.
+    assert not planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: REG.md\n").replace(
+        "scope: mul.py\n", "scope: mul.py\nshared: REG.md\n")).errors
+
+
+def test_tasks_sharing_a_directory_never_hold_leases_together(env):
+    # If a later amendment drops the ordering, the lease guard still refuses to run both at once.
+    approved_run(env, plan=PLAN_TWO, executor=[{"sleep": 0}])
+    con = env.con()
+    con.execute("UPDATE tasks SET scope_json=? WHERE id IN ('T1','T2')", ('["+src/reg/"]',))
+    con.commit()
+    assert planfile.scopes_overlap(["+src/reg/"], ["+src/reg/"])
+    code, out = env.office("dispatch", "T1", env={"OFFICE_WORKER_LAUNCHER": "external"})
+    assert code == 0, out
+    code, out = env.office("dispatch", "T2", env={"OFFICE_WORKER_LAUNCHER": "external"})
+    assert code != 0 and "scope-held" in out and "T1" in out, out
+
+
+def test_a_bare_shared_directory_is_a_tree_for_the_plan_check_and_the_lease_guard():
+    # Review #447 F1: `shared: src/reg` (no trailing slash) escaped both checks.
+    plan = planfile.parse(SHARED_TREE.replace("shared: src/reg/\n", "shared: src/reg\n"))
+    assert any("share the directory 'src/reg'" in e for e in plan.errors), plan.errors
+    assert planfile.scopes_overlap(["+src/reg"], ["+src/reg"])
+
+
+def test_a_shared_file_glob_stays_parallel_safe():
+    # Review #447 F8: `locales/*.json` names append-only files, not a directory.
+    plan = planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: locales/*.json\n").replace(
+        "scope: mul.py\n", "scope: mul.py\nshared: locales/*.json\n"))
+    assert not plan.errors, plan.errors
+
+
+def test_bracket_directories_are_literal_for_overlap_and_matching():
+    # Review #447 F3 and F4.
+    assert not planfile.scopes_overlap(["+src/app/[slug]/"], ["src/app/(dash)/page.tsx"])
+    plan = planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: src/app/[slug]/\n").replace(
+        "scope: mul.py\n", "scope: mul.py, src/app/(dash)/page.tsx\n"))
+    assert not any("share the directory" in e for e in plan.errors), plan.errors
+    assert planfile.path_in_scope("src/app/[slug]/page.tsx", ["src/app/[slug]/*.tsx"])
+    assert not planfile.path_in_scope("src/app/s/page.tsx", ["src/app/[slug]/page.tsx"])
+
+
+def test_a_note_glued_to_a_path_is_still_an_entry_error():
+    # Review #447 F9: parentheses only as whole segments.
+    plan = planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: vitest.config.ts(append-only)\n"))
+    assert any("vitest.config.ts(append-only)" in e for e in plan.errors), plan.errors
+
+
+def test_a_parallel_shared_directory_the_accepted_plan_had_is_grandfathered():
+    # Review #447 F2 and F10: grandfathering works from structure, pairs included.
+    first = planfile.parse(SHARED_TREE)
+    assert first.errors and first.pair_problems
+    again = planfile.parse(SHARED_TREE)
+    planfile.grandfather_entries(again, first.tasks)
+    assert not again.errors and any("already had it" in w for w in again.warnings), (again.errors, again.warnings)
+    quoted = PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py, it's (\"odd\") note\n")
+    old = planfile.parse(quoted)
+    assert old.errors
+    redo = planfile.parse(quoted)
+    planfile.grandfather_entries(redo, old.tasks)
+    assert not redo.errors, redo.errors
