@@ -246,12 +246,17 @@ def _shared_cache_put(harness: str, result: dict) -> None:
         pass
 
 
+_NOT_PROBED = (None, "no command configured", "probe disabled")
+
+
 def quota_unknown_record(candidate: dict | None) -> dict | None:
     """Why a chosen route's quota was not read, or None when it was. Kept on the
     dispatch's route record and shown in `office status` (#450)."""
     quota = (candidate or {}).get("quota") or {}
     if quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None:
         return None
+    if quota.get("cause") in _NOT_PROBED:
+        return None  # no probe ran: nothing failed, so nothing to flag on every live task
     return {"harness": (candidate or {}).get("adapter_id") or (candidate or {}).get("harness"),
             "status": quota.get("status") or "unknown", "cause": quota.get("cause") or "quota not probed"}
 
