@@ -78,8 +78,9 @@ Run `office --version`. This skill's directory is the `auto-office` package, so 
 - An authority entry (`X3`) the plan no longer names, still waiting on authorization, is not the user's
   to approve: `office decline X3 --reason "<why>"` drops it on the record and it stops being pending.
 - A worktree `setup` command that exits 127 (command not found) stops the dispatch before the executor
-  starts and blocks the task with the command, the log, and `office doctor`; fix the tool or
-  `worktree.setup`, then `office rerun <task> --fresh`. Other setup failures only post a notice.
+  starts and blocks the task with the command, the log, and `office doctor`. `worktree.setup` is pinned
+  when a run starts: install the missing tool, then `office rerun <task> --fresh`; or fix `worktree.setup`
+  in `.auto-office/config.yaml` and start a new run. Other setup failures only post a notice.
 - Exit 5 prints a `question:` line: dispatch, pane, question, options, and the answer command. Decide it
   yourself when it is planning, scope, ordering, or test detail: amend the contract first if the answer
   changes it, then `office answer <task|dispatch> <n>` (a number presses that option in a selection
