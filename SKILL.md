@@ -133,7 +133,7 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
   host blocks `--as orchestrator` as self-approval (Claude Code auto mode), never work around it: ask the user.
 - When no specialist reviewer returns a verdict (every route UNAVAILABLE, or the last reply INVALID_RESULT), the orchestrator may review on its
   behalf: `office review L-T1:convergence --report <file>` (visual: `--inspected <every screenshot>`). Specialists come first. It counts as
-  independent only when your session did not produce the work; a session that did is refused.
+  independent only when your session did not produce the work; a session that did is refused. Runs started before #423 record it as degraded and non-independent.
 - **v3.1 runs** (started before #337; `office inspect run` names the contract) keep PASS | CHANGES_REQUIRED | PLAN_DEFECT | BRIEF_DEFECT,
   per-task review and `--redirect`: follow their `next:` lines and `docs/v31-rolling-review-gates.md`. Runs started before #423 and #418 keep
   their older cap, waiver and plan-review behavior until `office upgrade`.

@@ -1,5 +1,7 @@
 # Families, amendments, and compaction
 
+> **3.0 runtime helpers.** The `office_runtime.py amend` flow below applies to 3.0 runs. On 3.1+ runs, amendments use `office amend` (structured contract edits are enforced without plan review, #425; plan review is initial-only, #418).
+
 ## Concurrent families and sticky focus
 
 One orchestrator may supervise multiple independent planner/executor/reviewer families across
