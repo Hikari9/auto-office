@@ -166,6 +166,15 @@ def test_the_overlay_is_hidden_on_a_page_whose_csp_blocks_inline_styles(browser,
 
 @pytest.mark.integration
 @requires_playwright
+def test_a_page_that_resets_its_stylesheets_while_loading_does_not_bring_the_overlay_back(browser, tmp_path):
+    page = CSP_PAGE.replace("</body>", "<script>addEventListener('DOMContentLoaded',()=>{document.adoptedStyleSheets=[]})</script></body>")
+    result = _capture(browser, tmp_path, page % "<nextjs-portal></nextjs-portal>", viewports="mobile")
+    for frame in result["frames"]:
+        assert frame["probe"]["elements"]["nextjs-portal"]["visible"] is False, frame["failures"]
+
+
+@pytest.mark.integration
+@requires_playwright
 def test_other_wide_elements_still_overflow_so_the_hiding_is_not_blanket(browser, tmp_path):
     wide = OVERLAY.replace("nextjs-portal", "div")
     result = _capture(browser, tmp_path, PAGE % wide, viewports="mobile")

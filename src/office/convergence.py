@@ -591,14 +591,15 @@ def _same_reviewer(con, run: dict, scope_id: str, kind: str, cycle: int) -> str 
     return row["reviewer_dispatch_id"] if row else None
 
 
-def _git_text(repo: Path, *args: str) -> str:
+def _git_text(repo: Path, *args: str) -> str | None:
     """Git output that may carry an executor's bytes (a commit message in any encoding): undecodable bytes
-    become U+FFFD instead of crashing the review job. Empty when git fails."""
+    become U+FFFD instead of crashing the review job. None when git fails or hangs, so a failure is never
+    shown to a reviewer as an empty message."""
     try:
         proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return proc.stdout.decode("utf-8", errors="replace").strip() if proc.returncode == 0 else ""
+        return None
+    return proc.stdout.decode("utf-8", errors="replace").strip() if proc.returncode == 0 else None
 
 
 def _task_commits(con, run: dict, tasks: list[dict]) -> list[dict]:
@@ -617,7 +618,8 @@ def _task_commits(con, run: dict, tasks: list[dict]) -> list[dict]:
         # (git allows any byte but NUL in one, so no in-band separator is safe).
         # --first-parent: a main merged into the branch brings other people's commits, not the executor's.
         listing = _git_text(repo, "rev-list", "--first-parent", "--no-merges",
-                            f"{row['base_commit']}..{sha}").split() if row["base_commit"] else []
+                            f"{row['base_commit']}..{sha}")
+        listing = (listing or "").split() if row["base_commit"] else []
         own = [{"commit": commit, "message": _git_text(repo, "log", "-1", "--format=%B", commit)
                 if i < briefs.OWN_COMMITS_SHOWN else ""}
                for i, commit in enumerate(c for c in listing if c != sha)]

@@ -69,7 +69,9 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
     if current and current["content_hash"] == digest:
         return Result(lines=[f"plan p{current['version']} already submitted"], next=_after_plan_next(con, run))
     # Runs pinned to v3.1 keep their semantics: their accepted plans are never newly refused.
-    lint = lint_plan(con, run, parsed.tasks, parsed.requirements.get("done_criteria") or frozen.get("done_criteria") or []) \
+    lint = lint_plan(con, run, parsed.tasks, parsed.requirements.get("done_criteria") or frozen.get("done_criteria") or [],
+                     blast=(parsed.requirements.get("blast_radius"),
+                            frozen.get("blast_radius") or (run.get("risk") or {}).get("blast_radius"))) \
         if contract.is_convergence(run) else []
     if lint:
         raise Refused("plan-lint", "plan criteria cannot be met as written: " + "; ".join(lint[:4]), scope="plan",
@@ -145,7 +147,7 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
     return res
 
 
-def lint_plan(con, run: dict, tasks: list[dict], done: list[str]) -> list[str]:
+def lint_plan(con, run: dict, tasks: list[dict], done: list[str], blast: tuple[str | None, str | None] = (None, None)) -> list[str]:
     """Deterministic problems in a plan's done and accept criteria, found before any reviewer sees it.
 
     1. With task PRs off, a criterion that needs a PR body, description or comment can never be met.
@@ -155,7 +157,13 @@ def lint_plan(con, run: dict, tasks: list[dict], done: list[str]) -> list[str]:
     criteria = [("done", None, c) for c in done] + [("accept", t["id"], c) for t in tasks for c in t.get("accept") or []]
     if any(briefs.refers_to_pr_text(c) for _, _, c in criteria):
         from office import prs
-        found = prs.settings(con, run)  # asks GitHub once, outside any transaction, as dispatch does
+        plan_blast, frozen_blast = blast
+        if plan_blast and plan_blast != frozen_blast and "local" in (plan_blast, frozen_blast):
+            # Whether PRs exist turns on a blast radius this plan is about to change: detecting now would pin the
+            # answer for the old one for the whole run. A plan going local has none; one leaving local is unknown.
+            found = {"enabled": False, "reason": "blast radius is local"} if plan_blast == "local" else {"transient": True}
+        else:
+            found = prs.settings(con, run)  # asks GitHub once, outside any transaction, as dispatch does
         if not found.get("enabled") and not found.get("transient"):
             for kind, tid, text in criteria:
                 if briefs.refers_to_pr_text(text):

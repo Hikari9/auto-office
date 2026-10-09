@@ -62,6 +62,7 @@ def test_criteria_that_need_pr_text(text):
     "Don't put the summary in the PR body", "we shouldn't add it in the PR description",
     "Do not paste the README.md diff in the PR body", "Never put the output of v1.2 in the PR description",
     "avoid a PR comment", "put it in the commit body instead of the PR body",
+    "The summary cannot go in the PR body", "Don\u2019t put it in the PR body", "nothing in the PR body",
 ])
 def test_criteria_that_do_not(text):
     from office import briefs
@@ -130,6 +131,33 @@ def test_a_summary_line_or_a_forbidden_location_or_a_file_name_case_is_not_a_con
     assert lint(["the PR body contains a summary of the change"], _task("T1", "the commit message has a summary line")) == []
     assert lint(["the PR body has the report"], _task("T1", "do not put the report in the commit body")) == []
     assert lint(["the report is written to docs/Report.md"], _task("T1", "the report is saved in docs/report.md")) == []
+
+
+@pytest.mark.parametrize("text", [
+    "the summary is not in the commit body but in the PR description",
+    "the summary is in the PR body (no secrets)",
+])
+def test_a_negation_ends_with_its_clause(text):
+    from office import briefs
+    assert briefs.refers_to_pr_text(text), text
+
+
+def test_a_file_is_a_location_only_where_something_is_placed_in_it():
+    from office import briefs
+    assert briefs.locations("the summary lists every change made") == set()
+    assert briefs.locations("whether config.yml is valid") == set()
+    assert briefs.locations("a summary in a.md.bak") == set() and briefs.locations("see v1.0.md") == set()
+    assert briefs.locations("a summary in `docs/r.md`") == {"`docs/r.md`"}
+
+
+def test_checking_a_long_criterion_stays_linear():
+    import time
+
+    from office import briefs
+    text = "not in the PR body " * 20000
+    start = time.monotonic()
+    assert not briefs.refers_to_pr_text(text) and briefs.locations(text) == set()
+    assert time.monotonic() - start < 2
 
 
 def test_a_named_file_needs_no_preposition_and_paths_compare_normalised(settings):
@@ -225,3 +253,16 @@ def test_a_v31_run_is_not_newly_refused_by_the_lint(env):
     env.write_plan(PR_DONE)
     env.office("submit", check=0)
     assert _plan_version(env) == 1
+
+
+def test_the_pr_check_does_not_pin_detection_for_a_blast_radius_the_plan_is_about_to_change(settings):
+    from office import plans
+    done = ["the PR body lists the test steps"]
+    # intake froze local; the plan declares repo: PRs may exist once it is applied, so nothing is decided now.
+    assert plans.lint_plan(None, {"id": "r"}, [], done, blast=("repo", "local")) == []
+    # the plan goes local: PRs will be off, and the criterion can never be met.
+    problems = plans.lint_plan(None, {"id": "r"}, [], done, blast=("local", "repo"))
+    assert len(problems) == 1 and "blast radius is local" in problems[0]
+    assert settings.asked == [], "neither answer asked (or pinned) the old blast radius's detection"
+    settings.set(PR_OFF)
+    assert plans.lint_plan(None, {"id": "r"}, [], done, blast=("repo", "repo")) and len(settings.asked) == 1

@@ -420,22 +420,28 @@ DEV_OVERLAYS = ("nextjs-portal", "#__next-build-watcher")
 _HIDE_OVERLAYS_JS = """
 (() => {
   const css = %s.join(',') + '{display:none!important}';
-  // A constructed stylesheet is not subject to the page's CSP (an inline <style> is), so it goes first.
-  try {
-    const sheet = new CSSStyleSheet();
-    sheet.replaceSync(css);
-    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
-    return;
-  } catch (e) {}
-  const inject = () => {
+  let sheet = null;
+  try { sheet = new CSSStyleSheet(); sheet.replaceSync(css); } catch (e) { sheet = null; }
+  const apply = () => {
+    // A constructed stylesheet is not subject to the page's CSP (an inline <style> is), so it goes first; the
+    // page may reset adoptedStyleSheets later, so it is put back when the document settles.
+    try {
+      if (sheet) {
+        if (!document.adoptedStyleSheets.includes(sheet)) document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+        return;
+      }
+    } catch (e) {}
     if (document.getElementById('__office_hide_dev_overlays')) return;
-    const style = document.createElement('style');
-    style.id = '__office_hide_dev_overlays';
-    style.textContent = css;
-    (document.head || document.documentElement).appendChild(style);
+    try {
+      const style = document.createElement('style');
+      style.id = '__office_hide_dev_overlays';
+      style.textContent = css;
+      (document.head || document.documentElement).appendChild(style);
+    } catch (e) {}
   };
-  try { inject(); } catch (e) {}
-  document.addEventListener('DOMContentLoaded', inject);
+  apply();
+  document.addEventListener('DOMContentLoaded', apply);
+  window.addEventListener('load', apply);
 })();
 """ % json.dumps(list(DEV_OVERLAYS))
 

@@ -48,10 +48,13 @@ _LOCATIONS = {
                                   re.I),
     "the issue": re.compile(r"\bissue\s+(?:body|comment|description)s?\b|\bcomment\s+on\s+(?:the\s+)?issue\b", re.I),
 }
-_NEGATED = re.compile(r"\b(?:not|no|never|without|nor|avoid|instead of|rather than)\b|n't\b", re.I)
+_NEGATED = re.compile(r"\b(?:not|no|nothing|never|without|nor|cannot|avoid|instead of|rather than)\b|n['\u2019]t\b", re.I)
 # A clause ends at punctuation, but a `.` inside `README.md` or `v1.2` does not end one.
-_CLAUSE_END = re.compile(r"[,;:]|\.(?=\s|$)")
-_FILE = re.compile(r"(?<![\w./-])`?((?:\.{1,2}/)?[\w][\w./-]*\.(?:md|txt|rst|json|ya?ml))(?![\w-])`?", re.I)
+_CLAUSE_END = re.compile(r"[,;:()\n]|\.(?=\s|$)|\s(?:but|then)\s", re.I)
+CLAUSE_WINDOW = 300  # how far back a negation is looked for: keeps the check linear on any input
+# A named file is a location only where a cue places something in it (`in README.md`, `and README.md`).
+_FILE = re.compile(r"\b(?:in|at|to|into|as|under|and|or)\s+(?:the\s+)?`?((?:\.{1,2}/)?\w[\w./-]*\.(?:md|txt|rst|json|ya?ml))(?![\w-]|\.\w)`?",
+                   re.I)
 # What a criterion may deliver: the same noun in a done criterion and an accept item is the same deliverable.
 _DELIVERABLES = re.compile(r"\b(write[- ]?up|summary|report|rationale|analysis|explanation|notes|changelog|postmortem|"
                            r"evidence|findings)\b(?!\s+line)", re.I)
@@ -63,7 +66,9 @@ def refers_to_pr(text: str) -> bool:
 
 def _places(pattern: re.Pattern, text: str) -> bool:
     """The pattern matches outside a negation: `do not put it in the PR body` places nothing there."""
-    return any(not _NEGATED.search(_CLAUSE_END.split(text[:m.start()])[-1]) for m in pattern.finditer(text or ""))
+    text = text or ""
+    return any(not _NEGATED.search(_CLAUSE_END.split(text[max(0, m.start() - CLAUSE_WINDOW):m.start()])[-1])
+               for m in pattern.finditer(text))
 
 
 def refers_to_pr_text(text: str) -> bool:
@@ -546,7 +551,9 @@ OWN_COMMITS_SHOWN = 12
 
 
 def _message_lines(message: str, indent: str) -> list[str]:
-    message = (message or "").strip()
+    if message is None:
+        return [f"{indent}| (message unavailable: git could not read it; do not fault the task for it)"]
+    message = message.strip()
     if len(message) > COMMIT_MESSAGE_CHARS:
         message = message[:COMMIT_MESSAGE_CHARS] + " [... message truncated]"
     return [f"{indent}| {line}" for line in (message.splitlines() or ["(empty message)"])]

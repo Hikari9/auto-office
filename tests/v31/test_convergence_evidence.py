@@ -461,7 +461,19 @@ def test_a_commit_message_in_another_encoding_does_not_crash_the_review(tmp_path
                     "commit", "-q", "-F", "-"], check=True, input="caf\xe9 \xff\xfe".encode("latin-1"))
     text = convergence._git_text(tmp_path, "-c", "i18n.logOutputEncoding=latin1", "log", "-1", "--format=%B", "HEAD")
     assert text.startswith("caf") and "\ufffd" in text
-    assert convergence._git_text(tmp_path, "log", "-1", "nonexistent-ref") == ""
+    assert convergence._git_text(tmp_path, "log", "-1", "nonexistent-ref") is None
+
+
+def test_a_git_failure_is_not_shown_to_the_reviewer_as_an_empty_message(monkeypatch):
+    import subprocess
+    from types import SimpleNamespace as NS
+
+    from office import briefs, convergence
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired("git", 30)))
+    assert convergence._git_text(".", "log") is None
+    brief = "\n".join(briefs.commit_lines([{"task": "T1", "commit": "a" * 40, "message": None, "own": []}], "/co"))
+    assert "message unavailable: git could not read it" in brief and "(empty message)" not in brief
+    assert NS
 
 
 def test_the_reviewer_reads_the_executors_own_commit_message_under_the_office_commit(env):
