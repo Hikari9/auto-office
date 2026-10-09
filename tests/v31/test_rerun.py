@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from conftest import GOOD_ADD, approved_run
+from test_adaptive_dispatch import FB1, PLANNED, _approve, _quota
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
@@ -363,3 +364,166 @@ def test_request_launch_refuses_a_second_executor_session(env, monkeypatch):
         with db.transaction(con):
             dispatch.request_launch(con, run, "T1", role="executor")
     assert did in err.value.message
+
+
+# Route flags on rerun (#308): `--as` and `--review-as` work like dispatch's, and a rerun
+# without `--as` keeps a user override route, checked for quota, and says so.
+CODEX = "codex@1/gpt-6-astra@low"
+
+
+def _planned_executor_ended(env, *, as_route=None):
+    _approve(env)
+    args = ["dispatch", "T1", *(["--as", as_route] if as_route else [])]
+    code, out = env.office(*args, env=_quota(env))
+    assert code == 0, out
+    con = env.con()
+    con.execute("UPDATE dispatches SET status='ended', ended_at='2026-10-09T00:00:00+00:00' WHERE task_id='T1'")
+    con.execute("UPDATE tasks SET status='changes_required' WHERE id='T1'")
+    con.commit()
+
+
+def _latest(env):
+    con = env.con()
+    row = con.execute("SELECT id, triple FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC").fetchone()
+    return row["id"], row["triple"]
+
+
+def test_as_external_records_the_launch_form_of_the_named_route(env):
+    _planned_executor_ended(env)
+    code, out = env.office("rerun", "T1", "--fresh", "--as", FB1, "--external", env=_quota(env))
+    assert code == 0 and f"on {CODEX} (user override) launching" in out, out
+    did, _ = _latest(env)
+    override = json.loads(env.con().execute("SELECT override_json FROM dispatches WHERE id=?", (did,)).fetchone()[0])
+    assert override["external"] is True and override["triple"] == CODEX
+
+
+def test_as_cannot_be_combined_with_reroute(env):
+    _planned_executor_ended(env, as_route=FB1)
+    code, out = env.office("rerun", "T1", "--fresh", "--reroute", "--as", FB1, env=_quota(env))
+    assert code == 2 and "--reroute routes from evidence" in out, out
+
+
+def test_resume_cannot_move_to_another_harness(env):
+    _planned_executor_ended(env)
+    code, out = env.office("rerun", "T1", "--resume", "--as", FB1, env=_quota(env))
+    assert code == 4 and "cannot resume T1 on codex" in out and "--fresh --as codex/gpt-6-astra@low" in out, out
+    assert env.con().execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == 1
+
+
+def test_fresh_as_runs_the_named_route_and_says_it_is_a_user_override(env):
+    _planned_executor_ended(env)
+    code, out = env.office("rerun", "T1", "--fresh", "--as", FB1, env=_quota(env))
+    assert code == 0 and f"on {CODEX} (user override) launching" in out, out
+    assert _latest(env)[1] == CODEX
+
+
+def test_as_needs_the_route_shape_and_cli_needs_as(env):
+    _planned_executor_ended(env)
+    code, out = env.office("rerun", "T1", "--fresh", "--as", "codex", env=_quota(env))
+    assert code == 2 and "<harness>/<model>" in out, out
+    code, out = env.office("rerun", "T1", "--fresh", "--cli", "claude", env=_quota(env))
+    assert code == 2 and "--cli needs --as" in out, out
+
+
+def test_rerun_without_as_keeps_the_user_override_route_and_says_so(env):
+    _planned_executor_ended(env, as_route=FB1)
+    code, out = env.office("rerun", "T1", "--fresh", env=_quota(env))
+    assert code == 0 and f"on {CODEX} (user override) launching" in out, out
+    assert "original route" not in out and _latest(env)[1] == CODEX
+
+
+def test_a_user_override_route_is_still_quota_checked_on_rerun(env):
+    _planned_executor_ended(env, as_route=FB1)
+    before = env.con().execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0]
+    code, out = env.office("rerun", "T1", "--fresh", env=_quota(env, codex=1))
+    assert code == 4 and f"original route {CODEX} cannot run now" in out, out
+    assert "--as <harness>/<model>" in out, out
+    assert env.con().execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == before
+
+
+def test_review_as_pins_the_code_reviewer_for_the_task(env):
+    _planned_executor_ended(env)
+    code, out = env.office("rerun", "T1", "--fresh", "--review-as", "codex/gpt-6-astra@low", env=_quota(env))
+    assert code == 0, out
+    review = json.loads(env.con().execute("SELECT review_override_json FROM tasks WHERE id='T1'").fetchone()[0])
+    assert review == {"as": "codex/gpt-6-astra@low", "cli": None, "external": False, "by": "user"}
+
+
+def test_review_cli_needs_review_as(env):
+    _planned_executor_ended(env)
+    code, out = env.office("rerun", "T1", "--fresh", "--review-cli", "x", env=_quota(env))
+    assert code == 2 and "--review-as" in out, out
+
+
+def test_resume_as_the_same_model_resumes_and_a_model_switch_is_refused(env):
+    _planned_executor_ended(env)
+    con = env.con()
+    con.execute("UPDATE dispatches SET session_id='S1' WHERE task_id='T1'")
+    con.commit()
+    code, out = env.office("rerun", "T1", "--resume", "--as", "claude/claude-opus-5-5@medium", env=_quota(env))
+    assert code == 0 and "resuming" in out, out
+    did, _ = _latest(env)
+    payload = json.loads(con.execute("SELECT payload_json FROM outbox WHERE dedup_key=?", (f"launch:{did}",)).fetchone()[0])
+    assert "S1" in payload["resume"]["argv"], payload["resume"]["argv"]
+    con.execute("UPDATE dispatches SET status='ended', ended_at='2026-10-09T00:00:01+00:00' WHERE id=?", (did,))
+    con.execute("UPDATE tasks SET status='changes_required' WHERE id='T1'")
+    con.commit()
+    code, out = env.office("rerun", "T1", "--resume", "--as", "claude/claude-haiku-5-5@medium", env=_quota(env))
+    assert code == 4 and "keeps its model and effort" in out and "--fresh --as" in out, out
+
+
+def test_rerun_follows_a_route_declared_between_rounds_and_resume_refuses_it(env):
+    _planned_executor_ended(env)
+    code, out = env.office("amend", "route", "T1", "--as", FB1, "--quote", "astra next round", env=_quota(env))
+    assert code == 0, out
+    code, out = env.office("rerun", "T1", "--resume", env=_quota(env))
+    assert code == 4 and "route was changed since" in out, out
+    code, out = env.office("rerun", "T1", "--fresh", env=_quota(env))
+    assert code == 0 and f"on {CODEX} (user override) launching" in out, out
+    assert _latest(env)[1] == CODEX
+
+
+def test_review_cli_records_the_reviewer_argv(env):
+    _planned_executor_ended(env)
+    code, out = env.office("rerun", "T1", "--fresh", "--review-as", "codex/gpt-6-astra@low",
+                           "--review-cli", "agent --flag", env=_quota(env))
+    assert code == 0, out
+    review = json.loads(env.con().execute("SELECT review_override_json FROM tasks WHERE id='T1'").fetchone()[0])
+    assert review == {"as": "codex/gpt-6-astra@low", "cli": "agent --flag", "external": False, "by": "user"}
+
+
+def test_review_external_records_that_the_user_starts_the_reviewer(env):
+    _planned_executor_ended(env)
+    code, out = env.office("rerun", "T1", "--fresh", "--review-as", "codex/gpt-6-astra@low", "--review-external",
+                           env=_quota(env))
+    assert code == 0, out
+    review = json.loads(env.con().execute("SELECT review_override_json FROM tasks WHERE id='T1'").fetchone()[0])
+    assert review == {"as": "codex/gpt-6-astra@low", "cli": None, "external": True, "by": "user"}
+
+
+# #456: a contract amendment relaunches the executor on the route the task records. The relaunch
+# used to take the ended session's route, so a route declared with `office amend route` was lost.
+def _contract_amendment(env):
+    env.write_plan(PLANNED.replace("- calc.add(2, 3) == 5", "- calc.add(2, 3) == 5\n- calc.add(1, 1) == 2"))
+    return env.office("amend", "T1", "--contract", "--", "also check add(1, 1)", env=_quota(env))
+
+
+def _latest_triple(env):
+    return env.con().execute("SELECT triple FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC").fetchone()[0]
+
+
+def test_a_contract_amendment_relaunches_on_the_as_route(env):
+    _planned_executor_ended(env, as_route=FB1)
+    code, out = _contract_amendment(env)
+    assert code == 0, out
+    assert _latest_triple(env) == CODEX
+
+
+def test_a_contract_amendment_relaunches_on_a_route_declared_since_the_last_round(env):
+    _planned_executor_ended(env)
+    code, out = env.office("amend", "route", "T1", "--as", "claude/claude-opus-5-5@high", "--quote", "high next round",
+                           env=_quota(env))
+    assert code == 0, out
+    code, out = _contract_amendment(env)
+    assert code == 0, out
+    assert _latest_triple(env) == "claude@1/claude-opus-5-5@high", "the declared route wins over the ended session's"

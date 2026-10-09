@@ -14,7 +14,7 @@ import re
 import uuid
 from pathlib import Path
 
-from office import db, jobs, paths, planfile, planpath, plans, state
+from office import db, jobs, paths, planfile, planpath, plans, routing, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, loads, now_iso, sha256_bytes
@@ -576,6 +576,16 @@ def _record(con, run, klass, scope_ids, delta, from_v, to_v) -> str:
     return amendment_id
 
 
+def _relaunch_decision(task: dict) -> dict | None:
+    """The route an amendment's relaunch runs: the route recorded on the task.
+    `office amend route` records a declared route there, and every dispatch records
+    the route it ran, so the relaunch never falls back to the ended session's route (#456)."""
+    rec = state.recorded_route(task)
+    if not rec:
+        return None
+    return {**rec, "status": "selected", "selected": routing.candidate_id(rec["candidate"])}
+
+
 def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, target_version: int,
              hold: list[str] = ()) -> list[str]:
     """Queue one combined delta per affected dispatched task and supersede older
@@ -627,7 +637,8 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
             # The worker is gone. The relaunched session starts from the current contract, but an ordinary
             # delta is not in the contract and a reopened task has no findings: hand the delivery to the new
             # session so its brief carries the delta, and it is delivered once that prompt is confirmed.
-            new_did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"))
+            new_did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
+                                              decision=_relaunch_decision(task))
             con.execute("UPDATE deliveries SET dispatch_id=?, status='queued', superseded_by=NULL WHERE id=?",
                         (new_did, did))
         targets.append(tid)
