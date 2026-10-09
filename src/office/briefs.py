@@ -229,7 +229,7 @@ def planner_brief(con, run: dict, packet: dict) -> str:
     return "\n".join(out) + "\n"
 
 
-def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> str:
+def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carried: list | None = None) -> str:
     out = [
         "ROLE executor",
         f"TASK {packet['task_id']} {packet['title']}",
@@ -287,10 +287,12 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
         for f in findings:
             out.append(f"- {f['code']} [{f['severity']}] {f['location'] or ''} {f['summary']}"
                        + (f" -> {f['action']}" if f["action"] else ""))
-    amendments = con.execute("SELECT amendment_id, target_version, content FROM deliveries WHERE run_id=? AND task_id=? "
+    amendments = con.execute("SELECT id, amendment_id, target_version, content FROM deliveries WHERE run_id=? AND task_id=? "
                              "AND dispatch_id=? AND status IN ('queued','delivered') ORDER BY target_version",
                              (run["id"], packet["task_id"], packet["dispatch_id"])).fetchall() \
         if con is not None and packet.get("dispatch_id") else []
+    if carried is not None:
+        carried.extend(a["id"] for a in amendments)  # exactly what this brief renders
     for a in amendments:
         out += ["", f"AMENDMENT {a['amendment_id']} (plan -> p{a['target_version']}): apply it, then run office ack {a['amendment_id']}"]
         out += [f"    {line}" for line in a["content"][:AMENDMENT_BRIEF_CHARS].splitlines()]
@@ -450,10 +452,11 @@ def ledger_lines() -> list[str]:
     ]
 
 
-def worker_brief(con, run: dict, packet: dict, setup: dict | None = None) -> str:
+def worker_brief(con, run: dict, packet: dict, setup: dict | None = None, carried: list | None = None) -> str:
+    """`carried`, when given, receives the delivery ids the brief renders."""
     if packet["role"] == "planner":
         return planner_brief(con, run, packet)
-    return executor_brief(con, run, packet, setup=setup)
+    return executor_brief(con, run, packet, setup=setup, carried=carried)
 
 
 def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_summary: str,

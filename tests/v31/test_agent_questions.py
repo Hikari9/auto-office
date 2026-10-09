@@ -105,3 +105,64 @@ def test_a_headless_worker_that_ended_on_a_question_is_a_question_not_a_relaunch
     assert "question: T1" in out and "Q1" in out and "office amend T1" in out and "office rerun T1" in out, out
     code, out = env.office("status")
     assert "question: T1" in out, out
+
+
+def test_final_question_reports_the_latest_question_and_ignores_bare_ids():
+    # Review F5: an earlier, answered question in the log is not the one asked now.
+    log = ("Question (Q1): may I touch a.ts?\nAnswered: yes.\n...work...\n"
+           "Question (Q2): may I also touch b.ts?\nTASK=T1 SUBMIT=not attempted NEXT=Answer Q2\n")
+    assert questions.final_question(log)["question"].startswith("Question (Q2)")
+    # Review F8: a NEXT that only mentions a question id does not ask anything.
+    assert questions.final_question("Stopped.\nTASK=T1 SUBMIT=not attempted NEXT=rerun checks; Q1 was resolved\n") is None
+    # Review F10: one fingerprint rule for live and ended questions.
+    q = questions.final_question(log)
+    assert q["fingerprint"] == questions.fingerprint(q)
+
+
+def test_only_a_cleanly_ended_executor_can_end_on_a_question():
+    # Review F3 (planners have no amend/rerun answer path) and F6 (a crash is not a question).
+    from office import dispatch
+    assert dispatch._may_end_on_question({"role": "executor", "terminal_classification": "success"})
+    assert not dispatch._may_end_on_question({"role": "planner", "terminal_classification": "success"})
+    assert not dispatch._may_end_on_question({"role": "executor", "terminal_classification": "nonzero"})
+
+
+@pytest.mark.approved
+def test_a_crashed_worker_whose_last_line_is_a_question_is_still_relaunched(env):
+    from conftest import approved_run, task_row
+    approved_run(env, executor=[{"raw": "Does the fixture need a DB?", "exit": 3}] * 4)
+    env.office("dispatch", "T1", check=0)
+    t = task_row(env)
+    assert not (t["pause_reason"] or "").startswith(questions.ENDED_PREFIX), t
+
+
+def test_a_next_naming_a_question_with_an_answer_or_approval_still_asks():
+    # Review #446 F7.
+    assert questions.final_question("Stopped.\nTASK=T1 SUBMIT=not attempted NEXT=await orchestrator answer to Q1\n")
+    assert questions.final_question("Stopped.\nTASK=T1 SUBMIT=not attempted NEXT=need approval on Q1\n")
+    assert questions.final_question("Stopped.\nTASK=T1 SUBMIT=not attempted NEXT=rerun checks; Q1 was resolved\n") is None
+
+
+@pytest.mark.approved
+def test_a_tail_cut_mid_line_never_supplies_the_question(env):
+    # Review #446 F9: the first line of a partial tail is a fragment.
+    from conftest import approved_run
+    from office import dispatch, paths, state
+    approved_run(env)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    ddir = paths.run_dir(run["id"]) / "dispatches" / "Dcut"
+    ddir.mkdir(parents=True, exist_ok=True)
+    tail = "TASK=T1 SUBMIT=not attempted NEXT=Answer Q1 about b.ts\n"
+    line = "Question (Q9): an old question that is cut?\n"
+    body = "x" * 20000 + "\n" + line + "y\n" * ((16384 - len(tail) - 10) // 2) + tail
+    (ddir / "output.log").write_text(body)
+    q = dispatch._ended_on_question(run, {"id": "Dcut", "log_path": str(ddir / "output.log")})
+    assert q and q["question"].startswith("Answer Q1"), q  # never the cut "...is cut?" fragment
+
+
+def test_the_brief_reports_exactly_the_deliveries_it_renders():
+    # Review #446 F8: brief-deliveries.json comes from the brief's own query.
+    import inspect
+    from office import briefs
+    assert "carried" in inspect.signature(briefs.worker_brief).parameters

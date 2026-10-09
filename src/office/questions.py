@@ -142,13 +142,18 @@ def parse(text: str | None, *, status: str | None = None, busy: bool | None = No
         q = _plain(lines)
     if q is not None:
         q["options"] = q["options"][:MAX_OPTIONS]
-        q["fingerprint"] = hashlib.sha256(json.dumps([q["kind"], q["question"], q["options"]]).encode()).hexdigest()
+        q["fingerprint"] = fingerprint(q)
     return q
 
 
 # A worker's closing status line names its next step: `... SUBMIT=not attempted NEXT=Answer Q1 ...`.
 _NEXT = re.compile(r"\bNEXT=(.+)$")
-_ASKS = re.compile(r"^\W*(?:answer|approve|authori[sz]e|confirm|decide|choose|tell me)\b|\bQ\d+\b", re.I)
+# A NEXT asks the orchestrator something when it opens with a request (answer, approve,
+# decide...) or names a question id together with an answer/approval/decision ("await
+# orchestrator answer to Q1", "need approval on Q1"). A bare id ("Q1 was resolved") does not.
+_ASK_WORD = r"(?:answer|approv(?:e|al)|authori[sz](?:e|ation)|confirm(?:ation)?|decid(?:e|ing)|decision|choose|choice|tell me|reply)"
+_ASKS = re.compile(r"^\W*" + _ASK_WORD + r"\b|\b" + _ASK_WORD + r"\b[^;]*\bQ\d+\b|\bQ\d+\b[^;]*\b" + _ASK_WORD + r"\b",
+                   re.I)
 _QUESTION_LINE = re.compile(r"\bQ\d+\b|\bquestion\b", re.I)
 ENDED_PREFIX = "worker ended on a question: "
 
@@ -163,11 +168,17 @@ def final_question(text: str | None) -> dict | None:
     nxt = next((m.group(1).strip() for ln in reversed(lines[-6:]) if (m := _NEXT.search(ln))), None)
     if not ((nxt and _ASKS.search(nxt)) or lines[-1].endswith("?")):
         return None
-    asked = next((ln for ln in lines if "?" in ln and _QUESTION_LINE.search(ln)), None) \
+    # The latest question wins: a log can echo the prompt or an earlier, answered turn.
+    asked = next((ln for ln in reversed(lines) if "?" in ln and _QUESTION_LINE.search(ln)), None) \
         or next((ln for ln in reversed(lines) if ln.endswith("?")), None) or nxt or lines[-1]
     q = {"kind": "text", "question": _line(re.sub(r"[*_`]+", "", asked), MAX_QUESTION), "options": [], "ended": True}
-    q["fingerprint"] = hashlib.sha256(json.dumps([q["kind"], q["question"], []]).encode()).hexdigest()
+    q["fingerprint"] = fingerprint(q)
     return q
+
+
+def fingerprint(q: dict) -> str:
+    """The identity `_record` dedups a question sighting on."""
+    return hashlib.sha256(json.dumps([q["kind"], q["question"], q["options"]]).encode()).hexdigest()
 
 
 def _ended_question_dispatches(con, run: dict) -> list[tuple[dict, dict]]:

@@ -239,15 +239,127 @@ def test_revoking_one_dispatch_stops_only_that_dispatch(env, monkeypatch):
     # Run 330605a8: `office revoke <dispatch>` also killed the task's other live session.
     _setup(env, monkeypatch, session=None)
     con, run, first = _launching(env, monkeypatch)
-    con.execute("UPDATE dispatches SET status='running', launcher='external' WHERE id=?", (first,))
-    con.commit()
     from office import db, dispatch
+    # Two live sessions can no longer be requested; build the state the bug left behind.
+    con.execute("UPDATE outbox SET status='done' WHERE dedup_key=?", (f"launch:{first}",))
+    con.commit()
     with db.transaction(con):
         second = dispatch.request_launch(con, run, "T1", role="executor")
-    con.execute("UPDATE dispatches SET status='running', launcher='external' WHERE id=?", (second,))
+    con.execute("UPDATE dispatches SET status='running', launcher='external' WHERE id IN (?,?)", (first, second))
     con.commit()
     stopped = []
     monkeypatch.setattr(dispatch, "stop_dispatch", lambda run, d, notes=None: stopped.append(d["id"]) or True)
     res = dispatch.revoke(con, run, second, "test")
     assert stopped == [second], stopped
     assert any(first in ln and "left running" in ln for ln in res.lines), res.lines
+
+
+@pytest.mark.approved
+def test_rerun_refuses_while_a_non_current_session_of_the_task_is_live(env, monkeypatch):
+    # Review F1/F9: revoking the current dispatch can leave an older one running; rerun must not
+    # start a third session beside it.
+    _setup(env, monkeypatch, session=None)
+    con, run, older = _launching(env, monkeypatch)
+    from office import db, dispatch, rerun
+    # Two sessions can no longer be requested; build the state an older bug left behind.
+    con.execute("UPDATE outbox SET status='done' WHERE dedup_key=?", (f"launch:{older}",))
+    con.commit()
+    with db.transaction(con):
+        current = dispatch.request_launch(con, run, "T1", role="executor")
+    con.execute("UPDATE outbox SET status='queued' WHERE dedup_key=?", (f"launch:{older}",))
+    con.execute("UPDATE dispatches SET status='exited', ended_at=started_at, terminal_classification='success' "
+                "WHERE id=?", (current,))
+    con.commit()
+    with pytest.raises(rerun.Refused) as err:
+        rerun.rerun(con, run, "T1", resume=False, fresh=True)
+    assert older in err.value.message
+
+
+@pytest.mark.approved
+def test_revoking_a_task_cancels_a_launch_that_has_not_started(env, monkeypatch):
+    # Review F2: the remedy rerun names (office revoke) must be able to end a pending launch.
+    _setup(env, monkeypatch, session=None)
+    con, run, did = _launching(env, monkeypatch)
+    from office import dispatch, gates, state
+    res = dispatch.revoke(con, run, "T1", "test")
+    assert any("cancelled" in ln and did in ln for ln in res.lines), res.lines
+    assert not gates.worker_live(con, did) and state.get_dispatch(con, did)["status"] == "cancelled"
+    job = con.execute("SELECT status FROM outbox WHERE dedup_key=?", (f"launch:{did}",)).fetchone()
+    assert job["status"] == "failed"
+
+
+@pytest.mark.approved
+def test_a_launch_revoked_during_setup_starts_no_agent(env, monkeypatch):
+    # Review F2: a claimed launch job re-checks the dispatch before it starts the agent.
+    _setup(env, monkeypatch, session=None)
+    con, run, did = _launching(env, monkeypatch)
+    from office import dispatch, state, worktree_setup
+
+    def setup_then_revoked(*a, **kw):
+        con.execute("UPDATE dispatches SET status='cancelled', ended_at=started_at WHERE id=?", (did,))
+        con.commit()
+        return None
+    monkeypatch.setattr(worktree_setup, "prepare", setup_then_revoked)
+    launched = []
+    monkeypatch.setattr(dispatch, "launch", lambda *a, **kw: launched.append(a) or {})
+    job = {"kind": "launch_agent", "payload": {"dispatch_id": did, "task_id": "T1", "role": "executor"}}
+    out = dispatch.job_launch_agent(con, run, job)
+    assert out.get("skipped") == "cancelled" and not launched, out
+
+
+@pytest.mark.approved
+def test_an_amendment_made_while_launching_is_confirmed_from_the_brief(env, monkeypatch):
+    # Review F7: a delivery created after the dispatch started but carried by its brief is confirmed.
+    import json as _json
+    _setup(env, monkeypatch, session=None)
+    con, run, did = _launching(env, monkeypatch)
+    from office import amend, paths
+    con.execute("INSERT INTO deliveries(id, run_id, amendment_id, task_id, dispatch_id, target_version, status, content, "
+                "created_at) VALUES('dl1', ?, 'A9', 'T1', ?, 9, 'queued', 'x', '2999-01-01T00:00:00+00:00')",
+                (run["id"], did))
+    con.execute("UPDATE dispatches SET status='running' WHERE id=?", (did,))
+    con.commit()
+    ddir = paths.run_dir(run["id"]) / "dispatches" / did
+    ddir.mkdir(parents=True, exist_ok=True)
+    (ddir / "launch.json").write_text(_json.dumps({"prompt_landed": True}))
+    (ddir / "brief-deliveries.json").write_text(_json.dumps(["dl1"]))
+    assert amend.confirm_launch_deliveries(con, run) == 1
+
+
+@pytest.mark.approved
+def test_revoke_leaves_a_claimed_launch_to_finish_instead_of_orphaning_its_agent(env, monkeypatch):
+    # Review #446 F2/F3: cancelling under a launch job that is already starting the agent left
+    # an agent nothing tracked.
+    _setup(env, monkeypatch, session=None)
+    con, run, did = _launching(env, monkeypatch)
+    con.execute("UPDATE outbox SET status='claimed' WHERE dedup_key=?", (f"launch:{did}",))
+    con.commit()
+    from office import dispatch, state
+    res = dispatch.revoke(con, run, "T1", "test")
+    assert state.get_dispatch(con, did)["status"] == "launching", res.lines
+    assert any(did in ln and "starting its agent" in ln for ln in res.lines), res.lines
+
+
+@pytest.mark.approved
+def test_cancel_never_ends_a_dispatch_that_recorded_its_launch_since_the_snapshot(env, monkeypatch):
+    _setup(env, monkeypatch, session=None)
+    con, run, did = _launching(env, monkeypatch)
+    from office import dispatch, state
+    stale = state.get_dispatch(con, did)
+    con.execute("UPDATE dispatches SET status='running', launcher='process', pid=1 WHERE id=?", (did,))
+    con.commit()
+    assert dispatch._cancel_pending_launch(con, run, stale, "test") is False
+    assert state.get_dispatch(con, did)["status"] == "running"
+    assert con.execute("SELECT status FROM outbox WHERE dedup_key=?", (f"launch:{did}",)).fetchone()[0] == "queued"
+
+
+@pytest.mark.approved
+def test_request_launch_refuses_a_second_executor_session(env, monkeypatch):
+    # Review #446 F4: amend and auto-relaunch reach request_launch directly.
+    _setup(env, monkeypatch, session=None)
+    con, run, did = _launching(env, monkeypatch)
+    from office import db, dispatch
+    with pytest.raises(dispatch.Refused) as err:
+        with db.transaction(con):
+            dispatch.request_launch(con, run, "T1", role="executor")
+    assert did in err.value.message
