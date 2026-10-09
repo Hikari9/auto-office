@@ -257,3 +257,18 @@ def test_an_edited_plan_draft_keeps_entries_the_accepted_plan_had():
     current = {"content_hash": "other", "tasks": planfile.parse(text).tasks, "body": text}
     new_text, parsed = amend._next_plan_text(current, text + "\n", ["T1"], "x")
     assert not parsed.errors
+
+
+def test_a_bare_resume_through_an_explicit_binding_keeps_it_explicit(env):
+    # R3-9.
+    env.office("start", "here", "--planner", "inline", check=0)
+    env.office("start", "elsewhere", "--planner", "inline", check=0)
+    con = env.con()
+    con.execute("DELETE FROM session_bindings")
+    here, there = [r[0] for r in con.execute("SELECT id FROM runs ORDER BY created_at")]
+    sess = {"OFFICE_SESSION": "sess-k", "OFFICE_HARNESS": "claude", "HERDR_PANE_ID": ""}
+    assert env.office("resume", there[:8], env=sess)[0] == 0
+    con.execute("UPDATE runs SET git_common_dir=? WHERE id=?", (str(env.repo.parent / "other-repo" / ".git"), there))
+    con.commit()
+    assert env.office("resume", env=sess)[0] == 0
+    assert tuple(con.execute("SELECT run_id, bound_by FROM session_bindings WHERE session_id='sess-k'").fetchone()) == (there, "resume")

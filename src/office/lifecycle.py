@@ -233,7 +233,10 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
         if not worker:
             # Only `office resume <run>` is an explicit choice that wins across repositories;
             # a bare resume binds by cwd and yields like an `office start` binding.
-            discovery.bind(con, run, keys, "resume" if target.source == "flag" else "resume-cwd")
+            # A bare resume that resolved through an explicit binding keeps it explicit (R3-9).
+            bound, how = discovery._binding(con, keys)
+            kept = target.source == "session" and bound is not None and bound["id"] == run["id"] and how == "resume"
+            discovery.bind(con, run, keys, "resume" if target.source == "flag" or kept else "resume-cwd")
         reconcile(con, run)
         if not worker:
             # An explicit resume is the retry for an integration that failed on
