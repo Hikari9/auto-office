@@ -7,7 +7,7 @@ Check `claude --version`, `claude --help`, and `claude agents --help` against th
 Set `WT`, `MODEL`, `EFFORT`, `BRIEF`, and `TASK_LABEL` to real values. The repository's verified background-agent recipe sends the brief via stdin:
 
 ```bash
-sh <skill-dir>/scripts/agent-preflight.sh claude "$WT" "$EXPECTED_BRANCH"
+sh "$AUTO_OFFICE_LEAN_DIR/scripts/agent-preflight.sh" claude "$WT" "$EXPECTED_BRANCH"
 (cd "$WT" && SHELL=/bin/bash claude --bg --remote-control "$TASK_LABEL" \
   --model "$MODEL" --effort "$EFFORT" --add-dir "$WT" \
   --allowedTools "Read Write Edit Grep Glob Bash(git *)" < "$BRIEF")

@@ -7,7 +7,7 @@ Use Codex when its exact installed model and effort are confirmed. Start with `c
 Prepare an exclusive Git worktree and a brief file. Worktree ownership is separate from the CLI sandbox. From a trusted shell, set `WT`, `MODEL`, `EFFORT`, and `BRIEF` to real values:
 
 ```bash
-sh <skill-dir>/scripts/agent-preflight.sh codex "$WT" "$EXPECTED_BRANCH"
+sh "$AUTO_OFFICE_LEAN_DIR/scripts/agent-preflight.sh" codex "$WT" "$EXPECTED_BRANCH"
 codex exec --sandbox workspace-write --cd "$WT" --model "$MODEL" \
   -c "model_reasoning_effort=\"$EFFORT\"" "$(cat "$BRIEF")" < /dev/null
 ```

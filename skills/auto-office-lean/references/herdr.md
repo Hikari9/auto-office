@@ -26,11 +26,10 @@ Inspect `herdr pane get "$PANE"` and the agent's banner/session metadata to conf
 ```bash
 herdr agent get worker-api
 herdr agent read worker-api --source visible
-herdr agent wait worker-api --until blocked --timeout 120000
-# Only if a known selection/input is authorized and the displayed UI matches:
-herdr agent send-keys worker-api enter
-# After the agent is truly done and its work is preserved:
-herdr pane close "$PANE"
+# If blocked: inspect the requested decision and obtain any needed authority.
+# herdr agent send-keys worker-api enter
+# When it is truly finished, its work is preserved, and this pane is yours:
+# herdr pane close "$PANE"
 ```
 
 `herdr agent prompt` is for agent instructions. Never use `herdr pane run` or `pane send-text` to send instructions into an agent composer; those are for ordinary shell panes. If a prompt is visibly typed but unsubmitted, send only `herdr pane send-keys "$PANE" enter`, not the text again. Answer technical implementation questions yourself; obtain user authority for new requirements, permissions, destructive/external actions, or merges.

@@ -7,7 +7,7 @@ Use `agy --help` and `agy models` at launch time. Native Gemini variants include
 Set `WT`, `AGY_MODEL`, and `BRIEF` to real values. Work from the target checkout as well as declaring `--add-dir`; that flag alone does not guarantee the intended cwd.
 
 ```bash
-sh <skill-dir>/scripts/agent-preflight.sh agy "$WT" "$EXPECTED_BRANCH"
+sh "$AUTO_OFFICE_LEAN_DIR/scripts/agent-preflight.sh" agy "$WT" "$EXPECTED_BRANCH"
 (cd "$WT" && agy --model "$AGY_MODEL" --add-dir "$WT" \
   --print-timeout 45m --prompt="$(cat "$BRIEF")")
 ```

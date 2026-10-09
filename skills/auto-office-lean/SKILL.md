@@ -35,7 +35,7 @@ An explicit user choice wins. Otherwise require capability, trust, and safe perm
 - **[Claude CLI](references/claude.md):** background agents, model/effort pinning, permissions, liveness and non-forking control.
 - **[Herdr](references/herdr.md):** observable pane-native launch, prompt, blocked-question handling and owned-pane cleanup.
 
-Use `sh <skill-dir>/scripts/agent-preflight.sh <codex|agy|claude|herdr> <absolute-worktree> [expected-branch]` when validating a launch. It checks the installed executable and worktree/branch identity without dispatching anything. These recipes are optional execution tools, not a new control plane; check installed CLI help if a version disagrees.
+Set `AUTO_OFFICE_LEAN_DIR` to the absolute directory containing this `SKILL.md`. Use `sh "$AUTO_OFFICE_LEAN_DIR/scripts/agent-preflight.sh" <codex|agy|claude|herdr> <absolute-worktree> [expected-branch]` when validating a launch. It checks the installed executable and worktree/branch identity without dispatching anything. These recipes are optional execution tools, not a new control plane; check installed CLI help if a version disagrees.
 
 ## Keep the machinery out of the way
 
