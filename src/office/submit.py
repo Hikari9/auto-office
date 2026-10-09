@@ -105,7 +105,8 @@ def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect:
                 with db.transaction(con):
                     state.emit(con, run, "submit.rejected", f"{exc.category}: {exc.message}", audience="runtime",
                                task_id=d.get("task_id"), dispatch_id=dispatch_id, payload={"code": exc.category})
-                    if exc.category not in ("self-review-ledger-signaled", "self-review-stale", "self-review-exemption"):
+                    if exc.category not in ("self-review-ledger-signaled", "self-review-missing", "self-review-stale",
+                                            "self-review-exemption"):
                         signal_refused(con, run, d, f"{exc.category}: {exc.message}")
         raise
 
@@ -501,14 +502,18 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
     tier = briefs.self_review_tier(run.get("gear"), run.get("risk_json"))
     enforced = contract.of(run) != contract.LEGACY  # runs pinned to v3.1 keep ledger-less submissions (#421)
     has_ledger = _read_untracked_text(wt, briefs.LEDGER_FILE, briefs.LEDGER_MAX_CHARS) is not None
-    if exempt and not has_ledger:
-        _check_exemption(task, exempt, reason, tier)
+    reason = preflight._one_line(reason or "", 200)  # it reaches the reviewer's brief: one printable line
+    if exempt and not has_ledger and enforced and task["scope"] and any(preflight._in_scope_changes(
+            wt, task, preflight.committed_changes(wt, base, head, dep_bases))):
+        _check_exemption(task, exempt, reason, tier)  # empty, read-only and v3.1 work needs no exemption
     ledger_stop, ledger_fix, signaled = preflight.ledger_gate(
         con, run, task, d, wt, base, head, dep_bases, stop=[], fix=[], submission=True,
         require=enforced and not (exempt and not has_ledger))
     if ledger_stop or ledger_fix:
         details = "; ".join(ledger_stop + ledger_fix)
         category = "self-review-ledger-signaled" if signaled else "self-review-ledger"
+        if enforced and not ledger_stop and not has_ledger:
+            category = "self-review-missing"  # the worker writes the ledger itself: no orchestrator signal
         next_step = "run office preflight, apply its repairs, then office submit" if not ledger_stop else \
             "run office preflight, report the stop for the orchestrator, and stop"
         if enforced and not ledger_stop and not has_ledger:
