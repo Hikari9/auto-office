@@ -363,3 +363,44 @@ def test_request_launch_refuses_a_second_executor_session(env, monkeypatch):
         with db.transaction(con):
             dispatch.request_launch(con, run, "T1", role="executor")
     assert did in err.value.message
+
+
+@pytest.mark.approved
+def test_an_internal_relaunch_refused_by_a_live_session_blocks_instead_of_rolling_back(env, monkeypatch):
+    # R3-3: after_worker_exit's auto-relaunch must not raise out of the end transaction.
+    _setup(env, monkeypatch, session=None)
+    con, run, older = _launching(env, monkeypatch)
+    from office import db, dispatch, state
+    con.execute("UPDATE outbox SET status='done' WHERE dedup_key=?", (f"launch:{older}",))
+    con.commit()
+    with db.transaction(con):
+        current = dispatch.request_launch(con, run, "T1", role="executor")
+    con.execute("UPDATE outbox SET status='queued' WHERE dedup_key=?", (f"launch:{older}",))  # older is live again
+    con.execute("UPDATE dispatches SET status='exited', ended_at=started_at, terminal_classification='nonzero' "
+                "WHERE id=?", (current,))
+    con.execute("UPDATE tasks SET status='running' WHERE id='T1'")
+    con.commit()
+    with db.transaction(con):
+        dispatch.after_worker_exit(con, run, current)  # must not raise
+    t = state.get_task(con, run["id"], "T1")
+    assert t["status"] == "blocked" and "relaunch refused" in t["pause_reason"], t
+
+
+@pytest.mark.approved
+def test_a_launch_whose_lease_was_revoked_during_setup_ends_itself(env, monkeypatch):
+    # R3-4: revoke leaves a claimed launch alone; the job checks the lease before launching.
+    _setup(env, monkeypatch, session=None)
+    con, run, did = _launching(env, monkeypatch)
+    from office import dispatch, state, worktree_setup
+
+    def setup_then_revoked(*a, **kw):
+        con.execute("UPDATE leases SET revoked_at='2026-01-01T00:00:00+00:00' WHERE dispatch_id=?", (did,))
+        con.commit()
+        return None
+    monkeypatch.setattr(worktree_setup, "prepare", setup_then_revoked)
+    launched = []
+    monkeypatch.setattr(dispatch, "launch", lambda *a, **kw: launched.append(a) or {})
+    job = {"kind": "launch_agent", "payload": {"dispatch_id": did, "task_id": "T1", "role": "executor"}}
+    out = dispatch.job_launch_agent(con, run, job)
+    assert out.get("skipped") == "revoked" and not launched, out
+    assert state.get_dispatch(con, did)["ended_at"]

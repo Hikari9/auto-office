@@ -166,3 +166,12 @@ def test_the_brief_reports_exactly_the_deliveries_it_renders():
     import inspect
     from office import briefs
     assert "carried" in inspect.signature(briefs.worker_brief).parameters
+
+
+def test_applying_an_answer_is_not_asking_but_waiting_on_one_is():
+    # R3-5.
+    for done in ("apply the answer to Q1, then submit", "implement Q1 decision (use UTC) and submit",
+                 "no decision needed on Q2, implement b.ts"):
+        assert questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={done}\n") is None, done
+    for ask in ("waiting on Q1", "blocked until Q1 is resolved"):
+        assert questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={ask}\n"), ask

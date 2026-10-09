@@ -113,7 +113,13 @@ def test_authority_terms_ignore_a_send_to_the_orchestrator(text):
 @pytest.mark.parametrize("text", ["send SMS to members", "send the invitations", "send a newsletter",
                                   # review #446 F1: an exempt object sent to anyone but the orchestrator counts
                                   "send it to all members", "send the summary to every parent",
-                                  "send NEWSLETTER_2026 to members", "send it back"])
+                                  "send NEWSLETTER_2026 to members", "send it back",
+                                  # R3-2: the orchestrator must be the whole recipient, and a protocol
+                                  # word must name no recipient or channel
+                                  "send the report to the office team",
+                                  "send the summary to Office staff and every parent",
+                                  "send it to the orchestrator and to all members", "send it to office@example.org",
+                                  "send NEWSLETTER_2026 out tonight", "send PROMO-CODE via sms"])
 def test_authority_terms_still_match_external_sends(text):
     from office.amend import AUTHORITY_TERMS
     assert AUTHORITY_TERMS.search(text) is not None, text

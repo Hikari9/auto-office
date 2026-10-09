@@ -22,14 +22,20 @@ from office.util import dumps, now_iso, sha256_bytes
 # is one part of a hyphen/underscore compound identifier (`send-keys`, `send_keys`,
 # `release-notes`) names a thing, not the action, so it does not count; `--prod` and
 # `force-push` still do.
-# A `send` addressed to the orchestrator is a report, not an external action: `send <it | the
-# report/result/status/summary/reply/review> [back] to the orchestrator/Office`, or an all-caps
-# compound protocol word (`send READY-FOR-LIVE again`) with no other recipient in the clause.
-# Anything sent to anyone else (`send it to all members`, `send NEWSLETTER_2026 to members`) counts.
-_OFFICE_NAME = r"(?:the\s+)?(?:orchestrator|office)\b"
-_TO_OFFICE = r"to\s+" + _OFFICE_NAME
+# A `send` addressed only to the orchestrator is a report, not an external action:
+#   `send <it | the report/result/status/summary/reply/review> [back] to the orchestrator/Office`
+#   where the orchestrator/Office ends the recipient (no "team", "staff", "@...", no "and ..."),
+#   or an all-caps compound protocol word (`send READY-FOR-LIVE again`) whose clause names no
+#   recipient or channel (no to/out/via/over/through/by, no address).
+# Anything else (`send it to all members`, `send NEWSLETTER_2026 out tonight`) counts.
+_CLAUSE_END = r"(?=\s*(?:$|[.;,\n)]|(?:for|when|after|once|before|then|again|now|if)\b))"
+_OFFICE_ONLY = r"(?:the\s+)?(?:orchestrator|office)(?![\w@.-])" + _CLAUSE_END
+_TO_OFFICE = r"to\s+" + _OFFICE_ONLY
+_NO_OTHER = r"(?![^.;\n]*\b(?:and|&|plus|also)\b)(?![^.;\n]*@)"
 _SEND = (r"send(?!\s+(?:(?:it|(?:the|a|an|your)\s+(?:report|result|status|summary|reply|review))(?:\s+back)?\s+"
-         + _TO_OFFICE + r"|(?-i:[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+)\b(?![^.;\n]*\bto\s+(?!" + _OFFICE_NAME + r"))))")
+         + _TO_OFFICE + _NO_OTHER + r"|(?-i:[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+)\b"
+         r"(?![^.;\n]*\b(?:out|via|over|through|by|email|sms|text)\b)(?![^.;\n]*\bto\s+(?!" + _OFFICE_ONLY + r"))"
+         + _NO_OTHER + r"))")
 AUTHORITY_TERMS = re.compile(
     r"\b(?<!\w-)(?:deploy|production|prod|publish|release|" + _SEND + r"|email|notify users|delete|drop table|truncate|"
     r"force.?push|merge (?:to|into) main|migrat(?:e|ion) (?:prod|production)|payment|charge|"

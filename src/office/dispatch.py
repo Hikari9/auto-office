@@ -945,8 +945,19 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
                     (packet["packet_hash"], str(ddir / "packet.json"), str(ddir / "output.log"), dispatch["id"]))
     current = state.get_dispatch(con, dispatch["id"])
     if current["status"] != "launching":
-        # Revoked while its worktree was being set up (review F2): start nothing.
         return {"skipped": current["status"]}
+    lease = con.execute("SELECT revoked_at FROM leases WHERE id=?", (current.get("lease_id"),)).fetchone() \
+        if current.get("lease_id") else None
+    if lease and lease["revoked_at"]:
+        # Revoked while its worktree was being set up: this job owns the claim, so it ends the
+        # dispatch itself instead of starting an agent whose submits are fenced (R3-4).
+        with db.transaction(con):
+            con.execute("UPDATE dispatches SET status='cancelled', terminal_classification='revoked', ended_at=? "
+                        "WHERE id=? AND ended_at IS NULL AND status='launching'", (now_iso(), dispatch["id"]))
+            state.emit(con, run, "dispatch.ended", f"{dispatch.get('task_id')} {role} ended: revoked before its agent "
+                       "started", audience="runtime", task_id=dispatch.get("task_id"), dispatch_id=dispatch["id"],
+                       payload={"exit_code": None, "signal": None, "classification": "revoked"})
+        return {"skipped": "revoked"}
     launcher = launch(run, dispatch, "worker", ddir, cwd=wt, cli=payload.get("cli"),
                       external=bool(payload.get("external")), resume=payload.get("resume"))
     return {"dispatch_id": dispatch["id"], **launcher}
@@ -3018,7 +3029,7 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
         if retries <= limit:
             state.emit(con, run, "task.relaunch", f"{task['id']} worker ended ({d['terminal_classification']}) "
                        f"without submitting; relaunching {retries}/{limit}", audience="runtime", task_id=task["id"])
-            request_launch(con, run, task["id"], role=d["role"])
+            _launch_or_block(con, run, task["id"], role=d["role"])
             return
         state.update_task(con, run["id"], task["id"], status="blocked",
                           pause_reason=f"worker ended ({d['terminal_classification']}) without submitting")
@@ -3122,6 +3133,18 @@ def _amendment_undelivered(con, run: dict, payload: dict, d: dict) -> None:
                    f"to {d['id']}; its blocker stays: office revoke {tid}, then office rerun {tid} --resume|--fresh", task_id=tid, dispatch_id=d["id"])
 
 
+def _launch_or_block(con, run: dict, task_id: str, **kw) -> str | None:
+    """An internal relaunch (auto-relaunch, stacked start): a refusal blocks the task with
+    its reason instead of rolling back the transition that asked for it."""
+    try:
+        return request_launch(con, run, task_id, **kw)
+    except Refused as err:
+        state.update_task(con, run["id"], task_id, status="blocked", pause_reason=f"relaunch refused: {err.message}")
+        state.emit(con, run, "task.blocked", f"{task_id} not relaunched: {err.message}; {err.next_step or ''}".strip(),
+                   task_id=task_id)
+        return None
+
+
 def start_stacked(con, run: dict, accepted_task: str) -> list[str]:
     """Launch tasks the orchestrator stacked after `accepted_task`. Caller holds tx."""
     started = []
@@ -3129,6 +3152,6 @@ def start_stacked(con, run: dict, accepted_task: str) -> list[str]:
         if t["status"] == "queued" and t.get("stack_after") == accepted_task:
             graph = {x["id"]: x["depends"] for x in state.tasks(con, run["id"])}
             base = _base_for(con, run, t, graph, accepted_task)
-            request_launch(con, run, t["id"], role="executor", base=base)
-            started.append(t["id"])
+            if _launch_or_block(con, run, t["id"], role="executor", base=base):
+                started.append(t["id"])
     return started
