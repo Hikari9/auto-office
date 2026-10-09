@@ -489,14 +489,15 @@ def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_s
 
 def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision: dict, diff: str,
                              checks_summary: str, carried: list[dict], checkout: str, round_no: int,
-                             requirements: dict | None = None, evidence: dict | None = None) -> str:
+                             requirements: dict | None = None, evidence: dict | None = None,
+                             max_rounds: int | None = None) -> str:
     """One independent convergence review of a composed lane or shared scope (#337)."""
     kind = "shared-scope" if scope.get("shared") else "lane"
     out = [
         "ROLE independent convergence reviewer. Change nothing except your reply file. You did not write this change.",
         f"SCOPE {kind} {scope['id']}: the composed result of {', '.join(t['id'] for t in tasks)}"
         + (f" (shared boundary of lanes {', '.join(scope.get('lanes') or [])}: {scope.get('why')})" if scope.get("shared") else ""),
-        f"ROUND {round_no} of {contract.MAX_ROUNDS} substantive rounds",
+        f"ROUND {round_no} of {max_rounds or contract.MAX_ROUNDS} substantive rounds",
     ]
     if requirements:
         out += _lines("REQUIREMENTS done criteria:", requirements.get("done_criteria"))

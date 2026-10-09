@@ -25,7 +25,7 @@ def test_invalid_result_lets_the_orchestrator_review_on_the_reviewers_behalf(env
     report = tmp_path / "review.txt"
     report.write_text(APPROVED)
     env.office("review", "L-T1:convergence", "--report", str(report), check=0)
-    assert _gates(env, "convergence_review")[-1]["independence"] == "degraded-orchestrator"
+    assert _gates(env, "convergence_review")[-1]["independence"] == "independent-orchestrator"
     assert _scope(env, "L-T1")["status"] == "approved"
 
 

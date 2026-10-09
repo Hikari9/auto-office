@@ -265,7 +265,7 @@ def resolve_gates(gear: str, risk_high: bool, config: dict) -> dict:
     if review_contract == contract.CONVERGENCE:
         # #337: every RECHECK sequence stops at three substantive rounds.
         plan_rounds = code_rounds = contract.MAX_ROUNDS
-    return {
+    gates = {
         # Pinned per run (#337): the review contract this run keeps for its life.
         "review_contract": review_contract,
         # `policy_optional` / `shallow` / `cost_bounded` fund the gate; they
@@ -284,6 +284,12 @@ def resolve_gates(gear: str, risk_high: bool, config: dict) -> dict:
         "review_reprompt_max": int(verification.get("review_reprompt_max", 3)),
         "dedicated_planner": planner is True,
     }
+    if review_contract == contract.CONVERGENCE:
+        # #423: the configurable substantive-round cap for lane and shared-scope
+        # reviews, pinned at start so resume and recovery keep it.
+        gates["convergence_max_rounds"] = contract.check_round_cap(
+            (config.get("review") or {}).get("max_rounds", contract.MAX_ROUNDS))
+    return gates
 
 
 def quota_reserve_percent(config: dict) -> float:

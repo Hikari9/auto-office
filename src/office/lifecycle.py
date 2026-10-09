@@ -38,7 +38,7 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
           base: str | None = None, planner: str | None = None, issue: str | None = None,
           no_prs: bool = False, end_state: str | None = None, deploy: dict | None = None,
           benchmark_refresh: bool = False, from_run: str | None = None,
-          plan_review_rounds: int | None = None) -> Result:
+          plan_review_rounds: int | None = None, review_rounds: int | None = None) -> Result:
     source = None
     if from_run:
         # #337: moving old work onto the current review contract is an explicit,
@@ -89,6 +89,13 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         from office import plans
         gates["plan_review_max_rounds"] = plans.check_round_cap(plan_review_rounds)
         gates["plan_review_rounds_by"] = "user"
+    if review_rounds is not None:
+        # The convergence-review cap for this run (#423), pinned like the config value.
+        from office import contract
+        if gates.get("review_contract") != contract.CONVERGENCE:
+            raise Usage("no-convergence-contract", "--review-rounds sets the convergence-v1 round cap; this run "
+                        "pins the v3.1 contract", next_step="drop --review-rounds")
+        gates["convergence_max_rounds"] = contract.check_round_cap(review_rounds)
     base_sha = paths.git(top, "rev-parse", base or "HEAD")
     run_id = new_run_id()
     sdir = paths.run_dir(run_id)
