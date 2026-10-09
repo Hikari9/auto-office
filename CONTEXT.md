@@ -14,6 +14,7 @@ A plan defect confined to one task brief. Under convergence-v1, root-cause metad
 **Ordinary amendment**:
 An in-contract change to decomposition, ordering, routing, acceptance detail, or tests that the orchestrator may make without waking the planner.
 _Avoid_: refinement, tweak, replan
+An amendment that adds or drops an acceptance criterion or required check, or changes `depends`, edits the task's structured contract: the plan version records it, the new checks run at the gate, and the amendment keeps the old and effective contract and its rationale. It never reopens plan review.
 
 **Contract amendment**:
 A planner-owned change to cross-scope interfaces, ownership boundaries, authority, or irreversible actions.
