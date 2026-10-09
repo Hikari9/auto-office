@@ -248,3 +248,16 @@ def test_ask_forms_tied_to_a_question_id_and_negated_waits(nxt, asks):
     # R4-3.
     q = questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={nxt}\n")
     assert bool(q) is asks, (nxt, q)
+
+
+@pytest.mark.parametrize("nxt,asks", [
+    # PR #492 review item 3: ask forms main caught
+    ("can you answer Q1", True), ("the orchestrator should answer Q1", True), ("Q1: please answer", True),
+    ("requesting approval for Q1", True), ("Q1 is awaiting a decision", True),
+    # item 4: negated needs and waits report progress
+    ("Q1 doesn't need an answer anymore, continue", False), ("nothing pending on Q1", False),
+    ("need nothing on Q1, submit", False),
+])
+def test_review_492_ask_and_negation_probes(nxt, asks):
+    q = questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={nxt}\n")
+    assert bool(q) is asks, (nxt, q)

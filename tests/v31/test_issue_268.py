@@ -284,3 +284,15 @@ def test_suffixless_and_dot_directories_below_the_root_are_directories(entry):
     # R4-4: these are real directories; classing them as files took their contents out of scope.
     assert planfile.shared_tree(entry)
     assert planfile.path_in_scope(entry.lstrip("+") + "/a.md", [entry])
+
+
+@pytest.mark.parametrize("entry,is_dir", [
+    # PR #492 review item 7
+    ("+README", False), ("+LICENSE", False), ("+src/Makefile", False), ("+docs/README", True),
+    # item 5: common files that were classed as directories
+    ("+.npmignore", False), ("+.gitkeep", False), ("+.coveragerc", False), ("+.flake8", False),
+    ("+.pylintrc", False), ("+.nojekyll", False), ("+docs/CODEOWNERS", False), ("+Readme", False),
+    ("+License", False),
+])
+def test_review_492_file_and_directory_probes(entry, is_dir):
+    assert planfile.shared_tree(entry) is is_dir

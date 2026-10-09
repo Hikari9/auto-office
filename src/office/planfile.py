@@ -401,36 +401,39 @@ def _entry_problem(entry: str) -> str | None:
 _BUILD_FILES = {"makefile", "gnumakefile", "dockerfile", "containerfile", "procfile", "jenkinsfile", "gemfile",
                 "rakefile", "brewfile", "vagrantfile", "justfile", "podfile", "fastfile", "appfile", "caddyfile",
                 "pipfile", "snakefile", "earthfile", "tiltfile", "taskfile"}
-# Root-level, all-caps suffixless names that are conventionally files (README, LICENSE, ...).
-_ROOT_DOC_FILES = {"README", "LICENSE", "LICENCE", "COPYING", "AUTHORS", "CHANGELOG", "NOTICE", "CODEOWNERS",
-                   "OWNERS", "CONTRIBUTORS", "VERSION", "HISTORY"}
-# Dot-names that are files (dotfiles); any other dot-name is treated as a directory.
-_DOT_FILES = {".gitignore", ".gitattributes", ".gitmodules", ".npmrc", ".yarnrc", ".nvmrc", ".node-version",
-              ".python-version", ".ruby-version", ".tool-versions", ".editorconfig", ".prettierrc", ".prettierignore",
-              ".eslintrc", ".eslintignore", ".stylelintrc", ".babelrc", ".browserslistrc", ".dockerignore", ".env",
-              ".envrc", ".mailmap", ".htaccess", ".markdownlint", ".mocharc", ".swcrc", ".vercelignore"}
+# Root-level suffixless names that are conventionally files, any case (README, Readme, LICENSE, ...).
+_ROOT_DOC_FILES = {"readme", "license", "licence", "copying", "authors", "changelog", "notice", "codeowners",
+                   "owners", "contributors", "version", "history"}
+# Suffixless names that are files at any depth (`docs/CODEOWNERS`, `.github/CODEOWNERS`).
+_ANYWHERE_FILES = {"codeowners"}
+# Dot-names that are directories; any other dot-name (`.npmignore`, `.flake8`, `.gitkeep`) is a file.
+_DOT_DIRS = {".github", ".gitlab", ".vscode", ".idea", ".husky", ".changeset", ".devcontainer", ".circleci", ".config",
+             ".storybook", ".cargo", ".yarn", ".turbo", ".next", ".claude", ".codex", ".office", ".well-known",
+             ".vitepress", ".vuepress", ".docusaurus", ".svelte-kit", ".nuxt", ".expo", ".git", ".venv", ".cache",
+             ".gradle", ".mvn", ".bundle", ".devbox", ".direnv", ".hooks", ".githooks", ".ci", ".buildkite",
+             ".gitea", ".forgejo", ".azuredevops", ".tekton", ".dagger", ".docker", ".k8s", ".helm", ".ssh"}
 
 
 def entry_is_dir(bare: str) -> bool:
     """Whether a scope or shared entry (without `+`) names a directory. Without the
-    filesystem this is a naming rule that errs toward directory, the safe side for
-    sharing (a shared directory must be ordered; a shared file may run in parallel):
-    a trailing `/` or `**`, a `*.d` name, any dot-name that is not a known dotfile
-    (`.github`, `public/.well-known`), and any suffixless name except known build files
-    (`Makefile`, `docker/Dockerfile`) and root-level all-caps docs (`README`, `LICENSE`).
-    `*.json` globs and other suffixed names are files."""
+    filesystem this is a naming rule: a trailing `/` or `**`, a `*.d` name, a known
+    dot-directory (`.github`, `public/.well-known`), and any suffixless name except known
+    build files (`Makefile`, `src/Makefile`), `CODEOWNERS`, and root-level docs in any case
+    (`README`, `Readme`, `LICENSE`). Other dot-names (`.npmignore`, `.flake8`), `*.json`
+    globs and suffixed names are files. `docs/README` is a directory."""
     if bare.endswith("/") or "**" in bare:
         return True
     last = bare.rsplit("/", 1)[-1]
+    low = last.lower()
+    if last.endswith(".d"):
+        return True
     if last.startswith("."):
-        if "." in last[1:]:
-            return last.endswith(".d")  # .env.local, .eslintrc.json
-        return last.lower() not in _DOT_FILES
+        return low in _DOT_DIRS
     if "." in last:
-        return last.endswith(".d")
-    if last.lower() in _BUILD_FILES:
         return False
-    return not ("/" not in bare and last in _ROOT_DOC_FILES)
+    if low in _BUILD_FILES or low in _ANYWHERE_FILES:
+        return False
+    return not ("/" not in bare and low in _ROOT_DOC_FILES)
 
 
 def shared_tree(entry: str) -> bool:

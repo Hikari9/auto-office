@@ -140,3 +140,24 @@ def test_an_audience_after_the_office_still_counts(text):
     # R4-2.
     from office.amend import AUTHORITY_TERMS
     assert AUTHORITY_TERMS.search(text) is not None, text
+
+
+@pytest.mark.parametrize("text", [
+    # PR #492 review item 1: an action word must not let a later recipient through
+    "send it to the office and then to all members", "send it to the office and post it to members",
+    # item 2: default-deny after the recipient (unlisted audiences, purpose then audience, clause after comma)
+    "send the report to the office and donors", "send the report to the office and congregants",
+    "send the report to the office for review by parents",
+    "send the report to the office for approval, then to all members",
+    "send READY-FOR-LIVE and donors", "send it to office.example.org",
+])
+def test_anything_after_the_orchestrator_but_an_end_or_next_action_is_external(text):
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is not None, text
+
+
+def test_a_done_note_after_the_orchestrator_is_exempt():
+    # Item 6: "(done)" ends the report; "and to nobody else" stays refused (stricter, by design).
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search("send the status to the orchestrator (done)") is None
+    assert AUTHORITY_TERMS.search("send the status to the orchestrator and to nobody else") is not None
