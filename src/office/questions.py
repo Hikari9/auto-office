@@ -40,7 +40,7 @@ TAIL_LINES = 60
 PROTOCOL = ("answer it yourself (planning, scope, ordering, test detail); ask the user only if it is a "
             "user decision (requirements, authority, irreversible or external action)")
 
-_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[@-_]")
+_ANSI = dispatch._CSI  # the one ANSI stripper (CSI, OSC, two-byte escapes)
 # Footer lines a selection widget shows while it waits for a choice. Claude:
 # "Enter to select · Tab/Arrow keys to navigate · Esc to cancel"; codex: "Press enter
 # to confirm or esc to cancel"; agy: "Waiting for user confirmation".

@@ -1771,6 +1771,9 @@ def _confirm_trust(pane: str, read, herdr, text: str | None = None) -> bool:
     Current Claude Code preselects "No, exit", so a bare Enter would quit the
     agent; Enter is pressed only once the selected option is the trust one.
     `text` is a screen the caller already read."""
+    if text is None or _selected_option(text) is None or not _trust_dialog(text):
+        # The first frame may be blank, unreadable or half-drawn too (R3-11).
+        text = _settled(read, None)
     for key in ("down", "down", "up", "up", "up", None):
         text = read() if text is None else text
         if not _trust_dialog(text):
@@ -2272,6 +2275,15 @@ def _unreserve_pane(run: dict, pane: str) -> None:
         atomic_write_json(f, held)
 
 
+def _tab_exists(tab_id: str) -> bool:
+    """False only when herdr says the tab is gone; an unreachable herdr counts as present."""
+    try:
+        proc = subprocess.run(["herdr", "tab", "get", tab_id], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return proc.returncode == 0 or "not_found" not in (proc.stdout or "") + (proc.stderr or "")
+
+
 def _live_panes(panes: list) -> list:
     """The recorded panes herdr has not reported gone (an unreachable herdr keeps them)."""
     return [p for p in panes if _pane_exists(p)]
@@ -2425,16 +2437,16 @@ def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None,
 
 def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None) -> str | None:
     """No caller pane to split (or a run begun before split mode): a tab owned by the run."""
-    orphans: list = []
-    if tab and not _herdr_json(["tab", "get", tab["tab_id"]]):
-        tab = None  # the user closed it
+    orphans: list = list((tab or {}).get("orphan_tabs") or [])  # carried whenever the record is replaced
+    if tab and not _tab_exists(tab["tab_id"]):
+        tab = None  # the user closed it (an unreachable herdr keeps it)
     if tab is not None:
         # Panes closed since (by the user or as abandoned) are never split from (review F1).
         tab["panes"] = _live_panes(tab.get("panes") or [])
         if not tab["panes"]:
             # The tab outlived its recorded panes: open a new one, and keep the old id so
             # close_herdr_tab still closes it.
-            orphans = [*(tab.get("orphan_tabs") or []), tab["tab_id"]]
+            orphans.append(tab["tab_id"])
             tab = None
     if tab is None:
         workspace = (os.environ.get("HERDR_WORKSPACE_ID") or os.environ.get("HERDR_PANE_ID") or "").split(":")[0]
@@ -2539,7 +2551,7 @@ def _pane_ledger(run: dict, dispatch: dict, pane: str, *, agent: str | None = No
 # A harness's startup header block opens and closes with a rule line: dashes
 # (`codex exec`'s stream) or a box edge (codex's interactive banner, whose
 # lines sit between box sides). Session ids are read only inside one (#406).
-_ANSI_SEQ = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_ANSI_SEQ = _CSI  # one stripper (OSC included)
 _HEADER_RULE = re.compile(r"-{8,}|[╭┌][─━].*[─━][╮┐]|[╰└][─━].*[─━][╯┘]")
 
 
@@ -2731,7 +2743,7 @@ class _SessionSniffer:
     HEADER_BYTES = 16384
     BANNER_LINES = 3  # lines allowed before the opening rule
     ATTEMPTS = 2
-    _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+    _ANSI = _CSI
 
     def __init__(self, run: dict, dispatch: dict, adapter: dict | None, log_path=None):
         self.run, self.dispatch, self.log_path = run, dispatch, log_path
