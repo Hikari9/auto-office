@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 import yaml
 
-from office import candidates, db, paths, state
+from office import candidates, db, paths, route_policy, state
 from office import config as cfg
 from office.result import Result
 from office.state import OfficeError, Refused
@@ -434,10 +434,14 @@ def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
     policy = dict(run.get("policy") or {})
     blocks = ("roles", "routing")
     changed = [b for b in blocks if policy.get(b) != live.get(b)]
+    if policy.get(route_policy.PROVENANCE_KEY) != live[route_policy.PROVENANCE_KEY] and "routing" not in changed:
+        changed.append("routing")
     short = run["id"][:8]
     if not changed:
         return Result(lines=[f"run {short} already routes from the current config files; nothing changed"])
     policy.update({b: live.get(b) for b in blocks})
+    policy[route_policy.PROVENANCE_KEY] = live[route_policy.PROVENANCE_KEY]
+    policy[route_policy.DIGEST_KEY] = route_policy.policy_digest(policy)
     recorded = policy.get(cfg.FILE_BLOCKS_KEY)
     if recorded is not None:
         # The drift baseline for roles follows the re-pin, so a later edit still reads as drift.

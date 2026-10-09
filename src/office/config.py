@@ -12,10 +12,11 @@ from typing import Any
 
 import yaml
 
-from office import paths
+from office import paths, route_policy
 from office.util import sha256_file, sha256_obj
 
-NON_CONFIGURABLE_KEYS = {"schema_version", "config_precedence", "hard_invariants"}
+NON_CONFIGURABLE_KEYS = {"schema_version", "config_precedence", "hard_invariants",
+                         route_policy.PROVENANCE_KEY, route_policy.DIGEST_KEY}
 GEARS = ("direct", "direct+review", "light", "quick", "express", "full")
 PLAYBOOKS = ("Change", "Restructure", "Investigate", "Prototype", "Visual")
 BLAST_RADIUS = ("local", "repo", "production", "production-data")
@@ -70,6 +71,15 @@ def config_paths(repo_root: Path | None) -> dict[str, Path]:
     return files
 
 
+def _policy_leaves(data: Any, path: str = "") -> dict[str, Any]:
+    if isinstance(data, dict):
+        return {key: value for k, v in data.items()
+                for key, value in _policy_leaves(v, f"{path}.{k}" if path else k).items()}
+    if path == route_policy.CEILING_KEY or path.startswith(("routing.discovery.", "routing.user_policy.")):
+        return {path: data}
+    return {}
+
+
 def resolve(repo_root: Path | None, sets: list[str] | None = None,
             files: dict[str, str | None] | None = None) -> tuple[dict, list]:
     """Return (effective config, warnings). `files` is a read_files() snapshot;
@@ -97,7 +107,10 @@ def resolve(repo_root: Path | None, sets: list[str] | None = None,
         layers.append(("prompt_cli", cli))
     warnings: list = []
     effective = default
+    provenance = {key: "shipped" for key in _policy_leaves(default)}
     for tier, data in layers:
+        if not isinstance(data, dict):
+            raise ValueError(f"{tier} config must be a mapping")
         kept = {}
         for k, v in (data or {}).items():
             if k == "schema_version":
@@ -116,11 +129,19 @@ def resolve(repo_root: Path | None, sets: list[str] | None = None,
                 kept[k] = {pk: pv for pk, pv in v.items() if pk != "runs_db"}
             else:
                 kept[k] = v
+        before_warnings = len(warnings)
         effective = deep_merge(effective, kept, tier, warnings)
+        ignored = [w["key"] for w in warnings[before_warnings:] if w["reason"] == "type-mismatch-ignored"]
+        for key in _policy_leaves(kept):
+            if not any(key == k or key.startswith(k + ".") for k in ignored):
+                provenance[key] = "run" if tier == "prompt_cli" else tier
+    effective[route_policy.PROVENANCE_KEY] = {k: provenance.get(k, "shipped") for k in _policy_leaves(effective)}
     from office import adaptive
-    problems = adaptive.validate(effective)
+    problems = (adaptive.validate(effective) + route_policy.validate_discovery(effective)
+                + route_policy.validate_user_policy(effective) + route_policy.validate_ceiling(effective))
     if problems:
         raise ValueError("; ".join(problems))
+    effective[route_policy.DIGEST_KEY] = route_policy.policy_digest(effective)
     return effective, warnings
 
 
