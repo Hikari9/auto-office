@@ -355,20 +355,23 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
 
 
 def _base_for(con, run: dict, task: dict, graph: dict, stack_after: str | None) -> str:
-    """Base commit: run base, or the dependency revision this task builds on."""
-    deps = list(task["depends"]) + ([stack_after] if stack_after else [])
-    base = run["base_sha"]
-    for dep in deps:
-        d = state.get_task(con, run["id"], dep)
-        rev_id = (d or {}).get("accepted_revision_id") or (d or {}).get("current_revision_id")
-        if not rev_id:
-            if dep == stack_after:
-                continue
+    """Base commit: the run base, or what contains every dependency revision this task builds on
+    (accepted, else current): the dependency head that already contains the others, else an
+    Office merge commit of them. Dependencies that conflict refuse, naming them and the paths."""
+    from office import integration
+    heads = integration.dependency_heads(con, run, task, stack_after=stack_after)
+    have = {h["task"] for h in heads}
+    for dep in task["depends"]:
+        if dep not in have and dep != stack_after:
             raise Refused("dependency-not-ready", f"{task['id']} depends on {dep}, which has no submitted revision",
                           scope=task["id"], next_step=f"dispatch {dep} first, or office dispatch {dep} {task['id']} (stacked)")
-        rev = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (rev_id,)).fetchone()
-        base = rev["commit_sha"]
-    return base
+    if not heads:
+        return run["base_sha"]
+    try:
+        return integration.combine(run, heads, task["id"])
+    except Refused as e:
+        e.scope = e.scope or task["id"]
+        raise
 
 
 # ------------------------------------------------------------------ launch request
@@ -433,8 +436,12 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
 
 
 def acquire_lease(con, run: dict, task: dict, holder: str, role: str) -> dict:
-    """One fenced lease per task scope. Overlapping live scopes are refused."""
+    """One fenced lease per task scope. Overlapping live scopes are refused, except that a dependent's
+    live lease never blocks its prerequisite (the plan lets ordered tasks overlap): the dependent is
+    restacked or reported stale afterwards."""
     now = datetime.now(timezone.utc)
+    graph = {t["id"]: t["depends"] for t in state.tasks(con, run["id"])}
+    dependants = planfile.dependants(graph, task["id"])
     rows = con.execute("SELECT * FROM leases WHERE run_id=? AND released_at IS NULL AND revoked_at IS NULL",
                        (run["id"],)).fetchall()
     for row in rows:
@@ -442,6 +449,8 @@ def acquire_lease(con, run: dict, task: dict, holder: str, role: str) -> dict:
             # Handing the task's lease to a new holder (fix round, relaunch):
             # revoke the old one so a late submit from it is fenced out.
             con.execute("UPDATE leases SET revoked_at=?, revoke_reason='superseded' WHERE id=?", (now.isoformat(), row["id"]))
+            continue
+        if row["task_id"] in dependants:
             continue
         other = state.get_task(con, run["id"], row["task_id"]) if row["task_id"] else None
         other_scope = other["scope"] if other else json.loads(row["scope"] or "[]")
@@ -493,19 +502,41 @@ def _revoke_task(con, run: dict, task_id: str, reason: str) -> Result:
         task = state.get_task(con, run["id"], task_id)
         if task is None:
             raise Usage("unknown-task", f"no task {task_id}")
-        con.execute("UPDATE leases SET revoked_at=?, revoke_reason=? WHERE run_id=? AND task_id=? AND released_at IS NULL "
-                    "AND revoked_at IS NULL", (now_iso(), reason, run["id"], task_id))
-        state.update_task(con, run["id"], task_id, status="paused", pause_reason=f"lease revoked: {reason}")
-        state.emit(con, run, "lease.revoked", f"{task_id} lease revoked", task_id=task_id)
+        # An accepted task whose relaunched worker never got a newer revision in (its submit was
+        # refused, or it never submitted) still stands on its accepted revision: the revoke only
+        # releases the lease.
+        keeps = (task["status"] != "cancelled" and bool(task.get("accepted_revision_id"))
+                 and task.get("current_revision_id") == task["accepted_revision_id"])
+        if keeps:
+            con.execute("UPDATE leases SET released_at=? WHERE run_id=? AND task_id=? AND released_at IS NULL "
+                        "AND revoked_at IS NULL", (now_iso(), run["id"], task_id))
+            state.update_task(con, run["id"], task_id, status="accepted", pause_reason=None)
+            state.emit(con, run, "lease.released", f"{task_id} worker revoked; lease released, "
+                       f"{task_id} stays accepted on {task['accepted_revision_id']}", task_id=task_id)
+        else:
+            con.execute("UPDATE leases SET revoked_at=?, revoke_reason=? WHERE run_id=? AND task_id=? AND released_at IS NULL "
+                        "AND revoked_at IS NULL", (now_iso(), reason, run["id"], task_id))
+            if task["status"] != "cancelled":  # a task the plan removed stays removed
+                state.update_task(con, run["id"], task_id, status="paused", pause_reason=f"lease revoked: {reason}")
+            state.emit(con, run, "lease.revoked", f"{task_id} lease revoked", task_id=task_id)
     live = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE run_id=? AND task_id=? AND ended_at IS NULL "
                                          "AND status IN ('launching', 'running')", (run["id"], task_id)).fetchall()]
     notes: list[str] = []
     stopped = [d["id"] for d in live if stop_dispatch(run, d, notes=notes)]
-    lines = [f"{task_id} lease revoked | later submits from its holder are rejected"]
+    lines = [f"{task_id} lease {'released' if keeps else 'revoked'} | later submits from its holder are rejected"]
+    if keeps:
+        lines.append(f"{task_id} stays accepted on {task['accepted_revision_id']}")
+        unapplied = [r["amendment_id"] for r in con.execute(
+            "SELECT DISTINCT amendment_id FROM deliveries WHERE run_id=? AND task_id=? AND status IN ('queued','delivered')",
+            (run["id"], task_id)).fetchall()]
+        if unapplied:
+            lines.append(f"{', '.join(unapplied)} was not applied to {task_id}; office amend {task_id} -- \"<change>\" "
+                         "delivers it again")
     if stopped:
         lines.append(f"stopped {', '.join(stopped)} (SIGTERM)")
     lines += notes
-    return Result(lines=lines, next=f"office dispatch {task_id} to relaunch")
+    return Result(lines=lines, next=(f'office amend {task_id} -- "<change>" to reopen it' if keeps
+                                     else f"office dispatch {task_id} to relaunch"))
 
 
 def _end_dispatch(con, run: dict, d: dict, classification: str, why: str, *, stop: bool = True,
@@ -796,6 +827,7 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
         "contract_version": task["contract_version"],
         "lease_id": dispatch["lease_id"],
         "base_commit": dispatch["base_commit"],
+        "base_merge": _base_merge_of(run, dispatch["base_commit"]),
         "worktree": dispatch["worktree"],
         "route": dispatch["route"].get("selection_disclosure"),
         "branch": dispatch.get("branch"),
@@ -806,6 +838,14 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
         "restack": extra.get("restack"),
     }
     return state.packet_envelope(run, f"{role}-dispatch", body)
+
+
+def _base_merge_of(run: dict, base: str) -> str | None:
+    """The tasks an Office merge commit base combines ("T1, T2"), or None for any other base."""
+    out = paths.git(run["repo_root"], "log", "-1", "--format=%P%x00%s", base, check=False)
+    parents, _, subject = out.partition("\0")
+    m = re.fullmatch(r"office: base of T\d+, a merge of (T\d+(?:, T\d+)*)", subject)
+    return m.group(1) if m and len(parents.split()) == 2 else None
 
 
 def _pr_packet(con, run: dict, task: dict, dispatch: dict) -> dict | None:
@@ -2898,7 +2938,14 @@ def start_stacked(con, run: dict, accepted_task: str) -> list[str]:
     for t in state.tasks(con, run["id"]):
         if t["status"] == "queued" and t.get("stack_after") == accepted_task:
             graph = {x["id"]: x["depends"] for x in state.tasks(con, run["id"])}
-            base = _base_for(con, run, t, graph, accepted_task)
+            try:
+                base = _base_for(con, run, t, graph, accepted_task)
+            except Refused as e:
+                # The acceptance that released this task must still commit: park the task and tell the orchestrator.
+                state.update_task(con, run["id"], t["id"], status="paused", stack_after=None, pause_reason=e.message[:200])
+                state.signal_orchestrator(con, run, source="stacked start refused", task_id=t["id"], dispatch_id=None,
+                                          reason=e.message, next_step=e.next_step or f"office dispatch {t['id']}")
+                continue
             request_launch(con, run, t["id"], role="executor", base=base)
             started.append(t["id"])
     return started

@@ -42,6 +42,9 @@ Auto Office {ver}
                                     answer the question a pane agent is waiting on (a number presses that option)
   office dismiss <task|dispatch|--all>
                                     close the kept panes of ended dispatches (final text is saved first)
+  office rebase <task> --move|--merge|--record
+                                    after land --rebase: put an open task on the new base (move: re-apply its change
+                                    there; merge: merge the new main in; record: you did it by hand)
   office close                      finish the run after acceptance and landing
                                     (--landed-externally <pr>: its work merged through another PR)
   office benchmarks brief|submit <f> opted-in runs: one background refresh of missing benchmark scores
@@ -231,6 +234,15 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--redeploy", action="store_true", help="with --e2e: deploy prod again from the merged tree")
     s.add_argument("--mark-deployed", action="store_true",
                    help="with --e2e: the operator confirms the merged tree is already live in prod")
+    s = sp.add_parser("rebase", parents=[common])
+    s.add_argument("task")
+    how = s.add_mutually_exclusive_group()
+    how.add_argument("--move", dest="rebase_how", action="store_const", const="move",
+                     help="re-apply the task's change on the new base (a field both sides changed refuses; settle it by hand)")
+    how.add_argument("--merge", dest="rebase_how", action="store_const", const="merge",
+                     help="merge the new default branch into the task's branch")
+    how.add_argument("--record", dest="rebase_how", action="store_const", const="record",
+                     help="the worktree was moved or merged by hand: verify it and record the new base")
     s = sp.add_parser("close", parents=[common])
     s.add_argument("--handoff", help="PR URL or branch handed to the user for merge")
     s.add_argument("--abandon", metavar="REASON", help="end the run without landing")
@@ -610,6 +622,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "ack":
         from office import amend
         return amend.ack(con, run, args.amendment)
+    if cmd == "rebase":
+        from office import land
+        return land.rebase_task(con, run, args.task, args.rebase_how)
     if cmd == "land" and args.rebase:
         from office import land
         return land.rebase(con, run)

@@ -16,7 +16,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from office import briefs, db, discovery, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, state, version
+from office import briefs, db, discovery, dispatch as dispatch_mod, gates, integration, jobs, paths, planpath, plans, state, version
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_bytes, sha256_file, sha256_obj, short
@@ -510,6 +510,17 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
                          f"{paths.office_trailer(run['id'])}")
     from office import planfile, prs
     base = d["base_commit"]
+    moved = integration.stale_base(run, base, commit)
+    if moved:
+        msg = (f"{task['id']}'s worktree holds the run's new base {moved[:12]}, but the task's recorded base is older, so "
+               "the default branch's own files would read as this task's edits")
+        with db.transaction(con):
+            state.signal_orchestrator(con, run, source="submit refused", task_id=task["id"], dispatch_id=d["id"],
+                                      reason=f"base-not-recorded: {msg}",
+                                      next_step=f"office rebase {task['id']} --record (the worktree already holds the new base)")
+        raise Refused("base-not-recorded", msg, scope=task["id"], preserved="your worktree (nothing was submitted)",
+                      next_step="wait for the orchestrator to record the new base (office rebase --record), then run "
+                                "office preflight and office submit again")
     touched = paths.git(wt, "diff", "--no-renames", "--name-only", base, commit).split()
     dep_bases = [b for b in _dependency_bases(con, run, task, commit) if b != base]
     for b in dep_bases:
@@ -571,6 +582,12 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
         prev = task.get("current_revision_id")
         prev_row = con.execute("SELECT * FROM revisions WHERE id=?", (prev,)).fetchone() if prev else None
         changed = paths.git(wt, "diff", "--name-only", prev_row["commit_sha"] if prev_row else base, commit).split()
+        if prev_row and prev_row["base_commit"] != base:
+            # The task moved onto a new base (office rebase): the default branch's own files differ from the
+            # previous revision too, but they are not this revision's changes.
+            task_files = set(paths.git(wt, "diff", "--name-only", base, commit).split())
+            base_moved = set(paths.git(wt, "diff", "--name-only", prev_row["base_commit"] or base, base).split())
+            changed = [f for f in changed if f in task_files or f not in base_moved]
         status = "amendment_pending" if pending else "current"
         env_fp = sha256_obj({"office": run["office_version"], "policy": run["config_hash"]})
         con.execute("INSERT INTO revisions(id, run_id, task_id, seq, dispatch_id, lease_id, fencing, commit_sha, tree_sha, "

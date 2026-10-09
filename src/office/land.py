@@ -391,8 +391,171 @@ def _rebase_locked(con, run: dict, tasks: list[dict]) -> Result:
     return Result(lines=[f"every accepted task merges cleanly onto origin/{base} {new[:12]}",
                          "integration re-composes there and re-runs the run checks and "
                          + ("one review of the rebase scope (S-rebase)" if contract.is_convergence(run)
-                            else "an integration review")],
+                            else "an integration review"),
+                         "a task reopened later is put on the new base by the orchestrator, per task, either way: "
+                         + rebase_paths_line("T<n>")],
                   next="office status (then office land once integration is accepted)")
+
+
+def rebase_paths_line(tid: str) -> str:
+    return (f"office rebase {tid} --move (re-apply {tid}'s change on the new base; a version field both sides bumped is bumped again by hand) "
+            f"| office rebase {tid} --merge (merge the new default branch into {tid}'s branch)")
+
+
+def rebase_task(con, run: dict, tid: str, how: str | None) -> Result:
+    """After `office land --rebase` moved the run base, put one task on it. The orchestrator
+    chooses the path per task, and Office never picks one:
+
+      --move   re-apply the task's change on the new base as one commit on it (the branch is
+               rewritten, so a pushed one needs a force-push with lease);
+      --merge  merge the new default branch into the task's branch (history kept, no force-push);
+      --record the worktree was already moved or merged by hand: verify it, then record.
+
+    Every path records the task's new base on its dispatch, so preflight and the submit scope
+    check diff against it and never report the default branch's own files as the task's edits.
+    A file both sides changed refuses with both files and both ways to settle it: Office does not
+    resolve them, version fields included."""
+    if os.environ.get("OFFICE_DISPATCH_ID"):
+        raise Refused("worker-cannot-land", "a worker cannot rebase a task; the orchestrator does")
+    task = state.get_task(con, run["id"], tid.upper())
+    if task is None:
+        raise Usage("unknown-task", f"no task {tid}")
+    tid = task["id"]
+    onto = ((run.get("landing") or {}).get("rebase") or {}).get("onto")
+    if not onto:
+        raise Refused("not-rebased", "the run base has not moved: office land --rebase records a move first", scope=tid)
+    if how not in ("move", "merge", "record"):
+        raise Usage("rebase-path", f"say how {tid} moves onto the run's new base {onto[:12]}: {rebase_paths_line(tid)}",
+                    next_step=rebase_paths_line(tid))
+    d = state.get_dispatch(con, task["current_dispatch_id"]) if task.get("current_dispatch_id") else None
+    wt = Path(d["worktree"]) if d and d.get("worktree") else None
+    if task["status"] == "cancelled" or wt is None or not (wt / ".git").exists():
+        raise Refused("no-worktree", f"{tid} has no task worktree to move", scope=tid)
+    if how != "record" and gates.worker_live(con, d["id"]):
+        raise Refused("worker-live", f"{tid} has a live worker ({d['id']}) in the worktree", scope=tid,
+                      next_step=f"office revoke {tid}, office rebase {tid} --move|--merge, then office rerun {tid} --resume")
+    if how != "record":
+        _require_task_branch(run, tid, wt, d)
+    old = d["base_commit"]
+    head = before = paths.git(wt, "rev-parse", "HEAD")
+    new = _new_base(run, tid, old, onto, strict=how == "move" and not _holds_new_base(run, head, onto))
+    if how != "record":
+        if paths.git(wt, "status", "--porcelain", "--untracked-files=no", check=False):
+            raise Refused("worktree-dirty", f"{tid}'s worktree has uncommitted changes", scope=tid,
+                          preserved="the worktree", next_step=f"commit or discard them in {wt}, then office rebase {tid} --{how}")
+        if _holds_new_base(run, head, onto):
+            how = "record"
+        elif how == "merge":
+            _merge_new_base(run, tid, wt, onto, old)
+        else:
+            _move_onto_new_base(run, tid, wt, new, old, head, onto)
+        head = paths.git(wt, "rev-parse", "HEAD")
+    if not _holds_new_base(run, head, onto):
+        raise Refused("base-not-in-worktree", f"{tid}'s worktree does not contain the new base {onto[:12]} yet",
+                      scope=tid, preserved="the worktree",
+                      next_step=f"move it first ({rebase_paths_line(tid)}), or finish the hand merge and commit, then "
+                                f"office rebase {tid} --record")
+    with db.transaction(con):
+        con.execute("UPDATE dispatches SET base_commit=? WHERE id=?", (new, d["id"]))
+        state.emit(con, run, "task.rebased", f"{tid} based on {new[:12]} (run base moved to {onto[:12]}; was {old[:12]})",
+                   task_id=tid, dispatch_id=d["id"], payload={"how": how, "from": old, "base": new, "onto": onto, "head_before": before})
+    res = Result(lines=[f"{tid} is based on {new[:12]} ({'recorded' if how == 'record' else how}); preflight and the "
+                        f"scope check diff against it"])
+    if how == "move":
+        res.add(f"{tid}'s branch was rewritten: push it with force-with-lease if it was pushed")
+    res.next = f"office rerun {tid} --resume|--fresh" if task["status"] in ("paused", "changes_required") else "office status"
+    return res
+
+
+def _holds_new_base(run: dict, head: str, onto: str) -> bool:
+    """The worktree holds the run's new base (by a merge, a move or a hand merge)."""
+    return gates._is_ancestor(run, onto, head)
+
+
+def _require_task_branch(run: dict, tid: str, wt: Path, d: dict) -> None:
+    """A merge or reset moves whatever the worktree has checked out: it must be this task's own linked
+    worktree of the run's repository, on the task's branch."""
+    ident = paths.repo_identity(wt)
+    repo_ident = paths.repo_identity(run["repo_root"])
+    head = paths.git(wt, "symbolic-ref", "-q", "HEAD", check=False)
+    if (ident is None or ident[0] != wt.resolve() or repo_ident is None
+            or ident[1] != repo_ident[1] or repo_ident[0] == wt.resolve() or head != f"refs/heads/{d.get('branch')}"):
+        raise Refused("worktree-mismatch", f"{tid}'s worktree {wt} is not the checkout of its branch {d.get('branch')}; "
+                      "nothing was changed", scope=tid, preserved="the worktree",
+                      next_step=f"check out {d.get('branch')} there (or move the task by hand), then office rebase {tid} "
+                                "--record")
+
+
+def _new_base(run: dict, tid: str, old: str, onto: str, *, strict: bool) -> str:
+    """The task's old base with the run's new base added: the new base itself when it contains the old one.
+    A task built on a dependency revision whose changes collide with the new base has no such commit: a
+    move needs one (and refuses), while a merge or a hand merge records the new run base itself, since the
+    scope check already subtracts what the task's dependencies changed."""
+    try:
+        return integration.combine(run, [{"task": "its old base", "commit": old}, {"task": "the new run base", "commit": onto}], tid)
+    except Refused as e:
+        if e.category != "dependency-conflict":
+            raise
+        if not strict:
+            return onto
+        raise Refused("rebase-collision", f"{tid}'s base {old[:12]} and the new run base {onto[:12]} do not combine: "
+                      f"{e.message.rsplit(': ', 1)[-1]}", scope=tid, preserved="the worktree",
+                      next_step=COMPOSE_BY_HAND.format(base="main")) from None
+
+
+def _collision(tid: str, wt: Path, files: list[str], onto: str, old: str) -> Refused:
+    shown = ", ".join(files[:8]) or "files"
+    return Refused("rebase-collision", f"{tid} and the new base {onto[:12]} both changed {shown}; Office does not resolve "
+                   "them (a version field included)", scope=tid, preserved="the worktree, unchanged",
+                   next_step=f"settle it by hand in {wt}, either way: (a) git reset --hard {onto[:12]}, re-apply "
+                             f"{tid}'s change there (bump the version again) and commit; or (b) git merge {onto[:12]}, pick "
+                             f"the value, and commit; then office rebase {tid} --record")
+
+
+def _merge_new_base(run: dict, tid: str, wt: Path, onto: str, old: str) -> None:
+    env = {**os.environ, **paths.commit_identity_env(wt)}
+    proc = subprocess.run(["git", "-C", str(wt), "merge", "--no-edit", "-m",
+                           f"office: merge the new base {onto[:12]} into {tid}\n\n{paths.office_trailer(run['id'])}", onto],
+                          capture_output=True, text=True, env=env)
+    if proc.returncode != 0:
+        files = ["".join(c if c.isprintable() else "?" for c in f)
+                 for f in paths.git(wt, "diff", "--name-only", "--diff-filter=U", check=False).splitlines() if f]
+        subprocess.run(["git", "-C", str(wt), "merge", "--abort"], capture_output=True)
+        if not files:  # not a conflict: a hook, a signing failure, a dirty index
+            raise Refused("merge-failed", f"git merge of the new base into {tid} failed: "
+                          f"{(proc.stderr or proc.stdout).strip()[:200]}", scope=tid, preserved="the worktree, unchanged")
+        raise _collision(tid, wt, files, onto, old)
+
+
+def _move_onto_new_base(run: dict, tid: str, wt: Path, new: str, old: str, head: str, onto: str) -> None:
+    """The task's change since its old base, three-way merged onto the new base, as one commit on it."""
+    repo = Path(run["repo_root"])
+    proc = subprocess.run(["git", "-C", str(wt), "merge-tree", "--write-tree", "--name-only", "-z", f"--merge-base={old}",
+                           new, head], capture_output=True, text=True)
+    tree, files = integration.parse_merge_tree(proc.stdout)
+    if proc.returncode == 1:
+        raise _collision(tid, wt, files, onto, old)
+    if proc.returncode == 129:
+        raise Refused("git-too-old", "--move needs git >= 2.40 (git merge-tree --merge-base)", scope=tid,
+                      next_step="upgrade git, or use --merge")
+    if proc.returncode != 0:
+        raise Refused("merge-tree-failed", f"git merge-tree failed for {tid}: {proc.stderr.strip()[:200]}", scope=tid)
+    env = {**os.environ, **paths.commit_identity_env(repo)}
+    commit = subprocess.run(["git", "-C", str(wt), "commit-tree", tree, "-p", new, "-m",
+                             f"{tid}: re-applied on the new base {onto[:12]}\n\n{paths.office_trailer(run['id'])}"],
+                            capture_output=True, text=True, env=env)
+    if commit.returncode != 0:
+        raise Refused("move-failed", f"could not record {tid}'s moved commit: {commit.stderr.strip()[:200]}", scope=tid)
+    moved = commit.stdout.strip()
+    # Paths the move newly tracks that already exist untracked (ignored ones included) would be overwritten.
+    new_paths = set(paths.git(wt, "ls-tree", "-r", "--name-only", moved).splitlines()) \
+        - set(paths.git(wt, "ls-tree", "-r", "--name-only", "HEAD").splitlines())
+    in_the_way = sorted(p for p in new_paths if os.path.lexists(wt / p))
+    if in_the_way:  # `reset --hard` would overwrite them (a merge would refuse)
+        raise Refused("worktree-dirty", f"{tid}'s worktree has untracked files the moved commit tracks: "
+                      f"{', '.join(in_the_way[:8])}", scope=tid, preserved="the worktree, unchanged",
+                      next_step=f"move or delete them in {wt}, then office rebase {tid} --move")
+    paths.git(wt, "reset", "--hard", "-q", moved)
 
 
 # ------------------------------------------------------------------ ask
@@ -464,6 +627,7 @@ def _merge_all(con, run: dict, res: Result) -> str:
                 _restack(con, run, t, up, base)
             if _gh(run, "pr", "edit", str(pr["number"]), "--base", base).returncode != 0:
                 raise Refused("retarget-failed", f"could not retarget #{pr['number']} to {base}")
+        _settle_criss_cross(run, t, base, res)
         _wait_checks(run, pr["number"])
         proc = _gh(run, "pr", "merge", str(pr["number"]), prs.MERGE_FLAGS[method])
         if proc.returncode != 0 and re.search(r"not up to date|behind|out of date", proc.stderr + proc.stdout, re.I):
@@ -482,6 +646,38 @@ def _merge_all(con, run: dict, res: Result) -> str:
         res.add(f"{t['id']} #{pr['number']} merged ({method})")
         merged.append(t["id"])
     return before
+
+
+def _settle_criss_cross(run: dict, task: dict, base: str, res: Result) -> None:
+    """Restacks leave a task branch and the default branch with several merge bases (a criss-cross), which
+    GitHub reports as CONFLICTING although `git merge-tree` merges them cleanly. Merge the default branch into
+    the pushed task branch when it does; a real conflict refuses, naming the files."""
+    d = (task.get("pr") or {}).get("branch") or f"office/{run['id'][:8]}/{task['id']}"
+    if d == base or d.startswith("-") or ":" in d or not d.startswith("office/"):
+        return  # not a branch Office pushed: leave the merge to GitHub
+    repo = Path(run["repo_root"])
+    # Explicit refs: a single-branch clone's fetch refspec would not store the task branch.
+    ours, theirs = f"refs/office/land/{d}", f"refs/office/land/{base}"
+    if _git(repo, "fetch", "-q", "origin", f"+refs/heads/{d}:{ours}", f"+refs/heads/{base}:{theirs}").returncode != 0:
+        return  # nothing to compare: the merge itself reports what is wrong
+    if len(paths.git(repo, "merge-base", "--all", ours, theirs, check=False).split()) < 2:
+        return
+    tree, files = integration._merge_tree(repo, ours, theirs)
+    if files:
+        raise Refused("merge-conflict", f"{task['id']} conflicts with {base} on {', '.join(files[:8])}",
+                      preserved="the task branch and the merges so far",
+                      next_step=f"merge origin/{base} into {d} by hand and resolve it, push, then office land")
+    env = {**os.environ, **paths.commit_identity_env(repo)}
+    commit = subprocess.run(["git", "-C", str(repo), "commit-tree", tree, "-p", ours, "-p", theirs, "-m",
+                             f"office: merge {base} into {task['id']}\n\n{paths.office_trailer(run['id'])}"],
+                            capture_output=True, text=True, env=env)
+    pushed = subprocess.run(["git", "-C", str(repo), "push", "origin", f"{commit.stdout.strip()}:refs/heads/{d}"],
+                            capture_output=True, text=True) if commit.returncode == 0 else commit
+    if pushed.returncode != 0:
+        raise Refused("merge-failed", f"{task['id']} has several merge bases with {base} and merging {base} into {d} "
+                      f"failed: {(pushed.stderr or pushed.stdout).strip()[:200]}",
+                      preserved="the task branch", next_step=f"merge origin/{base} into {d} by hand, push, then office land")
+    res.add(f"{task['id']} had several merge bases with {base}: merged {base} into {d} (a clean merge-tree)")
 
 
 def _restack(con, run: dict, task: dict, up: dict, base: str) -> None:

@@ -127,6 +127,58 @@ def test_fix_round_without_findings_stops_and_names_the_escalation(env, tmp_path
     assert code == 0 and "finding: F1 [medium] calc.py:1 add() drops negatives" in out, out
 
 
+def _fix_round_packet(env, d, **fields):
+    from office import paths
+    pkt = paths.run_dir(d["run_id"]) / "dispatches" / d["id"] / "packet.json"
+    data = json.loads(pkt.read_text())
+    data.update({"fix_of": "R1", **fields})
+    pkt.write_text(json.dumps(data))
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+def test_fix_round_that_is_only_a_restack_is_ready(env):
+    """#398 item 5: a rerun that only restacked the worktree is a fix round with nothing to fix."""
+    wenv, wt, d = _dispatched(env)
+    _fix_round_packet(env, d, restack={"merged": [{"task": "T0", "revision": "R9-x", "commit": "c" * 40}], "conflict": None})
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert code == 0 and "PREFLIGHT ready" in out and "restack: T0 R9-x" in out, out
+    assert "no open findings" not in out, out
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+def test_fix_round_whose_restack_conflicts_is_not_the_no_findings_stop(env):
+    wenv, wt, d = _dispatched(env)
+    conflict = {"task": "T0", "revision": "R9-x", "commit": "c" * 40, "then": []}
+    _fix_round_packet(env, d, restack={"merged": [], "conflict": conflict})
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert code == 0 and "restack: T0 R9-x" in out and "no open findings" not in out, out
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+@pytest.mark.parametrize("status,code,word", [("delivered", 1, "office ack A1"), ("applied", 0, "amendment: A1 applied")])
+def test_fix_round_that_is_only_a_delivered_amendment_is_not_the_no_findings_stop(env, status, code, word):
+    wenv, wt, d = _dispatched(env)
+    _fix_round_packet(env, d)
+    con = env.con()
+    con.execute("INSERT INTO deliveries(id, run_id, amendment_id, task_id, dispatch_id, target_version, status, content, created_at) "
+                "VALUES('dl1', ?, 'A1', 'T1', ?, 1, ?, 'also reject strings', '2026-01-01')", (d["run_id"], d["id"], status))
+    con.commit()
+    got, out = env.office("preflight", cwd=wt, env=wenv)
+    assert got == code and word in out and "no open findings" not in out, out
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+def test_fix_round_with_no_findings_amendment_or_restack_still_stops(env):
+    wenv, wt, d = _dispatched(env)
+    _fix_round_packet(env, d, restack={"merged": [], "conflict": None})  # an empty restack is not a reason
+    code, out = env.office("preflight", cwd=wt, env=wenv)
+    assert code == 4 and "no open findings or amendments" in out, out
+
+
 def _signals(env):
     return [dict(r) for r in env.con().execute("SELECT * FROM events WHERE kind='worker.signal' ORDER BY seq")]
 
