@@ -16,6 +16,18 @@ Auto Office is deliberately not a generic multi-agent chat framework. It has a l
 
 **Start here:** [Manifesto](MANIFESTO.md) · [Install](#install) · [Opinionated SDLC](#the-opinionated-sdlc) · [Routing](#routing-different-roles-can-use-different-agents) · [Benchmarks](#benchmarks-intelligence-floors-without-online-routing) · [State & resume](#state-durability-and-resume) · [Development](#development)
 
+## Auto Self Improve (issue-only)
+
+Run `office self-improve` to monitor bugs across the entire active Office run and all subagents.
+Every `office land`/`office close` attempt also audits the full run automatically, even on refusal.
+Only Auto-Office-owned defects are candidates. A cheaper read-only investigator prepares sanitized
+reports, and the runtime creates or reuses GitHub issues in `Hikari9/auto-office`; it never fixes a
+bug or opens a PR. Reports are persisted outside run-prune detail, and GitHub/model failures retry
+without blocking landing. The CLI reports filed, pending, retry and suspected counts.
+Investigation currently requires an installed budget-qualified Claude model with API authentication.
+It runs in bare mode with tools, MCP servers, hooks, skills and automatic context disabled;
+unavailable routes retain incidents for retry. Deduplication scans all open and closed issues.
+
 ## The lifecycle at a glance
 
 ```mermaid

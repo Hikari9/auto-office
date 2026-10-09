@@ -10,8 +10,8 @@ notes: >-
   actually accepts on the command line. They are not interchangeable — the spec name `luna` is
   rejected by codex, which wants `gpt-5.6-luna` — and a row that leaves `invocation_model_id`
   null makes the router dispatch the canonical name unverified. When a dispatch fails on an
-  unknown model, record it with `office_runtime.py route-defect` and amend the row here through
-  `auto-self-improve`; never hand-patch the slug in a brief and move on.
+  unknown model, record it with `office_runtime.py route-defect` and file an evidence-backed GitHub issue through
+  `auto-self-improve`; never silently patch the catalog or generate a PR.
 
   Verified non-dispatchable on this account (2026-09-23, run 8cb62cce, defects
   b13bc3e4 and c10c0577): `gpt-5.1-codex-max` via the codex harness. `codex` accepts

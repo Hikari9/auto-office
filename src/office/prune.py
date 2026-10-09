@@ -216,6 +216,13 @@ def _prune_one(con, run_id: str) -> str | None:
         shutil.rmtree(sdir, ignore_errors=True)
         if sdir.exists():
             problems.append("run directory not fully removed")
+    # Preserve bug evidence before the details (events/outbox/evidence) disappear.
+    try:
+        from office import bugwatch
+        bugwatch.capture(con, run_id, force=True)
+        bugwatch.start_reporter()
+    except Exception:
+        pass  # reporting never prevents legitimate cleanup
     with db.transaction(con):
         final_plan = state.current_plan(con, run_id)
         req = con.execute("SELECT frozen_json FROM requirements WHERE run_id=? ORDER BY version DESC LIMIT 1",

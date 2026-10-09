@@ -1,3 +1,5 @@
+> Historical v3 proposal workflow; superseded by issue-only auto-self-improve. Do not invoke for active runs.
+
 # Self-improvement graduation bar
 
 What a proposal on the standing branch must satisfy before a maintainer merges it. The bar is
