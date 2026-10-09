@@ -612,6 +612,7 @@ office prompt <task|dispatch> -- "<message>"
 office submit                         planner/executor: submit a plan or work
 office rerun <task> --resume|--fresh  run a routed repair (RECHECK or disposition fix)
 office amend <scope> -- "<delta>"     ordinary, --contract, or requirements amendment
+office amend <T> --add-check|--add-accept|--set ...   edit the task contract (enforced, audited)
 office ack <amendment-id>             worker: confirm delivered amendment is applied
 office land                           compose/verify and follow the run's landing policy
 office close                          finish after acceptance + landing/handoff
