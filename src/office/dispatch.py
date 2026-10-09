@@ -28,7 +28,7 @@ try:
 except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
-from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, state, version, worktree_setup
+from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, scoring, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (atomic_write_json, claim_signalable, dumps, now_iso, parse_iso, pid_alive,
@@ -45,13 +45,14 @@ PLANNER_TASK = "P1"
 # answers only a folder-trust dialog, and only for a directory it created for
 # the run (`_office_owned`); hook trust, imports and updates stay the user's (#399).
 TRUST_SCREEN = "folder-trust 'Trust this folder'"
+EXTERNAL_IMPORTS_SCREEN = "external CLAUDE.md imports dialog"
 _STARTUP_SCREEN_MARKERS = (
     ("hooks need review", "Codex 'Hooks need review'"),
     ("trust this folder", TRUST_SCREEN),
     # Claude Code: "Quick safety check: Is this a project you created or one you trust?"
     ("quick safety check", TRUST_SCREEN),
     ("is this a project you created or one you trust", TRUST_SCREEN),
-    ("allow external claude.md file imports", "Claude external-import approval"),
+    ("allow external claude.md file imports", EXTERNAL_IMPORTS_SCREEN),
     ("update available", "'Update available' prompt"),
 )
 
@@ -156,6 +157,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 decision = routes.get(tid) if (routes.get(tid) or {}).get("status") == "selected" else None
                 if decision:
                     _record_routing(con, run, decision)
+                    note_route(con, run, task, decision)
                 did = request_launch(con, run, tid, role="executor", decision=decision,
                                      base=_base_for(con, run, task, graph, after))
                 res.add(f"{tid} was stacked after {after}, which is already accepted -> {did} launching")
@@ -190,13 +192,14 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 con.execute("INSERT INTO artifact_versions(id, run_id, kind, version, content_hash, created_at) "
                             "VALUES(?,?,?,?,?,?)", (uuid.uuid4().hex, run["id"], "stack", 0,
                                                      sha256_obj({"task": tid, "after": stack_after, "route": decision["selected"]}), now_iso()))
-                _stash_route(con, run, tid, decision)
+                note_route(con, run, task, decision)
                 res.add(f"{tid} stacked after {stack_after}")
             else:
                 # A planned slate reports its own fallback; drift is for legacy previews.
                 drift = None if decision.get("route_source") == "plan" else plan_view.drift(con, run, tid, decision)
                 if drift:
                     res.add(drift)
+                note_route(con, run, task, decision)
                 did = request_launch(con, run, tid, role="executor", decision=decision, base=base)
                 verb = "prepared for you to start (external; nothing launched)" if external else "launching"
                 res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} {verb}"
@@ -236,7 +239,7 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     kind = "fix" if task.get("current_dispatch_id") else "fresh"
     fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
                                   dispatch_kind=kind)
-    planned = None if (override or reroute) else _planned_slate(con, run, tid)
+    planned = None if (override or reroute) else _effective_slate(con, run, task)
     if reroute and fresh.get("status") == "selected":
         fresh["route_source"], fresh["route_note"] = "reroute", "rerouted from current evidence"
     if not planned:
@@ -259,7 +262,9 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     req = fresh.get("request") or {}
     disclosure = routing.selection_disclosure("executor", cand, req.get("preferred_seed"),
                                               (req.get("policy") or {}).get("cost_policy", "balanced"))
-    label = "planned primary" if i == 0 else f"planned fallback {i}"
+    chooser = planned.get("chooser")
+    label = {"declared": "declared route", "recorded": "recorded route"}.get(chooser, "planned primary") if i == 0 \
+        else f"planned fallback {i}"
     note = label if i == 0 else f"{label}; " + "; ".join(f"{t['route']}: {t['reason']}" for t in taken)
     disclosure["reason"] = f"{disclosure['reason'].split('; ')[0]}; {note}"
     disclosure["adaptive"] = True
@@ -269,6 +274,24 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
             "planned": planned,
             "decision_hash": sha256_obj({"planned": planned.get("decision_hash"), "fresh": fresh.get("decision_hash"),
                                          "dispatched": rid, "fallbacks_taken": taken})}
+
+
+def _effective_slate(con, run: dict, task: dict) -> dict | None:
+    """The slate dispatch tries in order (#426). A route already recorded on the
+    task (an earlier dispatch, a stack, or a deliberate `office amend route`) is
+    the primary, so a re-dispatch restores it instead of recomputing; a declared
+    one has no fallbacks, because a deliberate choice is never swapped silently.
+    Otherwise the approved plan's slate."""
+    plan = _planned_slate(con, run, task["id"])
+    rec = state.recorded_route(task)
+    if not rec:
+        return plan
+    primary = routing.candidate_id(rec["candidate"])
+    declared = bool(rec.get("declared"))
+    order = [] if declared else [r for r in [(plan or {}).get("primary"), *((plan or {}).get("fallbacks") or [])]
+                                 if r and r != primary]
+    return {**(plan or {}), "primary": primary, "fallbacks": order, "chooser": "declared" if declared else "recorded",
+            "planned_primary": (plan or {}).get("primary")}
 
 
 def _route_failure(tid: str, decision: dict) -> str:
@@ -318,10 +341,6 @@ def _record_routing(con, run: dict, decision: dict) -> None:
                                                       dispatched=decision.get("selected"), explored=explored)
 
 
-def _stash_route(con, run, tid, decision):
-    state.update_task(con, run["id"], tid, route_json=dumps(_route_payload(decision)))
-
-
 def _route_payload(decision: dict) -> dict:
     """What a dispatch keeps of its decision, so a stacked start or a relaunch
     reproduces the same route, override, and launch form."""
@@ -329,7 +348,45 @@ def _route_payload(decision: dict) -> dict:
     for key in ("override", "launch", "benchmark_snapshot", "route_source", "fallbacks_taken", "audit_id"):
         if decision.get(key):
             out[key] = decision[key]
+    unknown = candidates.quota_unknown_record(decision.get("candidate"))
+    if unknown and decision.get("candidate"):
+        out["quota_unknown"] = unknown
+    if (decision.get("planned") or {}).get("chooser") == "declared" or decision.get("declared") \
+            or decision.get("override"):
+        out["declared"] = True  # a deliberate route survives the next dispatch of the task
     return out
+
+
+def note_route(con, run: dict, task: dict, decision: dict) -> None:
+    """Record the effective route on the task before its agent runs (#426), and a
+    `route.changed` event when it differs from what Office would have run:
+    a fallback (quota, unavailable), `--reroute`, or an explicit `--as`/`--route`.
+    Caller holds the transaction."""
+    tid = task["id"]
+    after = decision["selected"]
+    norm = scoring.normalize_triple
+    rec = state.recorded_route(task)
+    recorded = routing.candidate_id(rec["candidate"]) if rec else None
+    source = decision.get("route_source") or ("override" if decision.get("override") else "router")
+    planned = decision.get("planned") or {}
+    taken = decision.get("fallbacks_taken") or []
+    why = "; ".join(f"{t['route']}: {t['reason']}" for t in taken)
+    if taken:
+        before = planned.get("primary")
+        kind = "quota" if any("quota" in t["reason"] for t in taken) else "unavailable"
+        change = (before, kind, f"fallback: {why}", "office")
+    elif source == "reroute":
+        before = recorded or ((state.task_dispatches(con, run["id"], tid) or [{}])[-1].get("triple"))
+        change = (before, "reroute", "rerouted from current evidence", "orchestrator")
+    elif source == "override":
+        before = recorded or (_planned_slate(con, run, tid) or {}).get("primary")
+        change = (before, "override", (decision.get("selection_disclosure") or {}).get("reason") or "route override",
+                  "user")
+    else:
+        before, change = None, None
+    if change and before and norm(before) != norm(after):
+        state.record_route_change(con, run, tid, before, after, kind=change[1], reason=change[2], actor=change[3])
+    state.update_task(con, run["id"], tid, route_json=dumps(_route_payload(decision)))
 
 
 def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> list[str]:
@@ -388,13 +445,22 @@ def _base_for(con, run: dict, task: dict, graph: dict, stack_after: str | None) 
 # ------------------------------------------------------------------ launch request
 
 def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | None = None,
-                   base: str | None = None, extra: dict | None = None, fix_of: str | None = None) -> str:
+                   base: str | None = None, extra: dict | None = None, fix_of: str | None = None,
+                   replaces: str | None = None) -> str:
     """Create the dispatch row, lease and launch job. Caller holds the tx.
 
     Routing for executors happens before the transaction; planner and fix
     rounds route here from pinned state because they have no orchestrator turn.
     """
     task = state.get_task(con, run["id"], task_id)
+    if role == "executor":
+        from office import gates
+        live = gates.live_task_session(con, run["id"], task_id, exclude=replaces)
+        if live:
+            # One session per worktree: amend, rerun and relaunch all come through here.
+            raise Refused("worker-live", f"{task_id} still has a live worker ({live})", scope=task_id,
+                          next_step=f'office prompt {task_id} -- "<message>" to reach it, or office revoke {task_id} '
+                                    "to end it first")
     prior = None
     if task.get("current_dispatch_id"):
         prior = state.get_dispatch(con, task["current_dispatch_id"])
@@ -520,14 +586,54 @@ def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = N
                                          "AND status IN ('launching', 'running')", (run["id"], task_id)).fetchall()]
     notes: list[str] = []
     others = [d["id"] for d in live if only and d["id"] != only]
-    stopped = [d["id"] for d in live if (not only or d["id"] == only) and stop_dispatch(run, d, notes=notes)]
+    targets = [d for d in live if not only or d["id"] == only]
+    cancelled = [d["id"] for d in targets if _cancel_pending_launch(con, run, d, reason)]
+    # Re-read: a launch may have recorded its launcher and pid since the snapshot.
+    fresh = [state.get_dispatch(con, d["id"]) for d in targets if d["id"] not in cancelled]
+    stopped = [d["id"] for d in fresh if stop_dispatch(run, d, notes=notes)]
+    starting = [d["id"] for d in fresh if d["id"] not in stopped and d["status"] == "launching" and not d.get("launcher")]
     lines = [f"{task_id} lease revoked | later submits from its holder are rejected"]
     if stopped:
         lines.append(f"stopped {', '.join(stopped)} (SIGTERM)")
+    if cancelled:
+        lines.append(f"cancelled {', '.join(cancelled)} before its agent started")
+    if starting:
+        lines.append(f"{', '.join(starting)} is starting its agent now; it is tracked once up: office revoke "
+                     f"{task_id} again to stop it")
     if others:
-        lines.append(f"left running: {', '.join(others)} (not the dispatch named; office revoke {task_id} ends them too)")
+        lines.append(f"left running: {', '.join(others)} (not the dispatch named; its lease is revoked too, so its "
+                     f"submits are rejected; office revoke {task_id} ends it, and office rerun refuses until it ends)")
     lines += notes
     return Result(lines=lines, next=f"office dispatch {task_id} to relaunch")
+
+
+def _cancel_pending_launch(con, run: dict, d: dict, reason: str) -> bool:
+    """End a dispatch whose launch job has not been picked up yet: fail the queued job
+    and record the end in one transaction. A claimed job may already be starting the
+    agent, and cancelling under it would leave an agent nothing tracks; it is left to
+    finish its launch (it is then tracked, and a second revoke stops it)."""
+    if d["status"] != "launching" or d.get("launcher") or d.get("pid"):
+        return False
+    key = (run["id"], f"launch:{d['id']}")
+    with db.transaction(con):
+        if not con.execute("SELECT 1 FROM outbox WHERE run_id=? AND kind='launch_agent' AND dedup_key=? "
+                           "AND status='queued'", key).fetchone():
+            return False
+        # Guarded on the row as it is now, not the caller's snapshot: a launch that recorded
+        # its launcher or pid meanwhile is running and is stopped, not cancelled.
+        ended = con.execute("UPDATE dispatches SET status='cancelled', terminal_classification='revoked', ended_at=? "
+                            "WHERE id=? AND ended_at IS NULL AND status='launching' AND launcher IS NULL AND pid IS NULL",
+                            (now_iso(), d["id"])).rowcount
+        if not ended:
+            return False
+        con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, max_attempts=attempts "
+                    "WHERE run_id=? AND kind='launch_agent' AND dedup_key=? AND status='queued'",
+                    (f"revoked: {reason}"[:200], now_iso(), *key))
+        if ended:
+            state.emit(con, run, "dispatch.ended", f"{d.get('task_id') or d['role']} {d['role']} ended: revoked before "
+                       "its agent started", audience="runtime", task_id=d.get("task_id"), dispatch_id=d["id"],
+                       payload={"exit_code": None, "signal": None, "classification": "revoked"})
+    return bool(ended)
 
 
 def _end_dispatch(con, run: dict, d: dict, classification: str, why: str, *, stop: bool = True,
@@ -886,11 +992,18 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     packet = build_packet(con, run, dispatch, role, payload)
     state.check_packet(run, packet)
     atomic_write_json(ddir / "packet.json", packet)
-    brief = briefs.worker_brief(con, run, packet, setup=setup)
+    carried: list = []
+    brief = briefs.worker_brief(con, run, packet, setup=setup, carried=carried)
     (ddir / "brief.md").write_text(brief, encoding="utf-8")
+    # The deliveries this brief rendered: they are confirmed once its prompt lands.
+    atomic_write_json(ddir / "brief-deliveries.json", carried)
     with db.transaction(con):
         con.execute("UPDATE dispatches SET packet_hash=?, packet_path=?, log_path=? WHERE id=?",
                     (packet["packet_hash"], str(ddir / "packet.json"), str(ddir / "output.log"), dispatch["id"]))
+    current = state.get_dispatch(con, dispatch["id"])
+    if current["status"] != "launching":
+        # Revoked while its worktree was being set up (review F2): start nothing.
+        return {"skipped": current["status"]}
     launcher = launch(run, dispatch, "worker", ddir, cwd=wt, cli=payload.get("cli"),
                       external=bool(payload.get("external")), resume=payload.get("resume"))
     return {"dispatch_id": dispatch["id"], **launcher}
@@ -986,7 +1099,11 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         label = pane_label(run, dispatch, kind)
         pane = _herdr_pane(run, cwd, label=label, dispatch_id=dispatch["id"]) if inter else None
         if inter and not pane:
+            spec["fallback_reason"] = "no herdr pane could be opened"
+            atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
             _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
+            if resume:
+                _headless_resume(run, dispatch, kind, spec, resume)
         if pane:
             started = _herdr_agent_start(run, dispatch, spec, env, inter, pane, cwd, ddir, label=label)
             if started:
@@ -1000,6 +1117,8 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
             # The agent never came up in the pane: fall back to a plain process,
             # and keep that visible on the dispatch (its notice says why).
             headless = "process-fallback"
+            if resume:
+                _headless_resume(run, dispatch, kind, spec, resume)
     log = open(ddir / "supervisor.log", "ab")
     try:
         proc = subprocess.Popen(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
@@ -1011,6 +1130,29 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         proc.wait()
         return _wait_terminal(dispatch["id"])
     return {"launcher": headless, "pid": proc.pid}
+
+
+def _headless_resume(run: dict, dispatch: dict, kind: str, spec: dict, resume: dict) -> None:
+    """A `rerun --resume` dispatch whose pane never came up. Resume the recorded
+    session headless with the adapter's headless resume args when it declares
+    them, else say it started fresh, and drop the parent's session id the
+    dispatch inherited so the new session is recorded without a session.mismatch (#445)."""
+    adapter = adapters.load_all().get(dispatch.get("adapter_id") or dispatch.get("harness") or "")
+    session = resume.get("session_id")
+    form = adapters.headless_resume_args(adapter, kind, session) if adapter and session else None
+    if form:
+        spec["headless_resume"] = form
+        _launch_notice(run, dispatch, f"resumed headless: session {session} continues with the harness's resume form "
+                                      "(no pane)")
+    else:
+        spec["headless_fresh"] = True
+        _set_dispatch(dispatch["id"], session_id=None)
+        dispatch["session_id"] = None
+        _assign_session(dispatch)
+        why = "no session id was recorded" if not session else "its adapter declares no headless resume form"
+        _launch_notice(run, dispatch, f"the resume could not run in a pane and {why}: started a FRESH session, not "
+                                      "a continuation of the parent's; the brief and the preserved worktree carry the task")
+    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
 
 
 def _supervise_in_process(dispatch_id: str, cwd: Path, extra: dict) -> None:
@@ -1136,8 +1278,16 @@ def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = Tru
     return env_file
 
 
+# CSI sequences, OSC sequences (an OSC 8 hyperlink), and two-byte escapes.
+_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+
+
+def _strip_ansi(text: str | None) -> str:
+    return _CSI.sub("", text or "")
+
+
 def _startup_screen(text: str | None) -> str | None:
-    low = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text or "").lower()
+    low = _strip_ansi(text).lower()
     return next((label for marker, label in _STARTUP_SCREEN_MARKERS if marker in low), None)
 
 
@@ -1172,6 +1322,8 @@ def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pa
     recovery = (f"orchestrator recovery: {inspect}; do not auto-approve trust, "
                 "credentials, or user-authority prompts; resolve a safe runtime blocker or choose another route, "
                 "then follow `office status` / `office resume` instead of abandoning the run")
+    spec["fallback_reason"] = f"{failure} ({why}){observed}"
+    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
     _launch_notice(run, dispatch, f"{failure} ({why}){observed}; running headless instead. {recovery}")
 
 
@@ -1200,7 +1352,19 @@ def _close_abandoned_pane(run: dict, dispatch: dict, pane: str) -> bool:
     if held or pane in _reserved_panes(run, open_ids):
         return False
     _herdr_quiet("pane", "close", pane)
-    return not _pane_exists(pane)
+    if _pane_exists(pane):
+        return False
+    with _pane_lock(run):
+        # A closed pane left in the layout would be split from later and fail (review F1).
+        try:
+            layout = json.loads(tab_file.read_text()) if tab_file.is_file() else None
+        except (OSError, ValueError):
+            layout = None
+        if layout and pane in (layout.get("panes") or []):
+            layout["panes"] = [p for p in layout["panes"] if p != pane]
+            atomic_write_json(tab_file, layout)
+        _unreserve_pane(run, pane)
+    return True
 
 
 def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
@@ -1235,7 +1399,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         if "agent_pane_busy" in why and not retried:
             # The pane still holds an agent (a finished session herdr keeps):
             # split a fresh one and try once more before going headless (#200 B7).
-            fresh = _herdr_fresh_pane(run, cwd, pane)
+            fresh = _herdr_fresh_pane(run, cwd, pane, dispatch_id=dispatch["id"])
             if fresh:
                 return _herdr_agent_start(run, dispatch, spec, env, inter, fresh, cwd, ddir, retried=True, label=label)
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, "herdr agent start failed", why)
@@ -1295,7 +1459,8 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
                                           f"{pane}); submit it: herdr pane send-keys {pane} Enter")
         else:
             screen = _startup_screen(view)
-            title = "folder-trust dialog" if screen == TRUST_SCREEN else f"{screen} screen"
+            title = ("folder-trust dialog" if screen == TRUST_SCREEN else screen if screen == EXTERNAL_IMPORTS_SCREEN
+                     else f"{screen} screen")
             why = (f" the {title} holds the composer; review or skip it in the pane and"
                    if screen else "")
             _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
@@ -1487,7 +1652,7 @@ _CTX_RE = re.compile(r"\bctx:\s*(\d+(?:\.\d+)?)\s*k\b", re.I)
 
 
 def _trust_dialog(text: str | None) -> bool:
-    low = (text or "").lower()
+    low = _strip_ansi(text).lower()
     return any(m in low for m in TRUST_DIALOG_MARKERS)
 
 
@@ -1577,13 +1742,17 @@ _DECLINE = re.compile(r"\b(?:no|exit|quit|cancel|skip|without|don'?t|do not)\b",
 
 
 def _selected_option(text: str | None) -> str | None:
-    lines = [ln for ln in re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text or "").splitlines()[-40:]]
+    lines = _strip_ansi(text).splitlines()[-40:]
     picked = [m.group(1) for ln in lines if (m := _CURSOR.match(ln))]
     return picked[-1] if picked else None
 
 
 def _trust_selected(option: str | None) -> bool:
-    return bool(option) and "trust" in option.lower() and not _DECLINE.search(option)
+    low = (option or "").strip().lower()
+    # The trust option itself, or a plain "Yes, proceed/continue"; never any other "Yes, ..."
+    # a startup screen offers (an MCP server, terms).
+    ok = "trust" in low or re.match(r"yes,?\s+(?:proceed|continue)\b", low)
+    return bool(low) and bool(ok) and not _DECLINE.search(low)
 
 
 def _confirm_trust(pane: str, read, herdr, text: str | None = None) -> bool:
@@ -1597,28 +1766,53 @@ def _confirm_trust(pane: str, read, herdr, text: str | None = None) -> bool:
             return False
         option = _selected_option(text)
         if _trust_selected(option):
-            herdr("pane", "send-keys", pane, "Enter")
-            return True
+            # A frame read right after a key can predate the redraw: confirm only when a
+            # fresh, complete frame still shows the trust option selected.
+            again = _settled(read, None)
+            if _trust_dialog(again) and _trust_selected(_selected_option(again)):
+                herdr("pane", "send-keys", pane, "Enter")
+                return True
+            text = again
+            continue
         if key is None or option is None:
             return False
         herdr("pane", "send-keys", pane, key)
-        text = None
-        time.sleep(float(os.environ.get("OFFICE_HERDR_KEY_DELAY", "1")) / 4)
+        text = _settled(read, option)
     return False
+
+
+def _settled(read, before: str | None) -> str:
+    """The first complete frame (the dialog with a selection) whose selection differs from
+    `before`; a blank, half-drawn or unreadable frame is read again. After the settle time
+    (OFFICE_HERDR_KEY_SETTLE, default twice OFFICE_HERDR_KEY_DELAY) the last frame read is
+    returned (the list end: the key moved nothing)."""
+    delay = float(os.environ.get("OFFICE_HERDR_KEY_DELAY", "1"))
+    deadline = time.time() + float(os.environ.get("OFFICE_HERDR_KEY_SETTLE", 2 * delay))
+    last = ""
+    while True:
+        text = read()
+        option = _selected_option(text) if _trust_dialog(text) else None
+        if option is not None:
+            last = text
+            if option != before:
+                return text
+        if time.time() >= deadline:
+            return last or text
+        time.sleep(0.2)
 
 
 def _answer_startup_trust(pane: str, name: str, timeout: float) -> bool:
     """`herdr agent start` gave up on an agent held by a folder-trust dialog
     (`agent_not_ready`): answer it, then wait until Herdr reports the agent
     ready. True when the agent is up past the dialog."""
-    read = lambda: "\n".join(_pane_read(pane).splitlines()[-40:])  # noqa: E731
+    read = lambda: _pane_visible(pane)  # noqa: E731  the screen now, not scrollback (review F4)
     if not _confirm_trust(pane, read, _herdr_quiet):
         return False
     deadline = time.time() + timeout
     while True:
         res = _herdr_json(["agent", "get", name])
-        agent = res.get("agent") or {}
-        status = agent.get("status") or agent.get("agent_status")
+        agent = res.get("agent") or res  # flat or nested, as _agent_up reads it (review F5)
+        status = (agent.get("status") or agent.get("agent_status")) if isinstance(agent, dict) else None
         if status in ("idle", "working", "done") and not _trust_dialog(read()):
             return True
         if time.time() >= deadline:
@@ -1874,6 +2068,23 @@ def _watch_notice(dispatch_id: str, text: str) -> None:
     _launch_notice(run, d, text)
 
 
+def headless_fallbacks(con, run: dict) -> list[str]:
+    """One line per live dispatch that was meant for a Herdr pane and runs headless
+    instead, with why (launch.json `fallback_reason`). `office status` and `wait` show it."""
+    out = []
+    for d in con.execute("SELECT id, task_id, role FROM dispatches WHERE run_id=? AND ended_at IS NULL "
+                         "AND status IN ('launching','running') AND launcher IN ('process','process-fallback') "
+                         "ORDER BY started_at", (run["id"],)).fetchall():
+        try:
+            spec = json.loads((paths.run_dir(run["id"]) / "dispatches" / d["id"] / "launch.json").read_text())
+        except (OSError, ValueError):
+            continue
+        reason = spec.get("fallback_reason") if isinstance(spec, dict) else None
+        if reason:
+            out.append(f"{d['task_id'] or d['role']} {d['id']} runs headless (herdr fallback): {reason[:300]}")
+    return out
+
+
 def _launch_notice(run: dict, dispatch: dict, text: str) -> None:
     """Record a launch problem where `office status` shows it."""
     con = db.connect()
@@ -2006,15 +2217,24 @@ def _herdr_pane(run: dict, cwd: Path, label: str | None = None, dispatch_id: str
     only once its agent has started: without the lock and the reservation two
     launches took the same idle pane, and one's setup line never ran because the
     other's agent already held the pane (run f00446ac)."""
+    with _pane_lock(run):
+        pane = _herdr_pick_pane(run, cwd)
+        if pane and dispatch_id:
+            _reserve_pane(run, pane, dispatch_id)
+    if pane and label:
+        _herdr_rename(pane, label)  # cosmetic: outside the lock (review F9)
+    return pane
+
+
+@contextlib.contextmanager
+def _pane_lock(run: dict):
+    """Serializes pane picks, splits and layout edits for one run."""
     run_dir = paths.run_dir(run["id"])
     run_dir.mkdir(parents=True, exist_ok=True)
     with open(run_dir / "herdr-tab.lock", "a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
-            pane = _herdr_pick_pane(run, cwd, label)
-            if pane and dispatch_id:
-                _reserve_pane(run, pane, dispatch_id)
-            return pane
+            yield
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
@@ -2029,6 +2249,23 @@ def _reserve_pane(run: dict, pane: str, dispatch_id: str) -> None:
     atomic_write_json(f, held)
 
 
+def _unreserve_pane(run: dict, pane: str) -> None:
+    """Drop a closed pane's reservation. Caller holds the pane lock."""
+    f = paths.run_dir(run["id"]) / "herdr-reservations.json"
+    try:
+        held = json.loads(f.read_text()) if f.is_file() else {}
+    except (OSError, ValueError):
+        return
+    if pane in held:
+        held.pop(pane)
+        atomic_write_json(f, held)
+
+
+def _live_panes(panes: list) -> list:
+    """The recorded panes herdr has not reported gone (an unreachable herdr keeps them)."""
+    return [p for p in panes if _pane_exists(p)]
+
+
 def _reserved_panes(run: dict, open_ids: set) -> set:
     """Panes reserved for a dispatch that has not ended."""
     f = paths.run_dir(run["id"]) / "herdr-reservations.json"
@@ -2039,7 +2276,7 @@ def _reserved_panes(run: dict, open_ids: set) -> set:
     return {pane for pane, did in held.items() if did in open_ids}
 
 
-def _herdr_pick_pane(run: dict, cwd: Path, label: str | None = None) -> str | None:
+def _herdr_pick_pane(run: dict, cwd: Path) -> str | None:
     """A visible Herdr pane for a dispatch, split beside the caller's own pane.
 
     The first dispatch splits the orchestrator's pane (`HERDR_PANE_ID`, or
@@ -2054,8 +2291,6 @@ def _herdr_pick_pane(run: dict, cwd: Path, label: str | None = None) -> str | No
         pane = _herdr_own_tab_pane(run, cwd, tab_file, layout)
     else:
         pane = _herdr_split_pane(run, cwd, tab_file, layout, anchor)
-    if pane and label:
-        _herdr_rename(pane, label)
     return pane
 
 
@@ -2147,14 +2382,23 @@ def _pane_is_shell(pane: str) -> bool:
 def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None, anchor: str | None) -> str | None:
     layout = layout or {"mode": "split", "anchor": anchor, "panes": []}
     anchor = layout.get("anchor") or anchor
-    live = [p for p in layout["panes"] if _herdr_json(["pane", "get", p])]  # the user may close panes
+    live = _live_panes(layout["panes"])  # the user may close panes
     busy = _busy_panes(run)
     for pane in live:
         if pane not in busy and _pane_is_shell(pane):
-            subprocess.run(["herdr", "pane", "run", pane, f"cd {shlex.quote(str(cwd))}"], capture_output=True, timeout=30)
+            # No `cd` here: the launch's setup line cds, so the lock holds no extra herdr call.
             layout["panes"] = live
             atomic_write_json(tab_file, layout)
             return pane
+    if not live and anchor and not _pane_exists(anchor):  # unreachable herdr is not "gone"
+        # The recorded anchor is gone (the orchestrator's pane was closed): split from the
+        # caller's pane instead, else give the run its own tab. Splitting a gone pane failed
+        # every later launch into headless.
+        caller = os.environ.get("OFFICE_HERDR_ANCHOR") or os.environ.get("HERDR_PANE_ID")
+        if caller and caller != anchor and _pane_exists(caller):
+            anchor = layout["anchor"] = caller
+        else:
+            return _herdr_own_tab_pane(run, cwd, tab_file, None)
     # Split the caller's pane vertically (side by side); stack further agents in that column.
     target, direction = (live[-1], "down") if live else (anchor, "right")
     res = _herdr_json(["pane", "split", "--pane", target, "--direction", direction, "--cwd", str(cwd), "--no-focus"])
@@ -2170,8 +2414,17 @@ def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None,
 
 def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None) -> str | None:
     """No caller pane to split (or a run begun before split mode): a tab owned by the run."""
+    orphans: list = []
     if tab and not _herdr_json(["tab", "get", tab["tab_id"]]):
         tab = None  # the user closed it
+    if tab is not None:
+        # Panes closed since (by the user or as abandoned) are never split from (review F1).
+        tab["panes"] = _live_panes(tab.get("panes") or [])
+        if not tab["panes"]:
+            # The tab outlived its recorded panes: open a new one, and keep the old id so
+            # close_herdr_tab still closes it.
+            orphans = [*(tab.get("orphan_tabs") or []), tab["tab_id"]]
+            tab = None
     if tab is None:
         workspace = (os.environ.get("HERDR_WORKSPACE_ID") or os.environ.get("HERDR_PANE_ID") or "").split(":")[0]
         args = ["tab", "create", "--label", f"office-{run['id'][:8]}", "--cwd", str(cwd), "--no-focus"]
@@ -2182,13 +2435,14 @@ def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None) 
         if not root:
             return None
         tab = {"mode": "tab", "tab_id": (res.get("tab") or {}).get("tab_id"), "panes": [root]}
+        if orphans:
+            tab["orphan_tabs"] = orphans
         atomic_write_json(tab_file, tab)
         return root
     busy = _busy_panes(run)
     for pane in tab["panes"]:
         if pane not in busy and _pane_is_shell(pane):
-            subprocess.run(["herdr", "pane", "run", pane, f"cd {shlex.quote(str(cwd))}"], capture_output=True, timeout=30)
-            return pane
+            return pane  # the launch's setup line cds
     direction = "right" if len(tab["panes"]) % 2 else "down"
     res = _herdr_json(["pane", "split", "--pane", tab["panes"][-1], "--direction", direction, "--cwd", str(cwd), "--no-focus"])
     pane = (res.get("pane") or {}).get("pane_id")
@@ -2223,7 +2477,8 @@ def close_herdr_tab(run: dict) -> None:
                     if _pane_exists(pane):
                         subprocess.run(["herdr", "pane", "close", pane], capture_output=True, timeout=30)
             else:
-                subprocess.run(["herdr", "tab", "close", tab["tab_id"]], capture_output=True, timeout=30)
+                for tab_id in [*(tab.get("orphan_tabs") or []), tab["tab_id"]]:
+                    subprocess.run(["herdr", "tab", "close", tab_id], capture_output=True, timeout=30)
         except (OSError, ValueError, subprocess.SubprocessError, KeyError):
             pass
 
@@ -2538,20 +2793,24 @@ def _set_dispatch(dispatch_id: str, **cols) -> None:
         con.close()
 
 
-def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str) -> str | None:
-    """A new pane split from one herdr refused as busy, recorded in the run's layout."""
-    res = _herdr_json(["pane", "split", "--pane", busy_pane, "--direction", "down", "--cwd", str(cwd), "--no-focus"])
-    pane = (res.get("pane") or {}).get("pane_id")
-    if not pane:
-        return None
-    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
-    try:
-        layout = json.loads(tab_file.read_text()) if tab_file.is_file() else None
-    except (OSError, ValueError):
-        layout = None
-    if layout is not None:
-        layout.setdefault("panes", []).append(pane)
-        atomic_write_json(tab_file, layout)
+def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str, dispatch_id: str | None = None) -> str | None:
+    """A new pane split from one herdr refused as busy, recorded in the run's layout
+    and reserved for the dispatch, under the pane lock (review F2)."""
+    with _pane_lock(run):
+        res = _herdr_json(["pane", "split", "--pane", busy_pane, "--direction", "down", "--cwd", str(cwd), "--no-focus"])
+        pane = (res.get("pane") or {}).get("pane_id")
+        if not pane:
+            return None
+        tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
+        try:
+            layout = json.loads(tab_file.read_text()) if tab_file.is_file() else None
+        except (OSError, ValueError):
+            layout = None
+        if layout is not None:
+            layout.setdefault("panes", []).append(pane)
+            atomic_write_json(tab_file, layout)
+        if dispatch_id:
+            _reserve_pane(run, pane, dispatch_id)
     return pane
 
 
@@ -2563,6 +2822,17 @@ def _pane_exists(pane: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return True
     return "pane_not_found" not in (proc.stdout or "") + (proc.stderr or "")
+
+
+def _pane_visible(pane: str) -> str:
+    """The pane's visible screen, or "" when herdr cannot read it. An answered dialog
+    can linger in scrollback; the screen shows what is up now."""
+    try:
+        proc = subprocess.run(["herdr", "pane", "read", pane, "--source", "visible", "--lines", "40"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout if proc.returncode == 0 else ""
 
 
 def _pane_read(pane: str) -> str:
@@ -2764,7 +3034,9 @@ def supervise(dispatch_id: str) -> int:
                                          cwd=Path(spec["cwd"]), output=output,
                                          images=[Path(i) for i in spec.get("images") or []],
                                          include_dirs=[Path(i) for i in spec.get("include_dirs") or []],
-                                         session_id=_assigned_session(d))
+                                         session_id=None if spec.get("headless_resume") else
+                                         (d.get("session_id") if spec.get("headless_fresh") else _assigned_session(d)),
+                                         resume_args=spec.get("headless_resume"))
         prompt = Path(spec["prompt_file"]).read_text(encoding="utf-8")
         if prof.get("image_transport") in ("prompt-at", "prompt-path") and spec.get("images"):
             prefix = "@" if prof["image_transport"] == "prompt-at" else ""
@@ -2805,7 +3077,7 @@ def supervise(dispatch_id: str) -> int:
                     child.stdin.close()
                 except BrokenPipeError:
                     pass
-            sniffer = None if d.get("resumed_from") else _SessionSniffer(run, d, adapter, log_path)
+            sniffer = None if d.get("resumed_from") and not spec.get("headless_fresh") else _SessionSniffer(run, d, adapter, log_path)
             for chunk in iter(lambda: child.stdout.read1(65536), b""):
                 log.write(chunk)
                 log.flush()
@@ -2944,7 +3216,9 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
                        f"--fresh; work is preserved in its worktree", task_id=task["id"])
             return
         from office import questions
-        asked = _ended_on_question(run, d)
+        # Only an executor that ended cleanly stopped to ask: a crashed or killed worker's last
+        # line is narration, and a planner question has no amend/rerun path (review F3, F6).
+        asked = _ended_on_question(run, d) if _may_end_on_question(d) else None
         if asked:
             # A worker that stopped to ask needs an answer, not the same brief again: a
             # relaunch asks the same question (run 330605a8 relaunched one twice).
@@ -2968,13 +3242,25 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
                    f"({d['terminal_classification']}); work is preserved in its worktree", task_id=task["id"])
 
 
+def _may_end_on_question(d: dict) -> bool:
+    return d.get("role") == "executor" and d.get("terminal_classification") == "success"
+
+
 def _ended_on_question(run: dict, d: dict) -> dict | None:
     """The question a worker's final message ended on, saved where `office wait`
     finds it (question.json), or None."""
-    from office import gates, questions
+    from office import questions
     ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    from office import gates
     try:
-        q = questions.final_question(gates._log_text(d, ddir))
+        with open(gates.log_path(d, ddir), "rb") as fh:  # only the final message matters: read the tail
+            fh.seek(0, os.SEEK_END)
+            start = max(fh.tell() - 16384, 0)
+            fh.seek(start)
+            tail = fh.read().decode("utf-8", errors="replace")
+        if start:
+            tail = tail.split("\n", 1)[-1]  # the first line is cut mid-line
+        q = questions.final_question(tail)
     except OSError:
         return None
     if q:

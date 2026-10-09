@@ -20,7 +20,7 @@ goes to step 2. Skip for an empty or tiny mechanical diff. Fix rounds repeat ste
 ## 2. Adversarial self-review
 
 Find the base and the tier in the brief's `SELF-REVIEW` line (`git diff <base>`, `(tier: <tier>)`). Office sets
-the tier from the run's gear and risk. You cannot lower it. Do the review as the tier says:
+the tier from the run's gear and risk (unknown risk is never the `inline` tier, and a planner-declared lightweight path does not lower it). You cannot lower it. Do the review as the tier says:
 
 - **`inline`:** no subagents. Make one fresh pass per lens yourself and fix medium+ findings.
   You may skip a lens that clearly does not apply, with a one-line reason in your report.
@@ -64,46 +64,36 @@ stale, or malformed ledger and any open finding as a fix. Submit consumes the le
 
 ## 3. Checks
 
-Run the brief's `CHECKS` lines. Check `uptime` first. When the load average is above twice the CPU count, use
-long timeouts (900s or more), never 270-290s caps. Record pass/fail counts.
+Run the brief's `CHECKS` lines. Check `uptime` first. When the load average is above twice the CPU count, use long timeouts (900s or
+more), never 270-290s caps. Record pass/fail counts.
 
 ## 4. Commit and push
 
-Commit in-scope files only. When the brief has a `GIT` line, push to that branch, and never force-push.
-Never touch files another tool stamped outside SCOPE (`git checkout <base> -- <file>` restores them).
-Write or update the step 2 ledger after the final commit: its `COMMIT` must be HEAD, and each round needs a fresh file.
+Commit in-scope files only. When the brief has a `GIT` line, push to that branch, and never force-push. Never touch files another tool
+stamped outside SCOPE (`git checkout <base> -- <file>` restores them). Write or update the step 2 ledger after the final commit: its
+`COMMIT` must be HEAD, and each round needs a fresh file.
 
 ## 5. Preflight
 
-```bash
-office preflight; echo "rc=$?"
-```
+Run `office preflight; echo "rc=$?"`. Verdicts: `ready` (0): run the `next:` line exactly as printed (`. <agent.env> && office submit`).
+`fix` (1): apply each `fix:` line, then preflight again. `wait` (75): the task is held by a plan finding (RECHECK or INTAKE_GAP; v3.1: a
+plan defect) or an amendment and you still hold the lease; poll as below. `stop` (4): terminal; go to step 7 with `SUBMIT=refused: <stop line>`.
 
-| Verdict | Exit | Do |
-|---|---|---|
-| `ready` | 0 | Run the `next:` line exactly as printed (`. <agent.env> && office submit`). |
-| `fix` | 1 | Apply each `fix:` line, then preflight again. |
-| `wait` | 75 | The task is held by a plan finding (RECHECK or INTAKE_GAP; v3.1: a plan defect) or an amendment, and you still hold the lease. Poll as shown below. |
-| `stop` | 4 | Terminal for you. Go to step 7 with `SUBMIT=refused: <stop line>`. |
-
-To wait, start this with `Bash` `run_in_background` (or the Monitor tool), and keep the session open:
+To wait, start this with `Bash` `run_in_background` (or the Monitor tool) and keep the session open:
 
 ```bash
 for i in $(seq 30); do office preflight >/dev/null; rc=$?; [ "$rc" -ne 75 ] && break; sleep 60; done; echo "rc=$rc"
 ```
 
-The loop polls task state, not event numbers, so a stale event cannot end it early. When it exits 0,
-submit once. When it exits 4 or 30 minutes pass, report and stop. If an `AMENDMENT <id>` arrives
-while you wait, apply it, run `office ack <id>`, and go back to step 1.
-
-Preflight never reacquires a lost lease. Only the orchestrator moves a task to a new holder.
+It polls task state, not event numbers. On exit 0, submit once. On exit 4 or after 30 minutes, report and stop. If an `AMENDMENT <id>`
+arrives while you wait, apply it, run `office ack <id>`, and go back to step 1. Preflight never reacquires a lost lease; only the
+orchestrator moves a task to a new holder.
 
 ## 6. Submit
 
-Use the exact line from `next:`. Shell env does not persist between `Bash` calls, so source
-`agent.env` and run `office submit` in the same command. If submit refuses with `lease-lost`,
-`superseded-dispatch`, or `task-paused`, that is terminal. Do not retry and do not investigate. For an
-`outside-scope` refusal, revert the file or run `office submit --request-scope <file> -- "<reason>"`.
+Use the exact line from `next:`, sourcing `agent.env` and running `office submit` in the same `Bash` call (shell env does not persist).
+`lease-lost`, `superseded-dispatch` or `task-paused` is terminal: do not retry or investigate. For `outside-scope`, revert the file or run
+`office submit --request-scope <file> -- "<reason>"`.
 
 ## 7. Report
 

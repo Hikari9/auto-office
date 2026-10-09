@@ -2,7 +2,7 @@
 
 ## Normative vs implementation data
 
-`OFFICE-SKILLS-V3-SPEC.md` is normative. Code/config in this bundle is an implementation candidate.
+`OFFICE-SKILLS-V3-SPEC.md` is the normative 3.0 routing and data-model spec, historical for review and lifecycle policy (see `MANIFESTO.md` and `docs/review-convergence.md`). Code/config in this bundle is an implementation candidate.
 
 The implementation intentionally does **not** invent provider facts the spec expects to be refreshed or proven locally. In particular:
 

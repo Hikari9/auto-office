@@ -1,5 +1,7 @@
 # Auto Office v3 — lifecycle spec
 
+> **Historical, reference-only (3.0 era).** This document explains where rules came from. It is not current operational policy: where it disagrees, `MANIFESTO.md`, then the runtime and `docs/review-convergence.md`, then the active skills win. In particular, plan review is initial-only (#418), independent review is per lane plus a risk- or shared-outcome-triggered integrated review (#337, #422), and a round-cap waiver never becomes APPROVED and is not landing authority (#423).
+
 Companion to `OFFICE-SKILLS-V3-SPEC.md`. That document specifies **how a role is
 routed**. This one specifies **how a run is driven**: intake, approval, parallel
 execution, integration, and the autonomy ceiling.

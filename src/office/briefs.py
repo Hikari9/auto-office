@@ -32,7 +32,10 @@ PLAN_FORMAT = """\
 ## Requirements
 done:
 - <observable criterion>
-blast_radius: local | repo | production | production-data
+blast_radius: local | repo | production | production-data   (classify it; undeclared risk keeps independent code review on)
+irreversible: yes | no   (optional; yes is high risk)
+size_class: S | M | L | XL   (optional; L and XL are high risk)
+lightweight: <why this work is trivial and low risk>   (optional; needs blast_radius local or repo; refused for unknown or high risk)
 non_goals:
 - <explicitly out of scope>
 actions:
@@ -48,10 +51,10 @@ deploy_verify: <command that exits 0 when the deploy is healthy>   (recommended)
 
 ## Tasks
 ### T1: <title>
-scope: <ownership envelope: paths/globs this task may write>, <more>   (bare paths only; a dir/ entry owns its tree)
+scope: <ownership envelope: paths/globs this task may write>, <more>
 shared: <append-only registry files other tasks also edit>   (optional; e.g. an auth gate manifest)
-        (scope:/shared: entries are bare paths or globs: no notes or parentheses; put limits such as
-         "only the importer entry" in accept:)
+Each scope:/shared: entry is a path or glob with no note attached; a `dir/` entry owns its tree.
+Put limits such as "only the importer entry" in accept:.
 depends: none | T<n>, T<m>
 interfaces: <what it provides or consumes>   (optional)
 lane: <name>          (optional; tasks with one lane converge together; default: tasks joined by depends)
@@ -229,7 +232,7 @@ def planner_brief(con, run: dict, packet: dict) -> str:
     return "\n".join(out) + "\n"
 
 
-def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> str:
+def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carried: list | None = None) -> str:
     out = [
         "ROLE executor",
         f"TASK {packet['task_id']} {packet['title']}",
@@ -287,10 +290,12 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
         for f in findings:
             out.append(f"- {f['code']} [{f['severity']}] {f['location'] or ''} {f['summary']}"
                        + (f" -> {f['action']}" if f["action"] else ""))
-    amendments = con.execute("SELECT amendment_id, target_version, content FROM deliveries WHERE run_id=? AND task_id=? "
+    amendments = con.execute("SELECT id, amendment_id, target_version, content FROM deliveries WHERE run_id=? AND task_id=? "
                              "AND dispatch_id=? AND status IN ('queued','delivered') ORDER BY target_version",
                              (run["id"], packet["task_id"], packet["dispatch_id"])).fetchall() \
         if con is not None and packet.get("dispatch_id") else []
+    if carried is not None:
+        carried.extend(a["id"] for a in amendments)  # exactly what this brief renders
     for a in amendments:
         out += ["", f"AMENDMENT {a['amendment_id']} (plan -> p{a['target_version']}): apply it, then run office ack {a['amendment_id']}"]
         out += [f"    {line}" for line in a["content"][:AMENDMENT_BRIEF_CHARS].splitlines()]
@@ -450,10 +455,11 @@ def ledger_lines() -> list[str]:
     ]
 
 
-def worker_brief(con, run: dict, packet: dict, setup: dict | None = None) -> str:
+def worker_brief(con, run: dict, packet: dict, setup: dict | None = None, carried: list | None = None) -> str:
+    """`carried`, when given, receives the delivery ids the brief renders."""
     if packet["role"] == "planner":
         return planner_brief(con, run, packet)
-    return executor_brief(con, run, packet, setup=setup)
+    return executor_brief(con, run, packet, setup=setup, carried=carried)
 
 
 def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_summary: str,
@@ -486,14 +492,15 @@ def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_s
 
 def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision: dict, diff: str,
                              checks_summary: str, carried: list[dict], checkout: str, round_no: int,
-                             requirements: dict | None = None, evidence: dict | None = None) -> str:
+                             requirements: dict | None = None, evidence: dict | None = None,
+                             max_rounds: int | None = None) -> str:
     """One independent convergence review of a composed lane or shared scope (#337)."""
     kind = "shared-scope" if scope.get("shared") else "lane"
     out = [
         "ROLE independent convergence reviewer. Change nothing except your reply file. You did not write this change.",
         f"SCOPE {kind} {scope['id']}: the composed result of {', '.join(t['id'] for t in tasks)}"
         + (f" (shared boundary of lanes {', '.join(scope.get('lanes') or [])}: {scope.get('why')})" if scope.get("shared") else ""),
-        f"ROUND {round_no} of {contract.MAX_ROUNDS} substantive rounds",
+        f"ROUND {round_no} of {max_rounds or contract.MAX_ROUNDS} substantive rounds",
     ]
     if requirements:
         out += _lines("REQUIREMENTS done criteria:", requirements.get("done_criteria"))

@@ -105,3 +105,126 @@ def test_a_headless_worker_that_ended_on_a_question_is_a_question_not_a_relaunch
     assert "question: T1" in out and "Q1" in out and "office amend T1" in out and "office rerun T1" in out, out
     code, out = env.office("status")
     assert "question: T1" in out, out
+
+
+def test_final_question_reports_the_latest_question_and_ignores_bare_ids():
+    # Review F5: an earlier, answered question in the log is not the one asked now.
+    log = ("Question (Q1): may I touch a.ts?\nAnswered: yes.\n...work...\n"
+           "Question (Q2): may I also touch b.ts?\nTASK=T1 SUBMIT=not attempted NEXT=Answer Q2\n")
+    assert questions.final_question(log)["question"].startswith("Question (Q2)")
+    # Review F8: a NEXT that only mentions a question id does not ask anything.
+    assert questions.final_question("Stopped.\nTASK=T1 SUBMIT=not attempted NEXT=rerun checks; Q1 was resolved\n") is None
+    # Review F10: one fingerprint rule for live and ended questions.
+    q = questions.final_question(log)
+    assert q["fingerprint"] == questions.fingerprint(q)
+
+
+def test_only_a_cleanly_ended_executor_can_end_on_a_question():
+    # Review F3 (planners have no amend/rerun answer path) and F6 (a crash is not a question).
+    from office import dispatch
+    assert dispatch._may_end_on_question({"role": "executor", "terminal_classification": "success"})
+    assert not dispatch._may_end_on_question({"role": "planner", "terminal_classification": "success"})
+    assert not dispatch._may_end_on_question({"role": "executor", "terminal_classification": "nonzero"})
+
+
+@pytest.mark.approved
+def test_a_crashed_worker_whose_last_line_is_a_question_is_still_relaunched(env):
+    from conftest import approved_run, task_row
+    approved_run(env, executor=[{"raw": "Does the fixture need a DB?", "exit": 3}] * 4)
+    env.office("dispatch", "T1", check=0)
+    t = task_row(env)
+    assert not (t["pause_reason"] or "").startswith(questions.ENDED_PREFIX), t
+
+
+def test_a_next_naming_a_question_with_an_answer_or_approval_still_asks():
+    # Review #446 F7.
+    assert questions.final_question("Stopped.\nTASK=T1 SUBMIT=not attempted NEXT=await orchestrator answer to Q1\n")
+    assert questions.final_question("Stopped.\nTASK=T1 SUBMIT=not attempted NEXT=need approval on Q1\n")
+    assert questions.final_question("Stopped.\nTASK=T1 SUBMIT=not attempted NEXT=rerun checks; Q1 was resolved\n") is None
+
+
+@pytest.mark.approved
+def test_a_tail_cut_mid_line_never_supplies_the_question(env):
+    # Review #446 F9: the first line of a partial tail is a fragment.
+    from conftest import approved_run
+    from office import dispatch, paths, state
+    approved_run(env)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    ddir = paths.run_dir(run["id"]) / "dispatches" / "Dcut"
+    ddir.mkdir(parents=True, exist_ok=True)
+    tail = "TASK=T1 SUBMIT=not attempted NEXT=Answer Q1 about b.ts\n"
+    line = "Question (Q9): an old question that is cut?\n"
+    body = "x" * 20000 + "\n" + line + "y\n" * ((16384 - len(tail) - 10) // 2) + tail
+    (ddir / "output.log").write_text(body)
+    q = dispatch._ended_on_question(run, {"id": "Dcut", "log_path": str(ddir / "output.log")})
+    assert q and q["question"].startswith("Answer Q1"), q  # never the cut "...is cut?" fragment
+
+
+def test_the_brief_reports_exactly_the_deliveries_it_renders():
+    # Review #446 F8: brief-deliveries.json comes from the brief's own query.
+    import inspect
+    from office import briefs
+    assert "carried" in inspect.signature(briefs.worker_brief).parameters
+
+
+AGY_WIDGET = (Path(__file__).parent / "fixtures" / "agy_question_widget.txt").read_text()
+
+
+def test_parse_agy_question_header_widget():
+    q = questions.parse(AGY_WIDGET, status="blocked", busy=False)
+    assert q["kind"] == "select" and q["question"].startswith("Which approach should the migration")
+    assert [o["n"] for o in q["options"]] == [1, 2, 3]
+    assert q["options"][0]["label"].startswith("(Recommended)")
+    # Output after the widget means it was answered.
+    assert questions.parse(AGY_WIDGET + "\n⏺ moving on\n> \n", status="idle", busy=False) is None
+
+
+def test_question_header_is_not_a_widget_while_the_agent_is_idle():
+    # Ordinary output such as "Question 2/5 done" plus a numbered list is not a pending widget.
+    assert questions.parse(AGY_WIDGET, status="idle", busy=False) is None
+    assert questions.parse(AGY_WIDGET, status=None, busy=None) is None
+    assert questions.parse(AGY_WIDGET, status=None, busy=True)["kind"] == "select"
+
+
+@pytest.mark.approved
+def test_wait_records_a_dialog_question_for_blocked_with_no_recognised_widget(env, monkeypatch):
+    _, run, d, con = _herdr_worker(env, monkeypatch, reads=["Allow this tool call? [y/n]"], agent="blocked")
+    res = guide.wait(con, run, timeout=5, poll=0.1)
+    assert res.exit_code == questions.EXIT
+    assert any("[dialog]" in ln for ln in res.lines if ln.startswith("question:"))
+    assert con.execute("SELECT count(*) FROM events WHERE kind=? AND dispatch_id=?",
+                       (questions.EVENT, d["id"])).fetchone()[0] == 1
+
+
+@pytest.mark.approved
+def test_status_flags_a_blocked_pane_with_no_recorded_question(env, monkeypatch):
+    _, run, d, con = _herdr_worker(env, monkeypatch, reads=[WIDGET], agent="blocked")
+    calls = []
+
+    def fake_list():
+        calls.append(1)
+        return [{"name": "office-other", "pane_id": "w9:p9", "agent_status": "idle"},
+                {"name": "x", "pane_id": "w1:p7", "agent_status": "blocked"}]
+    monkeypatch.setattr(questions, "_herdr_agents", fake_list)
+    # the hook path (session start) and plain status() never call herdr
+    guide.status(con, run)
+    assert not calls
+    lines = guide.status(con, run, probe_panes=True).lines
+    assert len(calls) == 1
+    assert any("blocked in pane" in ln and "no question recorded" in ln and "office wait" in ln for ln in lines)
+    # status records nothing
+    assert con.execute("SELECT count(*) FROM events WHERE kind=?", (questions.EVENT,)).fetchone()[0] == 0
+    # once a question is recorded the flag gives way to the question line
+    questions.scan(con, run)
+    calls.clear()
+    lines = guide.status(con, run, probe_panes=True).lines
+    assert not calls and not any("no question recorded" in ln for ln in lines)
+    assert any(ln.startswith("question:") for ln in lines)
+
+
+@pytest.mark.approved
+def test_status_survives_herdr_list_failing(env, monkeypatch):
+    _, run, d, con = _herdr_worker(env, monkeypatch, reads=[WIDGET], agent="blocked")
+    monkeypatch.setattr(questions, "_herdr_agents", lambda: None)
+    assert not any("no question recorded" in ln for ln in guide.status(con, run, probe_panes=True).lines)

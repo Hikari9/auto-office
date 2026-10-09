@@ -43,6 +43,9 @@ _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[@-_]")
 # to confirm or esc to cancel"; agy: "Waiting for user confirmation".
 _SELECT_FOOTER = re.compile(r"enter to (?:select|confirm)|arrow keys to navigate|↑/↓ to navigate"
                             r"|waiting for user confirmation", re.I)
+# agy's question widget has a header instead of a known footer: "Question 1/1", the question
+# text, then "1. (Recommended) ..." options (#432).
+_SELECT_HEADER = re.compile(r"^\s*[│┃|]?\s*Question\s+\d+\s*/\s*\d+\b", re.I)
 _OPTION = re.compile(r"^\s*(?:[❯›>●○◯▶▸]\s*)?(\d{1,2})[.)]\s+(\S.*?)\s*$")
 _RULE = re.compile(r"^\s*[─━═—–-]{8,}\s*$")
 _BOX = "│┃|"
@@ -71,7 +74,35 @@ def _unbox(ln: str) -> str:
     return s
 
 
-def _select(lines: list[str]) -> dict | None:
+def _select_header(lines: list[str]) -> dict | None:
+    head = max((i for i, ln in enumerate(lines) if _SELECT_HEADER.match(ln)), default=None)
+    if head is None:
+        return None
+    options, want, last, body = [], 1, head, []
+    for i, ln in enumerate(lines[head + 1:], head + 1):
+        m = _OPTION.match(ln)
+        if m and int(m.group(1)) == want:
+            options.append({"n": want, "label": _line(m.group(2), MAX_OPTION)})
+            want += 1
+            last = i
+        elif not options and _unbox(ln) and not _RULE.match(ln):
+            body.append(_unbox(ln))
+    if not options:
+        return None
+    # Only a hint line or two may follow the widget; later output means it was answered.
+    tail = [ln for ln in lines[last + 1:] if ln.strip() and not _RULE.match(ln)]
+    if len(tail) > 3 or any(_BULLET.match(ln) for ln in tail):
+        return None
+    return {"kind": "select", "question": _line(" ".join(body[:8]), MAX_QUESTION) or "(question text not shown)",
+            "options": options}
+
+
+def _select(lines: list[str], *, header: bool = True) -> dict | None:
+    q = _select_footer(lines)
+    return q if q is not None or not header else _select_header(lines)
+
+
+def _select_footer(lines: list[str]) -> dict | None:
     footer = max((i for i, ln in enumerate(lines) if _SELECT_FOOTER.search(ln)), default=None)
     if footer is None:
         return None
@@ -135,20 +166,27 @@ def parse(text: str | None, *, status: str | None = None, busy: bool | None = No
     (`blocked` means herdr itself recognized an approval or question UI); `busy` is whether
     the turn is still running. A plain-text question counts only once the turn has ended."""
     lines = _clean(text or "")[-TAIL_LINES:]
-    q = _select(lines)
+    # A "Question n/m" header with numbered lines is common in ordinary output; it counts as a
+    # widget only while the agent is not idle (herdr `blocked`/`working`, or a running turn).
+    q = _select(lines, header=busy is True or status not in (None, "idle", "done"))
     if q is None and status == "blocked":
         q = {"kind": "dialog", "question": "an approval or question dialog Office could not parse", "options": []}
     if q is None and busy is False and status in (None, "idle", "done"):
         q = _plain(lines)
     if q is not None:
         q["options"] = q["options"][:MAX_OPTIONS]
-        q["fingerprint"] = hashlib.sha256(json.dumps([q["kind"], q["question"], q["options"]]).encode()).hexdigest()
+        q["fingerprint"] = fingerprint(q)
     return q
 
 
 # A worker's closing status line names its next step: `... SUBMIT=not attempted NEXT=Answer Q1 ...`.
 _NEXT = re.compile(r"\bNEXT=(.+)$")
-_ASKS = re.compile(r"^\W*(?:answer|approve|authori[sz]e|confirm|decide|choose|tell me)\b|\bQ\d+\b", re.I)
+# A NEXT asks the orchestrator something when it opens with a request (answer, approve,
+# decide...) or names a question id together with an answer/approval/decision ("await
+# orchestrator answer to Q1", "need approval on Q1"). A bare id ("Q1 was resolved") does not.
+_ASK_WORD = r"(?:answer|approv(?:e|al)|authori[sz](?:e|ation)|confirm(?:ation)?|decid(?:e|ing)|decision|choose|choice|tell me|reply)"
+_ASKS = re.compile(r"^\W*" + _ASK_WORD + r"\b|\b" + _ASK_WORD + r"\b[^;]*\bQ\d+\b|\bQ\d+\b[^;]*\b" + _ASK_WORD + r"\b",
+                   re.I)
 _QUESTION_LINE = re.compile(r"\bQ\d+\b|\bquestion\b", re.I)
 ENDED_PREFIX = "worker ended on a question: "
 
@@ -163,11 +201,17 @@ def final_question(text: str | None) -> dict | None:
     nxt = next((m.group(1).strip() for ln in reversed(lines[-6:]) if (m := _NEXT.search(ln))), None)
     if not ((nxt and _ASKS.search(nxt)) or lines[-1].endswith("?")):
         return None
-    asked = next((ln for ln in lines if "?" in ln and _QUESTION_LINE.search(ln)), None) \
+    # The latest question wins: a log can echo the prompt or an earlier, answered turn.
+    asked = next((ln for ln in reversed(lines) if "?" in ln and _QUESTION_LINE.search(ln)), None) \
         or next((ln for ln in reversed(lines) if ln.endswith("?")), None) or nxt or lines[-1]
     q = {"kind": "text", "question": _line(re.sub(r"[*_`]+", "", asked), MAX_QUESTION), "options": [], "ended": True}
-    q["fingerprint"] = hashlib.sha256(json.dumps([q["kind"], q["question"], []]).encode()).hexdigest()
+    q["fingerprint"] = fingerprint(q)
     return q
+
+
+def fingerprint(q: dict) -> str:
+    """The identity `_record` dedups a question sighting on."""
+    return hashlib.sha256(json.dumps([q["kind"], q["question"], q["options"]]).encode()).hexdigest()
 
 
 def _ended_question_dispatches(con, run: dict) -> list[tuple[dict, dict]]:
@@ -287,6 +331,39 @@ def recorded(con, run: dict) -> list[str]:
         if last and last["kind"] == EVENT:
             out.append(line(d, json.loads(last["payload_json"] or "{}")))
     out += [line(d, q) for d, q in _ended_question_dispatches(con, run)]
+    return out
+
+
+def _herdr_agents() -> list[dict] | None:
+    """One `herdr agent list` call; None when herdr is absent, slow or errors."""
+    import shutil
+    import subprocess
+    if not shutil.which("herdr"):
+        return None
+    try:
+        proc = subprocess.run(["herdr", "agent", "list"], capture_output=True, text=True, timeout=5)
+        agents = (json.loads(proc.stdout or "{}").get("result") or {}).get("agents")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return agents if proc.returncode == 0 and isinstance(agents, list) else None
+
+
+def blocked_unrecorded(con, run: dict) -> list[str]:
+    """Lines for live pane dispatches herdr reports `blocked` with no recorded question: a
+    question `office wait` has not scanned yet. At most one `herdr agent list` call, none
+    without a live pane dispatch; records nothing, and herdr failing yields no lines."""
+    live = [d for d in _live_pane_dispatches(con, run)
+            if not ((last := _last(con, run["id"], d["id"])) and last["kind"] == EVENT)]
+    agents = _herdr_agents() if live else None
+    if not agents:
+        return []
+    out = []
+    for d in live:
+        name = dispatch.herdr_agent_name(d["id"])
+        a = next((a for a in agents if a.get("name") == name or a.get("pane_id") == d["pane_id"]), None)
+        if a and (a.get("agent_status") or a.get("status")) == "blocked":
+            out.append(f"{d.get('task_id') or d['id']} blocked in pane {d['pane_id']} (no question recorded): "
+                       f"run office wait / office answer {d['id']}")
     return out
 
 

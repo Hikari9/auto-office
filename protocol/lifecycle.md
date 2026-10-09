@@ -1,5 +1,7 @@
 # Lifecycle and gears
 
+> The order below is the 3.0 phase list. For 3.1+ runs plan review covers the initial plan only (#418) and `office status` drives the order; see `MANIFESTO.md` and `docs/orchestrator-reference.md`.
+
 The lifecycle order is fixed: provisional intent → tracking issue creation/reuse and family recording → interactive planner discovery and requirements freeze → baseline → shape/risk → decisions → plan → plan review when required → execution packets → routed execution → self-verification → independent review when required → browser/runtime verification when user-facing → reconciliation → tracking issue update → closeout → telemetry/state → lazy maintenance → optional isolated proposals.
 
 Every phase that is entered has a self-review checkpoint before the run advances. The phase owner checks the phase objective, done criteria, current state, evidence, and residual risks or decisions, then records a disposition to proceed, amend, or stop. Optional phases that are omitted are covered by self-review of the omission decision. The receipt, evidence floor, and distinction from independent approval are normative in lifecycle spec §8.0.

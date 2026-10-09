@@ -162,6 +162,10 @@ roles:
 #     rolling plan review and per-task independent review.
 review:
   contract: convergence-v1
+  # Substantive rounds (1-10) per lane or shared-scope RECHECK sequence before
+  # the orchestrator must waive with a recorded reason or escalate to the user
+  # (#423). Pinned per run at `office start` (or --review-rounds N).
+  max_rounds: 3
 # Gear presets. Under convergence-v1, `independent_code_review` funds the lane
 # convergence review (a hard landing gate) and `plan_review` funds the initial
 # plan review. The round ceiling defaults to 3 and the *_max_rounds keys below

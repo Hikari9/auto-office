@@ -7,6 +7,7 @@ lines per task so a planner never writes JSON:
     done:
     - a user can reset their password
     blast_radius: repo
+    lightweight: typo fix in one doc line, no behavior change   (optional, #424; needs an explicit low blast_radius)
     non_goals:
     - no SSO changes
     actions:
@@ -39,6 +40,7 @@ TASK_HEADING = re.compile(r"^###\s+(T\d+)\s*[:.\-–]\s*(.+?)\s*$")
 SECTION = re.compile(r"^##\s+(.+?)\s*$")
 KEYVAL = re.compile(r"^([A-Za-z_][A-Za-z_ ]*?)\s*:\s*(.*)$")
 BLAST = ("local", "repo", "production", "production-data")
+SIZES = ("S", "M", "L", "XL")
 # How far a run goes after its PRs (3.2): stop and ask, preview deploy only,
 # merge only, or merge + prod deploy end to end.
 END_STATES = ("ask", "preview", "merge", "e2e")
@@ -71,6 +73,10 @@ class ParsedPlan:
     run_checks: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Structured scope problems, so a revision can keep what the accepted plan already had:
+    # (task id, entry, error text) and (task a, task b, shared entry, error text).
+    entry_problems: list[tuple] = field(default_factory=list)
+    pair_problems: list[tuple] = field(default_factory=list)
 
 
 def _is_no_check(value: str) -> bool:
@@ -174,6 +180,12 @@ def parse(text: str) -> ParsedPlan:
             elif key == "converge":
                 # #337: lanes naming one shared boundary get one more review together.
                 task["converge"] = _split_list(value)
+            elif key == "accept_needs":
+                # #422: the lane's acceptance depends on these tasks' results in other lanes.
+                task["accept_needs"] = _split_list(value)
+            elif key == "integration_risk":
+                # #422: the planner marks the composed outcome high risk to integrate.
+                task["integration_risk"] = value.strip().lower()
             elif key == "notes":
                 if value:
                     task["notes"].append(value)
@@ -181,6 +193,10 @@ def parse(text: str) -> ParsedPlan:
                 task["notes"].append(f"{key}: {value}")
             continue
         if section == "requirements":
+            if key == "lightweight":
+                # #424: kept even when empty, so validation can demand the rationale.
+                req["lightweight"], list_key = value, None
+                continue
             list_key = key if not value else None
             if value:
                 if key == "checks":
@@ -223,6 +239,9 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
         "goal": req.get("goal"),
         "done_criteria": req.get("done") if isinstance(req.get("done"), list) else [],
         "blast_radius": req.get("blast_radius"),
+        "irreversible": req.get("irreversible"),
+        "size_class": req.get("size_class"),
+        "lightweight": ({"rationale": str(req["lightweight"]).strip()} if "lightweight" in req else None),
         "non_goals": (req.get("non_goals") or req.get("non-goals") or []),
         "named_actions": actions,
         "end_state": req.get("end_state"),
@@ -242,10 +261,12 @@ def _validate(plan: ParsedPlan) -> None:
         if not t["scope"] and not t.get("scope_none"):
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `scope:` (paths this task may write)")
         for entry in t["scope"]:
-            if not _path_like(entry.lstrip(SHARED)):
+            problem = _entry_problem(entry)
+            if problem:
                 # Each entry is matched as one path or glob: a note after it never matches (#416).
-                plan.errors.append(f"{t['id']} (line {t['line']}): scope/shared entry {entry!r} is not a path or glob; "
-                                   "list bare paths and put limits (e.g. 'only the importer entry') in `accept:`")
+                err = f"{t['id']} (line {t['line']}): {ENTRY_ERROR} {entry!r} {problem}"
+                plan.errors.append(err)
+                plan.entry_problems.append((t["id"], entry, err))
         if not t["accept"]:
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `accept:` criteria")
         if t["checks"] is None:
@@ -255,6 +276,11 @@ def _validate(plan: ParsedPlan) -> None:
                 plan.errors.append(f"{t['id']}: depends on unknown task {dep}")
             if dep == t["id"]:
                 plan.errors.append(f"{t['id']}: depends on itself")
+        for need in t.get("accept_needs") or []:
+            if need not in known or need == t["id"]:
+                plan.errors.append(f"{t['id']}: accept_needs names unknown or own task {need}")
+        if t.get("integration_risk") not in (None, "", "high", "normal"):
+            plan.errors.append(f"{t['id']}: integration_risk must be high or normal")
         if t["visual"] is not None and not t["visual"].get("none") and not t["visual"].get("url"):
             plan.errors.append(f"{t['id']}: visual block needs `url:`")
     if _has_cycle({t["id"]: t["depends"] for t in plan.tasks}):
@@ -262,9 +288,20 @@ def _validate(plan: ParsedPlan) -> None:
     r = plan.requirements
     if r.get("blast_radius") and r["blast_radius"] not in BLAST:
         plan.errors.append(f"requirements blast_radius must be one of {', '.join(BLAST)}")
+    if r.get("size_class") and r["size_class"] not in SIZES:
+        plan.errors.append(f"requirements size_class must be one of {', '.join(SIZES)}")
+    if r.get("irreversible") and str(r["irreversible"]).lower() not in ("yes", "no", "true", "false"):
+        plan.errors.append("requirements irreversible must be yes or no")
+    if r.get("lightweight") is not None and not r["lightweight"]["rationale"]:
+        plan.errors.append("requirements `lightweight:` needs a one-line rationale (why this work is trivial and low risk)")
     end = r.get("end_state")
     if end and end not in END_STATES:
         plan.errors.append(f"requirements end_state must be one of {', '.join(END_STATES)}")
+    for a, b, entry in _unordered_shared_trees(plan.tasks):
+        err = (f"{a} and {b} may run in parallel but share the directory {entry.lstrip(SHARED)!r}; a shared directory "
+               f"is allowed only for tasks ordered by `depends` (add `depends: {a}` to {b}, or share files)")
+        plan.errors.append(err)
+        plan.pair_problems.append((a, b, entry, err))
     for a, b in _parallel_overlaps(plan.tasks):
         plan.warnings.append(f"{a} and {b} may run in parallel but their scopes overlap; leases will serialize them")
 
@@ -326,25 +363,80 @@ def is_shared(pattern: str) -> bool:
     return pattern.startswith(SHARED)
 
 
-_NOT_PATH = re.compile(r"[\s()`]")
+ENTRY_ERROR = "scope/shared entry"
+# Whitespace, backticks and a colon mean prose rode along with the path
+# (`x.csv (append-only: ...)`). Parentheses and brackets alone are path
+# characters (Next.js route groups `(app)`, dynamic segments `[slug]`).
+_NOT_PATH = re.compile(r"[\s`:]")
 
 
-def _path_like(entry: str) -> bool:
-    """A scope or shared entry is one path or glob. Whitespace, parentheses and
-    backticks mean prose rode along with it (`x.csv (append-only: ...)`)."""
-    return bool(entry) and not _NOT_PATH.search(entry)
+def _entry_problem(entry: str) -> str | None:
+    """Why a scope or shared entry is not one path or glob, or None."""
+    bare = entry.lstrip(SHARED)
+    if not bare or _NOT_PATH.search(bare) or bare.count("(") != bare.count(")") or bare.count("[") != bare.count("]") \
+            or re.search(r"[^/][(\[]", bare):
+        # Brackets are path characters only as whole segments (`(group)/`, `[slug]/`);
+        # `x.csv(A3)` is a note glued to a path.
+        return ("is not a path or glob; list bare paths or globs (no notes) and put limits "
+                "(e.g. 'only the importer entry') in `accept:`")
+    return None
+
+
+def shared_tree(entry: str) -> bool:
+    """A `shared:` entry naming a directory rather than registry files: a trailing `/`, a
+    `**`, or a last segment with no file suffix (`src/reg`, `src/*`). A file glob such as
+    `locales/*.json` names append-only files and stays parallel-safe."""
+    bare = entry.lstrip(SHARED)
+    last = bare.rstrip("/").rsplit("/", 1)[-1]
+    # A root-level suffixless name (`Makefile`, `Dockerfile`) is a file, not a directory.
+    return is_shared(entry) and (bare.endswith("/") or "**" in bare
+                                 or ("." not in last and "/" in bare.rstrip("/")))
+
+
+def _unordered_shared_trees(tasks: list[dict]):
+    """(a, b, entry) for each pair of tasks that could run at once while one shares a
+    directory the other also lists or overlaps. A shared file is append-only and may be
+    edited in parallel; a shared directory may be shared only by tasks a `depends` path
+    orders, so its editors never run together."""
+    graph = {t["id"]: t["depends"] for t in tasks}
+    for i, a in enumerate(tasks):
+        for b in tasks[i + 1:]:
+            if a["id"] in ancestors(graph, b["id"]) or b["id"] in ancestors(graph, a["id"]):
+                continue
+            for x, y in ((a, b), (b, a)):
+                hit = next((e for e in x["scope"] if shared_tree(e) and scopes_overlap([e], y["scope"])), None)
+                if hit:
+                    yield a["id"], b["id"], hit
+                    break
+
+
+def grandfather_entries(parsed: "ParsedPlan", prev_tasks: list[dict] | None) -> None:
+    """A revision of an accepted plan keeps an entry the earlier version already
+    had: its entry error becomes a warning, so a run accepted before entry
+    validation can still be amended. New or changed entries stay errors."""
+    prev = {t["id"]: set(t.get("scope") or []) for t in prev_tasks or []}
+    old = {err for tid, entry, err in parsed.entry_problems if entry in prev.get(tid, ())}
+    try:
+        before = {frozenset((a, b)) for a, b, _ in _unordered_shared_trees(
+            [{"id": t["id"], "depends": t.get("depends") or [], "scope": t.get("scope") or []} for t in prev_tasks or []])}
+    except (KeyError, TypeError):
+        before = set()
+    old |= {err for a, b, _, err in parsed.pair_problems if frozenset((a, b)) in before}
+    for err in [e for e in parsed.errors if e in old]:
+        parsed.warnings.append(err + " (kept: the accepted plan already had it)")
+    parsed.errors[:] = [e for e in parsed.errors if e not in old]
 
 
 def literal_prefix(pattern: str) -> str:
-    m = re.search(r"[*?\[]", pattern)
+    m = re.search(r"[*?]", pattern)  # brackets are path characters in scope entries
     return pattern[: m.start()] if m else pattern
 
 
 def scopes_overlap(a: list[str], b: list[str]) -> bool:
     for pa in a:
         for pb in b:
-            if is_shared(pa) and is_shared(pb):
-                continue  # both append to a shared registry; compose resolves it
+            if is_shared(pa) and is_shared(pb) and not (shared_tree(pa) or shared_tree(pb)):
+                continue  # both append to a shared registry file; compose resolves it
             la, lb = literal_prefix(pa.lstrip(SHARED)), literal_prefix(pb.lstrip(SHARED))
             if la.startswith(lb) or lb.startswith(la):
                 return True
@@ -362,14 +454,89 @@ def _parallel_overlaps(tasks: list[dict]):
 
 def path_in_scope(path: str, scope: list[str]) -> bool:
     import fnmatch
-    for pattern in scope:
-        pattern = pattern.lstrip(SHARED)
+    for raw in scope:
+        pattern = raw.lstrip(SHARED)
         if pattern.endswith("/**"):
             if path == pattern[:-3] or path.startswith(pattern[:-2]):
                 return True
-        if fnmatch.fnmatch(path, pattern) or path == pattern:
+        # Brackets are path characters (`[slug]`), never a glob class.
+        literal = re.sub(r"[\[\]]", lambda m: "[[]" if m.group() == "[" else "[]]", pattern)
+        if fnmatch.fnmatchcase(path, literal) or path == pattern:
             return True
-        # A plain directory entry (`src/auth/` or `src/auth`) owns everything under it (#334).
-        if pattern and not re.search(r"[*?\[]", pattern) and path.startswith(pattern.rstrip("/") + "/"):
+        # A directory entry (`src/auth/`, `src/auth`, `src/app/[slug]/`) owns everything under it,
+        # compared literally so brackets are path characters, not a glob class (#334). A shared
+        # directory is valid only for tasks ordered by `depends` (plan validation), and it
+        # counts in the overlap check, so its tasks never hold leases together.
+        if pattern and not re.search(r"[*?]", pattern) \
+                and path.startswith(pattern.rstrip("/") + "/"):
             return True
     return False
+
+
+# ------------------------------------------------------------------ structured task edits
+
+EDIT_LIST_KEYS = ("accept", "checks")
+EDIT_SET_KEYS = ("depends", "scope", "interfaces")
+
+
+def _norm(s: str) -> str:
+    return " ".join(str(s).split()).lower()
+
+
+def _drop_match(items: list[str], text: str, key: str, tid: str) -> str:
+    """The one entry of `items` that `text` names: exact (whitespace/case-insensitive), else the only one containing it."""
+    exact = [i for i in items if _norm(i) == _norm(text)]
+    hits = exact or [i for i in items if _norm(text) and _norm(text) in _norm(i)]
+    if len(hits) != 1:
+        raise ValueError(f"{text!r} names {len(hits)} of {tid}'s {key} entries (current: "
+                         + ("; ".join(i[:60] for i in items) or "none") + ")")
+    return hits[0]
+
+
+def edit_task(text: str, task_id: str, *, add_accept=(), drop_accept=(), add_checks=(), drop_checks=(),
+              set_fields: dict | None = None) -> str:
+    """PLAN.md `text` with structured edits applied to one task's block: entries added to or dropped from
+    its `accept:` / `checks:` lists, and `depends`/`scope`/`interfaces` replaced. The edited key is
+    rewritten in the canonical form; every other line is kept. Raises ValueError when the edit names
+    a task or entry the plan does not have."""
+    parsed = next((t for t in parse(text).tasks if t["id"] == task_id), None)
+    if parsed is None:
+        raise ValueError(f"the plan has no task {task_id}")
+    lines = text.split("\n")
+    start = next(i for i, ln in enumerate(lines) if (m := TASK_HEADING.match(ln)) and m.group(1) == task_id)
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("#") and re.match(r"#{2,3}\s", lines[i])),
+               len(lines))
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1  # keep the blank separator after the block
+    edits: dict[str, list[str]] = {}
+    for key, add, drop in (("accept", add_accept, drop_accept), ("checks", add_checks, drop_checks)):
+        if not (add or drop):
+            continue
+        items = list(parsed[key] or [])
+        for d in drop:
+            items.remove(_drop_match(items, d, key, task_id))
+        items += [a.strip() for a in add if a.strip() and a.strip() not in items]
+        edits[key] = (["accept:", *[f"- {i}" for i in items]] if key == "accept" else
+                      (["checks:", *[f"- {i}" for i in items]] if items else ["checks: none"]))
+    for key, value in (set_fields or {}).items():
+        if key not in EDIT_SET_KEYS:
+            raise ValueError(f"cannot set {key!r}; settable keys are {', '.join(EDIT_SET_KEYS)}")
+        if not value.strip():
+            raise ValueError(f"--set {key} needs a value; write `none` to clear it")
+        edits[key] = [f"{key}: {value.strip()}"]
+    block = lines[start + 1:end]
+    for key, new in edits.items():
+        out, i, placed = [], 0, False
+        while i < len(block):
+            if re.match(rf"{key}\s*:", block[i], re.I):
+                i += 1
+                while i < len(block) and block[i].strip().startswith(("- ", "* ")):
+                    i += 1
+                if not placed:
+                    out += new
+                    placed = True
+                continue
+            out.append(block[i])
+            i += 1
+        block = out if placed else out + new
+    return "\n".join(lines[:start + 1] + block + lines[end:])

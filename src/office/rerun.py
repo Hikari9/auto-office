@@ -13,7 +13,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, state
+from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, routing, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import pid_alive, sha256_obj
@@ -123,13 +123,16 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
         return None
     env = {**os.environ, **paths.commit_identity_env(wt)}
     merged = []
-    for dep, rev_id, sha in pending:
+    for i, (dep, rev_id, sha) in enumerate(pending):
         proc = subprocess.run(["git", "-C", str(wt), "merge", "--no-edit", "-m",
                                f"office: restack {task['id']} onto {dep} {rev_id}\n\n{paths.office_trailer(run['id'])}", sha],
                               capture_output=True, text=True, env=env)
         if proc.returncode != 0:
             subprocess.run(["git", "-C", str(wt), "merge", "--abort"], capture_output=True)
+            # Every dependency still to merge, the conflicting one first: the executor makes all of them.
+            unmerged = [{"task": t, "revision": r, "commit": c} for t, r, c in pending[i:]]
             return {"base": None, "merged": merged, "conflict": {"task": dep, "revision": rev_id, "commit": sha},
+                    "unmerged": unmerged,
                     "line": f"restack onto {dep} {rev_id} conflicts; the executor merges {sha[:7]} first"}
         merged.append({"task": dep, "revision": rev_id, "commit": sha})
     base = merged[-1]["commit"] if len(task["depends"]) == 1 else None
@@ -176,8 +179,9 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         raise Usage("unknown-task", f"no task {tid}")
     if task["status"] in ("accepted", "cancelled"):
         raise Refused("task-done", f"{tid} is {task['status']}; nothing to rerun", scope=tid)
-    if gates.worker_live(con, task.get("current_dispatch_id")):
-        raise Refused("worker-live", f"{tid} still has a live worker ({task['current_dispatch_id']})", scope=tid,
+    live = gates.live_task_session(con, run["id"], tid)
+    if live:
+        raise Refused("worker-live", f"{tid} still has a live worker ({live})", scope=tid,
                       next_step=f'office prompt {tid} -- "<message>" to reach it (an amendment already tells it to '
                                 f"resubmit), or office revoke {tid} to end it first")
     parent = _last_ended_executor(con, run, tid)
@@ -220,6 +224,14 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         if decision.get("status") != "selected":
             raise Refused("no-route", dispatch._route_failure(tid, decision), scope=tid,
                           next_step=dispatch._route_next(decision, tid, run))
+    elif (state.recorded_route(task) or {}).get("declared") and \
+            routing.candidate_id(state.recorded_route(task)["candidate"]) != parent.get("triple"):
+        # A route declared between rounds (office amend route) is followed, not the parent's.
+        if resume:
+            raise Refused("resume-impossible", f"{tid}'s route was changed since {parent['id']}; a resumed session "
+                          "keeps its own", scope=tid, next_step=_fresh_cmd(tid))
+        rec = state.recorded_route(task)
+        decision = {**rec, "status": "selected", "selected": routing.candidate_id(rec["candidate"])}
     else:
         blocked = _sticky_check(con, run, task, parent)
         if blocked:
@@ -235,6 +247,7 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
     with db.transaction(con):
         if decision:
             dispatch._record_routing(con, run, decision)
+            dispatch.note_route(con, run, task, decision)
         did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
                                       extra=extra, base=(restack or {}).get("base"), decision=decision)
         if restack:

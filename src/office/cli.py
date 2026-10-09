@@ -30,10 +30,12 @@ Auto Office {ver}
   office preflight                  executor: read-only checks before submit (ready|fix|wait|stop)
   office submit                     planner/executor: submit your plan or your work
   office amend <scope> -- "<delta>" change the plan (scope: plan, T2, or T2,T3)
+  office amend <task> --add-check "<cmd>" | --add-accept "<text>" | --set depends=T1  change the task's enforced contract
   office amend <scope> --no-review --reason "<why>" -- "<delta>"   ordinary amendment, no plan review
                                     (only matters while plan review is open; a closed review never reopens)
   office amend route <task> --as <harness>/<model>[@effort] --quote "<words>" [--restart]
-                                    re-record a live dispatch's model (same harness); --restart relaunches it
+                                    declare a pending task's route, or re-record a live dispatch's model
+                                    (same harness); --restart relaunches it
   office ack <amendment-id>         worker: record that you applied a delivered amendment
   office rerun <task> --resume|--fresh [--reroute]
                                     after a worker ends: continue its session, or start a new one with the findings
@@ -51,6 +53,9 @@ Auto Office {ver}
   office inspect [run|task|gate|evidence|events|route|learner|trust|convergence] [id]
   office decide <lane> escalate|continue|waive|stop --quote "<user's words>"
                                     the user's choice once a lane review spent its 3 RECHECK rounds
+  office waive <lane> --reason "<why the open findings are acceptable>"
+                                    the orchestrator's choice once a lane review spent its RECHECK rounds: accept the
+                                    residual risk (the verdict stays RECHECK; not landing authority)
   office disposition <scope>:<F-id> fix|fixed|dismissed|follow-up -- "<note>"
                                     close a non-blocking (APPROVED) finding, or a plan finding the orchestrator
                                     owns after plan review's round cap; fix routes it, no re-review
@@ -68,6 +73,7 @@ Auto Office {ver}
   office prune [--run <id>]         show finished runs that office prune -f would remove
 
 Global flags: --run <id>, --json, --verbose. Every command ends with `next:`.
+Principles: MANIFESTO.md. Operating contract: SKILL.md and docs/review-convergence.md.
 """
 
 SUBMIT_HELP = """\
@@ -178,6 +184,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--plan-review-rounds", type=int, metavar="N",
                    help="the user's intake choice: at most N substantive rounds for the initial plan review "
                         "(default 3)")
+    s.add_argument("--review-rounds", type=int, metavar="N",
+                   help="at most N substantive rounds per lane or shared-scope convergence review (default 3; "
+                        "config review.max_rounds)")
     s.add_argument("--from-run", metavar="RUN",
                    help="start a new run carrying an earlier run's requirements and plan draft (e.g. to move "
                         "v3.1 work onto the current review contract); the earlier run is not changed")
@@ -231,6 +240,14 @@ def _parser() -> argparse.ArgumentParser:
                    help="requirements: remove the frozen done criterion this names")
     s.add_argument("--add-criterion", action="append", default=[], metavar="TEXT",
                    help="requirements: add a done criterion")
+    s.add_argument("--add-accept", action="append", default=[], metavar="TEXT",
+                   help="add an acceptance criterion to the named task's contract")
+    s.add_argument("--drop-accept", action="append", default=[], metavar="TEXT", help="drop a task acceptance criterion")
+    s.add_argument("--add-check", action="append", default=[], metavar="CMD",
+                   help="add a required check (run at the gate) to the named task's contract")
+    s.add_argument("--drop-check", action="append", default=[], metavar="CMD", help="drop a required check")
+    s.add_argument("--set", action="append", default=[], dest="set_fields", metavar="KEY=VALUE",
+                   help="set the named task's depends, scope, or interfaces (scope/interfaces need --contract)")
     _redirect_args(s)
     s = sp.add_parser("ack", parents=[common])
     s.add_argument("amendment")
@@ -326,6 +343,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("choice", choices=("escalate", "continue", "waive", "stop"))
     s.add_argument("--quote", help="the user's own words")
     s.add_argument("--reason", help="waive: why the unmet gate is accepted")
+    s = sp.add_parser("waive", parents=[common])
+    s.add_argument("scope", help="a lane (L-T1) or shared scope (S-T1+T3) that spent its round cap")
+    s.add_argument("--reason", help="why the open findings are acceptable (substantive, durable)")
     s = sp.add_parser("disposition", parents=[common])
     s.add_argument("finding", help="<scope>:<code>[,<code>] (e.g. L-T1:F2 or plan:P1)")
     s.add_argument("how", choices=("fix", "fixed", "dismissed", "follow-up"))
@@ -499,7 +519,7 @@ def _run(args, unknown) -> int:
                               harness=args.harness, session=args.session, base=args.base, planner=args.planner,
                               issue=args.issue, no_prs=args.no_prs, end_state=args.end_state,
                               benchmark_refresh=args.benchmark_refresh, from_run=args.from_run,
-                              plan_review_rounds=args.plan_review_rounds,
+                              plan_review_rounds=args.plan_review_rounds, review_rounds=args.review_rounds,
                               deploy={k: v for k in ("preview", "prod", "verify")
                                       if (v := getattr(args, f"deploy_{k}"))})
         return emit(res, args)
@@ -575,9 +595,14 @@ def _run(args, unknown) -> int:
     try:
         target = _target(con, args)
         if target.legacy is not None:
-            return emit(_legacy_result(target), args)
+            res = _legacy_result(target)
+            if target.note:
+                res.notices.append(target.note)
+            return emit(res, args)
         run = target.run
         res = _dispatch_command(con, run, args, unknown, cwd, target)
+        if target.note:
+            res.notices.append(target.note)
         if cmd not in ("status", "resume", "preflight"):
             from office import guide, state
             guide.piggyback(con, state.get_run(con, run["id"]), res)
@@ -599,7 +624,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
             with db.transaction(con):
                 lifecycle.reconcile(con, run)
             jobs.kick(con, run["id"])
-        return guide.status(con, run, verbose=args.verbose)
+        return guide.status(con, run, verbose=args.verbose, probe_panes=True)
     if cmd == "wait":
         from office import guide
         return guide.wait(con, run, timeout=args.timeout, poll=args.poll)
@@ -625,10 +650,15 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "amend":
         from office import amend
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()
+        edits = {"add_accept": args.add_accept, "drop_accept": args.drop_accept, "add_checks": args.add_check,
+                 "drop_checks": args.drop_check,
+                 "set_fields": dict(f.split("=", 1) if "=" in f else (f, "") for f in args.set_fields)}
+        if any(edits.values()) and not delta:
+            delta = amend.edits_delta(args.scope, edits)
         return amend.amend(con, run, args.scope, delta, contract=args.contract, requirements=args.requirements,
                            quote=args.quote, cwd=cwd, redirect=_redirect(args),
                            drop_criteria=args.drop_criterion, add_criteria=args.add_criterion,
-                           no_review=args.no_review, reason=args.reason)
+                           no_review=args.no_review, reason=args.reason, edits=edits)
     if cmd == "ack":
         from office import amend
         return amend.ack(con, run, args.amendment)
@@ -663,6 +693,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "decide":
         from office import convergence
         return convergence.decide(con, run, args.scope, args.choice, quote=args.quote, reason=args.reason)
+    if cmd == "waive":
+        from office import convergence
+        return convergence.cap_waive(con, run, args.scope, reason=args.reason)
     if cmd == "disposition":
         from office import convergence
         note = " ".join([*(args.note or []), *[u for u in unknown if u != "--"]]).strip()
