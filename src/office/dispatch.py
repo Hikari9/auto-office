@@ -28,7 +28,7 @@ try:
 except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
-from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, state, version, worktree_setup
+from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, scoring, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (atomic_write_json, claim_signalable, dumps, now_iso, parse_iso, pid_alive,
@@ -157,6 +157,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 decision = routes.get(tid) if (routes.get(tid) or {}).get("status") == "selected" else None
                 if decision:
                     _record_routing(con, run, decision)
+                    note_route(con, run, task, decision)
                 did = request_launch(con, run, tid, role="executor", decision=decision,
                                      base=_base_for(con, run, task, graph, after))
                 res.add(f"{tid} was stacked after {after}, which is already accepted -> {did} launching")
@@ -191,13 +192,14 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 con.execute("INSERT INTO artifact_versions(id, run_id, kind, version, content_hash, created_at) "
                             "VALUES(?,?,?,?,?,?)", (uuid.uuid4().hex, run["id"], "stack", 0,
                                                      sha256_obj({"task": tid, "after": stack_after, "route": decision["selected"]}), now_iso()))
-                _stash_route(con, run, tid, decision)
+                note_route(con, run, task, decision)
                 res.add(f"{tid} stacked after {stack_after}")
             else:
                 # A planned slate reports its own fallback; drift is for legacy previews.
                 drift = None if decision.get("route_source") == "plan" else plan_view.drift(con, run, tid, decision)
                 if drift:
                     res.add(drift)
+                note_route(con, run, task, decision)
                 did = request_launch(con, run, tid, role="executor", decision=decision, base=base)
                 verb = "prepared for you to start (external; nothing launched)" if external else "launching"
                 res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} {verb}"
@@ -237,7 +239,7 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     kind = "fix" if task.get("current_dispatch_id") else "fresh"
     fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
                                   dispatch_kind=kind)
-    planned = None if (override or reroute) else _planned_slate(con, run, tid)
+    planned = None if (override or reroute) else _effective_slate(con, run, task)
     if reroute and fresh.get("status") == "selected":
         fresh["route_source"], fresh["route_note"] = "reroute", "rerouted from current evidence"
     if not planned:
@@ -260,7 +262,9 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     req = fresh.get("request") or {}
     disclosure = routing.selection_disclosure("executor", cand, req.get("preferred_seed"),
                                               (req.get("policy") or {}).get("cost_policy", "balanced"))
-    label = "planned primary" if i == 0 else f"planned fallback {i}"
+    chooser = planned.get("chooser")
+    label = {"declared": "declared route", "recorded": "recorded route"}.get(chooser, "planned primary") if i == 0 \
+        else f"planned fallback {i}"
     note = label if i == 0 else f"{label}; " + "; ".join(f"{t['route']}: {t['reason']}" for t in taken)
     disclosure["reason"] = f"{disclosure['reason'].split('; ')[0]}; {note}"
     disclosure["adaptive"] = True
@@ -270,6 +274,24 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
             "planned": planned,
             "decision_hash": sha256_obj({"planned": planned.get("decision_hash"), "fresh": fresh.get("decision_hash"),
                                          "dispatched": rid, "fallbacks_taken": taken})}
+
+
+def _effective_slate(con, run: dict, task: dict) -> dict | None:
+    """The slate dispatch tries in order (#426). A route already recorded on the
+    task (an earlier dispatch, a stack, or a deliberate `office amend route`) is
+    the primary, so a re-dispatch restores it instead of recomputing; a declared
+    one has no fallbacks, because a deliberate choice is never swapped silently.
+    Otherwise the approved plan's slate."""
+    plan = _planned_slate(con, run, task["id"])
+    rec = state.recorded_route(task)
+    if not rec:
+        return plan
+    primary = routing.candidate_id(rec["candidate"])
+    declared = bool(rec.get("declared"))
+    order = [] if declared else [r for r in [(plan or {}).get("primary"), *((plan or {}).get("fallbacks") or [])]
+                                 if r and r != primary]
+    return {**(plan or {}), "primary": primary, "fallbacks": order, "chooser": "declared" if declared else "recorded",
+            "planned_primary": (plan or {}).get("primary")}
 
 
 def _route_failure(tid: str, decision: dict) -> str:
@@ -319,10 +341,6 @@ def _record_routing(con, run: dict, decision: dict) -> None:
                                                       dispatched=decision.get("selected"), explored=explored)
 
 
-def _stash_route(con, run, tid, decision):
-    state.update_task(con, run["id"], tid, route_json=dumps(_route_payload(decision)))
-
-
 def _route_payload(decision: dict) -> dict:
     """What a dispatch keeps of its decision, so a stacked start or a relaunch
     reproduces the same route, override, and launch form."""
@@ -330,7 +348,42 @@ def _route_payload(decision: dict) -> dict:
     for key in ("override", "launch", "benchmark_snapshot", "route_source", "fallbacks_taken", "audit_id"):
         if decision.get(key):
             out[key] = decision[key]
+    if (decision.get("planned") or {}).get("chooser") == "declared" or decision.get("declared") \
+            or decision.get("override"):
+        out["declared"] = True  # a deliberate route survives the next dispatch of the task
     return out
+
+
+def note_route(con, run: dict, task: dict, decision: dict) -> None:
+    """Record the effective route on the task before its agent runs (#426), and a
+    `route.changed` event when it differs from what Office would have run:
+    a fallback (quota, unavailable), `--reroute`, or an explicit `--as`/`--route`.
+    Caller holds the transaction."""
+    tid = task["id"]
+    after = decision["selected"]
+    norm = scoring.normalize_triple
+    rec = state.recorded_route(task)
+    recorded = routing.candidate_id(rec["candidate"]) if rec else None
+    source = decision.get("route_source") or ("override" if decision.get("override") else "router")
+    planned = decision.get("planned") or {}
+    taken = decision.get("fallbacks_taken") or []
+    why = "; ".join(f"{t['route']}: {t['reason']}" for t in taken)
+    if taken:
+        before = planned.get("primary")
+        kind = "quota" if any("quota" in t["reason"] for t in taken) else "unavailable"
+        change = (before, kind, f"fallback: {why}", "office")
+    elif source == "reroute":
+        before = recorded or ((state.task_dispatches(con, run["id"], tid) or [{}])[-1].get("triple"))
+        change = (before, "reroute", "rerouted from current evidence", "orchestrator")
+    elif source == "override":
+        before = recorded or (_planned_slate(con, run, tid) or {}).get("primary")
+        change = (before, "override", (decision.get("selection_disclosure") or {}).get("reason") or "route override",
+                  "user")
+    else:
+        before, change = None, None
+    if change and before and norm(before) != norm(after):
+        state.record_route_change(con, run, tid, before, after, kind=change[1], reason=change[2], actor=change[3])
+    state.update_task(con, run["id"], tid, route_json=dumps(_route_payload(decision)))
 
 
 def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> list[str]:

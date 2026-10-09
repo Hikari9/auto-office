@@ -246,6 +246,9 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
             if ids:
                 parts.append(f"{label} {','.join(ids)}")
         res.add(" | ".join(parts))
+    routes = effective_routes(con, run, tasks)
+    if routes:
+        res.add("routes: " + ", ".join(f"{tid} {r}" for tid, r in routes.items()))
     rs = plans.review_state(con, run)
     if rs["required"]:
         pr = "plan review " + ("closed (" + (rs["ended_reason"] or "") + ")" if rs["ended"] else
@@ -276,11 +279,30 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     res.next = next_action(con, run)
     res.data = {"run_id": run["id"], "phase": run["phase"], "office_version": run["office_version"],
                 "requirements_version": run["requirements_version"], "plan_version": run["plan_version"],
-                "tasks": {t["id"]: t["status"] for t in tasks}, "plan_review": {k: v for k, v in rs.items() if k != "open_defects"},
+                "tasks": {t["id"]: t["status"] for t in tasks}, "routes": routes, "plan_review": {k: v for k, v in rs.items() if k != "open_defects"},
                 "open_defects": [d["code"] for d in rs["open_defects"]], "next": res.next}
     if resumed:
         res.verbose.append("resumed: pending jobs and deliveries reconstructed from runs.db")
     return res
+
+
+def effective_routes(con, run: dict, tasks: list[dict]) -> dict[str, str]:
+    """Each unfinished task's effective route (#426): the one recorded on the
+    task, else the plan's primary it will dispatch on. Shown so a swap is visible."""
+    from office import plan_view, routing
+    pv = plan_view.load(con, run["id"], run["plan_version"]) if run.get("plan_version") else None
+    out = {}
+    for t in tasks:
+        if t["status"] in ("accepted", "cancelled"):
+            continue
+        rec = state.recorded_route(t)
+        if rec:
+            out[t["id"]] = routing.candidate_id(rec["candidate"]) + (" (declared)" if rec.get("declared") else "")
+            continue
+        plan = (((pv or {}).get("tasks") or {}).get(t["id"]) or {}).get("route_plan") or {}
+        if plan.get("primary"):
+            out[t["id"]] = f"{plan['primary']} (planned)"
+    return out
 
 
 def _plan_review_live(con, run: dict) -> str:
