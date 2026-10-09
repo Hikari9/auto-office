@@ -29,6 +29,8 @@ Auto Office {ver}
                                     launch tasks (routing, worktrees, leases are automatic)
   office preflight                  executor: read-only checks before submit (ready|fix|wait|stop)
   office submit                     planner/executor: submit your plan or your work
+  office raise [--kind question|blocker|scope-request] [--path P ...] -- "<text>"
+                                    executor: stop for a decision or a blocker without submitting (office raise --help)
   office amend <scope> -- "<delta>" change the plan (scope: plan, T2, or T2,T3)
   office amend <task> --add-check "<cmd>" | --add-accept "<text>" | --set depends=T1  change the task's enforced contract
   office amend <scope> --no-review --reason "<why>" -- "<delta>"   ordinary amendment, no plan review
@@ -43,6 +45,7 @@ Auto Office {ver}
                                     message a live pane agent and confirm it was submitted (never herdr pane run)
   office answer <task|dispatch> <n> | -- "<text>"
                                     answer the question a pane agent is waiting on (a number presses that option)
+                                    or a worker's `office raise`; a headless worker is queued the answer
   office dismiss <task|dispatch|--all>
                                     close the kept panes of ended dispatches (final text is saved first)
   office close                      finish the run after acceptance and landing
@@ -74,6 +77,24 @@ Auto Office {ver}
 
 Global flags: --run <id>, --json, --verbose. Every command ends with `next:`.
 Principles: MANIFESTO.md. Operating contract: SKILL.md and docs/review-convergence.md.
+"""
+
+RAISE_HELP = """\
+office raise [--kind question|blocker|scope-request] [--path P ...] -- "<text>"
+
+Executor (inside your task worktree): stop on something only the orchestrator resolves, without submitting.
+It needs no commit and records a durable event for this run, task, dispatch and session. Your task is
+blocked (not live) until the orchestrator answers; `office wait` wakes it once and `office status` keeps it
+listed. Use it instead of `office submit` when you cannot finish: submit takes finished work only.
+
+  question       you need a decision (ambiguous spec, a choice between approaches)
+  blocker        something outside your control stops you (a missing prerequisite, a broken environment)
+  scope-request  finishing needs a file outside your SCOPE: add --path <repo-relative path> for each
+
+The same text from this session again records nothing new. The answer arrives as a message in this session
+(a prompt in a pane, your next office command if headless); if the session had ended it is in the next
+session's brief. An answer never changes your contract: a scope-request is granted only by a contract
+amendment, which also unblocks you. Then continue and run `office submit` when the work is done.
 """
 
 SUBMIT_HELP = """\
@@ -232,6 +253,13 @@ def _parser() -> argparse.ArgumentParser:
                         "(low-risk tasks only; reason after --)")
     s.add_argument("reason", nargs="*", help=argparse.SUPPRESS)
     _redirect_args(s)
+    s = sp.add_parser("raise", parents=[common], add_help=False)
+    s.add_argument("-h", "--help", action="store_true")
+    s.add_argument("--kind", default="question", metavar="KIND",
+                   help="question (default), blocker or scope-request")
+    s.add_argument("--path", action="append", default=[], metavar="P",
+                   help="a repo-relative path the raise is about (required for scope-request)")
+    s.add_argument("text", nargs="*", help=argparse.SUPPRESS)
     s = sp.add_parser("amend", parents=[common])
     s.add_argument("scope")
     s.add_argument("delta", nargs="*")
@@ -602,6 +630,9 @@ def _run(args, unknown) -> int:
         from office import briefs
         print(SUBMIT_HELP.format(fmt=briefs.PLAN_FORMAT))
         return 0
+    if cmd == "raise" and args.help:
+        print(RAISE_HELP.rstrip())
+        return 0
     con = _con()
     try:
         target = _target(con, args)
@@ -648,6 +679,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "preflight":
         from office import preflight
         return preflight.preflight(con, run, cwd)
+    if cmd == "raise":
+        from office import raising
+        return raising.raise_issue(con, run, cwd=cwd, kind=args.kind, text=" ".join(args.text or []), files=args.path)
     if cmd == "submit":
         from office import submit
         return submit.submit(con, run, cwd=cwd, plan_path=args.plan, redirect=_redirect(args),

@@ -12,6 +12,9 @@ A question is one of:
   but the pane text did not parse as a list;
 - `text`: the agent ended its turn on a plain-text question (its last message ends in `?`).
 
+An executor can also stop on purpose with `office raise` (raising.py); its open raises are listed and
+answered through the same `wait`/`status`/`answer` surface.
+
 Protocol: the orchestrator answers on its own judgement (planning, scope, ordering, test
 detail) and takes a question to the user only when it hints at a user decision
 (requirements, authority, an irreversible or external action).
@@ -249,10 +252,11 @@ def _who(d: dict) -> str:
 def answer_command(d: dict, q: dict) -> str:
     target = d["id"]
     if q.get("ended"):
-        # The session has ended: the answer travels as an amendment into the next session.
+        # The session has ended: the answer is recorded for the next session's brief, or travels as an amendment.
         t = d.get("task_id") or target
-        return (f'office amend {t} --contract -- "<delta>" if the answer changes scope or acceptance, else '
-                f'office amend {t} --no-review --reason "answer" -- "<answer>"; then office rerun {t} --resume|--fresh')
+        return (f'office answer {t} -- "<answer>"; if the answer changes scope or acceptance: '
+                f'office amend {t} --contract -- "<delta>" instead (else office amend {t} --no-review --reason "answer" '
+                f'-- "<answer>"); then office rerun {t} --resume|--fresh')
     if q["kind"] == "select" and q["options"]:
         return f'office answer {target} <1-{len(q["options"])}> (or office answer {target} -- "<text>")'
     return f'office answer {target} -- "<text>"'
@@ -319,19 +323,23 @@ def scan(con, run: dict) -> tuple[list[str], list[str], dict]:
         every.append(text)
         if _record(con, run, d, q, {"text": None}):
             new.append(text)
-    return new, every, acts
+    from office import raising
+    fresh, open_ = raising.report(con, run)
+    return new + fresh, every + open_, acts
 
 
 def recorded(con, run: dict) -> list[str]:
     """`question:` lines for questions `office wait` saw and nothing has answered or cleared,
-    on dispatches still live. Reads no pane, so `office status` stays cheap."""
+    on dispatches still live, plus every open raise and every worker that ended on a question (pane or
+    headless). Reads no pane, so `office status` stays cheap."""
     out = []
     for d in _live_pane_dispatches(con, run):
         last = _last(con, run["id"], d["id"])
         if last and last["kind"] == EVENT:
             out.append(line(d, json.loads(last["payload_json"] or "{}")))
     out += [line(d, q) for d, q in _ended_question_dispatches(con, run)]
-    return out
+    from office import raising
+    return out + [raising.line(r) for r in raising.open_raises(con, run)]
 
 
 def _herdr_agents() -> list[dict] | None:
@@ -392,17 +400,50 @@ def _answer_timeout() -> float:
         return 10.0
 
 
+def _answer_ended(con, run: dict, d: dict, who: str, text: str) -> Result | None:
+    """Answer a worker that ended on a question (pane or headless): nothing is listening, so the answer is
+    recorded, the task stays blocked for `office rerun`, and the next session's brief carries it. None when
+    `d` did not end on a question."""
+    tid = d.get("task_id")
+    task = state.get_task(con, run["id"], tid) if tid else None
+    f = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "question.json"
+    if not (task and task["current_dispatch_id"] == d["id"] and task["status"] == "blocked"
+            and (task.get("pause_reason") or "").startswith(ENDED_PREFIX) and f.is_file()):
+        return None
+    try:
+        q = json.loads(f.read_text())
+    except ValueError:
+        return None
+    with db.transaction(con):
+        state.emit(con, run, ANSWERED, f"{who} {d['id']}: question answered (recorded for the rerun)", audience="runtime",
+                   task_id=tid, dispatch_id=d["id"],
+                   payload={"fingerprint": q.get("fingerprint"), "question": q.get("question"), "answer": text[:500],
+                            "taken": True, "delivery": "pending-rerun"})
+        state.update_task(con, run["id"], tid, pause_reason=f"question answered but {d['id']} ended: "
+                          f"office rerun {tid} --resume|--fresh")
+    return Result(lines=[f"{tid} {d['id']}: answer recorded; the worker has ended, so nothing was delivered"],
+                  next=f"office rerun {tid} --resume|--fresh (the new session's brief carries the answer); "
+                       f'a scope or acceptance change needs office amend {tid} --contract -- "<delta>"')
+
+
 def answer(con, run: dict, target: str | None, text: str) -> Result:
     """Answer the question a live pane agent is waiting on. A number answers a selection widget
     with that keypress (`office prompt` types text, which a widget ignores or misreads). Any other
     answer to a widget dismisses it with Esc, then is sent as a prompt. A plain-text question is
     answered with `office prompt`."""
-    from office import prompting
+    from office import prompting, raising
+    raising.refuse_worker()
     if not target or not text.strip():
         raise Usage("answer-usage", "name the task or dispatch and the answer",
                     next_step='office answer <task|dispatch> <option> | office answer <task|dispatch> -- "<text>"')
     d = prompting._resolve(con, run, target)
     who = d.get("task_id") or d["id"]
+    from office import raising
+    res = raising.answer(con, run, d, text.strip())
+    if res is None:
+        res = _answer_ended(con, run, d, who, text.strip())
+    if res is not None:
+        return res
     if d.get("launcher") != "herdr" or not d.get("pane_id"):
         raise Refused("no-pane", f"{d['id']} ({who}) has no Herdr pane to answer in", scope=who)
     q = _current(d)
