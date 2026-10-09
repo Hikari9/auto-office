@@ -121,7 +121,12 @@ continue with the installed runtime. A failed or offline check is informational 
   (APPROVED, its round cap, or a waiver), no amendment of any kind is reviewed again; you own them.
   While it is still open, a revision is its next round; to skip that for a trivial one:
   `office amend plan --no-review --reason "doc-only wording" -- "<delta>"`.
-  Scope, interfaces, ownership, and authority are contract amendments: `office amend <scope> --contract -- "<request>"`. Requirements change only on the
+  A note is prose only. To change what is enforced, edit the task's structured contract: `office amend T1 --add-check "<cmd>"`
+  (also `--add-accept`, `--drop-check`, `--drop-accept`, `--set depends=T2`) versions the task contract, runs the new check at the
+  gate (an accepted task reruns it and reopens only on failure), and records old contract, effective contract and rationale
+  (`office inspect amendments`). It never queues plan review. Authority words in an edit are refused.
+  Scope, interfaces, ownership, and authority are contract amendments (`--set scope=...`, `--set interfaces=...` need `--contract`;
+  a changed scope or interface reopens the task and its dependants): `office amend <scope> --contract -- "<request>"`. Requirements change only on the
   user's words: `office amend requirements --quote "<words>" -- "<change>"`.
 - A paused or blocked task names its blocker and what was preserved: resolve it, or take the decision to the user.
 - If a command reports a missing route or trust, show the user the route notice; only they can

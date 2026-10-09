@@ -28,6 +28,8 @@ def inspect(con, run: dict, what: str | None, ident: str | None) -> Result:
         return _gate(con, run, ident)
     if what == "evidence":
         return _evidence(con, run, ident)
+    if what in ("amendments", "amendment"):
+        return _amendments(con, run, ident)
     if what == "events":
         return _events(con, run, ident)
     if what == "route":
@@ -43,7 +45,7 @@ def inspect(con, run: dict, what: str | None, ident: str | None) -> Result:
         lines = convergence.inspect_lines(con, run, ident)
         return Result(lines=lines, data=convergence.receipt(con, run) if contract.is_convergence(run) else {})
     raise Usage("unknown-view", f"cannot inspect {what!r}",
-                next_step="office inspect run|plan|task|gate|evidence|events|route|learner|trust|convergence [id]")
+                next_step="office inspect run|plan|task|gate|evidence|amendments|events|route|learner|trust|convergence [id]")
 
 
 def _plan(con, run, ident) -> Result:
@@ -140,6 +142,27 @@ def _evidence(con, run, ident) -> Result:
     lines = [f"{e['id']} {e['kind']} {e['task_id'] or ''} {e['revision_id'] or ''} {(e['sha256'] or '')[:19]} {e['path'] or ''}"
              for e in rows]
     return Result(lines=lines or ["no evidence"], data={"evidence": [dict(e) for e in rows]})
+
+
+def _amendments(con, run, ident) -> Result:
+    """Each amendment with its rationale and, when it changed a task contract, the old and effective contract."""
+    rows = con.execute("SELECT * FROM amendments WHERE run_id=? ORDER BY seq", (run["id"],)).fetchall()
+    if ident:
+        rows = [r for r in rows if r["id"].endswith(":" + ident.upper()) or r["id"] == ident]
+    lines, data = [], []
+    for a in rows:
+        rec = loads(a["structured_json"]) if a["structured_json"] else {}
+        label = a["id"].split(":")[-1]
+        lines.append(f"{label} {a['class']} p{a['from_plan_version']}->p{a['to_plan_version'] or '-'} {a['status']} "
+                     f"by {a['requested_by']}: {a['delta'][:160]}")
+        for tid, ch in (rec.get("changed") or {}).items():
+            for key in ("scope", "depends", "interfaces", "accept", "checks"):
+                old, new = (ch["before"] or {}).get(key), (ch["after"] or {}).get(key)
+                if old != new:
+                    lines.append(f"  {tid} {key}: {json.dumps(old)} -> {json.dumps(new)}"
+                                 if ch["before"] and ch["after"] else f"  {tid} {'added' if ch['after'] else 'removed'}")
+        data.append({**dict(a), "structured": rec})
+    return Result(lines=lines or ["no amendments"], data={"amendments": data})
 
 
 def _events(con, run, ident) -> Result:

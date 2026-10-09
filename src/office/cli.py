@@ -30,6 +30,7 @@ Auto Office {ver}
   office preflight                  executor: read-only checks before submit (ready|fix|wait|stop)
   office submit                     planner/executor: submit your plan or your work
   office amend <scope> -- "<delta>" change the plan (scope: plan, T2, or T2,T3)
+  office amend <task> --add-check "<cmd>" | --add-accept "<text>" | --set depends=T1  change the task's enforced contract
   office amend <scope> --no-review --reason "<why>" -- "<delta>"   ordinary amendment, no plan review
                                     (only matters while plan review is open; a closed review never reopens)
   office amend route <task> --as <harness>/<model>[@effort] --quote "<words>" [--restart]
@@ -231,6 +232,14 @@ def _parser() -> argparse.ArgumentParser:
                    help="requirements: remove the frozen done criterion this names")
     s.add_argument("--add-criterion", action="append", default=[], metavar="TEXT",
                    help="requirements: add a done criterion")
+    s.add_argument("--add-accept", action="append", default=[], metavar="TEXT",
+                   help="add an acceptance criterion to the named task's contract")
+    s.add_argument("--drop-accept", action="append", default=[], metavar="TEXT", help="drop a task acceptance criterion")
+    s.add_argument("--add-check", action="append", default=[], metavar="CMD",
+                   help="add a required check (run at the gate) to the named task's contract")
+    s.add_argument("--drop-check", action="append", default=[], metavar="CMD", help="drop a required check")
+    s.add_argument("--set", action="append", default=[], dest="set_fields", metavar="KEY=VALUE",
+                   help="set the named task's depends, scope, or interfaces (scope/interfaces need --contract)")
     _redirect_args(s)
     s = sp.add_parser("ack", parents=[common])
     s.add_argument("amendment")
@@ -630,10 +639,15 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "amend":
         from office import amend
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()
+        edits = {"add_accept": args.add_accept, "drop_accept": args.drop_accept, "add_checks": args.add_check,
+                 "drop_checks": args.drop_check,
+                 "set_fields": dict(f.split("=", 1) if "=" in f else (f, "") for f in args.set_fields)}
+        if any(edits.values()) and not delta:
+            delta = amend.edits_delta(args.scope, edits)
         return amend.amend(con, run, args.scope, delta, contract=args.contract, requirements=args.requirements,
                            quote=args.quote, cwd=cwd, redirect=_redirect(args),
                            drop_criteria=args.drop_criterion, add_criteria=args.add_criterion,
-                           no_review=args.no_review, reason=args.reason)
+                           no_review=args.no_review, reason=args.reason, edits=edits)
     if cmd == "ack":
         from office import amend
         return amend.ack(con, run, args.amendment)
