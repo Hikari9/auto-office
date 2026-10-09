@@ -336,10 +336,11 @@ def _in_scope_changes(wt: Path, task: dict, changed: list[str]) -> tuple[list[st
 
 
 def ledger_verdict(wt: Path, task: dict, changed: list[str], head: str, tier: str = "deep", *,
-                   submission: bool = False) -> tuple[list[str], list[str]]:
+                   submission: bool = False, require: bool = False) -> tuple[list[str], list[str]]:
     """(stop, fix) for the task's self-review ledger; both empty when none is owed. The ledger names
     HEAD, so uncommitted in-scope work is a preflight fix. Submit captures that work and applies only
-    the ledger's stop/fix verdict, preserving ledger-less submissions that were legal before the gate."""
+    the ledger's stop/fix verdict. A submission with no ledger passes only when `require` is false (a run
+    pinned before #421, or a declared exemption); otherwise in-scope work with no ledger is a fix (#421)."""
     name = briefs.LEDGER_FILE
     if paths.git(wt, "ls-files", "--", name, check=False).strip() or paths.git(wt, "ls-tree", "HEAD", "--", name, check=False).strip():
         return [], [f"ledger: {name} is committed or staged; leave it untracked: git rm --cached {name} (commit "
@@ -353,7 +354,7 @@ def ledger_verdict(wt: Path, task: dict, changed: list[str], head: str, tier: st
     if text is None and os.path.lexists(wt / name):
         return [], uncommitted + [f"ledger: {name} must be a regular untracked file (not a symlink or hard link)"]
     if text is None:
-        if submission:
+        if submission and not (require and (committed or pending)):
             return [], []
         return [], uncommitted + [f"ledger: no {name}; run the SELF-REVIEW and write it in this worktree root in "
                                   "the format the brief gives"]
@@ -378,22 +379,28 @@ def ledger_round(wt: Path) -> int | None:
     return parse_ledger(text)[0]["round"] if text else None
 
 
-def ledger_gate(con, run: dict, task: dict, d: dict, wt: Path, base: str, head: str,
-                dep_bases: list[str], *, stop: list[str], fix: list[str],
-                submission: bool = False) -> tuple[list[str], list[str], bool]:
-    """Check the ledger against the committed diff and signal the orchestrator when required.
-
-    `stop` and `fix` are preflight's other findings, so both commands choose the
-    same signal verdict and reasons without duplicating the ledger gate.
-    """
+def committed_changes(wt: Path, base: str, head: str, dep_bases: list[str]) -> list[str]:
+    """Files the task committed: base..head, narrowed to those that also differ from every dependency base."""
     changed = [f for f in _git(wt, "diff", "--name-only", "-z", base, head).split("\0") if f]
     for b in dep_bases:
         if b != base:
             also = set(_git(wt, "diff", "--name-only", "-z", b, head).split("\0"))
             changed = [f for f in changed if f in also]
+    return changed
+
+
+def ledger_gate(con, run: dict, task: dict, d: dict, wt: Path, base: str, head: str,
+                dep_bases: list[str], *, stop: list[str], fix: list[str],
+                submission: bool = False, require: bool = False) -> tuple[list[str], list[str], bool]:
+    """Check the ledger against the committed diff and signal the orchestrator when required.
+
+    `stop` and `fix` are preflight's other findings, so both commands choose the
+    same signal verdict and reasons without duplicating the ledger gate.
+    """
+    changed = committed_changes(wt, base, head, dep_bases)
     ledger_stop, ledger_fix = ledger_verdict(
         wt, task, changed, head, briefs.self_review_tier(run.get("gear"), run.get("risk_json")),
-        submission=submission)
+        submission=submission, require=require)
     all_stop = stop + ledger_stop
     all_fix = fix + ledger_fix
     signaled = bool(all_stop or (all_fix and (ledger_round(wt) or 0) >= briefs.MAX_REVIEW_ROUNDS))

@@ -117,6 +117,34 @@ def _office_runner(env, cwd, in_process):
     return inline_office if in_process and "OFFICE_VERSION_OVERRIDE" not in env else subprocess_office
 
 
+def _in_scope(path, prompt):
+    """Whether `path` is inside the brief's `SCOPE` line (the runtime's own scope match). With no
+    SCOPE line, Python sources stand in for the task's own work."""
+    m = re.search(r"^SCOPE (.+?)  \(", prompt, re.M)
+    if not m:
+        return path.endswith(".py")
+    from office import planfile
+    return planfile.path_in_scope(path, [e.strip() for e in m.group(1).split(",") if e.strip()])
+
+
+def _comply_with_self_review(cwd, env, writes, err, prompt=""):
+    """What a compliant executor does before `office submit` (#421): commit the in-scope work it wrote,
+    then write a clean ledger naming that HEAD. Out-of-scope writes stay uncommitted leftovers, as a
+    stray cache or note would. An action with "no_ledger": true skips both."""
+    def git(*a):
+        proc = subprocess.run(["git", *a], cwd=str(cwd), env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        err.write(proc.stdout)
+        return proc.stdout.strip()
+    git("add", "--", *[w for w in writes if _in_scope(w, prompt)])  # uncommitted in-scope work is not covered
+    if subprocess.run(["git", "commit", "-qm", "work", "--allow-empty"], cwd=str(cwd), env=env,
+                      capture_output=True).returncode:  # no identity configured: use a stand-in
+        git("-c", "user.email=a@b", "-c", "user.name=w", "commit", "-qm", "work", "--allow-empty")
+    head = git("rev-parse", "HEAD")
+    lenses = "\n".join(f"LENS {n} reviewed" for n in ("security", "edge-cases", "platform", "test-strength"))
+    (Path(cwd) / "OFFICE_SELF_REVIEW.md").write_text(f"COMMIT {head}\nROUND 1\n{lenses}\n")
+
+
 def _act(argv, prompt, env, cwd, in_process, out, err):
     """Perform the next scripted action. Returns the exit code; a negative code
     is a death by that signal. Text for stdout and stderr goes to `out`, `err`."""
@@ -180,6 +208,8 @@ def _act(argv, prompt, env, cwd, in_process, out, err):
     if action.get("ack"):
         r = office("ack", action["ack"])
         out.write(r.stdout + "\n")
+    if role == "executor" and writes and not action.get("no_ledger") and any(w.endswith(".py") for w in writes):
+        _comply_with_self_review(cwd, env, writes, err, prompt)
     if action.get("submit"):
         r = office("submit")
         out.write(r.stdout + r.stderr + "\n")

@@ -6,6 +6,8 @@ for the commit"). Provenance moves to an `Office-Run:` trailer.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from conftest import GOOD_ADD, approved_run
@@ -34,7 +36,12 @@ def test_identity_comes_from_the_repo_config_then_env_then_fallback(env, monkeyp
 def test_submission_commit_uses_the_operator_identity(env):
     env.git("config", "user.name", "Rico T")
     env.git("config", "user.email", "rico@example.org")
-    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    # A run pinned to v3.1 may submit uncommitted work with no ledger, so Office itself makes the submission commit.
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True, "no_ledger": True}],
+                 code_reviewer=[{"reply": "VERDICT: PASS"}])
+    con = env.con()
+    con.execute("UPDATE runs SET gates_json=?", (json.dumps({"review_contract": "v3.1"}),))
+    con.commit()
     env.office("dispatch", "T1", check=0)
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]

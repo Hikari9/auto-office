@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 import fake_agent
-from conftest import GOOD_ADD, Env, _activate, approved_run, task_row
+from conftest import GOOD_ADD, Env, _activate, approved_run, self_reviewed, task_row
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 PASS = {"reply": "VERDICT: APPROVED\nNEXT proceed"}  # the lane reviewer (#337)
@@ -74,6 +74,7 @@ def _reviewer_flow(env):
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
     (wt / "calc.py").write_text(GOOD_ADD)
+    self_reviewed(wt, "calc.py")
     env.office("submit", cwd=wt, env=wenv, check=0)
 
 

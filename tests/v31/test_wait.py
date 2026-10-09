@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 
-from conftest import GOOD_ADD, approved_run
+from conftest import GOOD_ADD, approved_run, self_reviewed
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
@@ -328,6 +328,7 @@ def test_an_agent_idle_after_an_accepted_submit_is_not_a_stall(env):
     e = _herdr(env, status="idle", pane="> done")
     d = _as_herdr(env)
     (Path(d["worktree"]) / "calc.py").write_text(GOOD_ADD)
+    self_reviewed(d["worktree"], "calc.py")
     code, out = env.office("submit", cwd=d["worktree"], env={**e, "OFFICE_DISPATCH_ID": d["id"], "OFFICE_ROLE": "executor"})
     assert code == 0, out
     code, out = _wait(env, e)
