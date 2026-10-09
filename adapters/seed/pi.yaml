@@ -79,7 +79,10 @@ source_notes: >-
   declared: pi has no verified read-only isolation, so it is not a code or
   visual reviewer, and its quota is always unknown (no probe; never treated as
   unlimited). Session identity is not declared; pi keeps its own session files,
-  which Office does not read, so no headless resume form exists yet.
+  which Office does not read, so no headless resume form exists yet. A
+  pane-hosted interactive form is declared for Herdr delegation (herdr_kind pi,
+  same trust flags and pinned model/effort; it keeps pi's own session, which
+  Herdr tracks and Office still does not read).
 session:
   id: none
 capabilities: [builder]
@@ -88,6 +91,12 @@ office_profiles:
     argv: [--print, --no-approve, --no-extensions, --no-mcp, --model, "{model}", --thinking, "{effort}", --no-session]
     prompt: stdin
     output: stdout
+    herdr_kind: pi
+    # Pane-hosted interactive form (visible delegation under Herdr): the same
+    # trust posture, the model and effort still pinned. Sessions stay on here so
+    # Herdr can track pi's own session files; the headless form stays ephemeral.
+    interactive:
+      argv: [--no-approve, --no-extensions, --no-mcp, --model, "{model}", --thinking, "{effort}"]
     # pi has no timeout of its own in --print mode, so the supervisor's wall cap
     # stops a stuck dispatch instead of holding the task open forever.
     max_minutes: 60

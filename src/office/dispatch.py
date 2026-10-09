@@ -404,10 +404,24 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
         kind, args = Path(argv[0]).name, argv[1:]
     else:
         adapter = adapters.load_all().get(d.get("adapter_id") or "")
-        inter = adapters.interactive_argv(adapter, "worker" if output is None else "reviewer", model=d.get("model") or "",
+        kind_name = "worker" if output is None else "reviewer"
+        inter = adapters.interactive_argv(adapter, kind_name, model=d.get("model") or "",
                                           effort=d.get("effort") or "none", cwd=Path(wt),
                                           output=Path(output) if output else None,
                                           session_id=_assigned_session(d)) if adapter and d.get("model") else None
+        if inter is None and adapter and d.get("model") and adapters.profile(adapter, kind_name):
+            # No pane-hosted form: show the recorded headless invocation instead
+            # of a bare executable, which would run on the harness's default
+            # model with none of the pinned trust flags.
+            try:
+                headless, _ = adapters.build_argv(adapter, kind_name, model=d.get("model") or "",
+                                                  effort=d.get("effort") or "none", cwd=Path(wt),
+                                                  output=Path(output) if output else None,
+                                                  session_id=_assigned_session(d))
+            except adapters.AdapterError:
+                headless = None
+            if headless:
+                inter = (headless[1:], d.get("harness") or "<kind>")
         kind, args = (inter[1], inter[0]) if inter else (d.get("harness") or "<kind>", [])
     if output is None:
         pointer = (f"Read and carry out the brief at {ddir / 'brief.md'} exactly. "

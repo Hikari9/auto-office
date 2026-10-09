@@ -60,6 +60,23 @@ def test_pi_worker_argv_never_grants_project_resource_trust():
     assert worker["prompt"] == "stdin" and worker.get("max_minutes"), "headless pi has no timeout of its own"
 
 
+def test_pi_herdr_form_pins_model_and_keeps_the_trust_posture():
+    """Visible delegation (Herdr) needs a pane-hosted form; without one the
+    launch silently degrades to headless and the printed start command is bare."""
+    worker = _adapter()["office_profiles"]["worker"]
+    assert worker.get("herdr_kind") == "pi"
+    inter = worker.get("interactive") or {}
+    assert "--approve" not in inter.get("argv", []), inter
+    for flag in ("--no-approve", "--no-extensions", "--no-mcp"):
+        assert flag in inter["argv"], inter
+    assert "--print" not in inter["argv"], "the pane form is interactive, not a headless print run"
+    args, kind = adapters.interactive_argv(_adapter(), "worker", model=MIMO_FLASH, effort="medium",
+                                           cwd=Path("/tmp/wt"))
+    assert kind == "pi" and args[0] != "pi"
+    assert args[args.index("--model") + 1] == MIMO_FLASH, args
+    assert args[args.index("--thinking") + 1] == "medium", args
+
+
 def test_no_seed_adapter_argv_passes_approve():
     for name, a in adapters.load_all().items():
         forms = [(a.get("invocation") or {}).get("argv") or [],
