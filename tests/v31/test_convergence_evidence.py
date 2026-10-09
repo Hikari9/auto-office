@@ -450,6 +450,25 @@ def test_merges_and_commits_brought_in_by_a_merge_are_not_the_executors(con, tmp
     assert [o["message"] for o in out[0]["own"]] == ["T1: mine"]
 
 
+def test_an_unreadable_commit_list_is_unavailable_not_empty(con, tmp_path):
+    import subprocess
+
+    from office import briefs, convergence
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q", "-b", "main"], check=True)
+    (tmp_path / "f").write_text("x")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "f"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "office: T1 submission"],
+                   check=True)
+    tip = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    con.execute("INSERT INTO revisions(id, run_id, task_id, seq, commit_sha, tree_sha, base_commit, requirements_version, "
+                "plan_version, applied_version, env_fingerprint, operation_id, status, created_at) "
+                "VALUES('R1','run-1','T1',1,?,?,?,1,1,1,'e','op','accepted','now')", (tip, "t", "deadbeef" * 5))
+    out = convergence._task_commits(con, {"repo_root": str(tmp_path)}, [{"id": "T1", "scope": ["a"], "accepted_revision_id": "R1"}])
+    assert out[0]["own"] is None
+    text = "\n".join(briefs.commit_lines(out, "/co"))
+    assert "executor commits under it: unavailable" in text and "none (Office committed" not in text
+
+
 def test_a_commit_message_in_another_encoding_does_not_crash_the_review(tmp_path):
     import subprocess
 

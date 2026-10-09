@@ -619,10 +619,11 @@ def _task_commits(con, run: dict, tasks: list[dict]) -> list[dict]:
         # --first-parent: a main merged into the branch brings other people's commits, not the executor's.
         listing = _git_text(repo, "rev-list", "--first-parent", "--no-merges",
                             f"{row['base_commit']}..{sha}")
-        listing = (listing or "").split() if row["base_commit"] else []
-        own = [{"commit": commit, "message": _git_text(repo, "log", "-1", "--format=%B", commit)
-                if i < briefs.OWN_COMMITS_SHOWN else ""}
-               for i, commit in enumerate(c for c in listing if c != sha)]
+        # None (git failed) is not "the executor made no commits": the brief says the list is unavailable.
+        own = None if row["base_commit"] and listing is None else [
+            {"commit": commit, "message": _git_text(repo, "log", "-1", "--format=%B", commit)
+             if i < briefs.OWN_COMMITS_SHOWN else ""}
+            for i, commit in enumerate(c for c in (listing or "").split() if c != sha)] if row["base_commit"] else []
         out.append({"task": t["id"], "commit": sha, "own": own,
                     "message": _git_text(repo, "log", "-1", "--format=%B", sha)})
     return out

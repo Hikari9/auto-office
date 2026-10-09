@@ -158,7 +158,9 @@ def lint_plan(con, run: dict, tasks: list[dict], done: list[str], blast: tuple[s
     if any(briefs.refers_to_pr_text(c) for _, _, c in criteria):
         from office import prs
         plan_blast, frozen_blast = blast
-        if plan_blast and plan_blast != frozen_blast and "local" in (plan_blast, frozen_blast):
+        pinned = ((run.get("landing") or {}).get("prs") or {})
+        if plan_blast and plan_blast != frozen_blast and "local" in (plan_blast, frozen_blast) \
+                and ("enabled" not in pinned or pinned.get("transient")):
             # Whether PRs exist turns on a blast radius this plan is about to change: detecting now would pin the
             # answer for the old one for the whole run. A plan going local has none; one leaving local is unknown.
             found = {"enabled": False, "reason": "blast radius is local"} if plan_blast == "local" else {"transient": True}

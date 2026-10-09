@@ -148,6 +148,14 @@ def test_a_file_is_a_location_only_where_something_is_placed_in_it():
     assert briefs.locations("whether config.yml is valid") == set()
     assert briefs.locations("a summary in a.md.bak") == set() and briefs.locations("see v1.0.md") == set()
     assert briefs.locations("a summary in `docs/r.md`") == {"`docs/r.md`"}
+    assert briefs.locations("Do not put the summary in README.md") == set(), "a forbidden file is no location"
+    assert briefs.locations("Never write notes to README.md, put them in the commit body") == {"the commit body"}
+
+
+def test_a_negation_early_in_a_long_clause_still_applies():
+    from office import briefs
+    text = "Do not " + "write about the thing and keep going with more words " * 6 + "and put the summary in the PR body"
+    assert len(text) > 300 and not briefs.refers_to_pr_text(text)
 
 
 def test_checking_a_long_criterion_stays_linear():
@@ -266,3 +274,11 @@ def test_the_pr_check_does_not_pin_detection_for_a_blast_radius_the_plan_is_abou
     assert settings.asked == [], "neither answer asked (or pinned) the old blast radius's detection"
     settings.set(PR_OFF)
     assert plans.lint_plan(None, {"id": "r"}, [], done, blast=("repo", "repo")) and len(settings.asked) == 1
+
+
+def test_an_already_pinned_pr_setting_decides_whatever_blast_radius_the_plan_declares(settings):
+    from office import plans
+    done = ["the PR body lists the test steps"]
+    on = {"id": "r", "landing": {"prs": PR_ON}}
+    settings.set(PR_ON)
+    assert plans.lint_plan(None, on, [], done, blast=("local", "repo")) == [] and len(settings.asked) == 1

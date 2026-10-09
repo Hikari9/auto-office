@@ -2,6 +2,7 @@
 plus the one command it runs when done; nothing about receipts or telemetry."""
 from __future__ import annotations
 
+import bisect
 import json
 import posixpath
 import re
@@ -51,7 +52,7 @@ _LOCATIONS = {
 _NEGATED = re.compile(r"\b(?:not|no|nothing|never|without|nor|cannot|avoid|instead of|rather than)\b|n['\u2019]t\b", re.I)
 # A clause ends at punctuation, but a `.` inside `README.md` or `v1.2` does not end one.
 _CLAUSE_END = re.compile(r"[,;:()\n]|\.(?=\s|$)|\s(?:but|then)\s", re.I)
-CLAUSE_WINDOW = 300  # how far back a negation is looked for: keeps the check linear on any input
+CLAUSE_WINDOW = 2000  # how far back a negation is looked for: keeps the check linear on any input
 # A named file is a location only where a cue places something in it (`in README.md`, `and README.md`).
 _FILE = re.compile(r"\b(?:in|at|to|into|as|under|and|or)\s+(?:the\s+)?`?((?:\.{1,2}/)?\w[\w./-]*\.(?:md|txt|rst|json|ya?ml))(?![\w-]|\.\w)`?",
                    re.I)
@@ -64,11 +65,19 @@ def refers_to_pr(text: str) -> bool:
     return bool(PR_MENTION.search(text or ""))
 
 
-def _places(pattern: re.Pattern, text: str) -> bool:
-    """The pattern matches outside a negation: `do not put it in the PR body` places nothing there."""
+def _placed(pattern: re.Pattern, text: str):
+    """The matches of `pattern` outside a negation: `do not put it in the PR body` places nothing there."""
     text = text or ""
-    return any(not _NEGATED.search(_CLAUSE_END.split(text[max(0, m.start() - CLAUSE_WINDOW):m.start()])[-1])
-               for m in pattern.finditer(text))
+    ends = [m.end() for m in _CLAUSE_END.finditer(text)]
+    for m in pattern.finditer(text):
+        i = bisect.bisect_right(ends, m.start())
+        start = max(ends[i - 1] if i else 0, m.start() - CLAUSE_WINDOW)
+        if not _NEGATED.search(text, start, m.start()):
+            yield m
+
+
+def _places(pattern: re.Pattern, text: str) -> bool:
+    return any(_placed(pattern, text))
 
 
 def refers_to_pr_text(text: str) -> bool:
@@ -83,7 +92,7 @@ def deliverables(text: str) -> set[str]:
 def locations(text: str) -> set[str]:
     """Where a criterion says its deliverable lives: the PR body, the commit body, the issue, a named file."""
     found = {name for name, pattern in _LOCATIONS.items() if _places(pattern, text)}
-    return found | {f"`{posixpath.normpath(m.lower())}`" for m in _FILE.findall(text or "")}
+    return found | {f"`{posixpath.normpath(m.group(1).lower())}`" for m in _placed(_FILE, text)}
 
 
 PLAN_FORMAT = """\
@@ -567,8 +576,12 @@ def commit_lines(commits: list[dict], checkout: str) -> list[str]:
     for c in commits:
         out.append(f"- {c['task']} accepted revision {c['commit'][:12]}:")
         out += _message_lines(c.get("message"), "    ")
-        own = c.get("own") or []
-        if own:
+        own = c.get("own")
+        if own is None:
+            out.append(f"  {c['task']} executor commits under it: unavailable (git could not list them); do not "
+                       "fault the task for their absence")
+            own = []
+        elif own:
             out.append(f"  {c['task']} executor commits under it ({len(own)}):")
         elif (c.get("message") or "").lstrip().startswith("office:"):
             out.append(f"  {c['task']} executor commits under it: none (Office committed the working tree at submit)")
