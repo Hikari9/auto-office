@@ -407,6 +407,8 @@ def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
     opt-in that moves a running run off the values it pinned at start. Later
     dispatches route from the re-pinned policy; the drift notice then has nothing
     left to report for those blocks. `quote` is the user's words authorizing it."""
+    if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
+        raise Refused("worker-cannot-apply-routing", "a worker cannot re-pin a run's routing; the orchestrator does, on the user's words")
     if not run_arg:
         raise _usage("--apply-routing needs --run <id>", next_step="office list shows run ids")
     run = state.find_run(con, run_arg)
