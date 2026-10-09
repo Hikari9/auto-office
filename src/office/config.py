@@ -227,8 +227,10 @@ def resolve_risk(config: dict, blast_radius: str | None, size_class: str | None,
     high_size = set(signals.get("high_size_class") or ["L", "XL"])
     high = bool(irreversible) or blast_radius in high_blast or size_class in high_size
     from office import risk
+    # `integration` (#422) is the part of `high` that is integration risk: size is not.
     return {"blast_radius": blast_radius, "size_class": size_class,
             "irreversible": bool(irreversible), "high": high,
+            "integration": bool(irreversible) or blast_radius in high_blast,
             **risk.classify(blast_radius, size_class, bool(irreversible), high)}
 
 

@@ -227,10 +227,9 @@ def integration_risk(run: dict, planned: dict, by_task: dict | None = None) -> s
     blast radius or irreversibility, else a task the plan declares `integration_risk:
     high`. Size class is not integration risk. Absence of a marker is never risk."""
     risk = run.get("risk") or {}
-    if risk.get("irreversible"):
-        return "run risk signal: irreversible"
-    if risk.get("blast_radius") in ("production", "production-data"):
-        return f"run risk signal: blast radius {risk['blast_radius']}"
+    if risk.get("integration"):
+        return ("run risk signal: irreversible" if risk.get("irreversible")
+                else f"run risk signal: blast radius {risk.get('blast_radius')}")
     marked = sorted((tid for tid, t in planned.items() if str(t.get("integration_risk") or "").lower() == "high"
                      and (by_task is None or tid in by_task)), key=_tid_key)
     return f"the plan declares it on {', '.join(marked)}" if marked else None
@@ -400,6 +399,9 @@ def integrated_review(con, run: dict) -> dict:
     merely ran together need none; a shared outcome, interface, acceptance dependency,
     shared registry or high integration risk require one bound to the composed scope."""
     run = state.get_run(con, run["id"])
+    if not contract.has_integrated_review(run):
+        return {"required": None, "scopes": [],
+                "reason": "integrated-review triggers not evaluated (run predates #422)"}
     lane_list = lanes(con, run)
     scopes = [s for s in shared_scopes(con, run, lane_list) if s["id"] != "S-rebase"]
     if scopes:
@@ -446,7 +448,8 @@ def _covered_by(con, run: dict, scope: dict, composed: dict) -> str | None:
         if not set(scope["tasks"]) <= set(other):
             continue
         done = [g for g in scope_gates(con, run, sid, commit=st.get("commit")) if g["kind"] == "convergence_review"
-                and g["status"] == "done" and g["verdict"] == "APPROVED" and g.get("independence") == contract.INDEPENDENT]
+                and g["status"] == "done" and g["verdict"] == "APPROVED" and g.get("review_status") == contract.COMPLETED
+                and g.get("independence") == contract.INDEPENDENT]
         if done:
             return sid
     return None
@@ -1585,7 +1588,8 @@ def inspect_lines(con, run: dict, scope_id: str | None = None) -> list[str]:
     run = state.get_run(con, run["id"])
     lines = [f"review contract {contract.of(run)}"]
     ir = integrated_review(con, run)
-    lines.append(("integrated review required: " if ir["required"] else "integrated review not required: ") + ir["reason"])
+    lines.append(("integrated review required: " if ir["required"] else "integrated review not required: "
+                  if ir["required"] is False else "integrated review: ") + ir["reason"])
     for s in summary(con, run):
         if scope_id and s["id"].lower() != scope_id.lower():
             continue

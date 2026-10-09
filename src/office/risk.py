@@ -80,6 +80,9 @@ def planner_reclassify(risk: dict, req: dict, raise_only: bool = False) -> dict 
     # Same thresholds as intake's defaults.
     merged["high"] = bool(risk.get("high")) or bool(merged["irreversible"]) or \
         merged.get("blast_radius") in ("production", "production-data") or merged.get("size_class") in ("L", "XL")
+    # #422: a planner raise to irreversible or production is integration risk too (size is not).
+    merged["integration"] = bool(risk.get("integration")) or bool(merged["irreversible"]) or \
+        merged.get("blast_radius") in ("production", "production-data")
     merged.update(classify(merged.get("blast_radius"), merged.get("size_class"), merged["irreversible"], merged["high"]))
     if cur_by != "intake" or merged["classification"] != classification(risk):
         merged["classified_by"] = "intake" if cur_by == "intake" else "planner"
