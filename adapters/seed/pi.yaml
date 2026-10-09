@@ -6,6 +6,12 @@ version_fingerprint:
 model_source:
   type: cli
   command: [pi, --offline, --list-models]
+# Checked before each headless launch; a failure stops the launch with the
+# reason recorded (`preflight_failed`), never a silent wrong-model dispatch.
+# model_check also requires the dispatch's pinned slug in the listed models.
+preflight:
+  model_check: [pi, --offline, --list-models]
+  auth_check: [pi, auth, check, --model, "{model}"]
 effort_mapping:
   none: off
   low: low
@@ -16,7 +22,11 @@ effort_mapping:
 benchmark_slug_mapping: {}
 invocation:
   executable: pi
-  argv: [--print, --approve, --model, "{model}", --thinking, "{effort}", --no-session]
+  # --approve is project-resource trust (project settings, .pi/mcp.json,
+  # extensions, skills, system-prompt files), not a sandbox or bypassPermissions:
+  # an Office worktree is untrusted input, so the worker form declines all of it.
+  # AGENTS.md/CLAUDE.md context files load regardless and stay available.
+  argv: [--print, --no-approve, --no-extensions, --no-mcp, --model, "{model}", --thinking, "{effort}", --no-session]
   prompt_transport: stdin
   cwd_transport: process-cwd
 safe_prompt_passing:
@@ -40,29 +50,42 @@ agentic_capability:
 failure_signatures:
   - {id: prompt-on-stdin-not-consumed, attribution: adapter, pattern: "exit 0 with no output and no file writes although the prompt was piped on stdin"}
   - {id: effort-knob-accepted-but-ignored, attribution: adapter, pattern: "--thinking accepted without error but the run behaves identically across levels"}
-  - {id: slug-accepted-default-model-launched, attribution: adapter, pattern: "--model <slug> accepted without error but the session silently launches on the account default model"}
+  - {id: custom-model-id-served-as-something-else, attribution: harness, pattern: "--model <provider>/<unknown> is accepted as a custom model id and reaches the provider API instead of failing locally; an unknown provider or unlisted slug fails at launch (exit 1), but a provider that serves a custom id as a different model still yields exit 0 wrong-model output (no model identity is read back yet)"}
 conformance:
   deterministic: pending
   live: pending
 source_notes: >-
-  pi 1.1.0 registered 2026-10-09. Launch evidence for this adapter's worker form:
-  `printf <prompt> | pi --print --approve --model <slug> --thinking medium --no-session`
-  answered the stdin prompt, created and ran a file in a throwaway git repo, and
-  exited 0. --approve trusts the dispatch worktree's project-local files, the
-  analogue of claude's bypassPermissions; --no-session keeps a headless dispatch out
-  of pi's own session store. --thinking (off..max) is the only effort knob pi
-  exposes, so effort_mapping is that map verbatim; only medium is proven to launch,
-  and no level is proven to change model behavior. No reviewer or vision profile is
-  declared: pi has no verified read-only isolation, so it is not a code or visual
-  reviewer, and its quota is always unknown (no probe; never treated as unlimited).
-  Session identity is not declared; pi keeps its own session files, which Office
-  does not read, so no headless resume form exists yet.
+  pi 1.1.0 registered 2026-10-09; the flags below were re-verified against that
+  pinned version on 2026-10-09. --approve is pi's project-resource trust: it
+  loads project settings, .pi/mcp.json, extensions, skills and system-prompt
+  files from the worktree, and is neither a sandbox nor an analogue of claude's
+  bypassPermissions. Office-managed worktrees hold untrusted input, so the
+  worker form declines all of it: --no-approve (project resources;
+  AGENTS.md/CLAUDE.md context files load regardless of project trust and stay
+  available), --no-extensions (no extension discovery or built-in extensions),
+  and --no-mcp (no MCP server connects). Probed on 2026-10-09 with these flags:
+  the worker form still creates and runs files and answers the stdin prompt, a
+  project AGENTS.md instruction still applied, and an unknown provider or model
+  fails at launch with exit 1 and a stderr message instead of falling back.
+  --model takes pi's documented provider/id syntax, so catalog rows pin the
+  provider (xiaomi-token-plan-sgp/...) and never resolve an ambiguous global
+  default; preflight re-checks the pinned slug against the harness model list
+  and provider credentials before every headless launch and stops it with
+  preflight_failed otherwise. Exit 0 is not model conformance: no structured
+  model identity is read back yet (a --mode json readback is a follow-up), so
+  conformance stays pending and only medium is proven to launch (--thinking
+  off..max is pi's only effort knob, so effort_mapping is that map verbatim; no
+  level is proven to change model behavior). No reviewer or vision profile is
+  declared: pi has no verified read-only isolation, so it is not a code or
+  visual reviewer, and its quota is always unknown (no probe; never treated as
+  unlimited). Session identity is not declared; pi keeps its own session files,
+  which Office does not read, so no headless resume form exists yet.
 session:
   id: none
 capabilities: [builder]
 office_profiles:
   worker:
-    argv: [--print, --approve, --model, "{model}", --thinking, "{effort}", --no-session]
+    argv: [--print, --no-approve, --no-extensions, --no-mcp, --model, "{model}", --thinking, "{effort}", --no-session]
     prompt: stdin
     output: stdout
     # pi has no timeout of its own in --print mode, so the supervisor's wall cap

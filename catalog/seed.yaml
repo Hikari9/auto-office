@@ -719,11 +719,17 @@ models:
     source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gemini-3-8-flash-low', release_url: 'https://artificialanalysis.ai/models/releases/gemini-3-8-flash', fetched_at: '2026-09-27T14:55:21Z', page_title: Gemini 3.8 Flash (low)}
     content_hash: d6bb96f9b31490cb8287ca2b8eb21a1d041b754d3e30a343c0249b4ddd34b65d
     supersession_metadata:
+  # pi/gpt-5-codex@high: disabled on 2026-10-09. Registering the pi harness would
+  # otherwise activate this pre-existing row, but the model is deprecated by its
+  # vendor (superseded_by gpt-5-1-codex) and has no independent re-verification
+  # against the pi launch profile (its openai/gpt-5-codex slug is not in the
+  # local pi model list at all). Keep it out of candidate selection until a
+  # maintainer re-verifies or supersedes it (#478).
   - model_id: gpt-5-codex
     invocation_model_id: openai/gpt-5-codex
     invocation_harness: pi
     invocation_source: 'local-evidence:pi --offline --list-models'
-    dispatchable: true
+    dispatchable: false
     source_identifier: gpt-5-codex
     source_name: artificial-analysis
     effort: high
@@ -1093,9 +1099,9 @@ models:
     content_hash:
     supersession_metadata:
   - model_id: mimo-v2.6-pro
-    invocation_model_id: mimo-v2.6-pro
+    invocation_model_id: xiaomi-token-plan-sgp/mimo-v2.6-pro
     invocation_harness: pi
-    invocation_source: 'local-evidence: pi --offline --list-models lists mimo-v2.6-pro on xiaomi-token-plan-sgp; pi --print --model mimo-v2.6-pro --thinking medium answered a stdin prompt and wrote+ran a file in a throwaway repo on 2026-10-09'
+    invocation_source: 'local-evidence: provider-pinned slug xiaomi-token-plan-sgp/mimo-v2.6-pro is listed by pi --offline --list-models and passes pi auth check --model <slug>; printf <prompt> | pi --print --no-approve --no-extensions --no-mcp --model xiaomi-token-plan-sgp/mimo-v2.6-pro --thinking medium --no-session answered a stdin prompt and wrote+ran a file in a throwaway repo on 2026-10-09 (exit 0 is launch evidence, not model conformance: no model identity readback yet)'
     dispatchable: true
     source_identifier: mimo-v2-6-pro
     source_name: artificial-analysis
@@ -1110,9 +1116,9 @@ models:
     content_hash:
     supersession_metadata:
   - model_id: mimo-v2.6-flash
-    invocation_model_id: mimo-v2.6-flash
+    invocation_model_id: xiaomi-token-plan-sgp/mimo-v2.6-flash
     invocation_harness: pi
-    invocation_source: 'local-evidence: pi --offline --list-models lists mimo-v2.6-flash on xiaomi-token-plan-sgp; pi --print --model mimo-v2.6-flash --thinking medium answered a stdin prompt and wrote+ran a file in a throwaway repo on 2026-10-09'
+    invocation_source: 'local-evidence: provider-pinned slug xiaomi-token-plan-sgp/mimo-v2.6-flash is listed by pi --offline --list-models and passes pi auth check --model <slug>; printf <prompt> | pi --print --no-approve --no-extensions --no-mcp --model xiaomi-token-plan-sgp/mimo-v2.6-flash --thinking medium --no-session answered a stdin prompt and wrote+ran a file in a throwaway repo on 2026-10-09 (exit 0 is launch evidence, not model conformance: no model identity readback yet)'
     dispatchable: true
     source_identifier: mimo-v2-6-flash
     source_name: artificial-analysis

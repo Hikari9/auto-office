@@ -96,7 +96,8 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
         raise Usage("invalid-override", "--review-cli/--review-external need --review-as <harness>/<model>[@effort]")
     launch_prefs = {k: v for k, v in (("cli", cli), ("external", external)) if v}
     if review_as:
-        candidates.declared_decision(review_as, flag="--review-as")  # validates the route's shape
+        candidates.declared_decision(review_as, flag="--review-as", role="code_reviewer",
+                                    config=state.pinned_config(run))  # validates shape and role fit
     if state.is_terminal(run):
         raise Refused("run-terminal", f"run is {run['phase']}")
     from office import guide, plan_view, plans, prs, queuecmd
@@ -120,7 +121,8 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             if block:
                 continue
         if as_model:
-            routes[tid] = candidates.declared_decision(as_model)
+            routes[tid] = candidates.declared_decision(as_model, role="executor",
+                                                       config=state.pinned_config(run))
         else:
             routes[tid] = planned_route(con, run, task, override=route, reroute=reroute)
         if launch_prefs and routes[tid].get("status") == "selected":
@@ -3030,6 +3032,16 @@ def supervise(dispatch_id: str) -> int:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         adapter = adapters.load_all()[d["adapter_id"]]
         output = Path(spec["output"]) if spec.get("output") else None
+        if os.environ.get("OFFICE_PREFLIGHT") != "off":
+            # The candidate's provider/model and credentials, validated on this
+            # host before anything launches: an unlisted slug or missing auth
+            # fails here with the reason recorded, never a silent wrong-model run.
+            ok, why = adapters.run_preflight(adapter, d.get("model") or "")
+            if not ok:
+                _note(log_path, f"launch stopped before the harness started: {why}")
+                _launch_notice(run, d, why)
+                classification, code = "preflight_failed", 127
+                return 1
         argv, prof = adapters.build_argv(adapter, spec["kind"], model=d["model"], effort=d["effort"] or "none",
                                          cwd=Path(spec["cwd"]), output=output,
                                          images=[Path(i) for i in spec.get("images") or []],
@@ -3078,7 +3090,9 @@ def supervise(dispatch_id: str) -> int:
                 except BrokenPipeError:
                     pass
             sniffer = None if d.get("resumed_from") and not spec.get("headless_fresh") else _SessionSniffer(run, d, adapter, log_path)
+            wrote = 0
             for chunk in iter(lambda: child.stdout.read1(65536), b""):
+                wrote += len(chunk)
                 log.write(chunk)
                 log.flush()
                 if sniffer:
@@ -3096,6 +3110,10 @@ def supervise(dispatch_id: str) -> int:
             sig, classification = state_box["signal"], "signal"
         else:
             classification = "success" if code == 0 else "nonzero"
+        if classification == "success" and not wrote and not output:
+            # A worker with no reply file ended cleanly but said nothing: the
+            # prompt may never have been consumed (adapter failure_signatures).
+            _note(log_path, "the harness exited 0 with no output; the prompt may not have been consumed")
     except _Stopped as stop:
         sig, classification = stop.signum, "signal"
     except FileNotFoundError as exc:

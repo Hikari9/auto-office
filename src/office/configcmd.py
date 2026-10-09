@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 import yaml
 
-from office import candidates, db, paths, state
+from office import adapters, candidates, db, paths, state
 from office import config as cfg
 from office.result import Result
 from office.state import OfficeError, Refused
@@ -71,10 +71,28 @@ def _simple_seed(value: Any) -> bool:
                                            and set(e) <= {"model_id", "harness", "effort"} for e in value)
 
 
-def validate_seed(entries: list[dict]) -> list[str]:
-    """Problems with seed entries against the shipped catalog (empty when valid)."""
+def _role_requires(config: dict | None, role: str | None) -> set[str]:
+    """The capabilities a route must declare to serve `role` (config roles.<role>.required_capabilities)."""
+    if not role:
+        return set()
+    return set(candidates.role_policy(config or {}, role).get("required_capabilities") or [])
+
+
+def _row_serves(row: dict, required: set[str]) -> bool:
+    """Whether the harness behind a catalog row declares every capability the role needs."""
+    if not required:
+        return True
+    adapter = adapters.load_all().get(row.get("invocation_harness") or "")
+    return required <= set((adapter or {}).get("capabilities") or [])
+
+
+def validate_seed(entries: list[dict], *, role: str | None = None, config: dict | None = None) -> list[str]:
+    """Problems with seed entries against the shipped catalog (empty when valid).
+    With a role, an entry must also be a route that role can actually use: a
+    builder-only harness is not a planner or reviewer preference."""
     rows = candidates.catalog_rows()
     models = sorted({r["model_id"] for r in rows})
+    required = _role_requires(config, role)
     problems = []
     for e in entries:
         if not isinstance(e, dict) or not e.get("model_id"):
@@ -90,13 +108,22 @@ def validate_seed(entries: list[dict]) -> list[str]:
             have = sorted({r.get("invocation_harness") for r in same_model if r.get("invocation_harness")})
             problems.append(f"{label}: {e['model_id']} runs on {', '.join(have)}, not {e['harness']}")
             continue
-        if not e.get("effort"):
-            continue
         # An alias (opus, sonnet) follows the newest concrete model, so any effort that harness offers is valid.
         pool = same_model
         if any(r.get("alias_family") for r in same_model):
             pool = [r for r in rows if r.get("invocation_harness") in {x.get("invocation_harness") for x in same_model}]
-        if not any(r.get("effort") == e["effort"] and e.get("harness") in (None, r.get("invocation_harness")) for r in pool):
+        pool = [r for r in pool if e.get("harness") in (None, r.get("invocation_harness"))]
+        if not any(r.get("dispatchable") is not False for r in pool):
+            problems.append(f"{label}: {e['model_id']} is not dispatchable (its catalog row is disabled or superseded)")
+            continue
+        if required and not any(_row_serves(r, required) for r in pool):
+            have = sorted({r.get("invocation_harness") for r in pool})
+            problems.append(f"{label}: {', '.join(have)} cannot serve role {role} "
+                            f"(needs capabilities {sorted(required)})")
+            continue
+        if not e.get("effort"):
+            continue
+        if not any(r.get("effort") == e["effort"] for r in pool):
             have = sorted({r.get("effort") for r in pool if r.get("effort")})
             problems.append(f"{label}: no {e['effort']} effort for {e['model_id']} (known: {', '.join(have)})")
     return problems
@@ -243,7 +270,8 @@ def _validate(new: dict, tier: str, cwd: Path | None) -> list[str]:
         raise _usage(f"cost_policy.default must be one of {', '.join(policy.get('available') or [])}")
     # Only what this file sets: a shipped default is not the edit's to reject.
     for role, conf in (new.get("roles") or {}).items():
-        problems = validate_seed((conf or {}).get("preferred_seed") or []) if isinstance(conf, dict) else []
+        problems = (validate_seed((conf or {}).get("preferred_seed") or [], role=role, config=effective)
+                    if isinstance(conf, dict) else [])
         if problems:
             raise _usage(f"roles.{role}.preferred_seed: " + "; ".join(problems),
                          next_step="office setup lists the known routes (type ? at a prompt)")
@@ -463,11 +491,15 @@ def _installed() -> dict[str, bool]:
     return {h: shutil.which(h) is not None for h in HARNESSES}
 
 
-def known_routes() -> list[str]:
-    """One line per harness/model with its efforts, for the `?` prompt."""
+def known_routes(role: str | None = None, *, config: dict | None = None) -> list[str]:
+    """One line per harness/model with its efforts, for the `?` prompt. With a
+    role, only routes that role can use: a builder-only harness is never offered
+    as a planner or reviewer preference, and a disabled row is never offered."""
+    required = _role_requires(config, role)
     by: dict[tuple[str, str], set[str]] = {}
     for r in candidates.catalog_rows():
-        if r.get("invocation_harness") and r.get("effort"):
+        if r.get("invocation_harness") and r.get("effort") and r.get("dispatchable") is not False \
+                and _row_serves(r, required):
             by.setdefault((r["invocation_harness"], r["model_id"]), set()).add(r["effort"])
     order = ["none", "low", "medium", "high", "xhigh", "max"]
     return [f"{h}/{m}@{{{','.join(sorted(e, key=lambda x: order.index(x) if x in order else 99))}}}"
@@ -510,7 +542,7 @@ def setup(*, tier: str, yes: bool = False, cwd: Path | None = None,
         while True:
             answer = ask("  routes> ")
             if answer == "?":
-                out("\n".join(f"    {r}" for r in known_routes()))
+                out("\n".join(f"    {r}" for r in known_routes(role, config=effective)))
                 continue
             if not answer:
                 break
@@ -520,7 +552,7 @@ def setup(*, tier: str, yes: bool = False, cwd: Path | None = None,
                 break
             try:
                 seed = parse_seed(answer)
-                problems = validate_seed(seed)
+                problems = validate_seed(seed, role=role, config=effective)
             except OfficeError as exc:
                 seed, problems = [], [exc.message]
             if problems or not seed:

@@ -181,6 +181,54 @@ def effort_value(adapter: dict, effort: str) -> str | None:
     return mapping.get(effort, effort)
 
 
+PREFLIGHT_TIMEOUT_S = 20
+
+
+def preflight_checks(adapter: dict, model: str) -> list[tuple[str, list[str]]]:
+    """Named (check, argv) preflight commands for one launch of `model`, in
+    declaration order, with `{model}` expanded to the pinned invocation slug."""
+    spec = (adapter or {}).get("preflight") or {}
+    return [(name, [str(a).replace("{model}", str(model)) for a in raw])
+            for name, raw in spec.items() if isinstance(raw, (list, tuple)) and raw]
+
+
+def _model_listed(text: str, slug: str) -> bool:
+    """Whether a harness model listing offers `slug`. A `provider/id` slug must
+    match a listed provider and model (adjacent columns or the joined form); a
+    bare id must be a listed model. Unverifiable is not listed: a launch that
+    cannot name the model it will run fails clearly instead of routing silently."""
+    listed = [line.split() for line in (text or "").splitlines()]
+    if "/" not in slug:
+        return any(slug in tokens for tokens in listed)
+    provider, _, name = slug.partition("/")
+    return any((slug in tokens)
+               or (len(tokens) >= 2 and tokens[0] == provider and tokens[1] == name)
+               for tokens in listed)
+
+
+def run_preflight(adapter: dict, model: str) -> tuple[bool, str]:
+    """Run the adapter's preflight checks for one launch: (ok, detail). A
+    `model_check` additionally requires the pinned slug in the harness's model
+    list; every check must exit 0. This is the candidate's provider/model and
+    credential validation on the dispatching host — a local probe recorded at
+    registration time proves nothing about another host."""
+    for name, argv in preflight_checks(adapter, model):
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=PREFLIGHT_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            return False, f"preflight {name} timed out after {PREFLIGHT_TIMEOUT_S}s ({' '.join(argv)})"
+        except (OSError, subprocess.SubprocessError):
+            return False, f"preflight {name} could not run ({' '.join(argv)})"
+        if proc.returncode != 0:
+            detail = next((ln.strip() for ln in reversed((proc.stderr or proc.stdout or "").splitlines()) if ln.strip()), "")
+            return False, (f"preflight {name} exited {proc.returncode}: {detail}" if detail
+                           else f"preflight {name} exited {proc.returncode} ({' '.join(argv)})")
+        if name == "model_check" and not _model_listed(proc.stdout, model):
+            return False, (f"preflight model_check: {model} is not in the harness's model list on this host; "
+                           "pin a listed provider/model (provider/id) or install it here")
+    return True, ""
+
+
 def toml_path(path: Path) -> str:
     """`path`, resolved, as a TOML basic string. Codex keys `projects` trust on
     the canonical path (macOS `/tmp` is `/private/tmp`), and a JSON string is a
