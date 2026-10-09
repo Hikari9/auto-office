@@ -180,6 +180,12 @@ def parse(text: str) -> ParsedPlan:
             elif key == "converge":
                 # #337: lanes naming one shared boundary get one more review together.
                 task["converge"] = _split_list(value)
+            elif key == "accept_needs":
+                # #422: the lane's acceptance depends on these tasks' results in other lanes.
+                task["accept_needs"] = _split_list(value)
+            elif key == "integration_risk":
+                # #422: the planner marks the composed outcome high risk to integrate.
+                task["integration_risk"] = value.strip().lower()
             elif key == "notes":
                 if value:
                     task["notes"].append(value)
@@ -270,6 +276,11 @@ def _validate(plan: ParsedPlan) -> None:
                 plan.errors.append(f"{t['id']}: depends on unknown task {dep}")
             if dep == t["id"]:
                 plan.errors.append(f"{t['id']}: depends on itself")
+        for need in t.get("accept_needs") or []:
+            if need not in known or need == t["id"]:
+                plan.errors.append(f"{t['id']}: accept_needs names unknown or own task {need}")
+        if t.get("integration_risk") not in (None, "", "high", "normal"):
+            plan.errors.append(f"{t['id']}: integration_risk must be high or normal")
         if t["visual"] is not None and not t["visual"].get("none") and not t["visual"].get("url"):
             plan.errors.append(f"{t['id']}: visual block needs `url:`")
     if _has_cycle({t["id"]: t["depends"] for t in plan.tasks}):

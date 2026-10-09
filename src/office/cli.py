@@ -53,6 +53,9 @@ Auto Office {ver}
   office inspect [run|task|gate|evidence|events|route|learner|trust|convergence] [id]
   office decide <lane> escalate|continue|waive|stop --quote "<user's words>"
                                     the user's choice once a lane review spent its 3 RECHECK rounds
+  office waive <lane> --reason "<why the open findings are acceptable>"
+                                    the orchestrator's choice once a lane review spent its RECHECK rounds: accept the
+                                    residual risk (the verdict stays RECHECK; not landing authority)
   office disposition <scope>:<F-id> fix|fixed|dismissed|follow-up -- "<note>"
                                     close a non-blocking (APPROVED) finding, or a plan finding the orchestrator
                                     owns after plan review's round cap; fix routes it, no re-review
@@ -180,6 +183,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--plan-review-rounds", type=int, metavar="N",
                    help="the user's intake choice: at most N substantive rounds for the initial plan review "
                         "(default 3)")
+    s.add_argument("--review-rounds", type=int, metavar="N",
+                   help="at most N substantive rounds per lane or shared-scope convergence review (default 3; "
+                        "config review.max_rounds)")
     s.add_argument("--from-run", metavar="RUN",
                    help="start a new run carrying an earlier run's requirements and plan draft (e.g. to move "
                         "v3.1 work onto the current review contract); the earlier run is not changed")
@@ -336,6 +342,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("choice", choices=("escalate", "continue", "waive", "stop"))
     s.add_argument("--quote", help="the user's own words")
     s.add_argument("--reason", help="waive: why the unmet gate is accepted")
+    s = sp.add_parser("waive", parents=[common])
+    s.add_argument("scope", help="a lane (L-T1) or shared scope (S-T1+T3) that spent its round cap")
+    s.add_argument("--reason", help="why the open findings are acceptable (substantive, durable)")
     s = sp.add_parser("disposition", parents=[common])
     s.add_argument("finding", help="<scope>:<code>[,<code>] (e.g. L-T1:F2 or plan:P1)")
     s.add_argument("how", choices=("fix", "fixed", "dismissed", "follow-up"))
@@ -509,7 +518,7 @@ def _run(args, unknown) -> int:
                               harness=args.harness, session=args.session, base=args.base, planner=args.planner,
                               issue=args.issue, no_prs=args.no_prs, end_state=args.end_state,
                               benchmark_refresh=args.benchmark_refresh, from_run=args.from_run,
-                              plan_review_rounds=args.plan_review_rounds,
+                              plan_review_rounds=args.plan_review_rounds, review_rounds=args.review_rounds,
                               deploy={k: v for k in ("preview", "prod", "verify")
                                       if (v := getattr(args, f"deploy_{k}"))})
         return emit(res, args)
@@ -683,6 +692,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "decide":
         from office import convergence
         return convergence.decide(con, run, args.scope, args.choice, quote=args.quote, reason=args.reason)
+    if cmd == "waive":
+        from office import convergence
+        return convergence.cap_waive(con, run, args.scope, reason=args.reason)
     if cmd == "disposition":
         from office import convergence
         note = " ".join([*(args.note or []), *[u for u in unknown if u != "--"]]).strip()

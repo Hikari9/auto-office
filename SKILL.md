@@ -122,7 +122,7 @@ continue with the installed runtime. A failed or offline check is informational 
   surface into tasks' `accept:` criteria. Plan the seams, not the internals: `scope:` is an ownership envelope
   (module or domain dirs plus their tests); name exact files only where tasks collide or depend. Append-only
   registries several tasks touch (gate manifests, endpoint/grant lists, policy maps, shared mocks) go under each
-  task's `shared:`. Tasks that must land together share a `lane:`; lanes sharing an outcome, a `converge:`.
+  task's `shared:`. Tasks that must land together share a `lane:`; lanes sharing an outcome, a `converge:`; acceptance needing another lane's result, `accept_needs: T2`; a risky composition, `integration_risk: high` (each adds one integrated review).
 - Ordinary amendments (decomposition, ordering, acceptance detail, tests) are yours:
   `office amend <T2|plan> -- "<delta>"`. Plan review reviews the initial plan only: once it closes
   (APPROVED, its round cap, or a waiver), no amendment of any kind is reviewed again; you own them.
@@ -160,8 +160,13 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
   acceptance; lanes sharing a boundary then get one shared-scope review. `office inspect convergence`.
 - Findings never relaunch anything on their own. A RECHECK routes every blocking finding to its owning
   tasks at once: run `office rerun <task> --resume|--fresh` for each, in parallel.
-- After 3 lane RECHECK rounds nothing runs. Ask the user at once with the remaining findings, attempts, risk
-  and your recommendation, then `office decide <scope> escalate|continue|waive|stop --quote "<words>"`.
+- At the lane round cap (3 by default; `office start --review-rounds N` or `review.max_rounds`, pinned per run)
+  nothing runs and review does not stay blocked. Choose one: waive and accept the residual risk with a
+  substantive reason, `office waive <scope> --reason "<why the open findings are acceptable>"` (the verdict stays
+  RECHECK, the receipt records the reason, open findings, composed commit and your session; this is not landing
+  authority, and landing still needs the user's authorization from intake or later); or escalate: ask the user
+  at once with the remaining findings, attempts, risk and your recommendation, then `office decide <scope>
+  escalate|continue|waive|stop --quote "<words>"`. Runs started before #423 only have the user's `office decide`.
 - Before landing, give each APPROVED finding a disposition: `office disposition <scope>:<code>
   fix|fixed|dismissed|follow-up -- "<note>"` (`fix` reopens the owner for a repair without re-review).
 - Only landing authority waives a required review: the user (`office approve waive L-T1:convergence|visual --quote
@@ -170,9 +175,10 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
   layer may still block `--as orchestrator` as self-approval (Claude Code auto mode does): never work around
   it; ask the user and record their waiver with `--quote`.
 - When no specialist reviewer returns a verdict (every route UNAVAILABLE, or the last reply INVALID_RESULT),
-  the orchestrator is authorized to review on the reviewer's behalf, recorded as degraded and non-independent:
-  `office review L-T1:convergence --report <file>` (visual: `--inspected <every screenshot>`). This is the
-  runtime's prescribed step, not self-approval: the producer was a subagent, and the landing receipt shows it.
+  the orchestrator is authorized to review on the reviewer's behalf: `office review L-T1:convergence --report
+  <file>` (visual: `--inspected <every screenshot>`). Specialists come first. The review counts as independent
+  only when your session did not produce the work (the producer was a subagent, and the receipt shows it); a
+  session that produced the work is refused. Runs started before #423 record it as degraded and non-independent.
 - **v3.1 runs** (started before #337; `office inspect run` names the contract) keep PASS | CHANGES_REQUIRED |
   PLAN_DEFECT | BRIEF_DEFECT, per-task review and plan-defect redirects (`--redirect`): follow their `next:` lines and `docs/v31-rolling-review-gates.md`.
 
