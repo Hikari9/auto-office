@@ -567,6 +567,8 @@ def _ask(con, run: dict) -> Result:
             continue
         pr = t.get("pr") or {}
         lines.append(f"  {t['id']} {pr.get('url') or '(no PR: ' + _pr_reason(run) + ')'}")
+    if prs.retryable((run.get("landing") or {}).get("prs") or {}):
+        lines.append("  office pr on: push the accepted branches and open the PRs once GitHub is reachable")
     return Result(lines=lines, next='ask the user (native question tool): merge | preview deploy | merge + prod | stop; '
                   'then office land --merge|--preview|--e2e --quote "<words>", or office close --handoff <pr-url>')
 
@@ -605,7 +607,8 @@ def _merge_all(con, run: dict, res: Result) -> str:
     s = prs.settings(con, run)
     if not s.get("enabled"):
         raise Refused("prs-off", f"merging needs task PRs, which are off ({s.get('reason')})",
-                      next_step="push the integration branch, open a PR, then office close --handoff <pr-url>")
+                      next_step="office pr on once GitHub is reachable, or push the integration branch, open a PR, "
+                                "then office close --handoff <pr-url>")
     base, method = s["base_branch"], s["merge_method"]
     repo = Path(run["repo_root"])
     _git(repo, "fetch", "-q", "origin", base)
@@ -628,6 +631,12 @@ def _merge_all(con, run: dict, res: Result) -> str:
             if _gh(run, "pr", "edit", str(pr["number"]), "--base", base).returncode != 0:
                 raise Refused("retarget-failed", f"could not retarget #{pr['number']} to {base}")
         _settle_criss_cross(run, t, base, res)
+        ready = _gh(run, "pr", "ready", str(pr["number"]))  # an accepted task's PR can still be a draft
+        if ready.returncode != 0:
+            raise Refused("ready-failed", f"could not mark #{pr['number']} ({t['id']}) ready for review: "
+                          f"{(ready.stderr or ready.stdout).strip()[:200]}",
+                          preserved=f"merged so far: {', '.join(merged) or 'none'}; {base} was {before[:12]}",
+                          next_step="office land again once GitHub answers (merged PRs are skipped)")
         _wait_checks(run, pr["number"])
         proc = _gh(run, "pr", "merge", str(pr["number"]), prs.MERGE_FLAGS[method])
         if proc.returncode != 0 and re.search(r"not up to date|behind|out of date", proc.stderr + proc.stdout, re.I):

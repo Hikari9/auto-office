@@ -8,12 +8,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-STATE = Path(os.environ["FAKE_GH_STATE"])
+def state_path() -> Path:
+    return Path(os.environ["FAKE_GH_STATE"])  # read per call: tests import this module once and change the path
 
 
 def load() -> dict:
-    if STATE.exists():
-        return json.loads(STATE.read_text())
+    if state_path().exists():
+        return json.loads(state_path().read_text())
     return {"repo": {"nameWithOwner": "o/r", "defaultBranchRef": {"name": "main"}, "mergeCommitAllowed": True,
                      "squashMergeAllowed": True, "rebaseMergeAllowed": True}, "prs": [], "calls": []}
 
@@ -41,7 +42,12 @@ def main(argv: list[str]) -> int:
     s = load()
     s["calls"].append(argv)
     out, code = "", 0
-    if argv[:2] == ["issue", "close"]:
+    fail = s.get("fail") or {}  # {"pr ready": n}: the next n such calls exit 1 (-1: every call)
+    key = " ".join(argv[:2])
+    if fail.get(key):
+        fail[key] -= fail[key] > 0
+        code, out = 1, f"{key}: simulated gh failure"
+    elif argv[:2] == ["issue", "close"]:
         s.setdefault("closed_issues", []).append(argv[2])
     elif argv[:2] == ["repo", "view"]:
         if s.get("repo_view_failures", 0) > 0:
@@ -87,7 +93,7 @@ def main(argv: list[str]) -> int:
         elif argv[1] == "checks":
             code = s.get("checks_exit", 0)
             out = "no required checks reported" if code == 0 else "build  fail"
-    STATE.write_text(json.dumps(s))
+    state_path().write_text(json.dumps(s))
     if out:
         print(out, file=sys.stdout if code == 0 else sys.stderr)
     return code

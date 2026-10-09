@@ -185,7 +185,7 @@ def test_ensure_pr_relabels_when_pr_becomes_known(env, monkeypatch):
     monkeypatch.setattr(prs, "body", lambda *a: "b")
     monkeypatch.setattr(prs, "pr_base", lambda *a: "main")
     monkeypatch.setattr(prs, "_find", lambda repo, branch: {"number": 261, "url": "u", "baseRefName": "main"})
-    monkeypatch.setattr(prs, "_gh", lambda *a, **k: type("P", (), {"returncode": 1, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(prs, "_gh", lambda *a, **k: type("P", (), {"returncode": 0, "stdout": "{}", "stderr": ""})())  # pr view/edit succeed
     monkeypatch.setattr(prs.state, "update_task", lambda *a, **k: None)
     monkeypatch.setattr(prs.db, "transaction", lambda con: __import__("contextlib").nullcontext())
     run = {"id": "r1", "repo_root": str(env.repo)}
@@ -254,7 +254,7 @@ def test_prs_relabel_hook_failure_is_swallowed(env, monkeypatch):
     monkeypatch.setattr(prs, "body", lambda *a: "b")
     monkeypatch.setattr(prs, "pr_base", lambda *a: "main")
     monkeypatch.setattr(prs, "_find", lambda repo, branch: {"number": 5, "url": "u", "baseRefName": "main"})
-    monkeypatch.setattr(prs, "_gh", lambda *a, **k: type("P", (), {"returncode": 1, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(prs, "_gh", lambda *a, **k: type("P", (), {"returncode": 0, "stdout": "{}", "stderr": ""})())  # pr view/edit succeed
     monkeypatch.setattr(prs.state, "update_task", lambda *a, **k: None)
     monkeypatch.setattr(prs.db, "transaction", lambda con: __import__("contextlib").nullcontext())
     pr = prs.ensure_pr(None, {"id": "r1", "repo_root": str(env.repo)}, {"id": "T3", "title": "t"}, {"id": "D1", "branch": "b"})

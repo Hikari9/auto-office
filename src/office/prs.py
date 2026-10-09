@@ -20,7 +20,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from office import db, paths, plan_view, state
+from office import db, jobs, paths, plan_view, state
+from office.result import Result
 from office.util import dumps
 
 MERGE_FLAGS = {"merge": "--merge", "squash": "--squash", "rebase": "--rebase"}
@@ -30,6 +31,14 @@ MERGE_FLAGS = {"merge": "--merge", "squash": "--squash", "rebase": "--rebase"}
 
 def _gh(args: list[str], cwd: str, timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(["gh", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout)
+
+
+def _gh_ok(args: list[str], cwd: str, what: str) -> subprocess.CompletedProcess:
+    """`gh`, raising on a non-zero exit so the job retries and a failure is never recorded as done."""
+    proc = _gh(args, cwd)
+    if proc.returncode != 0:
+        raise RuntimeError(f"gh {what} failed: {(proc.stderr or proc.stdout).strip()}"[:300])
+    return proc
 
 
 def _blast_radius(con, run: dict) -> str | None:
@@ -83,6 +92,86 @@ def settings(con, run: dict) -> dict:
             state.emit(con, run, "prs.enabled", f"task PRs on: GitHub answered after an earlier failure "
                        f"({current.get('reason')})", audience="runtime")
     return detected
+
+
+def retryable(setting: dict) -> bool:
+    """Whether `office pr on` is worth suggesting: PRs went off for a GitHub failure, not by choice or by run."""
+    return bool(setting.get("transient")) and not setting.get("enabled")
+
+
+def reenable(con, run: dict) -> Result:
+    """`office pr on`: turn task PRs on for a run that is already past its first revision.
+
+    `settings` re-probes a transient failure only until a revision exists; after that PRs stay
+    off, and with them every accepted task's branch and PR. This probes GitHub again, pins the
+    result, then pushes each accepted task's reviewed revision and opens (or updates) its stacked
+    PR, parents first, ready for review. Safe to repeat: a failed push or call is reported and
+    the same command finishes the rest."""
+    from office import integration
+    run = state.get_run(con, run["id"])
+    if state.is_terminal(run):
+        raise state.Refused("run-ended", f"run {run['id'][:8]} has ended; task PRs stay as they were")
+    before = ((run.get("landing") or {}).get("prs") or {})
+    if before.get("reason") == "--no-prs":
+        raise state.Refused("prs-opted-out", "task PRs stay off: this run was started with --no-prs",
+                            preserved="the run, its task branches and revisions (nothing was pushed)",
+                            next_step="push the integration branch it names and office close --handoff <pr-url>, "
+                                      "or start a new run without --no-prs")
+    detected = _detect(con, run)  # GitHub is never called inside a transaction
+    if not detected.get("enabled"):
+        raise state.Refused("prs-unavailable", f"task PRs stay off: {detected.get('reason')}",
+                            preserved="the run, its task branches and revisions (nothing was pushed)",
+                            next_step="fix GitHub access (gh auth status, network, origin), then office pr on")
+    with db.transaction(con):
+        landing = dict(state.get_run(con, run["id"]).get("landing") or {})
+        carried = {k: v for k, v in before.items() if k not in ("enabled", "reason", "transient")}
+        landing["prs"] = {**detected, **carried}
+        state.update_run(con, run["id"], landing=landing)
+        if not before.get("enabled"):
+            state.emit(con, run, "prs.enabled", f"task PRs on by office pr on (were off: {before.get('reason') or 'unset'})",
+                       audience="runtime")
+    run = state.get_run(con, run["id"])
+    res = Result(lines=[f"task PRs on for {detected.get('repo') or 'origin'} (base {detected['base_branch']})"])
+    failed = []
+    for t in integration._topo([t for t in state.tasks(con, run["id"]) if t["status"] == "accepted"]):
+        task = state.get_task(con, run["id"], t["id"])  # re-read: its parent's PR was just recorded
+        if not has_pr(task) or (task.get("pr") or {}).get("merged") or not task.get("accepted_revision_id"):
+            continue
+        up = parent(con, run, task)
+        if up and up["id"] in failed:  # its PR would open against the wrong base
+            failed.append(task["id"])
+            res.add(f"{task['id']} waits for {up['id']}")
+            continue
+        try:
+            pr = _publish(con, run, task, task["accepted_revision_id"])[1]
+            _gh_ok(["pr", "ready", str(pr["number"])], run["repo_root"], "pr ready")
+            res.add(f"{task['id']} #{pr['number']} pushed, ready for review (base {pr['base']})")
+        except Exception as exc:
+            failed.append(task["id"])
+            with db.transaction(con):
+                state.emit(con, run, "pr.error", f"{task['id']} office pr on: {exc}"[:300], task_id=task["id"])
+            res.add(f"{task['id']} not synced: {exc}"[:300])
+    if failed:
+        raise state.Refused("prs-sync-failed", f"task PRs are on, but {', '.join(failed)} did not sync\n" + "\n".join(res.lines),
+                            preserved="PR settings and the PRs that did sync", next_step="office pr on (repeat once GitHub answers)")
+    res.next = "office status"
+    return res
+
+
+def status(con, run: dict) -> Result:
+    """`office pr status`: the run's PR setting and what each task has on GitHub (no GitHub call)."""
+    run = state.get_run(con, run["id"])
+    s = (run.get("landing") or {}).get("prs") or {}
+    res = Result(lines=[f"task PRs on (base {s.get('base_branch') or 'main'}, merge {s.get('merge_method') or 'merge'})"
+                        if s.get("enabled") else
+                        f"task PRs off: {s.get('reason') or 'not probed yet'}" + (" (will be probed again)" if s.get("transient") else "")])
+    for t in state.tasks(con, run["id"]):
+        if has_pr(t):
+            pr = t.get("pr") or {}
+            res.add(f"{t['id']} ({t['status']}) " + (f"#{pr['number']} {'merged' if pr.get('merged') else 'open'}"
+                                                   if pr.get("number") else "no PR"))
+    res.next = ("office pr on" if retryable(s) and _has_revision(con, run) else "office status")
+    return res
 
 
 def _has_revision(con, run: dict) -> bool:
@@ -187,10 +276,16 @@ def pr_blocker(con, run: dict, task: dict) -> str | None:
     return None
 
 
+# A GitHub outage rides out about 15s * (1+2+3+4) of backoff; a sync waiting on a revision sync that
+# never ends stops waiting after MAX_DEFERRALS * 30s and publishes (accepted) or fails (the rest).
+PR_SYNC_ATTEMPTS = 5
+MAX_DEFERRALS = 20
+
+
 def queue(con, run: dict, task_id: str, event: str, ref: str) -> None:
     if enabled(run) and has_pr(state.get_task(con, run["id"], task_id)):
         state.enqueue(con, run, "pr_sync", {"task_id": task_id, "event": event, "ref": ref},
-                      dedup_key=f"pr_sync:{run['id'][:8]}:{task_id}:{event}:{ref}", max_attempts=2)
+                      dedup_key=f"pr_sync:{run['id'][:8]}:{task_id}:{event}:{ref}", max_attempts=PR_SYNC_ATTEMPTS)
 
 
 # ------------------------------------------------------------------ git side
@@ -215,9 +310,8 @@ def push(run: dict, dispatch: dict, *, commit: str = "HEAD", force: bool = False
 # ------------------------------------------------------------------ job
 
 def _find(repo: str, branch: str) -> dict | None:
-    proc = _gh(["pr", "list", "--head", branch, "--state", "open", "--json", "number,url,baseRefName,isDraft"], repo)
-    if proc.returncode != 0:
-        return None
+    proc = _gh_ok(["pr", "list", "--head", branch, "--state", "open", "--json", "number,url,baseRefName,isDraft"],
+                  repo, "pr list")  # a failed lookup must not read as "no PR" and open a second one
     found = json.loads(proc.stdout or "[]")
     return found[0] if found else None
 
@@ -237,21 +331,18 @@ def ensure_pr(con, run: dict, task: dict, dispatch: dict) -> dict:
     base = pr_base(con, run, task)
     found = _find(repo, dispatch["branch"])
     if found is None:
-        proc = _gh(["pr", "create", "--draft", "--base", base, "--head", dispatch["branch"],
-                    "--title", f"{task['id']}: {task['title']}", "--body-file", str(body_path)], repo)
-        if proc.returncode != 0:
-            raise RuntimeError(f"gh pr create failed: {(proc.stderr or proc.stdout).strip()}"[:300])
+        proc = _gh_ok(["pr", "create", "--draft", "--base", base, "--head", dispatch["branch"],
+                       "--title", f"{task['id']}: {task['title']}", "--body-file", str(body_path)], repo, "pr create")
         url = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
         found = {"number": _number(url), "url": url, "baseRefName": base, "isDraft": True}
     else:
-        view = _gh(["pr", "view", str(found["number"]), "--json", "body"], repo)
-        if view.returncode == 0:
-            current = json.loads(view.stdout or "{}").get("body") or ""
-            body_path.write_text(merge_body(current, body_path.read_text(encoding="utf-8")), encoding="utf-8")
+        view = _gh_ok(["pr", "view", str(found["number"]), "--json", "body"], repo, "pr view")
+        current = json.loads(view.stdout or "{}").get("body") or ""
+        body_path.write_text(merge_body(current, body_path.read_text(encoding="utf-8")), encoding="utf-8")
         args = ["pr", "edit", str(found["number"]), "--body-file", str(body_path)]
         if found.get("baseRefName") != base:
             args += ["--base", base]
-        _gh(args, repo)
+        _gh_ok(args, repo, "pr edit")
     pr = {**(task.get("pr") or {}), "number": found["number"], "url": found["url"], "base": base,
           "branch": dispatch["branch"]}
     with db.transaction(con):
@@ -266,7 +357,7 @@ def ensure_pr(con, run: dict, task: dict, dispatch: dict) -> dict:
 
 
 def _comment(run: dict, pr: dict, text: str) -> None:
-    _gh(["pr", "comment", str(pr["number"]), "--body", text], run["repo_root"])
+    _gh_ok(["pr", "comment", str(pr["number"]), "--body", text], run["repo_root"], "pr comment")
 
 
 def _gate_line(con, run: dict, task: dict, rev_id: str) -> str:
@@ -284,11 +375,13 @@ def job_pr_sync(con, run: dict, job: dict) -> dict:
     if not has_pr(task):
         return {"skipped": "no file scope, no PR"}
     try:
-        return _sync(con, run, task, p["event"], p["ref"])
-    except Exception as exc:  # GitHub trouble is a notice, never a lifecycle failure
+        return _sync(con, run, task, job["id"], p["event"], p["ref"], p.get("deferrals", 0))
+    except jobs.Defer:
+        raise
+    except Exception as exc:  # GitHub trouble is a notice, never a lifecycle failure; the job retries
         with db.transaction(con):
             state.emit(con, run, "pr.error", f"{task['id']} PR {p['event']}: {exc}"[:300], task_id=task["id"])
-        return {"error": str(exc)[:300]}
+        raise
 
 
 def _publish(con, run: dict, task: dict, rev_id: str) -> tuple[dict, dict]:
@@ -301,7 +394,17 @@ def _publish(con, run: dict, task: dict, rev_id: str) -> tuple[dict, dict]:
     return rev, ensure_pr(con, run, task, dispatch)
 
 
-def _sync(con, run: dict, task: dict, event: str, ref: str) -> dict:
+def _revision_pending(con, run: dict, task_id: str, job_id: str) -> bool:
+    """Is a `revision` sync of this task still queued or claimed (apart from `job_id`)?"""
+    for row in con.execute("SELECT payload_json FROM outbox WHERE run_id=? AND kind='pr_sync' AND id<>? "
+                           "AND status IN ('queued','claimed')", (run["id"], job_id)).fetchall():
+        p = json.loads(row["payload_json"] or "{}")
+        if p.get("task_id") == task_id and p.get("event") == "revision":
+            return True
+    return False
+
+
+def _sync(con, run: dict, task: dict, job_id: str, event: str, ref: str, deferrals: int = 0) -> dict:
     if event == "revision":
         rev, pr = _publish(con, run, task, ref)
         attempt = con.execute("SELECT COUNT(*) FROM revisions WHERE run_id=? AND task_id=?",
@@ -310,8 +413,13 @@ def _sync(con, run: dict, task: dict, event: str, ref: str) -> dict:
             _comment(run, pr, f"office: revision {ref} pushed (attempt {attempt}, replaces attempt {attempt - 1})")
         return {"pr": pr["number"], "pushed": rev["commit_sha"]}
     pr = task.get("pr") or {}
+    waiting = not pr.get("number") and _revision_pending(con, run, task["id"], job_id)
+    if waiting and deferrals < MAX_DEFERRALS:
+        raise jobs.Defer(f"{task['id']} has no PR yet and its revision sync is still pending")
+    if waiting and event != "accepted":
+        raise RuntimeError(f"the revision sync of {task['id']} is still pending after {deferrals} deferrals")
     if event == "accepted" and not pr.get("number"):
-        pr = _publish(con, run, task, ref)[1]  # the revision sync has not recorded the PR yet
+        pr = _publish(con, run, task, ref)[1]  # the revision sync failed for good and recorded no PR
     if not pr.get("number"):
         return {"skipped": "no PR yet"}
     if event == "verdict":
@@ -328,9 +436,7 @@ def _sync(con, run: dict, task: dict, event: str, ref: str) -> dict:
                           f"{_gate_line(con, run, task, gate['revision_id'])}")
         return {"commented": gate["verdict"]}
     if event == "accepted":
-        ready = _gh(["pr", "ready", str(pr["number"])], run["repo_root"])
-        if ready.returncode != 0:
-            raise RuntimeError(f"gh pr ready failed: {(ready.stderr or ready.stdout).strip()}"[:300])
+        _gh_ok(["pr", "ready", str(pr["number"])], run["repo_root"], "pr ready")
         _comment(run, pr, f"office: {task['id']} accepted on {ref}; ready for review")
         return {"ready": pr["number"]}
     return {"skipped": event}
