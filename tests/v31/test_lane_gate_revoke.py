@@ -244,3 +244,45 @@ def test_a_capture_failure_is_a_capture_problem_and_no_producer_finding(env, mon
     assert "identical to default" in gate["summary"]
     assert not _q(env, "SELECT 1 FROM findings WHERE gate_kind='visual'")
     assert _q(env, "SELECT status FROM tasks WHERE id='T1'")[0]["status"] != "changes_required"
+
+
+def _capture_invalid_frame(monkeypatch, tmp_path, cause, invalid):
+    """What visual.capture_all returns when a frame is invalid: the frame carries its cause in the receipt."""
+    from office import visual
+    _fake_capture(monkeypatch, tmp_path)
+
+    def capture_all(con, run, task, rev, gate, worktree):
+        receipt = tmp_path / f"receipt-{gate['id']}.json"
+        receipt.write_text(json.dumps({"reference": None, "frames": [
+            {"viewport": "desktop 1440x900", "state": "open", "invalid": invalid, **({"cause": cause} if cause else {})}]}))
+        return {"evidence_status": "INVALID_COMPARISON", "cause": invalid, "product_failures": [],
+                "receipt_path": str(receipt), "receipt_digest": "x"}
+
+    monkeypatch.setattr(visual, "capture_all", capture_all)
+
+
+def test_an_invalid_frame_caused_by_the_spec_is_unavailable_without_a_recapture(env, monkeypatch, tmp_path):
+    _capture_invalid_frame(monkeypatch, tmp_path, "spec", "selector '#buy' absent from page in state 'open'")
+    _visual_run(env)
+    gate = _gates(env, "visual")[0]
+    assert (gate["status"], gate["review_status"]) == ("done", "UNAVAILABLE"), gate
+    assert "visual spec defect" in gate["summary"] and "#buy" in gate["summary"], gate["summary"]
+    assert gate["recaptures"] in (0, None)
+    assert not _q(env, "SELECT 1 FROM findings WHERE gate_kind='visual'")
+
+
+def test_an_invalid_frame_caused_by_the_capture_is_a_capture_problem_without_a_recapture(env, monkeypatch, tmp_path):
+    _capture_invalid_frame(monkeypatch, tmp_path, "capture", "state 'open' screenshot identical to default")
+    _visual_run(env)
+    gate = _gates(env, "visual")[0]
+    assert (gate["status"], gate["review_status"], gate["evidence_status"]) == ("done", "EVIDENCE_BLOCKED", "CAPTURE_BLOCKED")
+    assert "identical to default" in gate["summary"] and gate["recaptures"] in (0, None)
+    assert not _q(env, "SELECT 1 FROM findings WHERE gate_kind='visual'")
+
+
+def test_an_invalid_frame_with_no_cause_is_still_recaptured(env, monkeypatch, tmp_path):
+    _capture_invalid_frame(monkeypatch, tmp_path, None, "page did not settle at 1440x900")
+    _visual_run(env)
+    gate = _gates(env, "visual")[0]
+    assert gate["review_status"] == "EVIDENCE_BLOCKED" and gate["evidence_status"] == "INVALID_COMPARISON", gate
+    assert int(gate["recaptures"]) == 1

@@ -738,6 +738,19 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
             g = {**gate, "task_id": task["id"]}
             cap = visual.capture_all(con, run, task, rev, g, checkout)
             status = cap["evidence_status"]
+            # A problem that is not the producer's work blocks the evidence, never the producer (#454): a capture
+            # that cannot show the state is a capture problem, a state the plan cannot reach is the plan's defect.
+            problems = _non_producer_problems(cap)
+            capture = [f for f in problems if f["cause"] == "capture"]
+            if capture:
+                return _visual_blocked(con, run, gate, "CAPTURE_BLOCKED",
+                                       f"{task['id']}: {'; '.join(_failure_text(f) for f in capture)}")
+            spec = [f for f in problems if f["cause"] == "spec"]
+            if spec:
+                return _visual_blocked(con, run, gate, "COMPARABLE",
+                                       f"{task['id']} visual spec defect, not a product failure: "
+                                       f"{'; '.join(_failure_text(f) for f in spec)}; the planner corrects the visual: "
+                                       "block (amend the plan), or the gate is waived", status=contract.UNAVAILABLE)
             if status == "INVALID_COMPARISON":
                 if int(gate["recaptures"] or 0) < int((run.get("gates") or {}).get("recapture_max", 1)):
                     with db.transaction(con):
@@ -750,18 +763,6 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
                                        f"{task['id']}: capture stayed invalid after recapture: {cap['cause']}")
             if status == "CAPTURE_BLOCKED":
                 return _visual_blocked(con, run, gate, "CAPTURE_BLOCKED", f"{task['id']}: {cap['cause']}")
-            # A failure that is not the producer's work blocks the evidence, never the producer (#454): a capture
-            # that cannot show the state is a capture problem, a state the plan cannot reach is the plan's defect.
-            capture = [f for f in cap["product_failures"] if f.get("cause") == "capture"]
-            if capture:
-                return _visual_blocked(con, run, gate, "CAPTURE_BLOCKED",
-                                       f"{task['id']}: {'; '.join(_failure_text(f) for f in capture)}")
-            spec = [f for f in cap["product_failures"] if f.get("cause") == "spec"]
-            if spec:
-                return _visual_blocked(con, run, gate, "COMPARABLE",
-                                       f"{task['id']} visual spec defect, not a product failure: "
-                                       f"{'; '.join(_failure_text(f) for f in spec)}; the planner corrects the visual: "
-                                       "block (amend the plan), or the gate is waived", status=contract.UNAVAILABLE)
             receipt = json.loads(Path(cap["receipt_path"]).read_text())
             receipts.append(cap["receipt_path"])
             references.append(receipt.get("reference"))
@@ -822,6 +823,20 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
     with db.transaction(con):
         ingest(con, state.get_run(con, run["id"]), gate["id"], outcome)
     return {"status": outcome.get("status"), "verdict": outcome.get("verdict")}
+
+
+def _non_producer_problems(cap: dict) -> list[dict]:
+    """What a capture reports that the producer did not cause: a failure or an invalid frame
+    whose `cause` is `spec` (the plan's visual block) or `capture` (the capture itself)."""
+    kinds = ("spec", "capture")
+    out = [f for f in cap.get("product_failures") or [] if f.get("cause") in kinds]
+    path = cap.get("receipt_path")
+    if cap["evidence_status"] == "INVALID_COMPARISON" and path and Path(path).is_file():
+        for fr in json.loads(Path(path).read_text()).get("frames") or []:
+            if fr.get("invalid") and fr.get("cause") in kinds:
+                out.append({"cause": fr["cause"], "location": f"{fr.get('viewport')} state {fr.get('state')}",
+                            "summary": fr["invalid"]})
+    return out
 
 
 def _failure_text(f: dict) -> str:
