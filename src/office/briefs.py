@@ -251,7 +251,9 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
                 "fresh for every submission, including a retry or fix round; submit refuses a file whose content "
                 "matches evidence already submitted for this task."]
     if packet.get("depends"):
-        out.append(f"BUILDS ON {', '.join(packet['depends'])} (already in this worktree's base)")
+        out.append(f"BUILDS ON {', '.join(packet['depends'])} (already in this worktree's base"
+                   + (f" {packet['base_commit'][:12]}" if packet.get("base_commit") else "")
+                   + (f", an Office merge of {packet['base_merge']}" if packet.get("base_merge") else "") + ")")
     out += _lines("ACCEPT", packet.get("accept"))
     checks = packet.get("checks") or []
     out.append("CHECKS the runtime will run: " + ("; ".join(checks) if checks else "none declared"))
@@ -273,9 +275,10 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None) -> s
                    + " into this worktree; build on it")
     if restack.get("conflict"):
         c = restack["conflict"]
-        out += ["", f"RESTACK FIRST: {c['task']} was accepted on {c['revision']}, which this worktree lacks. Run "
-                f"`git merge {c['commit']}`, resolve the conflicts inside your scope, and commit the merge. "
-                "Never rebase or force-push."]
+        steps = [c] + list(c.get("then") or [])
+        out += ["", f"RESTACK FIRST: {c['task']}'s revision {c['revision']} is not in this worktree. Run "
+                + ", then ".join(f"`git merge {x['commit']}` ({x['task']} {x['revision']})" for x in steps)
+                + ", resolve the conflicts inside your scope, and commit each merge. Never rebase or force-push."]
     fix = packet.get("fix_of")
     if fix:
         findings = con.execute("SELECT code, severity, location, summary, action FROM findings WHERE run_id=? AND task_id=? "

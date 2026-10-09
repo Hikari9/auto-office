@@ -7,6 +7,7 @@ A newer amendment supersedes an older unapplied one.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import uuid
@@ -473,11 +474,55 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
     return targets
 
 
+def unreachable_reason(d: dict | None) -> str:
+    """Why a notify prompt could not be sent to this worker dispatch at all."""
+    if not d:
+        return "dispatch not found"
+    if d.get("launcher") != "herdr" or not d.get("pane_id"):
+        return (f"headless worker (launcher {d.get('launcher') or 'none'}): no pane to prompt; "
+                "it gets the amendment on its next office command")
+    if d.get("status") != "running":
+        return f"dispatch is {d.get('status')}, not running"
+    return f"agent not alive in pane {d['pane_id']}"
+
+
+def record_notify(con, run: dict, payload: dict, *, delivered: bool, reason: str) -> None:
+    """What the notify prompt for an amendment came to. A landed prompt marks the delivery
+    delivered; otherwise it stays queued and the reason is recorded where inspect and status
+    show it. Other notify_worker payloads (findings) carry no amendment, and a delivery that
+    this dispatch no longer holds (superseded, handed to a newer session) has nothing to record."""
+    amendment_id, tid, did = payload.get("amendment_id"), payload.get("task_id"), payload.get("dispatch_id")
+    if not amendment_id:
+        return
+    with db.transaction(con):
+        held = con.execute("SELECT status FROM deliveries WHERE run_id=? AND task_id=? AND dispatch_id=? AND amendment_id=? "
+                           "AND status IN ('queued','delivered')", (run["id"], tid, did, amendment_id)).fetchone()
+        if held is None or (held["status"] == "delivered" and not delivered):  # a failure is no news once delivered
+            return
+        if delivered:
+            con.execute("UPDATE deliveries SET status='delivered', delivered_at=COALESCE(delivered_at, ?) "
+                        "WHERE run_id=? AND task_id=? AND dispatch_id=? AND amendment_id=? AND status='queued'",
+                        (now_iso(), run["id"], tid, did, amendment_id))
+        state.emit(con, run, "amendment.notify", f"{tid} {amendment_id} {'delivered' if delivered else 'queued'}: {reason}",
+                   audience="runtime", task_id=tid, dispatch_id=did,
+                   payload={"amendment_id": amendment_id, "delivered": delivered, "reason": reason})
+
+
+def delivery_note(con, run_id: str, task_id: str, amendment_id: str, dispatch_id: str | None, status: str = "queued") -> str:
+    """The latest recorded outcome of notifying the dispatch that holds this amendment, or "".
+    Once the delivery is delivered (by a landed prompt or the worker's own command) a note that
+    says it was not is stale and not shown."""
+    row = con.execute("SELECT payload_json FROM events WHERE run_id=? AND task_id=? AND kind='amendment.notify' "
+                      "AND dispatch_id IS ? AND json_extract(payload_json, '$.amendment_id')=? "
+                      "AND (? = 'queued' OR json_extract(payload_json, '$.delivered')=1) ORDER BY seq DESC LIMIT 1",
+                      (run_id, task_id, dispatch_id, amendment_id, status)).fetchone()
+    return (json.loads(row["payload_json"]).get("reason") or "") if row else ""
+
+
 def confirm_launch_deliveries(con, run: dict) -> int:
     """Mark delivered the amendments a relaunched session carries in its brief once that brief's
     prompt landed in its running agent (launch.json records it). Only deliveries recorded before the
     session started are in its brief; a later one reaches it by its own prompt. Returns how many changed."""
-    import json
     n = 0
     for r in con.execute("SELECT dl.id, dl.dispatch_id FROM deliveries dl JOIN dispatches d ON d.id=dl.dispatch_id "
                          "WHERE dl.run_id=? AND dl.status='queued' AND d.status='running' AND d.ended_at IS NULL "

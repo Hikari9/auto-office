@@ -8,6 +8,7 @@ injects the environment, and launches through a durable outbox job.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import re
@@ -354,20 +355,23 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
 
 
 def _base_for(con, run: dict, task: dict, graph: dict, stack_after: str | None) -> str:
-    """Base commit: run base, or the dependency revision this task builds on."""
-    deps = list(task["depends"]) + ([stack_after] if stack_after else [])
-    base = run["base_sha"]
-    for dep in deps:
-        d = state.get_task(con, run["id"], dep)
-        rev_id = (d or {}).get("accepted_revision_id") or (d or {}).get("current_revision_id")
-        if not rev_id:
-            if dep == stack_after:
-                continue
+    """Base commit: the run base, or what contains every dependency revision this task builds on
+    (accepted, else current): the dependency head that already contains the others, else an
+    Office merge commit of them. Dependencies that conflict refuse, naming them and the paths."""
+    from office import integration
+    heads = integration.dependency_heads(con, run, task, stack_after=stack_after)
+    have = {h["task"] for h in heads}
+    for dep in task["depends"]:
+        if dep not in have and dep != stack_after:
             raise Refused("dependency-not-ready", f"{task['id']} depends on {dep}, which has no submitted revision",
                           scope=task["id"], next_step=f"dispatch {dep} first, or office dispatch {dep} {task['id']} (stacked)")
-        rev = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (rev_id,)).fetchone()
-        base = rev["commit_sha"]
-    return base
+    if not heads:
+        return run["base_sha"]
+    try:
+        return integration.combine(run, heads, task["id"])
+    except Refused as e:
+        e.scope = e.scope or task["id"]
+        raise
 
 
 # ------------------------------------------------------------------ launch request
@@ -432,8 +436,12 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
 
 
 def acquire_lease(con, run: dict, task: dict, holder: str, role: str) -> dict:
-    """One fenced lease per task scope. Overlapping live scopes are refused."""
+    """One fenced lease per task scope. Overlapping live scopes are refused, except that a dependent's
+    live lease never blocks its prerequisite (the plan lets ordered tasks overlap): the dependent is
+    restacked or reported stale afterwards."""
     now = datetime.now(timezone.utc)
+    graph = {t["id"]: t["depends"] for t in state.tasks(con, run["id"])}
+    dependants = planfile.dependants(graph, task["id"])
     rows = con.execute("SELECT * FROM leases WHERE run_id=? AND released_at IS NULL AND revoked_at IS NULL",
                        (run["id"],)).fetchall()
     for row in rows:
@@ -441,6 +449,8 @@ def acquire_lease(con, run: dict, task: dict, holder: str, role: str) -> dict:
             # Handing the task's lease to a new holder (fix round, relaunch):
             # revoke the old one so a late submit from it is fenced out.
             con.execute("UPDATE leases SET revoked_at=?, revoke_reason='superseded' WHERE id=?", (now.isoformat(), row["id"]))
+            continue
+        if row["task_id"] in dependants:
             continue
         other = state.get_task(con, run["id"], row["task_id"]) if row["task_id"] else None
         other_scope = other["scope"] if other else json.loads(row["scope"] or "[]")
@@ -492,19 +502,41 @@ def _revoke_task(con, run: dict, task_id: str, reason: str) -> Result:
         task = state.get_task(con, run["id"], task_id)
         if task is None:
             raise Usage("unknown-task", f"no task {task_id}")
-        con.execute("UPDATE leases SET revoked_at=?, revoke_reason=? WHERE run_id=? AND task_id=? AND released_at IS NULL "
-                    "AND revoked_at IS NULL", (now_iso(), reason, run["id"], task_id))
-        state.update_task(con, run["id"], task_id, status="paused", pause_reason=f"lease revoked: {reason}")
-        state.emit(con, run, "lease.revoked", f"{task_id} lease revoked", task_id=task_id)
+        # An accepted task whose relaunched worker never got a newer revision in (its submit was
+        # refused, or it never submitted) still stands on its accepted revision: the revoke only
+        # releases the lease.
+        keeps = (task["status"] != "cancelled" and bool(task.get("accepted_revision_id"))
+                 and task.get("current_revision_id") == task["accepted_revision_id"])
+        if keeps:
+            con.execute("UPDATE leases SET released_at=? WHERE run_id=? AND task_id=? AND released_at IS NULL "
+                        "AND revoked_at IS NULL", (now_iso(), run["id"], task_id))
+            state.update_task(con, run["id"], task_id, status="accepted", pause_reason=None)
+            state.emit(con, run, "lease.released", f"{task_id} worker revoked; lease released, "
+                       f"{task_id} stays accepted on {task['accepted_revision_id']}", task_id=task_id)
+        else:
+            con.execute("UPDATE leases SET revoked_at=?, revoke_reason=? WHERE run_id=? AND task_id=? AND released_at IS NULL "
+                        "AND revoked_at IS NULL", (now_iso(), reason, run["id"], task_id))
+            if task["status"] != "cancelled":  # a task the plan removed stays removed
+                state.update_task(con, run["id"], task_id, status="paused", pause_reason=f"lease revoked: {reason}")
+            state.emit(con, run, "lease.revoked", f"{task_id} lease revoked", task_id=task_id)
     live = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE run_id=? AND task_id=? AND ended_at IS NULL "
                                          "AND status IN ('launching', 'running')", (run["id"], task_id)).fetchall()]
     notes: list[str] = []
     stopped = [d["id"] for d in live if stop_dispatch(run, d, notes=notes)]
-    lines = [f"{task_id} lease revoked | later submits from its holder are rejected"]
+    lines = [f"{task_id} lease {'released' if keeps else 'revoked'} | later submits from its holder are rejected"]
+    if keeps:
+        lines.append(f"{task_id} stays accepted on {task['accepted_revision_id']}")
+        unapplied = [r["amendment_id"] for r in con.execute(
+            "SELECT DISTINCT amendment_id FROM deliveries WHERE run_id=? AND task_id=? AND status IN ('queued','delivered')",
+            (run["id"], task_id)).fetchall()]
+        if unapplied:
+            lines.append(f"{', '.join(unapplied)} was not applied to {task_id}; office amend {task_id} -- \"<change>\" "
+                         "delivers it again")
     if stopped:
         lines.append(f"stopped {', '.join(stopped)} (SIGTERM)")
     lines += notes
-    return Result(lines=lines, next=f"office dispatch {task_id} to relaunch")
+    return Result(lines=lines, next=(f'office amend {task_id} -- "<change>" to reopen it' if keeps
+                                     else f"office dispatch {task_id} to relaunch"))
 
 
 def _end_dispatch(con, run: dict, d: dict, classification: str, why: str, *, stop: bool = True,
@@ -795,6 +827,7 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
         "contract_version": task["contract_version"],
         "lease_id": dispatch["lease_id"],
         "base_commit": dispatch["base_commit"],
+        "base_merge": _base_merge_of(run, dispatch["base_commit"]),
         "worktree": dispatch["worktree"],
         "route": dispatch["route"].get("selection_disclosure"),
         "branch": dispatch.get("branch"),
@@ -805,6 +838,14 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
         "restack": extra.get("restack"),
     }
     return state.packet_envelope(run, f"{role}-dispatch", body)
+
+
+def _base_merge_of(run: dict, base: str) -> str | None:
+    """The tasks an Office merge commit base combines ("T1, T2"), or None for any other base."""
+    out = paths.git(run["repo_root"], "log", "-1", "--format=%P%x00%s", base, check=False)
+    parents, _, subject = out.partition("\0")
+    m = re.fullmatch(r"office: base of T\d+, a merge of (T\d+(?:, T\d+)*)", subject)
+    return m.group(1) if m and len(parents.split()) == 2 else None
 
 
 def _pr_packet(con, run: dict, task: dict, dispatch: dict) -> dict | None:
@@ -961,7 +1002,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         else:
             inter = _interactive(dispatch, kind, cwd, include_dirs, output=output)
         label = pane_label(run, dispatch, kind)
-        pane = _herdr_pane(run, cwd, label=label) if inter else None
+        pane = _herdr_pane(run, cwd, label=label, dispatch_id=dispatch["id"]) if inter else None
         if inter and not pane:
             _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
         if pane:
@@ -970,6 +1011,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
                 if wait:
                     return _wait_terminal(dispatch["id"])
                 return started
+            _release_panes(run, dispatch["id"])
             if cli:
                 # Running the adapter's own argv headless would not be what the user asked for.
                 _launch_notice(run, dispatch, f"--cli agent did not start in herdr; left external. Start it by hand: {cli}")
@@ -1113,6 +1155,61 @@ def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = Tru
     return env_file
 
 
+def cwd_owner(con, run_id: str, cwd: str) -> dict | None:
+    """The dispatch of this run whose worktree holds `cwd` (the deepest worktree wins)."""
+    here, best = os.path.realpath(cwd), None
+    for r in con.execute("SELECT id, task_id, role, worktree FROM dispatches WHERE run_id=? AND worktree IS NOT NULL "
+                         "ORDER BY started_at", (run_id,)).fetchall():
+        wt = os.path.realpath(r["worktree"])
+        if (here == wt or here.startswith(wt.rstrip(os.sep) + os.sep)) and (best is None or len(wt) >= best[0]):
+            best = (len(wt), dict(r))
+    return best[1] if best else None
+
+
+def _who(dispatch_id: str, task_id: str | None = None) -> str:
+    """`D1 (T1)`: a dispatch with its task, looked up when not given."""
+    if task_id is None:
+        try:
+            con = db.connect()
+            try:
+                row = con.execute("SELECT task_id FROM dispatches WHERE id=?", (dispatch_id,)).fetchone()
+            finally:
+                con.close()
+            task_id = row["task_id"] if row else None
+        except Exception:  # a name in a notice must never fail a launch
+            task_id = None
+    return f"{dispatch_id} ({task_id})" if task_id else dispatch_id
+
+
+def _pane_mismatch(run: dict, dispatch: dict, pane: str, cwd: Path, *, check_cwd: bool) -> str | None:
+    """Why `pane` is not this dispatch's, or None. The run's layout says which dispatch the
+    pane is reserved for; herdr says where it actually is. A pane herdr cannot describe
+    (or one that reports no cwd) cannot be disproved, so only a stated mismatch refuses."""
+    me = _who(dispatch["id"], dispatch.get("task_id"))
+    holder = _reserved_by(run, pane)
+    if holder and holder != dispatch["id"]:
+        return f"pane {pane} is reserved for dispatch {_who(holder)}, not for {me}"
+    if not check_cwd:
+        return None
+    actual = (_herdr_json(["pane", "get", pane]).get("pane") or {}).get("cwd")
+    if not actual:
+        return None
+    here, want = os.path.realpath(actual), os.path.realpath(cwd)
+    if here == want or here.startswith(want.rstrip(os.sep) + os.sep):
+        return None
+    owner = None
+    try:
+        con = db.connect()
+        try:
+            owner = cwd_owner(con, run["id"], actual) if run.get("id") else None
+        finally:
+            con.close()
+    except Exception:
+        pass
+    other = f"dispatch {_who(owner['id'], owner['task_id'])}" if owner else "no dispatch worktree of this run"
+    return f"pane {pane} is in {actual}, which belongs to {other}, not {me}'s worktree {cwd}"
+
+
 def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
                        cwd: Path, ddir: Path, *, retried: bool = False, label: str | None = None) -> dict | None:
     """Start the real harness in the pane with `herdr agent start`, hand it a
@@ -1121,6 +1218,10 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     args, herdr_kind = inter
     name = herdr_agent_name(dispatch["id"])
     worker = spec["kind"] == "worker"
+    mismatch = _pane_mismatch(run, dispatch, pane, cwd, check_cwd=False)
+    if mismatch:  # before anything is typed into it
+        _launch_notice(run, dispatch, f"{mismatch}; nothing was typed into it; running headless instead")
+        return None
     # The pane's shell does not inherit this process's environment: source the
     # dispatch identity into it first, so the agent's own `office submit` works.
     env_file = write_agent_env(run, dispatch, ddir, worker=worker)
@@ -1140,7 +1241,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         if "agent_pane_busy" in why and not retried:
             # The pane still holds an agent (a finished session herdr keeps):
             # split a fresh one and try once more before going headless (#200 B7).
-            fresh = _herdr_fresh_pane(run, cwd, pane)
+            fresh = _herdr_fresh_pane(run, cwd, pane, dispatch["id"])
             if fresh:
                 return _herdr_agent_start(run, dispatch, spec, env, inter, fresh, cwd, ddir, retried=True, label=label)
         _launch_notice(run, dispatch, _agent_start_failure(herdr_kind, pane, why))
@@ -1193,8 +1294,15 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         except Exception:  # a landing probe must never abort the launch
             return False
 
-    landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen)
-    if not landed:
+    mismatch = _pane_mismatch(run, dispatch, pane, cwd, check_cwd=True)
+    if mismatch:
+        # The pane is not the one reserved for this dispatch: typing the pointer could brief another task's agent.
+        landed = False
+        _launch_notice(run, dispatch, f"brief pointer NOT sent: {mismatch}. Nothing was typed into the pane; "
+                                      f"once it is sorted out: office prompt {dispatch['id']} -- {shlex.quote(pointer)}")
+    else:
+        landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen)
+    if not landed and not mismatch:
         # The agent is up in a pane the user can see; a second headless copy
         # would race it. Say so and leave the pane for a manual re-prompt.
         view = _pane_view(name)
@@ -1865,24 +1973,86 @@ def _herdr_json(args: list[str]) -> dict:
         return {}
 
 
-def _herdr_pane(run: dict, cwd: Path, label: str | None = None) -> str | None:
+def _herdr_pane(run: dict, cwd: Path, label: str | None = None, dispatch_id: str | None = None) -> str | None:
     """A visible Herdr pane for a dispatch, split beside the caller's own pane.
 
     The first dispatch splits the orchestrator's pane (`HERDR_PANE_ID`, or
     `OFFICE_HERDR_ANCHOR` when set) to the right, so the agent appears in the
     tab the user is watching. Later dispatches reuse a pane whose dispatch has
     ended, else stack down in that column. The caller's pane is only ever split,
-    never run in or closed. Without a caller pane, the run gets its own tab."""
-    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
-    layout = json.loads(tab_file.read_text()) if tab_file.is_file() else None
+    never run in or closed. Without a caller pane, the run gets its own tab.
+
+    Choosing the pane and recording it as reserved for `dispatch_id` is one
+    step under the run's pane lock, so two launches at once (parallel dispatch,
+    back-to-back reruns) never take the same pane or lose each other's record."""
     anchor = os.environ.get("OFFICE_HERDR_ANCHOR") or os.environ.get("HERDR_PANE_ID")
-    if layout and layout.get("mode") != "split" or (layout is None and not anchor):
-        pane = _herdr_own_tab_pane(run, cwd, tab_file, layout)
-    else:
-        pane = _herdr_split_pane(run, cwd, tab_file, layout, anchor)
+    with _pane_lock(run) as tab_file:
+        layout = _read_layout(tab_file)
+        if layout and layout.get("mode") != "split" or (layout is None and not anchor):
+            pane = _herdr_own_tab_pane(run, cwd, tab_file, layout, dispatch_id)
+        else:
+            pane = _herdr_split_pane(run, cwd, tab_file, layout, anchor, dispatch_id)
     if pane and label:
         _herdr_rename(pane, label)
     return pane
+
+
+@contextlib.contextmanager
+def _pane_lock(run: dict):
+    """Exclusive, cross-process lock on the run's pane layout (herdr-tab.json);
+    yields that file's path. A flock dies with its process."""
+    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
+    tab_file.parent.mkdir(parents=True, exist_ok=True)
+    with tab_file.with_name("herdr-tab.lock").open("a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield tab_file
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _read_layout(tab_file: Path) -> dict | None:
+    try:
+        layout = json.loads(tab_file.read_text()) if tab_file.is_file() else None
+    except (OSError, ValueError):
+        return None
+    return layout if isinstance(layout, dict) else None
+
+
+def _release_panes(run: dict, dispatch_id: str) -> None:
+    """Drop every pane reservation this dispatch holds (its launch fell back, so the pane is free)."""
+    with _pane_lock(run) as tab_file:
+        layout = _read_layout(tab_file)
+        reserved = (layout or {}).get("reserved") or {}
+        held = [p for p, holder in reserved.items() if holder == dispatch_id]
+        if held:
+            for pane in held:
+                del reserved[pane]
+            atomic_write_json(tab_file, layout)
+
+
+def _reserved_by(run: dict, pane: str) -> str | None:
+    """The dispatch this run's layout reserved `pane` for, if any."""
+    layout = _read_layout(paths.run_dir(run["id"]) / "herdr-tab.json") if run.get("id") else None
+    return ((layout or {}).get("reserved") or {}).get(pane)
+
+
+def _reserved_busy(layout: dict) -> set:
+    """Reserved panes whose dispatch is still launching or running: a
+    launch reserves its pane well before the dispatch row records it."""
+    reserved = layout.get("reserved") or {}
+    if not reserved:
+        return set()
+    con = db.connect()
+    try:
+        busy = set()
+        for pane, did in reserved.items():
+            row = con.execute("SELECT status FROM dispatches WHERE id=?", (did,)).fetchone()
+            if row is not None and row["status"] in ("launching", "running"):
+                busy.add(pane)
+        return busy
+    finally:
+        con.close()
 
 
 def _herdr_rename(pane: str, label: str) -> None:
@@ -1955,15 +2125,18 @@ def _pane_is_shell(pane: str) -> bool:
     return bool(info) and not info.get("agent")
 
 
-def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None, anchor: str | None) -> str | None:
+def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None, anchor: str | None,
+                      dispatch_id: str | None = None) -> str | None:
+    """Caller holds the pane lock."""
     layout = layout or {"mode": "split", "anchor": anchor, "panes": []}
     anchor = layout.get("anchor") or anchor
     live = [p for p in layout["panes"] if _herdr_json(["pane", "get", p])]  # the user may close panes
-    busy = _busy_panes(run)
+    busy = _busy_panes(run) | _reserved_busy(layout)
     for pane in live:
         if pane not in busy and _pane_is_shell(pane):
             subprocess.run(["herdr", "pane", "run", pane, f"cd {shlex.quote(str(cwd))}"], capture_output=True, timeout=30)
             layout["panes"] = live
+            _reserve(layout, pane, dispatch_id)
             atomic_write_json(tab_file, layout)
             return pane
     # Split the caller's pane vertically (side by side); stack further agents in that column.
@@ -1975,12 +2148,21 @@ def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None,
         return None
     layout["panes"] = live + [pane]
     layout.setdefault("tab_id", info.get("tab_id"))
+    _reserve(layout, pane, dispatch_id)
     atomic_write_json(tab_file, layout)
     return pane
 
 
-def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None) -> str | None:
-    """No caller pane to split (or a run begun before split mode): a tab owned by the run."""
+def _reserve(layout: dict, pane: str, dispatch_id: str | None) -> None:
+    if dispatch_id:
+        layout.setdefault("reserved", {})[pane] = dispatch_id
+    else:
+        layout.get("reserved", {}).pop(pane, None)  # a caller naming no dispatch takes the pane over
+
+
+def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None, dispatch_id: str | None = None) -> str | None:
+    """No caller pane to split (or a run begun before split mode): a tab owned by the run.
+    Caller holds the pane lock."""
     if tab and not _herdr_json(["tab", "get", tab["tab_id"]]):
         tab = None  # the user closed it
     if tab is None:
@@ -1993,18 +2175,22 @@ def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None) 
         if not root:
             return None
         tab = {"mode": "tab", "tab_id": (res.get("tab") or {}).get("tab_id"), "panes": [root]}
+        _reserve(tab, root, dispatch_id)
         atomic_write_json(tab_file, tab)
         return root
-    busy = _busy_panes(run)
+    busy = _busy_panes(run) | _reserved_busy(tab)
     for pane in tab["panes"]:
         if pane not in busy and _pane_is_shell(pane):
             subprocess.run(["herdr", "pane", "run", pane, f"cd {shlex.quote(str(cwd))}"], capture_output=True, timeout=30)
+            _reserve(tab, pane, dispatch_id)
+            atomic_write_json(tab_file, tab)
             return pane
     direction = "right" if len(tab["panes"]) % 2 else "down"
     res = _herdr_json(["pane", "split", "--pane", tab["panes"][-1], "--direction", direction, "--cwd", str(cwd), "--no-focus"])
     pane = (res.get("pane") or {}).get("pane_id")
     if pane:
         tab["panes"].append(pane)
+        _reserve(tab, pane, dispatch_id)
         atomic_write_json(tab_file, tab)
     return pane
 
@@ -2046,11 +2232,7 @@ def _orchestrator_pane(run: dict) -> str | None:
     pane = os.environ.get("HERDR_PANE_ID")
     if pane:
         return pane
-    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
-    try:
-        layout = json.loads(tab_file.read_text()) if tab_file.is_file() else {}
-    except (OSError, ValueError):
-        layout = {}
+    layout = _read_layout(paths.run_dir(run["id"]) / "herdr-tab.json") or {}
     return layout.get("anchor") or os.environ.get("OFFICE_HERDR_ANCHOR") or None
 
 
@@ -2231,20 +2413,21 @@ def _set_dispatch(dispatch_id: str, **cols) -> None:
         con.close()
 
 
-def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str) -> str | None:
-    """A new pane split from one herdr refused as busy, recorded in the run's layout."""
-    res = _herdr_json(["pane", "split", "--pane", busy_pane, "--direction", "down", "--cwd", str(cwd), "--no-focus"])
-    pane = (res.get("pane") or {}).get("pane_id")
-    if not pane:
-        return None
-    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
-    try:
-        layout = json.loads(tab_file.read_text()) if tab_file.is_file() else None
-    except (OSError, ValueError):
-        layout = None
-    if layout is not None:
-        layout.setdefault("panes", []).append(pane)
-        atomic_write_json(tab_file, layout)
+def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str, dispatch_id: str | None = None) -> str | None:
+    """A new pane split from one herdr refused as busy, recorded in the run's layout
+    and reserved for the dispatch in place of the busy one."""
+    with _pane_lock(run) as tab_file:
+        res = _herdr_json(["pane", "split", "--pane", busy_pane, "--direction", "down", "--cwd", str(cwd), "--no-focus"])
+        pane = (res.get("pane") or {}).get("pane_id")
+        if not pane:
+            return None
+        layout = _read_layout(tab_file)
+        if layout is not None:
+            layout.setdefault("panes", []).append(pane)
+            if dispatch_id and (layout.get("reserved") or {}).get(busy_pane) == dispatch_id:
+                del layout["reserved"][busy_pane]
+            _reserve(layout, pane, dispatch_id)
+            atomic_write_json(tab_file, layout)
     return pane
 
 
@@ -2657,15 +2840,31 @@ def _quota_wall(run: dict, d: dict) -> str | None:
 
 def job_notify_worker(con, run: dict, job: dict) -> dict:
     """Best-effort native nudge to a live Herdr-hosted worker. Delivery truth
-    stays in runs.db and rides on the worker's next office command."""
-    from office import gates
+    stays in runs.db and rides on the worker's next office command; an
+    amendment's prompt that lands is recorded delivered, and one that cannot
+    reach the worker records why it stayed queued."""
+    from office import amend, gates
     payload = job["payload"]
     d = state.get_dispatch(con, payload["dispatch_id"])
     unblock = bool(payload.get("unblock"))
+
+    def note(delivered: bool, reason: str) -> None:
+        try:  # the record is bookkeeping: failing it never undoes or skips what was sent
+            amend.record_notify(con, run, payload, delivered=delivered, reason=reason)
+        except Exception:
+            pass
+
     if not d or d.get("launcher") != "herdr" or not d.get("pane_id") or d["status"] != "running" \
             or (unblock and not gates._agent_alive(herdr_agent_name(d["id"]))):
         if unblock and d:
             _amendment_undelivered(con, run, payload, d)
+        note(False, amend.unreachable_reason(d))
+        return {"sent": False}
+    wrong = _pane_mismatch(run, d, d["pane_id"], Path(d["worktree"]), check_cwd=True) if d.get("worktree") else None
+    if wrong:  # the recorded pane is someone else's now: nothing is typed into it
+        if unblock:
+            _amendment_undelivered(con, run, payload, d)
+        note(False, f"not sent: {wrong}")
         return {"sent": False}
     text = payload.get("text", "office status has an update for you.")
     landed = submit_prompt(d["pane_id"], text, pane=d["pane_id"])
@@ -2687,6 +2886,10 @@ def job_notify_worker(con, run: dict, job: dict) -> dict:
                                dispatch_id=d["id"])
         else:
             _amendment_undelivered(con, run, payload, d)
+    pane = d["pane_id"]
+    note(landed == "landed", f"prompt landed in pane {pane}" if landed == "landed" else
+         f"prompt typed but unsubmitted in pane {pane}" if landed == "held" else
+         f"prompt sent to pane {pane} but no landed signal")
     return {"sent": True, "landed": landed}
 
 
@@ -2717,7 +2920,14 @@ def start_stacked(con, run: dict, accepted_task: str) -> list[str]:
     for t in state.tasks(con, run["id"]):
         if t["status"] == "queued" and t.get("stack_after") == accepted_task:
             graph = {x["id"]: x["depends"] for x in state.tasks(con, run["id"])}
-            base = _base_for(con, run, t, graph, accepted_task)
+            try:
+                base = _base_for(con, run, t, graph, accepted_task)
+            except Refused as e:
+                # The acceptance that released this task must still commit: park the task and tell the orchestrator.
+                state.update_task(con, run["id"], t["id"], status="paused", stack_after=None, pause_reason=e.message[:200])
+                state.signal_orchestrator(con, run, source="stacked start refused", task_id=t["id"], dispatch_id=None,
+                                          reason=e.message, next_step=e.next_step or f"office dispatch {t['id']}")
+                continue
             request_launch(con, run, t["id"], role="executor", base=base)
             started.append(t["id"])
     return started
