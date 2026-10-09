@@ -73,6 +73,10 @@ continue with the installed runtime. A failed or offline check is informational 
 - Dispatch as the approved diagram shows: a wave's roots with `office dispatch T1 T2 --parallel`,
   dependents stacked (`office dispatch T1 T3`). Dispatch runs each task's planned primary route or names the
   fallback it took and why; when every planned route is out, it stops: `office dispatch <task> --reroute`.
+  The task records its effective route (harness, model, effort) at dispatch; `office status` lists it and
+  `office inspect route <task>` adds every change (old/new route, reason, actor, time). To change a pending or
+  running task's route deliberately: `office amend route <task> --as <harness>/<model>[@effort] --quote "<words>"`.
+  Office follows the recorded route on redispatch and rerun; it never swaps it silently.
 - A dispatch failure is a recovery checkpoint, not permission to abandon the Office run. Inspect the launch
   notice and `office inspect task <T> --verbose`; when Office names a failed Herdr pane, read it yourself with
   `herdr pane read <pane>` (or the saved `pane-tail.txt` once Office has closed the abandoned pane) to identify a

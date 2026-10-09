@@ -239,6 +239,7 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
     with db.transaction(con):
         if decision:
             dispatch._record_routing(con, run, decision)
+            dispatch.note_route(con, run, task, decision)
         did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
                                       extra=extra, base=(restack or {}).get("base"), decision=decision)
         if restack:
