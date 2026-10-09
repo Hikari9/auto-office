@@ -28,17 +28,19 @@ def _draft(con, root: Path, run: dict) -> Path:
 # A task blocked by its own worker's refused or scope-requesting submit. The
 # worker may still resubmit (revert, or after the amendment), so these do not
 # refuse a submit the way an orchestrator pause does.
-SELF_BLOCK = ("submit refused", "scope requested")
+SELF_BLOCK = ("submit refused", "scope requested", "raised")
 
 
 def self_blocked(task: dict) -> bool:
     return task["status"] == "blocked" and (task.get("pause_reason") or "").startswith(SELF_BLOCK)
 
 
-def _record_block(con, run: dict, task: dict, d: dict, reason: str, state_key: str, state_val: dict) -> None:
+def _record_block(con, run: dict, task: dict, d: dict, reason: str, state_key: str, state_val: dict,
+                  keep_id: bool = False) -> None:
     """Durable: the task is a blocker the orchestrator sees at once, and the
     dispatch keeps what it was blocked on. Caller holds the transaction. Ownership is
-    re-read here: a revoke or takeover since the caller looked refuses and changes nothing."""
+    re-read here: a revoke or takeover since the caller looked refuses and changes nothing.
+    `keep_id` joins a block this task is already in (a second raise) instead of replacing its id."""
     import json
     task = state.get_task(con, run["id"], task["id"])
     if task["current_dispatch_id"] != d["id"]:
@@ -53,7 +55,8 @@ def _record_block(con, run: dict, task: dict, d: dict, reason: str, state_key: s
     row = con.execute("SELECT override_json FROM dispatches WHERE id=?", (d["id"],)).fetchone()
     data = json.loads((row["override_json"] if row else None) or "{}")
     data[state_key] = state_val
-    data["block_id"] = uuid.uuid4().hex[:12]  # names this block: a stale notice cannot lift a newer one
+    if not (keep_id and self_blocked(task) and data.get("block_id")):
+        data["block_id"] = uuid.uuid4().hex[:12]  # names this block: a stale notice cannot lift a newer one
     # Never replace another blocker (revoke, orchestrator pause) with this one. A
     # `submitted` task is blocked too: its revision and gates stay as they are (acceptance
     # waits while the task is blocked) and the status it had is kept to restore on unblock.
@@ -183,30 +186,33 @@ def _scope_hunk(wt: Path, files: list[str], base: str = "HEAD", limit: int = 600
     return text + "\n... (truncated)" if cut else text
 
 
-def request_scope_change(con, run: dict, *, cwd: Path, files: list[str], reason: str) -> Result:
-    """Executor: ask the orchestrator to widen this task's scope. Blocks the
-    task and wakes `office wait`/`status` with the files, reason and diff hunk."""
+def executor_dispatch(con, run: dict, cwd: Path, flag: str) -> dict:
+    """The executor dispatch a command run inside a task worktree acts for (from OFFICE_DISPATCH_ID, else the
+    worktree). `flag` names the command in the refusal."""
     dispatch_id = os.environ.get("OFFICE_DISPATCH_ID")
     d = state.get_dispatch(con, dispatch_id) if dispatch_id else None
     if d is None:
         d = _worktree_dispatch(con, run, cwd)
     if d is None or d["role"] != "executor" or not d.get("task_id"):
-        raise Refused("not-an-executor", "--request-scope is for an executor inside its task worktree",
-                      next_step="office submit")
-    if not reason.strip():
-        raise Usage("scope-reason", "say why the scope must grow",
-                    next_step='office submit --request-scope <path> -- "<reason>"')
-    reason = reason.strip()[:2000]
-    task = state.get_task(con, run["id"], d["task_id"])
+        raise Refused("not-an-executor", f"{flag} is for an executor inside its task worktree", next_step="office submit")
+    return d
+
+
+def task_worktree(task: dict, d: dict, cwd: Path, retry: str) -> Path:
+    """The dispatch's worktree, refused unless `cwd` is inside it. `retry` is the command to run from there."""
     wt = Path(d["worktree"]).resolve()
     ident = paths.repo_identity(cwd)
     if ident is None or ident[0] != wt:
         raise Refused("wrong-worktree", f"run this from the task worktree ({task['id']}), not {cwd}",
-                      scope=task["id"], next_step=f'cd {shlex.quote(str(wt))} && office submit --request-scope '
-                                                  f'{shlex.quote(files[0] if files else "<path>")} -- "<reason>"')
-    files = clean_request_paths(wt, files)
+                      scope=task["id"], next_step=f"cd {shlex.quote(str(wt))} && {retry}")
+    return wt
+
+
+def check_holder(con, run: dict, task: dict, d: dict, what: str) -> None:
+    """Refuse unless `d` still holds `task`: not superseded, lease live, and the task not stopped by the
+    orchestrator. `what` names the rejected act ("request", "raise")."""
     if task["current_dispatch_id"] != d["id"]:
-        raise Refused("superseded-dispatch", f"{task['id']} now belongs to a newer dispatch; this session's request is rejected",
+        raise Refused("superseded-dispatch", f"{task['id']} now belongs to a newer dispatch; this session's {what} is rejected",
                       scope=task["id"], preserved="your worktree", next_step="stop; the current holder continues the task")
     if dispatch_mod.live_lease(con, run["id"], d["lease_id"]) is None:
         raise Refused("lease-lost", f"{task['id']} lease is no longer held by this session (revoked or taken over)",
@@ -214,6 +220,21 @@ def request_scope_change(con, run: dict, *, cwd: Path, files: list[str], reason:
     if task["status"] in ("paused", "blocked", "cancelled") and not self_blocked(task):
         raise Refused("task-paused", f"{task['id']} is {task['status']}: {task.get('pause_reason') or ''}",
                       scope=task["id"], preserved="your worktree", next_step="stop and wait; the orchestrator is resolving it")
+
+
+def request_scope_change(con, run: dict, *, cwd: Path, files: list[str], reason: str) -> Result:
+    """Executor: ask the orchestrator to widen this task's scope. Blocks the
+    task and wakes `office wait`/`status` with the files, reason and diff hunk."""
+    d = executor_dispatch(con, run, cwd, "--request-scope")
+    if not reason.strip():
+        raise Usage("scope-reason", "say why the scope must grow",
+                    next_step='office submit --request-scope <path> -- "<reason>"')
+    reason = reason.strip()[:2000]
+    task = state.get_task(con, run["id"], d["task_id"])
+    wt = task_worktree(task, d, cwd, "office submit --request-scope " + shlex.quote(files[0] if files else "<path>")
+                       + ' -- "<reason>"')
+    files = clean_request_paths(wt, files)
+    check_holder(con, run, task, d, "request")
     hunk = _scope_hunk(wt, files, d.get("base_commit") or "HEAD")
     # Executor-controlled text reaches a command the orchestrator copies: one quoted argument.
     amend_cmd = ("office amend " + shlex.quote(task["id"]) + " --contract -- "

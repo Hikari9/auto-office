@@ -3227,9 +3227,11 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
             state.emit(con, run, "task.blocked", f"{task['id']} worker ended on a question; answer it: "
                        f"{questions.answer_command(d, asked)}; work is preserved in its worktree", task_id=task["id"])
             return
+        # A dispatch that raised stopped on purpose (an answer, not a retry, resolves it): it is no failed attempt.
         retries = con.execute("SELECT COUNT(*) FROM dispatches d WHERE d.run_id=? AND d.task_id=? AND d.terminal_classification "
-                              "IS NOT NULL AND NOT EXISTS (SELECT 1 FROM revisions r WHERE r.dispatch_id=d.id)",
-                              (run["id"], task["id"])).fetchone()[0]
+                              "IS NOT NULL AND NOT EXISTS (SELECT 1 FROM revisions r WHERE r.dispatch_id=d.id) "
+                              "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.run_id=d.run_id AND e.dispatch_id=d.id "
+                              "AND e.kind='task.raised')", (run["id"], task["id"])).fetchone()[0]
         limit = (state.pinned_config(run).get("verification") or {}).get("environment_retry_max", 2)
         if retries <= limit:
             state.emit(con, run, "task.relaunch", f"{task['id']} worker ended ({d['terminal_classification']}) "

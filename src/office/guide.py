@@ -609,6 +609,7 @@ def _waiting_on(con, run: dict, task: dict) -> str:
 
 
 def worker_status(con, run: dict, dispatch_id: str) -> Result:
+    from office import raising
     d = state.get_dispatch(con, dispatch_id)
     task = state.get_task(con, run["id"], d["task_id"]) if d and d.get("task_id") else None
     if task is None:
@@ -629,6 +630,9 @@ def worker_status(con, run: dict, dispatch_id: str) -> Result:
         res.next = "fix the findings, then office submit"
     elif task["status"] in ("submitted",):
         res.next = "no action; verification is running"
+    elif raising.open_raises(con, run, dispatch_id=dispatch_id):
+        res.next = ("stop and wait; you raised it and the orchestrator answers: the answer arrives as a message in "
+                    "this session. Do not submit unfinished work")
     elif task["status"] in ("paused", "blocked"):
         res.next = f"stop; {task.get('pause_reason') or task['status']}"
     elif task["status"] == "accepted":
@@ -660,7 +664,7 @@ def piggyback(con, run: dict, res: Result) -> None:
 
 # Kinds that mean something failed or waits on the orchestrator. Everything else is informational.
 _URGENT_KINDS = frozenset({
-    "task.blocked", "task.paused", "task.findings_queued", "task.scope_requested", "task.restack_needed",
+    "task.blocked", "task.paused", "task.findings_queued", "task.scope_requested", "task.raised", "task.restack_needed",
     "task.amend_undelivered", "submit.refused", "submit.rejected", "integration.conflict", "integration.failed",
     "gate.unavailable", "gate.changes_required", "gate.attention", "gate.escalated", "gate.brief_defect",
     "plan.unavailable", "plan.changes_required", "plan.attention", "plan.escalated", "plan.defect",
