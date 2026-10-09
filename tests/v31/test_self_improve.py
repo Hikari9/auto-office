@@ -132,3 +132,18 @@ def test_dead_jobs_and_subagents_without_events_are_captured_once(env):
         assert con.execute("SELECT SUM(occurrences) FROM self_improve_incidents").fetchone()[0]==2
     finally:
         con.close()
+
+
+def test_worker_drains_more_than_ten_ready_incidents(env, monkeypatch):
+    con=env.con()
+    try:
+        for i in range(12):
+            bugwatch._record(con,'run-batch','job.failed',f'failure case {i}',f'event:{i}')
+        monkeypatch.setattr(bugwatch,'investigate',lambda *args:{'confidence':'strong','title':'test defect',
+                            'expected':'success','actual':'failed','evidence':'recorded failure','reproduction':''})
+        monkeypatch.setattr(bugwatch,'publish',lambda incident, report:
+                            'https://github.com/Hikari9/auto-office/issues/999')
+        assert bugwatch.worker()==0
+        assert con.execute("SELECT COUNT(*) FROM self_improve_incidents WHERE status='filed'").fetchone()[0]==12
+    finally:
+        con.close()

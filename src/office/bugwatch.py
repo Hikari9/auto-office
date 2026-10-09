@@ -317,6 +317,13 @@ def worker(*, once: bool = False) -> int:
                     _process(con,incident)
                 if once:
                     return 0
+                # MIN ignores NULL; pending incidents without a retry timestamp
+                # must be drained even if a batch contains more than ten.
+                immediate = con.execute("SELECT 1 FROM self_improve_incidents WHERE "
+                                        "status IN ('pending','ready','retry') AND next_retry_at IS NULL "
+                                        "LIMIT 1").fetchone()
+                if immediate:
+                    continue
                 wait = con.execute("SELECT MIN(next_retry_at) FROM self_improve_incidents "
                                    "WHERE status IN ('pending','ready','retry')").fetchone()[0]
                 if not wait:
