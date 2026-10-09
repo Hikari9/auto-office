@@ -431,7 +431,8 @@ def answer(con, run: dict, target: str | None, text: str) -> Result:
     with that keypress (`office prompt` types text, which a widget ignores or misreads). Any other
     answer to a widget dismisses it with Esc, then is sent as a prompt. A plain-text question is
     answered with `office prompt`."""
-    from office import prompting
+    from office import prompting, raising
+    raising.refuse_worker()
     if not target or not text.strip():
         raise Usage("answer-usage", "name the task or dispatch and the answer",
                     next_step='office answer <task|dispatch> <option> | office answer <task|dispatch> -- "<text>"')
