@@ -184,6 +184,10 @@ def test_unpinned_convergence_run_keeps_pre_422_scopes(env):
     env.office("dispatch", "T1", "T2", "--parallel", check=0)
     assert _scopes(env) == ["L-T1", "L-T2"]
     assert "integrated_review" not in _run_row(env)["landing"]
+    r = _receipt(env)
+    assert r["required"] is None and "not evaluated" in r["reason"] and "independent" not in r["reason"]
+    code, out = env.office("inspect", "convergence")
+    assert "not evaluated (run predates #422)" in out and "no shared interface" not in out
 
 
 def test_v31_pinned_run_untouched(env):
@@ -191,3 +195,47 @@ def test_v31_pinned_run_untouched(env):
     assert not contract.has_integrated_review({"gates": {"review_contract": "v3.1", "integrated_review": "v1"}})
     assert not contract.has_integrated_review({"gates": {"review_contract": contract.CONVERGENCE}})
     assert contract.has_integrated_review({"gates": {"review_contract": contract.CONVERGENCE, "integrated_review": "v1"}})
+
+
+def _covered_probe(env, mutate_sql=None, mutate_state=None):
+    """Run the shared-interface scenario, optionally weaken the covering review, and ask
+    whether a same-tree scope over the same tasks would still count as covered."""
+    from office import convergence, state, db
+    plan = PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\ninterfaces: provides add\n").replace(
+        "scope: mul.py\n", "scope: mul.py\ninterfaces: consumes add\n")
+    _two(env, plan)
+    con = env.con()
+    try:
+        rid = _run_row(env)["id"]
+        if mutate_sql:
+            con.execute(mutate_sql, ("S-T1+T2",))
+            con.commit()
+        if mutate_state:
+            run = state.get_run(con, rid)
+            convergence._set_scope(con, run, "S-T1+T2", **mutate_state(convergence.scope_state(run, "S-T1+T2")))
+            con.commit()
+        run = state.get_run(con, rid)
+        scope = convergence.find_scope(con, run, "S-T1+T2")
+        st = convergence.scope_state(run, "S-T1+T2")
+        return convergence._covered_by(con, run, {"id": "S-other", "tasks": scope["tasks"]}, {"tree": st["tree"]})
+    finally:
+        con.close()
+
+
+def test_covered_by_baseline_is_covered(env):
+    assert _covered_probe(env) == "S-T1+T2"
+
+
+@pytest.mark.parametrize("sql", [
+    "UPDATE gates SET independence='degraded-orchestrator' WHERE scope=? AND kind='convergence_review'",
+    "UPDATE gates SET independence='independent-orchestrator' WHERE scope=? AND kind='convergence_review'",
+    "UPDATE gates SET review_status='UNAVAILABLE' WHERE scope=? AND kind='convergence_review'",
+    "UPDATE gates SET input_key='S-T1+T2:deadbeef' WHERE scope=? AND kind='convergence_review'",
+])
+def test_covered_by_refuses_weak_or_misbound_reviews(env, sql):
+    assert _covered_probe(env, mutate_sql=sql) is None
+
+
+@pytest.mark.parametrize("status", ["waived", "escalated"])
+def test_covered_by_refuses_waived_scope(env, status):
+    assert _covered_probe(env, mutate_state=lambda st: {"status": status}) is None

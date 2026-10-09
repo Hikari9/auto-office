@@ -226,8 +226,10 @@ def resolve_risk(config: dict, blast_radius: str | None, size_class: str | None,
     high_blast = set(signals.get("high_blast_radius") or ["production", "production-data"])
     high_size = set(signals.get("high_size_class") or ["L", "XL"])
     high = bool(irreversible) or blast_radius in high_blast or size_class in high_size
+    # `integration` (#422) is the part of `high` that is integration risk: size is not.
     return {"blast_radius": blast_radius, "size_class": size_class,
-            "irreversible": bool(irreversible), "high": high}
+            "irreversible": bool(irreversible), "high": high,
+            "integration": bool(irreversible) or blast_radius in high_blast}
 
 
 def fit_gear(requested: str | None, risk: dict, volume: bool = False, interview: bool = False,
