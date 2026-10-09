@@ -25,6 +25,11 @@ from office.util import now_iso
 
 REPO = "Hikari9/auto-office"
 SELF_ENV = "OFFICE_SELF_IMPROVE_REPORTER"
+# One detached reporter per state home, for a bounded time. A disposable test
+# home must not retain a background worker forever: pending incidents and retry
+# receipts are durable in runs.db, and the next Office invocation resumes them.
+MAX_REPORTER_SECONDS = 900.0
+REPORTER_POLL_SECONDS = 5.0
 # Routine gates, user mistakes, quota limits, and external outages are not bugs.
 IGNORED = ("not-ready", "close-blocked", "user-quote-required", "invalid-override", "no-task",
            "usage", "quota-probe", "user-", "plan.awaiting", "self_improve", "self-improve")
@@ -144,11 +149,12 @@ def lifecycle_attempt(run_id: str | None, command: str, outcome: str, detail: st
                     _record(con,run_id,f"{command}.error",detail,"lifecycle")
             if run_id:
                 capture(con,run_id,force=True)
-            result = summary(con,run_id) if run_id else ""
+                result = summary(con,run_id)
+                start_reporter(con)
+            else:
+                result = ""
         finally:
             con.close()
-        if run_id:
-            start_reporter()
         return result
     except Exception:
         return "self-improve audit unavailable; retry on the next Office command"
@@ -162,19 +168,55 @@ def summary(con, run_id: str) -> str:
             ("filed","pending","ready","retry","suspected")))
 
 
-def start_reporter() -> None:
-    """Best effort wake-up. Worker also resumes on the next Office invocation."""
+def _lock_path() -> Path:
+    return paths.state_home() / "self-improve.lock"
+
+
+def _reporter_lifetime() -> float:
+    """Wall-clock bound on one detached reporter process (env-overridable)."""
+    try:
+        return max(1.0, float(os.environ.get("OFFICE_SELF_IMPROVE_MAX_SECONDS") or MAX_REPORTER_SECONDS))
+    except ValueError:
+        return MAX_REPORTER_SECONDS
+
+
+def _pending_work(con) -> bool:
+    row = con.execute("SELECT 1 FROM self_improve_incidents "
+                      "WHERE status IN ('pending','ready','retry') LIMIT 1").fetchone()
+    return row is not None
+
+
+def start_reporter(con=None) -> None:
+    """Best-effort wake-up, bounded to one live reporter per state home.
+
+    The per-home lock is the ownership record: a wake-up that finds it held
+    spawns nothing, so repeated CLI wakeups (and repeated test or
+    mutation-test invocations) cannot accumulate detached workers. A caller
+    with a connection also skips the spawn when no incident awaits work.
+    Either way the durable receipts in runs.db resume on the next Office
+    invocation. The worker also exits on its own lifetime bound or when its
+    disposable state home disappears.
+    """
     if os.environ.get(SELF_ENV):
         return
     try:
-        from office import frontdoor
-        argv, extra = frontdoor.current_argv()
-        env = dict(os.environ)
-        env.update(extra)
-        env[SELF_ENV] = "1"
-        subprocess.Popen([*argv,"_self_improve"], env=env, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True, close_fds=True)
+        if con is not None and not _pending_work(con):
+            return
+        lock = _lock_path()
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock, "a+") as probe:
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return  # a live reporter already owns this home
+            from office import frontdoor
+            argv, extra = frontdoor.current_argv()
+            env = dict(os.environ)
+            env.update(extra)
+            env[SELF_ENV] = "1"
+            subprocess.Popen([*argv,"_self_improve"], env=env, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True, close_fds=True)
     except Exception:
         pass
 
@@ -312,18 +354,40 @@ def _process(con, incident: dict) -> None:
                         "updated_at=? WHERE fingerprint=?",(failures,retry,sanitize(type(exc).__name__+": "+str(exc)),now_iso(),fp))
 
 
+def _wait(delay: float, deadline: float, home: Path) -> None:
+    """Sleep toward the next retry in short slices. A released home or the
+    lifetime deadline ends the wait early, so reclamation stays prompt."""
+    remaining = max(1.0,min(delay,60.0))
+    while remaining > 0 and home.exists():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return
+        slice_seconds = min(remaining,REPORTER_POLL_SECONDS,left)
+        time.sleep(slice_seconds)
+        remaining -= slice_seconds
+
+
 def worker(*, once: bool = False) -> int:
-    """Single-owner durable retry pump. A future CLI call recovers after a crash."""
-    lock = paths.state_home() / "self-improve.lock"
+    """Single-owner durable retry pump with a bounded lifetime.
+
+    The per-home lock is the ownership record. The worker exits when nothing
+    is pending, when its overall lifetime bound elapses, or when its state
+    home disappears (a disposable test home its owner released). Exiting
+    loses nothing: pending incidents and retry receipts are durable in
+    runs.db, and the next Office invocation starts a fresh reporter that
+    resumes them.
+    """
+    lock = _lock_path()
     lock.parent.mkdir(parents=True,exist_ok=True)
     with open(lock,"a+") as f:
         try:
             fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:
             return 0
+        deadline = time.monotonic() + _reporter_lifetime()
         con = db.connect()
         try:
-            while True:
+            while lock.parent.exists() and time.monotonic() < deadline:
                 due = _due(con)
                 for incident in due:
                     _process(con,incident)
@@ -339,6 +403,6 @@ def worker(*, once: bool = False) -> int:
                     delay = (datetime.fromisoformat(wait)-datetime.now(timezone.utc)).total_seconds()
                 except ValueError:
                     delay = 30
-                time.sleep(max(1,min(delay,60)))
+                _wait(delay,deadline,lock.parent)
         finally:
             con.close()
