@@ -84,6 +84,44 @@ def test_the_producing_session_cannot_review_its_own_work(env, tmp_path):
     assert _scope(env, "L-T1")["status"] == "unavailable"
 
 
+def _unavailable(env, tmp_path):
+    _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"exit": 1}])
+    env.office("dispatch", "T1", check=0)
+    report = tmp_path / "r.txt"
+    report.write_text(APPROVED)
+    return report
+
+
+def test_unknown_orchestrator_identity_fails_closed_to_degraded(env, tmp_path):
+    """No OFFICE_SESSION: nothing can show this session is not the producer."""
+    report = _unavailable(env, tmp_path)
+    _set_producer_session(env, "producer-session")
+    env.office("review", "L-T1:convergence", "--report", str(report), check=0)
+    assert _gates(env, "convergence_review")[-1]["independence"] == "degraded-orchestrator"
+
+
+def test_unrecorded_producer_session_fails_closed_to_degraded(env, tmp_path):
+    report = _unavailable(env, tmp_path)
+    con = env.con()
+    con.execute("UPDATE dispatches SET session_id=NULL WHERE role='executor'")
+    con.commit()
+    env.office("review", "L-T1:convergence", "--report", str(report),
+               env={"OFFICE_HARNESS": "claude", "OFFICE_SESSION": "orchestrator-session"}, check=0)
+    assert _gates(env, "convergence_review")[-1]["independence"] == "degraded-orchestrator"
+
+
+def test_lane_visual_cap_follows_the_configured_cap(env):
+    _start(env, extra=("--review-rounds", "5"))
+    assert _gates_json(env)["visual_review_max_rounds"] == 5
+
+
+def test_a_dispatched_role_marker_cannot_cap_waive(env):
+    _spent(env)
+    _reach_cap(env)
+    code, out = env.office("waive", "L-T1", "--reason", REASON, env={"OFFICE_ROLE": "executor"})
+    assert code == 4 and "worker-cannot-waive" in out, out
+
+
 def test_a_pre_423_convergence_run_keeps_the_degraded_fallback_record(env, tmp_path):
     _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"exit": 1}])
     _unpin(env)

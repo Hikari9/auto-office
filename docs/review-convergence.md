@@ -418,8 +418,11 @@ office review <scope>:visual --report <file> --inspected <every screenshot>
 
 Specialist reviewers come first; the fallback is available only after every route failed or returned no
 readable reply. The report uses the reviewer reply format. Independence means a different agent or session from
-the producer (#423): the review is recorded as `independent-orchestrator` unless this session produced work in the
-scope, in which case `office review` is refused (`self-review-prohibited`). Runs started before #423 record the
+the producer (#423). It fails closed: the review is recorded as `independent-orchestrator` only when this session's
+harness session id (`OFFICE_SESSION`) is known and every producer dispatch of the scope has a recorded, different
+session id. The same id is refused (`self-review-prohibited`). An unknown identity or an unrecorded producer
+session records `degraded-orchestrator`. The ids come from the environment and are not proof against a hostile
+session. Runs started before #423 record the
 fallback as `degraded-orchestrator`. Either is shown on receipts. For visual, every screenshot of the capture must be
 listed in `--inspected`; otherwise no visual verdict is recorded and the gate stays blocked for a
 capable reviewer (`office resume`) or a waiver.
