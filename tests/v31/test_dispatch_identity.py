@@ -53,7 +53,7 @@ elif args[:2] == ["pane", "get"]:
     time.sleep(delay / 2)
     d = txn(lambda d: d)
     if args[2] in d["cwd"]:
-        result = {{"pane": {{"pane_id": args[2], "agent": d["agents"].get(args[2]),
+        result = {{"pane": {{"pane_id": args[2], "agent": os.environ.get("FAKE_HERDR_AGENT_LIE") or d["agents"].get(args[2]),
                             "cwd": os.environ.get("FAKE_HERDR_CWD_LIE") or d["cwd"][args[2]]}}}}
 elif args[:2] == ["tab", "create"]:
     cwd = args[args.index("--cwd") + 1]
@@ -219,6 +219,41 @@ def test_a_failed_launch_releases_its_pane(light):
     assert dispatch._herdr_pane(light.run, light.wt("D2"), dispatch_id="D2") == pane
 
 
+def test_a_retried_launch_takes_back_its_own_reserved_pane(light):
+    # A launch that died after reserving its pane (job retried) is not blocked by its own reservation.
+    from office import dispatch, paths
+    pane_state(light.state, "w1:p101")
+    (paths.run_dir(light.run["id"]) / "herdr-tab.json").write_text(
+        json.dumps({"mode": "split", "anchor": "w1:pQ", "panes": ["w1:p101"], "reserved": {"w1:p101": "D1"}}))
+    assert dispatch._herdr_pane(light.run, light.wt("D1"), dispatch_id="D1") == "w1:p101"
+    assert dispatch._herdr_pane(light.run, light.wt("D2"), dispatch_id="D2") != "w1:p101"
+    assert light.layout()["reserved"]["w1:p101"] == "D1" and len(light.layout()["reserved"]) == 2
+
+
+def test_a_dispatch_holds_one_pane_at_a_time(light):
+    from office import dispatch
+    layout = {"reserved": {"w1:p101": "D1", "w1:p102": "D2"}}
+    dispatch._reserve(layout, "w1:p103", "D1")
+    assert layout["reserved"] == {"w1:p102": "D2", "w1:p103": "D1"}
+    dispatch._reserve(layout, "w1:p102", None)  # a caller naming no dispatch takes the pane over
+    assert layout["reserved"] == {"w1:p103": "D1"}
+
+
+def test_a_release_and_a_reservation_at_once_lose_neither_record(light):
+    from office import dispatch
+    held = dispatch._herdr_pane(light.run, light.wt("D1"), dispatch_id="D1")
+    _, other = together(lambda: dispatch._release_panes(light.run, "D1"),
+                        lambda: dispatch._herdr_pane(light.run, light.wt("D2"), dispatch_id="D2"))
+    layout = light.layout()
+    assert layout["reserved"] == {other: "D2"} and other in layout["panes"] and held in layout["panes"], layout
+
+
+def test_printable_collapses_control_characters_and_caps_length():
+    from office import dispatch
+    assert dispatch.printable("/wt/a\n\x1b[31mFAKE\tline") == "/wt/a [31mFAKE line"
+    assert len(dispatch.printable("/x" * 500)) == 200
+
+
 def _start_stubs(light, monkeypatch):
     """Stub the launch steps around the pane checks; collect the launch notices."""
     import types
@@ -262,20 +297,35 @@ def test_a_pane_in_another_tasks_worktree_never_gets_the_brief_pointer(light, mo
     pane = dispatch._herdr_pane(light.run, light.wt("D1"), dispatch_id="D1")
     monkeypatch.setenv("FAKE_HERDR_CWD_LIE", str(light.wt("D2")))  # herdr says the pane sits in T2's worktree
     res = _start(light, "D1", pane)
-    assert res and res["prompt_landed"] is False
-    assert "pointer" not in typed
+    assert res and res["prompt_landed"] is False and "pointer" not in typed
     assert not any(c[:2] in (["agent", "prompt"], ["pane", "send-text"]) for c in calls(light.state))
     assert len(notices) == 1 and "NOT sent" in notices[0], notices
     assert "D1 (T1)" in notices[0] and "D2 (T2)" in notices[0] and str(light.wt("D2")) in notices[0], notices
+    assert "office revoke T1" in notices[0], notices  # the started agent is not left idle unannounced
     assert json.loads((paths.run_dir(light.run["id"]) / "dispatches" / "D1" / "launch.json").read_text())["prompt_landed"] is False
 
 
-def test_the_pane_that_is_this_dispatchs_gets_its_pointer(light, monkeypatch):
+def test_a_pane_running_another_dispatchs_agent_never_gets_the_pointer(light, monkeypatch):
     from office import dispatch
     notices, typed = _start_stubs(light, monkeypatch)
     pane = dispatch._herdr_pane(light.run, light.wt("D1"), dispatch_id="D1")
+    monkeypatch.setenv("FAKE_HERDR_AGENT_LIE", dispatch.herdr_agent_name("D2"))  # herdr names another dispatch's agent here
     res = _start(light, "D1", pane)
-    assert res["prompt_landed"] is True and typed == ["setup", "pointer"] and not notices, (res, typed, notices)
+    assert res and res["prompt_landed"] is False and "pointer" not in typed
+    assert not any(c[:2] in (["agent", "prompt"], ["pane", "send-text"]) for c in calls(light.state))
+    assert len(notices) == 1 and "NOT sent" in notices[0] and dispatch.herdr_agent_name("D2") in notices[0], notices
+    assert dispatch.herdr_agent_name("D1") in notices[0] and "D1 (T1)" in notices[0] and "office revoke T1" in notices[0], notices
+
+
+def test_a_pane_reporting_this_dispatchs_agent_as_a_name_or_a_record_passes(light, monkeypatch):
+    from office import dispatch
+    me, d1 = dispatch.herdr_agent_name("D1"), {"id": "D1", "task_id": "T1"}
+    for reported in (me, {"name": me}, None):  # None: herdr names no agent, which cannot be disproved
+        monkeypatch.setattr(dispatch, "_herdr_json", lambda args, r=reported: {"pane": {"agent": r}})
+        assert dispatch._pane_mismatch(light.run, d1, "w1:p101", light.wt("D1"), check_cwd=False, agent=me) is None
+    other = dispatch.herdr_agent_name("D2")
+    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {"pane": {"agent": {"name": other}}})
+    assert other in dispatch._pane_mismatch(light.run, d1, "w1:p101", light.wt("D1"), check_cwd=False, agent=me)
 
 
 def _prompt_target(light, monkeypatch, did, pane, cwd):
@@ -303,6 +353,44 @@ def test_office_prompt_refuses_a_pane_in_another_tasks_worktree(light, monkeypat
         prompting.prompt(light.con, light.run, "D1", "hello")
     assert err.value.category == "pane-mismatch" and "T2" in err.value.message and "D2" in err.value.message
     assert not sent, "nothing is typed into the other task's pane"
+
+
+def test_office_prompt_refuses_a_pane_reserved_for_another_dispatch(light, monkeypatch):
+    from office import dispatch, paths, prompting
+    sent = _prompt_target(light, monkeypatch, "D1", "w1:p101", light.wt("D1"))
+    (paths.run_dir(light.run["id"]) / "herdr-tab.json").write_text(
+        json.dumps({"mode": "split", "anchor": "w1:pQ", "panes": ["w1:p101"], "reserved": {"w1:p101": "D2"}}))
+    with pytest.raises(prompting.Refused) as err:
+        prompting.prompt(light.con, light.run, "D1", "hello")
+    assert err.value.category == "pane-mismatch" and "reserved for dispatch D2" in err.value.message
+    assert not sent
+
+
+def test_office_prompt_never_echoes_a_control_character_in_the_panes_cwd(light, monkeypatch):
+    from office import prompting
+    nasty = light.wt("D1") / "sub\n\x1b[2Jfake line"
+    nasty.mkdir()
+    sent = _prompt_target(light, monkeypatch, "D1", "w1:p101", nasty)
+    res = prompting.prompt(light.con, light.run, "D1", "hello")
+    assert sent == ["hello"] and "\x1b" not in res.lines[0] and "\n" not in res.lines[0], res.lines
+
+
+def test_a_launch_mismatch_never_echoes_a_control_character_from_the_panes_cwd(light):
+    from office import dispatch
+    nasty = str(light.wt("D2")) + "/sub\n\x1b[2Jfake line"  # herdr reports a path inside another task's worktree
+    pane_state(light.state, "w1:p101", cwd=nasty)
+    why = dispatch._pane_mismatch(light.run, {"id": "D1", "task_id": "T1"}, "w1:p101", light.wt("D1"), check_cwd=True)
+    assert why and "belongs to dispatch D2 (T2)" in why and "fake line" in why, why
+    assert "\x1b" not in why and "\n" not in why, why
+
+
+def test_office_prompt_refusal_never_echoes_a_control_character_from_the_panes_cwd(light, monkeypatch):
+    from office import prompting
+    sent = _prompt_target(light, monkeypatch, "D1", "w1:p101", str(light.wt("D2")) + "/sub\n\x1b[2Jfake line")
+    with pytest.raises(prompting.Refused) as err:
+        prompting.prompt(light.con, light.run, "D1", "hello")
+    assert "belongs to T2" in err.value.message and "\x1b" not in err.value.message and "\n" not in err.value.message
+    assert not sent
 
 
 def test_office_prompt_still_prompts_a_pane_herdr_reports_no_cwd_for(light, monkeypatch):
@@ -472,6 +560,8 @@ def test_two_tasks_dispatched_in_parallel_each_get_their_own_pane_and_brief(env,
     state = install_fake(env.bin, env.tmp, monkeypatch)
     run, ((d1, dir1), (d2, dir2)) = _two_dispatches(env, monkeypatch)
     r1, r2 = together(lambda: _launch(run, d1, dir1), lambda: _launch(run, d2, dir2))
+    starts = [c[c.index("--pane") + 1] for c in calls(state) if c[:2] == ["agent", "start"]]
+    assert len(starts) == len(set(starts)) == 2, starts  # no pane was started twice: no busy-pane retry rescued a shared one
     assert r1["launcher"] == r2["launcher"] == "herdr"
     assert r1["pane"] != r2["pane"], (r1, r2)
     assert r1["prompt_landed"] is True and r2["prompt_landed"] is True
@@ -497,6 +587,20 @@ def test_a_pane_that_herdr_places_in_the_wrong_worktree_is_refused_and_prompts_a
     con = env.con()
     notice = [r[0] for r in con.execute("SELECT summary FROM events WHERE kind='launch'")]
     assert len(notice) == 1 and d1["id"] in notice[0] and d2["id"] in notice[0] and "T2" in notice[0], notice
+    assert "office revoke" in notice[0], notice
+
+
+def test_a_pane_running_another_dispatchs_agent_is_refused_and_prompts_are_never_typed(env, monkeypatch):
+    from office import dispatch
+    state = install_fake(env.bin, env.tmp, monkeypatch, delay="0")
+    run, ((d1, dir1), (d2, _)) = _two_dispatches(env, monkeypatch)
+    monkeypatch.setenv("FAKE_HERDR_AGENT_LIE", dispatch.herdr_agent_name(d2["id"]))
+    res = _launch(run, d1, dir1)
+    assert res["launcher"] == "herdr" and res["prompt_landed"] is False
+    assert not any(c[:2] in (["agent", "prompt"], ["pane", "send-text"]) for c in calls(state))
+    con = env.con()
+    notice = [r[0] for r in con.execute("SELECT summary FROM events WHERE kind='launch'")]
+    assert len(notice) == 1 and dispatch.herdr_agent_name(d2["id"]) in notice[0] and "office revoke" in notice[0], notice
 
 
 def test_office_prompt_names_the_pane_cwd_and_task_and_refuses_another_tasks_pane(env, monkeypatch):
@@ -509,6 +613,14 @@ def test_office_prompt_names_the_pane_cwd_and_task_and_refuses_another_tasks_pan
     con = env.con()
     con.execute("UPDATE dispatches SET pane_id=? WHERE id=?", (r2["pane"], d1["id"]))
     n = len([c for c in calls(state) if c[:2] == ["agent", "prompt"]])
+    code, out = env.office("prompt", "T1", "--", "hello again")
+    assert code != 0 and "reserved for dispatch " + d2["id"] in out, out
+    # A run laid out before reservations existed still has the cwd to go by.
+    from office import paths
+    tab = paths.run_dir(run["id"]) / "herdr-tab.json"
+    layout = json.loads(tab.read_text())
+    layout.pop("reserved")
+    tab.write_text(json.dumps(layout))
     code, out = env.office("prompt", "T1", "--", "hello again")
     assert code != 0 and "belongs to T2" in out and f"dispatch {d2['id']}" in out, out
     assert len([c for c in calls(state) if c[:2] == ["agent", "prompt"]]) == n
