@@ -111,3 +111,100 @@ def test_plan_preview_shares_one_quota_snapshot_across_tasks_and_roles(monkeypat
     assert len(routed) == 6
     assert all(snapshot == {"codex": {"status": "ok", "tightest_remaining_percent": 30}}
                for _, snapshot in routed)
+
+
+def _timeout_run(calls):
+    def fake_run(*args, **kwargs):
+        calls.append(1)
+        raise subprocess.TimeoutExpired(["probe"], 20)
+    return fake_run
+
+
+def test_timeout_on_quiet_host_is_unknown_without_retry(monkeypatch):
+    calls = []
+    monkeypatch.setattr(candidates.subprocess, "run", _timeout_run(calls))
+    monkeypatch.setattr("office.gates.host_overloaded", lambda: None)
+    result = candidates.probe_quota(_adapter(["probe"]))
+    assert result["status"] == "unknown" and len(calls) == 1
+
+
+def test_timeout_under_load_retries_once_then_unavailable(monkeypatch):
+    calls, sleeps = [], []
+    monkeypatch.setattr(candidates.subprocess, "run", _timeout_run(calls))
+    monkeypatch.setattr(candidates.time, "sleep", sleeps.append)
+    monkeypatch.setattr("office.gates.host_overloaded", lambda: "host load 40 exceeds 16 (8 CPUs)")
+    result = candidates.probe_quota(_adapter(["probe"]))
+    assert len(calls) == 2 and sleeps == [candidates.PROBE_RETRY_BACKOFF_S]
+    assert result["status"] == "unavailable" and result["tightest_remaining_percent"] is None
+    assert "host load 40" in result["cause"]
+
+
+def test_retry_after_loaded_timeout_can_succeed(monkeypatch):
+    outcomes = [subprocess.TimeoutExpired(["probe"], 20),
+                SimpleNamespace(returncode=0, stdout='{"tightest_remaining_percent": 55}')]
+
+    def fake_run(*a, **k):
+        out = outcomes.pop(0)
+        if isinstance(out, BaseException):
+            raise out
+        return out
+    monkeypatch.setattr(candidates.subprocess, "run", fake_run)
+    monkeypatch.setattr(candidates.time, "sleep", lambda s: None)
+    monkeypatch.setattr("office.gates.host_overloaded", lambda: "loaded")
+    assert candidates.probe_quota(_adapter(["probe"])) == {"status": "ok", "tightest_remaining_percent": 55.0}
+
+
+def test_successful_probe_is_cached_across_processes_and_failure_never_becomes_ok(monkeypatch):
+    calls = []
+
+    def fake_run(*a, **k):
+        calls.append(1)
+        return SimpleNamespace(returncode=0, stdout='{"tightest_remaining_percent": 80}')
+    monkeypatch.setattr(candidates.subprocess, "run", fake_run)
+    first = candidates.probe_quota(_adapter(["probe"]))
+    candidates._QUOTA_CACHE.clear()  # a new office process
+    assert candidates.probe_quota(_adapter(["probe"])) == first and len(calls) == 1
+
+    # A failed probe is remembered briefly, as a failure; the next process does not re-run it.
+    candidates._QUOTA_CACHE.clear()
+    candidates._shared_cache_path().unlink()
+    monkeypatch.setattr("office.gates.host_overloaded", lambda: None)
+    monkeypatch.setattr(candidates.subprocess, "run", _timeout_run(calls))
+    bad = candidates.probe_quota(_adapter(["probe"]))
+    candidates._QUOTA_CACHE.clear()
+    n = len(calls)
+    again = candidates.probe_quota(_adapter(["probe"]))
+    assert bad["status"] == again["status"] == "unknown" and len(calls) == n
+
+
+def test_cache_ttl_env_and_expiry(monkeypatch):
+    candidates._shared_cache_put("codex", {"status": "ok", "tightest_remaining_percent": 9.0})
+    assert candidates._shared_cache_get("codex") is not None
+    monkeypatch.setenv("OFFICE_QUOTA_CACHE_TTL", "0")
+    assert candidates._shared_cache_get("codex") is None
+
+
+def test_shared_cache_put_keeps_other_harnesses():
+    candidates._shared_cache_put("codex", {"status": "ok", "tightest_remaining_percent": 1.0})
+    candidates._shared_cache_put("claude", {"status": "ok", "tightest_remaining_percent": 2.0})
+    assert candidates._shared_cache_get("codex") and candidates._shared_cache_get("claude")
+
+
+def test_route_payload_records_unknown_quota_and_status_shows_it():
+    from office import dispatch
+    cand = {"adapter_id": "claude", "harness": "claude", "quota": {"status": "unknown", "cause": "command timed out after 20 seconds"}}
+    payload = dispatch._route_payload({"candidate": cand})
+    assert payload["quota_unknown"] == {"harness": "claude", "status": "unknown",
+                                        "cause": "command timed out after 20 seconds"}
+    ok = {"adapter_id": "claude", "quota": {"status": "ok", "tightest_remaining_percent": 50.0}}
+    assert "quota_unknown" not in dispatch._route_payload({"candidate": ok})
+
+    from office import guide
+    import sqlite3
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.execute("CREATE TABLE dispatches(id TEXT, route_json TEXT)")
+    con.execute("INSERT INTO dispatches VALUES('D1', ?)", (json.dumps(payload),))
+    note = guide._quota_unknown_note(con, {"id": "T1", "current_dispatch_id": "D1"})
+    assert note == "T1 routed on unknown quota: claude: command timed out after 20 seconds"
+    assert guide._quota_unknown_note(con, {"id": "T2", "current_dispatch_id": None}) is None
