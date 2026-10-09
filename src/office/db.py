@@ -23,7 +23,7 @@ from office import paths
 # Bump when SHARED_COLUMNS or the DDL changes. The version is a record, not the
 # gate: every open also runs the additive column pass (see `migrate`), so a
 # column added without a bump still reaches existing databases.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS recorded_overrides(override_id TEXT PRIMARY KEY, run_
 
 # Nullable 3.1 columns on tables shared with the legacy recorder.
 SHARED_COLUMNS = {
+    # v9 (#421): the self-review receipt (ledger digest or typed exemption) bound to the revision.
+    "revisions": ["self_review_json TEXT"],
     "runs": [
         "office_version TEXT", "repo_root TEXT", "git_common_dir TEXT", "goal TEXT", "phase TEXT",
         "gear TEXT", "playbook TEXT", "base_sha TEXT", "state_dir TEXT",

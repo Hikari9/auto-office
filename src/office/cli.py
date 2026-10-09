@@ -82,6 +82,13 @@ ask for more scope instead of reverting:
   office submit --request-scope <path> [--request-scope <path> ...] -- "<reason>"
 It records a contract-amendment request with the diff and waits; you are told to resubmit once amended.
 
+Substantive in-scope work needs a current self-review ledger (OFFICE_SELF_REVIEW.md, format in your brief) whose
+COMMIT is the HEAD you submit; submit records it against the revision. A stale ledger or uncommitted work it does
+not cover is refused. Empty and read-only work is exempt on its own. On a low-risk task (inline self-review tier)
+a trivial or mechanical change may submit without a ledger:
+  office submit --self-review-exempt trivial|mechanical -- "<reason>"
+The exemption is recorded on the revision. Independent review applies either way.
+
 Planner / orchestrator planning inline: submits .office/plans/<run>/PLAN.md (one draft per run). Format:
 
 {fmt}
@@ -211,6 +218,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--quote", help="the user's words (a defect redirect)")
     s.add_argument("--request-scope", action="append", default=[], metavar="PATH",
                    help="executor: ask the orchestrator to add PATH to this task's scope (reason after --)")
+    s.add_argument("--self-review-exempt", choices=["trivial", "mechanical"], metavar="TYPE",
+                   help="executor: submit with no self-review ledger because the change is trivial or mechanical "
+                        "(low-risk tasks only; reason after --)")
     s.add_argument("reason", nargs="*", help=argparse.SUPPRESS)
     _redirect_args(s)
     s = sp.add_parser("amend", parents=[common])
@@ -430,8 +440,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"unrecognized arguments: {run_like[0]} (name the run with --run: "
                          f"office --run {run_like[0]} {args.cmd} ...)")
         parser.parse_args(argv)  # raises the usage error
-    if args.cmd == "submit" and args.reason and not args.request_scope:
-        # The reason text belongs to --request-scope; a stray argument is still a usage error.
+    if args.cmd == "submit" and args.reason and not (args.request_scope or args.self_review_exempt):
+        # The reason text belongs to --request-scope or --self-review-exempt; a stray argument is still a usage error.
         parser.error(f"unrecognized arguments: {' '.join(args.reason)}")
     if args.version:
         print(version.current())
@@ -620,7 +630,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "submit":
         from office import submit
         return submit.submit(con, run, cwd=cwd, plan_path=args.plan, redirect=_redirect(args),
-                             request_scope=args.request_scope,
+                             request_scope=args.request_scope, exempt=args.self_review_exempt,
                              reason=" ".join(args.reason or []).strip())
     if cmd == "amend" and args.scope == "route":
         from office import routechange

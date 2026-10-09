@@ -117,6 +117,21 @@ def _office_runner(env, cwd, in_process):
     return inline_office if in_process and "OFFICE_VERSION_OVERRIDE" not in env else subprocess_office
 
 
+def _comply_with_self_review(cwd, env, writes, err):
+    """What a compliant executor does before `office submit` (#421): commit the work it wrote, then write
+    a clean ledger naming that HEAD. An action with "no_ledger": true skips both."""
+    def git(*a):
+        proc = subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=w", *a], cwd=str(cwd), env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        err.write(proc.stdout)
+        return proc.stdout.strip()
+    git("add", "--", *writes)
+    git("commit", "-qm", "work", "--allow-empty")
+    head = git("rev-parse", "HEAD")
+    lenses = "\n".join(f"LENS {n} reviewed" for n in ("security", "edge-cases", "platform", "test-strength"))
+    (Path(cwd) / "OFFICE_SELF_REVIEW.md").write_text(f"COMMIT {head}\nROUND 1\n{lenses}\n")
+
+
 def _act(argv, prompt, env, cwd, in_process, out, err):
     """Perform the next scripted action. Returns the exit code; a negative code
     is a death by that signal. Text for stdout and stderr goes to `out`, `err`."""
@@ -180,6 +195,8 @@ def _act(argv, prompt, env, cwd, in_process, out, err):
     if action.get("ack"):
         r = office("ack", action["ack"])
         out.write(r.stdout + "\n")
+    if action.get("submit") and role == "executor" and writes and not action.get("no_ledger"):
+        _comply_with_self_review(cwd, env, writes, err)
     if action.get("submit"):
         r = office("submit")
         out.write(r.stdout + r.stderr + "\n")

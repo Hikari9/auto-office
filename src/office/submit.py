@@ -16,7 +16,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from office import briefs, db, discovery, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, state, version
+from office import briefs, contract, db, discovery, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, state, version
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_bytes, sha256_file, sha256_obj, short
@@ -89,13 +89,13 @@ def unblock_self(con, run: dict, task: dict) -> str | None:
 
 
 def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect: dict | None = None,
-           request_scope: list[str] | None = None, reason: str = "") -> Result:
+           request_scope: list[str] | None = None, reason: str = "", exempt: str | None = None) -> Result:
     """A refusal inside a dispatch is recorded on it, so a worker that stopped
     after one can be told from one that is still working."""
     try:
         if request_scope:
             return request_scope_change(con, run, cwd=cwd, files=request_scope, reason=reason)
-        return _submit(con, run, cwd=cwd, plan_path=plan_path, redirect=redirect)
+        return _submit(con, run, cwd=cwd, plan_path=plan_path, redirect=redirect, exempt=exempt, reason=reason)
     except Refused as exc:
         dispatch_id = os.environ.get("OFFICE_DISPATCH_ID")
         # outside-scope records its own events, which also block the task on exit.
@@ -105,7 +105,7 @@ def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect:
                 with db.transaction(con):
                     state.emit(con, run, "submit.rejected", f"{exc.category}: {exc.message}", audience="runtime",
                                task_id=d.get("task_id"), dispatch_id=dispatch_id, payload={"code": exc.category})
-                    if exc.category != "self-review-ledger-signaled":
+                    if exc.category not in ("self-review-ledger-signaled", "self-review-stale", "self-review-exemption"):
                         signal_refused(con, run, d, f"{exc.category}: {exc.message}")
         raise
 
@@ -228,7 +228,8 @@ def request_scope_change(con, run: dict, *, cwd: Path, files: list[str], reason:
                        f"(it runs: {amend_cmd})")
 
 
-def _submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect: dict | None = None) -> Result:
+def _submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect: dict | None = None,
+            exempt: str | None = None, reason: str = "") -> Result:
     """`redirect` ({defect, quote, root_cause, requirement, reviewer}) submits a plan
     revision that follows the user's redirect of a plan defect (office.redirect)."""
     dispatch_id = os.environ.get("OFFICE_DISPATCH_ID")
@@ -250,12 +251,12 @@ def _submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect
             base = top[0] if top else Path(d["worktree"])
             return plans.submit_plan(con, run, Path(plan_path) if plan_path else _draft(con, base, run),
                                      submitter=dispatch_id, dispatch_id=dispatch_id, redirect=redirect)
-        return submit_revision(con, run, d, cwd)
+        return submit_revision(con, run, d, cwd, exempt=exempt, reason=reason)
     d = None if plan_path else _worktree_dispatch(con, run, cwd)
     if d is not None:
         # A restarted executor session lost OFFICE_DISPATCH_ID; its task
         # worktree still names the dispatch, and the lease check still fences it.
-        return submit_revision(con, run, d, cwd)
+        return submit_revision(con, run, d, cwd, exempt=exempt, reason=reason)
     if not plan_path:
         _refuse_lost_executor(con, run, cwd)
     if run.get("planner_mode") == "dedicated" and not plan_path:
@@ -453,7 +454,7 @@ def make_commit(worktree: Path, tree: str, head: str, message: str) -> str:
     return paths.git(worktree, "commit-tree", tree, "-p", head, "-m", message, env=env)
 
 
-def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
+def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = None, reason: str = "") -> Result:
     task = state.get_task(con, run["id"], d["task_id"])
     if task["current_dispatch_id"] != d["id"]:
         raise Refused("superseded-dispatch", f"{task['id']} now belongs to a newer dispatch; this session's submit is rejected",
@@ -497,15 +498,28 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     from office import preflight
     base = d["base_commit"]
     dep_bases = [b for b in _dependency_bases(con, run, task, head) if b != base]
+    tier = briefs.self_review_tier(run.get("gear"), run.get("risk_json"))
+    enforced = contract.of(run) != contract.LEGACY  # runs pinned to v3.1 keep ledger-less submissions (#421)
+    has_ledger = _read_untracked_text(wt, briefs.LEDGER_FILE, briefs.LEDGER_MAX_CHARS) is not None
+    if exempt and not has_ledger:
+        _check_exemption(task, exempt, reason, tier)
     ledger_stop, ledger_fix, signaled = preflight.ledger_gate(
-        con, run, task, d, wt, base, head, dep_bases, stop=[], fix=[], submission=True)
+        con, run, task, d, wt, base, head, dep_bases, stop=[], fix=[], submission=True,
+        require=enforced and not (exempt and not has_ledger))
     if ledger_stop or ledger_fix:
         details = "; ".join(ledger_stop + ledger_fix)
         category = "self-review-ledger-signaled" if signaled else "self-review-ledger"
         next_step = "run office preflight, apply its repairs, then office submit" if not ledger_stop else \
             "run office preflight, report the stop for the orchestrator, and stop"
+        if enforced and not ledger_stop and not has_ledger:
+            next_step = (f"write {briefs.LEDGER_FILE} (format in your brief's LEDGER lines) after your last commit with "
+                         f"COMMIT {head}, then office submit"
+                         + ('; a trivial or mechanical change may instead run: office submit --self-review-exempt '
+                            'trivial|mechanical -- "<reason>"' if tier == "inline" else ""))
         raise Refused(category, f"{task['id']} self-review ledger refused submission: {details}",
                       scope=task["id"], preserved="your worktree (nothing was submitted)", next_step=next_step)
+    receipt = _self_review_receipt(wt, task, run, head, tree, tier, enforced, exempt, reason,
+                                   preflight.committed_changes(wt, base, head, dep_bases), preflight)
     commit = make_commit(wt, tree, head, f"office: {task['id']} submission\n\nrun {run['id'][:8]} task {task['id']}\n\n"
                          f"{paths.office_trailer(run['id'])}")
     from office import planfile, prs
@@ -575,11 +589,11 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
         env_fp = sha256_obj({"office": run["office_version"], "policy": run["config_hash"]})
         con.execute("INSERT INTO revisions(id, run_id, task_id, seq, dispatch_id, lease_id, fencing, commit_sha, tree_sha, "
                     "base_commit, requirements_version, plan_version, applied_version, env_fingerprint, operation_id, status, "
-                    "supersedes, changed_json, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "supersedes, changed_json, created_at, self_review_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (rev_id, run["id"], task["id"], seq, d["id"], d["lease_id"],
                      (dispatch_mod.live_lease(con, run["id"], d["lease_id"]) or {}).get("fencing"), commit, tree,
                      base, run["requirements_version"], run["plan_version"], applied, env_fp, op_id, status,
-                     prev, dumps(changed), now_iso()))
+                     prev, dumps(changed), now_iso(), dumps(receipt) if receipt else None))
         paths.git(wt, "update-ref", f"refs/office/{run['id'][:8]}/{task['id']}/{rev_id}", commit)
         if evidence:
             dest = _stage_evidence(run, d, rev_id, evidence, staged)
@@ -603,10 +617,13 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
         state.update_task(con, run["id"], task["id"], current_revision_id=rev_id, status="submitted",
                            pause_reason=None)
         planned = gates.plan_for_revision(con, run, state.get_task(con, run["id"], task["id"]), rev_id, changed, d)
-        state.emit(con, run, "submit", f"{task['id']} submitted {rev_id}", audience="runtime", task_id=task["id"])
+        state.emit(con, run, "submit", f"{task['id']} submitted {rev_id}", audience="runtime", task_id=task["id"],
+                   payload={"self_review": receipt} if receipt else None)
     jobs.kick(con, run["id"])
     parts = [f"rev {rev_id} captured"] + ([f"supersedes {prev}"] if prev else []) + planned["summary"]
     res.add(" | ".join(parts))
+    if receipt:
+        res.add(describe_receipt(receipt))
     left_out = [f for f in left_out if f not in (briefs.EVIDENCE_FILE, briefs.LEDGER_FILE)]
     for label, names in (("untracked files outside", left_out), ("harness config edits outside", restored)):
         if names:
@@ -615,6 +632,62 @@ def submit_revision(con, run: dict, d: dict, cwd: Path) -> Result:
     res.next = "you may stop; results will be delivered"
     res.data = {"revision": rev_id, "commit": commit, "gates": planned["gates"]}
     return res
+
+
+EXEMPT_TYPES = ("trivial", "mechanical")  # declared by the executor; `empty` and `read-only` are derived
+
+
+def describe_receipt(r: dict) -> str:
+    """One line for a revision's self-review receipt, for submit output and review briefs."""
+    if r.get("kind") == "exempt":
+        why = f": {r['reason']}" if r.get("reason") else ""
+        return f"self-review exempt ({r['type']}{why}); independent review still applies"
+    return (f"self-review receipt: ledger {r['sha256'][:12]} bound to tree {r['tree'][:12]} "
+            f"(tier {r['tier']}, round {r['round']}, {r['findings']} findings)")
+
+
+def _check_exemption(task: dict, exempt: str, reason: str, tier: str) -> None:
+    """A declared exemption is for trivial or mechanical work on a low-risk task only (the inline tier, #309)."""
+    why = None
+    if exempt not in EXEMPT_TYPES:
+        why = f"--self-review-exempt takes {' or '.join(EXEMPT_TYPES)} (empty and read-only work is exempt on its own)"
+    elif not reason.strip():
+        why = 'an exemption needs a reason: office submit --self-review-exempt ' + exempt + ' -- "<reason>"'
+    elif tier != "inline":
+        why = (f"the {tier} self-review tier (set from this run's gear and blast radius) allows no exemption: "
+               f"write {briefs.LEDGER_FILE}")
+    if why:
+        raise Refused("self-review-exemption", f"{task['id']} self-review exemption refused: {why}",
+                      scope=task["id"], preserved="your worktree (nothing was submitted)",
+                      next_step=f"write {briefs.LEDGER_FILE} after your last commit, then office submit")
+
+
+def _self_review_receipt(wt: Path, task: dict, run: dict, head: str, tree: str, tier: str, enforced: bool,
+                         exempt: str | None, reason: str, changed: list[str], preflight) -> dict | None:
+    """What a revision records about its producer self-review (#421): the ledger's digest bound to the
+    submitted tree, or a typed exemption. None only for an unenforced run that submitted no ledger.
+    Never an approval: it does not touch the independent review that applies."""
+    committed, pending = preflight._in_scope_changes(wt, task, changed)
+    substantive = bool(committed or pending)
+    text = _read_untracked_text(wt, briefs.LEDGER_FILE, briefs.LEDGER_MAX_CHARS)
+    if text is not None:
+        if enforced and substantive and paths.git(wt, "rev-parse", f"{head}^{{tree}}") != tree:
+            raise Refused("self-review-stale", f"{task['id']} has uncommitted work the self-review ledger does not "
+                          f"cover: it names HEAD {head[:12]}, but the submitted tree differs from HEAD's",
+                          scope=task["id"], preserved="your worktree (nothing was submitted)",
+                          next_step=f"commit the work, review what changed, rewrite {briefs.LEDGER_FILE} with the new "
+                                    "HEAD as COMMIT, then office submit")
+        led = preflight.parse_ledger(text)[0]
+        return {"kind": "ledger", "commit": head, "tree": tree, "tier": tier, "round": led["round"],
+                "lenses": sorted(led["lenses"]), "findings": len(led["findings"]), "substantive": substantive,
+                "sha256": sha256_bytes(text.encode("utf-8"))}
+    if not enforced:
+        return None
+    if not task["scope"]:
+        return {"kind": "exempt", "type": "read-only", "tree": tree, "tier": tier}
+    if not substantive:
+        return {"kind": "exempt", "type": "empty", "tree": tree, "tier": tier}
+    return {"kind": "exempt", "type": exempt, "reason": reason.strip(), "tree": tree, "tier": tier}
 
 
 def _executor_ledger(wt: Path) -> Path | None:

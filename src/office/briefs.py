@@ -449,6 +449,9 @@ def ledger_lines() -> list[str]:
         "    Run `office preflight` anyway (it records the stop for the orchestrator), then print the status line and stop.",
         "    Preflight reports a missing, stale, or malformed ledger, a lens with no line, and any open finding as a fix;",
         "    it never skips a bad line.",
+        "    `office submit` refuses substantive in-scope work with no ledger naming the HEAD it submits (uncommitted work",
+        "    the ledger does not cover is refused too). Empty and read-only work is exempt on its own; on the inline tier a",
+        '    trivial or mechanical change may run `office submit --self-review-exempt trivial|mechanical -- "<reason>"`.',
     ]
 
 
@@ -471,6 +474,10 @@ def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_s
         out.append(f"SCOPE {', '.join(task.get('scope') or []) or 'none (external work: judge it from the evidence below)'}")
     out += [f"REVISION {revision['id']} commit {revision['commit_sha'][:12]}; a read-only checkout is at {checkout}",
             f"DETERMINISTIC CHECKS {checks_summary}"]
+    if revision.get("self_review_json"):
+        from office import submit
+        out.append("PRODUCER SELF-REVIEW (not an approval; judge the work yourself): "
+                   + submit.describe_receipt(json.loads(revision["self_review_json"])))
     if carried:
         out.append("OPEN FINDINGS from earlier rounds — confirm (repeat the FINDING line), RESOLVED, or RETRACT each:")
         for f in carried:

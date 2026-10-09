@@ -62,6 +62,14 @@ finding still open stops you. Run `office preflight` anyway so it records the st
 the status line and stop. `contract-conflict` stops you with the ACCEPT line quoted. Preflight reports a missing,
 stale, or malformed ledger and any open finding as a fix. Submit consumes the ledger.
 
+`office submit` also requires it (current runs; runs pinned to v3.1 keep ledger-less submits). Substantive in-scope
+work with no ledger, a ledger whose `COMMIT` is not the HEAD you submit, or uncommitted work the ledger does not
+cover is refused, and submit records the ledger's digest against the revision's tree. A ledger from an earlier
+revision or retry is stale: rewrite it after your last commit. Empty (no in-scope change) and read-only (no SCOPE)
+work is exempt on its own and recorded. On the `inline` tier only, a trivial or mechanical change may skip the ledger:
+`office submit --self-review-exempt trivial|mechanical -- "<reason>"` (the exemption is recorded and shown to the
+reviewer). No exemption weakens independent review, and the receipt is a producer record, never an approval.
+
 ## 3. Checks
 
 Run the brief's `CHECKS` lines. Check `uptime` first. When the load average is above twice the CPU count, use
