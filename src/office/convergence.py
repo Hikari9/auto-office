@@ -46,6 +46,7 @@ import uuid
 from pathlib import Path
 
 from office import briefs, contract, db, gates, paths, planfile, review_parse, state
+from office import risk as risk_mod
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_obj, short
@@ -1332,7 +1333,8 @@ def receipt(con, run: dict) -> dict:
     dispositions = [dict(r) for r in con.execute(
         "SELECT scope, code, gate_kind, level, disposition, disposition_note FROM findings WHERE run_id=? AND contract=? "
         "AND disposition IS NOT NULL GROUP BY scope, code ORDER BY MIN(created_at)", (run["id"], contract.CONVERGENCE))]
-    return {"review_contract": contract.of(run), "scopes": scopes, "waivers": waivers, "dispositions": dispositions,
+    return {"review_contract": contract.of(run), "risk": risk_mod.summary(run), "scopes": scopes, "waivers": waivers,
+            "dispositions": dispositions,
             "degraded": [f"{s['id']}:{r['kind']}" for s in scopes for r in s["reviews"]
                          if r["independence"] == contract.DEGRADED]}
 

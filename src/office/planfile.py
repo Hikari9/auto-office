@@ -7,6 +7,7 @@ lines per task so a planner never writes JSON:
     done:
     - a user can reset their password
     blast_radius: repo
+    lightweight: typo fix in one doc line, no behavior change   (optional, #424; needs an explicit low blast_radius)
     non_goals:
     - no SSO changes
     actions:
@@ -39,6 +40,7 @@ TASK_HEADING = re.compile(r"^###\s+(T\d+)\s*[:.\-–]\s*(.+?)\s*$")
 SECTION = re.compile(r"^##\s+(.+?)\s*$")
 KEYVAL = re.compile(r"^([A-Za-z_][A-Za-z_ ]*?)\s*:\s*(.*)$")
 BLAST = ("local", "repo", "production", "production-data")
+SIZES = ("S", "M", "L", "XL")
 # How far a run goes after its PRs (3.2): stop and ask, preview deploy only,
 # merge only, or merge + prod deploy end to end.
 END_STATES = ("ask", "preview", "merge", "e2e")
@@ -185,6 +187,10 @@ def parse(text: str) -> ParsedPlan:
                 task["notes"].append(f"{key}: {value}")
             continue
         if section == "requirements":
+            if key == "lightweight":
+                # #424: kept even when empty, so validation can demand the rationale.
+                req["lightweight"], list_key = value, None
+                continue
             list_key = key if not value else None
             if value:
                 if key == "checks":
@@ -227,6 +233,9 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
         "goal": req.get("goal"),
         "done_criteria": req.get("done") if isinstance(req.get("done"), list) else [],
         "blast_radius": req.get("blast_radius"),
+        "irreversible": req.get("irreversible"),
+        "size_class": req.get("size_class"),
+        "lightweight": ({"rationale": str(req["lightweight"]).strip()} if "lightweight" in req else None),
         "non_goals": (req.get("non_goals") or req.get("non-goals") or []),
         "named_actions": actions,
         "end_state": req.get("end_state"),
@@ -268,6 +277,12 @@ def _validate(plan: ParsedPlan) -> None:
     r = plan.requirements
     if r.get("blast_radius") and r["blast_radius"] not in BLAST:
         plan.errors.append(f"requirements blast_radius must be one of {', '.join(BLAST)}")
+    if r.get("size_class") and r["size_class"] not in SIZES:
+        plan.errors.append(f"requirements size_class must be one of {', '.join(SIZES)}")
+    if r.get("irreversible") and str(r["irreversible"]).lower() not in ("yes", "no", "true", "false"):
+        plan.errors.append("requirements irreversible must be yes or no")
+    if r.get("lightweight") is not None and not r["lightweight"]["rationale"]:
+        plan.errors.append("requirements `lightweight:` needs a one-line rationale (why this work is trivial and low risk)")
     end = r.get("end_state")
     if end and end not in END_STATES:
         plan.errors.append(f"requirements end_state must be one of {', '.join(END_STATES)}")

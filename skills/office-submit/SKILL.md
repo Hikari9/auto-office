@@ -20,7 +20,7 @@ goes to step 2. Skip for an empty or tiny mechanical diff. Fix rounds repeat ste
 ## 2. Adversarial self-review
 
 Find the base and the tier in the brief's `SELF-REVIEW` line (`git diff <base>`, `(tier: <tier>)`). Office sets
-the tier from the run's gear and risk. You cannot lower it. Do the review as the tier says:
+the tier from the run's gear and risk (unknown risk is never the `inline` tier, and a planner-declared lightweight path does not lower it). You cannot lower it. Do the review as the tier says:
 
 - **`inline`:** no subagents. Make one fresh pass per lens yourself and fix medium+ findings.
   You may skip a lens that clearly does not apply, with a one-line reason in your report.
