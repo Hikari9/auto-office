@@ -1046,6 +1046,8 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
             spec["fallback_reason"] = "no herdr pane could be opened"
             atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
             _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
+            if resume:
+                _headless_resume(run, dispatch, kind, spec, resume)
         if pane:
             started = _herdr_agent_start(run, dispatch, spec, env, inter, pane, cwd, ddir, label=label)
             if started:

@@ -49,7 +49,7 @@ def prompt(con, run: dict, target: str | None, text: str) -> Result:
                     next_step='office prompt <task|dispatch> -- "<message>"')
     d = _resolve(con, run, target)
     who = d.get("task_id") or d["id"]
-    if d.get("launcher") in ("process", "process-fallback") and d.get("task_id"):
+    if d.get("launcher") in ("process", "process-fallback") and d.get("task_id") and d.get("role") == "executor":
         return _queue(con, run, d, who, text)
     if d.get("launcher") != "herdr" or not d.get("pane_id"):
         raise Refused("no-pane", f"{d['id']} ({who}) has no Herdr pane to prompt", scope=who)

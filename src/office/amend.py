@@ -539,11 +539,16 @@ def pending_messages(con, run: dict, dispatch_id: str) -> list[str]:
     ride the worker's command responses like an amendment, are marked delivered (the
     dispatch's cursor moves past them) when shown, and ask for no ack."""
     consumer = f"message:{dispatch_id}"
-    events = state.unread_events(con, run["id"], consumer, ("runtime",), limit=200)
-    events = [e for e in events if e["kind"] == MESSAGE_KIND and e["dispatch_id"] == dispatch_id]
-    if not events:
-        return []
+    sql = ("SELECT seq, payload_json FROM events WHERE run_id=? AND audience='runtime' AND kind=? AND dispatch_id=? "
+           "AND seq>COALESCE((SELECT last_seq FROM cursors WHERE run_id=? AND consumer=?), 0) ORDER BY seq")
+    args = (run["id"], MESSAGE_KIND, dispatch_id, run["id"], consumer)
+    if not con.execute(sql, args).fetchone():
+        return []  # the common case: nothing queued, no write lock taken
     with db.transaction(con):
+        # Read and advance together, so a hook and a command cannot both deliver the same message.
+        events = con.execute(sql, args).fetchall()
+        if not events:
+            return []
         state.advance_cursor(con, run["id"], consumer, events[-1]["seq"])
     return ["ORCHESTRATOR MESSAGE (not a plan change; no ack needed):",
             *[f"  {line}" for e in events for line in (loads(e["payload_json"], {}).get("text") or "").splitlines()[:12]]]

@@ -128,3 +128,76 @@ def test_headless_fallback_of_a_resume_without_a_headless_form_says_fresh(env, m
         assert con.execute("SELECT session_id FROM dispatches WHERE id=?", (d["id"],)).fetchone()[0] != "sess-123"
     finally:
         con.close()
+
+
+@pytest.mark.approved
+def test_no_pane_fallback_of_a_resume_resumes_headless_and_says_so(env, monkeypatch):
+    from office import dispatch
+    monkeypatch.setattr(dispatch, "_herdr_pane", lambda *a, **k: None)
+    resume = {"parent": "D0", "session_id": "sess-123", "argv": ["--resume", "sess-123"], "herdr_kind": "claude",
+              "findings": "none"}
+    state_file, run, d, ddir, res = launch_in_herdr(env, monkeypatch, adapter="claude", model="m", effort="high",
+                                                    owned_cwd=True, resume=resume)
+    spec = json.loads((ddir / "launch.json").read_text())
+    assert spec["headless_resume"] == ["--resume", "sess-123"]
+    assert any("resumed headless" in e for e in _launch_events(env, run))
+    resume = {**resume, "session_id": None}
+    state_file, run, d, ddir, res = launch_in_herdr(env, monkeypatch, adapter="agy", resume=resume)
+    assert json.loads((ddir / "launch.json").read_text()).get("headless_fresh") is True
+    assert any("FRESH session" in e for e in _launch_events(env, run))
+
+
+def _headless_executor(env):
+    from conftest import approved_run
+    from office import state
+    approved_run(env)
+    env.office("dispatch", "T1", env={"OFFICE_WORKER_LAUNCHER": "external"}, check=0)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    did = con.execute("SELECT current_dispatch_id FROM tasks WHERE id='T1'").fetchone()[0]
+    con.execute("UPDATE dispatches SET launcher='process-fallback', pid=?, status='running', pane_id=NULL WHERE id=?",
+                (os.getpid(), did))
+    con.commit()
+    return con, run, did
+
+
+@pytest.mark.approved
+def test_queued_message_survives_many_unread_runtime_events_and_is_read_in_one_transaction(env):
+    from office import amend, prompting, state
+    con, run, did = _headless_executor(env)
+    with con:
+        for i in range(300):
+            state.emit(con, run, "noise", f"n{i}", audience="runtime", dispatch_id=did)
+    prompting.prompt(con, run, "T1", "after the noise")
+    seen = []
+    con.set_trace_callback(seen.append)
+    lines = amend.pending_messages(con, run, did)
+    con.set_trace_callback(None)
+    assert any("after the noise" in ln for ln in lines), lines
+    begin = next(i for i, s in enumerate(seen) if s.startswith("BEGIN"))
+    assert any("SELECT seq, payload_json" in s for s in seen[begin:]), seen  # the read is inside the transaction
+    assert amend.pending_messages(con, run, did) == []
+
+
+@pytest.mark.approved
+def test_prompt_to_a_headless_reviewer_is_refused_not_queued(env):
+    from office import prompting, state
+    from office.state import Refused
+    con, run, did = _headless_executor(env)
+    con.execute("UPDATE dispatches SET role='code_reviewer' WHERE id=?", (did,))
+    con.commit()
+    with pytest.raises(Refused) as exc:
+        prompting.prompt(con, run, did, "hello")
+    assert "no Herdr pane" in str(exc.value), exc.value
+
+
+@pytest.mark.approved
+def test_wait_timeout_path_shows_the_headless_fallback(env, monkeypatch):
+    monkeypatch.setenv("FAKE_HERDR_START_FAIL", "1")
+    state_file, run, d, ddir, res = launch_in_herdr(env, monkeypatch)
+    con = env.con()
+    con.execute("UPDATE dispatches SET status='running', ended_at=NULL WHERE id=?", (d["id"],))
+    con.commit()
+    from office import guide
+    out = guide.wait(con, run, timeout=0, poll=0)
+    assert any("runs headless (herdr fallback)" in ln for ln in out.lines), out.lines
