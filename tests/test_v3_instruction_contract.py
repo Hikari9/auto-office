@@ -106,7 +106,7 @@ class TestTrackingIssuePrecedesPlanning(unittest.TestCase):
     # recorded by `office start --issue`; there is no separate registry write.
     def test_tracking_issue_is_required_before_planning_spoke(self):
         text = (ROOT / 'SKILL.md').read_text(encoding='utf-8')
-        issue_pos = text.index('Create or reuse exactly one tracking GitHub issue')
+        issue_pos = text.index('create or reuse exactly one tracking GitHub issue')
         planning_pos = text.index('you plan inline')
         self.assertLess(issue_pos, planning_pos)
         self.assertRegex(text[issue_pos:planning_pos], r'office start "<goal>" --issue')
