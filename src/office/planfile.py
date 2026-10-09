@@ -265,6 +265,9 @@ def _validate(plan: ParsedPlan) -> None:
     end = r.get("end_state")
     if end and end not in END_STATES:
         plan.errors.append(f"requirements end_state must be one of {', '.join(END_STATES)}")
+    for a, b, tree in _unordered_shared_trees(plan.tasks):
+        plan.errors.append(f"{a} and {b} may run in parallel but share the directory {tree!r}; a shared directory "
+                           f"is allowed only for tasks ordered by `depends` (add `depends: {a}` to {b}, or share files)")
     for a, b in _parallel_overlaps(plan.tasks):
         plan.warnings.append(f"{a} and {b} may run in parallel but their scopes overlap; leases will serialize them")
 
@@ -339,10 +342,30 @@ def _entry_problem(entry: str) -> str | None:
     if not bare or _NOT_PATH.search(bare) or bare.count("(") != bare.count(")") or bare.count("[") != bare.count("]"):
         return ("is not a path or glob; list bare paths or globs (no notes) and put limits "
                 "(e.g. 'only the importer entry') in `accept:`")
-    if is_shared(entry) and (bare.endswith("/") or bare.endswith("/**")):
-        # Shared entries skip overlap and lease checks: only append-only registry files may be shared.
-        return "is a directory; `shared:` lists append-only registry files, not trees (put a tree in `scope:`)"
     return None
+
+
+def shared_tree(entry: str) -> bool:
+    """A `shared:` entry naming a directory or glob rather than one registry file."""
+    bare = entry.lstrip(SHARED)
+    return is_shared(entry) and (bare.endswith("/") or "*" in bare or "?" in bare)
+
+
+def _unordered_shared_trees(tasks: list[dict]):
+    """(a, b, entry) for each pair of tasks that could run at once while one shares a
+    directory the other also lists or overlaps. A shared file is append-only and may be
+    edited in parallel; a shared directory may be shared only by tasks a `depends` path
+    orders, so its editors never run together."""
+    graph = {t["id"]: t["depends"] for t in tasks}
+    for i, a in enumerate(tasks):
+        for b in tasks[i + 1:]:
+            if a["id"] in ancestors(graph, b["id"]) or b["id"] in ancestors(graph, a["id"]):
+                continue
+            for x, y in ((a, b), (b, a)):
+                hit = next((e for e in x["scope"] if shared_tree(e) and scopes_overlap([e], y["scope"])), None)
+                if hit:
+                    yield a["id"], b["id"], hit.lstrip(SHARED)
+                    break
 
 
 def grandfather_entries(parsed: "ParsedPlan", prev_tasks: list[dict] | None) -> None:
@@ -369,8 +392,8 @@ def literal_prefix(pattern: str) -> str:
 def scopes_overlap(a: list[str], b: list[str]) -> bool:
     for pa in a:
         for pb in b:
-            if is_shared(pa) and is_shared(pb):
-                continue  # both append to a shared registry; compose resolves it
+            if is_shared(pa) and is_shared(pb) and not (shared_tree(pa) or shared_tree(pb)):
+                continue  # both append to a shared registry file; compose resolves it
             la, lb = literal_prefix(pa.lstrip(SHARED)), literal_prefix(pb.lstrip(SHARED))
             if la.startswith(lb) or lb.startswith(la):
                 return True
@@ -396,9 +419,10 @@ def path_in_scope(path: str, scope: list[str]) -> bool:
         if fnmatch.fnmatch(path, pattern) or path == pattern:
             return True
         # A directory entry (`src/auth/`, `src/auth`, `src/app/[slug]/`) owns everything under it,
-        # compared literally so brackets are path characters, not a glob class (#334). Shared
-        # entries keep plain matching: a shared tree would skip the overlap check.
-        if pattern and not is_shared(raw) and not re.search(r"[*?]", pattern) \
+        # compared literally so brackets are path characters, not a glob class (#334). A shared
+        # directory is valid only for tasks ordered by `depends` (plan validation), and it
+        # counts in the overlap check, so its tasks never hold leases together.
+        if pattern and not re.search(r"[*?]", pattern) \
                 and path.startswith(pattern.rstrip("/") + "/"):
             return True
     return False

@@ -104,8 +104,8 @@ def test_directory_scope_entries_own_their_tree():
     # Review F4: brackets in a directory entry are path characters (Next.js dynamic routes).
     assert planfile.path_in_scope("src/app/[slug]/page.tsx", ["src/app/[slug]/"])
     assert planfile.path_in_scope("src/app/(dash)/x/page.tsx", ["src/app/(dash)"])
-    # Review F3: a shared entry never owns a tree through the directory rule.
-    assert not planfile.path_in_scope("src/reg/a.ts", ["+src/reg/"])
+    # A shared directory owns its tree (plan validation allows it only for ordered tasks).
+    assert planfile.path_in_scope("src/reg/a.ts", ["+src/reg/"])
     assert not planfile.path_in_scope("src/authz/x.ts", ["src/auth/"])
     assert not planfile.path_in_scope("src/authz.ts", ["src/auth"])
 
@@ -126,9 +126,8 @@ def test_scope_and_shared_entries_with_notes_are_plan_errors():
 def test_entry_validation_allows_route_groups_and_rejects_shared_trees_and_colons():
     ok = planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py, src/app/(dashboard)/**, src/app/[slug]/\n"))
     assert not ok.errors, ok.errors  # review F1
-    bad = planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py, vitest.config.ts:append-only\nshared: src/reg/\n"))
+    bad = planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py, vitest.config.ts:append-only\n"))
     assert any("vitest.config.ts:append-only" in e for e in bad.errors), bad.errors  # review F10
-    assert any("'+src/reg/' is a directory" in e for e in bad.errors), bad.errors  # review F3
 
 
 def test_an_entry_the_accepted_plan_already_had_is_a_warning_on_revision():
@@ -149,3 +148,42 @@ def test_planner_template_allows_globs_and_has_no_trailing_note_style():
     # Review F9.
     line = next(ln for ln in briefs.PLAN_FORMAT.splitlines() if ln.startswith("scope:"))
     assert "bare paths only" not in line and "paths/globs" in line
+
+
+SHARED_TREE = PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: src/reg/\n").replace(
+    "scope: mul.py\n", "scope: mul.py\nshared: src/reg/\n")
+
+
+def test_a_shared_directory_between_sequential_tasks_is_accepted():
+    # User decision: a shared directory is fine when its tasks never run in parallel.
+    plan = planfile.parse(SHARED_TREE.replace("scope: mul.py\nshared: src/reg/\ndepends: none",
+                                              "scope: mul.py\nshared: src/reg/\ndepends: T1"))
+    deps = {t["id"]: t["depends"] for t in plan.tasks}
+    assert deps == {"T1": [], "T2": ["T1"]}, deps
+    assert not plan.errors, plan.errors
+
+
+def test_a_shared_directory_between_parallel_tasks_is_a_plan_error():
+    plan = planfile.parse(SHARED_TREE)
+    errs = [e for e in plan.errors if "share the directory" in e]
+    assert len(errs) == 1 and "T1 and T2" in errs[0] and "'src/reg/'" in errs[0], plan.errors
+    # An exclusive path inside the shared tree is the same conflict.
+    mixed = planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: src/reg/\n").replace(
+        "scope: mul.py\n", "scope: mul.py, src/reg/x.ts\n"))
+    assert any("share the directory" in e for e in mixed.errors), mixed.errors
+    # Shared files keep today's append-only parallel behaviour.
+    assert not planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: REG.md\n").replace(
+        "scope: mul.py\n", "scope: mul.py\nshared: REG.md\n")).errors
+
+
+def test_tasks_sharing_a_directory_never_hold_leases_together(env):
+    # If a later amendment drops the ordering, the lease guard still refuses to run both at once.
+    approved_run(env, plan=PLAN_TWO, executor=[{"sleep": 0}])
+    con = env.con()
+    con.execute("UPDATE tasks SET scope_json=? WHERE id IN ('T1','T2')", ('["+src/reg/"]',))
+    con.commit()
+    assert planfile.scopes_overlap(["+src/reg/"], ["+src/reg/"])
+    code, out = env.office("dispatch", "T1", env={"OFFICE_WORKER_LAUNCHER": "external"})
+    assert code == 0, out
+    code, out = env.office("dispatch", "T2", env={"OFFICE_WORKER_LAUNCHER": "external"})
+    assert code != 0 and "scope-held" in out and "T1" in out, out
