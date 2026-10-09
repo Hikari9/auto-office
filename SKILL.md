@@ -93,6 +93,8 @@ continue with the installed runtime. A failed or offline check is informational 
   widget; `office prompt` types text, which a widget ignores) or `office answer <task|dispatch> -- "<text>"`.
   Take it to the user (native question tool) only when it hints at a user decision: requirements,
   authority, or an irreversible or external action. Never answer those on your own.
+- `office status` makes one `herdr agent list` call and prints a `blocker:` line for a live pane dispatch herdr
+  reports `blocked` with no recorded question. Run `office wait` to record it; status itself records nothing.
 - Executors push their task branch as they work and submit; the runtime pushes the accepted revision
   to the task's draft PR (stacked on its parent's), posts review results, and marks it ready on acceptance.
 - Reviewers are dispatched and read by the runtime, only from their reply files, never pane text. A bad reply

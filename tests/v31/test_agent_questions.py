@@ -166,3 +166,55 @@ def test_the_brief_reports_exactly_the_deliveries_it_renders():
     import inspect
     from office import briefs
     assert "carried" in inspect.signature(briefs.worker_brief).parameters
+
+
+AGY_WIDGET = (Path(__file__).parent / "fixtures" / "agy_question_widget.txt").read_text()
+
+
+def test_parse_agy_question_header_widget():
+    q = questions.parse(AGY_WIDGET, status="blocked", busy=False)
+    assert q["kind"] == "select" and q["question"].startswith("Which approach should the migration")
+    assert [o["n"] for o in q["options"]] == [1, 2, 3]
+    assert q["options"][0]["label"].startswith("(Recommended)")
+    # Output after the widget means it was answered.
+    assert questions.parse(AGY_WIDGET + "\n⏺ moving on\n> \n", status="idle", busy=False) is None
+
+
+@pytest.mark.approved
+def test_wait_records_a_dialog_question_for_blocked_with_no_recognised_widget(env, monkeypatch):
+    _, run, d, con = _herdr_worker(env, monkeypatch, reads=["Allow this tool call? [y/n]"], agent="blocked")
+    res = guide.wait(con, run, timeout=5, poll=0.1)
+    assert res.exit_code == questions.EXIT
+    assert any("[dialog]" in ln for ln in res.lines if ln.startswith("question:"))
+    assert con.execute("SELECT count(*) FROM events WHERE kind=? AND dispatch_id=?",
+                       (questions.EVENT, d["id"])).fetchone()[0] == 1
+
+
+@pytest.mark.approved
+def test_status_flags_a_blocked_pane_with_no_recorded_question(env, monkeypatch):
+    _, run, d, con = _herdr_worker(env, monkeypatch, reads=[WIDGET], agent="blocked")
+    calls = []
+
+    def fake_list():
+        calls.append(1)
+        return [{"name": "office-other", "pane_id": "w9:p9", "agent_status": "idle"},
+                {"name": "x", "pane_id": "w1:p7", "agent_status": "blocked"}]
+    monkeypatch.setattr(questions, "_herdr_agents", fake_list)
+    lines = guide.status(con, run).lines
+    assert len(calls) == 1
+    assert any("blocked in pane" in ln and "no question recorded" in ln and "office wait" in ln for ln in lines)
+    # status records nothing
+    assert con.execute("SELECT count(*) FROM events WHERE kind=?", (questions.EVENT,)).fetchone()[0] == 0
+    # once a question is recorded the flag gives way to the question line
+    questions.scan(con, run)
+    calls.clear()
+    lines = guide.status(con, run).lines
+    assert not calls and not any("no question recorded" in ln for ln in lines)
+    assert any(ln.startswith("question:") for ln in lines)
+
+
+@pytest.mark.approved
+def test_status_survives_herdr_list_failing(env, monkeypatch):
+    _, run, d, con = _herdr_worker(env, monkeypatch, reads=[WIDGET], agent="blocked")
+    monkeypatch.setattr(questions, "_herdr_agents", lambda: None)
+    assert not any("no question recorded" in ln for ln in guide.status(con, run).lines)
