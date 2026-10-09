@@ -68,6 +68,18 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
                       scope="plan", next_step=f"revise {plan_path} to follow the redirect, then submit again")
     if current and current["content_hash"] == digest:
         return Result(lines=[f"plan p{current['version']} already submitted"], next=_after_plan_next(con, run))
+    lint = lint_plan(con, run, parsed.tasks, parsed.requirements.get("done_criteria") or frozen.get("done_criteria") or [],
+                     blast=(parsed.requirements.get("blast_radius"),
+                            frozen.get("blast_radius") or (run.get("risk") or {}).get("blast_radius")))
+    if lint and not contract.is_convergence(run):
+        # Runs pinned to v3.1 keep their semantics: their accepted plans are never newly refused, only warned.
+        parsed.warnings[:0] = [f"plan lint: {problem}" for problem in lint[:3]]
+        lint = []
+    if lint:
+        raise Refused("plan-lint", "plan criteria cannot be met as written: " + "; ".join(lint[:4]), scope="plan",
+                      preserved=f"{plan_path} is unchanged", data={"problems": lint},
+                      next_step=f"reword those criteria in {plan_path} (one location per deliverable, no PR text without "
+                                "task PRs), then office submit")
     from office import visual
     visual_errors, visual_warnings = visual.preflight(parsed.tasks)
     if visual_errors:
@@ -135,6 +147,40 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
         res.notices.append(w)
     res.next = ("no action; findings will be delivered" if dispatch_id else _after_plan_next(con, state.get_run(con, run["id"])))
     return res
+
+
+def lint_plan(con, run: dict, tasks: list[dict], done: list[str], blast: tuple[str | None, str | None] = (None, None)) -> list[str]:
+    """Deterministic problems in a plan's done and accept criteria, found before any reviewer sees it.
+
+    1. With task PRs off, a criterion that needs a PR body, description or comment can never be met.
+    2. A done criterion and an accept item that place the same deliverable (a write-up, summary, ...) in
+       different places contradict each other (#363): reviewers then fault whichever location the work chose."""
+    problems = []
+    criteria = [("done", None, c) for c in done] + [("accept", t["id"], c) for t in tasks for c in t.get("accept") or []]
+    if any(briefs.refers_to_pr_text(c) for _, _, c in criteria):
+        from office import prs
+        plan_blast, frozen_blast = blast
+        pinned = ((run.get("landing") or {}).get("prs") or {})
+        if plan_blast and plan_blast != frozen_blast and "local" in (plan_blast, frozen_blast) \
+                and ("enabled" not in pinned or pinned.get("transient")):
+            # Whether PRs exist turns on a blast radius this plan is about to change: detecting now would pin the
+            # answer for the old one for the whole run. A plan going local has none; one leaving local is unknown.
+            found = {"enabled": False, "reason": "blast radius is local"} if plan_blast == "local" else {"transient": True}
+        else:
+            found = prs.settings(con, run)  # asks GitHub once, outside any transaction, as dispatch does
+        if not found.get("enabled") and not found.get("transient"):
+            for kind, tid, text in criteria:
+                if briefs.refers_to_pr_text(text):
+                    problems.append(f"{tid + ' accept' if tid else 'done'} criterion {text[:80]!r} needs a PR body, "
+                                    f"description or comment, but this run has no task PRs ({found.get('reason') or 'off'})")
+    for done_text in done:
+        for tid, text in ((t["id"], a) for t in tasks for a in t.get("accept") or []):
+            shared = briefs.deliverables(done_text) & briefs.deliverables(text)
+            where_done, where_accept = briefs.locations(done_text), briefs.locations(text)
+            if shared and where_done and where_accept and not where_done & where_accept:
+                problems.append(f"done {done_text[:70]!r} puts the {sorted(shared)[0]} in {', '.join(sorted(where_done))} "
+                                f"but {tid} accept {text[:70]!r} puts it in {', '.join(sorted(where_accept))}")
+    return problems
 
 
 def show_diagram(con, run: dict, version: int, tasks: list[dict], plan_path: Path | None, res: Result) -> None:
@@ -463,7 +509,9 @@ def job_plan_review(con, run: dict, job: dict) -> dict:
     rereview = gate["round"] > 1 or len(plan_gates(con, run["id"])) > 1
     if contract.is_convergence(run):
         carried = [f for f in blocking_findings(con, run) if f["code"] != "INTAKE_GAP"]
-        brief = briefs.plan_review_brief(run, plan, req["frozen"], [], rereview, carried=carried, round_no=gate["round"])
+        from office import convergence
+        brief = briefs.plan_review_brief(run, plan, req["frozen"], [], rereview, carried=carried, round_no=gate["round"],
+                                         used_codes=convergence.used_codes(con, run, PLAN_SCOPE))
     else:
         brief = briefs.plan_review_brief(run, plan, req["frozen"], open_defects(con, run["id"]), rereview)
     outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
@@ -959,6 +1007,12 @@ def _ingest_convergence(con, run: dict, gate_id: str, outcome: dict, *, independ
         state.emit(con, run, kind, f"PLAN REVIEW {status} {v} (runtime status, not a verdict; no round spent): "
                    f"{(outcome.get('summary') or 'no qualifying reviewer answered')[:240]}")
         return
+    from office import convergence
+    renamed = convergence.distinct_codes(con, run, PLAN_SCOPE, "plan_review", parsed)
+    if renamed:
+        state.emit(con, run, "finding.recoded", f"plan review reused finding code(s) of earlier rounds for new findings; "
+                   "recorded as " + ", ".join(f"{old} -> {new}" for old, new in sorted(renamed.items())),
+                   audience="runtime", payload={"scope": PLAN_SCOPE, "recoded": renamed})
     for code in parsed.resolved:
         con.execute("UPDATE findings SET state='resolved', updated_at=? WHERE run_id=? AND gate_kind='plan_review' AND code=? "
                     "AND state='open'", (now_iso(), run["id"], code))

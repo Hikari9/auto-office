@@ -130,6 +130,13 @@ DECISION <the user decision>   AFFECTS <scope>   WHY <why evidence cannot settle
 - In a later round the brief lists the open findings of the previous round. The reviewer confirms each
   (repeats the `FINDING` line), marks it `RESOLVED`, or `RETRACT`s it with evidence. A completed
   review supersedes earlier blocking findings it did not restate.
+- A finding code names one finding for the life of its scope, so a disposition or waiver written for `F2` binds
+  to that finding only. Each brief lists the codes the scope has used; if a reviewer still reuses one for a
+  different finding, Office records the new finding under the next unused code (a `finding.recoded` event).
+- The convergence brief names each task's accepted revision commit and message body, says that `office: ...`
+  commits are Office's own and not repairable by an executor, and states when the run has no task PRs. Where a
+  criterion refers to a task PR and the run has PRs, Office embeds the PR state and body (below the office
+  marker) in the brief, because reviewers may have no network.
 - A tooling, quota or evidence failure is not a verdict. A reviewer that cannot review says so in
   `NEXT` and stops.
 
@@ -156,6 +163,12 @@ judgment.
   user-visible without a `visual:` block and still gives it a gate.
 
 ### Plan review
+
+Plan submit lints the criteria (runs on this contract only) before any reviewer sees them: with task PRs off, a done or accept criterion
+that needs a PR body, description or comment is refused (`plan-lint`), as is an accept item and a done
+criterion that put the same deliverable in conflicting places (a write-up "in the PR body" vs "in the commit
+body", #363). The plan-review brief also asks reviewers to check each accept list against the done criteria
+it serves.
 
 Plan review runs when the gear funds it (`plan_review`). `office approve waive plan-review --quote
 "<words>"` still waives it.
@@ -305,8 +318,9 @@ for the run, never a role.
 A waiver:
 
 - keeps the underlying verdict or status (`RECHECK`, `UNAVAILABLE`, ...); it never rewrites it;
-- is bound to the scope, the gate kind and the scope's composed commit. A recomposition voids it unless
-  it is renewed;
+- is bound to the scope, the gate kind and the scope's composed tree (#360). A recomposition over the identical
+  tree (a new merge commit over the same content) keeps it and carries the waived gate as it stood, with no new
+  review; a different tree voids it unless it is renewed;
 - appears in the archive receipt under `convergence.waivers`, with the underlying verdict and reason.
 
 Under `convergence-v1`, `office approve waive T2:code_review|visual` and `office approve visual` are
@@ -418,4 +432,4 @@ Runs pinned to `v3.1` keep these semantics; Office never converts them.
 | Plan review | Rolling: after `CHANGES_REQUIRED`, dispatch while the amendment is re-reviewed; a defect blocks its scope until cleared | `RECHECK` holds only named tasks; same reviewer; APPROVED cleanup is not re-reviewed |
 | Requirement problems | `PLAN_DEFECT` + `office amend plan --contract --redirect ...` / `office submit --redirect ...` | `INTAKE_GAP` + `office amend requirements --quote ...` |
 | Round budget | Gear `*_max_rounds` | 3 substantive rounds per RECHECK sequence, then `office decide` |
-| Waivers | `office approve waive T2:<gate> --quote ...` (user) | Lane gates; landing authority; bound to the composed commit |
+| Waivers | `office approve waive T2:<gate> --quote ...` (user) | Lane gates; landing authority; bound to the composed tree |

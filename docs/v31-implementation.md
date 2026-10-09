@@ -244,7 +244,11 @@ reference goes to the reviewer as an estimate. Evidence status is separate from 
 Wrong viewport/auth/state, partial capture, missing fonts, and stale references are
 `INVALID_COMPARISON`: one automatic recapture, then `UNAVAILABLE`. Broken interactions, horizontal
 overflow, and elements clipped outside the viewport are deterministic product failures (no judgment
-spent). No reference means "fidelity unmeasured". Visual input keys hash only presentation content,
+spent). A state can be limited to viewports (`menu-open@mobile = click ...`), and known framework dev
+overlays (`nextjs-portal`) are hidden during capture. A scripted state that could not be reached (its click or
+expected element failed) is not a deterministic failure on its own: the script may be wrong as easily as the
+product, so it goes to the vision reviewer as evidence and spends no round; any measured failure, or a task with
+no reachable state, still ends the gate without judgment. No reference means "fidelity unmeasured". Visual input keys hash only presentation content,
 the reference bytes, the viewport/state contract and the environment, so unrelated edits reuse the
 verdict and a reference change invalidates it.
 
