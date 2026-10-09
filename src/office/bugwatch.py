@@ -21,13 +21,24 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from office import db, paths
-from office.util import now_iso
+from office.util import DEAD, claim_liveness, now_iso
 
 REPO = "Hikari9/auto-office"
 SELF_ENV = "OFFICE_SELF_IMPROVE_REPORTER"
-# One detached reporter per state home, for a bounded time. A disposable test
-# home must not retain a background worker forever: pending incidents and retry
-# receipts are durable in runs.db, and the next Office invocation resumes them.
+# start_reporter holds the home's flock through the spawn and passes the locked
+# fd to the child, so ownership never gaps between spawn and the child's own
+# claim: concurrent wake-ups cannot race that gap into duplicate reporters.
+LOCK_FD_ENV = "OFFICE_SELF_IMPROVE_LOCK_FD"
+# Set by whoever creates a disposable state home (the test Env fixture): the
+# home is reclaimed when its owner process is gone, even when the directory
+# survives an interrupted teardown. Unset means a persistent user home, whose
+# reporter is bounded by the lifetime cap and the per-home lock instead.
+OWNER_ENV = "OFFICE_STATE_HOME_OWNER"
+# Each reporter process runs for a bounded time (env-overridable). A queue that
+# outlives the bound hands ownership to a fresh successor, so retries due after
+# the bound are still delivered while the population stays one reporter per
+# home and no process lives unbounded. Pending incidents and retry receipts are
+# durable in runs.db in every case.
 MAX_REPORTER_SECONDS = 900.0
 REPORTER_POLL_SECONDS = 5.0
 # Routine gates, user mistakes, quota limits, and external outages are not bugs.
@@ -186,17 +197,57 @@ def _pending_work(con) -> bool:
     return row is not None
 
 
+def _owner_dead() -> bool:
+    """Whether the disposable-home owner that armed this state home is gone.
+
+    OWNER_ENV unset means a persistent home (the owner is the home itself,
+    bounded by the lifetime cap and the lock). Unknown is never dead: a
+    failed liveness probe keeps the reporter on those bounds instead of
+    reaping it on a guess."""
+    raw = os.environ.get(OWNER_ENV)
+    if not raw:
+        return False
+    try:
+        pid = int(raw.rpartition("@")[0].rpartition(":")[2])
+    except ValueError:
+        return False
+    return claim_liveness(pid, raw)[0] == DEAD
+
+
+def _live(home: Path) -> bool:
+    """The reporter still belongs to a living home and its living owner."""
+    return home.exists() and not _owner_dead()
+
+
+def _spawn_locked(lock_file) -> None:
+    """Spawn `_self_improve` as the next owner of the flock `lock_file` holds.
+
+    The locked fd is inherited (`pass_fds`), so the lock is held continuously
+    from before the spawn into the child's own claim; concurrent wake-ups see
+    it held and spawn nothing."""
+    from office import frontdoor
+    argv, extra = frontdoor.current_argv()
+    env = dict(os.environ)
+    env.update(extra)
+    env[SELF_ENV] = "1"
+    env[LOCK_FD_ENV] = str(lock_file.fileno())
+    subprocess.Popen([*argv,"_self_improve"], env=env, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True, close_fds=True,
+                     pass_fds=(lock_file.fileno(),))
+
+
 def start_reporter(con=None) -> None:
     """Best-effort wake-up, bounded to one live reporter per state home.
 
-    The per-home lock is the ownership record: a wake-up that finds it held
-    spawns nothing, so repeated CLI wakeups (and repeated test or
-    mutation-test invocations) cannot accumulate detached workers. A caller
-    with a connection also skips the spawn when no incident awaits work.
-    Either way the durable receipts in runs.db resume on the next Office
-    invocation. The worker also exits on its own lifetime bound or when its
-    disposable state home disappears.
-    """
+    The per-home lock is the ownership record: it is probed non-blocking and
+    held through the spawn, with the locked fd handed to the child, so
+    repeated CLI wakeups (and repeated test or mutation-test invocations)
+    cannot accumulate detached workers. A caller with a connection also
+    skips the spawn when no incident awaits work. Either way the durable
+    receipts in runs.db resume on the next Office invocation, and a reporter
+    exits on its lifetime bound, its released home, or its disposable-home
+    owner's death."""
     if os.environ.get(SELF_ENV):
         return
     try:
@@ -209,16 +260,42 @@ def start_reporter(con=None) -> None:
                 fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return  # a live reporter already owns this home
-            from office import frontdoor
-            argv, extra = frontdoor.current_argv()
-            env = dict(os.environ)
-            env.update(extra)
-            env[SELF_ENV] = "1"
-            subprocess.Popen([*argv,"_self_improve"], env=env, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True, close_fds=True)
+            _spawn_locked(probe)
     except Exception:
         pass
+
+
+def _adopt_or_acquire():
+    """The ownership lock: adopt the fd start_reporter handed over (its flock
+    has been held continuously since before the spawn), else claim it here.
+    None means a live reporter already owns this home."""
+    lock = _lock_path()
+    raw = os.environ.get(LOCK_FD_ENV)
+    if raw:
+        try:
+            fd = int(raw)
+            mine, path = os.fstat(fd), os.stat(lock)
+            if (mine.st_dev, mine.st_ino) == (path.st_dev, path.st_ino):
+                return os.fdopen(fd, "a+")
+        except (ValueError, OSError):
+            pass  # a stale or foreign fd: fall back to claiming the lock here
+    f = open(lock, "a+")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        f.close()
+        return None
+    return f
+
+
+def _budgeted(cap: float, budget: float | None) -> float:
+    """A blocking call's timeout: its own cap, never beyond the worker's
+    remaining lifetime budget."""
+    try:
+        remaining = float(budget)
+    except (TypeError, ValueError):
+        return cap
+    return max(1.0, min(cap, remaining))
 
 
 def _route(con):
@@ -241,8 +318,9 @@ def _route(con):
     return candidate,adapter
 
 
-def investigate(con, incident: dict) -> dict:
-    """Agent outputs a JSON draft, not an action. No GitHub or write tools."""
+def investigate(con, incident: dict, budget: float | None = None) -> dict:
+    """Agent outputs a JSON draft, not an action. No GitHub or write tools.
+    `budget` bounds the call by the worker's remaining lifetime."""
     from office import adapters
     c,adapter = _route(con)
     with tempfile.TemporaryDirectory(prefix="office-investigate-") as scratch:
@@ -271,7 +349,7 @@ def investigate(con, incident: dict) -> dict:
             "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR",
             "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")}
         proc = subprocess.run(args,input=prompt if prof.get("prompt")=="stdin" else None,
-                              cwd=root,env=env,capture_output=True,text=True,timeout=180)
+                              cwd=root,env=env,capture_output=True,text=True,timeout=_budgeted(180, budget))
         if proc.returncode:
             raise RuntimeError("investigation route failed with exit " + str(proc.returncode))
         raw = (next((p.read_text(encoding="utf-8") for p in (output,output.with_name("last-message.txt")) if p.exists()), proc.stdout)
@@ -289,20 +367,22 @@ def investigate(con, incident: dict) -> dict:
         return result
 
 
-def _gh(*args: str) -> str:
-    p = subprocess.run(["gh",*args],text=True,capture_output=True,timeout=90)
+def _gh(*args: str, timeout: float = 90) -> str:
+    p = subprocess.run(["gh",*args],text=True,capture_output=True,timeout=timeout)
     if p.returncode:
         raise RuntimeError("GitHub issue API temporarily unavailable")
     return p.stdout
 
 
-def publish(incident: dict, report: dict) -> str:
-    """Issue-only external write, globally deduplicated by opaque fingerprint."""
+def publish(incident: dict, report: dict, budget: float | None = None) -> str:
+    """Issue-only external write, globally deduplicated by opaque fingerprint.
+    `budget` bounds each GitHub call by the worker's remaining lifetime."""
     title = "[Auto-Office bug] " + report["title"][:95]
     fingerprint = incident["fingerprint"]
     marker = f"<!-- auto-self-improve:{fingerprint} -->"
     pages = json.loads(_gh("api", "--paginate", "--slurp",
-                           f"repos/{REPO}/issues?state=all&per_page=100"))
+                           f"repos/{REPO}/issues?state=all&per_page=100",
+                           timeout=_budgeted(90, budget)))
     items = [item for page in pages for item in page if "pull_request" not in item]
     existing = next((it.get("html_url") for it in items if marker in (it.get("body") or "")
                      or it.get("title","").casefold()==title.casefold()),None)
@@ -317,7 +397,8 @@ def publish(incident: dict, report: dict) -> str:
     with tempfile.TemporaryDirectory(prefix="office-issue-") as temp:
         p = Path(temp) / "issue.md"
         p.write_text(body,encoding="utf-8")
-        return _gh("issue","create","--repo",REPO,"--title",title,"--body-file",str(p)).strip()
+        return _gh("issue","create","--repo",REPO,"--title",title,"--body-file",str(p),
+                   timeout=_budgeted(90, budget)).strip()
 
 
 def _due(con) -> list[dict]:
@@ -327,10 +408,11 @@ def _due(con) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def _process(con, incident: dict) -> None:
+def _process(con, incident: dict, budget: float | None = None) -> None:
     fp = incident["fingerprint"]
     try:
-        report = json.loads(incident["report_json"]) if incident["report_json"] else investigate(con,incident)
+        report = (json.loads(incident["report_json"]) if incident["report_json"]
+                  else investigate(con,incident,budget))
         if report["confidence"] != "strong":
             with db.transaction(con):
                 con.execute("UPDATE self_improve_incidents SET status=?,report_json=?,updated_at=? WHERE fingerprint=?",
@@ -341,7 +423,7 @@ def _process(con, incident: dict) -> None:
         with db.transaction(con):
             con.execute("UPDATE self_improve_incidents SET status='ready',report_json=?,updated_at=? WHERE fingerprint=?",
                         (json.dumps(report),now_iso(),fp))
-        url = publish(incident,report)
+        url = publish(incident,report,budget)
         with db.transaction(con):
             con.execute("UPDATE self_improve_incidents SET status='filed',issue_url=?,last_error=NULL,updated_at=? "
                         "WHERE fingerprint=?",(url,now_iso(),fp))
@@ -354,11 +436,12 @@ def _process(con, incident: dict) -> None:
                         "updated_at=? WHERE fingerprint=?",(failures,retry,sanitize(type(exc).__name__+": "+str(exc)),now_iso(),fp))
 
 
-def _wait(delay: float, deadline: float, home: Path) -> None:
-    """Sleep toward the next retry in short slices. A released home or the
-    lifetime deadline ends the wait early, so reclamation stays prompt."""
+def _wait(delay: float, deadline: float, live) -> None:
+    """Sleep toward the next retry in short slices. A released home, a dead
+    disposable-home owner, or the lifetime deadline ends the wait early, so
+    reclamation stays prompt."""
     remaining = max(1.0,min(delay,60.0))
-    while remaining > 0 and home.exists():
+    while remaining > 0 and live():
         left = deadline - time.monotonic()
         if left <= 0:
             return
@@ -370,27 +453,32 @@ def _wait(delay: float, deadline: float, home: Path) -> None:
 def worker(*, once: bool = False) -> int:
     """Single-owner durable retry pump with a bounded lifetime.
 
-    The per-home lock is the ownership record. The worker exits when nothing
-    is pending, when its overall lifetime bound elapses, or when its state
-    home disappears (a disposable test home its owner released). Exiting
-    loses nothing: pending incidents and retry receipts are durable in
-    runs.db, and the next Office invocation starts a fresh reporter that
+    The per-home lock is the ownership record, adopted as an inherited fd
+    when start_reporter handed it over so ownership never gaps. The worker
+    exits when nothing is pending, when its lifetime bound elapses, when its
+    state home disappears, or when its disposable-home owner is gone. A
+    bound elapsing with work still queued hands ownership to a fresh
+    successor: retries that become due after the bound are still delivered,
+    while the population stays one reporter per home and every process is
+    recycled. Nothing is lost either way: pending incidents and retry
+    receipts are durable in runs.db, and the next Office invocation also
     resumes them.
     """
     lock = _lock_path()
     lock.parent.mkdir(parents=True,exist_ok=True)
-    with open(lock,"a+") as f:
-        try:
-            fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except BlockingIOError:
-            return 0
+    f = _adopt_or_acquire()
+    if f is None:
+        return 0
+    with f:
         deadline = time.monotonic() + _reporter_lifetime()
         con = db.connect()
         try:
-            while lock.parent.exists() and time.monotonic() < deadline:
+            while _live(lock.parent) and time.monotonic() < deadline:
                 due = _due(con)
                 for incident in due:
-                    _process(con,incident)
+                    if time.monotonic() >= deadline:
+                        break  # the rest stay queued; the successor continues
+                    _process(con,incident,deadline - time.monotonic())
                 if once:
                     return 0
                 if _due(con):
@@ -403,6 +491,15 @@ def worker(*, once: bool = False) -> int:
                     delay = (datetime.fromisoformat(wait)-datetime.now(timezone.utc)).total_seconds()
                 except ValueError:
                     delay = 30
-                _wait(delay,deadline,lock.parent)
+                _wait(delay,deadline,lambda: _live(lock.parent))
+            # Reclaimed homes take their reporter with them and spawn nothing;
+            # a lifetime bound elapsing with work queued hands off to keep
+            # retry delivery eventual without retaining an unbounded process.
+            if _live(lock.parent) and _pending_work(con):
+                try:
+                    _spawn_locked(f)
+                except Exception:
+                    pass
+            return 0
         finally:
             con.close()
