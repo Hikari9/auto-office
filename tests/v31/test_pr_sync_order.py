@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from datetime import datetime, timedelta
 
 from conftest import GOOD_ADD, start_inline
+from test_land_criss_cross import CONFLICTING_GH, _criss_cross
 from test_task_prs import github, gh
 
 
@@ -256,3 +258,33 @@ def test_land_refuses_when_a_pr_cannot_be_readied_and_merges_nothing(env, monkey
     code, out = env.office("land", "--merge", "--quote", "merge them")
     assert code == 4 and "ready-failed" in out and "could not mark #1 (T1) ready" in out, out
     assert [p["state"] for p in gh(env)["prs"]] == ["open", "open"]
+
+
+READY_AFTER_SETTLE_GH = CONFLICTING_GH.replace(
+    "fake_gh.git_merge = guarded\n",
+    """fake_gh.git_merge = guarded
+_main = fake_gh.main
+
+
+def logged(argv):
+    if argv[:2] == ["pr", "ready"]:  # record how many merge bases the branch had when it was readied
+        origin = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
+        head = "refs/heads/" + json.load(open(os.environ["FAKE_GH_STATE"]))["prs"][int(argv[2]) - 1]["head"]
+        n = len(subprocess.run(["git", "--git-dir", origin, "merge-base", "--all", head, "refs/heads/main"],
+                               capture_output=True, text=True).stdout.split())
+        open(os.environ["FAKE_GH_STATE"] + ".bases", "a").write(f"{argv[2]}:{n}\\n")
+    return _main(argv)
+
+
+fake_gh.main = logged
+""").replace("import subprocess, sys", "import json, os, subprocess, sys")
+
+
+def test_land_settles_a_criss_cross_before_it_readies_the_draft(env, monkeypatch):
+    _draft_stack(env, monkeypatch)
+    _criss_cross(env, env.tmp / "origin.git", clash=False)
+    (env.bin / "gh").write_text(READY_AFTER_SETTLE_GH)
+    code, out = env.office("land", "--merge", "--quote", "merge them")
+    assert code == 0 and "several merge bases" in out, out
+    assert [p["state"] for p in gh(env)["prs"]] == ["merged", "merged"]
+    assert (env.tmp / "gh.json.bases").read_text().split()[0] == "1:1"  # settled (one base) by the time #1 was readied
