@@ -306,9 +306,10 @@ def _validate(plan: ParsedPlan) -> None:
         plan.warnings.append(f"{a} and {b} may run in parallel but their scopes overlap; leases will serialize them")
 
 
-def end_state_problems(end: str | None, deploy: dict) -> tuple[list[str], list[str]]:
+def end_state_problems(end: str | None, deploy: dict, repo=None) -> tuple[list[str], list[str]]:
     """(errors, warnings) for an end state and its deploy commands, checked on
-    the merged requirements (start flags plus the plan)."""
+    the merged requirements (start flags plus the plan). `repo` (default: the
+    repository of the working directory) is where a command's paths are looked up."""
     errors, warnings = [], []
     if end == "preview" and not deploy.get("preview"):
         errors.append("end_state preview needs `deploy_preview: <command>`")
@@ -316,6 +317,14 @@ def end_state_problems(end: str | None, deploy: dict) -> tuple[list[str], list[s
         errors.append("end_state e2e needs `deploy_prod: <command>`")
     if end in ("preview", "e2e") and not deploy.get("verify"):
         warnings.append("no `deploy_verify:` command; the deploy is recorded without verification")
+    from pathlib import Path
+    from office import land, paths
+    if repo is None and (ident := paths.repo_identity()):
+        repo = ident[0]
+    if repo is not None and deploy:
+        repo = Path(repo)
+        warnings.extend(land.deploy_path_warnings(repo, {f"deploy_{k}": v for k, v in deploy.items()},
+                                                  land.env_files(land.config_for(repo))))
     return errors, warnings
 
 

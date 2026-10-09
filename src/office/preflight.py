@@ -191,9 +191,9 @@ def _test_file_exists(wt: Path, rel: str) -> bool:
     try:
         target = (wt / rel).resolve()
         target.relative_to(wt.resolve())
-    except (OSError, ValueError, RuntimeError):  # RuntimeError: a symlink loop, before Python 3.13
+        return target.is_file()
+    except (OSError, ValueError, RuntimeError):  # OSError: a name too long to stat; RuntimeError: a symlink loop before 3.13
         return False
-    return target.is_file()
 
 
 def _is_test_path(rel: str) -> bool:

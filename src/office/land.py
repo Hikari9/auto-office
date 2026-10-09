@@ -29,6 +29,8 @@ import contextlib
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -598,33 +600,128 @@ def _verify_main(con, run: dict, integrated: str, res: Result) -> str:
 
 def _deploy(con, run: dict, target: str, deploy: dict, cwd: Path, res: Result, rollback: str | None = None, *,
             commit: str, tree: str) -> None:
-    """Every event names the commit and tree checked out. `land.deploy.start`
+    """Every event names the commit, tree and cwd checked out. `land.deploy.start`
     goes first, so a land killed mid-deploy leaves a start with no result,
     which `_require_deploy_proof` treats as unknown rather than not deployed."""
     link = Path(run["repo_root"]) / ".vercel"
     if link.is_dir() and not (cwd / ".vercel").exists():
-        import shutil
         shutil.copytree(link, cwd / ".vercel")  # the local project link is untracked
+    copied = copy_env_files(Path(run["repo_root"]), cwd, env_files(state.pinned_config(run)))
+    if copied:
+        res.add(f"{target} deploy checkout {cwd}: copied deploy.env_files {', '.join(copied)} (never committed)")
     log_dir = paths.run_dir(run["id"]) / "deploys"
     log_dir.mkdir(parents=True, exist_ok=True)
-    ident = {"target": target, "commit": commit, "tree": tree}
+    ident = {"target": target, "commit": commit, "tree": tree, "cwd": str(cwd)}
     for step, cmd in (("deploy", deploy.get(target)), ("verify", deploy.get("verify"))):
         if not cmd:
             continue
         if step == "deploy":
             with db.transaction(con):
-                state.emit(con, run, "land.deploy.start", f"{target} deploy of {commit[:12]} started", payload=ident,
-                           audience="runtime")
+                state.emit(con, run, "land.deploy.start", f"{target} deploy of {commit[:12]} started in {cwd}",
+                           payload=ident, audience="runtime")
         proc = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=3600)
-        (log_dir / f"{target}-{step}.log").write_text(proc.stdout + proc.stderr, encoding="utf-8")
+        header = f"# office land {target} {step}\n# cwd: {cwd}\n# commit: {commit}\n# command: {cmd}\n\n"
+        (log_dir / f"{target}-{step}.log").write_text(header + proc.stdout + proc.stderr, encoding="utf-8")
         with db.transaction(con):
             state.emit(con, run, f"land.{step}", f"{target} {step} `{cmd}` exit {proc.returncode}",
                        payload={**ident, "exit": proc.returncode})
         if proc.returncode != 0:
-            raise Refused(f"{step}-failed", f"{target} {step} failed (exit {proc.returncode}): `{cmd}`",
+            raise Refused(f"{step}-failed", f"{target} {step} failed (exit {proc.returncode}) in {cwd}: `{cmd}`",
                           preserved=(f"merges are done; rollback target {rollback[:12]}" if rollback else "the PRs"),
                           next_step=f"see {log_dir / f'{target}-{step}.log'}; fix or roll back, then office land again")
-        res.add(f"{target} {step} ok: `{cmd}`")
+        res.add(f"{target} {step} ok: `{cmd}` (cwd {cwd})")
+
+
+# ------------------------------------------------- deploy environment files
+
+def env_files(config: dict) -> list[str]:
+    """The `deploy.env_files` entries of a config: repo-relative paths of ignored files a deploy needs."""
+    listed = (config.get("deploy") or {}).get("env_files") or []
+    return [str(e) for e in (listed if isinstance(listed, list) else [listed])]
+
+
+def copy_env_files(repo: Path, checkout: Path, entries: list[str]) -> list[str]:
+    """Copy each listed file from the repo into the deploy checkout, mode preserved. The
+    checkout is a throwaway worktree: nothing is staged or committed, and a tracked file
+    the checkout already holds is left alone. Returns the entries copied."""
+    root, dest_root = repo.resolve(), checkout.resolve()
+
+    def refuse(entry: str, why: str) -> Refused:
+        return Refused("deploy-env-file-invalid", f"deploy.env_files entry {entry!r} {why}", preserved="nothing was deployed",
+                       next_step="fix deploy.env_files in the config, then office land again")
+
+    copied = []
+    for entry in entries:
+        rel = Path(entry)
+        if not entry.strip() or rel.is_absolute() or ".." in rel.parts:
+            raise refuse(entry, "must be a path inside the repo")
+        src, dest = root / rel, dest_root / rel
+        if not src.is_file():
+            continue
+        if not src.resolve().is_relative_to(root):
+            raise refuse(entry, "is a link to a file outside the repo")
+        if dest.exists() or dest.is_symlink():
+            continue  # tracked: the checkout already holds the committed file
+        anchor = dest.parent
+        while not anchor.exists():
+            anchor = anchor.parent
+        if not anchor.resolve().is_relative_to(dest_root):
+            raise refuse(entry, "resolves outside the deploy checkout")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # private until the mode is applied
+        with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
+            shutil.copyfileobj(inp, out)
+        shutil.copymode(src, dest)
+        copied.append(entry)
+    return copied
+
+
+def _command_paths(cmd: str) -> list[str]:
+    """Path-like words of a shell command: arguments, `--flag=value` values and `VAR=value`
+    values, with operators dropped. Variable expansions, globs and URLs are not paths."""
+    lexer = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        words = list(lexer)
+    except ValueError:
+        words = cmd.split()
+    found = []
+    for word in words:
+        if re.search(r"\s", word):  # a quoted script, as in `sh -c '. ./.env && deploy'`
+            found += _command_paths(word)
+            continue
+        value = word.partition("=")[2] if word.startswith("-") else word.partition("=")[2] or word
+        if not value or value.startswith("-") or re.search(r"[$*?`;&|<>()~]|://", value):
+            continue
+        found.append(value)
+    return found
+
+
+def deploy_path_warnings(repo: Path, commands: dict[str, str], listed: list[str] | None = None) -> list[str]:
+    """Warnings for deploy commands that name an existing repo path a fresh checkout lacks
+    (gitignored or untracked, e.g. `.env`, or `myaccount/.env` passed to a sourced script).
+    Paths listed in `deploy.env_files` are copied in, so they are not reported. `commands`
+    maps a label (deploy_prod, deploy_verify, ...) to its shell command."""
+    root = repo.resolve()
+    covered = {Path(e).as_posix() for e in listed or []}
+    warnings: list[str] = []
+    for label, cmd in commands.items():
+        seen: set[str] = set()
+        for word in _command_paths(cmd or ""):
+            try:
+                rel = (root / word).resolve().relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if rel in seen or rel in covered or rel == "." or rel.split("/")[0] in (".git", ".vercel") \
+                    or not (root / rel).exists():
+                continue
+            seen.add(rel)
+            if _git(root, "ls-files", "--", rel).stdout.strip():
+                continue
+            kind = "gitignored" if _git(root, "check-ignore", "-q", "--", rel).returncode == 0 else "untracked"
+            warnings.append(f"{label} references {rel}, which is {kind} and absent from the fresh checkout the deploy "
+                            f"runs in; list it under deploy.env_files in the config to copy it in")
+    return warnings
 
 
 def _close_issue(con, run: dict, main: str, res: Result) -> None:
@@ -655,15 +752,17 @@ def detect_deploy(repo: Path) -> Result:
         proposals = {"deploy_preview": "vercel deploy", "deploy_prod": "vercel deploy --prod"}
         lines.append("vercel project: preview and prod deploys through the vercel CLI")
     pkg = repo / "package.json"
+    scripts, deploy_scripts = {}, []
     if pkg.exists():
         scripts = (json.loads(pkg.read_text() or "{}").get("scripts") or {})
+        deploy_scripts = [n for n in scripts if n.startswith("deploy")]
         for name in scripts:
             if name in ("deploy:preview", "deploy-preview"):
                 proposals["deploy_preview"] = f"pnpm run {name}"
             elif name in ("deploy", "deploy:prod", "deploy-prod"):
                 proposals.setdefault("deploy_prod", f"pnpm run {name}")
-        if any(n.startswith("deploy") for n in scripts):
-            lines.append("package.json deploy scripts: " + ", ".join(n for n in scripts if n.startswith("deploy")))
+        if deploy_scripts:
+            lines.append("package.json deploy scripts: " + ", ".join(deploy_scripts))
     wf = repo / ".github" / "workflows"
     ci = sorted(p.name for p in wf.glob("*.y*ml") if re.search(r"deploy|release|publish", p.read_text(errors="ignore"), re.I)) \
         if wf.is_dir() else []
@@ -678,4 +777,17 @@ def detect_deploy(repo: Path) -> Result:
     if proposals:
         lines += ["", "proposed PLAN.md requirements (confirm with the user first):",
                   *[f"{k}: {v}" for k, v in proposals.items()], "deploy_verify: <command that exits 0 when healthy>"]
-    return Result(lines=lines, data={"proposals": proposals, "ci": ci, "skills": skills})
+    listed = env_files(config_for(repo))
+    warnings = deploy_path_warnings(repo, {**proposals, **{f"package.json script {n}": scripts[n] for n in deploy_scripts}},
+                                    listed)
+    lines += [f"warning: {w}" for w in warnings]
+    return Result(lines=lines, data={"proposals": proposals, "ci": ci, "skills": skills, "warnings": warnings})
+
+
+def config_for(repo: Path) -> dict:
+    """The effective config for `repo` (shipped defaults, user and repo files), {} when it is invalid."""
+    from office import config as cfg
+    try:
+        return cfg.resolve(repo)[0]
+    except ValueError:
+        return {}

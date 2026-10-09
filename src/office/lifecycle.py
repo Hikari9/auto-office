@@ -204,6 +204,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         moved = planpath.relocate_legacy(con, top)
         if moved:
             res.notices.append(moved)
+        if deploy:
+            from office import land
+            res.notices += [f"warning: {w}" for w in land.deploy_path_warnings(
+                top, {f"deploy_{k}": v for k, v in deploy.items()}, land.env_files(config))]
         if risk["classification"] == "unknown":
             res.notices.append("risk is unclassified: independent code review is required until the plan declares "
                                "`blast_radius` (or `office start --blast-radius ...`); unknown risk is never low")

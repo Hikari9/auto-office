@@ -21,6 +21,11 @@ worktree:
   setup_inputs: []
   setup_timeout_s: 600
   applies_to: [task, integration, check]
+deploy:
+  # Repo-relative gitignored files a deploy needs (e.g. ".env", "myaccount/.env"). A deploy runs in
+  # a fresh checkout that lacks them, so Office copies each one from the repo into that checkout
+  # before the deploy command runs, mode preserved and never committed. Empty copies nothing.
+  env_files: []
 quota:
   # Ratified v3.1 charter (12A): protect 5% of provider quota.
   reserve_percent: 5
