@@ -304,7 +304,15 @@ def _under_checkout(run: dict, cwd: Path | None) -> bool:
         root = paths.primary_checkout(Path(run["git_common_dir"])).resolve()
     except OSError:
         return False
-    return here == root or root in here.parents
+    if not (here == root or root in here.parents):
+        return False
+    # A separate repository nested inside the checkout is not the bound run's repository.
+    for d in (here, *here.parents):
+        if d == root:
+            return True
+        if (d / ".git").exists():
+            return False
+    return True
 
 
 def _binding_crosses_repo(con, run: dict, ident) -> bool:

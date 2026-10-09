@@ -71,6 +71,10 @@ class ParsedPlan:
     run_checks: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Structured scope problems, so a revision can keep what the accepted plan already had:
+    # (task id, entry, error text) and (task a, task b, shared entry, error text).
+    entry_problems: list[tuple] = field(default_factory=list)
+    pair_problems: list[tuple] = field(default_factory=list)
 
 
 def _is_no_check(value: str) -> bool:
@@ -245,7 +249,9 @@ def _validate(plan: ParsedPlan) -> None:
             problem = _entry_problem(entry)
             if problem:
                 # Each entry is matched as one path or glob: a note after it never matches (#416).
-                plan.errors.append(f"{t['id']} (line {t['line']}): {ENTRY_ERROR} {entry!r} {problem}")
+                err = f"{t['id']} (line {t['line']}): {ENTRY_ERROR} {entry!r} {problem}"
+                plan.errors.append(err)
+                plan.entry_problems.append((t["id"], entry, err))
         if not t["accept"]:
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `accept:` criteria")
         if t["checks"] is None:
@@ -265,9 +271,11 @@ def _validate(plan: ParsedPlan) -> None:
     end = r.get("end_state")
     if end and end not in END_STATES:
         plan.errors.append(f"requirements end_state must be one of {', '.join(END_STATES)}")
-    for a, b, tree in _unordered_shared_trees(plan.tasks):
-        plan.errors.append(f"{a} and {b} may run in parallel but share the directory {tree!r}; a shared directory "
-                           f"is allowed only for tasks ordered by `depends` (add `depends: {a}` to {b}, or share files)")
+    for a, b, entry in _unordered_shared_trees(plan.tasks):
+        err = (f"{a} and {b} may run in parallel but share the directory {entry.lstrip(SHARED)!r}; a shared directory "
+               f"is allowed only for tasks ordered by `depends` (add `depends: {a}` to {b}, or share files)")
+        plan.errors.append(err)
+        plan.pair_problems.append((a, b, entry, err))
     for a, b in _parallel_overlaps(plan.tasks):
         plan.warnings.append(f"{a} and {b} may run in parallel but their scopes overlap; leases will serialize them")
 
@@ -339,16 +347,22 @@ _NOT_PATH = re.compile(r"[\s`:]")
 def _entry_problem(entry: str) -> str | None:
     """Why a scope or shared entry is not one path or glob, or None."""
     bare = entry.lstrip(SHARED)
-    if not bare or _NOT_PATH.search(bare) or bare.count("(") != bare.count(")") or bare.count("[") != bare.count("]"):
+    if not bare or _NOT_PATH.search(bare) or bare.count("(") != bare.count(")") or bare.count("[") != bare.count("]") \
+            or re.search(r"[^/][(\[]", bare):
+        # Brackets are path characters only as whole segments (`(group)/`, `[slug]/`);
+        # `x.csv(A3)` is a note glued to a path.
         return ("is not a path or glob; list bare paths or globs (no notes) and put limits "
                 "(e.g. 'only the importer entry') in `accept:`")
     return None
 
 
 def shared_tree(entry: str) -> bool:
-    """A `shared:` entry naming a directory or glob rather than one registry file."""
+    """A `shared:` entry naming a directory rather than registry files: a trailing `/`, a
+    `**`, or a last segment with no file suffix (`src/reg`, `src/*`). A file glob such as
+    `locales/*.json` names append-only files and stays parallel-safe."""
     bare = entry.lstrip(SHARED)
-    return is_shared(entry) and (bare.endswith("/") or "*" in bare or "?" in bare)
+    last = bare.rstrip("/").rsplit("/", 1)[-1]
+    return is_shared(entry) and (bare.endswith("/") or "**" in bare or "." not in last)
 
 
 def _unordered_shared_trees(tasks: list[dict]):
@@ -364,7 +378,7 @@ def _unordered_shared_trees(tasks: list[dict]):
             for x, y in ((a, b), (b, a)):
                 hit = next((e for e in x["scope"] if shared_tree(e) and scopes_overlap([e], y["scope"])), None)
                 if hit:
-                    yield a["id"], b["id"], hit.lstrip(SHARED)
+                    yield a["id"], b["id"], hit
                     break
 
 
@@ -373,19 +387,20 @@ def grandfather_entries(parsed: "ParsedPlan", prev_tasks: list[dict] | None) -> 
     had: its entry error becomes a warning, so a run accepted before entry
     validation can still be amended. New or changed entries stay errors."""
     prev = {t["id"]: set(t.get("scope") or []) for t in prev_tasks or []}
-    kept = []
-    for err in parsed.errors:
-        m = re.match(r"(\S+) \(line \d+\): " + re.escape(ENTRY_ERROR) + r" ('.*?'|\".*?\") ", err)
-        entry = m and m.group(2)[1:-1]
-        if m and entry in prev.get(m.group(1), ()):
-            parsed.warnings.append(err + " (kept: the accepted plan already had it)")
-        else:
-            kept.append(err)
-    parsed.errors[:] = kept
+    old = {err for tid, entry, err in parsed.entry_problems if entry in prev.get(tid, ())}
+    try:
+        before = {frozenset((a, b)) for a, b, _ in _unordered_shared_trees(
+            [{"id": t["id"], "depends": t.get("depends") or [], "scope": t.get("scope") or []} for t in prev_tasks or []])}
+    except (KeyError, TypeError):
+        before = set()
+    old |= {err for a, b, _, err in parsed.pair_problems if frozenset((a, b)) in before}
+    for err in [e for e in parsed.errors if e in old]:
+        parsed.warnings.append(err + " (kept: the accepted plan already had it)")
+    parsed.errors[:] = [e for e in parsed.errors if e not in old]
 
 
 def literal_prefix(pattern: str) -> str:
-    m = re.search(r"[*?\[]", pattern)
+    m = re.search(r"[*?]", pattern)  # brackets are path characters in scope entries
     return pattern[: m.start()] if m else pattern
 
 
@@ -416,7 +431,9 @@ def path_in_scope(path: str, scope: list[str]) -> bool:
         if pattern.endswith("/**"):
             if path == pattern[:-3] or path.startswith(pattern[:-2]):
                 return True
-        if fnmatch.fnmatch(path, pattern) or path == pattern:
+        # Brackets are path characters (`[slug]`), never a glob class.
+        literal = re.sub(r"[\[\]]", lambda m: "[[]" if m.group() == "[" else "[]]", pattern)
+        if fnmatch.fnmatchcase(path, literal) or path == pattern:
             return True
         # A directory entry (`src/auth/`, `src/auth`, `src/app/[slug]/`) owns everything under it,
         # compared literally so brackets are path characters, not a glob class (#334). A shared

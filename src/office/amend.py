@@ -393,6 +393,7 @@ def _envelope_changes(con, run: dict, parsed) -> list[str]:
 def _next_plan_text(current: dict, plan_text: str | None, scope_ids: list[str], delta: str):
     if plan_text and sha256_bytes(plan_text.encode()) != current["content_hash"]:
         parsed = planfile.parse(plan_text)
+        planfile.grandfather_entries(parsed, current.get("tasks"))
         if parsed.errors:
             raise Refused("plan-invalid", "the edited plan draft has problems: " + "; ".join(parsed.errors[:5]),
                           next_step="fix the edited plan draft, then retry the amendment")

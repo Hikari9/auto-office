@@ -187,3 +187,48 @@ def test_tasks_sharing_a_directory_never_hold_leases_together(env):
     assert code == 0, out
     code, out = env.office("dispatch", "T2", env={"OFFICE_WORKER_LAUNCHER": "external"})
     assert code != 0 and "scope-held" in out and "T1" in out, out
+
+
+def test_a_bare_shared_directory_is_a_tree_for_the_plan_check_and_the_lease_guard():
+    # Review #447 F1: `shared: src/reg` (no trailing slash) escaped both checks.
+    plan = planfile.parse(SHARED_TREE.replace("shared: src/reg/\n", "shared: src/reg\n"))
+    assert any("share the directory 'src/reg'" in e for e in plan.errors), plan.errors
+    assert planfile.scopes_overlap(["+src/reg"], ["+src/reg"])
+
+
+def test_a_shared_file_glob_stays_parallel_safe():
+    # Review #447 F8: `locales/*.json` names append-only files, not a directory.
+    plan = planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: locales/*.json\n").replace(
+        "scope: mul.py\n", "scope: mul.py\nshared: locales/*.json\n"))
+    assert not plan.errors, plan.errors
+
+
+def test_bracket_directories_are_literal_for_overlap_and_matching():
+    # Review #447 F3 and F4.
+    assert not planfile.scopes_overlap(["+src/app/[slug]/"], ["src/app/(dash)/page.tsx"])
+    plan = planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: src/app/[slug]/\n").replace(
+        "scope: mul.py\n", "scope: mul.py, src/app/(dash)/page.tsx\n"))
+    assert not any("share the directory" in e for e in plan.errors), plan.errors
+    assert planfile.path_in_scope("src/app/[slug]/page.tsx", ["src/app/[slug]/*.tsx"])
+    assert not planfile.path_in_scope("src/app/s/page.tsx", ["src/app/[slug]/page.tsx"])
+
+
+def test_a_note_glued_to_a_path_is_still_an_entry_error():
+    # Review #447 F9: parentheses only as whole segments.
+    plan = planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: vitest.config.ts(append-only)\n"))
+    assert any("vitest.config.ts(append-only)" in e for e in plan.errors), plan.errors
+
+
+def test_a_parallel_shared_directory_the_accepted_plan_had_is_grandfathered():
+    # Review #447 F2 and F10: grandfathering works from structure, pairs included.
+    first = planfile.parse(SHARED_TREE)
+    assert first.errors and first.pair_problems
+    again = planfile.parse(SHARED_TREE)
+    planfile.grandfather_entries(again, first.tasks)
+    assert not again.errors and any("already had it" in w for w in again.warnings), (again.errors, again.warnings)
+    quoted = PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py, it's (\"odd\") note\n")
+    old = planfile.parse(quoted)
+    assert old.errors
+    redo = planfile.parse(quoted)
+    planfile.grandfather_entries(redo, old.tasks)
+    assert not redo.errors, redo.errors
