@@ -70,6 +70,7 @@ visual:
   reference: <approved prototype/image path>  (optional; none means fidelity is unmeasured)
   viewports: desktop, mobile
   states: default; menu-open = click [data-test=menu]
+          (state steps: click, hover, type, wait, scroll, navigate <url> (resolved against url); end with -> expect <selector>)
   selectors: header, nav                   (elements to measure)
 route: <harness/model@effort>, <fallback>, <fallback>   (optional; omit to accept Office's ranked slate)
 route_why: <concrete reason>   (required when the primary is outside the close-call band of the best route)

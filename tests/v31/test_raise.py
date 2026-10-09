@@ -274,3 +274,22 @@ def test_a_headless_worker_that_ended_on_a_question_can_be_answered(env):
     first, second = _dispatches(env)[:2]
     brief = (paths.run_dir(first["run_id"]) / "dispatches" / second["id"] / "brief.md").read_text()
     assert "yes, add it" in brief and "ANSWER to your raised question" in brief
+
+
+@pytest.mark.approved
+def test_a_dispatched_worker_cannot_answer(env):
+    wenv, wt = _live(env)
+    env.office("raise", "--", ASK, cwd=wt, env=wenv, check=0)
+    for who in (wenv, {"OFFICE_ROLE": "executor"}):
+        code, out = env.office("answer", "T1", "--", "self-approved", cwd=wt, env=who)
+        assert code != 0 and "worker cannot answer" in out, out
+    # nothing was written: the raise is still open and the task still blocked
+    assert not _events(env, "task.raise_answered") and task_row(env)["status"] == "blocked"
+    code, out = env.office("answer", "T1", "--", "A", env=EXTERNAL)
+    assert code == 0 and task_row(env)["status"] == "running", out
+
+
+def test_plan_format_names_the_visual_state_verbs():
+    from office import briefs
+    for word in ("click", "hover", "type", "wait", "scroll", "navigate <url>", "-> expect <selector>"):
+        assert word in briefs.PLAN_FORMAT, word
