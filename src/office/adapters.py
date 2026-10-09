@@ -194,7 +194,8 @@ def toml_path(path: Path) -> str:
 
 def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
                output: Path | None = None, images: list[Path] | None = None,
-               include_dirs: list[Path] | None = None, session_id: str | None = None) -> tuple[list[str], dict]:
+               include_dirs: list[Path] | None = None, session_id: str | None = None,
+               resume_args: list[str] | None = None) -> tuple[list[str], dict]:
     """Return (argv, profile). Placeholders are substituted element-wise; the
     prompt never passes through a shell. `session_id` is appended through the
     adapter's `session.assign_arg` when the harness accepts an assigned id."""
@@ -246,7 +247,17 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
         argv.append(arg)
     if session_id and assigns_session(adapter):
         argv.extend(str(a).replace("{session_id}", session_id) for a in session_spec(adapter)["assign_arg"])
+    argv.extend(str(a) for a in resume_args or [])
     return argv, prof
+
+
+def headless_resume_args(adapter: dict, kind: str, session_id: str) -> list[str] | None:
+    """Args appended to the headless argv to continue `session_id`, from the
+    profile's `headless_resume_argv`; None when the harness declares no such form."""
+    form = (profile(adapter, kind) or {}).get("headless_resume_argv")
+    if not form or not session_id:
+        return None
+    return [str(a).replace("{session_id}", session_id) for a in form]
 
 
 def resume_argv(adapter: dict, kind: str, *, session_id: str, model: str, effort: str, cwd: Path,

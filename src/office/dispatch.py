@@ -45,13 +45,14 @@ PLANNER_TASK = "P1"
 # answers only a folder-trust dialog, and only for a directory it created for
 # the run (`_office_owned`); hook trust, imports and updates stay the user's (#399).
 TRUST_SCREEN = "folder-trust 'Trust this folder'"
+EXTERNAL_IMPORTS_SCREEN = "external CLAUDE.md imports dialog"
 _STARTUP_SCREEN_MARKERS = (
     ("hooks need review", "Codex 'Hooks need review'"),
     ("trust this folder", TRUST_SCREEN),
     # Claude Code: "Quick safety check: Is this a project you created or one you trust?"
     ("quick safety check", TRUST_SCREEN),
     ("is this a project you created or one you trust", TRUST_SCREEN),
-    ("allow external claude.md file imports", "Claude external-import approval"),
+    ("allow external claude.md file imports", EXTERNAL_IMPORTS_SCREEN),
     ("update available", "'Update available' prompt"),
 )
 
@@ -1095,7 +1096,11 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         label = pane_label(run, dispatch, kind)
         pane = _herdr_pane(run, cwd, label=label, dispatch_id=dispatch["id"]) if inter else None
         if inter and not pane:
+            spec["fallback_reason"] = "no herdr pane could be opened"
+            atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
             _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
+            if resume:
+                _headless_resume(run, dispatch, kind, spec, resume)
         if pane:
             started = _herdr_agent_start(run, dispatch, spec, env, inter, pane, cwd, ddir, label=label)
             if started:
@@ -1109,6 +1114,8 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
             # The agent never came up in the pane: fall back to a plain process,
             # and keep that visible on the dispatch (its notice says why).
             headless = "process-fallback"
+            if resume:
+                _headless_resume(run, dispatch, kind, spec, resume)
     log = open(ddir / "supervisor.log", "ab")
     try:
         proc = subprocess.Popen(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
@@ -1120,6 +1127,29 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         proc.wait()
         return _wait_terminal(dispatch["id"])
     return {"launcher": headless, "pid": proc.pid}
+
+
+def _headless_resume(run: dict, dispatch: dict, kind: str, spec: dict, resume: dict) -> None:
+    """A `rerun --resume` dispatch whose pane never came up. Resume the recorded
+    session headless with the adapter's headless resume args when it declares
+    them, else say it started fresh, and drop the parent's session id the
+    dispatch inherited so the new session is recorded without a session.mismatch (#445)."""
+    adapter = adapters.load_all().get(dispatch.get("adapter_id") or dispatch.get("harness") or "")
+    session = resume.get("session_id")
+    form = adapters.headless_resume_args(adapter, kind, session) if adapter and session else None
+    if form:
+        spec["headless_resume"] = form
+        _launch_notice(run, dispatch, f"resumed headless: session {session} continues with the harness's resume form "
+                                      "(no pane)")
+    else:
+        spec["headless_fresh"] = True
+        _set_dispatch(dispatch["id"], session_id=None)
+        dispatch["session_id"] = None
+        _assign_session(dispatch)
+        why = "no session id was recorded" if not session else "its adapter declares no headless resume form"
+        _launch_notice(run, dispatch, f"the resume could not run in a pane and {why}: started a FRESH session, not "
+                                      "a continuation of the parent's; the brief and the preserved worktree carry the task")
+    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
 
 
 def _supervise_in_process(dispatch_id: str, cwd: Path, extra: dict) -> None:
@@ -1289,6 +1319,8 @@ def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pa
     recovery = (f"orchestrator recovery: {inspect}; do not auto-approve trust, "
                 "credentials, or user-authority prompts; resolve a safe runtime blocker or choose another route, "
                 "then follow `office status` / `office resume` instead of abandoning the run")
+    spec["fallback_reason"] = f"{failure} ({why}){observed}"
+    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
     _launch_notice(run, dispatch, f"{failure} ({why}){observed}; running headless instead. {recovery}")
 
 
@@ -1424,7 +1456,8 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
                                           f"{pane}); submit it: herdr pane send-keys {pane} Enter")
         else:
             screen = _startup_screen(view)
-            title = "folder-trust dialog" if screen == TRUST_SCREEN else f"{screen} screen"
+            title = ("folder-trust dialog" if screen == TRUST_SCREEN else screen if screen == EXTERNAL_IMPORTS_SCREEN
+                     else f"{screen} screen")
             why = (f" the {title} holds the composer; review or skip it in the pane and"
                    if screen else "")
             _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
@@ -2030,6 +2063,23 @@ def _watch_notice(dispatch_id: str, text: str) -> None:
     finally:
         con.close()
     _launch_notice(run, d, text)
+
+
+def headless_fallbacks(con, run: dict) -> list[str]:
+    """One line per live dispatch that was meant for a Herdr pane and runs headless
+    instead, with why (launch.json `fallback_reason`). `office status` and `wait` show it."""
+    out = []
+    for d in con.execute("SELECT id, task_id, role FROM dispatches WHERE run_id=? AND ended_at IS NULL "
+                         "AND status IN ('launching','running') AND launcher IN ('process','process-fallback') "
+                         "ORDER BY started_at", (run["id"],)).fetchall():
+        try:
+            spec = json.loads((paths.run_dir(run["id"]) / "dispatches" / d["id"] / "launch.json").read_text())
+        except (OSError, ValueError):
+            continue
+        reason = spec.get("fallback_reason") if isinstance(spec, dict) else None
+        if reason:
+            out.append(f"{d['task_id'] or d['role']} {d['id']} runs headless (herdr fallback): {reason[:300]}")
+    return out
 
 
 def _launch_notice(run: dict, dispatch: dict, text: str) -> None:
@@ -2981,7 +3031,9 @@ def supervise(dispatch_id: str) -> int:
                                          cwd=Path(spec["cwd"]), output=output,
                                          images=[Path(i) for i in spec.get("images") or []],
                                          include_dirs=[Path(i) for i in spec.get("include_dirs") or []],
-                                         session_id=_assigned_session(d))
+                                         session_id=None if spec.get("headless_resume") else
+                                         (d.get("session_id") if spec.get("headless_fresh") else _assigned_session(d)),
+                                         resume_args=spec.get("headless_resume"))
         prompt = Path(spec["prompt_file"]).read_text(encoding="utf-8")
         if prof.get("image_transport") in ("prompt-at", "prompt-path") and spec.get("images"):
             prefix = "@" if prof["image_transport"] == "prompt-at" else ""
@@ -3022,7 +3074,7 @@ def supervise(dispatch_id: str) -> int:
                     child.stdin.close()
                 except BrokenPipeError:
                     pass
-            sniffer = None if d.get("resumed_from") else _SessionSniffer(run, d, adapter, log_path)
+            sniffer = None if d.get("resumed_from") and not spec.get("headless_fresh") else _SessionSniffer(run, d, adapter, log_path)
             for chunk in iter(lambda: child.stdout.read1(65536), b""):
                 log.write(chunk)
                 log.flush()

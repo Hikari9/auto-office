@@ -182,6 +182,12 @@ means `herdr pane send-keys <pane> Enter`, not a re-prompt, which would send it 
 reviewer yourself (an amendment nudge, a missing detail), run `office prompt <T2|dispatch> -- "<message>"`: it sends
 with `herdr agent prompt`, confirms it landed, and presses Enter for one left typed. Never use `herdr pane run` or
 `pane send-text` on an agent pane; Claude takes their Enter as part of the paste and leaves the text unsubmitted.
+A worker running headless (`process-fallback`, no pane) cannot be typed to: `office prompt` queues the
+message instead ("queued: ... runs headless; it sees this on its next office command"). It is not an amendment
+and needs no ack. A headless fallback shows in `office status` and `office wait` as "runs headless (herdr
+fallback): <why>". Claude's "Allow external CLAUDE.md file imports?" dialog is named there and never answered by
+Office; `office doctor` warns when CLAUDE.md imports files outside the repo. A `rerun --resume` that falls back
+headless resumes the recorded session when the adapter declares `headless_resume_argv`, else it says it started fresh.
 To relaunch a dispatch by hand, `office revoke T1`, then `office dispatch T1 --external` (plus `--as`
 for another model); it prints the `herdr pane run`, `herdr agent start`, and `herdr agent prompt` commands
 to run. A prompt has landed when the agent reports `working` or its pane shows a running turn. agy

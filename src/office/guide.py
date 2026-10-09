@@ -263,6 +263,9 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
             waiting = _waiting_on(con, run, t)
             if waiting:
                 res.add(f"{t['id']} waiting: {waiting}")
+    from office import dispatch as dispatch_mod
+    for line in dispatch_mod.headless_fallbacks(con, run):
+        res.add(line)
     from office import questions
     for q in questions.recorded(con, run):
         res.add(f"question: {q}")
@@ -588,6 +591,7 @@ def worker_status(con, run: dict, dispatch_id: str) -> Result:
                 + (f" -> {f['action'][:80]}" if f["action"] else ""))
     block = amend.pending_block(con, run, dispatch_id)
     res.lines.extend(block)
+    res.lines.extend(amend.pending_messages(con, run, dispatch_id))
     if block:
         res.next = "apply the amendment at a safe boundary, then office ack <id>"
     elif task["status"] == "changes_required":
@@ -607,9 +611,8 @@ def piggyback(con, run: dict, res: Result) -> None:
     """Attach pending deliveries (workers) or new orchestrator events."""
     worker = os.environ.get("OFFICE_DISPATCH_ID")
     if worker:
-        block = amend.pending_block(con, run, worker)
-        if block:
-            res.notices.extend(block)
+        res.notices.extend(amend.pending_block(con, run, worker))
+        res.notices.extend(amend.pending_messages(con, run, worker))
         return
     from office import db
     unread = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=200)
