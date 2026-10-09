@@ -43,6 +43,9 @@ _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[@-_]")
 # to confirm or esc to cancel"; agy: "Waiting for user confirmation".
 _SELECT_FOOTER = re.compile(r"enter to (?:select|confirm)|arrow keys to navigate|↑/↓ to navigate"
                             r"|waiting for user confirmation", re.I)
+# agy's question widget has a header instead of a known footer: "Question 1/1", the question
+# text, then "1. (Recommended) ..." options (#432).
+_SELECT_HEADER = re.compile(r"^\s*[│┃|]?\s*Question\s+\d+\s*/\s*\d+\b", re.I)
 _OPTION = re.compile(r"^\s*(?:[❯›>●○◯▶▸]\s*)?(\d{1,2})[.)]\s+(\S.*?)\s*$")
 _RULE = re.compile(r"^\s*[─━═—–-]{8,}\s*$")
 _BOX = "│┃|"
@@ -71,7 +74,35 @@ def _unbox(ln: str) -> str:
     return s
 
 
+def _select_header(lines: list[str]) -> dict | None:
+    head = max((i for i, ln in enumerate(lines) if _SELECT_HEADER.match(ln)), default=None)
+    if head is None:
+        return None
+    options, want, last, body = [], 1, head, []
+    for i, ln in enumerate(lines[head + 1:], head + 1):
+        m = _OPTION.match(ln)
+        if m and int(m.group(1)) == want:
+            options.append({"n": want, "label": _line(m.group(2), MAX_OPTION)})
+            want += 1
+            last = i
+        elif not options and _unbox(ln) and not _RULE.match(ln):
+            body.append(_unbox(ln))
+    if not options:
+        return None
+    # Only a hint line or two may follow the widget; later output means it was answered.
+    tail = [ln for ln in lines[last + 1:] if ln.strip() and not _RULE.match(ln)]
+    if len(tail) > 3 or any(_BULLET.match(ln) for ln in tail):
+        return None
+    return {"kind": "select", "question": _line(" ".join(body[:8]), MAX_QUESTION) or "(question text not shown)",
+            "options": options}
+
+
 def _select(lines: list[str]) -> dict | None:
+    q = _select_footer(lines)
+    return q if q is not None else _select_header(lines)
+
+
+def _select_footer(lines: list[str]) -> dict | None:
     footer = max((i for i, ln in enumerate(lines) if _SELECT_FOOTER.search(ln)), default=None)
     if footer is None:
         return None
@@ -298,6 +329,39 @@ def recorded(con, run: dict) -> list[str]:
         if last and last["kind"] == EVENT:
             out.append(line(d, json.loads(last["payload_json"] or "{}")))
     out += [line(d, q) for d, q in _ended_question_dispatches(con, run)]
+    return out
+
+
+def _herdr_agents() -> list[dict] | None:
+    """One `herdr agent list` call; None when herdr is absent, slow or errors."""
+    import shutil
+    import subprocess
+    if not shutil.which("herdr"):
+        return None
+    try:
+        proc = subprocess.run(["herdr", "agent", "list"], capture_output=True, text=True, timeout=5)
+        agents = (json.loads(proc.stdout or "{}").get("result") or {}).get("agents")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return agents if proc.returncode == 0 and isinstance(agents, list) else None
+
+
+def blocked_unrecorded(con, run: dict) -> list[str]:
+    """Lines for live pane dispatches herdr reports `blocked` with no recorded question: a
+    question `office wait` has not scanned yet. At most one `herdr agent list` call, none
+    without a live pane dispatch; records nothing, and herdr failing yields no lines."""
+    live = [d for d in _live_pane_dispatches(con, run)
+            if not ((last := _last(con, run["id"], d["id"])) and last["kind"] == EVENT)]
+    agents = _herdr_agents() if live else None
+    if not agents:
+        return []
+    out = []
+    for d in live:
+        name = dispatch.herdr_agent_name(d["id"])
+        a = next((a for a in agents if a.get("name") == name or a.get("pane_id") == d["pane_id"]), None)
+        if a and (a.get("agent_status") or a.get("status")) == "blocked":
+            out.append(f"{d.get('task_id') or d['id']} blocked in pane {d['pane_id']} (no question recorded): "
+                       f"run office wait / office answer {d['id']}")
     return out
 
 
