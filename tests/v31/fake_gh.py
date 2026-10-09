@@ -8,12 +8,15 @@ import sys
 import tempfile
 from pathlib import Path
 
-STATE = Path(os.environ["FAKE_GH_STATE"])
+def state_path() -> Path:
+    # Read per call: tests import this module in-process, so an import-time constant
+    # would pin every later test to the first test's state file.
+    return Path(os.environ["FAKE_GH_STATE"])
 
 
 def load() -> dict:
-    if STATE.exists():
-        return json.loads(STATE.read_text())
+    if state_path().exists():
+        return json.loads(state_path().read_text())
     return {"repo": {"nameWithOwner": "o/r", "defaultBranchRef": {"name": "main"}, "mergeCommitAllowed": True,
                      "squashMergeAllowed": True, "rebaseMergeAllowed": True}, "prs": [], "calls": []}
 
@@ -87,7 +90,7 @@ def main(argv: list[str]) -> int:
         elif argv[1] == "checks":
             code = s.get("checks_exit", 0)
             out = "no required checks reported" if code == 0 else "build  fail"
-    STATE.write_text(json.dumps(s))
+    state_path().write_text(json.dumps(s))
     if out:
         print(out, file=sys.stdout if code == 0 else sys.stderr)
     return code
