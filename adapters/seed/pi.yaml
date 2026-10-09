@@ -1,0 +1,70 @@
+id: pi
+verified_state: valid-unverified
+version_fingerprint:
+  command: [pi, --version]
+  parser: first-line
+model_source:
+  type: cli
+  command: [pi, --offline, --list-models]
+effort_mapping:
+  none: off
+  low: low
+  medium: medium
+  high: high
+  xhigh: xhigh
+  max: max
+benchmark_slug_mapping: {}
+invocation:
+  executable: pi
+  argv: [--print, --approve, --model, "{model}", --thinking, "{effort}", --no-session]
+  prompt_transport: stdin
+  cwd_transport: process-cwd
+safe_prompt_passing:
+  shell: false
+  supports_prompt_file: true
+  notes: >-
+    Pipe the prompt on stdin; pi consumes it when no message argument follows the
+    options. Never assemble a shell line: the prompt is one stdin byte stream, and
+    effort reaches pi only as the value of --thinking.
+dispatch_forms: [cli]
+trusted_for: [discovery, read-only-investigation, prototype, reversible-sandbox-worker, conformance]
+quota_probe:
+  type: external-primitive
+  command: null
+  unknown_is_unlimited: false
+shallow_review:
+  supported: false
+  minimum_effort: null
+agentic_capability:
+  default: unknown
+failure_signatures:
+  - {id: prompt-on-stdin-not-consumed, attribution: adapter, pattern: "exit 0 with no output and no file writes although the prompt was piped on stdin"}
+  - {id: effort-knob-accepted-but-ignored, attribution: adapter, pattern: "--thinking accepted without error but the run behaves identically across levels"}
+  - {id: slug-accepted-default-model-launched, attribution: adapter, pattern: "--model <slug> accepted without error but the session silently launches on the account default model"}
+conformance:
+  deterministic: pending
+  live: pending
+source_notes: >-
+  pi 1.1.0 registered 2026-10-09. Launch evidence for this adapter's worker form:
+  `printf <prompt> | pi --print --approve --model <slug> --thinking medium --no-session`
+  answered the stdin prompt, created and ran a file in a throwaway git repo, and
+  exited 0. --approve trusts the dispatch worktree's project-local files, the
+  analogue of claude's bypassPermissions; --no-session keeps a headless dispatch out
+  of pi's own session store. --thinking (off..max) is the only effort knob pi
+  exposes, so effort_mapping is that map verbatim; only medium is proven to launch,
+  and no level is proven to change model behavior. No reviewer or vision profile is
+  declared: pi has no verified read-only isolation, so it is not a code or visual
+  reviewer, and its quota is always unknown (no probe; never treated as unlimited).
+  Session identity is not declared; pi keeps its own session files, which Office
+  does not read, so no headless resume form exists yet.
+session:
+  id: none
+capabilities: [builder]
+office_profiles:
+  worker:
+    argv: [--print, --approve, --model, "{model}", --thinking, "{effort}", --no-session]
+    prompt: stdin
+    output: stdout
+    # pi has no timeout of its own in --print mode, so the supervisor's wall cap
+    # stops a stuck dispatch instead of holding the task open forever.
+    max_minutes: 60

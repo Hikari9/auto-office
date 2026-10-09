@@ -35,7 +35,7 @@ SETUP_ROLES = (
     ("code_reviewer", "Code reviewer"),
     ("visual_reviewer", "Visual reviewer"),
 )
-HARNESSES = ("claude", "codex", "agy")
+HARNESSES = ("claude", "codex", "agy", "pi")
 
 
 def _usage(message: str, next_step: str | None = None) -> OfficeError:
