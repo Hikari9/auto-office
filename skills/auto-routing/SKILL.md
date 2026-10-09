@@ -12,7 +12,7 @@ scheme is `../../protocol/routing.md` (learning: `../../protocol/telemetry-learn
 ## The scheme
 
 **Qualification (every role):** hard exclusions → derived adapter trust → required capabilities → absolute
-role floor → task shape → quota reserve. Unknown quota is not unlimited. Never lower a floor to save money or
+role floor → task shape → quota reserve. Unknown quota is not unlimited. A successful probe is cached per harness for 5 minutes (OFFICE_QUOTA_CACHE_TTL seconds); a timeout under host load is retried once and reported as unavailable; `office status` lists live tasks routed on unknown or unavailable quota. Never lower a floor to save money or
 quota. Only a valid, unexpired user `RecordedOverride` passes a derived gate; `--as`/`--route` are explicit user
 authority.
 

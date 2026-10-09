@@ -348,6 +348,9 @@ def _route_payload(decision: dict) -> dict:
     for key in ("override", "launch", "benchmark_snapshot", "route_source", "fallbacks_taken", "audit_id"):
         if decision.get(key):
             out[key] = decision[key]
+    unknown = candidates.quota_unknown_record(decision.get("candidate"))
+    if unknown and decision.get("candidate"):
+        out["quota_unknown"] = unknown
     if (decision.get("planned") or {}).get("chooser") == "declared" or decision.get("declared") \
             or decision.get("override"):
         out["declared"] = True  # a deliberate route survives the next dispatch of the task

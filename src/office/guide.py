@@ -5,6 +5,7 @@ agent never needs an `office next` command or the Office source to proceed.
 """
 from __future__ import annotations
 
+import json
 import re
 
 import os
@@ -263,6 +264,11 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
             waiting = _waiting_on(con, run, t)
             if waiting:
                 res.add(f"{t['id']} waiting: {waiting}")
+    for t in tasks:
+        if t["status"] in ("running", "launching", "submitted", "changes_required"):
+            note = _quota_unknown_note(con, t)
+            if note:
+                res.add(note)
     from office import dispatch as dispatch_mod
     for line in dispatch_mod.headless_fallbacks(con, run):
         res.add(line)
@@ -286,6 +292,19 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     return res
 
 
+def _quota_unknown_note(con, task: dict) -> str | None:
+    """A live task whose current dispatch was routed while its harness quota was
+    unknown: unknown is scored conservatively, never as unlimited (#450)."""
+    did = task.get("current_dispatch_id")
+    row = con.execute("SELECT route_json FROM dispatches WHERE id=?", (did,)).fetchone() if did else None
+    try:
+        unknown = json.loads(row["route_json"] or "{}").get("quota_unknown") if row else None
+    except ValueError:
+        return None
+    if not unknown:
+        return None
+    return (f"{task['id']} routed on {unknown.get('status', 'unknown')} quota: {unknown.get('harness')}: "
+            f"{unknown.get('cause')}")
 def effective_routes(con, run: dict, tasks: list[dict]) -> dict[str, str]:
     """Each unfinished task's effective route (#426): the one recorded on the
     task, else the plan's primary it will dispatch on. Shown so a swap is visible."""
