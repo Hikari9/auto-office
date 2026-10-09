@@ -25,6 +25,14 @@ elif args[:2] == ["pane", "get"] and args[2] in data["closed"]:
     sys.exit(1)
 elif args[:2] == ["pane", "get"]:
     result = {{"pane": {{"pane_id": args[2]}}}}
+elif args[:2] == ["tab", "get"] and os.environ.get("FAKE_HERDR_TAB_DOWN"):
+    json.dump(data, open(state, "w"))
+    sys.stderr.write("server unavailable")
+    sys.exit(1)
+elif args[:2] == ["tab", "get"] and args[2] in data.get("tabs_gone", []):
+    json.dump(data, open(state, "w"))
+    print(json.dumps({{"error": {{"code": "tab_not_found"}}}}))
+    sys.exit(1)
 elif args[:2] == ["tab", "get"]:
     result = {{"tab": {{"tab_id": args[2]}}}}
 elif args[:2] == ["tab", "close"]:
@@ -424,3 +432,28 @@ def test_reusing_a_pane_runs_no_herdr_command_under_the_lock(env, monkeypatch):
     first = dispatch._herdr_pane(run, env.repo)
     assert dispatch._herdr_pane(run, env.repo) == first
     assert not any(c[:2] == ["pane", "run"] for c in _calls(state))
+
+
+def test_orphan_tabs_survive_when_the_current_tab_is_gone(env, monkeypatch):
+    # R3-12.
+    state = _fake(env, monkeypatch)
+    state.write_text(json.dumps({"calls": [], "n": 0, "closed": [], "tabs_gone": ["w1:tB"]}))
+    from office import dispatch, paths
+    run = _run(env)
+    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
+    tab_file.write_text(json.dumps({"mode": "tab", "tab_id": "w1:tB", "panes": ["w1:p50"], "orphan_tabs": ["w1:tA"]}))
+    assert dispatch._herdr_pane(run, env.repo) == "w1:p900"
+    assert "w1:tA" in json.loads(tab_file.read_text()).get("orphan_tabs", [])
+
+
+def test_an_unreachable_herdr_never_drops_the_own_tab(env, monkeypatch):
+    # R3-13: a transient `tab get` failure is not "the user closed it".
+    state = _fake(env, monkeypatch)
+    monkeypatch.setenv("FAKE_HERDR_TAB_DOWN", "1")
+    from office import dispatch, paths
+    run = _run(env)
+    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
+    tab_file.write_text(json.dumps({"mode": "tab", "tab_id": "w1:tD", "panes": ["w1:p18"]}))
+    assert dispatch._herdr_pane(run, env.repo) == "w1:p18"
+    assert not any(c[:2] == ["tab", "create"] for c in _calls(state))
+    assert json.loads(tab_file.read_text())["tab_id"] == "w1:tD"
