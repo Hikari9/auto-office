@@ -255,11 +255,22 @@ def test_pr_criteria_pass_when_task_prs_are_on(env, monkeypatch):
 
 
 @pytest.mark.review_contract("v3.1")
-def test_a_v31_run_is_not_newly_refused_by_the_lint(env):
-    """Runs pinned to v3.1 keep their semantics: a plan they would have accepted is still accepted."""
+def test_a_v31_run_is_warned_by_the_lint_but_never_refused(env):
+    """Runs pinned to v3.1 keep their semantics: a plan they would have accepted is still accepted, with the notice."""
     _start_run(env)
     env.write_plan(PR_DONE)
-    env.office("submit", check=0)
+    code, out = env.office("submit", check=0)
+    assert "plan lint:" in out and "this run has no task PRs" in out, out
+    assert _plan_version(env) == 1
+
+
+@pytest.mark.review_contract("v3.1")
+def test_a_v31_run_is_warned_of_the_363_conflict_but_never_refused(env, monkeypatch):
+    github(env, monkeypatch)
+    _start_run(env)
+    env.write_plan(CONFLICT)
+    code, out = env.office("submit", check=0)
+    assert "plan lint:" in out and "puts the writeup in the PR body" in out and "the commit body" in out, out
     assert _plan_version(env) == 1
 
 

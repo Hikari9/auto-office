@@ -68,11 +68,13 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
                       scope="plan", next_step=f"revise {plan_path} to follow the redirect, then submit again")
     if current and current["content_hash"] == digest:
         return Result(lines=[f"plan p{current['version']} already submitted"], next=_after_plan_next(con, run))
-    # Runs pinned to v3.1 keep their semantics: their accepted plans are never newly refused.
     lint = lint_plan(con, run, parsed.tasks, parsed.requirements.get("done_criteria") or frozen.get("done_criteria") or [],
                      blast=(parsed.requirements.get("blast_radius"),
-                            frozen.get("blast_radius") or (run.get("risk") or {}).get("blast_radius"))) \
-        if contract.is_convergence(run) else []
+                            frozen.get("blast_radius") or (run.get("risk") or {}).get("blast_radius")))
+    if lint and not contract.is_convergence(run):
+        # Runs pinned to v3.1 keep their semantics: their accepted plans are never newly refused, only warned.
+        parsed.warnings[:0] = [f"plan lint: {problem}" for problem in lint[:3]]
+        lint = []
     if lint:
         raise Refused("plan-lint", "plan criteria cannot be met as written: " + "; ".join(lint[:4]), scope="plan",
                       preserved=f"{plan_path} is unchanged", data={"problems": lint},
