@@ -70,7 +70,8 @@ def history(con, run_id: str, *, dispatch_id: str | None = None, task_id: str | 
                              "next": p.get("next"), "created_at": e["created_at"]}
         elif (r := out.get(p.get("raise"))) is not None:
             r.update(state="answered" if e["kind"] == ANSWERED else "closed",
-                     answer=p.get("answer"), delivery=p.get("delivery"), closed_why=p.get("reason"))
+                     answer=p.get("answer"), delivery=p.get("delivery"), closed_why=p.get("reason"),
+                     answered_at=e["created_at"])
     return list(out.values())
 
 
@@ -209,7 +210,8 @@ def answer(con, run: dict, d: dict, text: str) -> Result | None:
     tid = d["task_id"]
     message = _message(opened[-1], text)
     how, note = "pending-rerun", None
-    if gates.worker_live(con, d["id"]):
+    row_live = gates.worker_live(con, d["id"])
+    if row_live:
         try:
             if d.get("launcher") == "herdr" and d.get("pane_id"):
                 res = prompting.prompt(con, run, d["id"], message)
@@ -232,28 +234,36 @@ def answer(con, run: dict, d: dict, text: str) -> Result | None:
         if how == "pending-rerun":
             if submit.self_blocked(task):
                 state.update_task(con, run["id"], tid, status="blocked",
-                                  pause_reason=f"raise answered but {d['id']} ended: office rerun {tid} --resume|--fresh")
+                                  pause_reason=f"raise answered but {d['id']} ended: "
+                                  + ("office revoke it, then " if row_live else "") + f"office rerun {tid} --resume|--fresh")
         elif submit.unblock_self(con, run, task):
             state.emit(con, run, "task.unblocked", f"{tid} unblocked: raise answered; the worker resubmits",
                        audience="runtime", task_id=tid, dispatch_id=d["id"])
     contract = (f'; this did not change its contract: office amend {tid} --contract -- "<delta>" does'
                 if opened[-1]["kind"] == "scope-request" else "")
     if how == "pending-rerun":
+        # A dispatch row that still reads live (its agent is gone) must be revoked before a rerun is allowed.
+        rerun = (f"office revoke {tid}, then " if row_live else "") + f"office rerun {tid} --resume|--fresh"
         return Result(lines=[f"{tid} {d['id']}: answer recorded; the worker has ended, so nothing was delivered{contract}"],
-                      next=f"office rerun {tid} --resume|--fresh (the new session's brief carries the answer)")
+                      next=f"{rerun} (the new session's brief carries the answer)")
     return Result(lines=[f"{tid} {d['id']}: raise answered; {note}{contract}"], next="office wait")
 
 
 def answered_for_brief(con, run_id: str, task_id: str, dispatch_id: str) -> list[dict]:
     """Answers recorded for earlier sessions of this task that never reached a worker because it had ended
-    (an answered raise, or an answered ended-on-question): the next session's brief carries them."""
+    (an answered raise, or an answered ended-on-question): the next session's brief carries them, once. An
+    answer older than another session's start was already in that session's brief."""
     from office import questions
-    out = [{"seq": r["seq"], "kind": r["kind"], "text": r["text"], "answer": r.get("answer") or ""}
+    from office.util import parse_iso
+    out = [{"seq": r["seq"], "at": r["answered_at"], "kind": r["kind"], "text": r["text"], "answer": r.get("answer") or ""}
            for r in history(con, run_id, task_id=task_id)
            if r["state"] == "answered" and r.get("delivery") == "pending-rerun" and r["dispatch_id"] != dispatch_id]
-    for e in con.execute("SELECT seq, dispatch_id, payload_json FROM events WHERE run_id=? AND task_id=? AND kind=? "
+    for e in con.execute("SELECT seq, dispatch_id, payload_json, created_at FROM events WHERE run_id=? AND task_id=? AND kind=? "
                          "ORDER BY seq", (run_id, task_id, questions.ANSWERED)).fetchall():
         p = loads(e["payload_json"], {})
         if p.get("delivery") == "pending-rerun" and e["dispatch_id"] != dispatch_id:
-            out.append({"seq": e["seq"], "kind": "question", "text": p.get("question") or "", "answer": p.get("answer") or ""})
-    return sorted(out, key=lambda a: a["seq"])[-3:]
+            out.append({"seq": e["seq"], "at": e["created_at"], "kind": "question", "text": p.get("question") or "",
+                        "answer": p.get("answer") or ""})
+    starts = [parse_iso(r[0]) for r in con.execute("SELECT started_at FROM dispatches WHERE run_id=? AND task_id=? AND id!=? "
+                                                   "AND started_at IS NOT NULL", (run_id, task_id, dispatch_id))]
+    return sorted((a for a in out if not any(t > parse_iso(a["at"]) for t in starts)), key=lambda a: a["seq"])[-3:]

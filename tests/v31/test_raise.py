@@ -215,6 +215,20 @@ def test_answering_an_ended_worker_records_it_and_the_rerun_brief_carries_it(env
     # the raising dispatch is not a failed attempt: its crashed successors still get the full retry budget
     # (environment_retry_max = 2 relaunches after the first failure), so D1 + 3 failures
     assert len(_dispatches(env)) == 4, [d["id"] for d in _dispatches(env)]
+    # the answer was in the first rerun's brief; the sessions after it do not repeat it
+    third = _dispatches(env)[2]
+    later = (paths.run_dir(first["run_id"]) / "dispatches" / third["id"] / "brief.md").read_text()
+    assert "ANSWER to your raised" not in later, later
+
+
+@pytest.mark.approved
+def test_answering_when_the_row_reads_live_but_the_agent_is_gone_says_to_revoke_first(env, monkeypatch):
+    _, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY], agent="gone")
+    wenv, wt = _worker(env)
+    env.office("raise", "--", ASK, cwd=wt, env=wenv, check=0)
+    code, out = env.office("answer", "T1", "--", "A", env=EXTERNAL)
+    assert code == 0 and "nothing was delivered" in out and "office revoke T1, then office rerun T1" in out, out
+    assert "office revoke it, then office rerun T1" in task_row(env)["pause_reason"]
 
 
 @pytest.mark.approved
