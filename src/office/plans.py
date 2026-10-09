@@ -86,22 +86,22 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
                       next_step=f"fix the visual block in {plan_path}, then office submit",
                       data={"errors": visual_errors})
     parsed.warnings[:0] = visual_warnings
-    # #420/#424: the risk this plan classifies, and a lightweight declaration checked against it, before any write.
-    proposed_risk = None if state.active_authorization(con, run, "plan") else \
-        risk.planner_reclassify(run.get("risk") or {}, parsed.requirements)
-    declaration = parsed.requirements.get("lightweight")
-    problem = risk.lightweight_problem(run, proposed_risk or run.get("risk") or {}, declaration)
-    if not problem and declaration and not (run.get("gates") or {}).get("lightweight") \
-            and state.active_authorization(con, run, "plan"):
-        problem = "the user already authorized this plan; declare the lightweight path before authorization"
-    if problem:
-        raise Refused("lightweight-refused", f"lightweight path refused: {problem}", scope="plan",
-                      preserved=f"{plan_path} is unchanged; the run keeps its review policy",
-                      next_step=f"classify risk in {plan_path} (`blast_radius: local|repo`), or drop `lightweight:`, "
-                                "then office submit")
     res = Result()
     with db.transaction(con):
         run = state.get_run(con, run["id"])
+        # #420/#424, recomputed under the tx so an authorization landing meanwhile is seen: the risk this plan
+        # classifies (after authorization only a raise applies) and a lightweight declaration checked against it.
+        authorized = bool(state.active_authorization(con, run, "plan"))
+        proposed_risk = risk.planner_reclassify(run.get("risk") or {}, parsed.requirements, raise_only=authorized)
+        declaration = parsed.requirements.get("lightweight")
+        problem = risk.lightweight_problem(run, proposed_risk or run.get("risk") or {}, declaration)
+        if not problem and declaration and authorized and not (run.get("gates") or {}).get("lightweight"):
+            problem = "the user already authorized this plan; declare the lightweight path before authorization"
+        if problem:
+            raise Refused("lightweight-refused", f"lightweight path refused: {problem}", scope="plan",
+                          preserved=f"{plan_path} is unchanged; the run keeps its review policy",
+                          next_step=f"classify risk in {plan_path} (`blast_radius: local|repo`), or drop `lightweight:`, "
+                                    "then office submit")
         if redirect:
             from office import redirect as redirect_mod
             for line in redirect_mod.record(con, run, redirect):
@@ -191,32 +191,49 @@ def show_diagram(con, run: dict, version: int, tasks: list[dict], plan_path: Pat
 def _apply_risk(con, run: dict, proposed: dict | None, declaration: dict | None, plan_version: int) -> list[str]:
     """Record the plan's risk classification and lightweight declaration (#420, #424) and re-resolve the review
     gates they imply. A run that predates risk classification keeps the gates it started with. Caller holds
-    the tx. Only the review keys are re-resolved; everything else in the pinned gates stays."""
+    the tx. A plan that raises risk to high gets what intake-declared high risk gets (fit gear, forced plan
+    review, visual, round caps); otherwise only the review keys are re-resolved."""
     from office import config as cfg
     cur = run.get("risk") or {}
     if risk.classification(cur) is None:
         return []
     new = proposed or cur
+    if proposed:
+        new = {**proposed, "history": [*(cur.get("history") or []), {
+            "plan_version": plan_version, "classification": proposed["classification"],
+            "classified_by": proposed.get("classified_by"), "was": cur.get("classification")}]}
     old = run.get("gates") or {}
     config = state.pinned_config(run)
-    base = cfg.resolve_gates(run["gear"], new, config)
-    gates = {k: v for k, v in {**old, **{k: base[k] for k in risk.FLOOR_KEYS}}.items() if k != "lightweight"}
-    started = bool(plan_gates(con, run["id"])) or bool((run.get("plan_review") or {}).get("ended"))
+    gear = run["gear"]
+    raised = bool(new.get("high")) and not cur.get("high")
+    if raised and gear == "direct":
+        gear = cfg.fit_gear(None, new)
+    base = cfg.resolve_gates(gear, new, config)
+    keys = list(risk.FLOOR_KEYS)
+    started = (bool(plan_gates(con, run["id"])) or bool((run.get("plan_review") or {}).get("ended"))
+               or bool(run["plan_version"]))  # a plan already went out: its review may be queued without a gate row yet
+    if raised:
+        keys += ["visual", "visual_review_max_rounds", "code_review_max_rounds", "dedicated_planner"]
+        if not started:
+            keys += ["plan_review", "plan_review_depth"] + (["plan_review_max_rounds"] if not old.get("plan_review_rounds_by") else [])
+    gates = {k: v for k, v in {**old, **{k: base[k] for k in keys}}.items() if k != "lightweight"}
     was = old.get("lightweight") or {}
     if "plan review" in (was.get("dropped") or []) and not started:
         gates["plan_review"] = base["plan_review"]
     if declaration:
-        gates = risk.apply_lightweight(gates, run["gear"], config, declaration, plan_version, plan_review_started=started)
+        gates = risk.apply_lightweight(gates, gear, config, declaration, plan_version, plan_review_started=started)
     if gates["plan_review"] != old.get("plan_review") and not started:
         pr = dict(run.get("plan_review") or {})
         pr["required"] = bool(gates["plan_review"])
         state.update_run(con, run["id"], plan_review=pr)
-    if new == cur and gates == old:
+    if new == cur and gates == old and gear == run["gear"]:
         return []
-    state.update_run(con, run["id"], risk=new, gates=gates)
+    state.update_run(con, run["id"], risk=new, gates=gates, **({"gear": gear} if gear != run["gear"] else {}))
     lines = []
     if new != cur:
         lines.append(f"risk classified {new['classification']} by the plan ({new['classification_basis']})")
+    if gear != run["gear"]:
+        lines.append(f"gear {run['gear']} -> {gear} (high risk)")
     if declaration and gates.get("lightweight"):
         lines.append("lightweight path: " + (", ".join(f"no {d}" for d in gates["lightweight"]["dropped"]) or "no review dropped")
                      + " | kept scope, checks, self-review, evidence, human landing")

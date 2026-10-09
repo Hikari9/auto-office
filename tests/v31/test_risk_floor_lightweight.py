@@ -250,3 +250,71 @@ def test_run_without_classification_is_untouched_and_cannot_go_lightweight(env):
     legacy = _run_row(env)
     assert risk.classification(legacy["risk"]) is None and risk.summary(legacy) is None
     assert "predates" in risk.lightweight_problem(legacy, legacy["risk"], {"rationale": "x"})
+
+
+# ---------------------------------------------------------------- review follow-ups (F1-F5)
+
+def _resubmit(env, plan):
+    env.write_plan(plan)
+    return env.office("submit")
+
+
+def test_a_raise_after_authorization_applies_and_gets_high_risk_review(env):
+    start_inline(env, plan=_plan("repo"), gear="direct")
+    env.office("approve", "plan", "--quote", "approved", check=0)
+    assert _run_row(env)["gates"]["code_review"] is False
+    code, out = _resubmit(env, _plan("repo", "irreversible: yes\n"))
+    assert code == 0, out
+    run = _run_row(env)
+    assert run["risk"]["classification"] == "elevated" and run["gates"]["code_review"] is True
+    assert run["gear"] == "full" and run["gates"]["visual"] is True  # same as intake-declared irreversible work
+
+
+def test_planner_raise_gets_the_same_gates_as_an_intake_raise(env):
+    start_inline(env, plan=_plan("production"), gear="direct")
+    run = _run_row(env)
+    intake = cfg.resolve_gates("express", cfg.resolve_risk(CONFIG, "production", None, False), CONFIG)
+    assert run["gear"] == "express"
+    for k in ("code_review", "code_review_max_rounds", "plan_review", "visual"):
+        assert run["gates"][k] == intake[k], k
+
+
+def test_a_lowering_after_authorization_is_ignored(env):
+    start_inline(env, plan=_plan("production"), gear="light")
+    env.office("approve", "plan", "--quote", "approved", check=0)
+    # production is frozen at authorization; a resubmitted plan naming a lower radius is refused or ignored.
+    _resubmit(env, _plan("production", "size_class: S\n"))
+    assert _run_row(env)["risk"]["classification"] == "elevated"
+
+
+def test_authorization_landing_mid_submit_blocks_a_new_lightweight_declaration(env, monkeypatch):
+    start_inline(env, plan=_plan("repo"), gear="light")
+    from office import visual
+    real = visual.preflight
+
+    def approve_then_preflight(tasks):
+        env.office("approve", "plan", "--quote", "approved", check=0)  # lands between parse and the write
+        return real(tasks)
+
+    monkeypatch.setattr(visual, "preflight", approve_then_preflight)
+    code, out = _resubmit(env, _plan("repo", "lightweight: typo\n"))
+    assert code != 0 and "authorized" in out, out
+    assert "lightweight" not in _run_row(env)["gates"] and _run_row(env)["gates"]["code_review"]
+
+
+def test_lightweight_on_a_later_plan_does_not_skip_a_queued_plan_review(env):
+    start_inline(env, plan=_plan("repo"), gear="express")
+    run = _run_row(env)
+    assert run["plan_review"]["required"] is True
+    code, out = _resubmit(env, _plan("repo", "lightweight: typo\n"))
+    assert code == 0, out
+    assert _run_row(env)["plan_review"]["required"] is True
+
+
+def test_reclassification_history_is_kept(env):
+    env.office("start", "fixture goal", "--gear", "light", "--planner", "inline", check=0)
+    _resubmit(env, _plan("repo"))
+    _resubmit(env, _plan("repo", "irreversible: yes\n"))
+    hist = _run_row(env)["risk"]["history"]
+    assert [h["classification"] for h in hist] == ["low", "elevated"], hist
+    assert risk.summary(_run_row(env))["history"] == hist

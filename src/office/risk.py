@@ -53,7 +53,7 @@ def floor_gates(risk: dict, code_review) -> tuple:
     return "full", True
 
 
-def planner_reclassify(risk: dict, req: dict) -> dict | None:
+def planner_reclassify(risk: dict, req: dict, raise_only: bool = False) -> dict | None:
     """The risk record after a plan's Requirements classify it, or None when nothing changes.
     The planner may classify an unknown run and may raise any run to elevated; it may not lower what the
     user declared at intake."""
@@ -85,6 +85,8 @@ def planner_reclassify(risk: dict, req: dict) -> dict | None:
         merged["classified_by"] = "intake" if cur_by == "intake" else "planner"
     else:
         merged["classified_by"] = cur_by
+    if raise_only and not (merged["high"] and not risk.get("high")):
+        return None  # after authorization a plan may only raise risk
     return merged if merged != risk else None
 
 
@@ -138,7 +140,7 @@ def summary(run: dict) -> dict | None:
     return {"classification": cls, "basis": risk.get("classification_basis"), "classified_by": risk.get("classified_by"),
             "blast_radius": risk.get("blast_radius"), "independent_code_review": bool(gates.get("code_review")),
             "review_floor": bool(gates.get("review_floor")), "why": gates.get("review_basis"),
-            "lightweight": gates.get("lightweight")}
+            "lightweight": gates.get("lightweight"), "history": risk.get("history") or []}
 
 
 def line(run: dict) -> str | None:
