@@ -72,10 +72,11 @@ def _simple_seed(value: Any) -> bool:
 
 
 def _role_requires(config: dict | None, role: str | None) -> set[str]:
-    """The capabilities a route must declare to serve `role` (config roles.<role>.required_capabilities)."""
+    """The capabilities a route must declare to serve `role` (config roles.<role>.required_capabilities).
+    `vision` is left out: routing adds it only once proven for the candidate, never from the adapter."""
     if not role:
         return set()
-    return set(candidates.role_policy(config or {}, role).get("required_capabilities") or [])
+    return set(candidates.role_policy(config or {}, role).get("required_capabilities") or []) - {"vision"}
 
 
 def _row_serves(row: dict, required: set[str]) -> bool:
