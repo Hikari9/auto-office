@@ -4,9 +4,19 @@ The approved **A — T3-style, run-first** layout from [issue #442](https://gith
 
 ## Access
 
-- Production `office web serve` or `office web start` defaults to the new **run-first Workbench**.
-- `?classic=1` opens the original Workstation (Issues, Agents, Allocation, Settings). The new shell provides a **Classic controls** shortcut; classic pages can be opened directly with `?classic=1&surface=agents`, `allocation`, `settings`, or `issues`.
-- Fixture mode defaults to **classic** so existing regression fixtures stay stable. Visit `?workbench=1` while running `office web serve --fixture small` to inspect and test the new run-first shell. Synthetic fixture data is labeled.
+The workbench is **opt-in** behind a reversible flag until maintainer visual sign-off on #442. The original Workstation is the default everywhere, including production.
+
+- `?workbench=1` opens the run-first Workbench for that visit. Settings > Default interface (inside the workbench) stores a per-browser preference (`localStorage` key `office-workbench-mode`) so it opens by default there. `?workbench=0` clears the preference.
+- `?classic=1` always opens the original Workstation, even when the preference is set. The workbench provides a **Classic controls** shortcut. Classic pages can be opened directly with `?classic=1&surface=agents`, `allocation`, `settings`, or `issues`.
+- Fixture mode behaves the same (classic by default), so existing regression fixtures stay stable. Synthetic fixture data is labeled.
+
+## Links and restore
+
+- Selecting a run pushes a history entry, so Back and Forward move between runs. The URL fragment is `#repo=<repository key>&run=<record id>`; other fragment parameters are preserved. **Copy link** in the run header copies it.
+- A link to a run this machine does not have shows a "Run not found" notice instead of another run.
+- Persisted in `localStorage`: last selected run, sidebar search, Issue Inbox filter, sidebar collapse and inspector visibility. Panels are not user-resizable, so widths are not stored.
+- Not implemented: pin/favorite runs and a run context menu.
+- In the Issue Inbox, an issue with more than one run lists each run and asks you to choose.
 
 ## Live behavior
 

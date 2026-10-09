@@ -1,6 +1,7 @@
 // Auto Office run-first workbench. A non-authoritative view over the existing
 // Office SSE projection; all semantic actions still go through /api/commands.
-// The original Workstation remains available via ?classic=1.
+// Opt-in until maintainer visual sign-off (#442): ?workbench=1 or the stored
+// preference (Settings). The original Workstation is the default and ?classic=1.
 import { chatBlocked, chatTarget, targetKey } from './chat.js';
 import { issueRows, repoName, shortRun, PLAN_APPROVAL_COMMAND } from './model.js';
 
@@ -9,12 +10,31 @@ const params = new URLSearchParams(location.search);
 const fixture = document.querySelector('meta[name="office-fixture"]')?.content || '';
 const token = document.querySelector('meta[name="office-token"]')?.content || '';
 const MODE_KEY = 'office-workbench-mode';
+const RUN_KEY = 'office-workbench-run';
+const UI_KEY = 'office-workbench-ui';
+const store_ = {
+  get(key) { try { return localStorage.getItem(key); } catch { return null; } },
+  set(key, value) { try { value === null ? localStorage.removeItem(key) : localStorage.setItem(key, value); } catch {} },
+};
+// Reversible flag: ?workbench=0 clears the stored preference, ?workbench=1 opts in for this load,
+// ?classic=1 always wins. Without either, the stored preference decides (default: classic).
+function workbenchEnabled() {
+  if (params.has('classic')) return false;
+  if (params.get('workbench') === '0') { store_.set(MODE_KEY, null); return false; }
+  if (params.has('workbench')) return true;
+  return store_.get(MODE_KEY) === 'workbench';
+}
+function loadUi() { try { return JSON.parse(store_.get(UI_KEY) || '{}') || {}; } catch { return {}; } }
+function saveUi() {
+  store_.set(UI_KEY, JSON.stringify({ query: state.query, issueQuery: state.issueQuery,
+    sidebarMini: $('ww')?.classList.contains('ww-sidebar-mini') || false, inspector: state.showInspector }));
+}
 const $ = (id) => document.getElementById(id);
 const state = {
   runId: null, view: 'run', query: '', expanded: new Set(), inspector: 'overview',
   showInspector: !matchMedia('(max-width:1100px)').matches, showSidebar: false, palette: false, activity: new Map(),
   drafts: new Map(), localSends: new Map(), pending: new Set(), updatePending: false,
-  activitySequence: 0, runScroll: new Map(), activeAgent: null, issueQuery: '',
+  activitySequence: 0, runScroll: new Map(), activeAgent: null, issueQuery: '', wish: null, notFound: null,
 };
 const ICON = {
   search: '<circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/>',
@@ -85,32 +105,57 @@ const sortRuns = (runs) => [...runs].sort((a,b) => {
   return rank(a)-rank(b) || (Date.parse(b.updated_at||b.created_at||0)||0)-(Date.parse(a.updated_at||a.created_at||0)||0) || a.id.localeCompare(b.id);
 });
 const selected = () => store?.state?.entities?.runs?.[state.runId] || null;
-function restoreRunId() {
-  const fragment = new URLSearchParams(location.hash.slice(1));
-  const fromHash = fragment.get('run');
-  const fromSession = (()=>{try{return sessionStorage.getItem('office-workbench-run')}catch{return null}})();
-  return fromHash || fromSession;
+// Deep link: #repo=<repo key>&run=<record id>. Other hash parameters are preserved.
+const hashParams = () => new URLSearchParams(location.hash.slice(1));
+function wishFromHash() {
+  const frag = hashParams(), run = frag.get('run');
+  return run ? { run, repo: frag.get('repo') || null } : null;
 }
+const findWish = (wish) => allRuns().find(r => r.id === wish.run && (!wish.repo || (r.repo?.key || repoLabel(r)) === wish.repo));
+function expandFor(run) { if (run) state.expanded.add(run.repo?.key || repoLabel(run)); }
 function chooseRun() {
   const runs = allRuns();
-  if (state.runId && runs.some(r=>r.id===state.runId)) return;
-  const wish=restoreRunId();
-  state.runId = runs.find(r=>r.id===wish)?.id || sortRuns(runs)[0]?.id || null;
+  if (state.wish && store.state) {
+    const hit = findWish(state.wish);
+    if (hit) { state.runId = hit.id; state.notFound = null; }
+    else { state.runId = null; state.notFound = state.wish; }
+    state.wish = null;
+  }
+  if (state.notFound && !state.runId) return;
+  if (state.runId && runs.some(r => r.id === state.runId)) { expandFor(selected()); return; }
+  const last = store_.get(RUN_KEY);
+  state.runId = runs.find(r => r.id === last)?.id || sortRuns(runs)[0]?.id || null;
+  const run = selected(); expandFor(run);
+  // Stamp the initial run on the current entry so Back returns to it rather than to a bare URL.
+  if (run && !wishFromHash()) history.replaceState(null, '', linkFor(run).slice(location.origin.length));
 }
-function selectRun(id) {
+function linkFor(run) {
+  const frag = hashParams();
+  frag.set('repo', run.repo?.key || repoLabel(run)); frag.set('run', run.id);
+  return `${location.origin}${location.pathname}${location.search}#${frag.toString()}`;
+}
+function selectRun(id, {push = true} = {}) {
   if (!store.state?.entities?.runs?.[id]) return;
   if (state.view === 'run') state.runScroll.set(state.runId, $('ww-feed')?.scrollTop || 0);
-  state.runId=id; state.view='run'; state.inspector='overview'; state.showSidebar=false;
-  try { sessionStorage.setItem('office-workbench-run',id); history.replaceState(null,'',`#run=${encodeURIComponent(id)}`); } catch {}
+  state.runId=id; state.view='run'; state.inspector='overview'; state.showSidebar=false; state.notFound=null;
+  const run = selected(); expandFor(run);
+  store_.set(RUN_KEY, id);
+  if (push && run) { const next = linkFor(run); if (next !== location.href) history.pushState(null, '', next.slice(location.origin.length)); }
   draw(); fetchActivity(true);
+}
+function applyHash() {
+  const wish = wishFromHash(); if (!wish) return;
+  const hit = store.state && findWish(wish);
+  if (hit) { if (hit.id !== state.runId || state.view !== 'run') selectRun(hit.id, {push: false}); }
+  else { state.wish = wish; state.runId = null; state.view = 'run'; chooseRun(); draw(); }
 }
 const classic = (surface='issues') => {
   const u=new URL(location.href);u.searchParams.set('classic','1');u.searchParams.set('surface',surface);location.assign(u.toString());
 };
 const openView = (view) => {state.view=view;state.showSidebar=false;draw();};
 function mount() {
-  // Keep fixture-mode's existing browser regression suite stable. New fixture QA opts in via ?workbench=1.
-  if (params.has('classic') || (fixture && !params.has('workbench'))) {
+  // Opt-in only: classic stays the default until visual sign-off (see workbenchEnabled).
+  if (!workbenchEnabled()) {
     const surface=params.get('surface');
     if (surface && ['issues','agents','allocation','settings'].includes(surface)) {
       document.querySelector(`.surface[data-surface="${surface}"]`)?.click();
@@ -136,11 +181,15 @@ function mount() {
     <div class="ww-toast-area" id="ww-toasts" role="status" aria-live="polite"></div>
   </div>`;
   document.body.prepend(root);document.body.dataset.workbench='true';
-  $('ww-search').addEventListener('input',(ev)=>{state.query=ev.target.value;renderSidebar();});
+  const ui=loadUi();state.query=String(ui.query||'');state.issueQuery=String(ui.issueQuery||'');
+  if(typeof ui.inspector==='boolean'&&!matchMedia('(max-width:1100px)').matches)state.showInspector=ui.inspector;
+  if(ui.sidebarMini)root.classList.add('ww-sidebar-mini');
+  $('ww-search').value=state.query;state.wish=wishFromHash();
+  $('ww-search').addEventListener('input',(ev)=>{state.query=ev.target.value;saveUi();renderSidebar();});
   $('ww-add-work').addEventListener('click',()=>openView('issues'));
-  $('ww-sidebar-toggle').addEventListener('click',()=>{root.classList.toggle('ww-sidebar-mini');});
+  $('ww-sidebar-toggle').addEventListener('click',()=>{root.classList.toggle('ww-sidebar-mini');saveUi();});
   $('ww-mobile-menu').addEventListener('click',()=>{state.showSidebar=!state.showSidebar;draw();});
-  $('ww-inspector-toggle').addEventListener('click',()=>{state.showInspector=!state.showInspector;draw();});
+  $('ww-inspector-toggle').addEventListener('click',()=>{state.showInspector=!state.showInspector;saveUi();draw();});
   $('ww-overlay').addEventListener('click',()=>{state.showSidebar=false;state.showInspector=false;draw();});
   document.addEventListener('keydown',(ev)=>{
     if ((ev.metaKey||ev.ctrlKey)&&ev.key.toLowerCase()==='k') {ev.preventDefault();togglePalette();}
@@ -150,7 +199,7 @@ function mount() {
   store?.subscribe?.(()=>{chooseRun();schedule();fetchActivity();});
   const narrow = matchMedia('(max-width:1100px)');
   narrow.addEventListener('change',(event)=>{if(event.matches)state.showInspector=false;draw();});
-  window.addEventListener('hashchange',()=>{const id=new URLSearchParams(location.hash.slice(1)).get('run');if(id&&id!==state.runId)selectRun(id);});
+  window.addEventListener('popstate',applyHash);
   chooseRun();draw();fetchActivity();
 }
 function schedule() {if(state.updatePending)return;state.updatePending=true;requestAnimationFrame(()=>{state.updatePending=false;draw();});}
@@ -172,7 +221,7 @@ function renderSidebar() {
     const label=repoLabel(runs[0]);const matchRepo=label.toLowerCase().includes(query);
     const matches=runs.filter(r=>matchRepo||(`${titleFor(r)} ${r.run_id} ${issueLabel(r)}`).toLowerCase().includes(query));
     if(!matches.length)continue;
-    if(!state.expanded.has(key)&&!state.expanded.size)state.expanded.add(key);
+    if(!state.expanded.has(key)&&!state.expanded.size&&!state.runId)state.expanded.add(key);
     const expanded=state.expanded.has(key)||!!query;
     const head=button([simple('folder'),text(label,'ww-repo-name'),text(String(runs.length),'ww-count')],()=>{if(state.expanded.has(key))state.expanded.delete(key);else state.expanded.add(key);renderSidebar();},'ww-repo',{ 'aria-expanded':String(expanded),title:label });
     nav.append(head);
@@ -215,20 +264,21 @@ function renderMain() {
   if(restoring){const next=$(restoring.id);if(next&&!next.disabled){next.focus({preventScroll:true});next.setSelectionRange(restoring.start,restoring.end);}}
 }
 function renderRun(wrap) {
+  if(state.notFound&&!selected()){const nf=state.notFound;wrap.append(el('section',{class:'ww-empty',dataset:{testid:'wb-run-not-found'}},el('h1',{text:'Run not found'}),el('p',{text:`No Office run matches ${nf.repo?`${nf.repo} / `:''}${nf.run}. It may have been removed, or this link is from another machine.`}),button('Choose a run',()=>{state.notFound=null;state.runId=null;chooseRun();history.replaceState(null,'',location.pathname+location.search);draw();},'ww-primary'),button('Open Issue Inbox',()=>openView('issues'),'ww-secondary')));return;}
   const r=selected();if(!r){wrap.append(el('section',{class:'ww-empty'},el('h1',{text:'No runs yet'}),el('p',{text:'Your active and historical Office runs will appear here. GitHub issues without runs stay in the Issue Inbox.'}),button('Open Issue Inbox',()=>openView('issues'),'ww-primary')));return;}
   const status=statusFor(r);
   const article=el('section',{class:'ww-thread'});
-  const head=el('header',{class:'ww-thread-header'},el('h1',{text:titleFor(r)}),el('p',{text:`${repoLabel(r)} · ${r.goal||'Office run'}`}),el('div',{class:'ww-meta'},badge(status[0],status[1]),badge(r.phase||'Phase unknown','quiet'),text(`Updated ${when(r.updated_at||r.created_at)}`,'ww-muted')));
+  const head=el('header',{class:'ww-thread-header'},el('h1',{text:titleFor(r)}),el('p',{text:`${repoLabel(r)} · ${r.goal||'Office run'}`}),el('div',{class:'ww-meta'},badge(status[0],status[1]),badge(r.phase||'Phase unknown','quiet'),text(`Updated ${when(r.updated_at||r.created_at)}`,'ww-muted'),button('Copy link',()=>copy(linkFor(r)),'ww-small',{dataset:{testid:'wb-copy-link'}})));
   article.append(head);
   if(store.status!=='live'||store.state?.freshness?.office?.state!=='live')article.append(el('div',{class:'ww-warning'},simple('alert'),text('Office is not live. Data may be stale; interactive commands are unavailable.')));
   if(r.awaiting_plan_authorization){const card=el('div',{class:'ww-warning'},simple('alert'),text('Waiting for explicit plan authorization. The browser cannot grant it.'),el('code',{text:PLAN_APPROVAL_COMMAND}),button('Copy command',()=>copy(PLAN_APPROVAL_COMMAND),'ww-small'));article.append(card);}
   const feed=el('section',{class:'ww-feed',id:'ww-feed',role:'log','aria-label':'Recorded run activity'});
   const activity=state.activity.get(r.run_id);
-  if(!activity){feed.append(el('div',{class:'ww-event-placeholder',text:'Loading recorded Office events…'}));}
+  if(!activity||!activity.items){feed.append(el('div',{class:'ww-event-placeholder',text:'Loading recorded Office events…'}));}
   else if(activity.error){feed.append(el('div',{class:'ww-warning',text:`Activity unavailable: ${activity.error}`}));}
   else if(!activity.items.length){feed.append(el('div',{class:'ww-event-placeholder',text:activity.available===false?'No event table for this runtime.':'No recorded events yet for this run.'}));}
   else for(const event of [...activity.items].reverse()) feed.append(eventRow(event));
-  for(const sent of state.localSends.get(r.id)||[]){const receipt=store.state?.entities?.commands?.[`command:${sent.id}`];if(receipt?.status)sent.status=receipt.status;feed.append(el('article',{class:'ww-event ww-user-event'},el('span',{class:'ww-event-glyph ww-purple'},simple('send')),el('div',{class:'ww-event-body'},el('div',{class:'ww-event-meta'},text('You → orchestrator','ww-strong'),text(when(sent.at),'ww-muted')),el('p',{text:sent.text}),badge(sent.status,sent.status==='completed'?'done':sent.status==='unknown'?'warn':'quiet'))));}
+  for(const sent of state.localSends.get(r.id)||[]){sent.status=receiptStatus(sent);feed.append(el('article',{class:'ww-event ww-user-event'},el('span',{class:'ww-event-glyph ww-purple'},simple('send')),el('div',{class:'ww-event-body'},el('div',{class:'ww-event-meta'},text('You → orchestrator','ww-strong'),text(when(sent.at),'ww-muted')),el('p',{text:sent.text}),badge(sent.status,sent.status==='completed'?'done':sent.status==='unknown'||sent.status==='failed'?'warn':'quiet'))));}
   feed.append(el('div',{class:'ww-end-marker',text:'Only recorded Office events are shown. Provider transcripts are not synthesized.'}));
   article.append(feed);wrap.append(article);
   requestAnimationFrame(()=>{const target=$('ww-feed');if(target&&state.view==='run'){const old=state.runScroll.get(r.id);target.scrollTop=old===undefined?target.scrollHeight:old;}});
@@ -281,6 +331,19 @@ async function sendCommand(kind,target,payload={},expect={}) {
   if(response.status<500) return {status:'failed',error:body?.reason||body?.message||`HTTP ${response.status}`,id};
   return {status:'unknown',error:'Service outcome unknown; do not retry without checking its receipt.',id};
 }
+// The server receipt (entities.commands, same source classic chat.js reads) is authoritative. A
+// non-terminal local status with no terminal receipt must not read "pending" forever, so it
+// degrades to "unknown" (check the receipt; never auto-retry) after RECEIPT_WAIT_MS.
+const RECEIPT_WAIT_MS = 30000;
+const TERMINAL = new Set(['completed', 'failed', 'unknown', 'checked']);
+function receiptStatus(sent) {
+  const server = sent.id && store.state?.entities?.commands?.[`command:${sent.id}`]?.status;
+  if (server && TERMINAL.has(server)) return server;
+  const status = server || sent.status;
+  if (TERMINAL.has(status)) return status;
+  if (sent.id && Date.now() - Date.parse(sent.at) > RECEIPT_WAIT_MS) return 'unknown';
+  return status;
+}
 async function sendMessage(runId,target,key,body) {
   const message=String(body||'').trim();if(!message||!target||state.pending.has(key))return;
   const r=store.state?.entities?.runs?.[runId];if(!r)return;
@@ -289,7 +352,7 @@ async function sendMessage(runId,target,key,body) {
   state.pending.add(key);const sent={text:message,at:new Date().toISOString(),status:'pending',id:null};
   state.localSends.set(runId,[...(state.localSends.get(runId)||[]),sent]);state.drafts.delete(key);draw();
   const result=await sendCommand('chat_send',{host:target.host,run_id:target.run_id,session:target.session},{text:message},{});
-  sent.id=result.id;sent.status=result.status;if(result.status==='failed'){sent.error=result.error;toast(`Message refused: ${result.error}`,'warn');state.drafts.set(key,message);}else if(result.status==='unknown')toast(result.error,'warn');
+  sent.id=result.id;sent.status=result.status;if(!TERMINAL.has(result.status))setTimeout(()=>{if(state.localSends.has(runId))schedule();},RECEIPT_WAIT_MS+500);if(result.status==='failed'){sent.error=result.error;toast(`Message refused: ${result.error}`,'warn');state.drafts.set(key,message);}else if(result.status==='unknown')toast(result.error,'warn');
   state.pending.delete(key);draw();
 }
 async function runAction(kind,r){if(!r?.controls?.[kind]?.allowed||store.state?.freshness?.office?.state!=='live'){toast('Office has not authorized this command.','warn');return;}const result=await sendCommand(kind,{run_id:r.run_id});toast(`${kind.replace('_',' ')}: ${result.status}${result.error?` (${result.error})`:''}`,result.status==='failed'?'warn':'info');}
@@ -350,13 +413,21 @@ function fetchActivity(force=false) {
 function renderInbox(wrap) {
   const s=store.state;const panel=el('section',{class:'ww-page'},el('div',{class:'ww-page-head'},el('h1',{text:'Issue Inbox'}),el('p',{text:'Find GitHub issues, identify launch readiness, and open existing Office runs.'})));
   const line=el('div',{class:'ww-toolbar'},el('input',{type:'search',placeholder:'Search issues and repositories','aria-label':'Search issues',id:'ww-issue-search'}),button('Manage intake in Classic',()=>classic('issues'),'ww-secondary'));
-  line.querySelector('input').value=state.issueQuery;line.querySelector('input').addEventListener('input',(e)=>{state.issueQuery=e.target.value;const pos=e.target.selectionStart;renderMain();const latest=$('ww-issue-search');latest?.focus({preventScroll:true});latest?.setSelectionRange(pos,pos);});panel.append(line);
+  line.querySelector('input').value=state.issueQuery;line.querySelector('input').addEventListener('input',(e)=>{state.issueQuery=e.target.value;saveUi();const pos=e.target.selectionStart;renderMain();const latest=$('ww-issue-search');latest?.focus({preventScroll:true});latest?.setSelectionRange(pos,pos);});panel.append(line);
   const rows=issueRows(s||{entities:{},freshness:{}}).filter(i=>`${i.repoName} #${i.number} ${i.title||''}`.toLowerCase().includes(state.issueQuery.toLowerCase()));
   const table=el('div',{class:'ww-inbox-list'});for(const i of rows.slice(0,400)){
-    const run=i.runs?.find(r=>r.liveness==='live')||i.run||null;
-    table.append(el('article',{class:'ww-inbox-row'},el('div',{},el('h3',{text:`#${i.number} ${i.title||'Title unavailable'}`}),el('p',{text:`${i.repoName} · ${i.runIds?.length||0} linked runs · ${i.phase}`})),el('div',{class:'ww-inbox-action'},run?button('Open run',()=>selectRun(run.id),'ww-secondary'):button('Start / queue',()=>classic('issues'),'ww-secondary'))));}
+    const runs=i.runs||[];
+    table.append(el('article',{class:'ww-inbox-row'},el('div',{},el('h3',{text:`#${i.number} ${i.title||'Title unavailable'}`}),el('p',{text:`${i.repoName} · ${i.runIds?.length||0} linked runs · ${i.phase}`})),el('div',{class:'ww-inbox-action'},openRunControl(runs))));}
   if(!rows.length)table.append(el('p',{class:'ww-empty-note',text:'No matching issues.'}));if(rows.length>400)table.append(el('p',{class:'ww-empty-note',text:'Showing 400 issues. Narrow your search to see other results.'}));
   panel.append(table);wrap.append(panel);
+}
+// One run opens directly. Several runs need an explicit choice: never guess which one the user meant.
+function openRunControl(runs) {
+  if(!runs.length)return button('Start / queue',()=>classic('issues'),'ww-secondary');
+  if(runs.length===1)return button('Open run',()=>selectRun(runs[0].id),'ww-secondary');
+  const box=el('div',{class:'ww-run-choice',dataset:{testid:'wb-run-choice'}},text(`${runs.length} runs, choose one`,'ww-muted'));
+  for(const r of sortRuns(runs))box.append(button(`${shortRun(r.run_id)} · ${statusFor(r)[0]}`,()=>selectRun(r.id),'ww-small',{dataset:{testid:'wb-open-run',runId:r.id},title:`${r.run_id} · ${r.phase||'Phase unknown'}`}));
+  return box;
 }
 function renderGlobalAgents(wrap) {
   const panel=el('section',{class:'ww-page'},el('div',{class:'ww-page-head'},el('h1',{text:'Agents'}),el('p',{text:'Inspect actual Office sessions and dispatches. Messaging is only available to active orchestrators in their run.'})));
@@ -376,7 +447,10 @@ function renderAllocation(wrap) {
 function renderSettings(wrap) {
   const panel=el('section',{class:'ww-page'},el('div',{class:'ww-page-head'},el('h1',{text:'Settings'}),el('p',{text:'Office policy is still governed by the runtime, not by browser preferences.'})));
   panel.append(card('Runtime and settings',el('div',{},el('p',{text:'Machine, repository and run-pinned settings retain their current precedence. Changing a setting requires an Office-authorized command.'}),button('Open Classic Settings',()=>classic('settings'),'ww-secondary'))));
-  panel.append(card('Navigation',el('div',{},el('p',{text:'The new run-first workbench is the default. The original Workstation remains accessible for full operational controls.'}),button('Open Classic Workstation',()=>classic(),'ww-secondary'))));wrap.append(panel);
+  panel.append(card('Navigation',el('div',{},el('p',{text:'This run-first workbench is opt-in. The original Workstation remains accessible for full operational controls.'}),button('Open Classic Workstation',()=>classic(),'ww-secondary'))));
+  const on=store_.get(MODE_KEY)==='workbench';
+  panel.append(card('Default interface',el('div',{},el('p',{text:on?'The run-first workbench opens by default in this browser. Add ?classic=1 to a URL to open the original Workstation once.':'The original Workstation opens by default. The workbench is opt-in until maintainer sign-off; use ?workbench=1 for a single visit or turn it on for this browser.'}),button(on?'Make Classic the default':'Make workbench the default',()=>{store_.set(MODE_KEY,on?null:'workbench');draw();toast(on?'Classic is the default again.':'Workbench will open by default in this browser.');},'ww-secondary',{dataset:{testid:'wb-mode-toggle'}}))));
+  wrap.append(panel);
 }
 function togglePalette(){state.palette=!state.palette;drawPalette();}
 function drawPalette() {
