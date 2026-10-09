@@ -182,7 +182,10 @@ def event_fields(**extra):
             "policy_digest": "sha256:policy", "probe_key": "exact-key", "reason": "manual isolated probe",
             "candidate_route": "codex/new-model@high", "fingerprint_json": {
                 "harness": "codex", "harness_version": "1.0", "adapter_hash": "sha256:adapter",
-                "profile": "isolated", "invocation_model_id": "new-model", "effort": "high"}, **extra}
+                "profile": "isolated", "invocation_model_id": "new-model", "effort": "high"},
+            "probe_freshness": "none", "allocation_json": {
+                "probes": {"used": 0, "max": 2}, "trials": {"used": 0, "max": 1},
+                "rolling": {"used": 0, "max": 15}}, **extra}
 
 
 def test_discovery_events_are_append_only_and_survive_migration(tmp_path):
@@ -212,6 +215,7 @@ def test_discovery_events_are_append_only_and_survive_migration(tmp_path):
     ("policy_digest", None), ("policy_digest", ""), ("probe_key", None), ("reason", " "),
     ("attempt_id", ""), ("kind", "unknown"), ("origin", "unknown"), ("candidate_route", None),
     ("fingerprint_json", None), ("fingerprint_json", {}), ("probe_freshness", "invented"),
+    ("probe_freshness", None), ("allocation_json", None), ("allocation_json", {}), ("allocation_json", "{"),
     ("sql_column);DELETE FROM runs;--", "value"),
 ])
 def test_discovery_event_rejects_missing_or_invalid_context(tmp_path, key, value):
@@ -250,8 +254,34 @@ def test_trial_terminal_outcome_is_unique_and_cache_hits_link_attempts(tmp_path)
         policy.record_event(con, **event_fields(kind="probe-cache-hit"))
     with db.transaction(con):
         cache_id = policy.record_event(con, **event_fields(kind="probe-cache-hit", source_attempt_id=fields["attempt_id"],
-                                                          probe_freshness="cached-fresh", allocation_json={"probes": {"used": 1, "max": 2}}))
+                                                          probe_freshness="cached-fresh", allocation_json={
+                                                              "probes": {"used": 1, "max": 2}, "trials": {"used": 0, "max": 1},
+                                                              "rolling": {"used": 0, "max": 15}}))
     cache = dict(con.execute("SELECT * FROM route_discovery_events WHERE id=?", (cache_id,)).fetchone())
     assert cache["source_attempt_id"] == fields["attempt_id"]
     assert json.loads(cache["allocation_json"])["probes"] == {"used": 1, "max": 2}
+    con.close()
+
+
+def test_event_validates_serialized_cap_snapshot_and_required_audit_context(tmp_path):
+    con = db.connect(tmp_path / "runs.db")
+    with db.transaction(con):
+        for allocation in ("{", "[]", "{}"):
+            with pytest.raises(ValueError):
+                policy.record_event(con, **event_fields(allocation_json=allocation))
+        fields = event_fields()
+        fields["allocation_json"] = json.dumps(fields["allocation_json"])
+        assert policy.record_event(con, **fields)
+    assert con.execute("SELECT count(*) FROM route_discovery_events").fetchone()[0] == 1
+    con.close()
+
+
+@pytest.mark.parametrize("missing", ["allocation_json", "probe_freshness"])
+def test_event_requires_cap_snapshot_and_freshness(tmp_path, missing):
+    con = db.connect(tmp_path / "runs.db")
+    fields = event_fields()
+    del fields[missing]
+    with db.transaction(con), pytest.raises(ValueError):
+        policy.record_event(con, **fields)
+    assert con.execute("SELECT count(*) FROM route_discovery_events").fetchone()[0] == 0
     con.close()

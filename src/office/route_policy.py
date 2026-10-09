@@ -230,11 +230,17 @@ def record_event(con, *, kind: str, attempt_id: str, origin: str, policy_digest:
     if kind == "probe-cache-hit" and not fields.get("source_attempt_id"):
         raise ValueError("probe-cache-hit requires source_attempt_id")
     freshness = fields.get("probe_freshness")
-    if freshness is not None and freshness not in ("fresh-run", "cached-fresh", "stale", "none"):
-        raise ValueError("unknown probe_freshness")
-    for key in ("fingerprint_json", "allocation_json"):
-        if key in fields and fields[key] is not None and not isinstance(fields[key], str):
-            fields[key] = dumps(fields[key])
+    if freshness not in ("fresh-run", "cached-fresh", "stale", "none"):
+        raise ValueError("discovery event requires valid probe_freshness")
+    allocation = fields.get("allocation_json")
+    if isinstance(allocation, str):
+        allocation = json.loads(allocation)
+    if not isinstance(allocation, dict) or any(not isinstance(allocation.get(k), dict) or
+                                              not {"used", "max"} <= allocation[k].keys()
+                                              for k in ("probes", "trials", "rolling")):
+        raise ValueError("discovery event requires allocation_json with probes, trials and rolling used/max")
+    fields["fingerprint_json"] = dumps(fingerprint)
+    fields["allocation_json"] = dumps(allocation)
     event_id = new_run_id()
     values = {"id": event_id, "attempt_id": attempt_id, "kind": kind, "origin": origin,
               "policy_digest": policy_digest, "policy_version": POLICY_VERSION, "probe_key": probe_key,
