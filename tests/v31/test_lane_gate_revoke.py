@@ -167,10 +167,30 @@ def test_the_fallback_flag_is_cleared_on_recompose_and_on_decide(env, monkeypatc
     with con:  # an escalated scope that still carries the flag
         convergence._set_scope(con, _run_row(env), "L-T1", status="escalated", fallback_available=True, fallback_kind="visual")
     monkeypatch.setattr(jobs, "kick", lambda *a, **k: 0)  # the next review would be unavailable again
+    monkeypatch.setattr(convergence, "_consider", lambda *a, **k: None)  # recompose clears it too: isolate decide
     with con:
         convergence.decide(con, _run_row(env), "L-T1", "review", quote="review it again")
     st = _scope(env, "L-T1")
     assert st["cycle"] == 2 and not st["fallback_available"] and not st.get("fallback_kind"), st
+
+
+def test_a_waived_gate_is_no_fallback_while_the_other_unavailable_gate_still_is(env, monkeypatch, tmp_path):
+    _fake_capture(monkeypatch, tmp_path)
+    _start(env, plan=PLAN_VISUAL, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+           convergence_reviewer=[{"exit": 1}], visual_reviewer=[{"exit": 1}], probe=[{"reply": "auto"}])
+    env.office("dispatch", "T1", check=0)
+    env.office(*WAIVE, check=0)
+    st = _scope(env, "L-T1")
+    assert st["status"] == "unavailable" and st["fallback_kind"] == "visual", st
+    from office import convergence
+    con, run = env.con(), _run_row(env)
+    assert convergence.fallback_gate(con, run, "L-T1", "convergence_review") is None
+    assert convergence.fallback_gate(con, run, "L-T1", "visual")["kind"] == "visual"
+    assert "office review L-T1:visual --report" in _status(env)["next"], _status(env)["next"]
+    report = tmp_path / "r.txt"
+    report.write_text(APPROVED)
+    code, out = env.office("review", "L-T1:convergence", "--report", str(report))
+    assert code != 0 and "fallback-not-allowed" in out, out
 
 
 # ------------------------------------------------------------------ #454: visual failures that are not the producer's
