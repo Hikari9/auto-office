@@ -377,7 +377,9 @@ def shared_tree(entry: str) -> bool:
     `locales/*.json` names append-only files and stays parallel-safe."""
     bare = entry.lstrip(SHARED)
     last = bare.rstrip("/").rsplit("/", 1)[-1]
-    return is_shared(entry) and (bare.endswith("/") or "**" in bare or "." not in last)
+    # A root-level suffixless name (`Makefile`, `Dockerfile`) is a file, not a directory.
+    return is_shared(entry) and (bare.endswith("/") or "**" in bare
+                                 or ("." not in last and "/" in bare.rstrip("/")))
 
 
 def _unordered_shared_trees(tasks: list[dict]):
