@@ -133,6 +133,9 @@ def body(con, run: dict, task: dict, dispatch: dict | None) -> str:
     if disclosure:
         why = plan_view.short_why(disclosure)
         lines.append(f"Route: `{plan_view.route_label(disclosure)}`" + (f", why: {why}" if why else ""))
+    from office import risk as risk_mod
+    if risk_mod.line(run):
+        lines += ["", f"Review policy: {risk_mod.line(run)}"]
     if task["accept"]:
         lines += ["", "Accept:", *[f"- {a}" for a in task["accept"]]]
     if landing.get("issue"):

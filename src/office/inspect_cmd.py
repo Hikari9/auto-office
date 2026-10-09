@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from office import adaptive, candidates, contract, plans, routing, state
+from office import risk as risk_mod
 from office.result import Result
 from office.state import Usage
 from office.util import loads, short
@@ -69,6 +70,7 @@ def _run(con, run) -> Result:
              f"plan p{run['plan_version']}" + (f" ({plan['kind']}, {plan['content_hash'][7:19]})" if plan else ""),
              f"plan review: {json.dumps({k: v for k, v in rs.items() if k != 'open_defects'})}",
              f"envelope: {json.dumps(run.get('envelope'))[:300]}",
+             *([f"review policy: {rl}"] if (rl := risk_mod.line(run)) else []),
              f"state dir: {run['state_dir']}", f"policy {run['policy_hash'][:19]} config {run['config_hash'][:19]}"]
     for a in con.execute("SELECT kind, target, requirements_version, quote, created_at FROM authorizations WHERE run_id=? "
                          "ORDER BY created_at", (run["id"],)).fetchall():
@@ -80,7 +82,7 @@ def _run(con, run) -> Result:
     if integ:
         lines.append(f"integration {integ.get('status')} {integ.get('branch', '')} {integ.get('detail', '')}")
     return Result(lines=lines, data={"run": {k: v for k, v in run.items() if not k.endswith("_json")},
-                                     "requirements": req["frozen"], "plan_review": rs})
+                                     "requirements": req["frozen"], "plan_review": rs, "risk": risk_mod.summary(run)})
 
 
 def _task(con, run, tid) -> Result:
@@ -179,6 +181,8 @@ def _route(con, run, role_or_task) -> Result:
     role = role_or_task or "executor"
     decision = candidates.route_role(con, state.pinned_config(run), run, role, probe=False)
     lines = [f"{role}: {decision.get('status')} -> {decision.get('selected')} (live, quota not probed)"]
+    if risk_mod.line(run):
+        lines.append(f"review policy: {risk_mod.line(run)}")
     if decision.get("routing"):
         lines += adaptive.render_slate(decision.get("slate") or [], indent="")
         lines += _matrix(decision["routing"])

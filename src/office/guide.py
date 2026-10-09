@@ -250,6 +250,12 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     routes = effective_routes(con, run, tasks)
     if routes:
         res.add("routes: " + ", ".join(f"{tid} {r}" for tid, r in routes.items()))
+    from office import risk as risk_mod
+    rline = risk_mod.line(run)
+    if rline and (risk_mod.classification(run.get("risk")) == risk_mod.UNKNOWN or (run.get("gates") or {}).get("lightweight")):
+        res.add(rline)
+    elif rline:
+        res.verbose.append(rline)
     rs = plans.review_state(con, run)
     if rs["required"]:
         pr = "plan review " + ("closed (" + (rs["ended_reason"] or "") + ")" if rs["ended"] else
