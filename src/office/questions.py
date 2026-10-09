@@ -188,8 +188,9 @@ _NEXT = re.compile(r"\bNEXT=(.+)$")
 # decide...) or names a question id together with an answer/approval/decision ("await
 # orchestrator answer to Q1", "need approval on Q1"). A bare id ("Q1 was resolved") does not.
 _ASK_WORD = r"(?:answer|approv(?:e|al)|authori[sz](?:e|ation)|confirm(?:ation)?|decid(?:e|ing)|decision|choose|choice|tell me|reply)"
-_ASKS = re.compile(r"^\W*" + _ASK_WORD + r"\b|\b" + _ASK_WORD + r"\b[^;]*\bQ\d+\b|\bQ\d+\b[^;]*\b" + _ASK_WORD + r"\b",
-                   re.I)
+# Waiting on a question id asks too; applying an answer or decision already given does not.
+_WAITING = r"(?:await(?:ing|s)?|wait(?:ing|s)?\s+(?:on|for)|needs?|blocked\s+(?:on|until|by)|pending)"
+_ASKS = re.compile(r"^\W*" + _ASK_WORD + r"\b|\b" + _WAITING + r"\b[^;]*\bQ\d+\b", re.I)
 _QUESTION_LINE = re.compile(r"\bQ\d+\b|\bquestion\b", re.I)
 ENDED_PREFIX = "worker ended on a question: "
 

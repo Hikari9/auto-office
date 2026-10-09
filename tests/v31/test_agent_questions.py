@@ -228,3 +228,12 @@ def test_status_survives_herdr_list_failing(env, monkeypatch):
     _, run, d, con = _herdr_worker(env, monkeypatch, reads=[WIDGET], agent="blocked")
     monkeypatch.setattr(questions, "_herdr_agents", lambda: None)
     assert not any("no question recorded" in ln for ln in guide.status(con, run, probe_panes=True).lines)
+
+
+def test_applying_an_answer_is_not_asking_but_waiting_on_one_is():
+    # R3-5.
+    for done in ("apply the answer to Q1, then submit", "implement Q1 decision (use UTC) and submit",
+                 "no decision needed on Q2, implement b.ts"):
+        assert questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={done}\n") is None, done
+    for ask in ("waiting on Q1", "blocked until Q1 is resolved"):
+        assert questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={ask}\n"), ask
