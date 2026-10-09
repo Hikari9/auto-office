@@ -316,6 +316,49 @@ def test_visual_preflight_rejects_unknown_verbs():
     assert errors_ok == []
 
 
+def test_visual_preflight_navigate_rejected_and_allowed_forms():
+    from office import visual
+    base_url = "http://127.0.0.1:8000/site/index.html"
+
+    # Rejected forms: file:, protocol-relative //host, metadata IP, non-local origin, data:, javascript:
+    rejected_cases = [
+        "file:///Users/u/.ssh/id_rsa",
+        "//evil.example/x",
+        "http://169.254.169.254/latest/meta-data/",
+        "https://internal.corp/",
+        "data:text/plain;base64,aGVsbG8=",
+        "javascript:alert(1)",
+    ]
+    for target in rejected_cases:
+        tasks = [{"id": "T1", "visual": {
+            "url": base_url, "start": "python3 -m http.server",
+            "states": f"default; nav = navigate {target}"}}]
+        errors, _ = visual.preflight(tasks)
+        assert len(errors) == 1, (target, errors)
+        assert "invalid navigate" in errors[0], (target, errors)
+
+    # Allowed forms: relative URL and absolute local URL
+    allowed_cases = [
+        "subpage.html",
+        "/site/subpage.html",
+        "http://127.0.0.1:8000/site/subpage.html",
+        "http://localhost:8000/site/subpage.html",
+    ]
+    for target in allowed_cases:
+        tasks = [{"id": "T1", "visual": {
+            "url": base_url, "start": "python3 -m http.server",
+            "states": f"default; nav = navigate {target}"}}]
+        errors, _ = visual.preflight(tasks)
+        assert errors == [], (target, errors)
+
+    # allow_remote_preview allows remote navigate targets
+    remote_tasks = [{"id": "T1", "visual": {
+        "url": "https://preview.example.com/", "allow_remote_preview": True, "start": "python3 -m http.server",
+        "states": "default; nav = navigate https://preview.example.com/other"}}]
+    errors, _ = visual.preflight(remote_tasks)
+    assert errors == []
+
+
 def test_playwright_empty_error_splitlines_does_not_raise(monkeypatch, tmp_path):
     from office import visual
 
@@ -358,6 +401,88 @@ def test_playwright_empty_error_splitlines_does_not_raise(monkeypatch, tmp_path)
     res = visual._capture_one(DummyBrowser(), "http://127.0.0.1:8000/", 1440, 900, st, [], evdir, "test", {})
     assert "failures" in res
     assert res["failures"][0]["summary"] == "interaction 'click #btn' failed: "
+
+
+def test_capture_one_navigate_rejected_and_allowed_forms(tmp_path):
+    from office import visual
+
+    navigated_urls = []
+
+    class MockPage:
+        def __init__(self):
+            self.url = ""
+
+        def on(self, *args, **kwargs):
+            pass
+
+        def goto(self, target, *args, **kwargs):
+            navigated_urls.append(target)
+            self.url = target
+            return None
+
+        def evaluate(self, *args, **kwargs):
+            return {"innerWidth": 1440, "innerHeight": 900, "scrollWidth": 1440, "fontStatus": "loaded",
+                    "failedFonts": [], "elements": {}}
+
+        def query_selector(self, sel):
+            return object()
+
+        def wait_for_timeout(self, *args):
+            pass
+
+        def screenshot(self, path, **kwargs):
+            from pathlib import Path
+            Path(path).write_bytes(b"x" * 2000)
+
+    class MockContext:
+        def new_page(self):
+            return MockPage()
+
+        def close(self):
+            pass
+
+    class MockBrowser:
+        def new_context(self, **kwargs):
+            return MockContext()
+
+    evdir = tmp_path / "ev"
+    evdir.mkdir()
+    base_url = "http://127.0.0.1:8000/site/index.html"
+
+    # Rejected forms in _capture_one produce cause: "spec" and invalid
+    rejected_cases = [
+        "file:///Users/u/.ssh/id_rsa",
+        "//evil.example/x",
+        "http://169.254.169.254/latest/meta-data/",
+        "https://internal.corp/",
+        "data:text/plain;base64,aGVsbG8=",
+        "javascript:alert(1)",
+    ]
+    for target in rejected_cases:
+        st = {"name": "test", "steps": [{"verb": "navigate", "arg": target}]}
+        res = visual._capture_one(MockBrowser(), base_url, 1440, 900, st, [], evdir, "test", {})
+        assert res.get("cause") == "spec", (target, res)
+        assert "invalid navigate" in res.get("invalid", ""), (target, res)
+        # Ensure page.goto was never called for rejected targets
+        assert target not in navigated_urls
+
+    # Reference capture leaves reference origin rejected
+    ref_base = "file:///path/to/design/proto.html"
+    ref_st_out = {"name": "test", "steps": [{"verb": "navigate", "arg": "http://127.0.0.1:8000/x"}]}
+    res_ref = visual._capture_one(MockBrowser(), ref_base, 1440, 900, ref_st_out, [], evdir, "ref-test", {}, reference=True)
+    assert res_ref.get("cause") == "spec"
+    assert "leaves reference origin" in res_ref.get("invalid", "")
+
+    # Allowed relative and absolute local URLs
+    st_rel = {"name": "test", "steps": [{"verb": "navigate", "arg": "subpage.html"}]}
+    res_rel = visual._capture_one(MockBrowser(), base_url, 1440, 900, st_rel, [], evdir, "test-rel", {})
+    assert "invalid" not in res_rel
+    assert res_rel["url"] == "http://127.0.0.1:8000/site/subpage.html"
+
+    st_abs = {"name": "test", "steps": [{"verb": "navigate", "arg": "http://127.0.0.1:8000/other"}]}
+    res_abs = visual._capture_one(MockBrowser(), base_url, 1440, 900, st_abs, [], evdir, "test-abs", {})
+    assert "invalid" not in res_abs
+    assert res_abs["url"] == "http://127.0.0.1:8000/other"
 
 
 @requires_playwright
