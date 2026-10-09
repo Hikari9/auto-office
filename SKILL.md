@@ -115,7 +115,7 @@ continue with the installed runtime. A failed or offline check is informational 
   surface into tasks' `accept:` criteria. Plan the seams, not the internals: `scope:` is an ownership envelope
   (module or domain dirs plus their tests); name exact files only where tasks collide or depend. Append-only
   registries several tasks touch (gate manifests, endpoint/grant lists, policy maps, shared mocks) go under each
-  task's `shared:`. Tasks that must land together share a `lane:`; lanes sharing an outcome, a `converge:`.
+  task's `shared:`. Tasks that must land together share a `lane:`; lanes sharing an outcome, a `converge:`; acceptance needing another lane's result, `accept_needs: T2`; a risky composition, `integration_risk: high` (each adds one integrated review).
 - Ordinary amendments (decomposition, ordering, acceptance detail, tests) are yours:
   `office amend <T2|plan> -- "<delta>"`. Plan review reviews the initial plan only: once it closes
   (APPROVED, its round cap, or a waiver), no amendment of any kind is reviewed again; you own them.

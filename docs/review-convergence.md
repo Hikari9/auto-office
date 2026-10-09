@@ -243,7 +243,7 @@ Plan findings are dispositioned with `office disposition plan:<P-id> fixed|dismi
 | Scope | Membership | Id |
 |---|---|---|
 | Lane | Tasks joined by `depends`, or naming the same `lane:`. The smallest independently landable workstream. | `L-<lane name>` or `L-<first task>` (for example `L-T1`) |
-| Shared scope | Lanes that share a `converge:` name, an interface (one provides what another consumes), a `shared:` registry, or changed files. | `S-<lane suffixes>` (for example `S-T1+T3`) |
+| Shared scope | Lanes that share a `converge:` name, an interface (one provides what another consumes), a `shared:` registry, a cross-lane acceptance dependency (`accept_needs:`), high integration risk, or changed files. | `S-<lane suffixes>` (for example `S-T1+T3`) |
 | Rebase scope | Created by `office land --rebase`: the whole run re-composed onto the new base. | `S-rebase` |
 
 Plan waves are never review boundaries, and having several planners adds no extra review.
@@ -261,6 +261,29 @@ the shared composition. Integration starts only after every lane and shared scop
 (`APPROVED`, waived, or not required).
 
 `office inspect convergence [scope]` shows lanes, shared scopes, gates, findings and escalations.
+
+### Integrated review (#422)
+
+The lane review is the normal unit. An integrated review is one shared-scope review bound to the exact
+composed commit of the lanes involved. It is required when lanes share:
+
+- an interface (`interfaces: provides X` in one lane, `consumes X` in another),
+- a cross-lane acceptance dependency (`accept_needs: T2` on a task whose acceptance needs another lane's result),
+- a shared outcome (`converge:`) or a `shared:` registry,
+- or high integration risk: the run's recorded high risk (`risk.high`: production blast radius, L/XL size,
+  irreversible) or a task declaring `integration_risk: high`. Office reads these markers as they are
+  and adds no new classification. Absence of a marker is never risk.
+
+Lanes that merely ran in the same wave, with none of these, add no review. When a prior independent
+APPROVED review already judged the same composed tree over at least the same tasks, the shared scope
+converges as `not_required` with the covering scope named and no second review runs. A single lane is
+always covered by its own lane review.
+
+Office records why the review was required or skipped: a `convergence.integrated_review` event (shown in
+`office status`), `landing.integrated_review`, the first line of `office inspect convergence`, and the
+`integrated_review` section of the landing and archive receipts. The review uses the same RECHECK
+routing, round cap and orchestrator cap waiver (#423) as any shared scope. Only runs on the current
+contract get it. Runs pinned to `v3.1` are unchanged.
 
 ## 8. The repair cycle and round accounting
 

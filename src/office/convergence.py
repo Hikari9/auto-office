@@ -139,7 +139,7 @@ def shared_scopes(con, run: dict, lane_list: list[dict] | None = None) -> list[d
     by_task = {tid: lane["id"] for lane in lane_list for tid in lane["tasks"]}
     tasks = {t["id"]: t for t in state.tasks(con, run["id"]) if t["id"] in by_task}
     planned = _plan_tasks(con, run)
-    edges: list[tuple[str, str, str]] = []
+    edges: list[tuple[str, str, str, str]] = []
     ids = [lane["id"] for lane in lane_list]
     names: dict[str, set[str]] = {}
     for tid, lane_id in by_task.items():
@@ -147,7 +147,7 @@ def shared_scopes(con, run: dict, lane_list: list[dict] | None = None) -> list[d
             names.setdefault(n, set()).add(lane_id)
     for n, members in names.items():
         members = sorted(members)
-        edges += [(members[0], m, f"shared outcome `{n}`") for m in members[1:]]
+        edges += [(members[0], m, f"shared outcome `{n}`", "outcome") for m in members[1:]]
     provides = {}
     for tid, t in tasks.items():
         for item in t.get("interfaces") or []:
@@ -160,7 +160,7 @@ def shared_scopes(con, run: dict, lane_list: list[dict] | None = None) -> list[d
             if words and words[0] in ("consumes", "consume"):
                 src = provides.get(" ".join(words[1:]).split(":")[-1].strip())
                 if src and src != by_task[tid]:
-                    edges.append((src, by_task[tid], f"{tid} consumes an interface lane {src} provides"))
+                    edges.append((src, by_task[tid], f"{tid} consumes an interface lane {src} provides", "interface"))
     shared_paths: dict[str, set[str]] = {}
     for tid, t in tasks.items():
         for p in t.get("scope") or []:
@@ -168,7 +168,15 @@ def shared_scopes(con, run: dict, lane_list: list[dict] | None = None) -> list[d
                 shared_paths.setdefault(p.lstrip(planfile.SHARED), set()).add(by_task[tid])
     for p, members in shared_paths.items():
         members = sorted(members)
-        edges += [(members[0], m, f"shared registry {p}") for m in members[1:]]
+        edges += [(members[0], m, f"shared registry {p}", "shared_path") for m in members[1:]]
+    for tid, t in ((tid, planned.get(tid) or {}) for tid in by_task):
+        for need in t.get("accept_needs") or []:
+            if need in by_task and by_task[need] != by_task[tid]:
+                edges.append((by_task[need], by_task[tid], f"{tid} acceptance depends on {need}'s result "
+                              f"(lane {by_task[need]})", "acceptance"))
+    marker = integration_risk(run, planned, by_task)
+    if marker and len(ids) > 1:
+        edges += [(ids[0], m, f"high integration risk: {marker}", "risk") for m in ids[1:]]
     accepted = {tid: t for tid, t in tasks.items() if t["status"] == "accepted"}
     changed = {tid: _changed(con, run, t) for tid, t in accepted.items()}
     acc = sorted(accepted, key=_tid_key)
@@ -177,7 +185,7 @@ def shared_scopes(con, run: dict, lane_list: list[dict] | None = None) -> list[d
             if by_task[a] != by_task[b]:
                 both = changed[a] & changed[b]
                 if both:
-                    edges.append((by_task[a], by_task[b], f"{a} and {b} both changed {sorted(both)[0]}"))
+                    edges.append((by_task[a], by_task[b], f"{a} and {b} both changed {sorted(both)[0]}", "changed"))
     parent = {i: i for i in ids}
 
     def find(x):
@@ -185,12 +193,12 @@ def shared_scopes(con, run: dict, lane_list: list[dict] | None = None) -> list[d
             x = parent[x]
         return x
 
-    why: dict[tuple, list[str]] = {}
-    for a, b, reason in edges:
+    why: dict[tuple, list[tuple[str, str]]] = {}
+    for a, b, reason, kind in edges:
         ra, rb = find(a), find(b)
         if ra != rb:
             parent[max(ra, rb)] = min(ra, rb)
-        why.setdefault((a, b), []).append(reason)
+        why.setdefault((a, b), []).append((reason, kind))
     groups: dict[str, list[str]] = {}
     for i in ids:
         groups.setdefault(find(i), []).append(i)
@@ -198,15 +206,29 @@ def shared_scopes(con, run: dict, lane_list: list[dict] | None = None) -> list[d
     for members in groups.values():
         if len(members) < 2:
             continue
-        reasons = [r for (a, b), rs in why.items() if a in members and b in members for r in rs]
+        found = [r for (a, b), rs in why.items() if a in members and b in members for r in rs]
+        reasons = [r for r, _ in found]
         tids = sorted({t for lane in lane_list if lane["id"] in members for t in lane["tasks"]}, key=_tid_key)
         out.append({"id": "S-" + "+".join(m[2:] for m in members), "lanes": members, "tasks": tids, "shared": True,
-                    "why": "; ".join(dict.fromkeys(reasons))})
+                    "why": "; ".join(dict.fromkeys(reasons)),
+                    "triggers": sorted({k for _, k in found})})
     if _rebased(run):
         tids = sorted(by_task, key=_tid_key)
         out.append({"id": "S-rebase", "lanes": ids, "tasks": tids, "shared": True,
-                    "why": f"rebased onto {_base(run)[:12]}: the composition onto the newer base is reviewed once"})
+                    "why": f"rebased onto {_base(run)[:12]}: the composition onto the newer base is reviewed once",
+                    "triggers": ["rebase"]})
     return out
+
+
+def integration_risk(run: dict, planned: dict, by_task: dict | None = None) -> str | None:
+    """The explicit high-integration-risk marker, or None (#422): the run's recorded
+    high risk (blast radius, size or irreversibility), else a task the plan declares
+    `integration_risk: high`. Absence of a marker is never risk."""
+    if (run.get("risk") or {}).get("high"):
+        return "the run is recorded as high risk"
+    marked = sorted((tid for tid, t in planned.items() if str(t.get("integration_risk") or "").lower() == "high"
+                     and (by_task is None or tid in by_task)), key=_tid_key)
+    return f"the plan declares it on {', '.join(marked)}" if marked else None
 
 
 def _base(run: dict) -> str:
@@ -347,6 +369,7 @@ def _close_fixes(con, run: dict, scope: dict) -> list[str]:
 def progress(con, run: dict) -> None:
     """Queue shared scopes whose lanes converged; queue integration once every
     scope converged. Caller holds the tx."""
+    _record_integrated(con, run)
     run = state.get_run(con, run["id"])
     lane_list = lanes(con, run)
     for s in shared_scopes(con, run, lane_list):
@@ -364,6 +387,62 @@ def progress(con, run: dict) -> None:
             # Same accepted set as an earlier composition (a rebase moved the base):
             # the per-set job already ran, so compose again explicitly.
             integration.retrigger(con, run)
+
+
+def integrated_review(con, run: dict) -> dict:
+    """Why an integrated (shared-scope) review is required or skipped (#422). Derived
+    from the plan and run each time, so it is a proof rather than a memory: lanes that
+    merely ran together need none; a shared outcome, interface, acceptance dependency,
+    shared registry or high integration risk require one bound to the composed scope."""
+    run = state.get_run(con, run["id"])
+    lane_list = lanes(con, run)
+    scopes = [s for s in shared_scopes(con, run, lane_list) if s["id"] != "S-rebase"]
+    if scopes:
+        out = []
+        for s in scopes:
+            st = scope_state(run, s["id"])
+            out.append({"scope": s["id"], "lanes": s["lanes"], "tasks": s["tasks"], "triggers": s.get("triggers") or [],
+                        "why": s["why"], "status": st.get("status") or "waiting", "commit": st.get("commit"),
+                        "covered_by": st.get("covered_by")})
+        return {"required": True, "reason": "; ".join(f"{o['scope']}: {o['why']}" for o in out), "scopes": out}
+    if len(lane_list) < 2:
+        reason = "one lane: its independent review is the review of the exact integrated result"
+    else:
+        reason = (f"{len(lane_list)} lanes are independent: no shared interface, outcome, acceptance dependency, shared "
+                  f"registry or high integration risk, so their lane reviews stand and no extra review is added")
+    return {"required": False, "reason": reason, "scopes": []}
+
+
+def _record_integrated(con, run: dict) -> None:
+    """Make the decision durable and visible in status once per change. Caller holds the tx."""
+    run = state.get_run(con, run["id"])
+    decision = integrated_review(con, run)
+    brief = {"required": decision["required"], "reason": decision["reason"],
+             "scopes": [{k: o[k] for k in ("scope", "tasks", "triggers")} for o in decision["scopes"]]}
+    landing = dict(run.get("landing") or {})
+    if landing.get("integrated_review") == brief:
+        return
+    landing["integrated_review"] = brief
+    state.update_run(con, run["id"], landing=landing)
+    state.emit(con, run, "convergence.integrated_review",
+               ("integrated review required: " if decision["required"] else "no integrated review: ") + decision["reason"],
+               audience="runtime")
+
+
+def _covered_by(con, run: dict, scope: dict, composed: dict) -> str | None:
+    """Another scope whose independent APPROVED review already judged this exact tree
+    over at least these tasks (#422): the review is not repeated."""
+    for sid, st in ((run.get("landing") or {}).get("convergence") or {}).items():
+        if sid == scope["id"] or st.get("status") != "approved" or st.get("tree") != composed["tree"]:
+            continue
+        other = (st.get("approved") or {}).get("tasks") or []
+        if not set(scope["tasks"]) <= set(other):
+            continue
+        done = [g for g in scope_gates(con, run, sid, commit=st.get("commit")) if g["kind"] == "convergence_review"
+                and g["status"] == "done" and g["verdict"] == "APPROVED" and g.get("independence") == contract.INDEPENDENT]
+        if done:
+            return sid
+    return None
 
 
 def requeue_all(con, run: dict) -> None:
@@ -429,6 +508,17 @@ def job_converge(con, run: dict, job: dict) -> dict:
                        f"{composed['detail']}")
             return composed
         st = scope_state(run, scope["id"])
+        if scope.get("shared") and review_required(run):
+            covering = _covered_by(con, run, scope, composed)
+            if covering:
+                _set_scope(con, run, scope["id"], commit=composed["commit"], tree=composed["tree"],
+                           branch=composed["branch"], covered_by=covering)
+                state.emit(con, run, "convergence.covered", f"{scope['id']} integrated review skipped: {covering}'s "
+                           f"independent review already covered tree {composed['tree'][:10]} for these tasks",
+                           audience="runtime")
+                _converge_scope(con, run, scope, basis=f"already covered by {covering}'s independent review of the "
+                                                       f"exact composed tree {composed['tree'][:10]}")
+                return {"status": "not_required", "covered_by": covering}
         cycle = int(st.get("cycle") or 1)
         round_no = int(st.get("round") or 1)
         rev = _rev(scope["id"], composed["commit"])
@@ -932,6 +1022,7 @@ def summary(con, run: dict) -> list[dict]:
         elif key is not None and st.get("key") != key and status in CONVERGED:
             status = "pending"
         out.append({"id": s["id"], "tasks": s["tasks"], "shared": s.get("shared", False), "why": s.get("why"),
+                    "triggers": s.get("triggers") or [], "covered_by": st.get("covered_by"),
                     "status": status, "round": st.get("round") or 1, "cycle": st.get("cycle") or 1,
                     "detail": st.get("detail"), "commit": st.get("commit"), "escalation": st.get("escalation"),
                     "intake_gap": st.get("intake_gap"), "fallback_available": st.get("fallback_available")})
@@ -1446,6 +1537,7 @@ def receipt(con, run: dict) -> dict:
         "SELECT scope, code, gate_kind, level, disposition, disposition_note FROM findings WHERE run_id=? AND contract=? "
         "AND disposition IS NOT NULL GROUP BY scope, code ORDER BY MIN(created_at)", (run["id"], contract.CONVERGENCE))]
     return {"review_contract": contract.of(run), "scopes": scopes, "waivers": waivers, "dispositions": dispositions,
+            "integrated_review": integrated_review(con, run),
             "degraded": [f"{s['id']}:{r['kind']}" for s in scopes for r in s["reviews"]
                          if r["independence"] == contract.DEGRADED],
             "orchestrator_reviews": [f"{s['id']}:{r['kind']}" for s in scopes for r in s["reviews"]
@@ -1470,6 +1562,8 @@ def waiver_lines(con, run: dict) -> list[str]:
 def inspect_lines(con, run: dict, scope_id: str | None = None) -> list[str]:
     run = state.get_run(con, run["id"])
     lines = [f"review contract {contract.of(run)}"]
+    ir = integrated_review(con, run)
+    lines.append(("integrated review required: " if ir["required"] else "integrated review not required: ") + ir["reason"])
     for s in summary(con, run):
         if scope_id and s["id"].lower() != scope_id.lower():
             continue
