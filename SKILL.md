@@ -137,8 +137,17 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
   or a merge is authorized. The verdict stands; the waiver binds to the composed commit. Your host's permission
   layer may still block `--as orchestrator` as self-approval (Claude Code auto mode does): never work around
   it; ask the user and record their waiver with `--quote`.
-- If every convergence reviewer route is UNAVAILABLE you may review it as a recorded, non-independent
-  fallback: `office review L-T1:convergence --report <file>` (visual: `--inspected <every screenshot>`).
+- A reviewer that cannot finish (every route UNAVAILABLE, a usage limit, or no usable reply) is a runtime status,
+  never a verdict. Its `next:` line offers exactly two options, and a waiver is not one of them: (1) the next
+  fallback reviewer for the same revision, `office rerun <task|L-T1:convergence|L-T1:visual> --review --review-as
+  <route>` (re-dispatches only the reviewer; no executor launches), or (2) your own review, recorded as a
+  non-independent fallback with who, route and revision: `office review L-T1:convergence --report <file>` (visual:
+  `--inspected <every screenshot>`; a v3.1 task: `office review T1 --report <file>`). The second is refused for work
+  you produced or for a gate whose reviewer returned a verdict. The landing receipt shows it as degraded.
+- Pin a reviewer any time with `--review-as <route>`: `office dispatch <task|L-T1:visual> --review-as <route>`, or
+  `office rerun <task> --review-as <route>`. A pin applies to the next review, a live worker keeps running, and a
+  pinned reviewer is never substituted: when it hits a wall Office says so and names the review-only reroute.
+  `office rerun` takes `--as` and `--review-as` with the meaning they have on dispatch.
 - **v3.1 runs** (started before #337; `office inspect run` names the contract) keep PASS | CHANGES_REQUIRED |
   PLAN_DEFECT | BRIEF_DEFECT, per-task review and plan-defect redirects (`--redirect`): follow their `next:` lines and `docs/v31-rolling-review-gates.md`.
 

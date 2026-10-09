@@ -34,8 +34,10 @@ Auto Office {ver}
   office amend route <task> --as <harness>/<model>[@effort] --quote "<words>" [--restart]
                                     re-record a live dispatch's model (same harness); --restart relaunches it
   office ack <amendment-id>         worker: record that you applied a delivered amendment
-  office rerun <task> --resume|--fresh [--reroute]
+  office rerun <task> --resume|--fresh [--reroute|--as <route>] [--review-as <route>]
                                     after a worker ends: continue its session, or start a new one with the findings
+  office rerun <task|L-T1:visual> --review [--review-as <route>]
+                                    re-run only the reviewer of the current revision (never an executor)
   office prompt <task|dispatch> -- "<message>"
                                     message a live pane agent and confirm it was submitted (never herdr pane run)
   office answer <task|dispatch> <n> | -- "<text>"
@@ -328,7 +330,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("how", choices=("fix", "fixed", "dismissed", "follow-up"))
     s.add_argument("note", nargs="*")
     s = sp.add_parser("review", parents=[common])
-    s.add_argument("target", help="<scope>:convergence|visual")
+    s.add_argument("target", help="<scope>:convergence|visual, or a v3.1 task id")
     s.add_argument("--report", required=True, help="your review, in the reviewer reply format")
     s.add_argument("--inspected", nargs="*", default=[], help="visual: every screenshot you inspected")
     s = sp.add_parser("revoke", parents=[common])
@@ -340,6 +342,20 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--fresh", action="store_true", help="start a new session with the open findings in its brief")
     s.add_argument("--reroute", action="store_true",
                    help="with --fresh: route from current evidence instead of keeping the original route")
+    s.add_argument("--review", action="store_true",
+                   help="re-run only the reviewer of the current revision (a task, or a lane gate L-T1:visual); "
+                        "never launches an executor")
+    s.add_argument("--as", dest="as_model", metavar="HARNESS/MODEL[@EFFORT]",
+                   help="with --fresh: run the executor on this model, bypassing registry, trust and floors")
+    s.add_argument("--cli", metavar="ARGV", help="with --as: start exactly this agent argv in a herdr pane")
+    s.add_argument("--external", action="store_true",
+                   help="with --fresh: prepare the dispatch and print how to start it; launch nothing")
+    s.add_argument("--review-as", metavar="HARNESS/MODEL[@EFFORT]",
+                   help="pin the reviewer for the next review (alone: while the worker keeps running; with --review: "
+                        "the route that re-runs it)")
+    s.add_argument("--review-cli", metavar="ARGV", help="with --review-as: start exactly this reviewer argv in herdr")
+    s.add_argument("--review-external", action="store_true",
+                   help="with --review-as: you start the reviewer; Office reads its review file")
     s = sp.add_parser("prompt", parents=[common])
     s.add_argument("target", nargs="?")
     s.add_argument("message", nargs="*")
@@ -669,7 +685,10 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return dispatch.revoke(con, run, args.task, args.reason)
     if cmd == "rerun":
         from office import rerun
-        return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh, reroute=args.reroute)
+        return rerun.rerun(con, run, args.task, resume=args.resume, fresh=args.fresh, reroute=args.reroute,
+                           review=args.review, as_model=args.as_model, cli=args.cli, external=args.external,
+                           review_as=args.review_as, review_cli=args.review_cli,
+                           review_external=args.review_external)
     if cmd == "dismiss":
         from office import rerun
         return rerun.dismiss(con, run, args.target, all_=args.dismiss_all)

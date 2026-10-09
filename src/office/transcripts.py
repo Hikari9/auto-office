@@ -129,10 +129,37 @@ def _text_blocks(content) -> str:
     return "\n".join(parts)
 
 
-def claude_final_text(path: Path) -> str | None:
+_CLOSING_MAX_CHARS = 300
+
+
+def _pick(messages: list[str], prefer) -> str | None:
+    """The last message. With `prefer` (a compiled pattern) an earlier message it matches wins
+    only when the last is a closing line ("done, the review is in reply.txt"): short, matching
+    nothing of the review's format. A reviewer's final answer is never replaced by what it quoted
+    earlier from the work under review."""
+    if not messages:
+        return None
+    last = messages[-1]
+    if prefer is None or prefer.search(last) or len(last) > _CLOSING_MAX_CHARS \
+            or re.search(r"^\W*(FINDING|NEXT|DECISION|EVIDENCE_STATUS)\b", last, re.M | re.I):
+        return last
+    hits = [m for m in messages if _opens_with(m, prefer)]
+    return hits[-1] if hits else last
+
+
+def _opens_with(message: str, prefer) -> bool:
+    """Does the message open with the review: its pattern on one of its first three lines (a heading or a
+    sentence may come before it), unless the line above introduces a quotation (`The README says:`)? A
+    verdict quoted from the work under review is not the reviewer's answer."""
+    lines = [ln for ln in message.splitlines() if ln.strip()][:3]
+    return any(prefer.match(ln) and not (i and lines[i - 1].rstrip().endswith(":")) for i, ln in enumerate(lines))
+
+
+def claude_final_text(path: Path, prefer=None) -> str | None:
     """The last assistant message's text. Claude logs one entry per content
-    block, so text blocks sharing the final message id are joined."""
-    last_id, chunks = None, []
+    block, so text blocks sharing a message id are joined."""
+    ids: list = []
+    chunks: list[list[str]] = []
     for row in _jsonl(path):
         if row.get("type") != "assistant":
             continue
@@ -141,22 +168,23 @@ def claude_final_text(path: Path) -> str | None:
         if not text.strip():
             continue
         mid = msg.get("id")
-        if mid is not None and mid == last_id:
-            chunks.append(text)
+        if mid is not None and ids and mid == ids[-1]:
+            chunks[-1].append(text)
         else:
-            last_id, chunks = mid, [text]
-    return "\n".join(chunks) if chunks else None
+            ids.append(mid)
+            chunks.append([text])
+    return _pick(["\n".join(c) for c in chunks], prefer)
 
 
-def codex_final_text(path: Path) -> str | None:
-    last = None
+def codex_final_text(path: Path, prefer=None) -> str | None:
+    messages = []
     for row in _jsonl(path):
         payload = row.get("payload") or {}
         if payload.get("type") == "message" and payload.get("role") == "assistant":
             text = _text_blocks(payload.get("content"))
             if text.strip():
-                last = text
-    return last
+                messages.append(text)
+    return _pick(messages, prefer)
 
 
 def _claude_candidates(cwd, since: float) -> list[Path]:
@@ -185,9 +213,11 @@ def _codex_candidates(since: float) -> list[Path]:
     return _recent(files, since)
 
 
-def final_reply(harness: str | None, *, marker: str, cwd: str | Path | None = None, since=None) -> str | None:
+def final_reply(harness: str | None, *, marker: str, cwd: str | Path | None = None, since=None,
+                prefer=None) -> str | None:
     """The final assistant reply of the session that was sent `marker` (the
-    brief path), or None when no transcript for it is found."""
+    brief path), or None when no transcript for it is found. `prefer` is a
+    compiled pattern the reply should match (see `_pick`)."""
     if not marker:
         return None
     t = _epoch(since)
@@ -200,7 +230,7 @@ def final_reply(harness: str | None, *, marker: str, cwd: str | Path | None = No
     for files, read in readers:
         for f in files:
             if _mentions(f, marker) and _prompted(f, marker, cwd):
-                text = read(f)
+                text = read(f, prefer)
                 if text and text.strip():
                     return text
     return None

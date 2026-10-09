@@ -101,12 +101,15 @@ def next_action(con, run: dict) -> str:
             return f'new authority entry {e["id"]} ({e["action"]}) needs authorization: ask the user (native question tool), then office approve {e["id"]} --quote "<words>"'
     tasks = state.tasks(con, run["id"])
     c = _counts(tasks)
+    from office import gates as gates_mod
     for status in ("blocked", "paused"):
         if c.get(status):
             tid = c[status][0]
             t = next(x for x in tasks if x["id"] == tid)
+            block = gates_mod.unavailable_review_block(con, run, t)
+            if block:
+                return gates_mod.task_review_next(con, run, t, block)
             return f"resolve {tid} ({t.get('pause_reason') or status}); office inspect task {tid}"
-    from office import gates as gates_mod
     if contract.is_convergence(run):
         # A lane RECHECK routes one consolidated repair set: name every owner at once.
         from office import convergence
@@ -162,9 +165,11 @@ def _plan_next_convergence(con, run: dict, rs: dict) -> str | None:
     dedicated = run.get("planner_mode") == "dedicated"
     revise = ('have the planner revise it: office amend plan --contract -- "<the findings>"' if dedicated
               else f'revise {planpath.rel(run)}, then office amend plan --contract -- "<what changed>"')
+    if st in ("unavailable", "attention") and plans.review_failed(con, run):
+        return plans.fallback_next(con, run)
     if st == "unavailable":
         return ("plan review is UNAVAILABLE (runtime status, not a verdict; no round spent): office resume retries "
-                'the reviewer chain, or the user may waive: office approve waive plan-review --quote "<words>"')
+                "the reviewer chain")
     if st == "attention":
         return ("the plan reviewer left no readable reply (INVALID_RESULT, no round spent): re-prompt it in its pane "
                 "or office resume")

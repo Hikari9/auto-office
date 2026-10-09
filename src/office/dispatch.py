@@ -28,7 +28,7 @@ try:
 except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
-from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, state, version, worktree_setup
+from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, review_parse, routing, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (atomic_write_json, claim_alive, claim_signalable, dumps, now_iso, parse_iso, pid_alive,
@@ -73,17 +73,18 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
         raise Usage("invalid-override", "use --as or --route, not both")
     if reroute and (as_model or route):
         raise Usage("invalid-override", "--reroute routes from evidence; --as/--route name the route yourself")
-    if cli and external or review_cli and review_external:
-        raise Usage("invalid-override", "a CLI launch and an external launch are mutually exclusive")
-    if cli and not as_model:
-        raise Usage("invalid-override", "--cli needs --as <harness>/<model>[@effort] so the dispatch records what runs")
-    if (review_cli or review_external) and not review_as:
-        raise Usage("invalid-override", "--review-cli/--review-external need --review-as <harness>/<model>[@effort]")
+    check_route_flags(as_model=as_model, cli=cli, external=external, review_as=review_as, review_cli=review_cli,
+                      review_external=review_external)
     launch_prefs = {k: v for k, v in (("cli", cli), ("external", external)) if v}
-    if review_as:
-        candidates.declared_decision(review_as, flag="--review-as")  # validates the route's shape
     if state.is_terminal(run):
         raise Refused("run-terminal", f"run is {run['phase']}")
+    if review_as:
+        from office import gates
+        gates.require_orchestrator(con, run, "pin a reviewer", code="worker-cannot-pin-reviewer")
+    executor_flags = bool(as_model or route or cli or external or reroute or parallel)
+    gate_targets = [t for t in task_ids if ":" in t]
+    if gate_targets:
+        return _pin_gates(con, run, task_ids, review_as, review_cli, review_external, executor_flags)
     from office import guide, plan_view, plans, prs, queuecmd
     plans.require_dispatchable(con, run)
     for tid in task_ids:
@@ -94,11 +95,16 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
     prs.settings(con, run)  # detected once, outside the transaction (it asks GitHub)
     # Route before the write transaction: routing reads evidence and probes quota.
     routes = {}
+    reviews_only: set[str] = set()
     for tid in task_ids:
         task = state.get_task(con, run["id"], tid)
         if task is None or task["role"] == "planner":
             raise Usage("unknown-task", f"{tid} is not a task in plan p{run['plan_version']}",
                         next_step="office status lists the ready tasks")
+        if review_as and not executor_flags and _reviews_only(con, run, task):
+            # `--review-as` on a task that already has work to review changes the reviewer, not the executor.
+            reviews_only.add(tid)
+            continue
         if not (as_model or route or cli or external):
             from office import gates
             block = gates.unavailable_review_block(con, run, task)
@@ -117,20 +123,26 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
         previous = None
         for tid in task_ids:
             task = state.get_task(con, run["id"], tid)
+            if tid in reviews_only:
+                # A worker still running keeps running; a submitted revision whose review cannot finish is
+                # reviewed again, by the pinned route, and no executor is launched (never a fresh dispatch).
+                from office import rerun
+                lines, _ = rerun.review_rerun(con, run, tid, rerun.review_pin(review_as, review_cli, review_external),
+                                              strict=False)
+                for line in lines:
+                    res.add(line)
+                previous = tid
+                continue
             if tid not in routes:
                 # A submitted revision blocked only by an UNAVAILABLE code
                 # review needs its review re-run, not a fresh executor.
                 from office import gates
-                if review_as:
-                    state.update_task(con, run["id"], tid, review_override={
-                        "as": review_as, "cli": review_cli, "external": bool(review_external), "by": "user"})
                 gid = gates.rerun_unavailable_review(con, run, state.get_task(con, run["id"], tid))
                 if gid is None:
                     raise Refused("state-changed", f"{tid} is no longer blocked on its code review; re-run dispatch",
                                   scope=tid, next_step=f"office dispatch {tid}")
-                res.add(f"{tid} code review re-run on {task['current_revision_id']} (gate {gid}"
-                        + (f", reviewer {review_as}" if review_as else "") + "); the submission is kept, "
-                        "no executor launched")
+                res.add(f"{tid} code review re-run on {task['current_revision_id']} (gate {gid}); the submission is "
+                        "kept, no executor launched")
                 previous = tid
                 continue
             after = task.get("stack_after")
@@ -195,6 +207,55 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
         state.emit(con, run, "dispatch", f"dispatched {' '.join(task_ids)}{' in parallel' if parallel else ''}",
                    payload={"tasks": task_ids, "parallel": parallel})
     jobs.kick(con, run["id"])
+    res.next = "exceptions only; office status"
+    return res
+
+
+def _reviews_only(con, run: dict, task: dict) -> bool:
+    """Does `--review-as` without an executor flag mean the reviewer of work that exists?
+    True for a task with a live worker (the pin applies to its next review) and for one with a
+    submitted revision (its review is re-run on the new pin). False for a task still to start, and
+    for one blocked for any reason but its review (that dispatch still relaunches the executor)."""
+    from office import gates
+    if gates.worker_live(con, task.get("current_dispatch_id")):
+        return True
+    if not task.get("current_revision_id"):
+        return False
+    if task["status"] == "blocked":
+        return gates.unavailable_review_block(con, run, task) is not None  # any other block still relaunches
+    return task["status"] in ("submitted", "accepted", "changes_required")
+
+
+def check_route_flags(*, as_model=None, cli=None, external=False, review_as=None, review_cli=None,
+                      review_external=False) -> None:
+    """The shape rules `office dispatch` and `office rerun` share for --as/--cli/--external
+    and --review-as/--review-cli/--review-external."""
+    if cli and external or review_cli and review_external:
+        raise Usage("invalid-override", "a CLI launch and an external launch are mutually exclusive")
+    if cli and not as_model:
+        raise Usage("invalid-override", "--cli needs --as <harness>/<model>[@effort] so the dispatch records what runs")
+    if (review_cli or review_external) and not review_as:
+        raise Usage("invalid-override", "--review-cli/--review-external need --review-as <harness>/<model>[@effort]")
+    if review_as:
+        candidates.declared_decision(review_as, flag="--review-as")  # validates the route's shape
+
+
+def _pin_gates(con, run: dict, targets: list[str], review_as, review_cli, review_external, executor_flags) -> Result:
+    """`office dispatch L-T1:visual --review-as <route>`: pin the reviewer of a lane gate
+    for its next review. It launches nothing."""
+    from office import convergence
+    if not review_as:
+        raise Usage("review-as-required", f"{', '.join(targets)} names a review gate: pin its reviewer with --review-as "
+                    "<harness>/<model>[@effort]", next_step=f"office dispatch {targets[0]} --review-as <route>")
+    if executor_flags or any(":" not in t for t in targets):
+        raise Usage("invalid-override", "a gate id pins a reviewer only; dispatch tasks separately")
+    res = Result()
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        for t in targets:
+            pinned = convergence.set_review_pin(con, run, t, review_as, cli=review_cli, external=review_external)
+            res.add(f"{pinned} reviewer pinned to {review_as}; it applies to the next review, and nothing running changes")
+            run = state.get_run(con, run["id"])
     res.next = "exceptions only; office status"
     return res
 
@@ -894,6 +955,14 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     setup = None
     if role == "executor":
         _set_aside_evidence(con, run, dispatch, wt, ddir)
+        from office import gates
+        restored = gates.restore_ledger(con, run, state.get_task(con, run["id"], dispatch["task_id"]), wt)
+        if restored:
+            with db.transaction(con):
+                state.emit(con, run, "launch.ledger_reused", f"{dispatch['task_id']}: the worktree holds exactly "
+                           f"{restored}'s reviewed tree, so its self-review ledger is restored: resubmitting it needs "
+                           "no new self-review", audience="runtime", task_id=dispatch["task_id"],
+                           dispatch_id=dispatch["id"])
         # The repo's own install, before the agent's first prompt; a failure is surfaced, never fatal.
         setup = worktree_setup.prepare(run, wt, "task", ddir / "setup.log", created=created,
                                        task_id=dispatch["task_id"], dispatch_id=dispatch["id"])
@@ -1114,7 +1183,7 @@ _VERDICT_LINE = re.compile(r"^\W*VERDICT\s*:", re.M)
 def _external_transcript_reply(d: dict, spec: dict) -> str | None:
     """An external reviewer's final reply from its transcript, once it holds a
     VERDICT line (an earlier progress message is not the review)."""
-    reply = transcript_reply(d, {**spec, "cwd": None})
+    reply = transcript_reply(d, {**spec, "cwd": None}, prefer=_VERDICT_LINE)
     return reply if reply and _VERDICT_LINE.search(reply) else None
 
 
@@ -1965,7 +2034,7 @@ def _session_cwd(spec: dict, harness: str | None, cwd: Path) -> Path:
     return cwd
 
 
-def transcript_reply(d: dict, spec: dict) -> str | None:
+def transcript_reply(d: dict, spec: dict, prefer=None) -> str | None:
     """The pane-hosted agent's final reply from its harness session log, found
     by the brief path its prompt named and the cwd it ran in."""
     from office import transcripts
@@ -1974,7 +2043,7 @@ def transcript_reply(d: dict, spec: dict) -> str | None:
         return None
     try:
         return transcripts.final_reply(d.get("harness"), marker=marker, cwd=spec.get("cwd"),
-                                       since=d.get("launched_at") or d.get("started_at"))
+                                       since=d.get("launched_at") or d.get("started_at"), prefer=prefer)
     except Exception:  # a fallback reader must never end the watch abnormally
         return None
 
@@ -2469,8 +2538,19 @@ def _pane_snapshot(name: str, pane: str) -> str:
         except (OSError, subprocess.SubprocessError):
             continue
         if proc.returncode == 0 and (proc.stdout or "").strip():
-            return proc.stdout
+            # Only the last source is hard-wrapped at the pane width: rejoin its records.
+            return review_parse.join_wrapped(proc.stdout) if args[-1] == "recent" else proc.stdout
     return ""
+
+
+def pane_text(d: dict) -> str:
+    """A pane-hosted dispatch's text as the unwrapped scrollback, never the
+    visible screen alone: a wall or a reply that scrolled off, or that the pane
+    width broke across lines, is still whole. Empty when there is no pane or
+    herdr cannot read it."""
+    if d.get("launcher") != "herdr" or not d.get("pane_id") or not shutil.which("herdr"):
+        return ""
+    return _pane_snapshot(herdr_agent_name(d["id"]), d["pane_id"])
 
 
 def _ledger_event(run: dict, d: dict, **fields) -> None:
@@ -2572,8 +2652,15 @@ def _started(dispatch_id: str, timeout: float) -> bool:
     return False
 
 
+# How long a dispatch's supervisor may be gone before the dispatch is recorded
+# lost. The supervisor writes the end itself, so a pid that stays dead means no
+# classification will ever come.
+SUPERVISOR_GRACE_SECONDS = 15.0
+
+
 def _wait_terminal(dispatch_id: str, timeout: float | None = None) -> dict:
     deadline = time.time() + (timeout or 4 * 3600)
+    gone_since = None
     while time.time() < deadline:
         con = db.connect()
         try:
@@ -2582,11 +2669,73 @@ def _wait_terminal(dispatch_id: str, timeout: float | None = None) -> dict:
             con.close()
         if d["status"] in ("exited", "failed", "cancelled"):
             return {"exit_code": d["exit_code"], "terminal": d["terminal_classification"], "signal": d["signal"]}
-        if d.get("pid") and d.get("launcher") in ("process", "process-fallback") and not pid_alive(d["pid"]) and d["status"] == "running":
+        if d.get("pid") and d.get("launcher") in ("process", "process-fallback", "herdr") \
+                and not _supervisor_alive(d["pid"]) and d["status"] == "running":
+            gone_since = gone_since or time.time()
+            if time.time() - gone_since >= _supervisor_grace():
+                # Nothing will classify this dispatch: record what is known (#305 B4)
+                # instead of leaving it `running` with no end for the gate to describe.
+                if lost_dispatch(dispatch_id, d):
+                    continue
+                gone_since = None
             time.sleep(1)
             continue
+        gone_since = None
         time.sleep(2)
     return {"exit_code": None, "terminal": "timeout"}
+
+
+def _supervisor_grace() -> float:
+    try:
+        return float(os.environ.get("OFFICE_SUPERVISOR_GRACE", SUPERVISOR_GRACE_SECONDS))
+    except ValueError:
+        return SUPERVISOR_GRACE_SECONDS
+
+
+def _supervisor_alive(pid: int) -> bool:
+    """Is the supervisor process running? A watcher this process started and that died is a zombie
+    until reaped, and a zombie still answers signal 0: reap it first (a pid that is not our child
+    raises and is left alone)."""
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except OSError:
+        pass
+    return pid_alive(pid)
+
+
+def lost_dispatch(dispatch_id: str, d: dict) -> bool:
+    """End a dispatch whose supervisor process died without recording how it ended. The
+    classification is `supervisor_lost`; the reason names the dead pid and the tail of the supervisor's
+    own log, where its crash is. A pane agent that is still working is not lost: its reply file is
+    the result, so the wait goes on (False); a reply it already wrote ends the dispatch as a success."""
+    ddir = paths.run_dir(d["run_id"]) / "dispatches" / dispatch_id
+    began = d.get("launched_at") or d.get("started_at")
+    wall = max(time.time() - parse_iso(began).timestamp(), 0.0) if began else 0.0
+    if d.get("launcher") == "herdr":
+        from office import rerun
+        try:
+            output = json.loads((ddir / "launch.json").read_text()).get("output")
+        except (OSError, ValueError):
+            output = None
+        if output and Path(output).is_file() and Path(output).stat().st_size:
+            _finish(dispatch_id, 0, None, "success", wall, reason="its supervisor is gone, but its reply file is written")
+            return True
+        if rerun.agent_alive(d):
+            return False  # its pane agent is still working: never end what is running
+    # Office's own supervisor log, where its crash is; never the agent's output, which may hold secrets.
+    log = ddir / "supervisor.log"
+    tail = ""
+    try:
+        with log.open("rb") as fh:
+            fh.seek(max(log.stat().st_size - 400, 0))
+            tail = fh.read().decode("utf-8", errors="replace").strip().replace("\n", " | ")
+    except OSError:
+        pass
+    if tail:
+        tail = f"supervisor.log: {tail}"
+    _finish(dispatch_id, None, None, "supervisor_lost", wall,
+            reason=f"its supervisor (pid {d.get('pid')}) is gone and recorded no end" + (f"; {tail}" if tail else ""))
+    return True
 
 
 # ------------------------------------------------------------------ supervisor
@@ -2755,7 +2904,7 @@ def _mark(dispatch_id: str, pid_child: int) -> None:
     _record_identity(run_id, dispatch_id, "supervisor", os.getpid())
 
 
-def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> None:
+def _finish(dispatch_id: str, code, sig, classification: str, wall: float, *, reason: str | None = None) -> None:
     accepted = False
     con = db.connect()
     try:
@@ -2766,9 +2915,9 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> No
                         "wall_clock_seconds=? WHERE id=?", (status, code, sig, classification, now_iso(), wall, dispatch_id))
             run = state.get_run(con, d["run_id"])
             state.emit(con, run, "dispatch.ended", f"{d['task_id'] or d['role']} {d['role']} ended: {classification}"
-                       + (f" (exit {code})" if code not in (None, 0) else ""), audience="runtime",
-                       task_id=d["task_id"], dispatch_id=dispatch_id,
-                       payload={"exit_code": code, "signal": sig, "classification": classification})
+                       + (f" (exit {code})" if code not in (None, 0) else "") + (f": {reason}" if reason else ""),
+                       audience="runtime", task_id=d["task_id"], dispatch_id=dispatch_id,
+                       payload={"exit_code": code, "signal": sig, "classification": classification, "reason": reason})
             if d["kind"] in ("planner", "executor"):
                 after_worker_exit(con, run, dispatch_id)
             accepted = (d["kind"] in ("planner", "executor") and classification == "success"

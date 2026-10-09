@@ -77,10 +77,101 @@ def _clean(line: str) -> str:
     return line.replace("**", "")
 
 
+# The reply grammar's record starters. A line that begins with none of them
+# and follows a long line is the tail of a record a terminal wrapped.
+# A record the grammar reads or complains about (the shapes parse() reacts to, malformed ones included), so a
+# wrapped tail is never taken for one and a real record is never taken for a tail: `Finding the cause...` is a
+# tail, `FINDING F2 no pipes` and a bare `FINDING` are records.
+_ID_WORD = r"[A-Za-z]+-?\d+\b"
+_RECORD = re.compile(r"^(?:(?:VERDICT|EVIDENCE_STATUS)\s*[:=]|(?:FINDING|DEFECT)(?:\s+" + _ID_WORD + r"|\s*\||\s*$)|"
+                     r"(?:RESOLVED|CLEARED|RETRACT(?:ED)?)\s+\S|(?:NEXT|DECISION|WHY|AFFECTS)\s*[:=]?\s+\S)", re.I)
+_JOINABLE = re.compile(r"^(?:(?:FINDING|DEFECT)(?:\s+" + _ID_WORD + r"|\s*\|)|RETRACT(?:ED)?\s+\S|"
+                       r"(?:NEXT|DECISION|WHY|AFFECTS)\s*[:=]?\s+\S)", re.I)
+_WRAP_MIN_WIDTH = 40
+_SENTENCE_START = re.compile(r"[A-Z][a-z]")  # a capitalised word: the reviewer's next paragraph, not a tail
+
+# Lines a harness TUI draws around a conversation and that are never a review:
+# rules, the composer, key hints, token and context counters, usage footers.
+_CHROME = re.compile(
+    r"^(?:[─━═\-_=·\s]*"
+    r"|[>❯›]\s*"
+    r"|\??\s*for shortcuts"
+    r"|.*\b(?:esc to (?:interrupt|cancel)|shift\+tab|ctrl\+[a-z]|press enter|bypass permissions|auto-accept)\b.*"
+    r"|.*\bctx:\s*\d.*"
+    r"|.*\b\d+%\s*(?:left|context)\b.*"
+    r"|.*\b\d+(?:\.\d+)?\s*k?\s*tokens\b.*"
+    r"|.*\bimprove documentation in\b.*"
+    r")$", re.I)
+
+
+def footer_only(text: str) -> bool:
+    """True when every non-blank line is terminal chrome: a capture of the
+    composer and its hints, not a reply."""
+    lines = [_clean(raw) for raw in (text or "").splitlines()]
+    lines = [ln for ln in lines if ln]
+    return bool(lines) and all(_CHROME.match(ln) for ln in lines)
+
+
+def join_wrapped(text: str) -> str:
+    """Rejoin the records a terminal hard-wrapped. A pane read without the
+    unwrapped source breaks every long line at the pane width; the tail of a
+    FINDING, NEXT or DECISION record then lands on a line of its own, where the
+    grammar would drop it or read it as a malformed record. A line continues
+    the record above when it starts no record of its own and that record's line
+    reaches the wrap width (the longest line of the text). A break inside a word
+    leaves the line exactly at the width and is joined without a space; one that
+    fell on a space (kept at the line's end, or the line a little short because
+    the capture trimmed it) or a TUI's indented tail is joined with one."""
+    raw = [ln.rstrip("\r") for ln in (text or "").split("\n")]
+    filled = [ln for ln in raw if ln.strip()]
+    if sum(1 for ln in filled if ln != ln.rstrip()) * 2 > len(filled):
+        raw = [ln.rstrip() for ln in raw]  # a capture padded to the pane width: its trailing spaces mean nothing
+    width = max((len(ln) for ln in raw), default=0)
+    if width < _WRAP_MIN_WIDTH:
+        return text
+    # A wrapped text has several lines cut at the width; an unwrapped one has a single longest line, and what
+    # follows it is the reviewer's next paragraph. With one cut, only a tail that continues a sentence joins.
+    cut_lines = sum(1 for ln in raw if len(ln) >= width)
+
+    def reach(line: str) -> str | bool:
+        body = line.rstrip()
+        if line != body and len(body) >= width * 0.8:
+            return "space"  # the break fell on a space the capture kept
+        if len(line) >= width:
+            return "exact"
+        return "space" if len(body) >= width * 0.8 else False
+
+    out: list[str] = []
+    last = -1  # index in `out` of the record a continuation would extend
+    full: str | bool = False
+    for line in raw:
+        clean = _clean(line)
+        if (clean and not _RECORD.match(clean) and last >= 0 and full and not _CHROME.match(clean)
+                and (cut_lines > 1 or not _SENTENCE_START.match(clean))):
+            glue = "" if full == "exact" and not line[:1].isspace() else " "
+            out[last] = out[last].rstrip() + glue + clean
+            full = reach(line)
+            continue
+        out.append(line)
+        if clean and _JOINABLE.match(clean):
+            last, full = len(out) - 1, reach(line)
+        else:
+            last, full = -1, False
+    return "\n".join(out)
+
+
 def normalize_verdict(raw: str) -> str | None:
     v = raw.strip().upper().replace("-", "_")
     v = _ALIASES.get(v, _ALIASES.get(v.replace("_", " "), v))
     return v if v in VERDICTS else None
+
+
+def _template_verdict(value: str) -> bool:
+    """`PASS | CHANGES_REQUIRED | ...`: the brief's format line echoed back
+    (a log that carries the prompt), never a verdict."""
+    words = [w for w in re.split(r"[\s|/,]+", value.upper().replace("-", "_")) if w]
+    known = {w for w in words if w in CONVERGENCE_VERDICTS or normalize_verdict(w)}
+    return "|" in value and len(known) > 1
 
 
 def parse(text: str, *, plan_review: bool = False, visual: bool = False, contract: str | None = None) -> Parsed:
@@ -91,12 +182,19 @@ def parse(text: str, *, plan_review: bool = False, visual: bool = False, contrac
     if not text or not text.strip():
         out.errors.append("empty reply")
         return out
-    for raw in text.splitlines():
+    if footer_only(text):
+        out.errors.append("reply holds only the terminal footer, no review")
+        return out
+    for raw in join_wrapped(text).splitlines():
         line = _clean(raw)
         if not line:
             continue
         m = re.match(r"^VERDICT\s*[:=]\s*(.+)$", line, re.I)
         if m:
+            if _template_verdict(m.group(1)):
+                out.errors.append(f"VERDICT line lists several verdicts ({m.group(1)[:60]!r}): that is the format, "
+                                  "not a verdict")
+                continue
             v = normalize_verdict(m.group(1).split()[0] if m.group(1).split() else "")
             if v is None:
                 v = normalize_verdict(m.group(1))
@@ -204,12 +302,19 @@ def parse_convergence(text: str, *, visual: bool = False) -> Parsed:
     if not text or not text.strip():
         out.errors.append("empty reply")
         return out
-    for raw in text.splitlines():
+    if footer_only(text):
+        out.errors.append("reply holds only the terminal footer, no review")
+        return out
+    for raw in join_wrapped(text).splitlines():
         line = _clean(raw)
         if not line:
             continue
         m = re.match(r"^VERDICT\s*[:=]\s*(.+)$", line, re.I)
         if m:
+            if _template_verdict(m.group(1)):
+                out.errors.append(f"VERDICT line lists several verdicts ({m.group(1)[:60]!r}): that is the format, "
+                                  "not a verdict")
+                continue
             word = (m.group(1).split() or [""])[0].strip().upper().replace("-", "_")
             if word not in CONVERGENCE_VERDICTS:
                 out.errors.append(f"unknown verdict {m.group(1)!r}: use APPROVED, RECHECK or INTAKE_GAP")

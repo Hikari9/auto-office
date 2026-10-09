@@ -51,6 +51,10 @@ from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_obj, short
 
 CONVERGED = ("approved", "waived", "not_required")
+# A review that ended with no verdict because the reviewer could not finish (every
+# route failed, or the last never wrote a readable reply). The runtime status of
+# the reviewer, not a judgment: the orchestrator may review in its place.
+FALLBACK_STATUSES = (contract.UNAVAILABLE, contract.INVALID_RESULT)
 REVIEW_KINDS = ("convergence_review", "visual")
 KIND_ALIASES = {"convergence": "convergence_review", "code": "convergence_review", "code_review": "convergence_review",
                 "convergence_review": "convergence_review", "visual": "visual", "ui": "visual"}
@@ -230,6 +234,63 @@ def find_scope(con, run: dict, scope_id: str) -> dict | None:
 
 def scope_state(run: dict, scope_id: str) -> dict:
     return dict(((run.get("landing") or {}).get("convergence") or {}).get(scope_id) or {})
+
+
+def gate_name(scope_id: str, kind: str) -> str:
+    """`L-T1:visual` / `L-T1:convergence`: how a lane gate is named on the command line."""
+    return f"{scope_id}:{'visual' if kind == 'visual' else 'convergence'}"
+
+
+def parse_gate_target(spec: str) -> tuple[str, str | None] | None:
+    """`L-T1:visual` -> ("L-T1", "visual"); `L-T1` -> ("L-T1", None); None for a task id or junk."""
+    m = re.fullmatch(r"([LS]-[\w+.-]+?)(?::(\w+))?", spec.strip(), re.I)
+    if not m:
+        return None
+    kind = KIND_ALIASES.get(m.group(2).lower()) if m.group(2) else None
+    return (m.group(1), kind) if (kind or not m.group(2)) else None
+
+
+def scope_pin(run: dict, scope_id: str, kind: str) -> dict | None:
+    """The reviewer route the user pinned for this scope's gate kind, if any."""
+    return ((scope_state(run, scope_id).get("review_pins") or {}).get(kind)) or None
+
+
+def set_review_pin(con, run: dict, target: str, route: str, *, cli: str | None = None, external: bool = False) -> str:
+    """Pin the reviewer route for the next review of `target`: a task id (its code
+    review, or its lane's convergence review) or a lane or shared-scope gate id
+    (`L-T1:visual`, `L-T1:convergence`). It applies to the next review, stays
+    until changed, and leaves a live worker and a review already running alone.
+    Caller holds the tx. Returns the name of what was pinned."""
+    gates.require_orchestrator(con, run, "pin a reviewer", code="worker-cannot-pin-reviewer")
+    pin = {"as": route, "cli": cli, "external": bool(external), "by": "user"}
+    parsed = parse_gate_target(target)
+    if parsed is None:
+        task = state.get_task(con, run["id"], target.upper())
+        if task is None or task["role"] == "planner":
+            raise Usage("unknown-task", f"{target} is not a task or a lane gate (L-T1:visual, L-T1:convergence)",
+                        next_step="office status lists the tasks; office inspect convergence lists the gates")
+        state.update_task(con, run["id"], task["id"], review_override=pin)
+        # The lane's own pin outranks its tasks': the newest command must win, so it takes this one too.
+        for lane in lanes(con, run):
+            if task["id"] in lane["tasks"] and (scope_state(run, lane["id"]).get("review_pins") or {}).get("convergence_review"):
+                pins = dict(scope_state(run, lane["id"]).get("review_pins") or {})
+                pins["convergence_review"] = pin
+                _set_scope(con, run, lane["id"], review_pins=pins)
+        return task["id"]
+    scope_id, kind = parsed
+    scope = find_scope(con, run, scope_id)
+    if scope is None:
+        raise Usage("unknown-scope", f"no lane or shared scope {scope_id}", next_step="office inspect convergence")
+    if kind is None:
+        raise Usage("bad-gate", f"say which gate of {scope['id']} to pin: {scope['id']}:convergence or "
+                    f"{scope['id']}:visual")
+    st = scope_state(state.get_run(con, run["id"]), scope["id"])
+    pins = dict(st.get("review_pins") or {})
+    pins[kind] = pin
+    _set_scope(con, run, scope["id"], review_pins=pins)
+    state.emit(con, run, "review.pinned", f"{gate_name(scope['id'], kind)} reviewer pinned to {route} for its next review",
+               audience="runtime")
+    return gate_name(scope["id"], kind)
 
 
 def _set_scope(con, run: dict, scope_id: str, **fields) -> dict:
@@ -535,8 +596,9 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
             evidence=evidence)
         exclude = list(st.get("exclude_routes") or [])
         resume = _same_reviewer(con, run, scope["id"], "convergence_review", int(gate.get("cycle") or 1))
-        # A user-pinned reviewer (office dispatch --review-as) on any lane task reviews the lane.
-        pinned = next((t["review_override"] for t in tasks if t.get("review_override")), None)
+        # A user-pinned reviewer (office dispatch --review-as) on the gate, else on any lane task, reviews the lane.
+        pinned = scope_pin(run, scope["id"], "convergence_review") \
+            or next((t["review_override"] for t in tasks if t.get("review_override")), None)
         outcome = gates.run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
                                      exclude=exclude or None, resume_from=resume if not exclude else None,
                                      review_override=pinned)
@@ -656,7 +718,8 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
     exclude = list(st.get("exclude_routes") or [])
     outcome = gates.run_reviewer(con, run, gate, "visual_reviewer", brief, cwd=evdir, visual=True, images=images,
                                  include_dirs=[evdir] + sorted({i.parent for i in images}), kind="vision",
-                                 exclude=exclude or None, resume_from=resume if not exclude else None)
+                                 exclude=exclude or None, resume_from=resume if not exclude else None,
+                                 review_override=scope_pin(run, scope["id"], "visual"))
     parsed = outcome.get("parsed")
     if parsed is not None:
         outcome["evidence_status"] = parsed.evidence_status
@@ -805,7 +868,7 @@ def settle(con, run: dict, scope: dict) -> None:
     rechecks = [g for g in unmet.values() if g["verdict"] == "RECHECK"]
     if blocked and not rechecks:
         g = blocked[0]
-        exhausted = g.get("review_status") == contract.UNAVAILABLE
+        exhausted = g.get("review_status") in FALLBACK_STATUSES
         _set_scope(con, run, scope["id"], status="unavailable" if g.get("review_status") == contract.UNAVAILABLE
                    else "evidence_blocked" if g.get("review_status") == contract.EVIDENCE_BLOCKED else "attention",
                    detail=f"{g['kind']} {g.get('review_status')}: {(g.get('summary') or '')[:200]}",
@@ -970,15 +1033,12 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
             if waiting:
                 return (f"{sid} RECHECK repairs wait for you, run them in parallel: "
                         + " ; ".join(f"office rerun {t} --resume|--fresh" for t in waiting))
-        if s["status"] == "unavailable":
+        if s["status"] in ("unavailable", "attention"):
             st = scope_state(state.get_run(con, run["id"]), sid)
             if st.get("fallback_available"):
-                kind = "visual" if st.get("fallback_kind") == "visual" else "convergence"
-                inspect = " --inspected <every screenshot>, only if you can view them" if kind == "visual" else ""
-                return (f"{sid}: every specialist reviewer route failed (runtime status, not a verdict). office resume "
-                        f"retries the chain; or review it yourself as the recorded degraded fallback: "
-                        f"office review {sid}:{kind} --report <file>{inspect}; or waive with landing authority")
-            return f"{sid}: a review is unavailable ({s['detail']}); office resume retries it, or waive it"
+                return fallback_next(con, state.get_run(con, run["id"]), s, st)
+            if s["status"] == "unavailable":
+                return f"{sid}: a review is unavailable ({s['detail']}); office resume retries it"
         if s["status"] in ("evidence_blocked", "attention", "conflict", "blocked"):
             return (f"{sid} {s['status']}: {s['detail']}; fix the cause, then office resume (a waiver needs landing "
                     f"authority: office approve waive {sid}:<convergence|visual> ...)")
@@ -988,6 +1048,39 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
         return (f"{len(nb)} APPROVED finding(s) still need a fix or disposition (no re-review): office disposition "
                 f"{r['scope']}:{r['code']} fix|fixed|dismissed|follow-up -- \"<note>\"")
     return None
+
+
+def fallback_next(con, run: dict, s: dict, st: dict) -> str:
+    """The next: line for a gate whose reviewer could not finish. Exactly two
+    recorded options, never a waiver: the next fallback reviewer for this
+    composed revision, or the orchestrator's own review recorded as a
+    non-independent fallback (who, route, revision)."""
+    sid, commit = s["id"], st.get("commit") or ""
+    kind = st.get("fallback_kind") or "convergence_review"
+    alias = "visual" if kind == "visual" else "convergence"
+    target = gate_name(sid, kind)
+    scope = find_scope(con, run, sid)
+    on_scope = scope_gates(con, run, sid, commit=commit)
+    nxt = gates.next_reviewer_route(con, run, "visual_reviewer" if kind == "visual" else "code_reviewer", None,
+                                    gates.reviewer_tried(con, run["id"], [g["id"] for g in on_scope]))
+    cause = next((g.get("summary") for g in reversed(on_scope) if g["kind"] == kind and g["status"] == "done"), "") or ""
+    quota = "quota stall" in cause
+    head = (f"{sid}: no specialist reviewer returned a verdict for {alias} on {commit[:10]}"
+            f"{' (the reviewer hit a usage limit)' if quota else ''} (runtime status, not a verdict).")
+    inspect = " --inspected <every screenshot>, only if you can view them" if kind == "visual" else ""
+    return gates.fallback_options(head, target, nxt, subject=f"revision {commit[:10]}",
+                                  report_cmd=f"office review {target} --report <file>{inspect}",
+                                  produced=gates.orchestrator_produced(con, run, (scope or {}).get("tasks") or []))
+
+
+def _requeue_review(con, run: dict, scope: dict, st: dict, kind: str, g: dict) -> str:
+    """A fresh review gate for the scope's current composed revision, replacing
+    one that ended without a verdict. No round is spent. Caller holds the tx."""
+    gid, _ = _new_gate(con, run, scope, _rev(scope["id"], st["commit"]), kind, int(g["round"] or 1),
+                       int(g.get("cycle") or 1))
+    state.enqueue(con, run, "convergence_review" if kind == "convergence_review" else "lane_visual",
+                  {"gate_id": gid, "scope": scope["id"]}, dedup_key=f"{kind}:{gid}", max_attempts=2)
+    return gid
 
 
 def retry_blocked(con, run: dict) -> list[str]:
@@ -1011,14 +1104,72 @@ def retry_blocked(con, run: dict) -> list[str]:
         latest = _latest(con, run, s["id"], st["commit"])
         for kind, g in latest.items():
             if g["status"] == "done" and g.get("review_status") != contract.COMPLETED:
-                gid, _ = _new_gate(con, run, s, _rev(s["id"], st["commit"]), kind, int(g["round"] or 1),
-                                   int(g.get("cycle") or 1))
-                state.enqueue(con, run, "convergence_review" if kind == "convergence_review" else "lane_visual",
-                              {"gate_id": gid, "scope": s["id"]}, dedup_key=f"{kind}:{gid}", max_attempts=2)
+                _requeue_review(con, run, s, st, kind, g)
                 out.append(f"{s['id']}:{kind}")
         if out:
             _set_scope(con, run, s["id"], status="reviewing", detail="retrying the unavailable review")
     return out
+
+
+def rerun_review(con, run: dict, spec: str, *, pin: dict | None = None) -> tuple[list[str], list[str]]:
+    """Re-dispatch only the reviewer of a lane or shared scope for its current
+    composed revision (`office rerun L-T1:visual --review`, or a task id for its
+    lane). Only a gate that ended without a verdict re-runs: a verdict is not
+    replaced by asking again. `pin` pins the route first. No executor is launched
+    and no round is spent. Returns (what was queued, what was pinned), as
+    `<scope>:<kind>`. Caller holds the tx."""
+    run = state.get_run(con, run["id"])
+    parsed = parse_gate_target(spec)
+    if parsed is None:
+        scopes = [s for s in lanes(con, run) if spec.upper() in s["tasks"]]
+        if not scopes:
+            raise Usage("unknown-task", f"{spec} is not a task of any lane", next_step="office inspect convergence")
+        parsed = (scopes[0]["id"], None)
+    scope = find_scope(con, run, parsed[0])
+    if scope is None:
+        raise Usage("unknown-scope", f"no lane or shared scope {parsed[0]}", next_step="office inspect convergence")
+    st = scope_state(run, scope["id"])
+    if not st.get("commit"):
+        raise Refused("no-review-yet", f"{scope['id']} has no composed revision to review yet", scope=scope["id"],
+                      next_step="office status")
+    latest = _latest(con, run, scope["id"], st["commit"])
+    kinds = [parsed[1]] if parsed[1] else sorted(latest)
+    todo, why = [], []
+    for kind in kinds:
+        g = latest.get(kind)
+        name = gate_name(scope["id"], kind)
+        if g is None:
+            why.append(f"{name} has no gate on {st['commit'][:10]}")
+        elif g["status"] != "done":
+            why.append(f"{name} is {g['status']}: a reviewer is already on it")
+        elif g.get("review_status") == contract.COMPLETED:
+            why.append(f"{name} already has a verdict ({g['verdict']}); a verdict is answered with "
+                       "findings or a decision, not a second review")
+        elif g.get("review_status") not in FALLBACK_STATUSES:
+            why.append(f"{name} is {g.get('review_status')}: that is the evidence, not the reviewer; "
+                       "office resume retries the capture")
+        else:
+            todo.append((kind, g))
+    if not todo:
+        raise Refused("nothing-to-rerun", "; ".join(why) or f"{scope['id']} has no review to re-run", scope=scope["id"],
+                      next_step="office inspect convergence")
+    pinned = []
+    if pin:
+        # A route pinned without naming a gate is a code-review route: the visual reviewer must see images,
+        # so it is pinned only by its own gate id.
+        for kind, _ in todo:
+            if parsed[1] or kind != "visual":
+                pinned.append(set_review_pin(con, run, gate_name(scope["id"], kind), pin["as"], cli=pin.get("cli"),
+                                             external=pin.get("external", False)))
+    made = []
+    for kind, g in todo:
+        _requeue_review(con, run, scope, st, kind, g)
+        made.append(gate_name(scope["id"], kind))
+    _set_scope(con, run, scope["id"], status="reviewing", detail="review re-run on the same composed revision",
+               fallback_available=False)
+    state.emit(con, run, "review.rerun", f"{', '.join(made)} re-run on {st['commit'][:10]} (reviewer only; no "
+               "executor launched)", audience="runtime")
+    return made, pinned
 
 
 # ------------------------------------------------------------------ authority: waivers, decisions, fallback
@@ -1209,15 +1360,23 @@ def _decide_plan(con, run: dict, choice: str, quote: str, reason: str | None) ->
 
 
 def fallback_review(con, run: dict, spec: str, report: Path, *, inspected: list[str]) -> Result:
-    """The orchestrator reviews a convergence gate itself once every specialist
-    route failed: recorded as degraded and non-independent (#337). For visual,
-    only when it inspected every screenshot of the capture."""
-    if os.environ.get("OFFICE_DISPATCH_ID"):
-        raise Refused("worker-cannot-review", "a producer or worker may not review; the fallback is the orchestrator's")
-    m = re.fullmatch(r"([LS]-[\w+.-]+):(\w+)", spec.strip())
-    if not m or KIND_ALIASES.get(m.group(2).lower()) is None:
+    """The orchestrator reviews a convergence gate itself when its reviewer
+    could not finish (every route failed, or the last never wrote a readable
+    reply): recorded as degraded and non-independent (#337) with who reviewed,
+    on which route, for which revision. It stands in for the reviewer only as
+    that recorded fallback; it is refused for work the orchestrator produced.
+    For visual, only when it inspected every screenshot of the capture."""
+    gates.require_orchestrator(con, run, "review in a reviewer's place")
+    if spec.strip().lower() == "plan" and contract.is_convergence(run):
+        from office import plans
+        return plans.fallback_review(con, run, report)
+    task_spec = re.fullmatch(r"(T\d+)(?::code(?:_review)?)?", spec.strip(), re.I)
+    if task_spec and not contract.is_convergence(run):
+        return gates.fallback_review_task(con, run, task_spec.group(1).upper(), report)
+    parsed_spec = parse_gate_target(spec)
+    if parsed_spec is None or parsed_spec[1] is None:
         raise Usage("bad-review-target", f"cannot review {spec!r}", next_step="office review L-T1:convergence --report <file>")
-    scope_id, kind = m.group(1), KIND_ALIASES[m.group(2).lower()]
+    scope_id, kind = parsed_spec
     if not report.is_file():
         raise Usage("no-report", f"no review file at {report}")
     parsed = review_parse.parse(gates._last_block(report.read_text(encoding="utf-8", errors="replace")),
@@ -1225,6 +1384,7 @@ def fallback_review(con, run: dict, spec: str, report: Path, *, inspected: list[
     if not parsed.valid or not parsed.verdict:
         raise Refused("report-invalid", "the report is not a valid review: " + "; ".join(parsed.errors[:3] or ["no verdict"]),
                       next_step="rewrite it in the review format, then retry")
+    who = gates.actor_identity()
     with db.transaction(con):
         run = state.get_run(con, run["id"])
         scope = find_scope(con, run, scope_id)
@@ -1232,10 +1392,22 @@ def fallback_review(con, run: dict, spec: str, report: Path, *, inspected: list[
             raise Usage("unknown-scope", f"no lane or shared scope {scope_id}")
         st = scope_state(run, scope["id"])
         g = _latest(con, run, scope["id"], st.get("commit") or "").get(kind)
-        if g is None or g["status"] != "done" or g.get("review_status") != contract.UNAVAILABLE:
-            raise Refused("fallback-not-allowed", f"{scope['id']} {kind}: the degraded fallback is only for a review "
-                          "every specialist reviewer route failed to give", scope=scope["id"],
-                          next_step="office resume retries the reviewer chain")
+        # Only a reviewer that could not finish is stood in for: every route
+        # failed (UNAVAILABLE) or the last never produced a parseable reply
+        # (INVALID_RESULT). A verdict, a running review and a capture problem are not.
+        if g is None or g["status"] != "done" or g.get("review_status") not in FALLBACK_STATUSES:
+            raise Refused("fallback-not-allowed", f"{scope['id']} {kind}: the orchestrator's review stands in only for a "
+                          "reviewer that could not finish (silent, or stopped on a usage limit); "
+                          f"{'a reviewer is still on it' if g and g['status'] != 'done' else 'this gate has a verdict or an evidence problem'}",
+                          scope=scope["id"],
+                          next_step=f"office rerun {gate_name(scope['id'], kind)} --review "
+                                    "--review-as <route> re-dispatches the reviewer" if g else "office status")
+        produced = gates.orchestrator_produced(con, run, scope["tasks"])
+        if produced:
+            raise Refused("orchestrator-produced-work", f"{scope['id']} {kind}: the orchestrator may not review work it "
+                          f"produced: {produced}", scope=scope["id"],
+                          next_step=f"another reviewer: office rerun {gate_name(scope['id'], kind)} --review "
+                                    "--review-as <route>")
         if kind == "visual":
             row = con.execute("SELECT path FROM evidence WHERE gate_id=? AND kind='capture_receipt' ORDER BY created_at "
                               "DESC LIMIT 1", (g["id"],)).fetchone()
@@ -1244,26 +1416,33 @@ def fallback_review(con, run: dict, spec: str, report: Path, *, inspected: list[
             seen = {Path(p).name for p in inspected}
             if not needed or not needed <= seen:
                 state.emit(con, run, "convergence.unavailable", f"{scope['id']} visual stays blocked: the fallback "
-                           "could not inspect the required screenshots; a capable reviewer or a waiver is needed")
+                           "could not inspect the required screenshots; a capable reviewer is needed")
                 raise Refused("cannot-inspect-evidence", f"{scope['id']} visual: the fallback reviewer must inspect every "
                               f"screenshot ({', '.join(sorted(needed - seen)) or 'none were captured'} not inspected); "
                               "no visual verdict is recorded", scope=scope["id"],
-                              next_step="a capable reviewer (office resume retries the chain) or a waiver with landing authority")
-        gid, _ = _new_gate(con, run, scope, _rev(scope["id"], st["commit"]), kind, int(g["round"] or 1),
+                              next_step=f"a capable reviewer: office rerun {scope['id']}:visual --review --review-as <route>")
+        commit = st.get("commit") or ""
+        gid, _ = _new_gate(con, run, scope, _rev(scope["id"], commit), kind, int(g["round"] or 1),
                            int(g.get("cycle") or 1))
+        route = f"orchestrator ({who}) (degraded fallback)"
         state.record_evidence(con, run["id"], "review_output", report, revision_id=g["revision_id"], gate_id=gid,
-                              meta={"route": "orchestrator", "independence": contract.DEGRADED, "replaces_gate": g["id"]})
+                              meta={"route": "orchestrator", "who": who, "revision": g["revision_id"], "commit": commit,
+                                    "independence": contract.DEGRADED, "replaces_gate": g["id"]})
         ingest(con, run, gid, {"status": contract.COMPLETED, "verdict": parsed.verdict, "parsed": parsed,
-                               "route": "orchestrator (degraded fallback)", "evidence_status": parsed.evidence_status,
-                               "summary": f"{parsed.verdict} by the orchestrator: degraded, non-independent fallback "
-                                          "after every specialist route failed"},
+                               "route": route, "evidence_status": parsed.evidence_status,
+                               "summary": f"{parsed.verdict} by the orchestrator ({who}) on route orchestrator for "
+                                          f"revision {commit[:10]}: degraded, non-independent fallback after the "
+                                          f"reviewer could not finish ({g.get('review_status')})"},
                independence=contract.DEGRADED)
-        state.emit(con, run, "review.degraded_fallback", f"{scope['id']} {kind} reviewed by the orchestrator as the "
-                   f"degraded, non-independent fallback: {parsed.verdict}")
+        state.emit(con, run, "review.degraded_fallback", f"{scope['id']} {kind} reviewed by the orchestrator ({who}, route "
+                   f"orchestrator, revision {commit[:10]}) as the degraded, non-independent fallback: {parsed.verdict}",
+                   payload={"who": who, "route": "orchestrator", "revision": g["revision_id"], "commit": commit,
+                            "replaces_gate": g["id"], "verdict": parsed.verdict})
     from office import jobs
     jobs.kick(con, run["id"])
     return Result(lines=[f"{scope['id']} {kind} {parsed.verdict} recorded as a degraded, non-independent orchestrator "
-                         "review (shown on the landing receipt)"], next="exceptions only; office status")
+                         f"review by {who} for revision {commit[:10]} (shown on the landing receipt)"],
+                  next="exceptions only; office status")
 
 
 def disposition(con, run: dict, spec: str, how: str, note: str) -> Result:
@@ -1318,7 +1497,8 @@ def receipt(con, run: dict) -> dict:
     for s in summary(con, run):
         reviews = [{"gate": g["id"], "kind": g["kind"], "round": g["round"], "cycle": g.get("cycle"),
                     "verdict": g["verdict"], "status": g.get("review_status"), "evidence": g.get("evidence_status"),
-                    "independence": g.get("independence"), "route": g.get("route"), "commit": g["input_key"].split(":")[-1]}
+                    "independence": g.get("independence"), "route": g.get("route"), "commit": g["input_key"].split(":")[-1],
+                    "recorded_as": g.get("summary") if g.get("independence") == contract.DEGRADED else None}
                    for g in scope_gates(con, run, s["id"]) if g["status"] == "done"]
         scopes.append({**{k: s[k] for k in ("id", "tasks", "shared", "why", "status", "commit")}, "reviews": reviews})
     waivers = []
@@ -1342,6 +1522,10 @@ def inspect_lines(con, run: dict, scope_id: str | None = None) -> list[str]:
             continue
         lines.append(f"{s['id']} [{s['status']}] tasks {', '.join(s['tasks'])} round {s['round']} cycle {s['cycle']}"
                      + (f" | shared: {s['why']}" if s["shared"] else "") + (f" | {s['detail']}" if s.get("detail") else ""))
+        st = scope_state(run, s["id"])
+        for kind, pin in sorted((st.get("review_pins") or {}).items()):
+            lines.append(f"  {gate_name(s['id'], kind)} reviewer pinned by user: {pin['as']}"
+                         + (" (external)" if pin.get("external") else ""))
         for g in scope_gates(con, run, s["id"]):
             if g["status"] == "cancelled":
                 continue
