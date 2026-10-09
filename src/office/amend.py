@@ -7,6 +7,8 @@ A newer amendment supersedes an older unapplied one.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import re
 import uuid
@@ -39,8 +41,10 @@ AUTHORITY_TERMS = re.compile(
 def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, requirements: bool = False,
           quote: str | None = None, cwd: Path | None = None, redirect: dict | None = None,
           drop_criteria: list[str] | None = None, add_criteria: list[str] | None = None,
-          no_review: bool = False, reason: str | None = None) -> Result:
-    """`redirect` ({defect, root_cause, requirement, reviewer}) marks a contract
+          no_review: bool = False, reason: str | None = None, edits: dict | None = None) -> Result:
+    """`edits` ({add_accept, drop_accept, add_checks, drop_checks, set_fields}) change the named tasks' structured
+    contract in the plan itself (`planfile.edit_task`), so the amendment is enforced, not only delivered as prose.
+    `redirect` ({defect, root_cause, requirement, reviewer}) marks a contract
     amendment as the user's redirect of a plan defect (see office.redirect).
     `drop_criteria`/`add_criteria` edit the frozen done criteria (requirements only). A requirements
     amendment that only adds criteria is not delivered to live tasks; naming tasks as the scope
@@ -74,15 +78,83 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
                           "or requirements revision follows the plan-review cycle (reviewed while it is open, never "
                           "after it closes)", scope=scope, preserved="plan unchanged",
                           next_step="rerun without --no-review (office amend --help)")
+    if (requirements or scope == "requirements") and any((edits or {}).values()):
+        raise Usage("edits-are-not-requirements", "structured contract edits are not a requirements change; "
+                    "amend the task contract and the requirements separately", next_step=EDIT_FORM)
     if requirements or scope == "requirements":
         to = [] if scope == "requirements" else _scope_ids(con, run, scope)
         return _requirements_change(con, run, delta, quote, drop_criteria or [], add_criteria or [], to)
-    scope_ids = _scope_ids(con, run, scope)
     plan_path = _orchestrator_plan_path(con, run, cwd)
+    with _draft_lock(plan_path if any((edits or {}).values()) else None):
+        return _amend_plan(con, run, scope, delta, contract, redirect, plan_path, no_review, reason, edits)
+
+
+@contextlib.contextmanager
+def _draft_lock(plan_path: Path | None):
+    """Serialize amendments that rewrite the plan draft, so a second one reads the first one's edit
+    instead of overwriting it with a stale copy."""
+    if plan_path is None:
+        yield
+        return
+    with open(plan_path.parent / ".amend.lock", "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _amend_plan(con, run, scope, delta, contract, redirect, plan_path, no_review, reason, edits) -> Result:
+    scope_ids = _scope_ids(con, run, scope)
     plan_text = planfile.strip_generated(plan_path.read_text(encoding="utf-8")) if plan_path else None
-    if contract:
-        return _contract(con, run, scope, scope_ids, delta, plan_text, redirect, plan_path)
-    return _ordinary(con, run, scope, scope_ids, delta, plan_text, plan_path, veto_reason=reason.strip() if no_review else None)
+    edits = {k: v for k, v in (edits or {}).items() if v}
+    original = plan_path.read_text(encoding="utf-8") if plan_path and edits else None
+    if edits:
+        if not scope_ids:
+            raise Usage("edit-needs-task", "structured contract edits name the task they change", next_step=EDIT_FORM)
+        if contract and run.get("planner_mode") != "inline":
+            # The planner owns the plan text: it receives the requested edits and submits the revised contract.
+            delta = f"{delta.strip()}\nrequested contract edits: {_edits_summary(scope_ids, edits)}"
+            edits = {}
+        else:
+            current = state.current_plan(con, run["id"])
+            if current is None:
+                raise Refused("no-plan", "there is no plan to amend", next_step="office submit the plan first")
+            plan_text = _apply_edits(plan_text if plan_text is not None else current["body"], scope_ids, edits)
+            if plan_path:
+                plan_path.write_text(plan_text, encoding="utf-8")
+    try:
+        if contract:
+            return _contract(con, run, scope, scope_ids, delta, plan_text, redirect, plan_path)
+        return _ordinary(con, run, scope, scope_ids, delta, plan_text, plan_path, veto_reason=reason.strip() if no_review else None)
+    except BaseException:
+        if original is not None:
+            plan_path.write_text(original, encoding="utf-8")  # a refused amendment leaves the draft as it was
+        raise
+
+
+EDIT_FORM = ('office amend <task> [--add-accept "<criterion>"] [--add-check "<command>"] [--drop-check "<command>"] '
+             '[--set depends|scope|interfaces=<value>] -- "<why>"')
+
+
+def edits_delta(scope: str, edits: dict) -> str:
+    """The delta for an amendment that is only structured edits (the rationale is then the edit itself)."""
+    return "contract edit " + _edits_summary([scope], {k: v for k, v in edits.items() if v})
+
+
+def _edits_summary(scope_ids: list[str], edits: dict) -> str:
+    parts = [f"{k.replace('_', ' ')} {v}" if k != "set_fields" else "; ".join(f"set {a}={b}" for a, b in v.items())
+             for k, v in edits.items()]
+    return f"{','.join(scope_ids)}: " + "; ".join(parts)
+
+
+def _apply_edits(text: str, scope_ids: list[str], edits: dict) -> str:
+    try:
+        for tid in scope_ids:
+            text = planfile.edit_task(text, tid, **edits)
+    except ValueError as exc:
+        raise Usage("bad-contract-edit", str(exc), next_step=EDIT_FORM) from exc
+    return text
 
 
 def _scope_ids(con, run: dict, scope: str) -> list[str]:
@@ -202,7 +274,9 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
                     "content_hash, parent_version, amendment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (run["id"], version, "ordinary", new_text, dumps(parsed.tasks), dumps(parsed.requirements),
                      "orchestrator", now_iso(), sha256_bytes(new_text.encode()), run["plan_version"], amendment_id))
+        before = _snapshot(con, run)
         sync = plans.sync_tasks(con, run, parsed.tasks, version, rerun_checks=True)
+        _audit(con, run, amendment_id, before, version, delta)
         # A checks-only change to an accepted task reruns its checks instead of reopening it.
         rerun = sync["checks_only"]
         # Added tasks are the only affected ones when the plan merely grows: a running task's contract is untouched.
@@ -309,13 +383,22 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
                     "content_hash, parent_version, amendment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (run["id"], version, "contract", text, dumps(parsed.tasks), dumps(parsed.requirements), author,
                      now_iso(), sha256_bytes(text.encode()), run["plan_version"], amendment_id))
+        before = _snapshot(con, run)
+        prior_graph = {t["id"]: t["depends"] for t in state.tasks(con, run["id"])}
         sync = plans.sync_tasks(con, run, parsed.tasks, version)
+        _audit(con, run, amendment_id, before, version, delta)
+        _sync_leases(con, run, sync["contract"])
         state.update_run(con, run["id"], plan_version=version)
         run = state.get_run(con, run["id"])
         plans.apply_run_checks(con, run, parsed.run_checks)
         run = state.get_run(con, run["id"])
-        affected = sorted(set(scope_ids) | set(sync["contract"]) | set(sync["acceptance"]))
+        affected = set(scope_ids) | set(sync["contract"]) | set(sync["acceptance"])
+        ripple = _ripple(con, run, prior_graph, sync)
+        affected -= set(ripple)
+        affected = sorted(affected)
         _deliver(con, run, amendment_id, affected, delta.strip(), version)
+        _deliver(con, run, amendment_id, ripple, f"{delta.strip()} (a task you build on changed its contract)", version,
+                 hold=ripple)
         flagged = _envelope_changes(con, run, parsed)
         from office import contract
         if contract.is_convergence(run):
@@ -373,10 +456,26 @@ def _require_contract_edit(con, run: dict, scope_ids: list[str], delta: str, tex
                       f'office amend {",".join(changed)} --contract -- "<summary>"')
 
 
-def contract_from_planner(con, run: dict, amendment_id: str | None, changes: dict, version: int) -> None:
+def _ripple(con, run: dict, prior_graph: dict, sync: dict) -> list[str]:
+    """The tasks built on one whose scope or interface just changed: dependants in the old plan or the new one
+    (an edit that drops the edge still changed what the dependant built on), minus the changed tasks. Caller holds tx."""
+    graph = {t["id"]: t["depends"] for t in state.tasks(con, run["id"])}
+    out: set[str] = set()
+    for tid in sync["contract"]:
+        out |= planfile.dependants(graph, tid) | planfile.dependants(prior_graph, tid)
+    return sorted(out - set(sync["contract"]) - set(sync["acceptance"]) - set(sync["cancelled"]))
+
+
+def contract_from_planner(con, run: dict, amendment_id: str | None, changes: dict, version: int,
+                          prior_graph: dict | None = None) -> None:
     """Deliver a planner-submitted contract revision. Caller holds tx."""
+    aid = amendment_id or "P" + str(version)
     affected = sorted(set(changes.get("contract", [])) | set(changes.get("acceptance", [])))
-    _deliver(con, run, amendment_id or "P" + str(version), affected, f"plan p{version} contract revision", version)
+    _deliver(con, run, aid, affected, f"plan p{version} contract revision", version)
+    ripple = _ripple(con, run, prior_graph or {}, changes)
+    _deliver(con, run, aid, ripple, f"plan p{version} contract revision (a task you build on changed its contract)",
+             version, hold=ripple)
+    _sync_leases(con, run, changes.get("contract", []))
     for t in state.tasks(con, run["id"]):
         if t["status"] == "paused" and (t.get("pause_reason") or "").startswith("contract amendment"):
             from office import gates
@@ -426,6 +525,47 @@ def _diff(con, run, planned: list[dict]) -> dict:
     return out
 
 
+def _snapshot(con, run: dict) -> dict:
+    """Each live task's contract as recorded now (what a plan version versions)."""
+    return {t["id"]: {"scope": t["scope"], "depends": t["depends"], "interfaces": t["interfaces"] or [],
+                      "accept": t["accept"], "checks": t["checks"]}
+            for t in state.tasks(con, run["id"]) if t["status"] != "cancelled"}
+
+
+def _audit(con, run: dict, amendment_id: str, before: dict, version: int, delta: str) -> dict:
+    """Record what an amendment did to the structured task contracts: the old contract, the effective one, and the
+    rationale (its delta), on the amendment row and as an event `office inspect amendments` shows. A note that
+    changes no contract records nothing extra. Caller holds the tx."""
+    after = _snapshot(con, run)
+    changed = {tid: {"before": before.get(tid), "after": after.get(tid)}
+               for tid in sorted(set(before) | set(after)) if before.get(tid) != after.get(tid)}
+    if changed:
+        record = {"plan_version": version, "rationale": delta.strip(), "changed": changed}
+        con.execute("UPDATE amendments SET structured_json=? WHERE id=?", (dumps(record), f"{run['id'][:8]}:{amendment_id}"))
+        state.emit(con, run, "amendment.contract_changed",
+                   f"{amendment_id} changed the contract of {', '.join(changed)} (plan p{version})", audience="runtime",
+                   payload={"amendment": amendment_id, **record})
+    return changed
+
+
+def _sync_leases(con, run: dict, task_ids: list[str]) -> None:
+    """A changed scope is the scope the task's live lease holds, so it must not overlap another live task's."""
+    for tid in task_ids:
+        task = state.get_task(con, run["id"], tid)
+        lease = con.execute("SELECT id FROM leases WHERE run_id=? AND task_id=? AND released_at IS NULL AND revoked_at IS NULL",
+                            (run["id"], tid)).fetchone()
+        if task is None or lease is None:
+            continue
+        for row in con.execute("SELECT task_id FROM leases WHERE run_id=? AND task_id IS NOT ? AND released_at IS NULL "
+                               "AND revoked_at IS NULL", (run["id"], tid)).fetchall():
+            other = state.get_task(con, run["id"], row["task_id"])
+            if other and planfile.scopes_overlap(task["scope"], other["scope"]):
+                raise Refused("scope-held", f"{tid}'s new scope overlaps {other['id']}, which holds a live lease",
+                              scope=tid, preserved="plan unchanged",
+                              next_step=f"wait for {other['id']} to be accepted, or order {tid} after it with depends")
+        con.execute("UPDATE leases SET scope=? WHERE id=?", (dumps(task["scope"]), lease["id"]))
+
+
 def _record(con, run, klass, scope_ids, delta, from_v, to_v) -> str:
     seq = con.execute("SELECT COUNT(*) FROM amendments WHERE run_id=?", (run["id"],)).fetchone()[0] + 1
     amendment_id = f"A{seq}"
@@ -436,9 +576,12 @@ def _record(con, run, klass, scope_ids, delta, from_v, to_v) -> str:
     return amendment_id
 
 
-def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, target_version: int) -> list[str]:
+def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, target_version: int,
+             hold: list[str] = ()) -> list[str]:
     """Queue one combined delta per affected dispatched task and supersede older
-    unapplied ones. Caller holds tx."""
+    unapplied ones. A task in `hold` is built on a task being redone: it gets the delta and is reopened, but no
+    executor is relaunched until the orchestrator reruns it (office rerun), after the dependency is accepted again.
+    Caller holds tx."""
     from office import dispatch, gates
     targets = []
     for tid in task_ids:
@@ -473,6 +616,13 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
         elif task["status"] in ("planned",):
             # Nothing has run: the first session starts from the current contract.
             con.execute("UPDATE deliveries SET status='superseded', superseded_by='relaunch' WHERE id=?", (did,))
+        elif tid in hold:
+            if task["status"] != "accepted":
+                state.update_task(con, run["id"], tid, status="changes_required",
+                                  pause_reason=f"waiting for the amended task(s) it depends on ({amendment_id})")
+            else:
+                state.update_task(con, run["id"], tid, pause_reason=f"amended by {amendment_id}; rerun after its "
+                                  "dependency is accepted again")
         else:
             # The worker is gone. The relaunched session starts from the current contract, but an ordinary
             # delta is not in the contract and a reopened task has no findings: hand the delivery to the new
