@@ -87,6 +87,16 @@ def round_cap(run: dict | None) -> int:
     return int(pinned) if pinned else MAX_ROUNDS
 
 
+INTEGRATED_REVIEW = "v1"
+
+
+def has_integrated_review(run: dict | None) -> bool:
+    """Only convergence-v1 runs started with the #422 triggers pinned get the
+    acceptance/risk triggers and the covered-result skip; older runs keep the
+    pre-#422 shared-scope behaviour."""
+    return is_convergence(run) and ((run or {}).get("gates") or {}).get("integrated_review") == INTEGRATED_REVIEW
+
+
 def has_cap_waiver(run: dict | None) -> bool:
     """Only runs that pinned a cap at start (#423) get the orchestrator's
     cap waiver; older convergence-v1 runs keep the user-only `office decide`."""

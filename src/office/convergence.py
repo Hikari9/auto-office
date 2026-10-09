@@ -169,12 +169,13 @@ def shared_scopes(con, run: dict, lane_list: list[dict] | None = None) -> list[d
     for p, members in shared_paths.items():
         members = sorted(members)
         edges += [(members[0], m, f"shared registry {p}", "shared_path") for m in members[1:]]
-    for tid, t in ((tid, planned.get(tid) or {}) for tid in by_task):
+    pinned = contract.has_integrated_review(run)
+    for tid, t in ((tid, planned.get(tid) or {}) for tid in by_task if pinned):
         for need in t.get("accept_needs") or []:
             if need in by_task and by_task[need] != by_task[tid]:
                 edges.append((by_task[need], by_task[tid], f"{tid} acceptance depends on {need}'s result "
                               f"(lane {by_task[need]})", "acceptance"))
-    marker = integration_risk(run, planned, by_task)
+    marker = integration_risk(run, planned, by_task) if pinned else None
     if marker and len(ids) > 1:
         edges += [(ids[0], m, f"high integration risk: {marker}", "risk") for m in ids[1:]]
     accepted = {tid: t for tid, t in tasks.items() if t["status"] == "accepted"}
@@ -221,11 +222,14 @@ def shared_scopes(con, run: dict, lane_list: list[dict] | None = None) -> list[d
 
 
 def integration_risk(run: dict, planned: dict, by_task: dict | None = None) -> str | None:
-    """The explicit high-integration-risk marker, or None (#422): the run's recorded
-    high risk (blast radius, size or irreversibility), else a task the plan declares
-    `integration_risk: high`. Absence of a marker is never risk."""
-    if (run.get("risk") or {}).get("high"):
-        return "the run is recorded as high risk"
+    """The explicit high-integration-risk signal, or None (#422): the run's production
+    blast radius or irreversibility, else a task the plan declares `integration_risk:
+    high`. Size class is not integration risk. Absence of a marker is never risk."""
+    risk = run.get("risk") or {}
+    if risk.get("irreversible"):
+        return "run risk signal: irreversible"
+    if risk.get("blast_radius") in ("production", "production-data"):
+        return f"run risk signal: blast radius {risk['blast_radius']}"
     marked = sorted((tid for tid, t in planned.items() if str(t.get("integration_risk") or "").lower() == "high"
                      and (by_task is None or tid in by_task)), key=_tid_key)
     return f"the plan declares it on {', '.join(marked)}" if marked else None
@@ -416,6 +420,8 @@ def integrated_review(con, run: dict) -> dict:
 def _record_integrated(con, run: dict) -> None:
     """Make the decision durable and visible in status once per change. Caller holds the tx."""
     run = state.get_run(con, run["id"])
+    if not contract.has_integrated_review(run):
+        return
     decision = integrated_review(con, run)
     brief = {"required": decision["required"], "reason": decision["reason"],
              "scopes": [{k: o[k] for k in ("scope", "tasks", "triggers")} for o in decision["scopes"]]}
@@ -508,7 +514,7 @@ def job_converge(con, run: dict, job: dict) -> dict:
                        f"{composed['detail']}")
             return composed
         st = scope_state(run, scope["id"])
-        if scope.get("shared") and review_required(run):
+        if scope.get("shared") and review_required(run) and contract.has_integrated_review(run):
             covering = _covered_by(con, run, scope, composed)
             if covering:
                 _set_scope(con, run, scope["id"], commit=composed["commit"], tree=composed["tree"],

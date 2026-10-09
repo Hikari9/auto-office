@@ -98,7 +98,7 @@ def test_high_run_risk_marker_is_read(env):
     env.office("dispatch", "T1", "T2", "--parallel", check=0)
     assert _run_row(env)["risk_json"] and '"high": true' in _run_row(env)["risk_json"], _run_row(env)["risk_json"]
     assert "S-T1+T2" in _scopes(env)
-    assert "high risk" in _receipt(env)["reason"]
+    assert "blast radius production" in _receipt(env)["reason"]
 
 
 def test_high_risk_single_lane_is_covered_by_the_lane_review(env):
@@ -144,3 +144,50 @@ def test_covered_shared_scope_converges_without_a_second_review(env, monkeypatch
     assert st["status"] == "not_required" and st["covered_by"] == "L-X" and "already covered" in st["basis"]
     assert _events(env, "convergence.covered")
     assert _run_row(env)["landing"]["integration"]["status"] == "accepted"
+
+
+def test_xl_size_alone_is_not_integration_risk(env):
+    _start(env, plan=PLAN_TWO, extra=("--size-class", "XL"),
+           executor=[{"write_by_task": WORK, "submit": True}], convergence_reviewer=[{"reply": APPROVED}])
+    env.office("dispatch", "T1", "T2", "--parallel", check=0)
+    assert '"high": true' in _run_row(env)["risk_json"]
+    assert _scopes(env) == ["L-T1", "L-T2"]
+    assert _decision(env)["required"] is False
+
+
+def _unpin(env):
+    con = env.con()
+    try:
+        row = con.execute("SELECT id, gates_json FROM runs").fetchone()
+        import json
+        g = json.loads(row["gates_json"])
+        g.pop("integrated_review", None)
+        con.execute("UPDATE runs SET gates_json=? WHERE id=?", (json.dumps(g), row["id"]))
+        con.commit()
+    finally:
+        con.close()
+
+
+def test_new_run_pins_integrated_review(env):
+    _start(env, plan=PLAN_TWO, executor=[{"write_by_task": WORK, "submit": True}],
+           convergence_reviewer=[{"reply": APPROVED}])
+    assert _run_row(env)["gates"]["integrated_review"] == "v1"
+
+
+def test_unpinned_convergence_run_keeps_pre_422_scopes(env):
+    plan = PLAN_TWO.replace("scope: mul.py\n", "scope: mul.py\nintegration_risk: high\n").replace(
+        "depends: none\nchecks: python3 -c \"import mul", "depends: none\naccept_needs: T1\nchecks: python3 -c \"import mul")
+    _start(env, plan=plan, extra=("--blast-radius", "production"), approve=False,
+           executor=[{"write_by_task": WORK, "submit": True}], convergence_reviewer=[{"reply": APPROVED}])
+    _unpin(env)
+    env.office("approve", "plan", "--quote", "approved", check=0)
+    env.office("dispatch", "T1", "T2", "--parallel", check=0)
+    assert _scopes(env) == ["L-T1", "L-T2"]
+    assert "integrated_review" not in _run_row(env)["landing"]
+
+
+def test_v31_pinned_run_untouched(env):
+    from office import contract
+    assert not contract.has_integrated_review({"gates": {"review_contract": "v3.1", "integrated_review": "v1"}})
+    assert not contract.has_integrated_review({"gates": {"review_contract": contract.CONVERGENCE}})
+    assert contract.has_integrated_review({"gates": {"review_contract": contract.CONVERGENCE, "integrated_review": "v1"}})
