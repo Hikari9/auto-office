@@ -180,6 +180,13 @@ def test_parse_agy_question_header_widget():
     assert questions.parse(AGY_WIDGET + "\n⏺ moving on\n> \n", status="idle", busy=False) is None
 
 
+def test_question_header_is_not_a_widget_while_the_agent_is_idle():
+    # Ordinary output such as "Question 2/5 done" plus a numbered list is not a pending widget.
+    assert questions.parse(AGY_WIDGET, status="idle", busy=False) is None
+    assert questions.parse(AGY_WIDGET, status=None, busy=None) is None
+    assert questions.parse(AGY_WIDGET, status=None, busy=True)["kind"] == "select"
+
+
 @pytest.mark.approved
 def test_wait_records_a_dialog_question_for_blocked_with_no_recognised_widget(env, monkeypatch):
     _, run, d, con = _herdr_worker(env, monkeypatch, reads=["Allow this tool call? [y/n]"], agent="blocked")
@@ -200,7 +207,10 @@ def test_status_flags_a_blocked_pane_with_no_recorded_question(env, monkeypatch)
         return [{"name": "office-other", "pane_id": "w9:p9", "agent_status": "idle"},
                 {"name": "x", "pane_id": "w1:p7", "agent_status": "blocked"}]
     monkeypatch.setattr(questions, "_herdr_agents", fake_list)
-    lines = guide.status(con, run).lines
+    # the hook path (session start) and plain status() never call herdr
+    guide.status(con, run)
+    assert not calls
+    lines = guide.status(con, run, probe_panes=True).lines
     assert len(calls) == 1
     assert any("blocked in pane" in ln and "no question recorded" in ln and "office wait" in ln for ln in lines)
     # status records nothing
@@ -208,7 +218,7 @@ def test_status_flags_a_blocked_pane_with_no_recorded_question(env, monkeypatch)
     # once a question is recorded the flag gives way to the question line
     questions.scan(con, run)
     calls.clear()
-    lines = guide.status(con, run).lines
+    lines = guide.status(con, run, probe_panes=True).lines
     assert not calls and not any("no question recorded" in ln for ln in lines)
     assert any(ln.startswith("question:") for ln in lines)
 
@@ -217,4 +227,4 @@ def test_status_flags_a_blocked_pane_with_no_recorded_question(env, monkeypatch)
 def test_status_survives_herdr_list_failing(env, monkeypatch):
     _, run, d, con = _herdr_worker(env, monkeypatch, reads=[WIDGET], agent="blocked")
     monkeypatch.setattr(questions, "_herdr_agents", lambda: None)
-    assert not any("no question recorded" in ln for ln in guide.status(con, run).lines)
+    assert not any("no question recorded" in ln for ln in guide.status(con, run, probe_panes=True).lines)

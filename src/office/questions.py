@@ -97,9 +97,9 @@ def _select_header(lines: list[str]) -> dict | None:
             "options": options}
 
 
-def _select(lines: list[str]) -> dict | None:
+def _select(lines: list[str], *, header: bool = True) -> dict | None:
     q = _select_footer(lines)
-    return q if q is not None else _select_header(lines)
+    return q if q is not None or not header else _select_header(lines)
 
 
 def _select_footer(lines: list[str]) -> dict | None:
@@ -166,7 +166,9 @@ def parse(text: str | None, *, status: str | None = None, busy: bool | None = No
     (`blocked` means herdr itself recognized an approval or question UI); `busy` is whether
     the turn is still running. A plain-text question counts only once the turn has ended."""
     lines = _clean(text or "")[-TAIL_LINES:]
-    q = _select(lines)
+    # A "Question n/m" header with numbered lines is common in ordinary output; it counts as a
+    # widget only while the agent is not idle (herdr `blocked`/`working`, or a running turn).
+    q = _select(lines, header=busy is True or status not in (None, "idle", "done"))
     if q is None and status == "blocked":
         q = {"kind": "dialog", "question": "an approval or question dialog Office could not parse", "options": []}
     if q is None and busy is False and status in (None, "idle", "done"):
