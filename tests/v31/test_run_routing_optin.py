@@ -84,3 +84,24 @@ def test_apply_routing_without_a_run_is_refused(env):
     _approve(env, plan=PLAN_ONE)
     code, out = env.office("config", "--apply-routing", "--quote", "x", env=EXTERNAL)
     assert code == 2 and "--apply-routing needs --run" in out, out
+
+
+def test_apply_routing_takes_only_run_and_quote(env):
+    _approve(env, plan=PLAN_ONE)
+    rid = _run(env)["id"]
+    code, out = env.office("config", "roles.executor.preferred_seed", SEED, "--apply-routing", "--run", rid[:8],
+                           "--quote", "x", env=EXTERNAL)
+    assert code == 2 and "takes only --run and --quote" in out, out
+    assert env.con().execute("SELECT COUNT(*) FROM events WHERE kind='run.routing_applied'").fetchone()[0] == 0
+
+
+def test_apply_routing_refuses_a_run_with_no_repo_on_record(env):
+    _approve(env, plan=PLAN_ONE)
+    con = env.con()
+    con.execute("UPDATE runs SET repo_root='/nonexistent/office-repo'")
+    con.commit()
+    rid = _run(env)["id"]
+    before = _seed(_run(env))
+    code, out = env.office("config", "--run", rid[:8], "--apply-routing", "--quote", "x", env=EXTERNAL)
+    assert code != 0 and "its repo config cannot be read" in out, out
+    assert _seed(_run(env)) == before

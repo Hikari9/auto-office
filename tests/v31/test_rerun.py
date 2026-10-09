@@ -464,7 +464,8 @@ def test_resume_as_the_same_model_resumes_and_a_model_switch_is_refused(env):
     assert code == 0 and "resuming" in out, out
     did, _ = _latest(env)
     payload = json.loads(con.execute("SELECT payload_json FROM outbox WHERE dedup_key=?", (f"launch:{did}",)).fetchone()[0])
-    assert "S1" in payload["resume"]["argv"], payload["resume"]["argv"]
+    argv = payload["resume"]["argv"]
+    assert "S1" in argv and "claude-opus-5-5" in argv, argv
     con.execute("UPDATE dispatches SET status='ended', ended_at='2026-10-09T00:00:01+00:00' WHERE id=?", (did,))
     con.execute("UPDATE tasks SET status='changes_required' WHERE id='T1'")
     con.commit()
@@ -527,3 +528,31 @@ def test_a_contract_amendment_relaunches_on_a_route_declared_since_the_last_roun
     code, out = _contract_amendment(env)
     assert code == 0, out
     assert _latest_triple(env) == "claude@1/claude-opus-5-5@high", "the declared route wins over the ended session's"
+
+
+def test_an_empty_as_is_refused_not_ignored(env):
+    _planned_executor_ended(env)
+    code, out = env.office("rerun", "T1", "--fresh", "--as", "", env=_quota(env))
+    assert code == 2 and "<harness>/<model>" in out, out
+    code, out = env.office("rerun", "T1", "--fresh", "--review-as", "codex", env=_quota(env))
+    assert code == 2 and "<harness>/<model>" in out, out
+
+
+def test_cli_is_recorded_on_the_launch_of_the_named_route(env):
+    _planned_executor_ended(env)
+    code, out = env.office("rerun", "T1", "--fresh", "--as", FB1, "--cli", "agent --x", env=_quota(env))
+    assert code == 0, out
+    did, _ = _latest(env)
+    payload = json.loads(env.con().execute("SELECT payload_json FROM outbox WHERE dedup_key=?", (f"launch:{did}",)).fetchone()[0])
+    assert payload["cli"] == "agent --x", payload
+
+
+def test_external_without_a_route_to_carry_it_is_refused(env):
+    _planned_executor_ended(env)
+    con = env.con()
+    con.execute("UPDATE dispatches SET route_json='{}' WHERE task_id='T1'")
+    con.commit()
+    before = con.execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0]
+    code, out = env.office("rerun", "T1", "--fresh", "--external", env=_quota(env))
+    assert code == 4 and "has no route to carry --external" in out and "--as <harness>/<model>" in out, out
+    assert env.con().execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == before

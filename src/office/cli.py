@@ -39,7 +39,8 @@ Auto Office {ver}
                                     declare a pending task's route, or re-record a live dispatch's model
                                     (same harness); --restart relaunches it
   office ack <amendment-id>         worker: record that you applied a delivered amendment
-  office rerun <task> --resume|--fresh [--reroute | --as <harness>/<model>[@effort]] [--review-as ...]
+  office rerun <task> --resume|--fresh [--reroute | --as <harness>/<model>[@effort] [--cli ARGV | --external]]
+                                    [--review-as <harness>/<model>[@effort] [--review-cli ARGV | --review-external]]
                                     after a worker ends: continue its session, or start a new one with the findings
   office prompt <task|dispatch> -- "<message>"
                                     message a live pane agent and confirm it was submitted (never herdr pane run)
@@ -407,7 +408,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--reroute", action="store_true",
                    help="with --fresh: route from current evidence instead of keeping the original route")
     s.add_argument("--as", dest="as_model", metavar="HARNESS/MODEL[@EFFORT]",
-                   help="run on this route (a user override, as dispatch --as); --resume needs the same harness")
+                   help="run on this route (a user override, as dispatch --as); --resume needs the same harness, model and effort")
     s.add_argument("--cli", metavar="ARGV", help="with --as: start exactly this agent argv in a herdr pane")
     s.add_argument("--external", action="store_true",
                    help="prepare the rerun and print how to start it; launch nothing")
@@ -604,15 +605,11 @@ def _run(args, unknown) -> int:
             con.close()
     if cmd == "config" and args.apply_routing:
         from office import configcmd
+        if args.key or args.value or args.unset or args.list_ or args.edit or args.path:
+            raise OfficeError("usage", "--apply-routing re-pins a run; it takes only --run and --quote", exit_code=2)
         con = _con()
         try:
-            from office import state
-            run_arg = getattr(args, "run_arg", None)
-            run = state.find_run(con, run_arg) if run_arg else None
-            if run is None:
-                raise OfficeError("usage", "--apply-routing needs --run <id>", exit_code=2,
-                                  next_step="office list shows run ids")
-            return emit(configcmd.apply_run_routing(con, run, args.quote), args)
+            return emit(configcmd.apply_run_routing(con, getattr(args, "run_arg", None), args.quote), args)
         finally:
             con.close()
     if cmd == "config":

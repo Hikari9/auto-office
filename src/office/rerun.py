@@ -182,7 +182,7 @@ def _route_decision(con, run: dict, task: dict, parent: dict, *, as_model: str |
     `--as` names a route (bypassing trust and floors, as dispatch does); `--reroute`
     routes from current evidence; a route declared between rounds (`office amend route`)
     is followed. A resumed session keeps its harness, so only `--as` on the same harness resumes."""
-    if as_model:
+    if as_model is not None:
         decision = candidates.declared_decision(as_model)
         if resume:
             cand = decision["candidate"]
@@ -231,17 +231,17 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
     if reroute and resume:
         raise Usage("rerun-mode", "--reroute starts a new session on another route; a resumed session keeps its own",
                     next_step=f"{_fresh_cmd(tid)} --reroute")
-    if reroute and as_model:
+    if reroute and as_model is not None:
         raise Usage("invalid-override", "--reroute routes from evidence; --as names the route yourself")
-    if cli and not as_model:
+    if cli and as_model is None:
         raise Usage("invalid-override", "--cli needs --as <harness>/<model>[@effort] so the rerun records what runs")
     if cli and external:
         raise Usage("invalid-override", "a CLI launch and an external launch are mutually exclusive")
-    if (review_cli or review_external) and not review_as:
+    if (review_cli or review_external) and review_as is None:
         raise Usage("invalid-override", "--review-cli/--review-external need --review-as <harness>/<model>[@effort]")
     if review_cli and review_external:
         raise Usage("invalid-override", "a CLI review and an external review are mutually exclusive")
-    if review_as:
+    if review_as is not None:
         candidates.declared_decision(review_as, flag="--review-as")  # validates the route's shape
     task = state.get_task(con, run["id"], tid)
     if task is None:
@@ -308,7 +308,7 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         if decision:
             dispatch._record_routing(con, run, decision)
             dispatch.note_route(con, run, task, decision)
-        if review_as:
+        if review_as is not None:
             state.update_task(con, run["id"], tid, review_override={
                 "as": review_as, "cli": review_cli, "external": bool(review_external), "by": "user"})
         did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),

@@ -402,19 +402,24 @@ def _applies_next() -> str:
 
 # ------------------------------------------------------------------ a run's routing (#308)
 
-def apply_run_routing(con, run: dict, quote: str | None) -> Result:
+def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
     """Re-pin a run's `roles` and `routing` from the current config files: the one
     opt-in that moves a running run off the values it pinned at start. Later
     dispatches route from the re-pinned policy; the drift notice then has nothing
     left to report for those blocks. `quote` is the user's words authorizing it."""
+    if not run_arg:
+        raise _usage("--apply-routing needs --run <id>", next_step="office list shows run ids")
+    run = state.find_run(con, run_arg)
+    if run is None:
+        raise _usage(f"no run {run_arg!r}", next_step="office list shows run ids")
     if not (quote or "").strip():
         raise _usage('--apply-routing records the user\'s words (--quote "<words>")',
                      next_step=f"office config --run {run['id'][:8]} --apply-routing --quote \"<words>\"")
     if state.is_terminal(run):
         raise Refused("run-terminal", f"run is {run['phase']}; its routing is no longer used")
     root = Path(run["repo_root"]) if run.get("repo_root") else None
-    if root is not None and not root.is_dir():
-        raise OfficeError("repo-missing", f"run {run['id'][:8]}'s repository {root} is gone; its repo config cannot be read",
+    if root is None or not root.is_dir():
+        raise OfficeError("repo-missing", f"run {run['id'][:8]}'s repository ({root or 'unrecorded'}) is gone; its repo config cannot be read",
                           next_step="restore the repository, then retry")
     repo = root
     files = cfg.read_files(repo)
