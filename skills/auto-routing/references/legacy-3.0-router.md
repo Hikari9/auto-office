@@ -30,9 +30,9 @@ When a dispatch fails because the harness rejected the model, effort, or adapter
    <run-state-dir> --kind invalid-invocation-slug --attempted <slug> --observed "<harness error>"
    --correction <working-slug> --harness <harness>`.
 2. Re-dispatch with the corrected identity so the run continues.
-3. Dispatch a subagent running `auto-self-improve` to amend the catalog row in an isolated
-   worktree/branch, then close the defect with `resolve-route-defect --id <id> --proposal-ref
-   <branch-or-PR>`.
+3. Dispatch a cheaper read-only `auto-self-improve` investigator to file an evidence-backed
+   GitHub issue only. Never amend catalogs, create a branch/PR or call `resolve-route-defect` from this skill.
+   (Legacy v3 proposal procedure is retired.)
 
 Step 3 is not optional cleanup. `auto-closeout` runs `check-route-defects` and will not report
 complete while an unresolved row remains, because a slug fixed only in this run's transcript is a

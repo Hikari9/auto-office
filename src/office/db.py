@@ -23,7 +23,7 @@ from office import paths
 # Bump when SHARED_COLUMNS or the DDL changes. The version is a record, not the
 # gate: every open also runs the additive column pass (see `migrate`), so a
 # column added without a bump still reaches existing databases.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -121,6 +121,12 @@ CREATE INDEX IF NOT EXISTS events_run ON events(run_id, audience, seq);
 CREATE TABLE IF NOT EXISTS cursors(run_id TEXT NOT NULL, consumer TEXT NOT NULL, last_seq INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(run_id, consumer));
 CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, kind TEXT NOT NULL, dedup_key TEXT NOT NULL UNIQUE, payload_json TEXT NOT NULL, office_version TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL DEFAULT 3, not_before TEXT, claimed_by TEXT, claimed_pid INTEGER, claimed_at TEXT, kicked_at TEXT, finished_at TEXT, result_json TEXT, error TEXT, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS outbox_run ON outbox(run_id, status);
+-- Bug-watch state deliberately lives outside prunable per-run details. Runs may
+-- close or be pruned before GitHub accepts an issue, all pending evidence survives.
+CREATE TABLE IF NOT EXISTS self_improve_runs(run_id TEXT PRIMARY KEY, armed INTEGER NOT NULL DEFAULT 0, cursor INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS self_improve_incidents(fingerprint TEXT PRIMARY KEY, run_id TEXT NOT NULL, kind TEXT NOT NULL, summary TEXT NOT NULL, origin TEXT NOT NULL, occurrences INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL, report_json TEXT, issue_url TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS self_improve_incidents_pending ON self_improve_incidents(status,next_retry_at);
+CREATE TABLE IF NOT EXISTS self_improve_attempts(id TEXT PRIMARY KEY, run_id TEXT, command TEXT NOT NULL, outcome TEXT NOT NULL, detail TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS evidence(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT, revision_id TEXT, gate_id TEXT, kind TEXT NOT NULL, path TEXT, sha256 TEXT, bytes INTEGER, meta_json TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS session_bindings(harness TEXT NOT NULL, session_id TEXT NOT NULL, run_id TEXT NOT NULL, bound_at TEXT NOT NULL, bound_by TEXT NOT NULL, ended_at TEXT, PRIMARY KEY(harness, session_id));
 CREATE TABLE IF NOT EXISTS capability_proofs(key TEXT PRIMARY KEY, harness TEXT NOT NULL, harness_version TEXT, model TEXT NOT NULL, effort TEXT, adapter_hash TEXT, capability TEXT NOT NULL, result TEXT NOT NULL, evidence_hash TEXT, details TEXT, proved_at TEXT NOT NULL);

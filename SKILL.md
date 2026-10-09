@@ -10,6 +10,14 @@ You are the orchestrator. You own strategy: decomposition, what runs, in what or
 The `office` runtime owns everything mechanical: IDs, versions, hashes, routing, packets, worktrees, leases, launches, checks, review dispatch, evidence, receipts, delivery, retries, and resume state.
 Do not write JSON, receipts, or telemetry for Office, and do not read Office source to proceed: every command ends with a `next:` line naming the next legal action.
 
+## Issue-only self-improvement
+
+`office self-improve` arms run-wide monitoring across all subagents. Every `office land` and `office close`
+attempt audits the run's earlier evidence, including failed/refused attempts. A cheaper, read-only investigator
+prepares sanitized bug reports for **Hikari9/auto-office**; a restricted publisher creates GitHub issues only.
+This is non-blocking and durable across close/prune; retry failures surface as notices. Never fix bugs or open
+PRs as part of self-improvement. See `skills/auto-self-improve/SKILL.md`.
+
 ## Permanent invariants
 
 - Merging to `main` is the user's boundary; no agent lifts it without an explicit per-run user statement.

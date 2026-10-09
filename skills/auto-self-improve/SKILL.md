@@ -1,26 +1,17 @@
 ---
 name: auto-self-improve
-description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use the office CLI). Internal Auto Office v3 self-improvement primitive. Use only to create isolated learned-pattern or catalog/policy proposal work from historical evidence after deterministic sanitization, replay/evals where required, privacy lint, deterministic proposal identity, independent review, and lineage metadata.
+description: Issue-only Auto-Office bug observer. Use when explicitly invoked, when Auto-Office encounters its own runtime/skill/adapter/hook bug, and on EVERY office land or office close attempt (successful, failed, or refused). Activate with `office self-improve`; capture the entire run, including subagents and prior evidence. Delegate bounded, read-only investigation to a cheaper model, deduplicate, and file sanitized GitHub issues in Hikari9/auto-office. Never fix bugs, edit source, commit, open a PR, or close issues.
 ---
 
-# Auto Self Improve
+# Auto Self Improve — issues only
 
-> **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
-> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
+**Hard boundary:** Self-improvement means evidence-backed **GitHub bug filing**, NOT self-repair. Never modify any repository content, amend model catalogs, create worktrees or branches, commit, open or merge PRs, resolve route defects, or close issues. Historical v3 proposal scripts are NOT part of this skill.
 
-Work in a separate worktree/branch from the family whose policy is pinned.
+1. **Arm the complete run.** From its repository, `office self-improve` enables durable run-wide observation. All orchestrator and subagent errors, retries, warnings, and anomalies are in scope. During `office land` and `office close` (including refused/failed attempts), the runtime also backfills all earlier evidence even if not explicitly armed. All further eligible bugs in that run follow the same policy.
+2. **Do not block delivery.** Landing/closeout continue regardless of investigation, model unavailability, GitHub failure, or retry state. The independent reporter persists reports in `runs.db` outside prunable run details; it retries with backoff, resumes on later Office commands, and reports filed/pending/retry/suspected statuses. Never claim success without a GitHub issue URL.
+3. **Delegate cheaply, safely.** Use the runtime's budget-qualified read-only reviewer route. The investigator can inspect sanitized evidence, source snapshots, and bounded isolated reproductions where safe; it may not alter the active run, original worktree, production, or external systems. The runtime, not the agent, owns the restricted GitHub issue-creation call. If no safe cheap route is available, retain the incident and retry.
+4. **File only relevant defects.** Include Auto-Office runtime, CLI, skills, routing, adapters, hooks, and integrations whose handling Auto-Office owns. Exclude target-application bugs, normal user/gate refusals, and third-party outages without Auto-Office defects. Confirmed or strongly evidenced defects can be filed without reliable reproduction; weak suspicions remain private until more evidence arrives.
+5. **Preserve evidence and privacy.** Store raw evidence only in private state. Public issues include expected/actual behavior, sanitized evidence, impact and safe reproduction steps where available, and a stable deduplication marker. Search open and closed issues first; reuse matches rather than creating duplicates. Do not expose person, repository, path, account, credential, or customer identifiers.
+6. **Prevent recursive reporting.** Never treat reporter failures as new incidents to self-investigate. Keep reporting failures in the durable retry queue with visible status.
 
-For learned patterns: private rows → deterministic sanitizer → minimal redacted evidence capsule → pattern compiler → deterministic privacy lint → public pattern with opaque evidence hash. Learned patterns may not directly change capability floors, reward definitions, hard exclusions, destructive permissions, maturity policy, or security boundaries.
-
-**Routing-identity amendments are a first-class catalog proposal.** A run that recorded a
-`route-defect` hands you the attempted slug, the harness error, and the working correction. Amend
-the catalog row's `invocation_model_id`/`invocation_harness` (do not rename `model_id` — the
-canonical name is spec data), cite the defect id as evidence, and return the proposal ref so the
-originating run can close the defect. The evidence here is a harness error string, so sanitize it
-like any other row before it leaves the private side.
-
-For catalog/policy proposals: include replay where required, eval results, diff explanation, policy hash change, and independent review.
-
-Use deterministic identity hashes before append/retry. Fetch/reconcile latest proposal branch, skip existing identity, apply if absent, commit/push, and retry a non-fast-forward once from fresh state. Never duplicate content because of races.
-
-A merged PR is terminal; create a successor PR with lineage. Activation occurs only after maintainer merge to main plus the next clean runtime load.
+`office self-improve` is the explicit entrypoint; automatic land/close auditing is runtime-owned. Read `protocol/privacy-self-improvement.md` for current issue-only rules. The legacy `scripts/office_propose.py` and related proposal material are historical only.

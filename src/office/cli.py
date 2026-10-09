@@ -49,6 +49,7 @@ Auto Office {ver}
                                     or a worker's `office raise`; a headless worker is queued the answer
   office dismiss <task|dispatch|--all>
                                     close the kept panes of ended dispatches (final text is saved first)
+  office self-improve               activate run-wide issue-only bug observation; show filing queue
   office close                      finish the run after acceptance and landing
                                     (--landed-externally <pr>: its work merged through another PR)
   office benchmarks brief|submit <f> opted-in runs: one background refresh of missing benchmark scores
@@ -302,6 +303,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--redeploy", action="store_true", help="with --e2e: deploy prod again from the merged tree")
     s.add_argument("--mark-deployed", action="store_true",
                    help="with --e2e: the operator confirms the merged tree is already live in prod")
+    sp.add_parser("self-improve", parents=[common])
     s = sp.add_parser("close", parents=[common])
     s.add_argument("--handoff", help="PR URL or branch handed to the user for merge")
     s.add_argument("--abandon", metavar="REASON", help="end the run without landing")
@@ -438,6 +440,8 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("_job", add_help=False)
     s.add_argument("job_id")
     s.add_argument("--attempt", dest="job_attempt", default=None)
+    s = sp.add_parser("_self_improve", add_help=False)
+    s.add_argument("--once", action="store_true")
     s = sp.add_parser("_supervise", add_help=False)
     s.add_argument("dispatch_id")
     return p
@@ -479,6 +483,8 @@ def emit_error(err: OfficeError, args) -> int:
         lines.append(f"preserved: {err.preserved}")
     if err.next_step:
         lines.append(f"next: {err.next_step}")
+    if err.data.get("self_improve_note"):
+        lines.append(err.data["self_improve_note"])
     if err.data.get("final"):
         lines.append(err.data["final"])
     print("\n".join(lines))
@@ -518,10 +524,24 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _run(args, unknown)
     except OfficeError as err:
+        if args.cmd in ("land", "close"):
+            from office import bugwatch
+            expected = ("close-blocked", "not-ready", "user-quote-required", "usage", "no-run", "ambiguous-run")
+            outcome = "refused" if err.category in expected else "unexpected-error"
+            note = bugwatch.lifecycle_attempt(getattr(args, "_watch_run_id", None), args.cmd,
+                                              outcome, err.category + ": " + err.message)
+            if note:
+                err.data["self_improve_note"] = note
         if args.cmd == "close":  # every office close path ends with its report line
             from office import closeout
             err.data.setdefault("final", closeout.done(f"stopped early ({err.category}); nothing closed or cleaned up"))
         return emit_error(err, args)
+    except Exception as err:
+        if args.cmd in ("land", "close"):
+            from office import bugwatch
+            bugwatch.lifecycle_attempt(getattr(args, "_watch_run_id", None), args.cmd,
+                                       "unexpected-error", type(err).__name__ + ": " + str(err))
+        raise
     except KeyboardInterrupt:
         return 130
 
@@ -556,6 +576,9 @@ def _legacy_result(target) -> Result:
 def _run(args, unknown) -> int:
     cmd = args.cmd
     cwd = Path.cwd()
+    if cmd == "_self_improve":
+        from office import bugwatch
+        return bugwatch.worker(once=args.once)
     if cmd == "_job":
         from office import jobs
         return jobs.main_job(args.job_id, args.job_attempt)
@@ -667,7 +690,23 @@ def _run(args, unknown) -> int:
                 res.notices.append(target.note)
             return emit(res, args)
         run = target.run
+        from office import bugwatch
+        if cmd in ("land", "close"):
+            args._watch_run_id = run["id"]
+            # Capture evidence BEFORE close can reclaim panes or prune can remove logs.
+            bugwatch.lifecycle_attempt(run["id"], cmd, "started")
         res = _dispatch_command(con, run, args, unknown, cwd, target)
+        if cmd in ("land", "close"):
+            notice = bugwatch.lifecycle_attempt(run["id"], cmd, "completed")
+            if notice:
+                res.notices.append(notice)
+        elif bugwatch.armed(con, run["id"]):
+            # Observe worker/subagent events without requiring any special agent hook.
+            try:
+                bugwatch.capture(con, run["id"])
+                bugwatch.start_reporter()
+            except Exception:
+                res.notices.append("self-improve audit unavailable; retry on next command")
         if target.note:
             res.notices.append(target.note)
         if cmd not in ("status", "resume", "preflight"):
@@ -683,6 +722,12 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "resume":
         from office import lifecycle
         return lifecycle.resume(con, target, harness=args.harness, session=args.session, cwd=cwd)
+    if cmd == "self-improve":
+        from office import bugwatch
+        bugwatch.arm(con, run["id"])
+        bugwatch.capture(con, run["id"])
+        bugwatch.start_reporter()
+        return Result(lines=[bugwatch.summary(con, run["id"])],next="continue the Office run; bug reporting stays active")
     if cmd == "status":
         from office import guide, jobs, lifecycle, db, state
         if not state.is_terminal(run):
