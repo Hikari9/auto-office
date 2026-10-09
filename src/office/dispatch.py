@@ -1136,8 +1136,16 @@ def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = Tru
     return env_file
 
 
+# CSI sequences, OSC sequences (an OSC 8 hyperlink), and two-byte escapes.
+_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+
+
+def _strip_ansi(text: str | None) -> str:
+    return _CSI.sub("", text or "")
+
+
 def _startup_screen(text: str | None) -> str | None:
-    low = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text or "").lower()
+    low = _strip_ansi(text).lower()
     return next((label for marker, label in _STARTUP_SCREEN_MARKERS if marker in low), None)
 
 
@@ -1200,7 +1208,19 @@ def _close_abandoned_pane(run: dict, dispatch: dict, pane: str) -> bool:
     if held or pane in _reserved_panes(run, open_ids):
         return False
     _herdr_quiet("pane", "close", pane)
-    return not _pane_exists(pane)
+    if _pane_exists(pane):
+        return False
+    with _pane_lock(run):
+        # A closed pane left in the layout would be split from later and fail (review F1).
+        try:
+            layout = json.loads(tab_file.read_text()) if tab_file.is_file() else None
+        except (OSError, ValueError):
+            layout = None
+        if layout and pane in (layout.get("panes") or []):
+            layout["panes"] = [p for p in layout["panes"] if p != pane]
+            atomic_write_json(tab_file, layout)
+        _unreserve_pane(run, pane)
+    return True
 
 
 def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
@@ -1235,7 +1255,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         if "agent_pane_busy" in why and not retried:
             # The pane still holds an agent (a finished session herdr keeps):
             # split a fresh one and try once more before going headless (#200 B7).
-            fresh = _herdr_fresh_pane(run, cwd, pane)
+            fresh = _herdr_fresh_pane(run, cwd, pane, dispatch_id=dispatch["id"])
             if fresh:
                 return _herdr_agent_start(run, dispatch, spec, env, inter, fresh, cwd, ddir, retried=True, label=label)
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, "herdr agent start failed", why)
@@ -1487,7 +1507,7 @@ _CTX_RE = re.compile(r"\bctx:\s*(\d+(?:\.\d+)?)\s*k\b", re.I)
 
 
 def _trust_dialog(text: str | None) -> bool:
-    low = (text or "").lower()
+    low = _strip_ansi(text).lower()
     return any(m in low for m in TRUST_DIALOG_MARKERS)
 
 
@@ -1577,13 +1597,17 @@ _DECLINE = re.compile(r"\b(?:no|exit|quit|cancel|skip|without|don'?t|do not)\b",
 
 
 def _selected_option(text: str | None) -> str | None:
-    lines = [ln for ln in re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text or "").splitlines()[-40:]]
+    lines = _strip_ansi(text).splitlines()[-40:]
     picked = [m.group(1) for ln in lines if (m := _CURSOR.match(ln))]
     return picked[-1] if picked else None
 
 
 def _trust_selected(option: str | None) -> bool:
-    return bool(option) and "trust" in option.lower() and not _DECLINE.search(option)
+    low = (option or "").strip().lower()
+    # The trust option itself, or a plain "Yes, proceed/continue"; never any other "Yes, ..."
+    # a startup screen offers (an MCP server, terms).
+    ok = "trust" in low or re.match(r"yes,?\s+(?:proceed|continue)\b", low)
+    return bool(low) and bool(ok) and not _DECLINE.search(low)
 
 
 def _confirm_trust(pane: str, read, herdr, text: str | None = None) -> bool:
@@ -1597,28 +1621,53 @@ def _confirm_trust(pane: str, read, herdr, text: str | None = None) -> bool:
             return False
         option = _selected_option(text)
         if _trust_selected(option):
-            herdr("pane", "send-keys", pane, "Enter")
-            return True
+            # A frame read right after a key can predate the redraw: confirm only when a
+            # fresh, complete frame still shows the trust option selected.
+            again = _settled(read, None)
+            if _trust_dialog(again) and _trust_selected(_selected_option(again)):
+                herdr("pane", "send-keys", pane, "Enter")
+                return True
+            text = again
+            continue
         if key is None or option is None:
             return False
         herdr("pane", "send-keys", pane, key)
-        text = None
-        time.sleep(float(os.environ.get("OFFICE_HERDR_KEY_DELAY", "1")) / 4)
+        text = _settled(read, option)
     return False
+
+
+def _settled(read, before: str | None) -> str:
+    """The first complete frame (the dialog with a selection) whose selection differs from
+    `before`; a blank, half-drawn or unreadable frame is read again. After the settle time
+    (OFFICE_HERDR_KEY_SETTLE, default twice OFFICE_HERDR_KEY_DELAY) the last frame read is
+    returned (the list end: the key moved nothing)."""
+    delay = float(os.environ.get("OFFICE_HERDR_KEY_DELAY", "1"))
+    deadline = time.time() + float(os.environ.get("OFFICE_HERDR_KEY_SETTLE", 2 * delay))
+    last = ""
+    while True:
+        text = read()
+        option = _selected_option(text) if _trust_dialog(text) else None
+        if option is not None:
+            last = text
+            if option != before:
+                return text
+        if time.time() >= deadline:
+            return last or text
+        time.sleep(0.2)
 
 
 def _answer_startup_trust(pane: str, name: str, timeout: float) -> bool:
     """`herdr agent start` gave up on an agent held by a folder-trust dialog
     (`agent_not_ready`): answer it, then wait until Herdr reports the agent
     ready. True when the agent is up past the dialog."""
-    read = lambda: "\n".join(_pane_read(pane).splitlines()[-40:])  # noqa: E731
+    read = lambda: _pane_visible(pane)  # noqa: E731  the screen now, not scrollback (review F4)
     if not _confirm_trust(pane, read, _herdr_quiet):
         return False
     deadline = time.time() + timeout
     while True:
         res = _herdr_json(["agent", "get", name])
-        agent = res.get("agent") or {}
-        status = agent.get("status") or agent.get("agent_status")
+        agent = res.get("agent") or res  # flat or nested, as _agent_up reads it (review F5)
+        status = (agent.get("status") or agent.get("agent_status")) if isinstance(agent, dict) else None
         if status in ("idle", "working", "done") and not _trust_dialog(read()):
             return True
         if time.time() >= deadline:
@@ -2006,15 +2055,24 @@ def _herdr_pane(run: dict, cwd: Path, label: str | None = None, dispatch_id: str
     only once its agent has started: without the lock and the reservation two
     launches took the same idle pane, and one's setup line never ran because the
     other's agent already held the pane (run f00446ac)."""
+    with _pane_lock(run):
+        pane = _herdr_pick_pane(run, cwd)
+        if pane and dispatch_id:
+            _reserve_pane(run, pane, dispatch_id)
+    if pane and label:
+        _herdr_rename(pane, label)  # cosmetic: outside the lock (review F9)
+    return pane
+
+
+@contextlib.contextmanager
+def _pane_lock(run: dict):
+    """Serializes pane picks, splits and layout edits for one run."""
     run_dir = paths.run_dir(run["id"])
     run_dir.mkdir(parents=True, exist_ok=True)
     with open(run_dir / "herdr-tab.lock", "a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
-            pane = _herdr_pick_pane(run, cwd, label)
-            if pane and dispatch_id:
-                _reserve_pane(run, pane, dispatch_id)
-            return pane
+            yield
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
@@ -2029,6 +2087,23 @@ def _reserve_pane(run: dict, pane: str, dispatch_id: str) -> None:
     atomic_write_json(f, held)
 
 
+def _unreserve_pane(run: dict, pane: str) -> None:
+    """Drop a closed pane's reservation. Caller holds the pane lock."""
+    f = paths.run_dir(run["id"]) / "herdr-reservations.json"
+    try:
+        held = json.loads(f.read_text()) if f.is_file() else {}
+    except (OSError, ValueError):
+        return
+    if pane in held:
+        held.pop(pane)
+        atomic_write_json(f, held)
+
+
+def _live_panes(panes: list) -> list:
+    """The recorded panes herdr has not reported gone (an unreachable herdr keeps them)."""
+    return [p for p in panes if _pane_exists(p)]
+
+
 def _reserved_panes(run: dict, open_ids: set) -> set:
     """Panes reserved for a dispatch that has not ended."""
     f = paths.run_dir(run["id"]) / "herdr-reservations.json"
@@ -2039,7 +2114,7 @@ def _reserved_panes(run: dict, open_ids: set) -> set:
     return {pane for pane, did in held.items() if did in open_ids}
 
 
-def _herdr_pick_pane(run: dict, cwd: Path, label: str | None = None) -> str | None:
+def _herdr_pick_pane(run: dict, cwd: Path) -> str | None:
     """A visible Herdr pane for a dispatch, split beside the caller's own pane.
 
     The first dispatch splits the orchestrator's pane (`HERDR_PANE_ID`, or
@@ -2054,8 +2129,6 @@ def _herdr_pick_pane(run: dict, cwd: Path, label: str | None = None) -> str | No
         pane = _herdr_own_tab_pane(run, cwd, tab_file, layout)
     else:
         pane = _herdr_split_pane(run, cwd, tab_file, layout, anchor)
-    if pane and label:
-        _herdr_rename(pane, label)
     return pane
 
 
@@ -2147,14 +2220,23 @@ def _pane_is_shell(pane: str) -> bool:
 def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None, anchor: str | None) -> str | None:
     layout = layout or {"mode": "split", "anchor": anchor, "panes": []}
     anchor = layout.get("anchor") or anchor
-    live = [p for p in layout["panes"] if _herdr_json(["pane", "get", p])]  # the user may close panes
+    live = _live_panes(layout["panes"])  # the user may close panes
     busy = _busy_panes(run)
     for pane in live:
         if pane not in busy and _pane_is_shell(pane):
-            subprocess.run(["herdr", "pane", "run", pane, f"cd {shlex.quote(str(cwd))}"], capture_output=True, timeout=30)
+            # No `cd` here: the launch's setup line cds, so the lock holds no extra herdr call.
             layout["panes"] = live
             atomic_write_json(tab_file, layout)
             return pane
+    if not live and anchor and not _pane_exists(anchor):  # unreachable herdr is not "gone"
+        # The recorded anchor is gone (the orchestrator's pane was closed): split from the
+        # caller's pane instead, else give the run its own tab. Splitting a gone pane failed
+        # every later launch into headless.
+        caller = os.environ.get("OFFICE_HERDR_ANCHOR") or os.environ.get("HERDR_PANE_ID")
+        if caller and caller != anchor and _pane_exists(caller):
+            anchor = layout["anchor"] = caller
+        else:
+            return _herdr_own_tab_pane(run, cwd, tab_file, None)
     # Split the caller's pane vertically (side by side); stack further agents in that column.
     target, direction = (live[-1], "down") if live else (anchor, "right")
     res = _herdr_json(["pane", "split", "--pane", target, "--direction", direction, "--cwd", str(cwd), "--no-focus"])
@@ -2170,8 +2252,17 @@ def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None,
 
 def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None) -> str | None:
     """No caller pane to split (or a run begun before split mode): a tab owned by the run."""
+    orphans: list = []
     if tab and not _herdr_json(["tab", "get", tab["tab_id"]]):
         tab = None  # the user closed it
+    if tab is not None:
+        # Panes closed since (by the user or as abandoned) are never split from (review F1).
+        tab["panes"] = _live_panes(tab.get("panes") or [])
+        if not tab["panes"]:
+            # The tab outlived its recorded panes: open a new one, and keep the old id so
+            # close_herdr_tab still closes it.
+            orphans = [*(tab.get("orphan_tabs") or []), tab["tab_id"]]
+            tab = None
     if tab is None:
         workspace = (os.environ.get("HERDR_WORKSPACE_ID") or os.environ.get("HERDR_PANE_ID") or "").split(":")[0]
         args = ["tab", "create", "--label", f"office-{run['id'][:8]}", "--cwd", str(cwd), "--no-focus"]
@@ -2182,13 +2273,14 @@ def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None) 
         if not root:
             return None
         tab = {"mode": "tab", "tab_id": (res.get("tab") or {}).get("tab_id"), "panes": [root]}
+        if orphans:
+            tab["orphan_tabs"] = orphans
         atomic_write_json(tab_file, tab)
         return root
     busy = _busy_panes(run)
     for pane in tab["panes"]:
         if pane not in busy and _pane_is_shell(pane):
-            subprocess.run(["herdr", "pane", "run", pane, f"cd {shlex.quote(str(cwd))}"], capture_output=True, timeout=30)
-            return pane
+            return pane  # the launch's setup line cds
     direction = "right" if len(tab["panes"]) % 2 else "down"
     res = _herdr_json(["pane", "split", "--pane", tab["panes"][-1], "--direction", direction, "--cwd", str(cwd), "--no-focus"])
     pane = (res.get("pane") or {}).get("pane_id")
@@ -2223,7 +2315,8 @@ def close_herdr_tab(run: dict) -> None:
                     if _pane_exists(pane):
                         subprocess.run(["herdr", "pane", "close", pane], capture_output=True, timeout=30)
             else:
-                subprocess.run(["herdr", "tab", "close", tab["tab_id"]], capture_output=True, timeout=30)
+                for tab_id in [*(tab.get("orphan_tabs") or []), tab["tab_id"]]:
+                    subprocess.run(["herdr", "tab", "close", tab_id], capture_output=True, timeout=30)
         except (OSError, ValueError, subprocess.SubprocessError, KeyError):
             pass
 
@@ -2538,20 +2631,24 @@ def _set_dispatch(dispatch_id: str, **cols) -> None:
         con.close()
 
 
-def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str) -> str | None:
-    """A new pane split from one herdr refused as busy, recorded in the run's layout."""
-    res = _herdr_json(["pane", "split", "--pane", busy_pane, "--direction", "down", "--cwd", str(cwd), "--no-focus"])
-    pane = (res.get("pane") or {}).get("pane_id")
-    if not pane:
-        return None
-    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
-    try:
-        layout = json.loads(tab_file.read_text()) if tab_file.is_file() else None
-    except (OSError, ValueError):
-        layout = None
-    if layout is not None:
-        layout.setdefault("panes", []).append(pane)
-        atomic_write_json(tab_file, layout)
+def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str, dispatch_id: str | None = None) -> str | None:
+    """A new pane split from one herdr refused as busy, recorded in the run's layout
+    and reserved for the dispatch, under the pane lock (review F2)."""
+    with _pane_lock(run):
+        res = _herdr_json(["pane", "split", "--pane", busy_pane, "--direction", "down", "--cwd", str(cwd), "--no-focus"])
+        pane = (res.get("pane") or {}).get("pane_id")
+        if not pane:
+            return None
+        tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
+        try:
+            layout = json.loads(tab_file.read_text()) if tab_file.is_file() else None
+        except (OSError, ValueError):
+            layout = None
+        if layout is not None:
+            layout.setdefault("panes", []).append(pane)
+            atomic_write_json(tab_file, layout)
+        if dispatch_id:
+            _reserve_pane(run, pane, dispatch_id)
     return pane
 
 
@@ -2563,6 +2660,17 @@ def _pane_exists(pane: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return True
     return "pane_not_found" not in (proc.stdout or "") + (proc.stderr or "")
+
+
+def _pane_visible(pane: str) -> str:
+    """The pane's visible screen, or "" when herdr cannot read it. An answered dialog
+    can linger in scrollback; the screen shows what is up now."""
+    try:
+        proc = subprocess.run(["herdr", "pane", "read", pane, "--source", "visible", "--lines", "40"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout if proc.returncode == 0 else ""
 
 
 def _pane_read(pane: str) -> str:
