@@ -77,7 +77,7 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
     if gear not in cfg.GEARS:
         raise Usage("bad-gear", f"unknown gear {gear!r}", next_step="use one of " + ", ".join(cfg.GEARS))
     try:
-        gates = cfg.resolve_gates(gear, risk["high"], config)
+        gates = cfg.resolve_gates(gear, risk, config)
     except ValueError as exc:
         raise Usage("bad-config", f"config is invalid: {exc}", next_step="fix review.contract, then retry")
     if plan_review_rounds is not None:
@@ -196,6 +196,9 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         moved = planpath.relocate_legacy(con, top)
         if moved:
             res.notices.append(moved)
+        if risk["classification"] == "unknown":
+            res.notices.append("risk is unclassified: independent code review is required until the plan declares "
+                               "`blast_radius` (or `office start --blast-radius ...`); unknown risk is never low")
         if planner_mode == "dedicated":
             res.next = "no action; the plan will return here (office status)"
         else:
@@ -507,6 +510,9 @@ def _archive_receipt(con, run: dict, landing: dict, handoff: str | None) -> dict
             "landing": landing, "handoff": handoff}
     from office import contract
     body["review_contract"] = contract.of(run)
+    from office import risk as risk_mod
+    if risk_mod.summary(run):
+        body["risk"] = risk_mod.summary(run)
     if contract.is_convergence(run):
         from office import convergence
         body["convergence"] = convergence.receipt(con, run)

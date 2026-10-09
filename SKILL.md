@@ -58,7 +58,8 @@ continue with the installed runtime. A failed or offline check is informational 
 3. `office start "<goal>" --issue <n> --end-state <answer>` (`--deploy-preview|prod|verify "<cmd>"`
    as confirmed; `--blast-radius local|repo|production|production-data`, `--size-class S|M|L|XL`,
    `--irreversible` from your provisional read;
-   unset is unknown, never low risk). Never ask about benchmark refreshes; that is the
+   unset is unknown, never low risk: an unknown run keeps independent code review under every gear until the plan
+   classifies it; see "Risk floor and the lightweight path" below). Never ask about benchmark refreshes; that is the
    `auto-update-benchmarks` skill, run only when the user explicitly calls it.
 4. If the output says a planner was queued, wait (`office wait`). Otherwise you plan inline:
    interview the user directly for anything you would otherwise guess, write `.office/plans/<run>/PLAN.md` (the path `office start` prints)
@@ -163,6 +164,24 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
   runtime's prescribed step, not self-approval: the producer was a subagent, and the landing receipt shows it.
 - **v3.1 runs** (started before #337; `office inspect run` names the contract) keep PASS | CHANGES_REQUIRED |
   PLAN_DEFECT | BRIEF_DEFECT, per-task review and plan-defect redirects (`--redirect`): follow their `next:` lines and `docs/v31-rolling-review-gates.md`.
+
+### Risk floor and the lightweight path
+
+- Every run records a risk classification: `low` (explicit `local`/`repo` blast radius, nothing high),
+  `elevated` (irreversible, production blast radius, size L/XL) or `unknown` (nothing declared). Unknown is never
+  low. Gear and mode tune ceremony; none of them drops independent code review below the floor `unknown` and
+  `elevated` imply. `office start` and `office submit` tell you when risk is still unclassified.
+- Classify it in the plan's Requirements: `blast_radius: local|repo|production|production-data`, optionally
+  `irreversible: yes` and `size_class: S|M|L|XL`. The plan may classify an unknown run or raise any run; it never
+  lowers what the user declared at intake. Classification is stored once and restored on resume, never recomputed.
+- Trivial low-risk work may declare the lightweight path in Requirements: `lightweight: <why this is trivial and low
+  risk>`. The runtime refuses it for unknown or elevated risk (misclassified or not), for gear `full`, and after the
+  user authorized the plan. It drops only review the gear tunes (`light`, `quick`, `direct` independent review;
+  `express` plan review), never one the gear funds outright. Scope, `checks:`, tier-appropriate self-review (#309),
+  the evidence receipt and human landing authority all stay.
+- `office status`, `office inspect run|route`, the convergence and archive receipts and the PR body show the
+  effective classification, why review was or was not required, and the lightweight declaration.
+- Runs that predate this (no stored classification) keep the gates they started with and cannot go lightweight.
 
 ## Herdr agents
 
