@@ -350,7 +350,7 @@ def _parser() -> argparse.ArgumentParser:
     # dispositions, and the orchestrator's degraded fallback review.
     s = sp.add_parser("decide", parents=[common])
     s.add_argument("scope", help="a lane (L-T1) or shared scope (S-T1+T3)")
-    s.add_argument("choice", choices=("escalate", "continue", "waive", "stop"))
+    s.add_argument("choice", choices=("escalate", "continue", "waive", "stop", "review"))
     s.add_argument("--quote", help="the user's own words")
     s.add_argument("--reason", help="waive: why the unmet gate is accepted")
     s = sp.add_parser("waive", parents=[common])
@@ -360,6 +360,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("finding", help="<scope>:<code>[,<code>] (e.g. L-T1:F2 or plan:P1)")
     s.add_argument("how", choices=("fix", "fixed", "dismissed", "follow-up"))
     s.add_argument("note", nargs="*")
+    s.add_argument("--quote", help="dismissed: the user's own words, which dismiss an open blocking lane finding")
     s = sp.add_parser("review", parents=[common])
     s.add_argument("target", help="<scope>:convergence|visual, or plan (the user's request for another plan review)")
     s.add_argument("--report", help="<scope>:<kind>: your review, in the reviewer reply format")
@@ -709,7 +710,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "disposition":
         from office import convergence
         note = " ".join([*(args.note or []), *[u for u in unknown if u != "--"]]).strip()
-        return convergence.disposition(con, run, args.finding, args.how, note)
+        return convergence.disposition(con, run, args.finding, args.how, note, quote=args.quote)
     if cmd == "review" and args.target.lower() == "plan":
         from office import plans
         return plans.request_review(con, run, args.quote, args.rounds)

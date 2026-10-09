@@ -335,9 +335,10 @@ office waive <scope> --reason "<why the open findings are acceptable>"
 The reason must be substantive (at least four words, twenty characters, not a placeholder such as `ok` or
 `ship it`) or the command is refused. It works only on a scope that spent its cap, never from a dispatched
 agent, and only on runs that pinned a cap at start. The reviewer verdict stays `RECHECK`; it is never rewritten to
-`APPROVED`. Each waived gate gets a receipt bound to the scope, the gate kind and the composed commit that records
+`APPROVED`. Each waived gate gets a receipt bound to the scope, the gate kind and the composed tree that records
 the reason, the underlying verdict, the unresolved findings (code, level, location, owners), the round and cap, and
-the orchestrator session that exercised it. A recomposition voids it. The receipt appears in the archive receipt
+the orchestrator session that exercised it. A recomposition to a different tree voids it; one with the same tree
+keeps it (section 9, Tree carry-over). The receipt appears in the archive receipt
 (`convergence.waivers`) and in the lines `office land` prints. It is not landing authority and needs none
 (section 11): landing still needs the user's authorization, from intake (`end_state: merge|e2e`) or later.
 
@@ -346,18 +347,41 @@ the orchestrator session that exercised it. A recomposition voids it. The receip
 and its own recommendation. It records the answer:
 
 ```text
-office decide <scope> escalate|continue|waive|stop --quote "<user's words>" [--reason "<why>"]
+office decide <scope> escalate|continue|waive|stop|review --quote "<user's words>" [--reason "<why>"]
 ```
 
 | Choice | Effect |
 |---|---|
 | `escalate` | A new bounded cycle that excludes the earlier reviewer routes. For a stronger producer, also `office rerun <task> --fresh --reroute`. |
-| `continue` | A new bounded cycle on the same routes. |
-| `waive` | Land despite the unmet gate. Needs landing authority (section 11); it records a user waiver of each unmet gate. |
+| `continue` | A new bounded cycle on the same routes. The open blocking findings are routed to their owners, which reopen as `changes_required`, and the command prints which tasks it reopens. |
+| `review` | A new bounded cycle that reviews the composed lane again and reopens no accepted producer. The open findings go to the reviewer, which resolves or restates them. |
+| `waive` | Land despite the unmet gate. Needs landing authority (section 11); it records a user waiver of each unmet gate. Every kind is checked before any is waived, so a gate that cannot be waived stops the whole command. |
 | `stop` | Pause the lane: its tasks are paused and nothing from it lands. |
 
 Round exhaustion is never turned into `INTAKE_GAP`. `office decide` is refused for workers and needs
 the user's quote.
+
+**Dismissing a blocking finding.** When the user judges a blocking finding a reviewer defect, the
+orchestrator records their words instead of sending the finding to a producer with nothing to change:
+
+```text
+office disposition <scope>:<code>[,<code>] dismissed --quote "<user's words>"
+```
+
+Without `--quote` a blocking finding is refused and the message names `--quote`; `fixed`, `follow-up` and `fix`
+never apply to a blocking finding. With it, the quote is recorded as the user's authority (the note defaults to it),
+the finding stops holding work (state `nonblocking`, disposition `dismissed` by the user), and any repair the finding had
+routed is released. Each unmet gate left with no open finding is waived on the user's authority, so its
+`RECHECK` verdict stands, and the scope settles once no unmet gate remains. A gate that still has open findings
+keeps the scope waiting. The archive receipt lists the dismissal (`convergence.dispositions`, with `blocking`,
+`disposition_by` and `authority_quote`) and the waiver.
+
+**Tree carry-over.** A scope that is settled (approved, waived, or not required) or still reviewing, and
+recomposes to a tree equal to its previous composed tree, starts no new convergence or visual cycle. A
+byte-identical resubmit is the usual cause: the compose merge commit is new, its tree is not. The earlier gates,
+verdicts, waivers and finding dispositions stay in force for the new commit (`convergence.carried`). Waivers record
+the composed tree and match on it; a waiver recorded before trees were stored still binds its commit only, so it
+does not carry. A scope in `RECHECK` is reviewed again after its repairs, and `decide` always starts a new cycle.
 
 A lane `INTAKE_GAP` uses the same command: ask the user, record the answer (`office amend
 requirements|plan ...`), then `office decide <lane> continue --quote "<user's words>"`.
@@ -372,7 +396,8 @@ finding left when plan review closed at its round cap; that releases the tasks i
 office disposition <scope>:<code>[,<code>] fix|fixed|dismissed|follow-up -- "<note>"
 ```
 
-`<scope>` is a lane or shared scope id, or `plan`. A note is required except for `fix`.
+`<scope>` is a lane or shared scope id, or `plan`. A note is required except for `fix`. A blocking lane finding is
+dismissed only with the user's `--quote` (section 9, Dismissing a blocking finding).
 
 - `fixed`: already repaired; the note says how.
 - `dismissed`: not a problem; the note says why.
@@ -398,8 +423,8 @@ orchestrator exercises it without landing authority, and it never grants any.
 A waiver:
 
 - keeps the underlying verdict or status (`RECHECK`, `UNAVAILABLE`, ...); it never rewrites it;
-- is bound to the scope, the gate kind and the scope's composed commit. A recomposition voids it unless
-  it is renewed;
+- is bound to the scope, the gate kind and the scope's composed tree. A recomposition to a different tree voids it
+  unless it is renewed; one with the same tree keeps it. The receipt also names the commit it was granted on;
 - appears in the archive receipt under `convergence.waivers`, with the underlying verdict, reason, scope, commit,
   acting session and (for a cap waiver) the unresolved findings, and in the `WAIVED ...` lines of `office land`.
 
