@@ -13,7 +13,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, state
+from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, routing, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import pid_alive, sha256_obj
@@ -224,6 +224,14 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         if decision.get("status") != "selected":
             raise Refused("no-route", dispatch._route_failure(tid, decision), scope=tid,
                           next_step=dispatch._route_next(decision, tid, run))
+    elif (state.recorded_route(task) or {}).get("declared") and \
+            routing.candidate_id(state.recorded_route(task)["candidate"]) != parent.get("triple"):
+        # A route declared between rounds (office amend route) is followed, not the parent's.
+        if resume:
+            raise Refused("resume-impossible", f"{tid}'s route was changed since {parent['id']}; a resumed session "
+                          "keeps its own", scope=tid, next_step=_fresh_cmd(tid))
+        rec = state.recorded_route(task)
+        decision = {**rec, "status": "selected", "selected": routing.candidate_id(rec["candidate"])}
     else:
         blocked = _sticky_check(con, run, task, parent)
         if blocked:
@@ -239,6 +247,7 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
     with db.transaction(con):
         if decision:
             dispatch._record_routing(con, run, decision)
+            dispatch.note_route(con, run, task, decision)
         did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
                                       extra=extra, base=(restack or {}).get("base"), decision=decision)
         if restack:
