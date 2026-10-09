@@ -33,6 +33,7 @@ REDACTIONS = (
     (re.compile(r"(?i)(?:gh[pousr]_|sk-[a-z0-9_-]{10,}|Bearer\s+)[A-Za-z0-9_./+=-]+"), "[redacted-secret]"),
     (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[redacted-email]"),
     (re.compile(r"https?://\S+"), "[redacted-url]"),
+    (re.compile(r"(?i)\b[a-z0-9_.-]+/[a-z0-9_.-]+\b"), "[redacted-repository]"),
     (re.compile(r"(?<!\w)(?:/Users/|/home/|/tmp/|/private/|[A-Z]:\\\\)[^\s,:;]+"), "[redacted-path]"),
     (re.compile(r"(?i)\b(?:token|password|secret|apikey|api_key|authorization)\s*[:=]\s*\S+"), "[redacted-field]"),
     (re.compile(r"\b[0-9a-f]{32,}\b", re.I), "[redacted-identifier]"),
@@ -66,8 +67,18 @@ def _record(con, run_id: str, kind: str, summary: str, origin: str) -> None:
     con.execute("INSERT INTO self_improve_incidents(fingerprint,run_id,kind,summary,origin,status,created_at,updated_at) "
                 "VALUES(?,?,?,?,?,'pending',?,?) ON CONFLICT(fingerprint) DO UPDATE SET "
                 "occurrences=occurrences+1,updated_at=excluded.updated_at,"
-                "status=CASE WHEN status='suspected' THEN 'pending' ELSE status END",
+                "status=CASE WHEN status='suspected' THEN 'pending' ELSE status END,"
+                "report_json=CASE WHEN status='suspected' THEN NULL ELSE report_json END,"
+                "next_retry_at=CASE WHEN status='suspected' THEN NULL ELSE next_retry_at END",
                 (key, run_id,kind,text,origin,now_iso(),now_iso()))
+
+
+def _once(con, run_id: str, origin: str, kind: str, summary: str) -> None:
+    """Persist a unique non-event source before considering it as an incident."""
+    saved = con.execute("INSERT OR IGNORE INTO self_improve_seen_sources(run_id,origin) VALUES(?,?)",
+                        (run_id,origin))
+    if saved.rowcount:
+        _record(con,run_id,kind,summary,origin)
 
 
 def arm(con, run_id: str) -> None:
@@ -100,6 +111,17 @@ def capture(con, run_id: str, *, force: bool = False) -> int:
                            "ORDER BY seq", (run_id,cursor)).fetchall()
         for e in rows:
             _record(con,run_id,e["kind"],e["summary"],f"event:{e['seq']}")
+        # Harvest failures that never emitted an event (dead process, aborted job).
+        for job in con.execute("SELECT id,kind,error FROM outbox WHERE run_id=? AND status='failed' "
+                               "AND error IS NOT NULL",(run_id,)).fetchall():
+            _once(con,run_id,"job:"+job["id"],"job.failed",job["kind"]+": "+job["error"])
+        for agent in con.execute("SELECT id,status,terminal_classification,exit_code FROM dispatches "
+                                 "WHERE run_id=? AND (status IN ('failed','lost','blocked') OR "
+                                 "terminal_classification IN ('failed','lost','crashed','timeout'))",
+                                 (run_id,)).fetchall():
+            _once(con,run_id,"dispatch:"+agent["id"],"dispatch.failed",
+                  "status="+str(agent["status"])+" terminal="+str(agent["terminal_classification"])+
+                  " exit="+str(agent["exit_code"]))
         if rows:
             con.execute("UPDATE self_improve_runs SET cursor=?,updated_at=? WHERE run_id=?",
                         (rows[-1]["seq"],now_iso(),run_id))
@@ -108,7 +130,7 @@ def capture(con, run_id: str, *, force: bool = False) -> int:
 
 def lifecycle_attempt(run_id: str | None, command: str, outcome: str, detail: str = "") -> str:
     """Called on every land/close attempt, including refused attempts; NEVER raises."""
-    if os.environ.get(SELF_ENV) or not run_id:
+    if os.environ.get(SELF_ENV):
         return ""
     try:
         con = db.connect()
@@ -116,13 +138,15 @@ def lifecycle_attempt(run_id: str | None, command: str, outcome: str, detail: st
             with db.transaction(con):
                 con.execute("INSERT INTO self_improve_attempts(id,run_id,command,outcome,detail,created_at) "
                             "VALUES(?,?,?,?,?,?)",(uuid.uuid4().hex,run_id,command,outcome,sanitize(detail),now_iso()))
-                if outcome == "unexpected-error":
+                if outcome == "unexpected-error" and run_id:
                     _record(con,run_id,f"{command}.error",detail,"lifecycle")
-            capture(con,run_id,force=True)
-            result = summary(con,run_id)
+            if run_id:
+                capture(con,run_id,force=True)
+            result = summary(con,run_id) if run_id else ""
         finally:
             con.close()
-        start_reporter()
+        if run_id:
+            start_reporter()
         return result
     except Exception:
         return "self-improve audit unavailable; retry on the next Office command"

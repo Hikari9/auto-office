@@ -74,7 +74,8 @@ def test_weak_suspicion_retained_without_publishing(env,monkeypatch):
         bugwatch._process(con,row)
         assert con.execute("SELECT status FROM self_improve_incidents").fetchone()[0]=="suspected"
         bugwatch._record(con,"run-3","job.failed","weird unrelated external failure","event:2")
-        assert con.execute("SELECT status FROM self_improve_incidents").fetchone()[0]=="pending"
+        again=con.execute("SELECT status,report_json FROM self_improve_incidents").fetchone()
+        assert again["status"]=="pending" and again["report_json"] is None
     finally:
         con.close()
 
@@ -113,5 +114,21 @@ def test_pruneable_details_not_needed_for_retry(env):
         con.execute("DELETE FROM events WHERE run_id='run-4'")
         con.execute("DELETE FROM outbox WHERE run_id='run-4'")
         assert bugwatch._due(con) and bugwatch._due(con)[0]["summary"]=="crashed subprocess"
+    finally:
+        con.close()
+
+
+def test_dead_jobs_and_subagents_without_events_are_captured_once(env):
+    con=env.con()
+    try:
+        con.execute("INSERT INTO outbox(id,run_id,kind,dedup_key,payload_json,office_version,status,error,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,datetime('now'))",
+                    ("job1","run-5","launch_agent","test-job1","{}",version.current(),"failed","child crashed"))
+        con.execute("INSERT INTO dispatches(id,run_id,status,terminal_classification,exit_code) "
+                    "VALUES(?,?,?,?,?)",("disp1","run-5","failed","crashed",1))
+        assert bugwatch.capture(con,"run-5",force=True)==0
+        assert con.execute("SELECT COUNT(*) FROM self_improve_incidents").fetchone()[0]==2
+        assert bugwatch.capture(con,"run-5",force=True)==0
+        assert con.execute("SELECT SUM(occurrences) FROM self_improve_incidents").fetchone()[0]==2
     finally:
         con.close()

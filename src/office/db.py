@@ -126,6 +126,7 @@ CREATE INDEX IF NOT EXISTS outbox_run ON outbox(run_id, status);
 CREATE TABLE IF NOT EXISTS self_improve_runs(run_id TEXT PRIMARY KEY, armed INTEGER NOT NULL DEFAULT 0, cursor INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS self_improve_incidents(fingerprint TEXT PRIMARY KEY, run_id TEXT NOT NULL, kind TEXT NOT NULL, summary TEXT NOT NULL, origin TEXT NOT NULL, occurrences INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL, report_json TEXT, issue_url TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS self_improve_incidents_pending ON self_improve_incidents(status,next_retry_at);
+CREATE TABLE IF NOT EXISTS self_improve_seen_sources(run_id TEXT NOT NULL, origin TEXT NOT NULL, PRIMARY KEY(run_id,origin));
 CREATE TABLE IF NOT EXISTS self_improve_attempts(id TEXT PRIMARY KEY, run_id TEXT, command TEXT NOT NULL, outcome TEXT NOT NULL, detail TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS evidence(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT, revision_id TEXT, gate_id TEXT, kind TEXT NOT NULL, path TEXT, sha256 TEXT, bytes INTEGER, meta_json TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS session_bindings(harness TEXT NOT NULL, session_id TEXT NOT NULL, run_id TEXT NOT NULL, bound_at TEXT NOT NULL, bound_by TEXT NOT NULL, ended_at TEXT, PRIMARY KEY(harness, session_id));

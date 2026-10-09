@@ -542,6 +542,12 @@ def main(argv: list[str] | None = None) -> int:
             bugwatch.lifecycle_attempt(getattr(args, "_watch_run_id", None), args.cmd,
                                        "unexpected-error", type(err).__name__ + ": " + str(err))
         raise
+    except Exception as err:
+        if args.cmd in ("land", "close"):
+            from office import bugwatch
+            bugwatch.lifecycle_attempt(getattr(args, "_watch_run_id", None), args.cmd,
+                                       "unexpected-error", type(err).__name__ + ": " + str(err))
+        raise
     except KeyboardInterrupt:
         return 130
 
