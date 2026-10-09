@@ -28,7 +28,7 @@ try:
 except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
-from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, state, version, worktree_setup
+from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, scoring, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (atomic_write_json, claim_signalable, dumps, now_iso, parse_iso, pid_alive,
@@ -45,13 +45,14 @@ PLANNER_TASK = "P1"
 # answers only a folder-trust dialog, and only for a directory it created for
 # the run (`_office_owned`); hook trust, imports and updates stay the user's (#399).
 TRUST_SCREEN = "folder-trust 'Trust this folder'"
+EXTERNAL_IMPORTS_SCREEN = "external CLAUDE.md imports dialog"
 _STARTUP_SCREEN_MARKERS = (
     ("hooks need review", "Codex 'Hooks need review'"),
     ("trust this folder", TRUST_SCREEN),
     # Claude Code: "Quick safety check: Is this a project you created or one you trust?"
     ("quick safety check", TRUST_SCREEN),
     ("is this a project you created or one you trust", TRUST_SCREEN),
-    ("allow external claude.md file imports", "Claude external-import approval"),
+    ("allow external claude.md file imports", EXTERNAL_IMPORTS_SCREEN),
     ("update available", "'Update available' prompt"),
 )
 
@@ -156,6 +157,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 decision = routes.get(tid) if (routes.get(tid) or {}).get("status") == "selected" else None
                 if decision:
                     _record_routing(con, run, decision)
+                    note_route(con, run, task, decision)
                 did = request_launch(con, run, tid, role="executor", decision=decision,
                                      base=_base_for(con, run, task, graph, after))
                 res.add(f"{tid} was stacked after {after}, which is already accepted -> {did} launching")
@@ -190,13 +192,14 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 con.execute("INSERT INTO artifact_versions(id, run_id, kind, version, content_hash, created_at) "
                             "VALUES(?,?,?,?,?,?)", (uuid.uuid4().hex, run["id"], "stack", 0,
                                                      sha256_obj({"task": tid, "after": stack_after, "route": decision["selected"]}), now_iso()))
-                _stash_route(con, run, tid, decision)
+                note_route(con, run, task, decision)
                 res.add(f"{tid} stacked after {stack_after}")
             else:
                 # A planned slate reports its own fallback; drift is for legacy previews.
                 drift = None if decision.get("route_source") == "plan" else plan_view.drift(con, run, tid, decision)
                 if drift:
                     res.add(drift)
+                note_route(con, run, task, decision)
                 did = request_launch(con, run, tid, role="executor", decision=decision, base=base)
                 verb = "prepared for you to start (external; nothing launched)" if external else "launching"
                 res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} {verb}"
@@ -236,7 +239,7 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     kind = "fix" if task.get("current_dispatch_id") else "fresh"
     fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
                                   dispatch_kind=kind)
-    planned = None if (override or reroute) else _planned_slate(con, run, tid)
+    planned = None if (override or reroute) else _effective_slate(con, run, task)
     if reroute and fresh.get("status") == "selected":
         fresh["route_source"], fresh["route_note"] = "reroute", "rerouted from current evidence"
     if not planned:
@@ -259,7 +262,9 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     req = fresh.get("request") or {}
     disclosure = routing.selection_disclosure("executor", cand, req.get("preferred_seed"),
                                               (req.get("policy") or {}).get("cost_policy", "balanced"))
-    label = "planned primary" if i == 0 else f"planned fallback {i}"
+    chooser = planned.get("chooser")
+    label = {"declared": "declared route", "recorded": "recorded route"}.get(chooser, "planned primary") if i == 0 \
+        else f"planned fallback {i}"
     note = label if i == 0 else f"{label}; " + "; ".join(f"{t['route']}: {t['reason']}" for t in taken)
     disclosure["reason"] = f"{disclosure['reason'].split('; ')[0]}; {note}"
     disclosure["adaptive"] = True
@@ -269,6 +274,24 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
             "planned": planned,
             "decision_hash": sha256_obj({"planned": planned.get("decision_hash"), "fresh": fresh.get("decision_hash"),
                                          "dispatched": rid, "fallbacks_taken": taken})}
+
+
+def _effective_slate(con, run: dict, task: dict) -> dict | None:
+    """The slate dispatch tries in order (#426). A route already recorded on the
+    task (an earlier dispatch, a stack, or a deliberate `office amend route`) is
+    the primary, so a re-dispatch restores it instead of recomputing; a declared
+    one has no fallbacks, because a deliberate choice is never swapped silently.
+    Otherwise the approved plan's slate."""
+    plan = _planned_slate(con, run, task["id"])
+    rec = state.recorded_route(task)
+    if not rec:
+        return plan
+    primary = routing.candidate_id(rec["candidate"])
+    declared = bool(rec.get("declared"))
+    order = [] if declared else [r for r in [(plan or {}).get("primary"), *((plan or {}).get("fallbacks") or [])]
+                                 if r and r != primary]
+    return {**(plan or {}), "primary": primary, "fallbacks": order, "chooser": "declared" if declared else "recorded",
+            "planned_primary": (plan or {}).get("primary")}
 
 
 def _route_failure(tid: str, decision: dict) -> str:
@@ -318,10 +341,6 @@ def _record_routing(con, run: dict, decision: dict) -> None:
                                                       dispatched=decision.get("selected"), explored=explored)
 
 
-def _stash_route(con, run, tid, decision):
-    state.update_task(con, run["id"], tid, route_json=dumps(_route_payload(decision)))
-
-
 def _route_payload(decision: dict) -> dict:
     """What a dispatch keeps of its decision, so a stacked start or a relaunch
     reproduces the same route, override, and launch form."""
@@ -329,7 +348,45 @@ def _route_payload(decision: dict) -> dict:
     for key in ("override", "launch", "benchmark_snapshot", "route_source", "fallbacks_taken", "audit_id"):
         if decision.get(key):
             out[key] = decision[key]
+    unknown = candidates.quota_unknown_record(decision.get("candidate"))
+    if unknown and decision.get("candidate"):
+        out["quota_unknown"] = unknown
+    if (decision.get("planned") or {}).get("chooser") == "declared" or decision.get("declared") \
+            or decision.get("override"):
+        out["declared"] = True  # a deliberate route survives the next dispatch of the task
     return out
+
+
+def note_route(con, run: dict, task: dict, decision: dict) -> None:
+    """Record the effective route on the task before its agent runs (#426), and a
+    `route.changed` event when it differs from what Office would have run:
+    a fallback (quota, unavailable), `--reroute`, or an explicit `--as`/`--route`.
+    Caller holds the transaction."""
+    tid = task["id"]
+    after = decision["selected"]
+    norm = scoring.normalize_triple
+    rec = state.recorded_route(task)
+    recorded = routing.candidate_id(rec["candidate"]) if rec else None
+    source = decision.get("route_source") or ("override" if decision.get("override") else "router")
+    planned = decision.get("planned") or {}
+    taken = decision.get("fallbacks_taken") or []
+    why = "; ".join(f"{t['route']}: {t['reason']}" for t in taken)
+    if taken:
+        before = planned.get("primary")
+        kind = "quota" if any("quota" in t["reason"] for t in taken) else "unavailable"
+        change = (before, kind, f"fallback: {why}", "office")
+    elif source == "reroute":
+        before = recorded or ((state.task_dispatches(con, run["id"], tid) or [{}])[-1].get("triple"))
+        change = (before, "reroute", "rerouted from current evidence", "orchestrator")
+    elif source == "override":
+        before = recorded or (_planned_slate(con, run, tid) or {}).get("primary")
+        change = (before, "override", (decision.get("selection_disclosure") or {}).get("reason") or "route override",
+                  "user")
+    else:
+        before, change = None, None
+    if change and before and norm(before) != norm(after):
+        state.record_route_change(con, run, tid, before, after, kind=change[1], reason=change[2], actor=change[3])
+    state.update_task(con, run["id"], tid, route_json=dumps(_route_payload(decision)))
 
 
 def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> list[str]:
@@ -1042,7 +1099,11 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         label = pane_label(run, dispatch, kind)
         pane = _herdr_pane(run, cwd, label=label, dispatch_id=dispatch["id"]) if inter else None
         if inter and not pane:
+            spec["fallback_reason"] = "no herdr pane could be opened"
+            atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
             _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
+            if resume:
+                _headless_resume(run, dispatch, kind, spec, resume)
         if pane:
             started = _herdr_agent_start(run, dispatch, spec, env, inter, pane, cwd, ddir, label=label)
             if started:
@@ -1056,6 +1117,8 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
             # The agent never came up in the pane: fall back to a plain process,
             # and keep that visible on the dispatch (its notice says why).
             headless = "process-fallback"
+            if resume:
+                _headless_resume(run, dispatch, kind, spec, resume)
     log = open(ddir / "supervisor.log", "ab")
     try:
         proc = subprocess.Popen(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
@@ -1067,6 +1130,29 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         proc.wait()
         return _wait_terminal(dispatch["id"])
     return {"launcher": headless, "pid": proc.pid}
+
+
+def _headless_resume(run: dict, dispatch: dict, kind: str, spec: dict, resume: dict) -> None:
+    """A `rerun --resume` dispatch whose pane never came up. Resume the recorded
+    session headless with the adapter's headless resume args when it declares
+    them, else say it started fresh, and drop the parent's session id the
+    dispatch inherited so the new session is recorded without a session.mismatch (#445)."""
+    adapter = adapters.load_all().get(dispatch.get("adapter_id") or dispatch.get("harness") or "")
+    session = resume.get("session_id")
+    form = adapters.headless_resume_args(adapter, kind, session) if adapter and session else None
+    if form:
+        spec["headless_resume"] = form
+        _launch_notice(run, dispatch, f"resumed headless: session {session} continues with the harness's resume form "
+                                      "(no pane)")
+    else:
+        spec["headless_fresh"] = True
+        _set_dispatch(dispatch["id"], session_id=None)
+        dispatch["session_id"] = None
+        _assign_session(dispatch)
+        why = "no session id was recorded" if not session else "its adapter declares no headless resume form"
+        _launch_notice(run, dispatch, f"the resume could not run in a pane and {why}: started a FRESH session, not "
+                                      "a continuation of the parent's; the brief and the preserved worktree carry the task")
+    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
 
 
 def _supervise_in_process(dispatch_id: str, cwd: Path, extra: dict) -> None:
@@ -1236,6 +1322,8 @@ def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pa
     recovery = (f"orchestrator recovery: {inspect}; do not auto-approve trust, "
                 "credentials, or user-authority prompts; resolve a safe runtime blocker or choose another route, "
                 "then follow `office status` / `office resume` instead of abandoning the run")
+    spec["fallback_reason"] = f"{failure} ({why}){observed}"
+    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
     _launch_notice(run, dispatch, f"{failure} ({why}){observed}; running headless instead. {recovery}")
 
 
@@ -1371,7 +1459,8 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
                                           f"{pane}); submit it: herdr pane send-keys {pane} Enter")
         else:
             screen = _startup_screen(view)
-            title = "folder-trust dialog" if screen == TRUST_SCREEN else f"{screen} screen"
+            title = ("folder-trust dialog" if screen == TRUST_SCREEN else screen if screen == EXTERNAL_IMPORTS_SCREEN
+                     else f"{screen} screen")
             why = (f" the {title} holds the composer; review or skip it in the pane and"
                    if screen else "")
             _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
@@ -1977,6 +2066,23 @@ def _watch_notice(dispatch_id: str, text: str) -> None:
     finally:
         con.close()
     _launch_notice(run, d, text)
+
+
+def headless_fallbacks(con, run: dict) -> list[str]:
+    """One line per live dispatch that was meant for a Herdr pane and runs headless
+    instead, with why (launch.json `fallback_reason`). `office status` and `wait` show it."""
+    out = []
+    for d in con.execute("SELECT id, task_id, role FROM dispatches WHERE run_id=? AND ended_at IS NULL "
+                         "AND status IN ('launching','running') AND launcher IN ('process','process-fallback') "
+                         "ORDER BY started_at", (run["id"],)).fetchall():
+        try:
+            spec = json.loads((paths.run_dir(run["id"]) / "dispatches" / d["id"] / "launch.json").read_text())
+        except (OSError, ValueError):
+            continue
+        reason = spec.get("fallback_reason") if isinstance(spec, dict) else None
+        if reason:
+            out.append(f"{d['task_id'] or d['role']} {d['id']} runs headless (herdr fallback): {reason[:300]}")
+    return out
 
 
 def _launch_notice(run: dict, dispatch: dict, text: str) -> None:
@@ -2928,7 +3034,9 @@ def supervise(dispatch_id: str) -> int:
                                          cwd=Path(spec["cwd"]), output=output,
                                          images=[Path(i) for i in spec.get("images") or []],
                                          include_dirs=[Path(i) for i in spec.get("include_dirs") or []],
-                                         session_id=_assigned_session(d))
+                                         session_id=None if spec.get("headless_resume") else
+                                         (d.get("session_id") if spec.get("headless_fresh") else _assigned_session(d)),
+                                         resume_args=spec.get("headless_resume"))
         prompt = Path(spec["prompt_file"]).read_text(encoding="utf-8")
         if prof.get("image_transport") in ("prompt-at", "prompt-path") and spec.get("images"):
             prefix = "@" if prof["image_transport"] == "prompt-at" else ""
@@ -2969,7 +3077,7 @@ def supervise(dispatch_id: str) -> int:
                     child.stdin.close()
                 except BrokenPipeError:
                     pass
-            sniffer = None if d.get("resumed_from") else _SessionSniffer(run, d, adapter, log_path)
+            sniffer = None if d.get("resumed_from") and not spec.get("headless_fresh") else _SessionSniffer(run, d, adapter, log_path)
             for chunk in iter(lambda: child.stdout.read1(65536), b""):
                 log.write(chunk)
                 log.flush()

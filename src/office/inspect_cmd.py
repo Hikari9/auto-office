@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 
-from office import adaptive, candidates, contract, plans, state
+from office import adaptive, candidates, contract, plans, routing, state
+from office import risk as risk_mod
 from office.result import Result
 from office.state import Usage
 from office.util import loads, short
@@ -28,6 +29,8 @@ def inspect(con, run: dict, what: str | None, ident: str | None) -> Result:
         return _gate(con, run, ident)
     if what == "evidence":
         return _evidence(con, run, ident)
+    if what in ("amendments", "amendment"):
+        return _amendments(con, run, ident)
     if what == "events":
         return _events(con, run, ident)
     if what == "route":
@@ -43,7 +46,7 @@ def inspect(con, run: dict, what: str | None, ident: str | None) -> Result:
         lines = convergence.inspect_lines(con, run, ident)
         return Result(lines=lines, data=convergence.receipt(con, run) if contract.is_convergence(run) else {})
     raise Usage("unknown-view", f"cannot inspect {what!r}",
-                next_step="office inspect run|plan|task|gate|evidence|events|route|learner|trust|convergence [id]")
+                next_step="office inspect run|plan|task|gate|evidence|amendments|events|route|learner|trust|convergence [id]")
 
 
 def _plan(con, run, ident) -> Result:
@@ -67,6 +70,7 @@ def _run(con, run) -> Result:
              f"plan p{run['plan_version']}" + (f" ({plan['kind']}, {plan['content_hash'][7:19]})" if plan else ""),
              f"plan review: {json.dumps({k: v for k, v in rs.items() if k != 'open_defects'})}",
              f"envelope: {json.dumps(run.get('envelope'))[:300]}",
+             *([f"review policy: {rl}"] if (rl := risk_mod.line(run)) else []),
              f"state dir: {run['state_dir']}", f"policy {run['policy_hash'][:19]} config {run['config_hash'][:19]}"]
     for a in con.execute("SELECT kind, target, requirements_version, quote, created_at FROM authorizations WHERE run_id=? "
                          "ORDER BY created_at", (run["id"],)).fetchall():
@@ -78,7 +82,7 @@ def _run(con, run) -> Result:
     if integ:
         lines.append(f"integration {integ.get('status')} {integ.get('branch', '')} {integ.get('detail', '')}")
     return Result(lines=lines, data={"run": {k: v for k, v in run.items() if not k.endswith("_json")},
-                                     "requirements": req["frozen"], "plan_review": rs})
+                                     "requirements": req["frozen"], "plan_review": rs, "risk": risk_mod.summary(run)})
 
 
 def _task(con, run, tid) -> Result:
@@ -142,6 +146,27 @@ def _evidence(con, run, ident) -> Result:
     return Result(lines=lines or ["no evidence"], data={"evidence": [dict(e) for e in rows]})
 
 
+def _amendments(con, run, ident) -> Result:
+    """Each amendment with its rationale and, when it changed a task contract, the old and effective contract."""
+    rows = con.execute("SELECT * FROM amendments WHERE run_id=? ORDER BY seq", (run["id"],)).fetchall()
+    if ident:
+        rows = [r for r in rows if r["id"].endswith(":" + ident.upper()) or r["id"] == ident]
+    lines, data = [], []
+    for a in rows:
+        rec = loads(a["structured_json"]) if a["structured_json"] else {}
+        label = a["id"].split(":")[-1]
+        lines.append(f"{label} {a['class']} p{a['from_plan_version']}->p{a['to_plan_version'] or '-'} {a['status']} "
+                     f"by {a['requested_by']}: {a['delta'][:160]}")
+        for tid, ch in (rec.get("changed") or {}).items():
+            for key in ("scope", "depends", "interfaces", "accept", "checks"):
+                old, new = (ch["before"] or {}).get(key), (ch["after"] or {}).get(key)
+                if old != new:
+                    lines.append(f"  {tid} {key}: {json.dumps(old)} -> {json.dumps(new)}"
+                                 if ch["before"] and ch["after"] else f"  {tid} {'added' if ch['after'] else 'removed'}")
+        data.append({**dict(a), "structured": rec})
+    return Result(lines=lines or ["no amendments"], data={"amendments": data})
+
+
 def _events(con, run, ident) -> Result:
     rows = con.execute("SELECT * FROM events WHERE run_id=? ORDER BY seq DESC LIMIT 40", (run["id"],)).fetchall()
     lines = [f"#{e['seq']} {e['created_at'][11:19]} {e['audience']} {e['kind']} {e['summary'][:120]}" for e in reversed(rows)]
@@ -156,6 +181,8 @@ def _route(con, run, role_or_task) -> Result:
     role = role_or_task or "executor"
     decision = candidates.route_role(con, state.pinned_config(run), run, role, probe=False)
     lines = [f"{role}: {decision.get('status')} -> {decision.get('selected')} (live, quota not probed)"]
+    if risk_mod.line(run):
+        lines.append(f"review policy: {risk_mod.line(run)}")
     if decision.get("routing"):
         lines += adaptive.render_slate(decision.get("slate") or [], indent="")
         lines += _matrix(decision["routing"])
@@ -210,7 +237,7 @@ def _route_task(con, run, tid) -> Result:
     route_learning.ensure_schema(con)
     rows = [dict(r) for r in con.execute("SELECT * FROM route_audit WHERE run_id=? AND task_id=? ORDER BY created_at, rowid",
                                          (run["id"], tid)).fetchall()]
-    lines, audits = [], []
+    lines, audits = _effective_route_lines(con, run, tid), []
     for row in rows:
         audit = loads(row["disclosure_json"], {})
         audits.append({**{k: v for k, v in row.items() if k != "disclosure_json"}, "disclosure": audit})
@@ -239,9 +266,26 @@ def _route_task(con, run, tid) -> Result:
             reason = (route.get("selection_disclosure") or {}).get("reason") or ""
             legacy.append(f"dispatch {d['id']} {d['triple']} (single-route record): {reason[:160]}")
     lines += legacy
+    changes = state.route_changes(con, run["id"], tid)
     if not lines:
         lines = [f"no routing recorded for {tid}; office inspect route shows a live decision"]
-    return Result(lines=lines, data={"task": tid, "audits": audits, "legacy": legacy})
+    return Result(lines=lines, data={"task": tid, "audits": audits, "legacy": legacy,
+                                     "effective_route": state.recorded_route(state.get_task(con, run["id"], tid)) or None,
+                                     "route_changes": changes})
+
+
+def _effective_route_lines(con, run, tid) -> list[str]:
+    """The route Office will follow for `tid` and every recorded change to it (#426)."""
+    task = state.get_task(con, run["id"], tid)
+    rec = state.recorded_route(task) if task else {}
+    lines = []
+    if rec:
+        how = "declared" if rec.get("declared") else (rec.get("route_source") or "recorded")
+        lines.append(f"{tid} effective route {routing.candidate_id(rec['candidate'])} ({how})")
+    for c in state.route_changes(con, run["id"], tid):
+        lines.append(f"route change {c['recorded_at'][:16]} {c.get('before') or 'unrecorded'} -> {c['after']} "
+                     f"[{c.get('kind')}] by {c.get('actor')}: {c.get('reason')}")
+    return lines
 
 
 def _learner(con, run) -> Result:

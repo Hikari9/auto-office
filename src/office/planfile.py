@@ -7,6 +7,7 @@ lines per task so a planner never writes JSON:
     done:
     - a user can reset their password
     blast_radius: repo
+    lightweight: typo fix in one doc line, no behavior change   (optional, #424; needs an explicit low blast_radius)
     non_goals:
     - no SSO changes
     actions:
@@ -39,6 +40,7 @@ TASK_HEADING = re.compile(r"^###\s+(T\d+)\s*[:.\-–]\s*(.+?)\s*$")
 SECTION = re.compile(r"^##\s+(.+?)\s*$")
 KEYVAL = re.compile(r"^([A-Za-z_][A-Za-z_ ]*?)\s*:\s*(.*)$")
 BLAST = ("local", "repo", "production", "production-data")
+SIZES = ("S", "M", "L", "XL")
 # How far a run goes after its PRs (3.2): stop and ask, preview deploy only,
 # merge only, or merge + prod deploy end to end.
 END_STATES = ("ask", "preview", "merge", "e2e")
@@ -191,6 +193,10 @@ def parse(text: str) -> ParsedPlan:
                 task["notes"].append(f"{key}: {value}")
             continue
         if section == "requirements":
+            if key == "lightweight":
+                # #424: kept even when empty, so validation can demand the rationale.
+                req["lightweight"], list_key = value, None
+                continue
             list_key = key if not value else None
             if value:
                 if key == "checks":
@@ -233,6 +239,9 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
         "goal": req.get("goal"),
         "done_criteria": req.get("done") if isinstance(req.get("done"), list) else [],
         "blast_radius": req.get("blast_radius"),
+        "irreversible": req.get("irreversible"),
+        "size_class": req.get("size_class"),
+        "lightweight": ({"rationale": str(req["lightweight"]).strip()} if "lightweight" in req else None),
         "non_goals": (req.get("non_goals") or req.get("non-goals") or []),
         "named_actions": actions,
         "end_state": req.get("end_state"),
@@ -279,6 +288,12 @@ def _validate(plan: ParsedPlan) -> None:
     r = plan.requirements
     if r.get("blast_radius") and r["blast_radius"] not in BLAST:
         plan.errors.append(f"requirements blast_radius must be one of {', '.join(BLAST)}")
+    if r.get("size_class") and r["size_class"] not in SIZES:
+        plan.errors.append(f"requirements size_class must be one of {', '.join(SIZES)}")
+    if r.get("irreversible") and str(r["irreversible"]).lower() not in ("yes", "no", "true", "false"):
+        plan.errors.append("requirements irreversible must be yes or no")
+    if r.get("lightweight") is not None and not r["lightweight"]["rationale"]:
+        plan.errors.append("requirements `lightweight:` needs a one-line rationale (why this work is trivial and low risk)")
     end = r.get("end_state")
     if end and end not in END_STATES:
         plan.errors.append(f"requirements end_state must be one of {', '.join(END_STATES)}")
@@ -456,3 +471,72 @@ def path_in_scope(path: str, scope: list[str]) -> bool:
                 and path.startswith(pattern.rstrip("/") + "/"):
             return True
     return False
+
+
+# ------------------------------------------------------------------ structured task edits
+
+EDIT_LIST_KEYS = ("accept", "checks")
+EDIT_SET_KEYS = ("depends", "scope", "interfaces")
+
+
+def _norm(s: str) -> str:
+    return " ".join(str(s).split()).lower()
+
+
+def _drop_match(items: list[str], text: str, key: str, tid: str) -> str:
+    """The one entry of `items` that `text` names: exact (whitespace/case-insensitive), else the only one containing it."""
+    exact = [i for i in items if _norm(i) == _norm(text)]
+    hits = exact or [i for i in items if _norm(text) and _norm(text) in _norm(i)]
+    if len(hits) != 1:
+        raise ValueError(f"{text!r} names {len(hits)} of {tid}'s {key} entries (current: "
+                         + ("; ".join(i[:60] for i in items) or "none") + ")")
+    return hits[0]
+
+
+def edit_task(text: str, task_id: str, *, add_accept=(), drop_accept=(), add_checks=(), drop_checks=(),
+              set_fields: dict | None = None) -> str:
+    """PLAN.md `text` with structured edits applied to one task's block: entries added to or dropped from
+    its `accept:` / `checks:` lists, and `depends`/`scope`/`interfaces` replaced. The edited key is
+    rewritten in the canonical form; every other line is kept. Raises ValueError when the edit names
+    a task or entry the plan does not have."""
+    parsed = next((t for t in parse(text).tasks if t["id"] == task_id), None)
+    if parsed is None:
+        raise ValueError(f"the plan has no task {task_id}")
+    lines = text.split("\n")
+    start = next(i for i, ln in enumerate(lines) if (m := TASK_HEADING.match(ln)) and m.group(1) == task_id)
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("#") and re.match(r"#{2,3}\s", lines[i])),
+               len(lines))
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1  # keep the blank separator after the block
+    edits: dict[str, list[str]] = {}
+    for key, add, drop in (("accept", add_accept, drop_accept), ("checks", add_checks, drop_checks)):
+        if not (add or drop):
+            continue
+        items = list(parsed[key] or [])
+        for d in drop:
+            items.remove(_drop_match(items, d, key, task_id))
+        items += [a.strip() for a in add if a.strip() and a.strip() not in items]
+        edits[key] = (["accept:", *[f"- {i}" for i in items]] if key == "accept" else
+                      (["checks:", *[f"- {i}" for i in items]] if items else ["checks: none"]))
+    for key, value in (set_fields or {}).items():
+        if key not in EDIT_SET_KEYS:
+            raise ValueError(f"cannot set {key!r}; settable keys are {', '.join(EDIT_SET_KEYS)}")
+        if not value.strip():
+            raise ValueError(f"--set {key} needs a value; write `none` to clear it")
+        edits[key] = [f"{key}: {value.strip()}"]
+    block = lines[start + 1:end]
+    for key, new in edits.items():
+        out, i, placed = [], 0, False
+        while i < len(block):
+            if re.match(rf"{key}\s*:", block[i], re.I):
+                i += 1
+                while i < len(block) and block[i].strip().startswith(("- ", "* ")):
+                    i += 1
+                if not placed:
+                    out += new
+                    placed = True
+                continue
+            out.append(block[i])
+            i += 1
+        block = out if placed else out + new
+    return "\n".join(lines[:start + 1] + block + lines[end:])
