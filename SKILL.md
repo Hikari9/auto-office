@@ -69,7 +69,7 @@ At lifecycle intake, run `office update --check`; if it reports an update, offer
   recorded route on redispatch and rerun and never swaps it silently.
 - When the user names a model, dispatch with `--as <harness>/<model>[@effort]` (`--cli "<argv>"` for an exact command, `--external` to
   only print how to start it). `--review-as` pins the reviewer of the task (v3.1) or lane (convergence-v1). A reviewer is always a
-  fresh session, never the executor's, though it may share the executor's model. `office rerun <task> --resume|--fresh [--as <route>] [--review-as <route>]` relaunches on a named route; `--resume` needs the route it ran on.
+  fresh session, never the executor's, though it may share the executor's model. `office rerun <task> --resume|--fresh [--as <route>] [--review-as <route>]` relaunches on a named route; `--resume` needs the route it ran on (another route needs `--fresh`).
 - Route and config changes reach a live run only on opt-in: `office config --run <id> --apply-routing --quote "<words>"` re-pins that run from the current config files.
 - A dispatch failure is a recovery checkpoint, not permission to abandon the run: read the launch notice, `office inspect task <T> --verbose`
   and any pane Office names, then follow the printed `next:` (re-prompt, `office resume`, `office rerun <task> --resume|--fresh`,
