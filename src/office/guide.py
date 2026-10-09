@@ -5,6 +5,7 @@ agent never needs an `office next` command or the Office source to proceed.
 """
 from __future__ import annotations
 
+import json
 import re
 
 import os
@@ -246,6 +247,15 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
             if ids:
                 parts.append(f"{label} {','.join(ids)}")
         res.add(" | ".join(parts))
+    routes = effective_routes(con, run, tasks)
+    if routes:
+        res.add("routes: " + ", ".join(f"{tid} {r}" for tid, r in routes.items()))
+    from office import risk as risk_mod
+    rline = risk_mod.line(run)
+    if rline and (risk_mod.classification(run.get("risk")) == risk_mod.UNKNOWN or (run.get("gates") or {}).get("lightweight")):
+        res.add(rline)
+    elif rline:
+        res.verbose.append(rline)
     rs = plans.review_state(con, run)
     if rs["required"]:
         pr = "plan review " + ("closed (" + (rs["ended_reason"] or "") + ")" if rs["ended"] else
@@ -260,6 +270,14 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
             waiting = _waiting_on(con, run, t)
             if waiting:
                 res.add(f"{t['id']} waiting: {waiting}")
+    for t in tasks:
+        if t["status"] in ("running", "launching", "submitted", "changes_required"):
+            note = _quota_unknown_note(con, t)
+            if note:
+                res.add(note)
+    from office import dispatch as dispatch_mod
+    for line in dispatch_mod.headless_fallbacks(con, run):
+        res.add(line)
     from office import questions
     for q in questions.recorded(con, run):
         res.add(f"question: {q}")
@@ -275,11 +293,43 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     res.next = next_action(con, run)
     res.data = {"run_id": run["id"], "phase": run["phase"], "office_version": run["office_version"],
                 "requirements_version": run["requirements_version"], "plan_version": run["plan_version"],
-                "tasks": {t["id"]: t["status"] for t in tasks}, "plan_review": {k: v for k, v in rs.items() if k != "open_defects"},
+                "tasks": {t["id"]: t["status"] for t in tasks}, "routes": routes, "plan_review": {k: v for k, v in rs.items() if k != "open_defects"},
                 "open_defects": [d["code"] for d in rs["open_defects"]], "next": res.next}
     if resumed:
         res.verbose.append("resumed: pending jobs and deliveries reconstructed from runs.db")
     return res
+
+
+def _quota_unknown_note(con, task: dict) -> str | None:
+    """A live task whose current dispatch was routed while its harness quota was
+    unknown: unknown is scored conservatively, never as unlimited (#450)."""
+    did = task.get("current_dispatch_id")
+    row = con.execute("SELECT route_json FROM dispatches WHERE id=?", (did,)).fetchone() if did else None
+    try:
+        unknown = json.loads(row["route_json"] or "{}").get("quota_unknown") if row else None
+    except ValueError:
+        return None
+    if not unknown:
+        return None
+    return (f"{task['id']} routed on {unknown.get('status', 'unknown')} quota: {unknown.get('harness')}: "
+            f"{unknown.get('cause')}")
+def effective_routes(con, run: dict, tasks: list[dict]) -> dict[str, str]:
+    """Each unfinished task's effective route (#426): the one recorded on the
+    task, else the plan's primary it will dispatch on. Shown so a swap is visible."""
+    from office import plan_view, routing
+    pv = plan_view.load(con, run["id"], run["plan_version"]) if run.get("plan_version") else None
+    out = {}
+    for t in tasks:
+        if t["status"] in ("accepted", "cancelled"):
+            continue
+        rec = state.recorded_route(t)
+        if rec:
+            out[t["id"]] = routing.candidate_id(rec["candidate"]) + (" (declared)" if rec.get("declared") else "")
+            continue
+        plan = (((pv or {}).get("tasks") or {}).get(t["id"]) or {}).get("route_plan") or {}
+        if plan.get("primary"):
+            out[t["id"]] = f"{plan['primary']} (planned)"
+    return out
 
 
 def _plan_review_live(con, run: dict) -> str:
@@ -568,6 +618,7 @@ def worker_status(con, run: dict, dispatch_id: str) -> Result:
                 + (f" -> {f['action'][:80]}" if f["action"] else ""))
     block = amend.pending_block(con, run, dispatch_id)
     res.lines.extend(block)
+    res.lines.extend(amend.pending_messages(con, run, dispatch_id))
     if block:
         res.next = "apply the amendment at a safe boundary, then office ack <id>"
     elif task["status"] == "changes_required":
@@ -587,9 +638,8 @@ def piggyback(con, run: dict, res: Result) -> None:
     """Attach pending deliveries (workers) or new orchestrator events."""
     worker = os.environ.get("OFFICE_DISPATCH_ID")
     if worker:
-        block = amend.pending_block(con, run, worker)
-        if block:
-            res.notices.extend(block)
+        res.notices.extend(amend.pending_block(con, run, worker))
+        res.notices.extend(amend.pending_messages(con, run, worker))
         return
     from office import db
     unread = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=200)
