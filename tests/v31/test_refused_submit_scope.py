@@ -325,7 +325,7 @@ def test_amend_command_quotes_hostile_paths_and_reason(env):
 
 
 @pytest.mark.approved
-@pytest.mark.parametrize("bad", ["", "  ", "/etc/passwd", "../outside", "a/../../b", ":(top)x", "."])
+@pytest.mark.parametrize("bad", ["/etc/passwd", "../outside"])  # the path policy itself: test_request_scope_paths.py
 def test_request_scope_rejects_empty_absolute_and_outside_paths(env, bad):
     wenv, wt = _live_refused(env)
     code, out = env.office("submit", "--request-scope", bad, "--", "why", cwd=wt, env=wenv)

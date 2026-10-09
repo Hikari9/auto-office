@@ -66,9 +66,23 @@ markers = [
 
 # Mutation testing (mutmut 3) audits whether the core-logic tests notice a changed behaviour. It is scoped to
 # deterministic policy modules and run by hand (docs/mutation-testing.md), never by the validate gate.
+# The default test selection is the unit tier: the same tests `pytest tests/` runs.
 [tool.mutmut]
-source_paths = ["src/office/scoring.py"]
-also_copy = ["src", "tests", "config", "schemas", "catalog", "adapters", "skills", "docs", "scripts", "SKILL.md", "VERSION", "plugin.json"]
+source_paths = [
+    "src/office/scoring.py",
+    "src/office/routing.py",
+    "src/office/scheduler.py",
+    "src/office/guide.py",
+    "src/office/briefs.py",
+    "src/office/preflight.py",
+    "src/office/config.py",
+    "src/office/web/service.py",
+]
+also_copy = ["src", "tests", "config", "schemas", "catalog", "adapters", "skills", "docs", "scripts", "SKILL.md", "VERSION", "plugin.json",
+             "README.md", "MANIFESTO.md", "CONTEXT.md", "CLAUDE.md", "references", "protocol", "patterns", "agents", "evals", "eval", "proposal-templates"]
 pytest_add_cli_args = ["-p", "no:cacheprovider", "-q"]
-pytest_add_cli_args_test_selection = ["tests/v31/test_scoring_properties.py"]
+# Tests that spawn `office` in a child process import the mutated tree without mutmut's context: leave them out.
+pytest_add_cli_args_test_selection = [
+    "tests", "--ignore=tests/v31/test_inprocess_launch.py",
+    "--deselect=tests/v31/test_onboarding.py::test_status_is_noninteractive_and_returns_without_a_terminal"]
 max_children = 2

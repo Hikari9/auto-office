@@ -2,6 +2,7 @@
 import json
 
 import pytest
+from hypothesis import given, strategies as st
 
 from office import db
 from office.web import server, synthetic
@@ -57,20 +58,25 @@ POLICY = {"scheduler": {"orchestrator_route": "claude", "orchestrator_fallbacks"
           "quota": {"reserve_percent": 5}}
 
 
-@pytest.mark.parametrize("quota,fallbacks,harness,source", [
-    ({}, ["codex"], "claude", None),  # unknown primary quota never falls back
-    ({"claude": {"remaining_percent": 50}}, ["codex"], "claude", None),
-    ({"claude": {"remaining_percent": 3}, "codex": {"remaining_percent": 60}}, ["codex"], "codex", "claude"),
-    ({"claude": {"remaining_percent": 3}}, ["codex"], None, "claude"),  # fallback quota unknown: wait
-    ({"claude": {"remaining_percent": 3}, "codex": {"remaining_percent": 2}}, ["codex"], None, "claude"),
-    ({"claude": {"remaining_percent": 3}, "codex": {"remaining_percent": 60}}, [], None, "claude"),  # none allowed
-    ({"claude": {"remaining_percent": 3}, "agy": {"remaining_percent": 1}, "codex": {"remaining_percent": 60}},
-     ["agy", "codex"], "codex", "claude"),
-])
-def test_orchestrator_route_falls_back_only_on_known_quota(quota, fallbacks, harness, source):
+_HARNESSES = ["claude", "codex", "agy", "hermes"]
+_remaining = st.one_of(st.none(), st.integers(min_value=0, max_value=100))
+
+
+@given(remaining=st.dictionaries(st.sampled_from(_HARNESSES), _remaining),
+       fallbacks=st.lists(st.sampled_from(_HARNESSES), max_size=4), installed=st.sets(st.sampled_from(_HARNESSES)))
+def test_orchestrator_route_falls_back_only_on_known_quota(remaining, fallbacks, installed):
+    """Unknown quota never moves the orchestrator. Exhausted primary quota moves it to the first allowed,
+    installed fallback whose quota is known to be above the reserve, or else the launch waits."""
+    quota = {h: {"remaining_percent": r} for h, r in remaining.items()}
     conf = {**POLICY, "scheduler": {**POLICY["scheduler"], "orchestrator_fallbacks": fallbacks}}
-    route = orchestrator_route(conf, quota)
-    assert (route["harness"], route["fallback_from"]) == (harness, source)
+    route = orchestrator_route(conf, quota, available=installed.__contains__)
+    known = lambda h: remaining.get(h) is not None  # noqa: E731
+    if not known("claude") or remaining["claude"] > 5:
+        assert (route["harness"], route["fallback_from"]) == ("claude", None)
+        return
+    assert route["fallback_from"] == "claude"
+    usable = [h for h in fallbacks if h != "claude" and known(h) and remaining[h] > 5 and h in installed]
+    assert route["harness"] == (usable[0] if usable else None)
 
 
 def test_default_config_allows_no_fallback():
