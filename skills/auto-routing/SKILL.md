@@ -12,7 +12,7 @@ scheme is `../../protocol/routing.md` (learning: `../../protocol/telemetry-learn
 ## The scheme
 
 **Qualification (every role):** hard exclusions → derived adapter trust → required capabilities → absolute
-role floor → task shape → quota reserve. Unknown quota is not unlimited. Never lower a floor to save money or
+role floor → task shape → quota reserve. Unknown quota is not unlimited. A successful probe is cached per harness for 5 minutes (OFFICE_QUOTA_CACHE_TTL seconds); a timeout under host load is retried once and reported as unavailable; `office status` lists live tasks routed on unknown or unavailable quota. Never lower a floor to save money or
 quota. Only a valid, unexpired user `RecordedOverride` passes a derived gate; `--as`/`--route` are explicit user
 authority.
 
@@ -37,7 +37,7 @@ and up to two fallbacks, each with a reason, one strength and one weakness.
 - **Dispatch:** re-checks live quota, trust and learned eligibility, runs the planned primary, and falls back in
   the recorded order only when fresh evidence rules a route out, naming why. It never runs an unplanned route: an
   exhausted slate stops, and `office dispatch <task> --reroute` routes from current evidence.
-- **Rerun:** keeps the original route; `office rerun <task> --fresh --reroute` routes again.
+- **Rerun and effective route (#426):** the task records the route it runs; a rerun or redispatch keeps it, and `office rerun <task> --fresh --reroute` routes again. Any swap logs a `route.changed` event (old, new, reason, actor, time); `office amend route <task> --as <h>/<m>[@e] --quote ".."` declares a pending task's route (no fallback) or re-records a live one. See `protocol/routing.md`.
 - **Learner:** attributes failures (route, plan, environment, reviewer, mixed, unknown) before learning, decays
   stale evidence, and changes learned eligibility only after maturity plus a held-out replay. It cannot change
   success definitions, attribution rules, factual gates or trust acts.

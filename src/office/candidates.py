@@ -109,7 +109,10 @@ def role_policy(config: dict, role: str) -> dict:
 
 
 def probe_quota(adapter: dict) -> dict:
-    """Tightest remaining quota percent, or unknown with a safe cause."""
+    """Tightest remaining quota percent, or unknown/unavailable with a safe cause.
+
+    A successful result is cached per harness (`quota_cache_ttl`); a failed one is
+    cached only briefly and stays unknown/unavailable, never ok (#450)."""
     harness = adapter.get("id")
     fixed = os.environ.get("OFFICE_QUOTA_FIXTURE")
     disabled = os.environ.get("OFFICE_QUOTA_PROBE") == "off"
@@ -139,35 +142,67 @@ def probe_quota(adapter: dict) -> dict:
         return result
     if command:
         argv = [str(paths.resources_root() / c) if c.startswith("scripts/") else c for c in command]
-        try:
-            proc = subprocess.run(argv, capture_output=True, text=True, timeout=20)
-            if proc.returncode != 0:
-                result = unknown(f"command exited with code {proc.returncode}")
-            else:
-                try:
-                    data = json.loads(proc.stdout)
-                except ValueError:
-                    result = unknown("command returned invalid JSON")
-                else:
-                    if not isinstance(data, dict) or "tightest_remaining_percent" not in data:
-                        result = unknown("command response missing tightest_remaining_percent")
-                    elif data["tightest_remaining_percent"] is None:
-                        result = unknown("command returned null tightest_remaining_percent")
-                    else:
-                        result = {"status": "ok", "tightest_remaining_percent": float(data["tightest_remaining_percent"])}
-        except subprocess.TimeoutExpired:
-            result = unknown("command timed out after 20 seconds")
-        except (OSError, subprocess.SubprocessError, TypeError, ValueError):
-            result = unknown("command could not be run or parsed")
-        if result["status"] == "ok":
-            _shared_cache_put(harness, result)
+        result = _run_probe(argv, unknown)
+        _shared_cache_put(harness, result)
     _QUOTA_CACHE[harness] = (time.time(), result)
     return result
 
 
-# Quota moves slowly relative to a dispatch; one probe result serves every
-# short-lived office process for a couple of minutes (some probes take ~20s).
-_SHARED_TTL = 120.0
+PROBE_TIMEOUT_S = 20
+PROBE_RETRY_BACKOFF_S = 2.0
+
+
+def _run_probe(argv: list[str], unknown) -> dict:
+    """Run one probe command. A timeout while the host is overloaded is the
+    environment, not the harness (the rule checks use, gates.host_overloaded):
+    it is retried once after a backoff, and if it times out again the result is
+    `unavailable` with the load as its cause. A timeout on a quiet host stays a
+    plain unknown with no retry, since a retry would only cost another 20s."""
+    from office import gates
+    for attempt in (1, 2):
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            loaded = gates.host_overloaded()
+            if not loaded:
+                return unknown(f"command timed out after {PROBE_TIMEOUT_S} seconds")
+            if attempt == 1:
+                time.sleep(PROBE_RETRY_BACKOFF_S)
+                continue
+            return {"status": "unavailable", "tightest_remaining_percent": None,
+                    "cause": f"command timed out twice after {PROBE_TIMEOUT_S} seconds; {loaded}"}
+        except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+            return unknown("command could not be run or parsed")
+        if proc.returncode != 0:
+            return unknown(f"command exited with code {proc.returncode}")
+        try:
+            data = json.loads(proc.stdout)
+        except ValueError:
+            return unknown("command returned invalid JSON")
+        if not isinstance(data, dict) or "tightest_remaining_percent" not in data:
+            return unknown("command response missing tightest_remaining_percent")
+        if data["tightest_remaining_percent"] is None:
+            return unknown("command returned null tightest_remaining_percent")
+        try:
+            return {"status": "ok", "tightest_remaining_percent": float(data["tightest_remaining_percent"])}
+        except (TypeError, ValueError):
+            return unknown("command could not be run or parsed")
+    return unknown("command could not be run or parsed")  # pragma: no cover
+
+
+# Quota moves slowly relative to a dispatch; one successful probe result serves every
+# short-lived office process for a few minutes (some probes take ~20s). OFFICE_QUOTA_CACHE_TTL
+# (seconds) overrides it. A failed probe is remembered only for a short while, so a harness
+# whose probe always times out does not cost every launch 20s; it is never reported as ok.
+_SHARED_TTL = 300.0
+_FAILED_TTL = 60.0
+
+
+def _shared_ttl() -> float:
+    try:
+        return max(0.0, float(os.environ.get("OFFICE_QUOTA_CACHE_TTL", _SHARED_TTL)))
+    except ValueError:
+        return _SHARED_TTL
 
 
 def _shared_cache_path() -> Path:
@@ -177,27 +212,53 @@ def _shared_cache_path() -> Path:
 def _shared_cache_get(harness: str) -> dict | None:
     try:
         entry = json.loads(_shared_cache_path().read_text()).get(harness)
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         return None
-    if entry and time.time() - float(entry.get("at", 0)) < _SHARED_TTL:
+    if not entry or not isinstance(entry.get("result"), dict):
+        return None
+    ok = entry["result"].get("status") == "ok"
+    ttl = _shared_ttl() if ok else min(_FAILED_TTL, _shared_ttl())
+    if time.time() - float(entry.get("at", 0)) < ttl:
         return entry["result"]
     return None
 
 
 def _shared_cache_put(harness: str, result: dict) -> None:
+    """Read-modify-write under an flock so concurrent office processes do not
+    drop each other's harness entries; the file itself is replaced atomically."""
+    import fcntl
     path = _shared_cache_path()
     try:
-        data = json.loads(path.read_text()) if path.exists() else {}
-    except (OSError, ValueError):
-        data = {}
-    data[harness] = {"at": time.time(), "result": result}
-    try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(data))
-        os.replace(tmp, path)
+        with open(path.with_suffix(".lock"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                data = json.loads(path.read_text()) if path.exists() else {}
+                if not isinstance(data, dict):
+                    data = {}
+            except (OSError, ValueError):
+                data = {}
+            data[harness] = {"at": time.time(), "result": result}
+            tmp = path.with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(data))
+            os.replace(tmp, path)
     except OSError:
         pass
+
+
+_NOT_PROBED = (None, "no command configured", "probe disabled")
+
+
+def quota_unknown_record(candidate: dict | None) -> dict | None:
+    """Why a chosen route's quota was not read, or None when it was. Kept on the
+    dispatch's route record and shown in `office status` (#450)."""
+    quota = (candidate or {}).get("quota") or {}
+    if quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None:
+        return None
+    if quota.get("cause") in _NOT_PROBED:
+        return None  # no probe ran: nothing failed, so nothing to flag on every live task
+    return {"harness": (candidate or {}).get("adapter_id") or (candidate or {}).get("harness"),
+            "status": quota.get("status") or "unknown", "cause": quota.get("cause") or "quota not probed"}
 
 
 def vision_proven(con: sqlite3.Connection, candidate: dict, adapter: dict) -> bool:
@@ -477,7 +538,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         for c in candidates:
             quota = c.get("quota") or {}
             harness = c.get("adapter_id")
-            if quota.get("status") == "unknown" and quota.get("cause") and harness not in seen:
+            if quota.get("status") in ("unknown", "unavailable") and quota.get("cause") and harness not in seen:
                 unknown.setdefault(harness, quota["cause"])
         if unknown:
             seen.update(unknown)

@@ -226,8 +226,10 @@ def resolve_risk(config: dict, blast_radius: str | None, size_class: str | None,
     high_blast = set(signals.get("high_blast_radius") or ["production", "production-data"])
     high_size = set(signals.get("high_size_class") or ["L", "XL"])
     high = bool(irreversible) or blast_radius in high_blast or size_class in high_size
+    from office import risk
     return {"blast_radius": blast_radius, "size_class": size_class,
-            "irreversible": bool(irreversible), "high": high}
+            "irreversible": bool(irreversible), "high": high,
+            **risk.classify(blast_radius, size_class, bool(irreversible), high)}
 
 
 def fit_gear(requested: str | None, risk: dict, volume: bool = False, interview: bool = False,
@@ -243,7 +245,12 @@ def fit_gear(requested: str | None, risk: dict, volume: bool = False, interview:
     return base
 
 
-def resolve_gates(gear: str, risk_high: bool, config: dict) -> dict:
+def resolve_gates(gear: str, risk, config: dict) -> dict:
+    """`risk` is the run's risk record (a bare bool is the pre-#420 high flag: no floor applies).
+    Gear tunes ceremony; it never drops independent code review below what the risk classification implies."""
+    from office import risk as risk_mod
+    record = risk if isinstance(risk, dict) else {}
+    risk_high = bool(record.get("high")) if isinstance(risk, dict) else bool(risk)
     preset = (config.get("gear_presets") or {}).get(gear, {})
     ad_hoc = config.get("ad_hoc_review_max_rounds")
 
@@ -252,6 +259,7 @@ def resolve_gates(gear: str, risk_high: bool, config: dict) -> dict:
 
     plan_review = value(preset.get("plan_review", False))
     code_review = value(preset.get("independent_code_review", False))
+    code_review, floor = risk_mod.floor_gates(record, code_review)
     plan_rounds = preset.get("plan_review_max_rounds")
     code_rounds = preset.get("code_review_max_rounds")
     if plan_review and plan_rounds is None:
@@ -274,6 +282,10 @@ def resolve_gates(gear: str, risk_high: bool, config: dict) -> dict:
         "plan_review_depth": plan_review if isinstance(plan_review, str) else "full",
         "code_review": bool(code_review),
         "code_review_depth": code_review if isinstance(code_review, str) else "full",
+        # #420: the review floor risk implies, and why review is or is not required.
+        "risk_classification": risk_mod.classification(record),
+        "review_floor": floor,
+        "review_basis": risk_mod.review_basis(gear, risk_mod.classification(record), bool(code_review), floor),
         "visual": value(preset.get("funded_browser_verification", False)),
         "plan_review_max_rounds": plan_rounds or 1,
         "code_review_max_rounds": code_rounds or 1,

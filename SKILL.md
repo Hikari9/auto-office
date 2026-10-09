@@ -58,7 +58,8 @@ continue with the installed runtime. A failed or offline check is informational 
 3. `office start "<goal>" --issue <n> --end-state <answer>` (`--deploy-preview|prod|verify "<cmd>"`
    as confirmed; `--blast-radius local|repo|production|production-data`, `--size-class S|M|L|XL`,
    `--irreversible` from your provisional read;
-   unset is unknown, never low risk). Never ask about benchmark refreshes; that is the
+   unset is unknown, never low risk: an unknown run keeps independent code review under every gear until the plan
+   classifies it; see "Risk floor and the lightweight path" below). Never ask about benchmark refreshes; that is the
    `auto-update-benchmarks` skill, run only when the user explicitly calls it.
 4. If the output says a planner was queued, wait (`office wait`). Otherwise you plan inline:
    interview the user directly for anything you would otherwise guess, write `.office/plans/<run>/PLAN.md` (the path `office start` prints)
@@ -73,6 +74,10 @@ continue with the installed runtime. A failed or offline check is informational 
 - Dispatch as the approved diagram shows: a wave's roots with `office dispatch T1 T2 --parallel`,
   dependents stacked (`office dispatch T1 T3`). Dispatch runs each task's planned primary route or names the
   fallback it took and why; when every planned route is out, it stops: `office dispatch <task> --reroute`.
+  The task records its effective route (harness, model, effort) at dispatch; `office status` lists it and
+  `office inspect route <task>` adds every change (old/new route, reason, actor, time). To change a pending or
+  running task's route deliberately: `office amend route <task> --as <harness>/<model>[@effort] --quote "<words>"`.
+  Office follows the recorded route on redispatch and rerun; it never swaps it silently.
 - A dispatch failure is a recovery checkpoint, not permission to abandon the Office run. Inspect the launch
   notice and `office inspect task <T> --verbose`; when Office names a failed Herdr pane, read it yourself with
   `herdr pane read <pane>` (or the saved `pane-tail.txt` once Office has closed the abandoned pane) to identify a
@@ -121,7 +126,12 @@ continue with the installed runtime. A failed or offline check is informational 
   (APPROVED, its round cap, or a waiver), no amendment of any kind is reviewed again; you own them.
   While it is still open, a revision is its next round; to skip that for a trivial one:
   `office amend plan --no-review --reason "doc-only wording" -- "<delta>"`.
-  Scope, interfaces, ownership, and authority are contract amendments: `office amend <scope> --contract -- "<request>"`. Requirements change only on the
+  A note is prose only. To change what is enforced, edit the task's structured contract: `office amend T1 --add-check "<cmd>"`
+  (also `--add-accept`, `--drop-check`, `--drop-accept`, `--set depends=T2`) versions the task contract, runs the new check at the
+  gate (an accepted task reruns it and reopens only on failure), and records old contract, effective contract and rationale
+  (`office inspect amendments`). It never queues plan review. Authority words in an edit are refused.
+  Scope, interfaces, ownership, and authority are contract amendments (`--set scope=...`, `--set interfaces=...` need `--contract`;
+  a changed scope or interface reopens the task and its dependants): `office amend <scope> --contract -- "<request>"`. Requirements change only on the
   user's words: `office amend requirements --quote "<words>" -- "<change>"`.
 - A paused or blocked task names its blocker and what was preserved: resolve it, or take the decision to the user.
 - If a command reports a missing route or trust, show the user the route notice; only they can
@@ -170,6 +180,24 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
 - **v3.1 runs** (started before #337; `office inspect run` names the contract) keep PASS | CHANGES_REQUIRED |
   PLAN_DEFECT | BRIEF_DEFECT, per-task review and plan-defect redirects (`--redirect`): follow their `next:` lines and `docs/v31-rolling-review-gates.md`.
 
+### Risk floor and the lightweight path
+
+- Every run records a risk classification: `low` (explicit `local`/`repo` blast radius, nothing high),
+  `elevated` (irreversible, production blast radius, size L/XL) or `unknown` (nothing declared). Unknown is never
+  low. Gear and mode tune ceremony; none of them drops independent code review below the floor `unknown` and
+  `elevated` imply. `office start` and `office submit` tell you when risk is still unclassified.
+- Classify it in the plan's Requirements: `blast_radius: local|repo|production|production-data`, optionally
+  `irreversible: yes` and `size_class: S|M|L|XL`. The plan may classify an unknown run or raise any run; it never
+  lowers what the user declared at intake. Classification is stored once and restored on resume, never recomputed.
+- Trivial low-risk work may declare the lightweight path in Requirements: `lightweight: <why this is trivial and low
+  risk>`. The runtime refuses it for unknown or elevated risk (misclassified or not), for gear `full`, and after the
+  user authorized the plan. It drops only review the gear tunes (`light`, `quick`, `direct` independent review;
+  `express` plan review), never one the gear funds outright. Scope, `checks:`, tier-appropriate self-review (#309),
+  the evidence receipt and human landing authority all stay.
+- `office status`, `office inspect run|route`, the convergence and archive receipts and the PR body show the
+  effective classification, why review was or was not required, and the lightweight declaration.
+- Runs that predate this (no stored classification) keep the gates they started with and cannot go lightweight.
+
 ## Herdr agents
 
 Inside Herdr, Office starts each dispatch as a real interactive agent in a pane beside yours and
@@ -184,6 +212,12 @@ means `herdr pane send-keys <pane> Enter`, not a re-prompt, which would send it 
 reviewer yourself (an amendment nudge, a missing detail), run `office prompt <T2|dispatch> -- "<message>"`: it sends
 with `herdr agent prompt`, confirms it landed, and presses Enter for one left typed. Never use `herdr pane run` or
 `pane send-text` on an agent pane; Claude takes their Enter as part of the paste and leaves the text unsubmitted.
+A worker running headless (`process-fallback`, no pane) cannot be typed to: `office prompt` queues the
+message instead ("queued: ... runs headless; it sees this on its next office command"). It is not an amendment
+and needs no ack. A headless fallback shows in `office status` and `office wait` as "runs headless (herdr
+fallback): <why>". Claude's "Allow external CLAUDE.md file imports?" dialog is named there and never answered by
+Office; `office doctor` warns when CLAUDE.md imports files outside the repo. A `rerun --resume` that falls back
+headless resumes the recorded session when the adapter declares `headless_resume_argv`, else it says it started fresh.
 To relaunch a dispatch by hand, `office revoke T1`, then `office dispatch T1 --external` (plus `--as`
 for another model); it prints the `herdr pane run`, `herdr agent start`, and `herdr agent prompt` commands
 to run. A prompt has landed when the agent reports `working` or its pane shows a running turn. agy

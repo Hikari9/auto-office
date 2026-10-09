@@ -64,6 +64,7 @@ office_profiles:
     prompt: stdin
     output: stdout
     herdr_kind: claude
+    headless_resume_argv: [--resume, "{session_id}"]
     interactive:
       argv: [--model, "{model}", --effort, "{effort}", --permission-mode, bypassPermissions, --add-dir, "{cwd}"]
       resume_argv: [--resume, "{session_id}"]

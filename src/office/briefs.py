@@ -32,7 +32,10 @@ PLAN_FORMAT = """\
 ## Requirements
 done:
 - <observable criterion>
-blast_radius: local | repo | production | production-data
+blast_radius: local | repo | production | production-data   (classify it; undeclared risk keeps independent code review on)
+irreversible: yes | no   (optional; yes is high risk)
+size_class: S | M | L | XL   (optional; L and XL are high risk)
+lightweight: <why this work is trivial and low risk>   (optional; needs blast_radius local or repo; refused for unknown or high risk)
 non_goals:
 - <explicitly out of scope>
 actions:
