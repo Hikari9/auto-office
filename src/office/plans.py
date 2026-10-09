@@ -118,6 +118,7 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
                     "content_hash, parent_version) VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (run["id"], new_version, kind, text, dumps(parsed.tasks), dumps(parsed.requirements),
                      dispatch_id or submitter, now_iso(), digest, run["plan_version"] or None))
+        prior_graph = {t["id"]: t["depends"] for t in state.tasks(con, run["id"])}
         changes = sync_tasks(con, run, parsed.tasks, new_version)
         state.update_run(con, run["id"], plan_version=new_version)
         run = state.get_run(con, run["id"])
@@ -133,7 +134,8 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
             from office import amend
             pending = con.execute("SELECT seq FROM amendments WHERE run_id=? AND class='contract' AND to_plan_version IS NULL "
                                   "ORDER BY seq DESC LIMIT 1", (run["id"],)).fetchone()
-            amend.contract_from_planner(con, run, f"A{pending['seq']}" if pending else None, changes, new_version)
+            amend.contract_from_planner(con, run, f"A{pending['seq']}" if pending else None, changes, new_version,
+                                         prior_graph)
             if pending:
                 con.execute("UPDATE amendments SET to_plan_version=? WHERE run_id=? AND seq=?",
                             (new_version, run["id"], pending["seq"]))

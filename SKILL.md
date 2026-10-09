@@ -74,6 +74,10 @@ continue with the installed runtime. A failed or offline check is informational 
 - Dispatch as the approved diagram shows: a wave's roots with `office dispatch T1 T2 --parallel`,
   dependents stacked (`office dispatch T1 T3`). Dispatch runs each task's planned primary route or names the
   fallback it took and why; when every planned route is out, it stops: `office dispatch <task> --reroute`.
+  The task records its effective route (harness, model, effort) at dispatch; `office status` lists it and
+  `office inspect route <task>` adds every change (old/new route, reason, actor, time). To change a pending or
+  running task's route deliberately: `office amend route <task> --as <harness>/<model>[@effort] --quote "<words>"`.
+  Office follows the recorded route on redispatch and rerun; it never swaps it silently.
 - A dispatch failure is a recovery checkpoint, not permission to abandon the Office run. Inspect the launch
   notice and `office inspect task <T> --verbose`; when Office names a failed Herdr pane, read it yourself with
   `herdr pane read <pane>` (or the saved `pane-tail.txt` once Office has closed the abandoned pane) to identify a
@@ -122,7 +126,12 @@ continue with the installed runtime. A failed or offline check is informational 
   (APPROVED, its round cap, or a waiver), no amendment of any kind is reviewed again; you own them.
   While it is still open, a revision is its next round; to skip that for a trivial one:
   `office amend plan --no-review --reason "doc-only wording" -- "<delta>"`.
-  Scope, interfaces, ownership, and authority are contract amendments: `office amend <scope> --contract -- "<request>"`. Requirements change only on the
+  A note is prose only. To change what is enforced, edit the task's structured contract: `office amend T1 --add-check "<cmd>"`
+  (also `--add-accept`, `--drop-check`, `--drop-accept`, `--set depends=T2`) versions the task contract, runs the new check at the
+  gate (an accepted task reruns it and reopens only on failure), and records old contract, effective contract and rationale
+  (`office inspect amendments`). It never queues plan review. Authority words in an edit are refused.
+  Scope, interfaces, ownership, and authority are contract amendments (`--set scope=...`, `--set interfaces=...` need `--contract`;
+  a changed scope or interface reopens the task and its dependants): `office amend <scope> --contract -- "<request>"`. Requirements change only on the
   user's words: `office amend requirements --quote "<words>" -- "<change>"`.
 - A paused or blocked task names its blocker and what was preserved: resolve it, or take the decision to the user.
 - If a command reports a missing route or trust, show the user the route notice; only they can
@@ -197,6 +206,12 @@ means `herdr pane send-keys <pane> Enter`, not a re-prompt, which would send it 
 reviewer yourself (an amendment nudge, a missing detail), run `office prompt <T2|dispatch> -- "<message>"`: it sends
 with `herdr agent prompt`, confirms it landed, and presses Enter for one left typed. Never use `herdr pane run` or
 `pane send-text` on an agent pane; Claude takes their Enter as part of the paste and leaves the text unsubmitted.
+A worker running headless (`process-fallback`, no pane) cannot be typed to: `office prompt` queues the
+message instead ("queued: ... runs headless; it sees this on its next office command"). It is not an amendment
+and needs no ack. A headless fallback shows in `office status` and `office wait` as "runs headless (herdr
+fallback): <why>". Claude's "Allow external CLAUDE.md file imports?" dialog is named there and never answered by
+Office; `office doctor` warns when CLAUDE.md imports files outside the repo. A `rerun --resume` that falls back
+headless resumes the recorded session when the adapter declares `headless_resume_argv`, else it says it started fresh.
 To relaunch a dispatch by hand, `office revoke T1`, then `office dispatch T1 --external` (plus `--as`
 for another model); it prints the `herdr pane run`, `herdr agent start`, and `herdr agent prompt` commands
 to run. A prompt has landed when the agent reports `working` or its pane shows a running turn. agy
