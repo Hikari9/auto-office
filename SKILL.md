@@ -132,7 +132,7 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
 - At the lane round cap (3 by default; `office start --review-rounds N` or `review.max_rounds`, pinned per run) nothing runs and review does
   not stay blocked. Choose one: waive and accept the residual risk with a substantive reason, `office waive <scope> --reason "<why the open
   findings are acceptable>"`, or escalate to the user with the findings, attempts, risk and your recommendation, then `office decide <scope>
-  escalate|continue|waive|stop|review --quote "<words>"` (`review` runs another round of the composed lane without reopening accepted tasks). A stuck lane review is cancelled with `office revoke <scope>:convergence|visual`. A waiver never becomes APPROVED (the verdict stays RECHECK and the receipt records the
+  escalate|continue|waive|stop|review --quote "<words>"` (`review` runs another round of the composed lane without reopening accepted tasks). `office revoke <scope>:convergence|visual` cancels a running lane review. A waiver never becomes APPROVED (the verdict stays RECHECK and the receipt records the
   reason, findings, composed commit and your session) and is not landing authority: landing still needs the user's authorization.
 - Outside the cap, only landing authority waives a required review: the user (`office approve waive L-T1:convergence|visual --quote "<words>"
   --reason "<why>"`), or you (`--as orchestrator --reason "<why>"`) only when the end state is merge/e2e or a merge is authorized. If your
