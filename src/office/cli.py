@@ -73,6 +73,7 @@ Auto Office {ver}
   office prune [--run <id>]         show finished runs that office prune -f would remove
 
 Global flags: --run <id>, --json, --verbose. Every command ends with `next:`.
+Principles: MANIFESTO.md. Operating contract: SKILL.md and docs/review-convergence.md.
 """
 
 SUBMIT_HELP = """\
@@ -633,7 +634,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
             with db.transaction(con):
                 lifecycle.reconcile(con, run)
             jobs.kick(con, run["id"])
-        return guide.status(con, run, verbose=args.verbose)
+        return guide.status(con, run, verbose=args.verbose, probe_panes=True)
     if cmd == "wait":
         from office import guide
         return guide.wait(con, run, timeout=args.timeout, poll=args.poll)

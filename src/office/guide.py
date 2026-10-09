@@ -220,7 +220,8 @@ def _plan_next_convergence(con, run: dict, rs: dict) -> str | None:
     return None
 
 
-def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> Result:
+def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
+           probe_panes: bool = False) -> Result:
     worker = os.environ.get("OFFICE_DISPATCH_ID")
     if worker:
         return worker_status(con, run, worker)
@@ -281,6 +282,11 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False) -> R
     from office import questions
     for q in questions.recorded(con, run):
         res.add(f"question: {q}")
+    if probe_panes:
+        # One `herdr agent list` call, made only by `office status` itself: never from hooks
+        # (session start) or `office wait`, which scans panes on its own.
+        for b in questions.blocked_unrecorded(con, run):
+            res.add(f"blocker: {b}")
     events = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=6)
     for e in events:
         res.add(f"· {e['summary']}")

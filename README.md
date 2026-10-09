@@ -309,7 +309,7 @@ Each run is pinned to the review contract it started with. Runs started before #
 
 ### 7. Integration is a separate gate
 
-Once every task is accepted and every lane and shared scope has converged, Office composes the accepted revisions in dependency order and runs the plan's run-level checks. Under `convergence-v1` there is no separate integration review: shared scopes already reviewed the cross-lane boundaries. (`v3.1` runs launch an integration reviewer at a real cross-task boundary, for example dependent/merging outputs or a shared interface.)
+Once every task is accepted and every lane and shared scope has converged, Office composes the accepted revisions in dependency order and runs the plan's run-level checks. Under `convergence-v1` the lane and shared-scope reviews already cover cross-lane boundaries; a risk- or shared-outcome-triggered integrated review (#422) adds one review of the composed result when no earlier independent review covers it exactly, and `office inspect convergence` records why it ran or was skipped. (`v3.1` runs launch an integration reviewer at a real cross-task boundary, for example dependent/merging outputs or a shared interface.)
 
 The integrated tree is the artifact that lands—not a collection of individually-green branches assumed to compose.
 

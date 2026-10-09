@@ -182,12 +182,8 @@ After that failed read, ask the agent to write its complete response as Markdown
 
 ## Track what you spawn, and close it when it's done
 
-A dispatch is not finished when its result is read; it is finished when its pane is gone. Panes
-accumulate silently otherwise — you read a report, move on, and the dead pane stays in the layout
-until the user notices.
-
-Record every pane you spawn in the shared pane ledger, in the same step as `agent start` — not as
-a separate bookkeeping pass. This skill owns recording, because recording happens at dispatch:
+A dispatch is finished when its pane is gone, not when its result is read. Record every pane you spawn in the shared pane
+ledger in the same step as `agent start`. This skill owns recording, because recording happens at dispatch:
 
 ```bash
 <this skill's directory>/scripts/herdr-ledger.mjs add \
@@ -195,10 +191,8 @@ a separate bookkeeping pass. This skill owns recording, because recording happen
   [--note "<what> PR#<n>"]
 ```
 
-Label every pane for a human right after the split, so a narrow tab bar says what it is doing
-(Office dispatches do this for you as `<task> <role> PR#<n> <short id>`, e.g. `T3 executor PR#261 D4f2a`).
-For ad-hoc agents started outside an Office run, name the work and put the PR or issue number in the
-label and in the ledger line (`--note`), most identifying part first, under about 40 characters:
+Label every pane right after the split (Office dispatches do this as `<task> <role> PR#<n> <short id>`). For ad-hoc agents, put
+the work and the PR or issue number in the label and the ledger `--note`, most identifying part first, under about 40 characters:
 
 ```bash
 herdr pane rename <pane> "<what> PR#<n>"   # e.g. "fix login PR#261" or "triage issue#88"
@@ -206,14 +200,10 @@ herdr pane rename <pane> "<what> PR#<n>"   # e.g. "fix login PR#261" or "triage 
 
 If the PR is opened after the pane starts, rename the pane again once the number is known.
 
-It defaults to `$HERDR_LEDGER`, else `$OFFICE_STATE_DIR/panes.jsonl` — the same ledger
-`scripts/office_spawn.sh` writes and `scripts/hooks/close_finished_panes.mjs` sweeps. One ledger
-per office run, in that run's own state directory. Not worktree-local, because a run's agents sit
-in several worktrees and each would otherwise see only its own spawns; and not one global file
-either, because a shared path accumulates rows from every run that ever executed and a sweep then
-has to reason about panes it has no business touching. With no run state directory set the script
-exits rather than guessing a scope. `session_id` is the resume handle for that agent after its
-pane closes; capture it here, not later.
+It defaults to `$HERDR_LEDGER`, else `$OFFICE_STATE_DIR/panes.jsonl` (the ledger `scripts/office_spawn.sh` writes and
+`scripts/hooks/close_finished_panes.mjs` sweeps): one per office run, in that run's state directory, so a sweep never reasons
+about another run's panes. With no run state directory set the script exits rather than guessing. `session_id` is the resume
+handle after the pane closes; capture it here.
 
 A brief for a dispatch that edits files should tell the agent to commit locally to its own dispatch branch (never push) right before its final report, so the work survives a later orchestrator mistake instead of depending on staying uncommitted and lucky — the orchestrator still owns final authorship and may amend/squash that commit. Every brief should also ask for one line back before that agent's final turn ends:
 
@@ -222,17 +212,12 @@ A brief for a dispatch that edits files should tell the agent to commit locally 
   --pane "$HERDR_PANE_ID" --status done --suggestion closeable|reusable|compactable
 ```
 
-`closeable` means nothing about this agent needs to persist. `reusable` means its session is worth
-resuming for a follow-up round as-is. `compactable` means it's resumable but should be compacted
-first. This makes ledger updates a normal command the spawned agent runs itself, not a fact you
-have to notice from outside — but treat a self-report as a candidate, never proof, the same as any
-other reported lifecycle state.
+`closeable`: nothing about this agent needs to persist. `reusable`: its session is worth resuming as-is. `compactable`:
+resumable but compact first. Treat a self-report as a candidate, never proof.
 
-When you're ready to reclaim finished panes, load the `herdr-close-panes` skill and run its sweep.
-That skill closes panes and nothing else; it reads this ledger but never writes a spawn into it.
-It closes only panes this same pane spawned (via the ledger's `orchestrator_pane_id`), cross-checks
-liveness through `herdr agent list`/`pane list` before closing anything, and reports back any
-survivor that flagged itself `reusable` or `compactable` instead of closing it.
+To reclaim finished panes, load the `herdr-close-panes` skill and run its sweep. It closes only panes this same pane spawned
+(via the ledger's `orchestrator_pane_id`), cross-checks liveness before closing, and reports survivors flagged `reusable` or
+`compactable` instead of closing them.
 
 ## Safety and coordination rules
 

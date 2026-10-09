@@ -1,0 +1,6 @@
+ Question 1/1
+ Which approach should the migration take for the new column?
+
+ 1. (Recommended) Add a nullable column and backfill later
+ 2. Add a NOT NULL column with a default
+ 3. Split it into a separate table
