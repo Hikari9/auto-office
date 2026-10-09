@@ -213,6 +213,13 @@ def mark_unavailable(con, run: dict, gate_id: str, reason: str) -> None:
     g = con.execute("SELECT * FROM gates WHERE id=?", (gate_id,)).fetchone()
     if g is None or g["status"] in ("done", "stale", "cancelled"):
         return
+    if g["subject"] == "lane":
+        # A lane gate closes as every other unavailable lane review does (status, no verdict, the scope
+        # settled), so waive and the fallback see the same gate (#453).
+        from office import convergence
+        convergence.ingest(con, state.get_run(con, run["id"]), gate_id,
+                           {"status": contract.UNAVAILABLE, "summary": reason[:500]})
+        return
     con.execute("UPDATE gates SET status='done', verdict='UNAVAILABLE', summary=?, finished_at=? WHERE id=?",
                 (reason[:500], now_iso(), gate_id))
     if g["task_id"] and g["subject"] == "task":
