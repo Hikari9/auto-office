@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from office import adaptive, candidates, contract, plans, state
+from office import adaptive, candidates, contract, plans, routing, state
 from office.result import Result
 from office.state import Usage
 from office.util import loads, short
@@ -233,7 +233,7 @@ def _route_task(con, run, tid) -> Result:
     route_learning.ensure_schema(con)
     rows = [dict(r) for r in con.execute("SELECT * FROM route_audit WHERE run_id=? AND task_id=? ORDER BY created_at, rowid",
                                          (run["id"], tid)).fetchall()]
-    lines, audits = [], []
+    lines, audits = _effective_route_lines(con, run, tid), []
     for row in rows:
         audit = loads(row["disclosure_json"], {})
         audits.append({**{k: v for k, v in row.items() if k != "disclosure_json"}, "disclosure": audit})
@@ -262,9 +262,26 @@ def _route_task(con, run, tid) -> Result:
             reason = (route.get("selection_disclosure") or {}).get("reason") or ""
             legacy.append(f"dispatch {d['id']} {d['triple']} (single-route record): {reason[:160]}")
     lines += legacy
+    changes = state.route_changes(con, run["id"], tid)
     if not lines:
         lines = [f"no routing recorded for {tid}; office inspect route shows a live decision"]
-    return Result(lines=lines, data={"task": tid, "audits": audits, "legacy": legacy})
+    return Result(lines=lines, data={"task": tid, "audits": audits, "legacy": legacy,
+                                     "effective_route": state.recorded_route(state.get_task(con, run["id"], tid)) or None,
+                                     "route_changes": changes})
+
+
+def _effective_route_lines(con, run, tid) -> list[str]:
+    """The route Office will follow for `tid` and every recorded change to it (#426)."""
+    task = state.get_task(con, run["id"], tid)
+    rec = state.recorded_route(task) if task else {}
+    lines = []
+    if rec:
+        how = "declared" if rec.get("declared") else (rec.get("route_source") or "recorded")
+        lines.append(f"{tid} effective route {routing.candidate_id(rec['candidate'])} ({how})")
+    for c in state.route_changes(con, run["id"], tid):
+        lines.append(f"route change {c['recorded_at'][:16]} {c.get('before') or 'unrecorded'} -> {c['after']} "
+                     f"[{c.get('kind')}] by {c.get('actor')}: {c.get('reason')}")
+    return lines
 
 
 def _learner(con, run) -> Result:

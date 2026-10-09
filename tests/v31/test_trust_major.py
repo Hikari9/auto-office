@@ -40,10 +40,11 @@ def test_non_numeric_label_does_not_inherit(tmp_path):
 
 
 def test_baseline_seeds_proven_and_local_act_wins(tmp_path):
-    triple = "claude@2/claude-sonnet-5@high"
+    # Derive from the shipped baseline so catalog model-id changes do not break this test.
+    triple = next(t for t, state in sorted(scoring.trust_baseline().items()) if t.startswith("claude@2/") and state == "proven")
     assert scoring.trust_baseline()[triple] == "proven"
     con = _db(tmp_path)
-    assert scoring.evaluate_trust_state(con, "claude@2.9.0/claude-sonnet-5@high") == (0, "proven")
+    assert scoring.evaluate_trust_state(con, triple.replace("claude@2/", "claude@2.9.0/")) == (0, "proven")
     con.execute("INSERT INTO adapter_trust_acts VALUES ('a',?,'valid-unverified','rico','demoted locally after review','r1','2026-10-01T00:00:00+00:00')", (triple,))
     assert scoring.evaluate_trust_state(con, triple) == (0, "valid-unverified")
 

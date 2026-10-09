@@ -184,7 +184,8 @@ def _bound(event: str, harness: str, payload: dict, bound_files: list[Path], wor
             lines = []
             if worker and os.environ.get("OFFICE_DISPATCH_ID"):
                 from office import amend
-                lines = amend.pending_block(con, run, os.environ["OFFICE_DISPATCH_ID"])
+                lines = (amend.pending_block(con, run, os.environ["OFFICE_DISPATCH_ID"])
+                         + amend.pending_messages(con, run, os.environ["OFFICE_DISPATCH_ID"]))
             else:
                 events = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=8)
                 lines = [f"office: {e['summary']}" for e in events]

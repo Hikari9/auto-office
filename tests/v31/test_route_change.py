@@ -64,8 +64,13 @@ def test_record_only_rewrites_the_route_and_keeps_lease_and_session(live):
         assert after[col] == before[col], col
     lease = con.execute("SELECT revoked_at, released_at FROM leases WHERE id=?", (before["lease_id"],)).fetchone()
     assert lease["revoked_at"] is None and lease["released_at"] is None
-    assert _route_events(con) == [{"before": before["triple"], "after": after["triple"], "quote": QUOTE,
-                                   "restart": False, "dispatch_id": before["id"]}]
+    (event,) = _route_events(con)
+    assert {k: event[k] for k in ("before", "after", "quote", "restart", "dispatch_id", "actor", "task_id", "stage")} == {
+        "before": before["triple"], "after": after["triple"], "quote": QUOTE, "restart": False,
+        "dispatch_id": before["id"], "actor": "user", "task_id": "T1", "stage": "executor"}
+    assert event["at"] and QUOTE in event["reason"]
+    task_route = json.loads(con.execute("SELECT route_json FROM tasks WHERE id='T1'").fetchone()[0])
+    assert task_route["declared"] and task_route["candidate"]["model_id"] == "sonnet", "the task records the new route"
     _, out = live.office("inspect", "task", "T1", env=EXTERNAL)
     assert f"dispatch {before['id']} executor claude@1/sonnet@high" in out and "user override" in out, out
 

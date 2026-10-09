@@ -34,7 +34,8 @@ Auto Office {ver}
   office amend <scope> --no-review --reason "<why>" -- "<delta>"   ordinary amendment, no plan review
                                     (only matters while plan review is open; a closed review never reopens)
   office amend route <task> --as <harness>/<model>[@effort] --quote "<words>" [--restart]
-                                    re-record a live dispatch's model (same harness); --restart relaunches it
+                                    declare a pending task's route, or re-record a live dispatch's model
+                                    (same harness); --restart relaunches it
   office ack <amendment-id>         worker: record that you applied a delivered amendment
   office rerun <task> --resume|--fresh [--reroute]
                                     after a worker ends: continue its session, or start a new one with the findings
