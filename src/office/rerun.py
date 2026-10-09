@@ -141,32 +141,89 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
 
 
 def _sticky_check(con, run: dict, task: dict, parent: dict) -> str | None:
-    """Why the original route may not run again now, from fresh evidence, or None.
+    """Why the parent's route may not run again now, from fresh evidence, or None.
 
-    A rerun keeps its route (#300); this only reads live quota, trust and learned
-    eligibility for that exact route. A route the fresh decision never saw
-    (a probe failure, a deduplicated alias) is not refused here."""
+    A rerun keeps its route (#300); this only reads live evidence for that exact
+    route. A planned or fallback route is checked for trust, quota and learned
+    eligibility, since those change while a run lives. A user override is checked
+    for quota alone: the user already chose it past trust and floors. A route the
+    fresh decision never saw (a probe failure, a deduplicated alias) is not refused."""
     route = parent.get("route") or {}
-    if route.get("override") or parent.get("role") != "executor":
+    if parent.get("role") != "executor":
         return None
+    override = None
+    if route.get("override"):
+        cand = route.get("candidate") or {}
+        override = f"{cand.get('harness')}/{cand.get('model_id')}@{cand.get('effort')}"
     try:
         fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=task["id"],
-                                      dispatch_kind="fix")
+                                      dispatch_kind="fix", override=override)
     except Exception:  # noqa: BLE001 - the check never blocks a rerun on its own failure
         return None
+    if override and fresh.get("status") == "protected_quota_would_be_consumed":
+        # The override is the only candidate, so its quota alone decides.
+        return "its quota would cross the protected reserve"
     from office import scoring
     triple = scoring.normalize_triple(parent.get("triple") or "")
+    stages = (6,) if override else (1, 2, 6, 7)
     for r in fresh.get("rejected") or []:
-        # Only evidence that changes while a run lives: trust/quarantine (2), quota (6),
-        # learned eligibility (7). Unknown quota is a comparison, not proof the route cannot run.
-        if r.get("stage") not in (1, 2, 6, 7) or "quota unknown" in r["reason"]:
+        # Unknown quota is a comparison, not proof the route cannot run.
+        if r.get("stage") not in stages or "quota unknown" in r["reason"]:
             continue
         if scoring.normalize_triple(r["candidate"]) == triple:
             return r["reason"]
     return None
 
 
-def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False) -> Result:
+def _route_decision(con, run: dict, task: dict, parent: dict, *, as_model: str | None, reroute: bool,
+                    resume: bool) -> dict | None:
+    """The route this rerun declares or re-evaluates, or None to keep the parent's route.
+
+    `--as` names a route (bypassing trust and floors, as dispatch does); `--reroute`
+    routes from current evidence; a route declared between rounds (`office amend route`)
+    is followed. A resumed session keeps its harness, so only `--as` on the same harness resumes."""
+    if as_model is not None:
+        decision = candidates.declared_decision(as_model)
+        if resume:
+            cand = decision["candidate"]
+            if cand["harness"] != (parent.get("adapter_id") or parent.get("harness")):
+                raise Refused("resume-impossible", f"cannot resume {task['id']} on {cand['harness']}: "
+                              f"{parent['id']}'s session belongs to {parent.get('adapter_id') or parent.get('harness')}",
+                              scope=task["id"], preserved="the task worktree", next_step=f"{_fresh_cmd(task['id'])} --as {as_model}")
+            if cand.get("invocation_model_id") != parent.get("model") or cand.get("effort") != parent.get("effort"):
+                raise Refused("resume-impossible", f"cannot resume {task['id']} on {as_model}: {parent['id']}'s session "
+                              f"keeps its model and effort ({parent.get('model')}@{parent.get('effort')})",
+                              scope=task["id"], preserved="the task worktree", next_step=f"{_fresh_cmd(task['id'])} --as {as_model}")
+        return decision
+    if reroute:
+        decision = dispatch.planned_route(con, run, task, reroute=True)
+        if decision.get("status") != "selected":
+            raise Refused("no-route", dispatch._route_failure(task["id"], decision), scope=task["id"],
+                          next_step=dispatch._route_next(decision, task["id"], run))
+        return decision
+    rec = state.recorded_route(task)
+    if rec.get("declared") and routing.candidate_id(rec["candidate"]) != parent.get("triple"):
+        # A route declared between rounds (office amend route) is followed, not the parent's.
+        if resume:
+            raise Refused("resume-impossible", f"{task['id']}'s route was changed since {parent['id']}; a resumed "
+                          "session keeps its own", scope=task["id"], next_step=_fresh_cmd(task["id"]))
+        return {**rec, "status": "selected", "selected": routing.candidate_id(rec["candidate"])}
+    blocked = _sticky_check(con, run, task, parent)
+    if blocked:
+        override = (parent.get("route") or {}).get("override")
+        if override:
+            fix = f"{_fresh_cmd(task['id'])} --as <harness>/<model>[@effort]"
+        else:
+            fix = f"{_fresh_cmd(task['id'])} --reroute routes from current evidence"
+        raise Refused("route-unavailable",
+                      f"{task['id']}'s original route {parent.get('triple')} cannot run now: {blocked}",
+                      scope=task["id"], preserved="the task worktree and its route history", next_step=fix)
+    return None
+
+
+def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False,
+          as_model: str | None = None, cli: str | None = None, external: bool = False,
+          review_as: str | None = None, review_cli: str | None = None, review_external: bool = False) -> Result:
     if resume == fresh:
         raise Usage("rerun-mode", f"say how to rerun {tid}: --resume continues the ended session with its context "
                     "(native harness resume); --fresh starts a new session with the open findings in its brief",
@@ -174,6 +231,18 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
     if reroute and resume:
         raise Usage("rerun-mode", "--reroute starts a new session on another route; a resumed session keeps its own",
                     next_step=f"{_fresh_cmd(tid)} --reroute")
+    if reroute and as_model is not None:
+        raise Usage("invalid-override", "--reroute routes from evidence; --as names the route yourself")
+    if cli and as_model is None:
+        raise Usage("invalid-override", "--cli needs --as <harness>/<model>[@effort] so the rerun records what runs")
+    if cli and external:
+        raise Usage("invalid-override", "a CLI launch and an external launch are mutually exclusive")
+    if (review_cli or review_external) and review_as is None:
+        raise Usage("invalid-override", "--review-cli/--review-external need --review-as <harness>/<model>[@effort]")
+    if review_cli and review_external:
+        raise Usage("invalid-override", "a CLI review and an external review are mutually exclusive")
+    if review_as is not None:
+        candidates.declared_decision(review_as, flag="--review-as")  # validates the route's shape
     task = state.get_task(con, run["id"], tid)
     if task is None:
         raise Usage("unknown-task", f"no task {tid}")
@@ -188,6 +257,7 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
     if parent is None:
         raise Refused("no-ended-executor", f"{tid} has no ended executor session to rerun", scope=tid,
                       next_step=f"office dispatch {tid}")
+    decision = _route_decision(con, run, task, parent, as_model=as_model, reroute=reroute, resume=resume)
     extra = None
     if resume:
         why = None
@@ -218,26 +288,16 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         found = _findings_text(con, run, tid)
         extra = {"resume": {"parent": parent["id"], "session_id": session, "argv": argv[0], "herdr_kind": argv[1],
                             "findings": found}}
-    decision = None
-    if reroute:
-        decision = dispatch.planned_route(con, run, task, reroute=True)
-        if decision.get("status") != "selected":
-            raise Refused("no-route", dispatch._route_failure(tid, decision), scope=tid,
-                          next_step=dispatch._route_next(decision, tid, run))
-    elif (state.recorded_route(task) or {}).get("declared") and \
-            routing.candidate_id(state.recorded_route(task)["candidate"]) != parent.get("triple"):
-        # A route declared between rounds (office amend route) is followed, not the parent's.
-        if resume:
-            raise Refused("resume-impossible", f"{tid}'s route was changed since {parent['id']}; a resumed session "
-                          "keeps its own", scope=tid, next_step=_fresh_cmd(tid))
-        rec = state.recorded_route(task)
-        decision = {**rec, "status": "selected", "selected": routing.candidate_id(rec["candidate"])}
-    else:
-        blocked = _sticky_check(con, run, task, parent)
-        if blocked:
-            raise Refused("route-unavailable", f"{tid}'s original route {parent.get('triple')} cannot run now: {blocked}",
-                          scope=tid, preserved="the task worktree and its route history",
-                          next_step=f"{_fresh_cmd(tid)} --reroute routes from current evidence")
+    launch_prefs = {k: v for k, v in (("cli", cli), ("external", external)) if v}
+    # The route this rerun runs: a declared or re-evaluated one, else the parent's (launch form only).
+    parent_route = parent.get("route") or {}
+    launch = decision or ({**parent_route, "status": "selected", "selected": parent.get("triple")}
+                          if launch_prefs and parent_route.get("candidate") else None)
+    if launch_prefs and not launch:
+        raise Refused("no-route", f"{tid} has no route to carry --{'cli' if cli else 'external'}; name one with --as",
+                      scope=tid, next_step=f"{_fresh_cmd(tid)} --as <harness>/<model>[@effort]")
+    if launch and launch_prefs:
+        launch = {**launch, "launch": launch_prefs}
     restack = _restack(con, run, task, parent.get("worktree"))
     if restack:
         extra = {**(extra or {}), "restack": {k: restack[k] for k in ("merged", "conflict")}}
@@ -248,8 +308,11 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         if decision:
             dispatch._record_routing(con, run, decision)
             dispatch.note_route(con, run, task, decision)
+        if review_as is not None:
+            state.update_task(con, run["id"], tid, review_override={
+                "as": review_as, "cli": review_cli, "external": bool(review_external), "by": "user"})
         did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
-                                      extra=extra, base=(restack or {}).get("base"), decision=decision)
+                                      extra=extra, base=(restack or {}).get("base"), decision=launch)
         if restack:
             state.emit(con, run, "task.restacked", f"{tid} {restack['line']}", task_id=tid, dispatch_id=did)
         if resume:
@@ -257,10 +320,15 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         state.emit(con, run, "task.rerun", f"{tid} rerun {'--resume from ' + parent['id'] if resume else '--fresh'} "
                    f"as {did}", task_id=tid, dispatch_id=did)
     jobs.kick(con, run["id"])
-    route_line = (f" on {decision['selected']} (rerouted)" if decision
-                  else f" on {parent.get('triple')} (original route)")
+    if reroute:
+        note = "rerouted"
+    elif ((launch or parent.get("route")) or {}).get("override"):
+        note = "user override"
+    else:
+        note = "original route"
+    route = launch["selected"] if launch else parent.get("triple")
     res = Result(lines=[f"{tid} -> {did} executor {'resuming ' + parent['id'] if resume else 'fresh session'}"
-                        f"{route_line} launching"]
+                        f" on {route} ({note}) launching"]
                  + ([f"{tid} {restack['line']}"] if restack else []))
     res.lines.extend(f"  {line}" for line in dispatch.launch_instructions(run, state.get_dispatch(con, did)))
     res.next = "exceptions only; office status"
