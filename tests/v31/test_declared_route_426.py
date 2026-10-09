@@ -133,6 +133,34 @@ def test_a_first_dispatch_with_as_records_the_deviation_and_stays_declared(env):
     assert code == 0 and _triple(env) == CODEX and len(_events(env)) == 1, out
 
 
+def _unverified(monkeypatch, triple):
+    from office import scoring
+    real = scoring.evaluate_trust_state
+    monkeypatch.setattr(scoring, "evaluate_trust_state",
+                        lambda con, cid: (0, "valid-unverified") if cid == triple else real(con, cid))
+
+
+def test_a_redispatch_follows_a_declared_unverified_route_on_the_users_authority(env, monkeypatch):
+    _approve(env)
+    _unverified(monkeypatch, CODEX)
+    code, out = env.office("dispatch", "T1", "--as", "codex/gpt-6-astra@low", env=EXTERNAL)
+    assert code == 0, out
+    env.office("revoke", "T1", env=EXTERNAL, check=0)
+    code, out = env.office("dispatch", "T1", env=_quota(env))
+    assert code == 0 and "every planned route is unavailable" not in out, out
+    assert _triple(env) == CODEX and len(_events(env)) == 1
+    assert _task_route(env)["declared"] is True
+
+
+def test_a_declared_unverified_route_still_stops_on_other_rejections(env, monkeypatch):
+    _approve(env)
+    _unverified(monkeypatch, CODEX)
+    env.office("amend", "route", "T1", "--as", "codex/gpt-6-astra@low", "--quote", "use astra here", check=0)
+    monkeypatch.setattr("office.routing.MUTABLE_TRUST_ROLES", set())  # trust passes, quota then rejects it
+    code, out = env.office("dispatch", "T1", env=_quota(env, codex=1))
+    assert code != 0 and "every planned route is unavailable" in out, out
+
+
 def test_a_task_between_rounds_can_be_rerouted_and_rerun_follows_it(env):
     _approve(env)
     env.office("dispatch", "T1", env=_quota(env), check=0)
