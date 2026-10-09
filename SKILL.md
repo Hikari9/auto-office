@@ -41,10 +41,22 @@ Take every decision to the user through the harness's native question tool when 
 ## Install check (every session, before anything else)
 
 Run `office --version`. This skill's directory is the `auto-office` package, so it is the install source.
-- **Not found:** stop and ask the user to approve installing it; never install silently. Then `uv tool install "<this skill's directory>"`, `office install`, `office doctor`.
+- **Not found:** stop and ask the user to approve installing it; never install silently. Then `uv tool install "<this skill's directory>"`, `office install --no-hooks` (onboarding offers hooks), `office doctor`.
 - **Release differs from this directory's `VERSION`, or `office doctor` prints `install: STALE`:** tell the user and offer `uv tool install --force --reinstall "<this skill's directory>"`, then `office install`. Runs already started keep their pinned runtime.
 
 At lifecycle intake, run `office update --check`; if it reports an update, offer it in the next native intake question round. A failed or offline check does not block intake. Detail: `docs/orchestrator-reference.md`.
+
+## First-run onboarding (after the install check, before intake)
+
+`office onboard --harness <your harness> --json`. If `data.due` is false, go to Start. Otherwise hold the user's request and onboard (`docs/onboarding.md`).
+You are the orchestrator; never ask for one. Round 1: if `harness.offer` is non-empty, ask **Install recommended** (`office install --only <harness>`),
+**Review individually** (show each `integration.items[].change`, then `office install --only <harness> --item <id>` per accepted item) or **Skip**;
+never write another harness's config. Ask too whether to set preferences now or Skip onboarding (keeps every preference).
+Round 2: the three `questions` in order, each with **Let Office decide** (Recommended), its other `options` (current, seeded) and a custom
+`harness/model@effort` from `eligible`. Show `current`, `about` and the `disclaimer`: a preference, never a guarantee.
+Record with `office onboard --planner <a> --executor <a> --reviewer <a>` (`office`, `keep` or a route) or `office onboard --skip`; a refused
+answer writes nothing, so re-ask it. Then continue the original request at Start; never make the user repeat it. Headless, or no way to ask:
+never wait or `--skip`; continue on the current preferences and tell the user to run `office onboard`.
 
 ## Start
 

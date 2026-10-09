@@ -117,7 +117,7 @@ office install
 office doctor
 ```
 
-`office install` is idempotent. It registers the current runtime and installs the harness integrations that Auto Office can verify safely. Existing config is backed up before Office-managed entries are changed.
+`office install` is idempotent. It registers the current runtime and installs the harness integrations that Auto Office can verify safely. Existing config is backed up before Office-managed entries are changed. `office install --only <harness>` limits it to one harness, `--item <id>` (repeatable: `session.start`, `prompt.submit`, `tool.pre`, `read-rules`) to the integration items you accept, and `--no-hooks` registers the runtime without writing any harness config. The `/auto-office` skill installs with `--no-hooks` and offers the current harness's integration during first-run onboarding.
 
 | Agent / harness | After `office install` |
 |---|---|
@@ -439,6 +439,24 @@ prompt / CLI > repo config > user config > plugin defaults
 ```
 
 The repo layer lives at `.auto-office/config.yaml`; user defaults live at `~/.config/auto-office/config.yaml`.
+
+### First-run onboarding: `office onboard`
+
+The first `/auto-office` invocation offers a short, skippable onboarding before intake, then continues the original request. The invoking agent asks through its own question tool; `office onboard` owns detection, validation and persistence:
+
+```bash
+office onboard --harness claude [--json]     # due or current, eligible routes, current-harness integration (never prompts)
+office onboard --planner office --executor keep --reviewer codex/gpt-6-luna@high
+office onboard --skip                         # keep every preference; mark onboarding complete
+```
+
+- Three questions, in order: default external planner, preferred executor, preferred reviewer. Each offers **Let Office decide** (recommended: clears your user-level preference so the shipped defaults apply), the eligible shipped seed routes, your current preference, or a custom `harness/model@effort`. No orchestrator question: the invoking agent is the orchestrator.
+- Only routes that are eligible here are accepted: the harness is installed and signed in, the catalog has the model and effort, and the role's capabilities, intelligence floor and derived trust allow it. A refused answer writes nothing.
+- Answers become ordinary `roles.<role>.preferred_seed` values in the user file (reviewer writes `plan_reviewer` and `code_reviewer`; visual review keeps its own routes). They keep the existing routing semantics: Office favors this route according to its routing policy, but may choose another model or effort when availability, quota, task fit, capability, evidence, or policy calls for it. Repo overrides and `--as` stay higher.
+- Completion is user-level state (`onboarding.schema_version`). Onboarding comes back only when its schema version changes, never on an ordinary release, and then prefills your current preferences. `office config onboarding.schema_version 0` shows it again.
+- Hook setup covers the current harness only: **Install recommended** (`office install --only <harness>`), **Review individually** (`--item`), or **Skip**. Codex, agy, Hermes and other harnesses without a verified hook mapping are reported, not installed.
+
+Details: [`docs/onboarding.md`](docs/onboarding.md).
 
 ### Setting preferences: `office config` and `office setup`
 

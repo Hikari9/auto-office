@@ -82,6 +82,12 @@ model_family_floors:
 adapter_trust:
   proven_min_successful_dispatches: 5
   proven_min_task_shapes: 2
+# First-run /auto-office onboarding (#484). User-level state only: `office onboard`
+# records the onboarding schema the user completed or skipped, and /auto-office
+# offers onboarding again only when office.onboarding.SCHEMA_VERSION is newer.
+# 0 means never onboarded. A repo file may not set it.
+onboarding:
+  schema_version: 0
 roles:
   orchestrator:
     router_selects: false

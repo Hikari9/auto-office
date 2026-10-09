@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "auto-office"
-version = "3.4.1"
+version = "3.5.0"
 description = "Auto Office: adaptive, independently reviewed agent engineering runtime behind one `office` CLI."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -43,6 +43,7 @@ packages = ["src/office"]
 # The hub (SKILL.md) links to these for operating detail, so a wheel-only install needs them.
 "docs/orchestrator-reference.md" = "office/_resources/docs/orchestrator-reference.md"
 "docs/review-convergence.md" = "office/_resources/docs/review-convergence.md"
+"docs/onboarding.md" = "office/_resources/docs/onboarding.md"
 "scripts/codex-usage.py" = "office/_resources/scripts/codex-usage.py"
 "scripts/claude-usage.py" = "office/_resources/scripts/claude-usage.py"
 "scripts/agy-usage.py" = "office/_resources/scripts/agy-usage.py"

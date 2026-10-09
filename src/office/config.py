@@ -107,6 +107,9 @@ def resolve(repo_root: Path | None, sets: list[str] | None = None,
                 warnings.append({"tier": tier, "key": k, "reason": "not-configurable-ignored"})
             elif k not in allowed:
                 warnings.append({"tier": tier, "key": k, "reason": "unknown-key-ignored"})
+            elif tier == "repo" and k == "onboarding":
+                # Onboarding completion is the user's, not a repository's (#484).
+                warnings.append({"tier": tier, "key": k, "reason": "user-level-key-not-repo-configurable"})
             elif tier == "repo" and k == "paths" and isinstance(v, dict) and "runs_db" in v:
                 # The authority is machine-level; a repo may not move it.
                 warnings.append({"tier": tier, "key": "paths.runs_db", "reason": "authority-path-not-repo-configurable"})

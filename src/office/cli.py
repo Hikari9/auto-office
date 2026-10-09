@@ -74,6 +74,9 @@ Auto Office {ver}
   office web start|stop|status|serve [--port N] [--fixture small|large]
                                     the local Office web UI (loopback only)
   office setup                      interactive: choose preferred agents, models, and cost policy
+  office onboard [--harness H]      first-run onboarding: status, eligible routes, current-harness integration
+  office onboard --planner|--executor|--reviewer <office|keep|harness/model@effort> | --skip
+                                    record onboarding answers as user-level preferences (or keep them all)
   office doctor                     check the installation, hooks, and runtimes
   office update [--check]           update Auto Office itself; --check looks for release/source updates
   office upgrade [run] [--to X.Y]   move a run to a newer release line (dry run; --apply)
@@ -351,6 +354,11 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--user", dest="tier", action="store_const", const="user")
     s.add_argument("--repo", dest="tier", action="store_const", const="repo")
     s.add_argument("-y", "--yes", action="store_true", help="write without the final confirmation")
+    s = sp.add_parser("onboard", parents=[common])
+    s.add_argument("--planner", help="office | keep | harness/model@effort")
+    s.add_argument("--executor", help="office | keep | harness/model@effort")
+    s.add_argument("--reviewer", help="office | keep | harness/model@effort (plan and code review)")
+    s.add_argument("--skip", action="store_true", help="keep every preference and mark onboarding complete")
     s = sp.add_parser("doctor", parents=[common])
     s.add_argument("--fix", action="store_true")
     s.add_argument("--probe-vision", action="store_true", help="run image-capability probes on visual routes (uses quota)")
@@ -369,6 +377,10 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--shell-guard", dest="shell_guard", action="store_true", default=None,
                    help="Claude: add a Bash hook that rewrites `sed -i` to `sed -i ''` on macOS")
     s.add_argument("--no-shell-guard", dest="shell_guard", action="store_false", help="remove that hook")
+    s.add_argument("--item", dest="items", action="append",
+                   help="apply only this integration item (session.start, prompt.submit, tool.pre, read-rules); repeatable")
+    s.add_argument("--no-hooks", dest="hooks", action="store_false",
+                   help="register the runtime only; write no harness config")
     s = sp.add_parser("uninstall", parents=[common])
     s.add_argument("--purge", action="store_true")
     # Authority and compatibility: discoverable, never in role briefs.
@@ -657,6 +669,12 @@ def _run(args, unknown) -> int:
     if cmd == "setup":
         from office import configcmd
         return emit(configcmd.setup(tier=args.tier or "user", yes=args.yes, cwd=cwd), args)
+    if cmd == "onboard":
+        from office import onboarding
+        answers = {"planner": args.planner, "executor": args.executor, "reviewer": args.reviewer}
+        if args.skip or any(answers.values()):
+            return emit(onboarding.apply(answers, skip=args.skip, cwd=cwd), args)
+        return emit(onboarding.status(harness=args.harness, cwd=cwd), args)
     if cmd == "doctor":
         from office import doctor
         return emit(doctor.doctor(fix=args.fix, probe_vision=args.probe_vision), args)
@@ -666,7 +684,7 @@ def _run(args, unknown) -> int:
     if cmd == "install":
         from office import install
         return emit(install.install(only=args.only, dry_run=args.dry_run, migrate_legacy=args.migrate_legacy_hooks,
-                                    shell_guard=args.shell_guard), args)
+                                    shell_guard=args.shell_guard, items=args.items, hooks=args.hooks), args)
     if cmd == "uninstall":
         from office import install
         return emit(install.uninstall(purge=args.purge), args)
