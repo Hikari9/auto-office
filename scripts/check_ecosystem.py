@@ -19,6 +19,7 @@ INIT_MARKERS=('TODO:', 'example_asset.txt', 'scripts/example.py', 'references/ap
 # #427 manifesto alignment moved detail out of the hub into docs/orchestrator-reference.md (264 -> 183), so 190 stands.
 # Executor self-review, office preflight and the worker status line: 177 -> 182 lines, ~5% headroom.
 # Issue-only monitoring adds a short lifecycle contract to the hub.
+# #484 first-run onboarding gate (office onboard) between the install check and Start: 197 -> 209.
 HUB_LINE_BUDGET = 210
 # 3.1: each 3.0 spoke carries a three-line banner pointing 3.1 runs at the office CLI;
 # the per-spoke budgets below grew by exactly those lines.

@@ -205,6 +205,8 @@ def _check_key(key: str, tier: str, force: bool) -> None:
                      next_step="office config --list --all")
     if tier == "repo" and key == "paths.runs_db":
         raise _usage("paths.runs_db is machine-level; a repo may not move it", next_step="office config --user paths.runs_db <path>")
+    if tier == "repo" and parts[0] == "onboarding":
+        raise _usage("onboarding state is user-level; a repo may not set it", next_step="office onboard")
     if force:
         return
     node: Any = default
@@ -550,7 +552,14 @@ def setup(*, tier: str, yes: bool = False, cwd: Path | None = None,
         out(f"  {key} = {'(reset to default)' if value is None else _show(key, value)}")
     if not yes and ask(f"Write to {target}? [Y/n] ").lower() not in ("", "y", "yes"):
         return Result(lines=["nothing written"], data={"changed": []})
+    return apply_changes(tier, changes, cwd)
 
+
+def apply_changes(tier: str, changes: list[tuple[str, Any]], cwd: Path | None = None) -> Result:
+    """Write (key, value) pairs to one tier's file in a single validated, atomic
+    write; a None value unsets its key. Nothing is written when validation fails."""
+    target = _tier_path(tier, cwd)
+    data = _load(target)
     for key, value in changes:
         if value is None:
             _unset_path(data, key.split("."))
@@ -563,3 +572,23 @@ def setup(*, tier: str, yes: bool = False, cwd: Path | None = None,
     if backup:
         res.notices.append(f"note: comments in {target} are not kept; the original is at {backup}")
     return res
+
+
+def role_preferences(roles: list[str], cwd: Path | None = None) -> dict[str, dict]:
+    """Each role's effective preferred_seed and where it comes from: what the
+    user and repo files set (None when unset) and the shipped default."""
+    root = _repo_root(cwd)
+    files = cfg.read_files(root)
+    effective, _ = cfg.resolve(root, files=files)
+    default = cfg.load_yaml(cfg.default_config_path()) or {}
+    tiers = {t: (yaml.safe_load(files[t]) or {}) if files.get(t) is not None else {} for t in ("user", "repo")}
+    out = {}
+    for role in roles:
+        parts = ["roles", role, "preferred_seed"]
+        row = {"effective": _get_path(effective, parts)[1] or [], "default": _get_path(default, parts)[1] or []}
+        for t, data in tiers.items():
+            ok, value = _get_path(data, parts) if isinstance(data, dict) else (False, None)
+            row[t] = value if ok else None
+        row["origin"] = "repo" if row["repo"] is not None else "user" if row["user"] is not None else "default"
+        out[role] = row
+    return out

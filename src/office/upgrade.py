@@ -23,7 +23,8 @@ from office.util import dumps, loads, now_iso, short
 # its gates_json (none recorded = v3.1), so an upgraded run is never converted.
 # 3.3 -> 3.4 needs none: no stored review record changes meaning, and a closed
 # plan review simply stays closed. A run mid-way through a plan-review state
-# 3.4 no longer has is refused instead (`_plan_review_blocker`).
+# 3.4 no longer has is refused instead (`_plan_review_blocker`). 3.4 -> 3.5 needs
+# none: onboarding (#484) adds only a user-level config key and new commands.
 MIGRATIONS: dict[tuple[str, str], object] = {}
 
 
