@@ -230,6 +230,16 @@ def test_a_spec_failure_is_unavailable_with_the_spec_named_and_no_producer_findi
     gate = _gates(env, "visual")[0]
     assert (gate["status"], gate["review_status"], gate["verdict"]) == ("done", "UNAVAILABLE", None), gate
     assert "visual spec defect" in gate["summary"] and "button#buy" in gate["summary"], gate["summary"]
+    assert gate["evidence_status"] == "SPEC_DEFECT"
+    nxt = _status(env)["next"]
+    assert nxt.index("amend the plan visual: block") < nxt.index("button#buy"), nxt
+    assert "office review" not in nxt, nxt
+    from office import convergence
+    assert not convergence.summary(env.con(), _run_row(env))[0]["fallback_available"]
+    report = tmp_path / "vis.txt"
+    report.write_text("EVIDENCE_STATUS: COMPARABLE\n" + APPROVED)
+    code, out = env.office("review", "L-T1:visual", "--report", str(report), "--inspected", "desktop-default.png")
+    assert code != 0 and "fallback-not-allowed" in out, out
     assert not _q(env, "SELECT 1 FROM findings WHERE gate_kind='visual'")
     assert _q(env, "SELECT status FROM tasks WHERE id='T1'")[0]["status"] != "changes_required"
     assert _scope(env, "L-T1")["status"] in ("unavailable", "reviewing")
@@ -286,3 +296,16 @@ def test_an_invalid_frame_with_no_cause_is_still_recaptured(env, monkeypatch, tm
     gate = _gates(env, "visual")[0]
     assert gate["review_status"] == "EVIDENCE_BLOCKED" and gate["evidence_status"] == "INVALID_COMPARISON", gate
     assert int(gate["recaptures"]) == 1
+
+
+def test_a_worker_cannot_revoke_a_lane_review(env):
+    """A dispatched producer or reviewer must not cancel the review that judges it: refused before any write."""
+    _unavailable_lane(env)
+    gid = _rewind_to_running(env)
+    for marker in ({"OFFICE_DISPATCH_ID": "Dsome"}, {"OFFICE_ROLE": "executor"}):
+        code, out = env.office("revoke", "L-T1:convergence", env=marker)
+        assert code == 4 and "worker-cannot-revoke" in out, out
+    gate = _gate(env, gid)
+    assert gate["status"] == "running" and gate["review_status"] is None, gate
+    assert _q(env, "SELECT status FROM outbox WHERE id='Jrev'")[0]["status"] == "queued"
+    assert _q(env, "SELECT ended_at FROM dispatches WHERE id='Drev'")[0]["ended_at"] is None
