@@ -301,6 +301,11 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
         out += [f"    {line}" for line in a["content"][:AMENDMENT_BRIEF_CHARS].splitlines()]
         if len(a["content"]) > AMENDMENT_BRIEF_CHARS:
             out.append(f"    [cut at {AMENDMENT_BRIEF_CHARS} characters: ask the orchestrator for the rest]")
+    from office import raising
+    for a in raising.answered_for_brief(con, run["id"], packet["task_id"], packet["dispatch_id"]) \
+            if con is not None and packet.get("dispatch_id") else []:
+        out += ["", f"ANSWER to your raised {a['kind']} ({raising._shown(a['text'], 160)}): {raising._shown(a['answer'], 600)}",
+                "    It does not change your contract or scope; only an AMENDMENT does."]
     pr = packet.get("pr")
     if pr:
         out += ["", f"GIT commit and push your work to this branch as you go: {pr['push']}",
@@ -319,10 +324,13 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
                 "RULES do not merge, push, deploy, publish, or send anything external. Committed and uncommitted",
                 "edits are both captured at submit. Do not write JSON or receipts for Office."]
     out += ["If an office command prints AMENDMENT <id>: apply it at a safe boundary, then run office ack <id>.",
-            "QUESTIONS if you need a decision, ask once with your question tool or end your turn on the question; "
-            "the orchestrator is notified by office wait and answers. Planning, scope, ordering, and test-detail "
-            "questions it decides; requirement, authority, and irreversible or external ones it takes to the user. "
-            "Do not guess past a scope or requirement doubt, and do not poll for the answer."]
+            "QUESTIONS if you need a decision or cannot finish, run `office raise [--kind question|blocker|scope-request] "
+            "[--path P] -- \"<text>\"` (no commit needed; office submit takes finished work only), then stop and wait: "
+            "the orchestrator is notified by office wait and the answer arrives as a message. A question tool or ending "
+            "your turn on the question also works. Planning, scope, ordering, and test-detail questions it decides; "
+            "requirement, authority, and irreversible or external ones it takes to the user. An answer never changes "
+            "your contract: a scope-request needs a contract amendment. Do not guess past a scope or requirement "
+            "doubt, and do not poll for the answer."]
     base = packet.get("base_commit") or "HEAD"
     out += simplify_lines(base) + self_review_lines(base, self_review_tier(run.get("gear"), run.get("risk_json")))
     out += ["WHEN DONE run: office preflight   (from this worktree; read-only). It prints one verdict:",
