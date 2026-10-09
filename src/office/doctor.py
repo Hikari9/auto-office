@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tomllib
 from pathlib import Path
@@ -138,6 +139,7 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
         problems += count
     res.add("known gap: Codex tool.pre denial is unverified; Codex hooks stay warn-only and are not installed")
     res.lines.extend(codex_hook_warnings(ident[0] if ident else None))
+    res.lines.extend(claude_import_warnings(ident[0] if ident else None))
     res.add("known gap: compact_advisor.sh was never wired to PostCompact; 3.1 keeps state durable in runs.db instead")
     all_adapters = adapters.load_all()
     for aid, a in sorted(all_adapters.items()):
@@ -169,6 +171,54 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
     res.next = "office doctor --fix" if problems and not fix else None
     res.exit_code = 1 if problems else 0
     return res
+
+
+_CLAUDE_IMPORT = re.compile(r"(?<![\w`@/])@((?:~|\.{1,2}|/)?[\w.\-~/]*[\w.\-/][\w.\-~/]*)")
+
+
+def claude_import_warnings(root: Path | None) -> list[str]:
+    """Warn when the repo's CLAUDE.md, or a file it imports, has an `@` import that
+    resolves outside the repo root. Claude Code opens every such session on an
+    "Allow external CLAUDE.md file imports?" dialog that holds a Herdr launch.
+    Office never answers it; the fix is the user's (approve it once in Claude, or
+    move the import inside the repo)."""
+    if not root:
+        return []
+    root = Path(root).resolve()
+    start = root / "CLAUDE.md"
+    if not start.is_file():
+        return []
+    outside: list[tuple[str, str]] = []
+    seen: set[Path] = set()
+    queue = [(start, 0)]
+    while queue:
+        f, depth = queue.pop()
+        if f in seen or depth > 4:
+            continue
+        seen.add(f)
+        try:
+            text = f.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            continue
+        # Imports inside fenced code blocks and inline code are text, not imports.
+        text = re.sub(r"```.*?```", "", text, flags=re.S)
+        text = re.sub(r"`[^`\n]*`", "", text)
+        for m in _CLAUDE_IMPORT.finditer(text):
+            raw = m.group(1).rstrip(".,;:)")
+            if not (raw.startswith(("~", ".", "/")) or "/" in raw or raw.lower().endswith(".md")):
+                continue  # `@name` mentions are not file imports
+            target = Path(os.path.expanduser(raw))
+            target = (target if target.is_absolute() else f.parent / target).resolve()
+            if target != root and root not in target.parents:
+                outside.append((f.name if f == start else str(f.relative_to(root)), raw))
+            elif target.is_file():
+                queue.append((target, depth + 1))
+    if not outside:
+        return []
+    shown = ", ".join(f"{raw} (in {src})" for src, raw in outside[:3]) + (f" (+{len(outside) - 3} more)" if len(outside) > 3 else "")
+    return [f"claude: CLAUDE.md imports outside the repo: {shown}. Every Herdr Claude launch here stops on Claude's "
+            "'Allow external CLAUDE.md file imports?' dialog and falls back to headless. Office does not answer it: "
+            "approve it once in Claude Code for this repo, or move the import inside the repo"]
 
 
 def codex_hook_warnings(cwd: Path | None = None) -> list[str]:

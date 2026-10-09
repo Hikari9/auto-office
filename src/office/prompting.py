@@ -9,7 +9,7 @@ composer, never sending the text twice.
 """
 from __future__ import annotations
 
-from office import db, dispatch, gates, state
+from office import amend, db, dispatch, gates, state
 from office.result import Result
 from office.state import Refused, Usage
 
@@ -29,12 +29,28 @@ def _resolve(con, run: dict, target: str) -> dict:
     return state.get_dispatch(con, task["current_dispatch_id"])
 
 
+def _queue(con, run: dict, d: dict, who: str, text: str) -> Result:
+    """A headless worker has no pane to type into: queue the message so it rides the
+    worker's next `office` command response, the way an amendment delivery does. It is
+    not a plan change and carries no ack (#445)."""
+    if not gates.worker_live(con, d["id"]):
+        raise Refused("dispatch-ended", f"{d['id']} ({who}) is not running; nothing would read a queued message",
+                      scope=who, next_step="office status")
+    with db.transaction(con):
+        state.emit(con, run, amend.MESSAGE_KIND, f"{who} {d['id']}: orchestrator message queued", audience="runtime",
+                   task_id=d.get("task_id"), dispatch_id=d["id"], payload={"text": text})
+    return Result(lines=[f"queued: {d['id']} runs headless; it sees this on its next office command"],
+                  next="office status")
+
+
 def prompt(con, run: dict, target: str | None, text: str) -> Result:
     if not target or not text.strip():
         raise Usage("prompt-usage", "name the task or dispatch and the message",
                     next_step='office prompt <task|dispatch> -- "<message>"')
     d = _resolve(con, run, target)
     who = d.get("task_id") or d["id"]
+    if d.get("launcher") in ("process", "process-fallback") and d.get("task_id"):
+        return _queue(con, run, d, who, text)
     if d.get("launcher") != "herdr" or not d.get("pane_id"):
         raise Refused("no-pane", f"{d['id']} ({who}) has no Herdr pane to prompt", scope=who)
     # Ask herdr, not the dispatch row: a reviewer that settled without a reply

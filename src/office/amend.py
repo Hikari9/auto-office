@@ -15,7 +15,7 @@ from pathlib import Path
 from office import db, jobs, paths, planfile, planpath, plans, state
 from office.result import Result
 from office.state import Refused, Usage
-from office.util import dumps, now_iso, sha256_bytes
+from office.util import dumps, loads, now_iso, sha256_bytes
 
 # Words that signal an authority-envelope change (external, irreversible, or
 # destructive action). An "ordinary" amendment carrying one is refused. A term that
@@ -529,6 +529,24 @@ def pending_block(con, run: dict, dispatch_id: str) -> list[str]:
     return [f"AMENDMENT {r['amendment_id']} delivered | task {r['task_id']} | plan -> p{r['target_version']}",
             *[f"  {line}" for line in r["content"].splitlines()[:8]],
             f"apply it at a safe boundary, then: office ack {r['amendment_id']}"]
+
+
+MESSAGE_KIND = "prompt.queued"
+
+
+def pending_messages(con, run: dict, dispatch_id: str) -> list[str]:
+    """Orchestrator messages queued by `office prompt` for a headless worker (#445). They
+    ride the worker's command responses like an amendment, are marked delivered (the
+    dispatch's cursor moves past them) when shown, and ask for no ack."""
+    consumer = f"message:{dispatch_id}"
+    events = state.unread_events(con, run["id"], consumer, ("runtime",), limit=200)
+    events = [e for e in events if e["kind"] == MESSAGE_KIND and e["dispatch_id"] == dispatch_id]
+    if not events:
+        return []
+    with db.transaction(con):
+        state.advance_cursor(con, run["id"], consumer, events[-1]["seq"])
+    return ["ORCHESTRATOR MESSAGE (not a plan change; no ack needed):",
+            *[f"  {line}" for e in events for line in (loads(e["payload_json"], {}).get("text") or "").splitlines()[:12]]]
 
 
 def ack(con, run: dict, amendment_id: str) -> Result:
