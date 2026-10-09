@@ -1152,7 +1152,8 @@ def cap_waive(con, run: dict, scope_id: str, *, reason: str | None) -> Result:
     It is not landing authority and needs none: the reviewer's verdict stays
     RECHECK, each waiver is bound to the composed commit and lists the findings
     left open, and landing still needs the user's authorization."""
-    if os.environ.get("OFFICE_DISPATCH_ID"):
+    # Environment markers are advisory (a worker could unset them); landing stays a separate human gate.
+    if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
         raise Refused("worker-cannot-waive", "a producer, planner or reviewer cannot waive a review; the orchestrator does")
     if not contract.has_cap_waiver(run):
         raise Refused("cap-waiver-unavailable", "this run predates the orchestrator cap waiver (#423): the user decides at "
@@ -1199,14 +1200,35 @@ def cap_waive(con, run: dict, scope_id: str, *, reason: str | None) -> Result:
                          "this is not landing authority"], next="exceptions only; office status")
 
 
-def producer_sessions(con, run: dict, scope: dict) -> set[str]:
-    """Harness session ids of every dispatch that produced a revision of the scope's tasks."""
+def producer_sessions(con, run: dict, scope: dict) -> tuple[set[str], bool]:
+    """Harness session ids of every dispatch that produced a revision of the scope's
+    tasks, and whether every one of them has a recorded id (False: unknown producer)."""
     ids: set[str] = set()
-    for r in con.execute("SELECT DISTINCT d.session_id FROM revisions r JOIN dispatches d ON d.id=r.dispatch_id "
-                         "WHERE r.run_id=? AND r.task_id IN (%s) AND d.session_id IS NOT NULL" % ",".join("?" * len(scope["tasks"])),
+    complete = True
+    for r in con.execute("SELECT d.session_id FROM revisions r LEFT JOIN dispatches d ON d.id=r.dispatch_id "
+                         "WHERE r.run_id=? AND r.task_id IN (%s)" % ",".join("?" * len(scope["tasks"])),
                          (run["id"], *scope["tasks"])):
-        ids.add(r["session_id"])
-    return ids
+        if r["session_id"]:
+            ids.add(r["session_id"])
+        else:
+            complete = False
+    return ids, complete
+
+
+def independence_of_orchestrator(con, run: dict, scope: dict) -> str:
+    """How an orchestrator review of `scope` is recorded (#423). It fails closed:
+    independent only when this session's harness session id is known and every
+    producer's is recorded and different. The same session is refused; anything
+    unknown is recorded as degraded. Only OFFICE_SESSION-style ids share an
+    identifier space with dispatches.session_id (herdr pane and process keys do not)."""
+    mine = {k["id"] for k in orchestrator_session()["keys"] if k["harness"] not in ("herdr", "proc")}
+    producers, complete = producer_sessions(con, run, scope)
+    if mine & producers:
+        raise Refused("self-review-prohibited", f"{scope['id']}: this session produced the work, so it cannot review it "
+                      "as independent", scope=scope["id"],
+                      next_step="office resume retries the specialist chain; a different orchestrator session "
+                                "may review; or waive at the round cap")
+    return contract.INDEPENDENT_ORCHESTRATOR if mine and complete else contract.DEGRADED
 
 
 def decide(con, run: dict, scope_id: str, choice: str, *, quote: str | None, reason: str | None = None) -> Result:
@@ -1333,17 +1355,9 @@ def fallback_review(con, run: dict, spec: str, report: Path, *, inspected: list[
                               f"screenshot ({', '.join(sorted(needed - seen)) or 'none were captured'} not inspected); "
                               "no visual verdict is recorded", scope=scope["id"],
                               next_step="a capable reviewer (office resume retries the chain) or a waiver with landing authority")
-        independent = contract.has_cap_waiver(run)
-        if independent:
-            # #423: independence is a different agent/session from the producer. The orchestrator
-            # qualifies unless it is the session that produced this work; then it cannot review it.
-            mine = {k["id"] for k in orchestrator_session()["keys"]}
-            if mine & producer_sessions(con, run, scope):
-                raise Refused("self-review-prohibited", f"{scope['id']} {kind}: this session produced the work, so it "
-                              "cannot review it as independent", scope=scope["id"],
-                              next_step="office resume retries the specialist chain; a different orchestrator session "
-                                        "may review; or waive at the round cap")
-        how = contract.INDEPENDENT_ORCHESTRATOR if independent else contract.DEGRADED
+        # #423: independence is a different agent/session from the producer (see independence_of_orchestrator).
+        how = independence_of_orchestrator(con, run, scope) if contract.has_cap_waiver(run) else contract.DEGRADED
+        independent = how == contract.INDEPENDENT_ORCHESTRATOR
         label = "independent orchestrator fallback" if independent else "degraded, non-independent fallback"
         gid, _ = _new_gate(con, run, scope, _rev(scope["id"], st["commit"]), kind, int(g["round"] or 1),
                            int(g.get("cycle") or 1))
@@ -1360,7 +1374,8 @@ def fallback_review(con, run: dict, spec: str, report: Path, *, inspected: list[
     jobs.kick(con, run["id"])
     return Result(lines=[f"{scope['id']} {kind} {parsed.verdict} recorded as an "
                          + ("independent orchestrator review (the producer is a different session)" if independent
-                            else "degraded, non-independent orchestrator review")
+                            else "degraded, non-independent orchestrator review (this session or a producer session "
+                                 "could not be identified)")
                          + " (shown on the landing receipt)"], next="exceptions only; office status")
 
 

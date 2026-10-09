@@ -96,6 +96,7 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
             raise Usage("no-convergence-contract", "--review-rounds sets the convergence-v1 round cap; this run "
                         "pins the v3.1 contract", next_step="drop --review-rounds")
         gates["convergence_max_rounds"] = contract.check_round_cap(review_rounds)
+        gates["visual_review_max_rounds"] = gates["convergence_max_rounds"]
     base_sha = paths.git(top, "rev-parse", base or "HEAD")
     run_id = new_run_id()
     sdir = paths.run_dir(run_id)

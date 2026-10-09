@@ -289,6 +289,7 @@ def resolve_gates(gear: str, risk_high: bool, config: dict) -> dict:
         # reviews, pinned at start so resume and recovery keep it.
         gates["convergence_max_rounds"] = contract.check_round_cap(
             (config.get("review") or {}).get("max_rounds", contract.MAX_ROUNDS))
+        gates["visual_review_max_rounds"] = gates["convergence_max_rounds"]  # one cap for every lane gate
     return gates
 
 

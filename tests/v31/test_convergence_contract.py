@@ -469,8 +469,8 @@ def test_reviewer_failures_walk_the_fallback_chain_without_spending_a_round(env)
 
 def test_exhausted_specialists_allow_a_degraded_orchestrator_review(env, tmp_path):
     """12, 13, 33, 34: every route failing is UNAVAILABLE status (not a verdict); the
-    orchestrator may then review, recorded as independent when it did not produce the work
-    (#423); a worker cannot."""
+    orchestrator may then review, recorded as degraded when its identity or a producer's is unknown
+    (#423 fails closed); a worker cannot."""
     _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"exit": 1}])
     env.office("dispatch", "T1", check=0)
     gate = _gates(env, "convergence_review")[0]
@@ -484,12 +484,12 @@ def test_exhausted_specialists_allow_a_degraded_orchestrator_review(env, tmp_pat
     assert code == 4 and "producer or worker" in out, out
     env.office("review", "L-T1:convergence", "--report", str(report), check=0)
     gates = _gates(env, "convergence_review")
-    assert gates[-1]["independence"] == "independent-orchestrator" and gates[-1]["verdict"] == "APPROVED"
+    assert gates[-1]["independence"] == "degraded-orchestrator" and gates[-1]["verdict"] == "APPROVED"
     assert _scope(env, "L-T1")["status"] == "approved"
     from office import convergence
     con = env.con()
     receipt = convergence.receipt(con, _run_row(env))
-    assert receipt["degraded"] == [] and receipt["orchestrator_reviews"] == ["L-T1:convergence_review"]
+    assert receipt["degraded"] == ["L-T1:convergence_review"] and receipt["orchestrator_reviews"] == []
 
 
 # ------------------------------------------------------------------ waivers (14, 35-39)
@@ -608,7 +608,7 @@ def test_visual_fallback_cannot_approve_uninspected_evidence(env, monkeypatch, t
     assert code == 4 and "cannot-inspect-evidence" in out or "inspect every" in out, out
     assert all(g["verdict"] is None for g in _gates(env, "visual"))
     env.office("review", "L-T1:visual", "--report", str(report), "--inspected", str(shot), check=0)
-    assert _gates(env, "visual")[-1]["independence"] == "independent-orchestrator"
+    assert _gates(env, "visual")[-1]["independence"] == "degraded-orchestrator"
     assert _scope(env, "L-T1")["status"] == "approved"
 
 
