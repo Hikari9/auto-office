@@ -163,6 +163,30 @@ def emit(con: sqlite3.Connection, run: dict, kind: str, summary: str, *, audienc
     return cur.lastrowid
 
 
+def record_route_change(con: sqlite3.Connection, run: dict, task_id: str, before: str | None, after: str, *,
+                        kind: str, reason: str, actor: str, dispatch_id: str | None = None,
+                        stage: str = "executor", extra: dict | None = None) -> int:
+    """One `route.changed` event (#426): old and new route, why, who, when, and
+    the task/stage it affects. Every swap of a recorded route goes through here,
+    so none is silent. Caller holds the transaction."""
+    payload = {"before": before, "after": after, "kind": kind, "reason": reason, "actor": actor, "task_id": task_id,
+               "stage": stage, "at": now_iso(), "dispatch_id": dispatch_id, **(extra or {})}
+    return emit(con, run, "route.changed", f"{task_id} {stage} route {before or 'unrecorded'} -> {after} "
+                f"({kind} by {actor}: {reason[:100]})", task_id=task_id, dispatch_id=dispatch_id, payload=payload)
+
+
+def route_changes(con: sqlite3.Connection, run_id: str, task_id: str) -> list[dict]:
+    rows = con.execute("SELECT payload_json, created_at FROM events WHERE run_id=? AND task_id=? AND kind='route.changed' "
+                       "ORDER BY seq", (run_id, task_id)).fetchall()
+    return [{"recorded_at": r["created_at"], **loads(r["payload_json"], {})} for r in rows]
+
+
+def recorded_route(task: dict) -> dict:
+    """The task's recorded effective route (`candidate`, `declared`, `route_source`), or {}."""
+    route = loads(task.get("route_json"), {})
+    return route if isinstance(route, dict) and route.get("candidate") else {}
+
+
 SIGNAL_KIND = "worker.signal"
 SIGNAL_REPEAT_S = 600  # the same reason from the same dispatch is news again after this long
 SIGNAL_CONSUMER = "orchestrator-signal"  # its own cursor: a signal is a stall whatever else is unread
