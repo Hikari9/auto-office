@@ -41,6 +41,8 @@ def test_redaction_removes_private_identifiers():
     for private in ("/Users", "rico", "topsecret", "me@", "https://secret"):
         assert private not in public
     assert "private value" not in bugwatch.sanitize('{"token": "private value"}')
+    assert bugwatch.sanitize("/Users/rico/company/file") == "[redacted-path]"
+    assert bugwatch.sanitize(r"C:\Users\rico\company\file") == "[redacted-path]"
     # Redact before truncating, including credentials that cross the old input cutoff.
     public = bugwatch.sanitize("x " * 880 + "token=private-value")
     assert "private" not in public
@@ -78,7 +80,8 @@ def test_weak_suspicion_retained_without_publishing(env,monkeypatch):
         bugwatch._process(con,row)
         assert con.execute("SELECT status FROM self_improve_incidents").fetchone()[0]=="suspected"
         bugwatch._record(con,"run-3","job.failed","weird unrelated external failure","event:2")
-        assert con.execute("SELECT status FROM self_improve_incidents").fetchone()[0]=="pending"
+        again=con.execute("SELECT status,report_json FROM self_improve_incidents").fetchone()
+        assert again["status"]=="pending" and again["report_json"] is None
     finally:
         con.close()
 
@@ -102,6 +105,19 @@ def test_issue_only_publisher_deduplicates_and_redacts(env,monkeypatch):
         return "https://github.com/Hikari9/auto-office/issues/999\n"
     monkeypatch.setattr(bugwatch,"_gh",fake)
     assert bugwatch.publish(incident,report).endswith("/999")
+
+
+def test_dedup_searches_later_pages_and_ignores_pull_requests(monkeypatch):
+    fingerprint = "b" * 64
+    marker = f"<!-- auto-self-improve:{fingerprint} -->"
+    def gh(*args):
+        assert args[0] == "api"  # a match on a later page must prevent creation
+        return json.dumps([
+            [{"pull_request": {}, "body": marker, "html_url": "pr-url"}],
+            [{"body": marker, "html_url": "closed-issue-url"}],
+        ])
+    monkeypatch.setattr(bugwatch, "_gh", gh)
+    assert bugwatch.publish({"fingerprint": fingerprint}, {"title": "defect"}) == "closed-issue-url"
     assert len(calls)==2 and not any("pr" in c or "push" in c for call in calls for c in call)
     calls.clear()
     monkeypatch.setattr(bugwatch,"_gh",lambda *a:json.dumps([[{"title":"different",
@@ -138,6 +154,22 @@ def test_repeat_weak_incident_is_reinvestigated(env, monkeypatch):
         assert row["report_json"] is None
         bugwatch._process(con, row)
         assert con.execute("SELECT status FROM self_improve_incidents").fetchone()[0] == "filed"
+    finally:
+        con.close()
+
+
+def test_dead_jobs_and_subagents_without_events_are_captured_once(env):
+    con=env.con()
+    try:
+        con.execute("INSERT INTO outbox(id,run_id,kind,dedup_key,payload_json,office_version,status,error,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,datetime('now'))",
+                    ("job1","run-5","launch_agent","test-job1","{}",version.current(),"failed","child crashed"))
+        con.execute("INSERT INTO dispatches(id,run_id,status,terminal_classification,exit_code) "
+                    "VALUES(?,?,?,?,?)",("disp1","run-5","failed","crashed",1))
+        assert bugwatch.capture(con,"run-5",force=True)==0
+        assert con.execute("SELECT COUNT(*) FROM self_improve_incidents").fetchone()[0]==2
+        assert bugwatch.capture(con,"run-5",force=True)==0
+        assert con.execute("SELECT SUM(occurrences) FROM self_improve_incidents").fetchone()[0]==2
     finally:
         con.close()
 
@@ -179,3 +211,18 @@ def test_investigator_has_no_tools_or_inherited_authority(env, monkeypatch):
     monkeypatch.setattr(bugwatch.subprocess, "run", run)
     assert bugwatch.investigate(None, {"kind": "job.failed", "summary": "relay crashed",
                                       "origin": "event:1", "occurrences": 1})["confidence"] == "strong"
+
+
+def test_worker_drains_more_than_ten_ready_incidents(env, monkeypatch):
+    con=env.con()
+    try:
+        for i in range(12):
+            bugwatch._record(con,'run-batch','job.failed',f'failure case {i}',f'event:{i}')
+        monkeypatch.setattr(bugwatch,'investigate',lambda *args:{'confidence':'strong','title':'test defect',
+                            'expected':'success','actual':'failed','evidence':'recorded failure','reproduction':''})
+        monkeypatch.setattr(bugwatch,'publish',lambda incident, report:
+                            'https://github.com/Hikari9/auto-office/issues/999')
+        assert bugwatch.worker()==0
+        assert con.execute("SELECT COUNT(*) FROM self_improve_incidents WHERE status='filed'").fetchone()[0]==12
+    finally:
+        con.close()
