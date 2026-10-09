@@ -850,6 +850,11 @@ def test_control_characters_and_length_never_reach_the_output_raw(repo):
         assert "\x1b" not in line and "\x07" not in line and len(line) < 600, line
 
 
+def test_a_test_name_too_long_to_stat_is_not_a_file(tmp_path):
+    from office import preflight
+    assert preflight._test_file_exists(tmp_path, "t" * 5000 + ".py") is False
+
+
 def test_bom_and_crlf_ledgers_parse(repo):
     head = _git(repo, "rev-parse", "HEAD")
     text = ledger_text(head, findings=["FINDING low security calc.py:1 | s | fixed"]).replace("\n", "\r\n")
