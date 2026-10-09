@@ -470,3 +470,22 @@ def task_row(env, tid="T1") -> dict:
         return dict(con.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
     finally:
         con.close()
+
+
+def write_clean_ledger(wt) -> str:
+    """Write the clean self-review ledger naming the worktree's HEAD (#421). Returns that HEAD."""
+    head = subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    lenses = "\n".join(f"LENS {n} reviewed" for n in ("security", "edge-cases", "platform", "test-strength"))
+    (Path(wt) / "OFFICE_SELF_REVIEW.md").write_text(f"COMMIT {head}\nROUND 1\n{lenses}\n")
+    return head
+
+
+def self_reviewed(wt, *files: str) -> str:
+    """Commit `files` in the task worktree and write the clean self-review ledger `office submit` now requires
+    for substantive in-scope work (#421). Returns the HEAD the ledger names."""
+    def git(*a):
+        return subprocess.run(["git", "-C", str(wt), "-c", "user.email=t@e.test", "-c", "user.name=t", *a],
+                              check=True, capture_output=True, text=True).stdout.strip()
+    git("add", "--", *files)
+    git("commit", "-qm", "work")
+    return write_clean_ledger(wt)

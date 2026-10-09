@@ -121,12 +121,14 @@ def _comply_with_self_review(cwd, env, writes, err):
     """What a compliant executor does before `office submit` (#421): commit the work it wrote, then write
     a clean ledger naming that HEAD. An action with "no_ledger": true skips both."""
     def git(*a):
-        proc = subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=w", *a], cwd=str(cwd), env=env,
+        proc = subprocess.run(["git", *a], cwd=str(cwd), env=env,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         err.write(proc.stdout)
         return proc.stdout.strip()
-    git("add", "--", *writes)
-    git("commit", "-qm", "work", "--allow-empty")
+    git("add", "--", *[w for w in writes if w.endswith(".py")])  # the in-scope source; other writes stay pending
+    if subprocess.run(["git", "commit", "-qm", "work", "--allow-empty"], cwd=str(cwd), env=env,
+                      capture_output=True).returncode:  # no identity configured: use a stand-in
+        git("-c", "user.email=a@b", "-c", "user.name=w", "commit", "-qm", "work", "--allow-empty")
     head = git("rev-parse", "HEAD")
     lenses = "\n".join(f"LENS {n} reviewed" for n in ("security", "edge-cases", "platform", "test-strength"))
     (Path(cwd) / "OFFICE_SELF_REVIEW.md").write_text(f"COMMIT {head}\nROUND 1\n{lenses}\n")
@@ -195,7 +197,7 @@ def _act(argv, prompt, env, cwd, in_process, out, err):
     if action.get("ack"):
         r = office("ack", action["ack"])
         out.write(r.stdout + "\n")
-    if action.get("submit") and role == "executor" and writes and not action.get("no_ledger"):
+    if role == "executor" and writes and not action.get("no_ledger") and any(w.endswith(".py") for w in writes):
         _comply_with_self_review(cwd, env, writes, err)
     if action.get("submit"):
         r = office("submit")

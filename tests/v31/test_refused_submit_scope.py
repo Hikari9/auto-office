@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import GOOD_ADD, PLAN_ONE, approved_run, task_row
+from conftest import GOOD_ADD, PLAN_ONE, approved_run, self_reviewed, task_row, write_clean_ledger
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 WIDER = PLAN_ONE.replace("scope: calc.py", "scope: calc.py, README.md")
@@ -49,6 +49,7 @@ def _live_refused(env):
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
     (wt / "calc.py").write_text(GOOD_ADD)
+    self_reviewed(wt, "calc.py")  # the in-scope work is committed and reviewed; README.md is the refused edit
     (wt / "README.md").write_text("changed\n")
     env.git("add", "-N", "README.md", cwd=wt)
     return wenv, wt
@@ -128,6 +129,7 @@ def test_amendment_tells_the_live_blocked_worker_to_resubmit(env, monkeypatch):
     assert task_row(env)["status"] == "running" and task_row(env)["pause_reason"] is None
     code, out = env.office("ack", "A1", cwd=wt, env=wenv)
     assert code == 0, out
+    self_reviewed(wt, "README.md")  # README.md is in scope now: a new review of the new work
     code, out = env.office("submit", cwd=wt, env=wenv)
     assert code == 0 and "captured" in out, out
 
@@ -226,10 +228,12 @@ def _submitted_then_refused(env):
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
     (wt / "calc.py").write_text(GOOD_ADD)
+    self_reviewed(wt, "calc.py")
     code, out = env.office("submit", cwd=wt, env=wenv)
     assert code == 0 and "captured" in out, out
     assert task_row(env)["status"] == "submitted"
     (wt / "README.md").write_text("changed\n")
+    write_clean_ledger(wt)  # the first submit consumed the ledger; the reviewed HEAD is unchanged
     return wenv, wt
 
 

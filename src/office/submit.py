@@ -671,7 +671,7 @@ def _self_review_receipt(wt: Path, task: dict, run: dict, head: str, tree: str, 
     substantive = bool(committed or pending)
     text = _read_untracked_text(wt, briefs.LEDGER_FILE, briefs.LEDGER_MAX_CHARS)
     if text is not None:
-        if enforced and substantive and paths.git(wt, "rev-parse", f"{head}^{{tree}}") != tree:
+        if enforced and pending:  # in-scope work newer than the HEAD the ledger names
             raise Refused("self-review-stale", f"{task['id']} has uncommitted work the self-review ledger does not "
                           f"cover: it names HEAD {head[:12]}, but the submitted tree differs from HEAD's",
                           scope=task["id"], preserved="your worktree (nothing was submitted)",

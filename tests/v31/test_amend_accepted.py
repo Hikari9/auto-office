@@ -46,7 +46,7 @@ def _deliveries(env):
 
 def _commit_work(env, wt):
     env.git("add", "-A", cwd=wt)
-    env.git("-c", "user.email=t@e.test", "-c", "user.name=t", "commit", "-qm", "calc", cwd=wt)
+    env.git("-c", "user.email=t@e.test", "-c", "user.name=t", "commit", "-qm", "calc", "--allow-empty", cwd=wt)
     write_ledger(wt)
 
 

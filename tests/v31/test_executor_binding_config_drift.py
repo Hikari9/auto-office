@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import GOOD_ADD, PLAN_ONE, PLAN_TWO, approved_run, task_row
+from conftest import GOOD_ADD, PLAN_ONE, PLAN_TWO, approved_run, self_reviewed, task_row
 from office import candidates, config as cfg, dispatch
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
@@ -47,6 +47,7 @@ def test_executor_without_env_in_its_task_worktree_gets_dispatch_scoped_behavior
     code, out = env.office("status", cwd=wt)
     assert code == 0 and out.startswith("T1 "), out
     (wt / "calc.py").write_text(GOOD_ADD)
+    self_reviewed(wt, "calc.py")
     code, out = env.office("submit", cwd=wt, env={"OFFICE_JOBS": "manual"})
     assert code == 0 and "captured" in out, out
     assert _bindings(env) == 0
