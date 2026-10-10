@@ -367,7 +367,8 @@ def _office_leftover(con, run: dict, pid: int) -> dict | None:
     while any member lives, so a listener in group G that started while the
     agent led G is that agent's descendant. When the group's leader still runs,
     its start time must equal the one recorded at launch (`agent.identity`). A
-    pane dispatch without that record is never matched. A leftover is not
+    pane dispatch without that record is never matched, nor one whose pane is
+    still open while its leader runs. A leftover is not
     stopped while a live executor works in the same worktree.
     """
     from office.util import process_start
@@ -378,23 +379,30 @@ def _office_leftover(con, run: dict, pid: int) -> dict | None:
     started = _epoch(process_start(pid))
     if started is None or pgid <= 1 or pgid in (os.getpgrp(), os.getpid()):
         return None
-    for d in con.execute("SELECT id, worktree, started_at, ended_at, launcher FROM dispatches WHERE run_id=? "
-                         "AND role='executor' AND ended_at IS NOT NULL ORDER BY started_at DESC", (run["id"],)).fetchall():
+    for d in con.execute("SELECT id, worktree, started_at, ended_at, launcher, pane_closed_at FROM dispatches "
+                         "WHERE run_id=? AND role='executor' AND ended_at IS NOT NULL ORDER BY started_at DESC",
+                         (run["id"],)).fetchall():
         ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
         try:
             recorded = int((ddir / "agent.pgid").read_text().strip())
         except (OSError, ValueError):
             continue
+        if recorded != pgid:
+            continue
         try:
             ident = json.loads((ddir / "agent.identity").read_text())
         except (OSError, ValueError):
             ident = None
-        if d["launcher"] == "herdr" and not (ident and ident.get("pid") == recorded and ident.get("start")):
+        herdr = d["launcher"] == "herdr"
+        if herdr and not (ident and ident.get("pid") == recorded and ident.get("start")):
             continue
-        if ident and ident.get("pid") == recorded and process_start(recorded) not in (None, ident.get("start")):
+        leader_start = process_start(recorded) if ident and ident.get("pid") == recorded else None
+        if leader_start not in (None, ident and ident.get("start")):
             continue  # the leader runs but is another process than the one Office launched
+        if herdr and leader_start is not None and d["pane_closed_at"] is None:
+            continue  # the harness still runs in a pane the orchestrator can read
         lo, hi = _epoch(d["started_at"]), _epoch(d["ended_at"])
-        if recorded != pgid or lo is None or hi is None or not (lo - 1 <= started <= hi + 1):
+        if lo is None or hi is None or not (lo - 1 <= started <= hi + 1):
             continue
         owner = {"dispatch_id": d["id"], "pgid": pgid, "worktree": d["worktree"]}
         live = con.execute("SELECT id FROM dispatches WHERE run_id=? AND role='executor' AND worktree=? "

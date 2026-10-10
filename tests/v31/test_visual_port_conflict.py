@@ -125,13 +125,15 @@ def _alive(pid) -> bool:
         return True
 
 
-def _executor(env, run, worktree, *, pgid, started, ended, did="DX1", launcher=None, identity=None):
+def _executor(env, run, worktree, *, pgid, started, ended, did="DX1", launcher=None, identity=None,
+              pane_closed=None):
     con = env.con()
     try:
         with db.transaction(con):
-            con.execute("INSERT INTO dispatches(id, run_id, role, started_at, ended_at, worktree, status, launcher) "
-                        "VALUES(?,?,?,?,?,?,?,?)", (did, run["id"], "executor", started, ended, str(worktree),
-                                                    "ended" if ended else "running", launcher))
+            con.execute("INSERT INTO dispatches(id, run_id, role, started_at, ended_at, worktree, status, launcher, "
+                        "pane_closed_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (did, run["id"], "executor", started, ended, str(worktree), "ended" if ended else "running",
+                         launcher, pane_closed))
     finally:
         con.close()
     ddir = paths.run_dir(run["id"]) / "dispatches" / did
@@ -296,7 +298,7 @@ def test_live_pane_leader_with_its_recorded_start_is_stopped(env, live_agent, tm
     lo, hi = _window()
     agent = live_agent()
     _executor(env, run, tmp_path, pgid=agent["pid"], started=lo, ended=hi, launcher="herdr",
-              identity={"pid": agent["pid"], "start": process_start(agent["pid"])})
+              identity={"pid": agent["pid"], "start": process_start(agent["pid"])}, pane_closed=hi)
     assert visual._capture_port_conflict(f"http://127.0.0.1:{agent['port']}/", con, run, tmp_path) is None
     assert agent["proc"].wait(timeout=10) is not None
 
@@ -367,3 +369,15 @@ def test_stop_dispatch_never_signals_a_pane_agent_group(env, live_agent, monkeyp
     except Exception:
         pass  # the dispatch row is absent; only the signals matter here
     assert agent["pid"] not in sent and agent["proc"].poll() is None
+
+
+@pytest.mark.approved
+def test_live_pane_leader_in_an_open_pane_is_not_stopped(env, live_agent, tmp_path):
+    # The dispatch ended but its pane stays open: the harness there is still the orchestrator's to read.
+    con, run = _run(env)
+    lo, hi = _window()
+    agent = live_agent()
+    _executor(env, run, tmp_path, pgid=agent["pid"], started=lo, ended=hi, launcher="herdr",
+              identity={"pid": agent["pid"], "start": process_start(agent["pid"])})
+    cause = visual._capture_port_conflict(f"http://127.0.0.1:{agent['port']}/", con, run, tmp_path)
+    assert cause and _bound(agent["port"]) and agent["proc"].poll() is None
