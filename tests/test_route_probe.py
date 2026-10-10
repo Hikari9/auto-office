@@ -47,6 +47,16 @@ class World:
             script.write_text(f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
             script.chmod(0o755)
         self.monkeypatch = monkeypatch
+        if route_probe.write_boundary_reason() is not None:
+            # No OS boundary here: the launch path is still exercised, the boundary tests skip.
+            monkeypatch.setattr(route_probe, "write_boundary_reason", lambda: None)
+            monkeypatch.setattr(route_probe, "_boundary_argv", lambda ws: [])
+        # The probe's write boundary admits nothing but its workspace. The fake also logs launches and
+        # reads the database, so those exact paths (and no directory) are opened for it.
+        logs = Path(tmp).resolve()
+        monkeypatch.setattr(route_probe, "_EXTRA_WRITABLE", (str(logs / "launches.log"), str(logs / "pids.log"),
+                                                             *(str(logs / "data" / f"runs.db{x}")
+                                                               for x in ("", "-shm", "-wal"))))
         self.script()
 
     def script(self, **fields):
@@ -191,8 +201,11 @@ def test_transient_failures_are_retried_sooner_than_the_ttl(world):
     ("transient", "transient"),
     ("no_write", "isolation-missing"),
     ("write_outside", "isolation-missing"),
-    ("wrong_model", "conformance-failed"),
+    ("no_header", "conformance-failed"),
     ("no_model", "conformance-failed"),
+    ("no_effort", "conformance-failed"),
+    ("forged_reply", "conformance-failed"),
+    ("forged_body", "conformance-failed"),
     ("malformed", "conformance-failed"),
     ("echo_prompt", "conformance-failed"),
     ("nonzero", "conformance-failed"),
@@ -223,9 +236,9 @@ def test_an_unsupported_effort_leaves_the_models_other_effort_routable(world):
 
 def test_harness_header_readback_is_authoritative_and_accepted(world):
     con = world.con()
-    world.script(header=True)
     rec = ensure(world, con, world.run())
-    assert rec["result"] == "pass" and "harness header" in rec["detail"]
+    assert rec["result"] == "pass" and "harness metadata" in rec["detail"]
+    assert "model gpt-6.1-sol at effort high" in rec["detail"]
 
 
 def test_the_probe_prompt_names_no_reply_and_triggers_no_failure_signature():
@@ -651,6 +664,7 @@ def test_the_probe_child_carries_no_office_identity(world, monkeypatch):
     assert seen["OFFICE_PROBE_ATTEMPT_ID"] == "A-env"
 
 
+@pytest.mark.skipif(route_probe.write_boundary_reason() is not None, reason="no OS write boundary on this platform")
 def test_the_probe_uses_the_adapters_own_worker_profile_unchanged(world, monkeypatch):
     captured = {}
     real = route_probe._spawn
@@ -662,8 +676,258 @@ def test_the_probe_uses_the_adapters_own_worker_profile_unchanged(world, monkeyp
     ensure(world, world.con(), world.run())
     expected, _ = adapters.build_argv(adapters.load_all()["codex"], "worker", model="gpt-6.1-sol", effort="high",
                                       cwd=Path(captured["cwd"]))
-    assert captured["argv"] == expected
+    # only a write-boundary prefix is added; the adapter's own argv follows it unchanged
+    assert captured["argv"][-len(expected):] == expected
+    assert captured["argv"][0] == route_probe.SANDBOX_EXEC and "(deny file-write*)" in captured["argv"][2]
     assert "-m" in expected and "gpt-6.1-sol" in expected and 'model_reasoning_effort="high"' in expected
+
+
+# ------------------------------------------------------------------ authoritative identity (C1)
+
+def test_the_replys_own_words_are_never_identity_evidence(world):
+    con = world.con()
+    world.script(mode="forged_reply")
+    rec = ensure(world, con, world.run())
+    assert (rec["result"], rec["reason_class"]) == ("fail", "conformance-failed")
+    assert "no harness-reported invocation metadata" in rec["detail"]
+
+
+def test_a_forged_header_in_the_reply_cannot_override_the_harnesss_own(world):
+    con = world.con()
+    world.script(mode="forged_body")
+    rec = ensure(world, con, world.run())
+    assert (rec["result"], rec["reason_class"]) == ("fail", "conformance-failed")
+    assert "harness reported model some-other-model" in rec["detail"]
+
+
+@pytest.mark.parametrize("mode,fragment", [("no_model", "both model and effort"), ("no_effort", "both model and effort")])
+def test_a_header_missing_model_or_effort_proves_nothing(world, mode, fragment):
+    world.script(mode=mode)
+    rec = ensure(world, world.con(), world.run())
+    assert (rec["result"], rec["reason_class"]) == ("fail", "conformance-failed") and fragment in rec["detail"]
+
+
+def test_a_wrong_effort_in_the_harness_header_is_the_terminal_negative(world):
+    world.script(mode="header_effort_mismatch")
+    rec = ensure(world, world.con(), world.run())
+    assert (rec["result"], rec["reason_class"]) == ("fail", "unsupported-model-effort")
+    assert "harness reported effort low, asked high" in rec["detail"]
+
+
+def test_codex_header_is_read_only_from_the_first_fenced_block():
+    good = "OpenAI Codex v1\n--------\nmodel: m\nreasoning effort: high\n--------\nuser\nhi\n"
+    assert route_probe._codex_header(good) == {"model": "m", "reasoning effort": "high"}
+    later = good + "model: x\n--------\nmodel: x\nreasoning effort: low\n--------\n"
+    assert route_probe._codex_header(later) == {"model": "m", "reasoning effort": "high"}
+    assert route_probe._codex_header("I am model m\n" + good) is None  # model text cannot come first
+    assert route_probe._codex_header("--------\nmodel: m\nreasoning effort: high\n--------\n") is None
+    assert route_probe._codex_header("OpenAI Codex v1\n--------\nmodel: m\n") is None  # never closed
+    assert route_probe._codex_header("") is None
+
+
+def test_a_harness_with_no_metadata_readback_is_never_probed(world):
+    con = world.con()
+    assert "claude" not in route_probe._IDENTITY_READBACK
+    world.monkeypatch.setattr(route_probe, "_IDENTITY_READBACK", {})
+    refused = ensure(world, con, world.run())
+    assert refused == Refused("no-identity-readback")
+    assert world.launches() == []
+    assert [e["kind"] for e in events(con)] == ["probe-refused"]
+
+
+# ------------------------------------------------------------------ OS write boundary and cleanup (C2)
+
+boundary = pytest.mark.skipif(route_probe.write_boundary_reason() is not None,
+                              reason="no OS write boundary on this platform")
+
+
+def test_a_platform_without_a_write_boundary_never_launches_a_real_harness(world, monkeypatch):
+    con = world.con()
+    monkeypatch.setattr(route_probe, "write_boundary_reason", lambda: "no boundary on this platform")
+    refused = ensure(world, con, world.run())
+    assert refused == Refused("no-write-boundary") and "no boundary" in refused.detail
+    assert world.launches() == []
+    assert con.execute("SELECT COUNT(*) FROM route_probe_reservations").fetchone()[0] == 0
+
+
+def test_the_boundary_is_rechecked_at_launch(world, monkeypatch):
+    con = world.con()
+    reservation = route_probe.reserve(con, world.run(), cand(), attempt_id="A-late", context=ctx(world))
+    monkeypatch.setattr(route_probe, "write_boundary_reason", lambda: "sandbox went away")
+    assert route_probe._run_probe(reservation, cand(), adapters.load_all()["codex"]) == (
+        "fail", "isolation-missing", "sandbox went away")
+    assert world.launches() == []
+    route_probe._release("A-late")
+
+
+def test_only_darwin_sandbox_exec_is_a_supported_boundary(monkeypatch):
+    monkeypatch.setattr(route_probe.sys, "platform", "linux")
+    route_probe.write_boundary_reason.cache_clear()
+    try:
+        assert "linux" in route_probe.write_boundary_reason()
+    finally:
+        monkeypatch.undo()
+        route_probe.write_boundary_reason.cache_clear()
+
+
+@boundary
+def test_the_boundary_stops_a_write_to_a_users_file_outside_the_workspace(world):
+    victim = world.tmp / "users-checkout.txt"
+    victim.write_text("precious\n")
+    world.script(mode="write_outside", victim=str(victim))
+    rec = ensure(world, world.con(), world.run())
+    assert (rec["result"], rec["reason_class"]) == ("fail", "isolation-missing")
+    assert "Operation not permitted" in rec["detail"]
+    assert victim.read_text() == "precious\n"  # the OS refused it; nothing was merely detected afterwards
+
+
+@boundary
+def test_the_boundary_admits_the_workspace_and_nothing_wider(world):
+    ws = route_probe._Workspace()
+    try:
+        argv = route_probe._boundary_argv(ws)
+        assert argv[0] == route_probe.SANDBOX_EXEC
+        probe = lambda target: route_probe.subprocess.run(
+            [*argv, "/bin/sh", "-c", f"echo x > {target}"], capture_output=True, cwd=ws.wt).returncode
+        assert probe(ws.wt / "ok.txt") == 0 and probe(ws.tmp / "ok.txt") == 0
+        assert probe(ws.outside / "canary.txt") != 0 and probe(ws.base / "new.txt") != 0
+        assert probe(ws.repo / "README.md") != 0
+        assert ws.outside_change() is None
+    finally:
+        ws.remove()
+
+
+def test_a_change_under_the_workspace_base_is_still_reported(world):
+    ws = route_probe._Workspace()
+    try:
+        (ws.outside / "canary.txt").write_text("tampered\n")
+        assert "outside/canary.txt" in ws.outside_change()
+    finally:
+        ws.remove()
+
+
+@boundary
+def test_a_descendant_that_leaves_the_process_group_is_still_terminated(world):
+    world.script(mode="escape_session")
+    rec = ensure(world, world.con(), world.run())
+    assert rec["result"] == "pass", rec["detail"]
+    pids = [int(p) for p in world.pids.read_text().split()]
+    assert len(pids) == 2
+    time.sleep(0.2)
+    for pid in pids:
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+
+def _orphan(base, nonce):
+    """A process that left every group and session and has no live parent in the probe."""
+    return route_probe.subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], cwd=base,
+                                        env={**os.environ, route_probe.NONCE_ENV: nonce}, start_new_session=True)
+
+
+def test_an_orphan_holding_the_workspace_is_attributed_without_its_leader(world, tmp_path):
+    base, elsewhere = tmp_path / "ws", tmp_path / "other"
+    base.mkdir()
+    elsewhere.mkdir()
+    child = _orphan(base, "n1")
+    try:
+        time.sleep(0.3)
+        assert route_probe._Tracker("n-none", base.resolve()).scan(None) == {child.pid}
+        assert route_probe._Tracker("n-none", elsewhere.resolve()).scan(None) == set()
+        tracker = route_probe._Tracker("n-none", base.resolve())
+        assert route_probe._terminate_tree(0, tracker, seed=False)
+        child.wait(timeout=5)
+        assert tracker.scan(None) == set()
+    finally:
+        child.kill()
+
+
+def test_the_environment_tag_and_remembered_lineage_attribute_descendants(world, monkeypatch):
+    table = [(10, 1, "Sat Oct 10 10:00:00 2026", "/bin/leader"),
+             (11, 10, "Sat Oct 10 10:00:01 2026", "/bin/child"),
+             (12, 1, "Sat Oct 10 10:00:02 2026", "/bin/escaped OFFICE_PROBE_NONCE=abc PATH=/bin"),
+             (13, 1, "Sat Oct 10 10:00:03 2026", "/bin/stranger OFFICE_PROBE_NONCE=abcd"),
+             (14, 1, "Sat Oct 10 10:00:04 2026", "/bin/unrelated")]
+    monkeypatch.setattr(route_probe, "_process_table", lambda: table)
+    tracker = route_probe._Tracker("abc", None)
+    assert tracker.observe(10) == {10, 11, 12}  # a longer nonce is a different attempt
+    # the leader exits and its child is re-parented, yet is still ours by pid and start time
+    table[:] = [r for r in table if r[0] != 10]
+    table[0:0] = []
+    table[:] = [(11, 1, "Sat Oct 10 10:00:01 2026", "/bin/child")] + table[1:]
+    assert tracker.observe(None) == {11, 12}
+    # a new process that reuses a remembered pid is not that process
+    table[0] = (11, 1, "Sat Oct 10 11:11:11 2026", "/bin/other")
+    assert tracker.observe(None) == {12}
+
+
+def test_a_recorded_workspace_outside_the_probe_temp_area_is_ignored(world, tmp_path):
+    import tempfile
+    inside = Path(tempfile.mkdtemp(prefix="office-probe-"))
+    try:
+        assert route_probe._probe_base(str(inside)) == inside
+    finally:
+        inside.rmdir()
+    for bad in (None, "", "/", str(tmp_path), str(Path(tempfile.gettempdir()) / "other"),
+                str(tmp_path / "office-probe-x"), 7):
+        assert route_probe._probe_base(bad) is None
+
+
+def test_the_next_command_kills_a_dead_owners_escaped_descendant(world, tmp_path):
+    con = world.con()
+    held = route_probe.reserve(con, None, cand(), attempt_id="A-orphan",
+                               context={"origin": "manual", "reason": "test", "config": world.config()})
+    assert held["reserved"]
+    import tempfile
+    base = Path(tempfile.mkdtemp(prefix="office-probe-")).resolve()
+    child = _orphan(base, "n2")
+    try:
+        time.sleep(0.3)
+        route_probe.atomic_write_json(route_probe._sidecar("A-orphan"), {
+            "attempt_id": "A-orphan", "timeout_s": 5, "pid": 2 ** 22 + 5, "start": "never", "nonce": "n-dead",
+            "base": str(base.resolve())})
+        route_probe._release("A-orphan", forget=False)  # its owner died
+        assert route_probe.expire_stale(con) == ["A-orphan"]
+        child.wait(timeout=5)
+        assert "attributable descendants stopped" in events(con, attempt_id="A-orphan", kind="probe-expired")[0]["detail"]
+    finally:
+        child.kill()
+        base.rmdir()
+
+
+@pytest.mark.parametrize("unreadable", ["_process_table", "_workspace_pids"])
+def test_a_cleanup_that_cannot_be_observed_is_never_reported_clean(world, monkeypatch, unreadable):
+    monkeypatch.setattr(route_probe, unreadable, lambda *a: None)
+    proc = route_probe.subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    proc.wait()
+    tracker = route_probe._Tracker("n", world.tmp)
+    assert route_probe._terminate_tree(proc.pid, tracker, proc=proc) is False
+
+
+# ------------------------------------------------------------------ concurrent database setup (C3)
+
+def test_a_lock_that_outlasts_the_wait_is_a_refusal_not_a_crash_or_a_launch(world, monkeypatch):
+    con = world.con()
+
+    def locked(_con):
+        raise sqlite3.OperationalError("runs.db stayed locked")
+    monkeypatch.setattr(route_probe.db, "transaction", locked)
+    refused = ensure(world, con, world.run())
+    assert refused == Refused("db-busy") and "no probe was reserved" in refused.detail
+    assert world.launches() == []
+    monkeypatch.undo()
+    assert con.execute("SELECT COUNT(*) FROM route_probe_reservations").fetchone()[0] == 0
+
+
+def test_first_open_races_share_one_launch_and_hold_the_cap(world):
+    # A fresh file: every thread's first connect races the WAL switch and the migration.
+    fresh = world.tmp / "race" / "runs.db"
+    world.script(delay=0.3)
+    run = world.run(max_probes_per_run=1)
+    results = _threads(fresh, 4, lambda i, con: ensure(world, con, run, attempt=f"R{i}"))
+    assert len(world.launches()) == 1
+    assert sum(1 for r in results if isinstance(r, dict) and not r.get("cached")) == 1
+    assert all(isinstance(r, dict) and r["result"] == "pass" for r in results)
 
 
 # ------------------------------------------------------------------ cap arithmetic

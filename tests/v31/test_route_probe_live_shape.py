@@ -24,6 +24,11 @@ def probe_env(env, monkeypatch):
     codex.write_text(f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
     codex.chmod(0o755)
     log = env.tmp / "launches.log"
+    from office import route_probe
+    if route_probe.write_boundary_reason() is not None:  # no OS boundary here: the launch path still runs
+        monkeypatch.setattr(route_probe, "write_boundary_reason", lambda: None)
+        monkeypatch.setattr(route_probe, "_boundary_argv", lambda ws: [])
+    monkeypatch.setattr(route_probe, "_EXTRA_WRITABLE", (str(log.parent.resolve() / log.name),))
     env.log = log
     env.set = lambda **fields: monkeypatch.setenv("FAKE_PROBE", json.dumps({"count_file": str(log), **fields}))
     env.launches = lambda: log.read_text().count("launch ") if log.exists() else 0

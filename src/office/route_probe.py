@@ -6,6 +6,14 @@ hash, launch profile, invocation model id, effort) by launching the adapter's ow
 worker profile once, with a tiny prompt, a short timeout and a disposable git
 worktree, then reading back the model identity, the reply and the filesystem.
 
+Identity comes only from the harness's own invocation metadata (a header the
+harness prints before any model output), never from text the model wrote, so a
+silently substituted model cannot echo its way to a pass. A harness without such a
+readback is not probed. The harness runs inside an OS-enforced write boundary
+limited to the disposable workspace; a platform or profile without one is not
+probed either. Descendants are attributed (environment tag, lineage, files held
+in the workspace) and terminated individually, not only by process group.
+
 A pass qualifies only that fingerprint. It is not adapter trust, not learned
 quality and not evidence about any sibling effort or model. Nothing here writes
 `adapter_trust_acts` or `recorded_overrides`, installs anything, widens a
@@ -27,6 +35,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import functools
 import json
 import math
 import os
@@ -35,6 +44,7 @@ import shutil
 import signal
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -60,6 +70,10 @@ DETAIL_LIMIT = 600
 IDENTITY_ENV = ("OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE_ROLE", "OFFICE_STATE_DIR",
                 "OFFICE_SESSION", "OFFICE_HARNESS", "OFFICE_VERSION", "OFFICE_FRONT_DOOR_HOPS")
 MANUAL_REASON = "manual: office doctor --probe-route"
+NONCE_ENV = "OFFICE_PROBE_NONCE"
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+# Extra paths a probe may write. Empty in production: only tests (whose fake harness logs launches) widen it.
+_EXTRA_WRITABLE: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -322,6 +336,12 @@ def _static_refusal(cand: dict, adapter: dict | None, fp: dict, ctx: dict, confi
         return "not-installed", f"{fp['harness']} is not installed"
     if "unknown" in (fp["harness_version"], fp["adapter_hash"]):
         return "no-fingerprint", "the harness version cannot be read, so no exact fingerprint exists"
+    if adapter.get("id") not in _IDENTITY_READBACK:
+        return "no-identity-readback", (f"{adapter.get('id')} exposes no harness-reported model and effort in its "
+                                        f"{fp['profile']} output, so an exact probe cannot be authoritative")
+    unavailable = write_boundary_reason()
+    if unavailable:
+        return "no-write-boundary", unavailable
     return None
 
 
@@ -405,6 +425,8 @@ def _owner_state(attempt_id: str, reserved_at: datetime | None, timeout_s: float
 
 
 def _group_alive(pgid: int) -> bool:
+    if pgid <= 1:  # 0 would address this process's own group
+        return False
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
@@ -414,43 +436,161 @@ def _group_alive(pgid: int) -> bool:
     return True
 
 
-def _terminate_group(pgid: int, *, proc: subprocess.Popen | None = None, term_wait: float = 3.0,
-                     kill_wait: float = 3.0) -> bool:
-    """Stop every process in the probe's own process group and confirm none is left."""
-    if proc is not None:
-        proc.poll()  # reap the leader so a zombie does not keep the group "alive"
+_PS_LINE = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\w{3}\s+\w+\s+\w+\s+[\d:]{8}\s+\d{4})\s+(.*)$")
+
+
+def _tool(name: str, *system: str) -> str:
+    """A system tool by absolute path, so a restricted PATH cannot hide it."""
+    return next((p for p in system if os.access(p, os.X_OK)), shutil.which(name) or name)
+
+
+def _process_table() -> list[tuple[int, int, str, str]] | None:
+    """(pid, ppid, start time, command and, where the OS shows it, environment) for
+    every process, or None when it cannot be read."""
+    try:
+        listing = subprocess.run([_tool("ps", "/bin/ps", "/usr/bin/ps"), "-axeww", "-o", "pid=,ppid=,lstart=,command="], capture_output=True,
+                                 text=True, timeout=10, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return [(int(m.group(1)), int(m.group(2)), m.group(3), m.group(4))
+            for m in map(_PS_LINE.match, listing.splitlines()) if m]
+
+
+def _workspace_pids(base: Path) -> set[int] | None:
+    """Processes holding any file or directory (including their cwd) under the
+    probe's disposable base. Nothing else knows that random path, so a holder is
+    the probe's. None when the holders cannot be listed."""
+    try:
+        proc = subprocess.run([_tool("lsof", "/usr/sbin/lsof", "/usr/bin/lsof"), "-nP", "-F", "p", "+D", str(base)], capture_output=True, text=True,
+                              timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode not in (0, 1):  # 1 is lsof's "nothing found"
+        return None
+    return {int(line[1:]) for line in proc.stdout.splitlines() if line[:1] == "p" and line[1:].isdigit()}
+
+
+class _Tracker:
+    """Which processes belong to one probe attempt.
+
+    A process group alone is not enough: a descendant that calls setsid leaves it.
+    So a process is the probe's when any of these holds, checked afresh each scan:
+    it carries the attempt's nonce in its environment (where the OS shows
+    environments), it descends from the leader or from a process seen to descend
+    from it (identified by pid and start time, so a reused pid is not one), or it
+    holds a file or its cwd under the probe's disposable workspace."""
+
+    def __init__(self, nonce: str, base: Path | None) -> None:
+        self.nonce, self.base = nonce, base
+        self.seen: dict[int, str] = {}
+
+    def observe(self, root: int | None) -> set[int] | None:
+        table = _process_table()
+        if table is None:
+            return None
+        tag = re.compile(rf"(?:^|\s){NONCE_ENV}={re.escape(self.nonce)}(?:\s|$)")
+        children: dict[int, list[int]] = {}
+        started = {}
+        found: set[int] = set()
+        for pid, ppid, start, command in table:
+            children.setdefault(ppid, []).append(pid)
+            started[pid] = start
+            if tag.search(command):
+                found.add(pid)
+        queue = [pid for pid, start in self.seen.items() if started.get(pid) == start]
+        if root:
+            queue.append(root)
+        while queue:
+            pid = queue.pop()
+            if pid not in found:
+                found.add(pid)
+                queue.extend(children.get(pid, []))
+        found = {pid for pid in found if pid in started}
+        self.seen.update({pid: started[pid] for pid in found})
+        return found
+
+    def scan(self, root: int | None) -> set[int] | None:
+        found = self.observe(root)
+        if found is None:
+            return None
+        if self.base is not None:
+            held = _workspace_pids(self.base)
+            if held is None:
+                return None
+            found |= held
+        return {pid for pid in found if pid > 1 and pid != os.getpid()}
+
+
+def _terminate_tree(pgid: int, tracker: _Tracker, *, proc: subprocess.Popen | None = None, seed: bool = True,
+                    term_wait: float = 3.0, kill_wait: float = 3.0) -> bool:
+    """Stop the probe's process group and every process the tracker attributes to
+    it, including ones that left the group, and confirm none is left."""
+
+    def left() -> set[int] | None:
+        if proc is not None:
+            proc.poll()  # reap the leader so a zombie does not count as alive
+        # A reaped leader's pid may be reused, so it only seeds the tree while it is still ours.
+        return tracker.scan(pgid if seed and (proc is None or proc.returncode is None) else None)
+
     for sig, wait in ((signal.SIGTERM, term_wait), (signal.SIGKILL, kill_wait)):
-        if not _group_alive(pgid):
-            break
-        try:
-            os.killpg(pgid, sig)
-        except ProcessLookupError:
-            break
+        pids = left()
+        if pids is None:
+            return False
+        if not pids and not _group_alive(pgid):
+            return True
+        if pgid > 1:
+            try:
+                os.killpg(pgid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
         deadline = time.time() + wait
         while time.time() < deadline:
-            if proc is not None:
-                proc.poll()
-            if not _group_alive(pgid):
-                break
-            time.sleep(0.05)
-    if proc is not None:
-        proc.poll()
-    return not _group_alive(pgid)
+            time.sleep(0.1)
+            pids = left()
+            if pids is None:
+                return False
+            if not pids and not _group_alive(pgid):
+                return True
+    pids = left()
+    return pids is not None and not pids and not _group_alive(pgid)
+
+
+def _probe_base(value) -> Path | None:
+    """A recorded workspace base, only if it is a probe workspace directly under the
+    temp directory. The sidecar is read back by another process and its base is
+    handed to a process-killing scan, so a path that is not one is ignored."""
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    try:
+        ok = path.name.startswith("office-probe-") and path.parent.resolve() == Path(tempfile.gettempdir()).resolve()
+    except OSError:
+        return None
+    return path if ok else None
 
 
 def _kill_recorded_children(attempt_id: str) -> str | None:
-    """Stop a probe process another (dead or overdue) owner recorded, but only
-    when its start time proves the pid is still that process."""
+    """Stop the probe processes another (dead or overdue) owner recorded: the
+    process group when its start time proves the pid is still that process, and
+    every process the recorded nonce or workspace attributes to the attempt."""
     try:
         rec = json.loads(_sidecar(attempt_id).read_text())
     except (OSError, ValueError):
         return None
-    pid = rec.get("pid")
-    if not isinstance(pid, int) or pid <= 1 or pid == os.getpid():
+    pid, nonce = rec.get("pid"), rec.get("nonce")
+    if not isinstance(nonce, str) or not nonce:
         return None
-    if not process_is(pid, rec.get("start")):
-        return f"recorded probe pid {pid} is no longer that process"
-    gone = _terminate_group(pid)
+    base = _probe_base(rec.get("base"))
+    ours = isinstance(pid, int) and pid > 1 and pid != os.getpid() and process_is(pid, rec.get("start"))
+    gone = _terminate_tree(pid if ours else 0, _Tracker(nonce, base), seed=ours)
+    if not ours and pid:
+        return (f"recorded probe pid {pid} is no longer that process; "
+                + ("attributable descendants stopped" if gone else "attributable descendants did not exit"))
     return f"terminated probe process group {pid}" if gone else f"probe process group {pid} did not exit"
 
 
@@ -501,6 +641,20 @@ def _inflight(con, probe_key: str) -> dict | None:
 
 def reserve(con, run: dict | None, cand: dict, *, attempt_id: str, context: dict | None = None,
             dispatch_id: str | None = None, budget=None, adapter: dict | None = None) -> dict | Refused:
+    """`_reserve` that answers lock contention with a refusal instead of an exception.
+    `db.transaction` already waits out a busy writer; a lock that outlasts that wait
+    means nothing was reserved, so nothing may launch."""
+    try:
+        return _reserve(con, run, cand, attempt_id=attempt_id, context=context, dispatch_id=dispatch_id,
+                        budget=budget, adapter=adapter)
+    except sqlite3.OperationalError as exc:
+        if not any(w in str(exc) for w in ("locked", "busy")):
+            raise
+        return Refused("db-busy", f"runs.db stayed locked, so no probe was reserved: {exc}", None, attempt_id)
+
+
+def _reserve(con, run: dict | None, cand: dict, *, attempt_id: str, context: dict | None = None,
+             dispatch_id: str | None = None, budget=None, adapter: dict | None = None) -> dict | Refused:
     """Atomically allocate one probe, or explain why not.
 
     One `db.transaction`: static gates, a fresh cached record, the fingerprint's
@@ -710,9 +864,31 @@ _PATTERNS = (
         r"read-only file system|operation not permitted|permission denied|sandbox|approval (?:is )?required|"
         r"requires approval|not allowed to (?:write|run|execute)", re.I)),
 )
-_HEADER_MODEL = re.compile(r"^[ \t]*model[ \t]*[:=][ \t]*([^\s#]+)[ \t]*$", re.I | re.M)
-_HEADER_EFFORT = re.compile(r"^[ \t]*reasoning[ _-]?effort[ \t]*[:=][ \t]*([A-Za-z]+)[ \t]*$", re.I | re.M)
-_REPLY_MODEL = re.compile(r"^[ \t]*PROBE-MODEL[ \t:]+([A-Za-z0-9_.:/@+-]+)[ \t]*$", re.M)
+_FENCE = re.compile(r"^-{4,}\s*$")
+_FIELD = re.compile(r"^\s*([A-Za-z][A-Za-z _-]*?)\s*:\s*(.*?)\s*$")
+
+
+def _codex_header(text: str) -> dict[str, str] | None:
+    """The `codex exec` banner: the harness's own record of the invocation it
+    resolved. It is the first thing on the stream, a banner line then a fenced
+    block of `key: value` lines, so nothing a model writes can appear before it.
+    Only that first block is read; a fence, `model:` or `reasoning effort:` line
+    in the reply is ignored."""
+    lines = text.lstrip().splitlines()
+    if len(lines) < 3 or not re.match(r"OpenAI Codex\b", lines[0]) or not _FENCE.match(lines[1]):
+        return None
+    fields: dict[str, str] = {}
+    for line in lines[2:]:
+        if _FENCE.match(line):
+            return fields
+        m = _FIELD.match(line)
+        if m:
+            fields.setdefault(re.sub(r"[ _-]+", " ", m.group(1).lower()), m.group(2))
+    return None  # the block never closed
+
+
+# Harness id -> parser of authoritative model and effort metadata. A harness absent here is never probed.
+_IDENTITY_READBACK = {"codex": _codex_header}
 
 
 def classify_text(text: str) -> str | None:
@@ -725,24 +901,28 @@ def classify_text(text: str) -> str | None:
 
 def probe_prompt(token: str | None = None) -> str:
     """The tiny probe prompt. It names no expected reply token, so a harness that
-    echoes its prompt cannot pass by echoing it."""
+    echoes its prompt cannot pass by echoing it, and it asks the model nothing about
+    its own identity: that comes from the harness's metadata."""
     return ("Conformance probe. Work only inside the current directory.\n"
             "1. Read the file probe-input.txt. It holds one token.\n"
             "2. Create probe-output.txt containing that same token and a newline.\n"
             "3. Do not change any other file and do not leave the current directory.\n"
-            "4. Reply with exactly two lines. Line one is PROBE-OK followed by a space and the token. "
-            "Line two is PROBE-MODEL followed by a space and the exact id of the model answering.\n")
+            "4. Reply with exactly one line: PROBE-OK followed by a space and the token.\n")
 
 
 class _Workspace:
     """A disposable git repository and linked worktree plus an outside canary.
 
-    The probe agent works in `wt`. Anything that changes under `base` outside
-    `wt` and the repository's `.git` is a write outside the worktree."""
+    The probe agent works in `wt`. `tmp` and `home` are its scratch space. The OS
+    write boundary lets the harness write only `wt`, the repository's `.git` (the
+    linked worktree's metadata), `tmp` and `home`. Anything else that changes
+    under `base` is a write outside the worktree, which the boundary should make
+    impossible and the snapshot proves."""
 
     def __init__(self) -> None:
         self.base = Path(tempfile.mkdtemp(prefix="office-probe-")).resolve()
         self.repo, self.wt, self.outside = self.base / "repo", self.base / "wt", self.base / "outside"
+        self.tmp, self.home = self.base / "tmp", self.base / "home"
         self.token = uuid.uuid4().hex[:12]
         self.setup_error: str | None = None
         try:
@@ -760,6 +940,8 @@ class _Workspace:
     def _setup(self) -> None:
         self.repo.mkdir()
         self.outside.mkdir()
+        self.tmp.mkdir(mode=0o700)
+        self.home.mkdir(mode=0o700)
         self._git("init", "-q", "-b", "main")
         (self.repo / "README.md").write_text("disposable probe repository\n")
         self._git("add", "-A")
@@ -773,11 +955,15 @@ class _Workspace:
         self.before = self.snapshot()
         self.head = self._git("rev-parse", "main").strip()
 
+    @property
+    def writable(self) -> list[Path]:
+        return [self.wt, self.repo / ".git", self.tmp, self.home]
+
     def snapshot(self) -> dict[str, str]:
         out: dict[str, str] = {}
         for path in sorted(self.base.rglob("*")):
             rel = path.relative_to(self.base)
-            if rel.parts[0] == "wt" or rel.parts[:2] == ("repo", ".git"):
+            if rel.parts[0] in ("wt", "tmp", "home") or rel.parts[:2] == ("repo", ".git"):
                 continue
             out[str(rel)] = "dir" if path.is_dir() else sha256_file(path)
         return out
@@ -801,28 +987,92 @@ class _Workspace:
         shutil.rmtree(self.base, ignore_errors=True)
 
 
+def _sbpl(path: Path | str) -> str:
+    return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+@functools.lru_cache(maxsize=1)
+def write_boundary_reason() -> str | None:
+    """None when this platform can enforce a filesystem write boundary on a probe,
+    else why not. Real-harness probing stays refused wherever this is not None.
+
+    Only macOS `sandbox-exec` is implemented. It is exercised here, once per
+    process, so a nested or disabled sandbox is reported instead of assumed."""
+    if sys.platform != "darwin":
+        return f"no OS-enforced write boundary is implemented for {sys.platform}"
+    if not os.access(SANDBOX_EXEC, os.X_OK):
+        return f"{SANDBOX_EXEC} is not available"
+    base = Path(tempfile.mkdtemp(prefix="office-boundary-")).resolve()
+    try:
+        target = base / "denied"
+        proc = subprocess.run([SANDBOX_EXEC, "-p", "(version 1)(allow default)(deny file-write*)", "/bin/sh", "-c",
+                               f"echo x > {target}"], capture_output=True, timeout=15)
+        if proc.returncode == 0 or target.exists():
+            return "sandbox-exec did not enforce a write boundary here"
+        ok = subprocess.run([SANDBOX_EXEC, "-p", "(version 1)(allow default)", "/usr/bin/true"],
+                            capture_output=True, timeout=15)
+        if ok.returncode != 0:
+            return "sandbox-exec cannot apply a profile here (already inside a sandbox?)"
+        return None
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"sandbox-exec could not be exercised: {exc}"
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def _boundary_argv(ws: _Workspace) -> list[str]:
+    """`sandbox-exec` denying every file write except the probe's own workspace.
+    The profile is inherited by every descendant, including one that leaves the
+    process group."""
+    allow = " ".join(f"(subpath {_sbpl(p)})" for p in [*ws.writable, *map(Path, _EXTRA_WRITABLE)])
+    devices = " ".join(f'(literal "{d}")' for d in ("/dev/null", "/dev/tty", "/dev/dtracehelper"))
+    return [SANDBOX_EXEC, "-p", f"(version 1)(allow default)(deny file-write*)(allow file-write* {allow} {devices})"]
+
+
 def _spawn(argv: list[str], cwd: str, env: dict, stdin: int) -> subprocess.Popen:
     """The one place a probe child is created: its own session, output piped back."""
     return subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
                             start_new_session=True)
 
 
-def _probe_env(attempt_id: str, probe_key: str) -> dict:
+def _probe_env(attempt_id: str, probe_key: str, ws: _Workspace, harness: str, nonce: str) -> dict:
+    """No Office identity, scratch space inside the boundary, and a nonce that tags
+    every descendant. A harness's state directory is a private one in the
+    workspace whose credentials are read-only links, so the probe cannot rewrite
+    the user's configuration or rotate their login."""
     env = {k: v for k, v in os.environ.items() if k not in IDENTITY_ENV}
-    env.update({"OFFICE_PROBE_ATTEMPT_ID": attempt_id, "OFFICE_PROBE_KEY": probe_key})
+    env.update({"OFFICE_PROBE_ATTEMPT_ID": attempt_id, "OFFICE_PROBE_KEY": probe_key, NONCE_ENV: nonce,
+                "TMPDIR": str(ws.tmp), "TMP": str(ws.tmp), "TEMP": str(ws.tmp)})
+    if harness == "codex":
+        real = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        private = ws.home / ".codex"
+        private.mkdir(exist_ok=True)
+        for name in ("auth.json", "config.toml"):
+            if (real / name).is_file():
+                try:
+                    (private / name).symlink_to(real / name)
+                except OSError:
+                    pass
+        env["CODEX_HOME"] = str(private)
     return env
 
 
 def _launch(argv: list[str], prof: dict, prompt: str, cwd: Path, env: dict, timeout_s: float,
-            attempt_id: str) -> dict:
+            attempt_id: str, base: Path | None = None) -> dict:
     """Run the harness once under a hard timeout. Always ends with the probe's
-    process group terminated and confirmed gone, or says it could not confirm."""
+    process group and every process attributed to it terminated and
+    confirmed gone, or says it could not confirm."""
     stdin = subprocess.PIPE if prof.get("prompt") == "stdin" else subprocess.DEVNULL
     if prof.get("prompt") == "argv":
         argv = argv + [prompt]
     elif prof.get("prompt") == "argv-bound":
         argv = argv + [prof.get("prompt_flag", "--prompt=") + prompt]
+    nonce = env[NONCE_ENV]
+    tracker = _Tracker(nonce, base)
     out = {"output": "", "returncode": None, "timed_out": False, "launch_error": None, "group_gone": True}
+    # Recorded before the spawn, so an owner that dies mid-launch still leaves its tag for the sweeper.
+    atomic_write_json(_sidecar(attempt_id), {"attempt_id": attempt_id, "timeout_s": timeout_s, "pid": None,
+                                             "start": None, "nonce": nonce, "base": str(base or "")})
     try:
         proc = _spawn(argv, str(cwd), env, stdin)
     except PermissionError as exc:
@@ -832,13 +1082,24 @@ def _launch(argv: list[str], prof: dict, prompt: str, cwd: Path, env: dict, time
         out["launch_error"] = ("transient", f"launch failed: {exc}")
         return out
     atomic_write_json(_sidecar(attempt_id), {"attempt_id": attempt_id, "timeout_s": timeout_s, "pid": proc.pid,
-                                             "start": process_start(proc.pid)})
+                                             "start": process_start(proc.pid), "nonce": nonce,
+                                             "base": str(base or "")})
+    deadline = time.monotonic() + timeout_s
     try:
         try:
-            data, _ = proc.communicate(input=prompt.encode() if stdin == subprocess.PIPE else None, timeout=timeout_s)
+            feed = prompt.encode() if stdin == subprocess.PIPE else None
+            while True:
+                try:
+                    data, _ = proc.communicate(input=feed, timeout=max(0.01, min(0.5, deadline - time.monotonic())))
+                    break
+                except subprocess.TimeoutExpired:
+                    feed = None
+                    tracker.observe(proc.pid)  # remember descendants while the leader can still name them
+                    if time.monotonic() >= deadline:
+                        raise
         except subprocess.TimeoutExpired:
             out["timed_out"] = True
-            out["group_gone"] = _terminate_group(proc.pid, proc=proc)
+            out["group_gone"] = _terminate_tree(proc.pid, tracker, proc=proc)
             try:
                 data, _ = proc.communicate(timeout=5)
             except (subprocess.TimeoutExpired, ValueError, OSError):
@@ -847,7 +1108,7 @@ def _launch(argv: list[str], prof: dict, prompt: str, cwd: Path, env: dict, time
         out["returncode"] = proc.returncode
     finally:
         # Normal exit or not, nothing the probe started may outlive it.
-        out["group_gone"] = _terminate_group(proc.pid, proc=proc) and out["group_gone"]
+        out["group_gone"] = _terminate_tree(proc.pid, tracker, proc=proc) and out["group_gone"]
     return out
 
 
@@ -855,8 +1116,12 @@ def _normal(value: str | None) -> str:
     return (value or "").strip().strip("`'\"").lower()
 
 
-def _evaluate(launch: dict, ws: _Workspace, prompt: str, expected_model: str, expected_effort: str | None) -> tuple:
-    """(result, reason_class, detail) for one finished launch."""
+def _evaluate(launch: dict, ws: _Workspace, prompt: str, harness: str, expected_model: str,
+              expected_effort: str | None) -> tuple:
+    """(result, reason_class, detail) for one finished launch.
+
+    Model and effort pass only when the harness's own metadata names both and both
+    match the exact request. The model's reply is never identity evidence."""
     text = launch["output"].replace(prompt, "")
     tail = " ".join(text.split())[-DETAIL_LIMIT // 2:]
     if launch["launch_error"]:
@@ -870,32 +1135,33 @@ def _evaluate(launch: dict, ws: _Workspace, prompt: str, expected_model: str, ex
         return "fail", "transient", f"probe timed out; its process group was terminated. {tail}"
     if launch["returncode"] != 0:
         return "fail", classify_text(text) or "conformance-failed", f"harness exited {launch['returncode']}: {tail}"
-    header_model = (_HEADER_MODEL.findall(text) or [None])[0]
-    header_effort = (_HEADER_EFFORT.findall(text) or [None])[0]
-    if header_model and _normal(header_model) != _normal(expected_model):
-        return "fail", "conformance-failed", f"harness reported model {header_model}, asked {expected_model}"
-    if header_effort and expected_effort and _normal(header_effort) != _normal(expected_effort):
-        return ("fail", "unsupported-model-effort",
-                f"harness reported effort {header_effort}, asked {expected_effort}")
+    reader = _IDENTITY_READBACK.get(harness)
+    meta = reader(text) if reader else None
+    if meta is None:
+        return "fail", "conformance-failed", "no harness-reported invocation metadata, so model and effort are unproven"
+    seen_model, seen_effort = meta.get("model"), meta.get("reasoning effort")
+    if not seen_model or not seen_effort:
+        return "fail", "conformance-failed", "harness metadata does not report both model and effort"
+    if _normal(seen_model) != _normal(expected_model):
+        return "fail", "conformance-failed", f"harness reported model {seen_model}, asked {expected_model}"
+    if expected_effort is None or _normal(seen_effort) != _normal(expected_effort):
+        return ("fail", "unsupported-model-effort", f"harness reported effort {seen_effort}, asked {expected_effort}")
     if not re.search(rf"^[ \t]*PROBE-OK[ \t]+{re.escape(ws.token)}[ \t]*$", text, re.M):
         return "fail", classify_text(text) or "conformance-failed", f"no well-formed probe reply: {tail}"
     written = ws.output_file()
     if written is None or written.strip() != ws.token:
         return ("fail", "isolation-missing",
                 "the permitted file write inside the disposable worktree was not observed")
-    reply_model = (_REPLY_MODEL.findall(text) or [None])[-1]
-    seen = header_model or reply_model
-    if not seen:
-        return "fail", "conformance-failed", "no model identity readback"
-    if _normal(seen) != _normal(expected_model):
-        return "fail", "conformance-failed", f"model readback {seen} does not match {expected_model}"
-    source = "harness header" if header_model else "reply"
-    return "pass", None, f"model {expected_model} read back from the {source}; reply, write and isolation verified"
+    return "pass", None, (f"model {expected_model} at effort {expected_effort} read back from the harness metadata; "
+                          "reply, write, write boundary and process cleanup verified")
 
 
 def _run_probe(reservation: dict, cand: dict, adapter: dict) -> tuple[str, str | None, str]:
     settings = reservation["settings"]
     fp = reservation["fingerprint"]
+    unavailable = write_boundary_reason()
+    if unavailable:  # re-checked at launch: nothing ever runs outside the boundary
+        return "fail", "isolation-missing", unavailable
     ws = _Workspace()
     try:
         if ws.setup_error:
@@ -906,9 +1172,11 @@ def _run_probe(reservation: dict, cand: dict, adapter: dict) -> tuple[str, str |
                                              effort=fp["effort"], cwd=ws.wt)
         except adapters.AdapterError as exc:
             return "fail", "isolation-missing", str(exc)
-        launch = _launch(argv, prof, prompt, ws.wt, _probe_env(reservation["attempt_id"], reservation["probe_key"]),
-                         float(settings["probe_timeout_s"]), reservation["attempt_id"])
-        return _evaluate(launch, ws, prompt, fp["invocation_model_id"], adapters.effort_value(adapter, fp["effort"]))
+        env = _probe_env(reservation["attempt_id"], reservation["probe_key"], ws, fp["harness"], uuid.uuid4().hex)
+        launch = _launch([*_boundary_argv(ws), *argv], prof, prompt, ws.wt, env, float(settings["probe_timeout_s"]),
+                         reservation["attempt_id"], ws.base)
+        return _evaluate(launch, ws, prompt, fp["harness"], fp["invocation_model_id"],
+                         adapters.effort_value(adapter, fp["effort"]))
     finally:
         ws.remove()
 
