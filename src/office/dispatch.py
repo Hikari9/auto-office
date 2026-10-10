@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import threading
 import sys
@@ -809,9 +811,14 @@ def live_lease(con, run_id: str, lease_id: str) -> dict | None:
 
 
 def renew_lease(con, lease_id: str) -> None:
+    """Extend a lease. Submit calls this in the transaction that captures a revision, so it is also where a
+    trial dispatch's first revision settles its trial as `submitted`."""
     now = datetime.now(timezone.utc)
     con.execute("UPDATE leases SET expires_at=?, renewed_at=? WHERE id=?",
                 ((now + timedelta(seconds=LEASE_TTL_SECONDS)).isoformat(), now.isoformat(), lease_id))
+    holder = con.execute("SELECT dispatch_id FROM leases WHERE id=?", (lease_id,)).fetchone()
+    if holder and holder[0] and con.execute("SELECT 1 FROM revisions WHERE dispatch_id=?", (holder[0],)).fetchone():
+        trial_submitted(con, holder[0])
 
 
 def revoke(con, run: dict, target: str, reason: str) -> Result:
@@ -3650,6 +3657,19 @@ def stop_worker_tree(run: dict, d: dict) -> tuple[bool, str]:
                             + (f" (terminated {len(roots)} recorded)" if roots else "")])
 
 
+def _file_digest(path: Path) -> str:
+    """A content digest for a regular file, the link text for a symlink (never followed), else size and mtime."""
+    try:
+        st = path.lstat()
+        if stat.S_ISLNK(st.st_mode):
+            return "link:" + os.readlink(path)
+        if stat.S_ISREG(st.st_mode) and st.st_size <= 8 << 20:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        return f"{st.st_size}:{st.st_mtime_ns}"
+    except OSError:
+        return "gone"
+
+
 def _worktree_snapshot(wt: Path) -> dict | None:
     """HEAD and every changed or untracked, non-ignored path with a digest of its content. Taken until two
     consecutive reads agree, so it describes a worktree nothing is writing. None when it never settles or
@@ -3657,8 +3677,9 @@ def _worktree_snapshot(wt: Path) -> dict | None:
     def once() -> dict | None:
         try:
             head = paths.git(wt, "rev-parse", "HEAD")
-            raw = subprocess.run(["git", "-C", str(wt), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
-                                 capture_output=True, timeout=120)
+            # The worktree is the failed agent's: no fsmonitor hook it may have configured runs for this read.
+            raw = subprocess.run(["git", "-C", str(wt), "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z",
+                                  "--untracked-files=all"], capture_output=True, timeout=120)
         except (OSError, subprocess.SubprocessError, paths.GitError):
             return None
         if raw.returncode != 0:
@@ -3670,12 +3691,7 @@ def _worktree_snapshot(wt: Path) -> dict | None:
             code, name = entries[i][:2], entries[i][3:]
             i += 2 if code[0] in "RC" else 1  # a rename carries its source as another field
             path = wt / name
-            try:
-                digest = sha256_obj(path.read_bytes().hex()) if path.is_file() and path.stat().st_size <= 8 << 20 \
-                    else f"{path.lstat().st_size}:{path.lstat().st_mtime_ns}"
-            except OSError:
-                digest = "gone"
-            files[name] = f"{code}:{digest}"
+            files[name] = f"{code}:{_file_digest(path)}"
         return {"head": head, "files": files}
 
     previous = once()
@@ -3695,9 +3711,9 @@ def work_started(con, d: dict, ddir: Path) -> tuple[bool, str]:
     a worktree that was launched on with no baseline recorded, blocks the fallback."""
     if con.execute("SELECT 1 FROM revisions WHERE dispatch_id=?", (d["id"],)).fetchone():
         return True, "a revision was submitted"
-    wt = Path(d.get("worktree") or "")
-    if not (wt / ".git").exists():
+    if not d.get("worktree") or not (Path(d["worktree"]) / ".git").exists():
         return False, "the dispatch never got a worktree"
+    wt = Path(d["worktree"])
     after = _worktree_snapshot(wt)
     if after is None:
         return True, "the worktree could not be snapshotted, so work cannot be ruled out"
@@ -3715,17 +3731,34 @@ def work_started(con, d: dict, ddir: Path) -> tuple[bool, str]:
     return False, "no revision, no commit and no worktree change since the launch"
 
 
-def _recovery_blocked(con, run: dict, d: dict, trial: dict, status: str, reason: str, next_step: str) -> dict:
+def _recovery_blocked(con, run: dict, d: dict, trial: dict, status: str, reason: str, next_step: str, *,
+                      exited: bool = False) -> dict:
     """Stop here: the worktree and the lease stay as they are, the trial is settled and the task blocks with
-    a next step. Nothing is launched and no lease moves."""
+    a next step. Nothing is launched and no lease moves. A dispatch whose worker is confirmed gone is ended,
+    so it does not stay a live session for the next dispatch to refuse on; one whose exit is not confirmed is
+    left as it is."""
     with db.transaction(con):
         task = state.get_task(con, run["id"], d["task_id"])
+        if exited:
+            _end_failed_dispatch(con, run, d["id"], "launch_failed")
         set_trial_status(con, trial, status, origin="recovery", detail=reason, outcome={"recovery": "blocked", "why": reason})
         if task and task["current_dispatch_id"] == d["id"] and task["status"] in ("running", "launching"):
             state.update_task(con, run["id"], task["id"], status="blocked", pause_reason=f"trial {trial['route']}: {reason}"[:300])
         state.emit(con, run, "task.blocked", f"{d['task_id']} trial route {trial['route']} failed: {reason}; no fallback "
                    f"was started. {next_step}", task_id=d["task_id"], dispatch_id=d["id"])
     return {"recovery": "blocked", "reason": reason}
+
+
+def _end_failed_dispatch(con, run: dict, dispatch_id: str, classification: str) -> None:
+    """Record the end of a dispatch whose worker is confirmed gone and never reported one. Caller holds the tx."""
+    ended = con.execute("UPDATE dispatches SET status=CASE WHEN status='cancelled' THEN status ELSE 'failed' END, "
+                        "terminal_classification=COALESCE(terminal_classification, ?), ended_at=? "
+                        "WHERE id=? AND ended_at IS NULL", (classification, now_iso(), dispatch_id)).rowcount
+    if ended:
+        d = state.get_dispatch(con, dispatch_id)
+        state.emit(con, run, "dispatch.ended", f"{d.get('task_id') or d['role']} {d['role']} ended: {classification}",
+                   audience="runtime", task_id=d.get("task_id"), dispatch_id=dispatch_id,
+                   payload={"exit_code": None, "signal": None, "classification": classification})
 
 
 def _recovery_fallback(con, run: dict, task: dict, d: dict, trial: dict) -> tuple[dict | None, str]:
@@ -3786,13 +3819,13 @@ def _trial_recovery(con, run: dict, job: dict) -> dict:
     meaningful, evidence = work_started(con, state.get_dispatch(con, d["id"]), ddir)
     if meaningful:
         return _recovery_blocked(con, run, d, trial, "abandoned", f"work had started ({evidence})",
-                                 f"The worktree {d.get('worktree')} is preserved; {rerun_hint}")
+                                 f"The worktree {d.get('worktree')} is preserved; {rerun_hint}", exited=True)
     fallback, why = _recovery_fallback(con, run, task, d, trial)
     if fallback is None:
         return _recovery_blocked(con, run, d, trial, "launch-failed", why,
-                                 f"The worker is gone and no work started; route it again: office dispatch {tid} --reroute")
+                                 f"The worker is gone and no work started; route it again: office dispatch {tid} --reroute",
+                                 exited=True)
     from office import plans, queuecmd
-    from office.state import Refused
     with db.transaction(con):
         run = state.get_run(con, run["id"])
         task = state.get_task(con, run["id"], tid)
@@ -3815,10 +3848,7 @@ def _trial_recovery(con, run: dict, job: dict) -> dict:
         else:
             reason = None
             now = now_iso()
-            if cur.get("ended_at") is None:
-                con.execute("UPDATE dispatches SET status=CASE WHEN status='cancelled' THEN status ELSE 'failed' END, "
-                            "terminal_classification=COALESCE(terminal_classification, 'launch_failed'), ended_at=? "
-                            "WHERE id=? AND ended_at IS NULL", (now, d["id"]))
+            _end_failed_dispatch(con, run, d["id"], "launch_failed")
             if cur.get("lease_id"):
                 con.execute("UPDATE leases SET released_at=?, revoke_reason='trial launch failed before any work' "
                             "WHERE id=? AND released_at IS NULL AND revoked_at IS NULL", (now, cur["lease_id"]))
@@ -3842,7 +3872,8 @@ def _trial_recovery(con, run: dict, job: dict) -> dict:
                        f"dispatched {fallback['selected']} as {new}", task_id=tid, dispatch_id=new)
     if reason:
         return _recovery_blocked(con, run, d, trial, "launch-failed", reason,
-                                 f"The worker is gone and no work started; resolve that, then office dispatch {tid} --reroute")
+                                 f"The worker is gone and no work started; resolve that, then office dispatch {tid} --reroute",
+                                 exited=True)
     if cur.get("launcher") == "herdr" and cur.get("pane_id"):
         _unreserve_pane(run, cur["pane_id"])
     return {"recovery": "fell-back", "fallback_dispatch": new}

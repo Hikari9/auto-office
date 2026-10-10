@@ -93,6 +93,13 @@ def _audit(cold, phase="dispatch"):
     return json.loads(row[0])
 
 
+def _revision(cold, d, rid="R1"):
+    cold.con.execute("INSERT INTO revisions(id, run_id, task_id, seq, dispatch_id, commit_sha, tree_sha, "
+                     "requirements_version, plan_version, applied_version, env_fingerprint, operation_id, status, created_at) "
+                     "VALUES(?,'run-A','T1',1,?,?,?,1,3,3,'e',?,'submitted',?)",
+                     (rid, d["id"], "a" * 40, "b" * 40, f"op-{rid}", now_iso()))
+
+
 def _frozen(cold):
     """Every discovery event row exactly as stored, to prove later steps only append."""
     return {e["seq"]: tuple(e.items()) for e in cold.events()}
@@ -436,7 +443,11 @@ def test_events_only_append_across_the_whole_trial_lifecycle(cold):
     assert cold.kinds(attempt)[-1] == "trial-launched" and cold.trials()[0]["status"] == "launched"
     assert {k: v for k, v in after_launch.items() if k in before} == before
     with db.transaction(cold.con):
-        assert dispatch.trial_submitted(cold.con, d["id"])
+        dispatch.renew_lease(cold.con, d["lease_id"])  # submit's call, before any revision exists: nothing to settle
+        assert cold.trials()[0]["status"] == "launched"
+        _revision(cold, d)
+        dispatch.renew_lease(cold.con, d["lease_id"])  # ... and in the transaction that captures the revision
+        assert cold.trials()[0]["status"] == "submitted"
         assert not dispatch.trial_submitted(cold.con, d["id"])  # a status change happens once
         assert not dispatch.abandon_trial(cold.con, d["id"], "late")
     final = _frozen(cold)
@@ -648,6 +659,7 @@ def test_untracked_meaningful_work_is_preserved_and_blocks_the_fallback(cold, tr
     assert not tree.alive() and work.exists() and work.stat().st_size > 0
     assert len(cold.dispatches()) == 1 and cold.trials()[0]["status"] == "abandoned"
     assert [bool(l["released_at"] or l["revoked_at"]) for l in cold.leases()] == [False]  # the lease stays with the work
+    assert cold.dispatches()[0]["ended_at"] and cold.dispatches()[0]["status"] == "failed"  # no phantom live session
     task = task_row(cold)
     assert task["status"] == "blocked" and "work had started" in task["pause_reason"] and "new_module.py" in task["pause_reason"]
     blocked = [e for e in cold.con.execute("SELECT summary FROM events WHERE kind='task.blocked'")][-1][0]
@@ -666,6 +678,7 @@ def test_a_worker_that_survives_the_termination_blocks_the_fallback_without_movi
     lease = _live_leases(cold)[0]["id"]
     recover(cold, d["id"])
     assert tree.alive()
+    assert not cold.dispatches()[0]["ended_at"]  # its worker may still be running: the record says so
     assert len(cold.dispatches()) == 1 and [l["id"] for l in _live_leases(cold)] == [lease] == [d["lease_id"]]
     assert cold.trials()[0]["status"] == "abandoned"
     task = task_row(cold)
@@ -962,3 +975,53 @@ def test_cli_cold_start_trial_worker_submits_and_the_trial_settles_as_submitted(
     kinds = [r[0] for r in con.execute("SELECT kind FROM route_discovery_events WHERE attempt_id=? ORDER BY seq", (trial["id"],))]
     assert kinds == ["probe-reserved", "probe-result", "dispatch-linked", "trial-reserved", "trial-launched", "trial-submitted"]
     assert not con.execute("SELECT 1 FROM adapter_trust_acts WHERE triple=?", (trial["route"],)).fetchone()
+
+
+def test_a_supervisor_that_is_this_process_is_never_the_worker_and_its_other_children_are_left_alone(cold, trees):
+    # `OFFICE_LAUNCHER=sync` supervises in the dispatching process, so the recorded supervisor identity is the
+    # process running the recovery. Neither it nor anything it started for another purpose is the worker.
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"])
+    threading.Thread(target=bystander.wait, daemon=True).start()
+    try:
+        ident = paths.run_dir("run-A") / "dispatches" / d["id"] / "supervisor.identity"
+        ident.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(ident, {"pid": os.getpid(), "start": process_start(os.getpid())})
+        recover(cold, d["id"])
+        assert bystander.poll() is None
+        assert cold.trials()[0]["status"] == "fell-back" and len(_live_leases(cold)) == 1
+    finally:
+        bystander.kill()
+
+
+def test_a_symlink_in_the_worktree_is_compared_by_its_link_text_and_never_followed(cold, tmp_path):
+    d, wt, ddir = in_flight(cold)
+    outside = tmp_path / "outside.bin"
+    outside.write_text("one")
+    (wt / "alias").symlink_to(outside)
+    before = dispatch._worktree_snapshot(wt)
+    assert before["files"]["alias"].endswith(f"link:{outside}")
+    outside.write_text("two")  # the target changes; the worktree did not
+    assert dispatch._worktree_snapshot(wt) == before
+    (wt / "alias").unlink()
+    (wt / "alias").symlink_to(tmp_path / "elsewhere")
+    assert dispatch._worktree_snapshot(wt) != before
+
+
+def test_the_snapshot_reads_the_failed_agents_worktree_without_its_fsmonitor_hook(cold, tmp_path):
+    d, wt, ddir = in_flight(cold)
+    marker = tmp_path / "hook-ran"
+    hook = tmp_path / "hook.sh"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    hook.chmod(0o755)
+    subprocess.run(["git", "-C", str(wt), "config", "core.fsmonitor", str(hook)], check=True)
+    assert dispatch._worktree_snapshot(wt) is not None
+    assert not marker.exists()
+
+
+def test_a_dispatch_with_no_worktree_is_pre_work_and_never_reads_the_current_directory(cold, monkeypatch):
+    d, wt, ddir = in_flight(cold)
+    monkeypatch.setattr(dispatch, "_worktree_snapshot", lambda path: pytest.fail(f"snapshotted {path}"))
+    for missing in (None, "", str(cold.tmp / "no-such-worktree")):
+        assert dispatch.work_started(cold.con, {**d, "worktree": missing}, ddir) == (False, "the dispatch never got a worktree")
