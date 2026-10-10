@@ -43,9 +43,10 @@ import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
+from urllib.parse import quote
 
 try:
-    import office  # noqa: F401
+    import office  # noqa: F401  (probe only: is the package importable)
 except ImportError:  # run from a checkout without the package installed
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -65,7 +66,7 @@ def live_db() -> Path:
 def snapshot(src: Path, dest_dir: Path) -> Path:
     """A consistent copy of `src`, taken through SQLite's backup API on a read-only connection."""
     dest = dest_dir / "runs-copy.db"
-    ro = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=30)
+    ro = sqlite3.connect(f"file:{quote(str(src))}?mode=ro", uri=True, timeout=30)
     try:
         out = sqlite3.connect(str(dest))
         try:
@@ -163,9 +164,13 @@ def decide(con, config: dict, run: dict, row: dict, *, discovery_input: dict | N
 
 
 def load_rows(con, limit: int | None = None) -> list[dict]:
-    rows = con.execute(
-        "SELECT id, run_id, task_id, role, phase, plan_version, decision_hash, primary_route, dispatched_route, created_at "
-        f"FROM route_audit WHERE role IN ({','.join('?' * len(ROLES))}) ORDER BY created_at, rowid", ROLES).fetchall()
+    try:
+        rows = con.execute(
+            "SELECT id, run_id, task_id, role, phase, plan_version, decision_hash, primary_route, dispatched_route, "
+            f"created_at FROM route_audit WHERE role IN ({','.join('?' * len(ROLES))}) ORDER BY created_at, rowid",
+            ROLES).fetchall()
+    except sqlite3.OperationalError:  # a database that never recorded a route decision
+        return []
     out = [dict(r) for r in rows]
     return out[:limit] if limit else out
 
@@ -203,7 +208,7 @@ def replay(db_path: Path, *, limit: int | None = None) -> dict:
             seen_runs[row["run_id"]] = run
             run = {**run, "plan_version": row["plan_version"] or run.get("plan_version")}
             try:
-                results = replay_one(con, run, row, allocation, report, trial_runs)
+                results = replay_one(con, run, row, allocation, trial_runs)
             except Exception as exc:  # noqa: BLE001 - a decision that cannot be rebuilt is counted, not hidden
                 report["skipped"][f"error:{type(exc).__name__}"] += 1
                 continue
@@ -220,14 +225,12 @@ def replay(db_path: Path, *, limit: int | None = None) -> dict:
         con.close()
 
 
-def replay_one(con, run: dict, row: dict, allocation: Allocation, report: dict, trial_runs: set) -> dict:
-    from office import route_policy
+def replay_one(con, run: dict, row: dict, allocation: Allocation, trial_runs: set) -> dict:
     configs = configs_for(run)
     results = {}
     for name in ("pinned", "pinned-off", "head-off"):
         results[name] = decide(con, configs[name], run, row)
     config = configs["head-on"]
-    settings = route_policy.discovery_settings(config)
     spends = row["phase"] in ALLOCATING_PHASES
     with simulated(allocation):
         first = decide(con, config, run, row)
@@ -245,7 +248,6 @@ def replay_one(con, run: dict, row: dict, allocation: Allocation, report: dict, 
     if spends:
         allocation.history.append(bool(outcome["trial"] and (outcome["trial"].get("discovery") or {}).get("intent") == "trial"))
     results["head-on"] = outcome
-    del settings
     return results
 
 
@@ -407,6 +409,14 @@ def self_test() -> int:
         copy_path = snapshot(live, tmp)
         check(copy_path != live and sha(copy_path) != "", "a snapshot is a separate file")
         check(refuse_live(copy_path) is None, "a copy is accepted")
+        odd = tmp / "odd name?#%.db"
+        sqlite3.connect(str(odd)).close()
+        (tmp / "odd").mkdir()
+        check(snapshot(odd, tmp / "odd").is_file(), "a path with URI characters can still be snapshotted")
+        from office import db as office_db
+        empty = tmp / "empty.db"
+        office_db.connect(empty).close()
+        check(replay(empty)["source"]["decisions"] == 0, "a database with no recorded decisions replays to zero")
         report = replay(copy_path)
         check((sha(live), live.stat().st_mtime_ns) == before, "the source database is untouched")
         pin = report["pinned"]

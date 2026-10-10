@@ -24,15 +24,14 @@ from office import (adapters, adaptive, candidates, config as cfg, db, dispatch,
                     route_policy, route_probe, routing, scoring, state)
 from office.util import dumps, now_iso
 
-from test_discovery_dispatch import (Cold, Tree, _audit, _between, _blast_radius, _changed_fingerprint, _disabled,
-                                     _irreversible, _large_task, _live_leases, _quarantined_fallback,
-                                     _quarantined_trial_route, _revision, _route_json, _spent_quota, _stale_probe,
-                                     _take_the_trial, _until, cache_pass, cold, in_flight, launched, recover, task_row, trees)
+from test_discovery_dispatch import (Tree, _audit, _between, _blast_radius, _irreversible, _large_task, _live_leases,
+                                     _quarantined_fallback, _quarantined_trial_route, _route_json, _spent_quota, _until,
+                                     cold, in_flight, launched, recover, task_row, trees)  # noqa: F401 (the two fixtures)
 from test_route_discovery_consumer_contract import (BASE_EAF155A, EFFORTS, SOL, World, categories, recorded_requests,
-                                                    skipped, world)
+                                                    skipped, world)  # noqa: F401 (the fixture)
 from test_route_discovery_routing import base as synthetic_base, discovery as synthetic_discovery, go, handle, untried
 from test_route_discovery_routing import failed as failed_probe, passed as passed_probe
-from test_route_learning_discovery import ALLOC, DIGEST, FALLBACK, ROUTE, Seed, TRIPLE, at, evidence, outcome, probe_key
+from test_route_learning_discovery import FALLBACK, ROUTE, Seed, TRIPLE, evidence, outcome
 
 ASTRA = "gpt-6-astra"  # the fake world's known-working route: every installed available route is user-trusted
 AUTHORITY = ("adapter_trust_acts", "recorded_overrides")
@@ -408,6 +407,16 @@ def test_s06_the_shipped_economic_scale_is_not_a_ceiling_for_new_runs(world, tie
     assert d["routing"]["budget_ceiling_source"] == tier
 
 
+def test_s06_a_number_that_came_from_the_shipped_tier_is_never_a_hard_ceiling():
+    shipped = copy.deepcopy(cfg.resolve(None)[0])
+    shipped["routing"]["adaptive"]["budget_ceiling_usd"] = 25  # e.g. an old shipped default
+    shipped[route_policy.PROVENANCE_KEY][route_policy.CEILING_KEY] = "shipped"
+    assert route_policy.budget_ceiling(shipped) == {"usd": None, "source": "shipped"}
+    for tier in ("user", "repo", "run"):
+        shipped[route_policy.PROVENANCE_KEY][route_policy.CEILING_KEY] = tier
+        assert route_policy.budget_ceiling(shipped) == {"usd": 25.0, "source": tier}
+
+
 def test_s06_a_run_pinned_before_this_change_keeps_its_own_ceiling():
     pinned = priced(ceiling=25.0, extra={"cost_scale_usd": 25})  # no provenance in the request: the old default stands
     assert pinned["status"] == "selected" and pinned["routing"]["budget_ceiling_usd"] == 25.0
@@ -472,7 +481,6 @@ def test_s07_an_archived_row_is_never_probed_or_routed(world):
     with pytest.raises(state.Usage) as err:
         route_probe.candidate_from_spec(spec)
     assert err.value.category == "route-archived"
-    pool = world.decide(None)["request"]["candidates"] + [c for c in world.decide(None)["skipped"] if isinstance(c, dict)]
     assert not [c for c in world.decide(None)["request"]["candidates"]
                 if (c["model_id"], c["effort"]) == (row["model_id"], row["effort"])]
     assert nothing_was_probed(world)
