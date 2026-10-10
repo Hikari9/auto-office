@@ -279,7 +279,8 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 continue
             plans.require_scope_clear(con, run, tid)
             stack_after = None if parallel or previous is None else previous
-            holder_accepted = bool(stack_after) and (state.get_task(con, run["id"], stack_after) or {}).get("status") == "accepted"
+            holder = (state.get_task(con, run["id"], stack_after) or {}) if stack_after else {}
+            holder_accepted = holder.get("status") == "accepted"
             parts = []
             base = _base_for(con, run, task, graph, stack_after, queued=bool(stack_after) and not holder_accepted,
                              parents=parts)

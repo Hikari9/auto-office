@@ -335,15 +335,17 @@ def _dependency_bases(con, run: dict, task: dict, commit: str) -> list[str]:
     return out
 
 
-def inherited_base(con, run: dict, task: dict, d: dict, head: str) -> str | None:
+def inherited_base(con, run: dict, task: dict, d: dict, head: str, dep_commits: list[str] | None = None) -> str | None:
     """M: the commit holding everything this task inherited, or None when it cannot be composed.
 
     M merges the dispatch's recorded base with every other task's accepted revision that `head`
     contains, declared dependency or not, and the newest revision of each declared dependency
     (_dependency_bases). What differs between M and HEAD is the task's own work, whatever its
-    parents edited in common (#490)."""
+    parents edited in common (#490). `dep_commits` is _dependency_bases when the caller has it."""
     from office import integration
-    heads = [("base", d["base_commit"]), *(("dependency", c) for c in _dependency_bases(con, run, task, head))]
+    if dep_commits is None:
+        dep_commits = _dependency_bases(con, run, task, head)
+    heads = [("base", d["base_commit"]), *(("dependency", c) for c in dep_commits)]
     for other in state.tasks(con, run["id"]):
         if other["id"] == task["id"] or other["id"] in task["depends"] or not other.get("accepted_revision_id"):
             continue
@@ -359,11 +361,12 @@ def inherited_base(con, run: dict, task: dict, d: dict, head: str) -> str | None
 def attribution(con, run: dict, task: dict, d: dict, head: str) -> tuple[str, list[str]]:
     """(base, dep_bases) the task's own files are measured against: M and no dependency bases, or,
     when M cannot be composed, the recorded base narrowed by every dependency base it contains."""
-    merged = inherited_base(con, run, task, d, head)
+    dep_commits = _dependency_bases(con, run, task, head)
+    merged = inherited_base(con, run, task, d, head, dep_commits)
     if merged:
         return merged, []
     base = d["base_commit"]
-    return base, [b for b in _dependency_bases(con, run, task, head) if b != base]
+    return base, [b for b in dep_commits if b != base]
 
 
 def capture_tree(worktree: Path, scratch: Path, leave_out: list[str] | None = None,
