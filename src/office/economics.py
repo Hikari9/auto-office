@@ -193,6 +193,14 @@ def _transcripts(harness: str, session_id: str) -> list[Path]:
 
 # ------------------------------------------------------------------ writes
 
+def _rank(col: str) -> str:
+    return f"(CASE {col} WHEN 'actual' THEN 3 WHEN 'quota' THEN 2 WHEN 'estimated-nominal' THEN 1 ELSE 0 END)"
+
+
+# Order-independent cost merge: actual > quota > estimated-nominal > unknown; a tie keeps the larger cost.
+_NEW_COST_WINS = (f"({_rank('excluded.cost_kind')} > {_rank('cost_kind')} OR ({_rank('excluded.cost_kind')} = "
+                  f"{_rank('cost_kind')} AND COALESCE(excluded.cost_usd, -1) > COALESCE(cost_usd, -1)))")
+
 _UPSERT = (
     "INSERT INTO usage_events(harness, session_id, turn_id, event_id, run_id, dispatch_id, task_id, role, phase, model, "
     "attribution, occurred_at, source, source_path, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, "
@@ -204,8 +212,8 @@ _UPSERT = (
     + ", ".join(f"{f}=MAX(COALESCE({f}, excluded.{f}), COALESCE(excluded.{f}, {f}))" for f in TOKEN_FIELDS)
     + ", occurred_at=MIN(COALESCE(occurred_at, excluded.occurred_at), COALESCE(excluded.occurred_at, occurred_at))"
     ", model=COALESCE(model, excluded.model)"
-    ", cost_usd=CASE WHEN cost_kind='unknown' THEN excluded.cost_usd ELSE cost_usd END"
-    ", cost_kind=CASE WHEN cost_kind='unknown' THEN excluded.cost_kind ELSE cost_kind END"
+    f", cost_usd=CASE WHEN {_NEW_COST_WINS} THEN excluded.cost_usd ELSE cost_usd END"
+    f", cost_kind=CASE WHEN {_NEW_COST_WINS} THEN excluded.cost_kind ELSE cost_kind END"
     ", run_id=CASE WHEN attribution='office' THEN run_id ELSE excluded.run_id END"
     ", dispatch_id=CASE WHEN attribution='office' THEN dispatch_id ELSE excluded.dispatch_id END"
     ", task_id=CASE WHEN attribution='office' THEN task_id ELSE excluded.task_id END"
@@ -264,10 +272,19 @@ def ingest(con, run: dict, *, file: str | None = None, harness: str | None = Non
         lines.append(f"ingested {len(events)} usage event(s) from {path}")
         return Result(lines=lines, next="office inspect economics", data={"enabled": True, **counts})
     sources = []
-    for d in con.execute("SELECT id, task_id, role, kind, harness, session_id, model FROM dispatches "
-                         "WHERE run_id=? AND session_id IS NOT NULL AND harness IS NOT NULL", (run["id"],)):
+    rows = [dict(d) for d in con.execute(
+        "SELECT id, task_id, role, kind, harness, session_id, started_at, ended_at FROM dispatches "
+        "WHERE run_id=? AND session_id IS NOT NULL AND harness IS NOT NULL ORDER BY started_at, id", (run["id"],))]
+    for i, d in enumerate(rows):
+        # A resumed dispatch can share its predecessor's session: each dispatch owns only the turns inside
+        # its own window, which ends when it ended or when the next dispatch on that session started.
+        nxt = next((n["started_at"] for n in rows[i + 1:]
+                    if (n["harness"], n["session_id"]) == (d["harness"], d["session_id"]) and n["started_at"]), None)
+        ends = [e for e in (d["ended_at"], nxt) if e]
+        end = min(ends, key=parse_iso) if ends else None
+        attribution = _window(d["started_at"], end) if d["started_at"] else "office"
         sources.append((d["harness"], d["session_id"], {"run_id": run["id"], "dispatch_id": d["id"],
-                        "task_id": d["task_id"], "role": d["role"], "phase": d["kind"], "attribution": "office"}))
+                        "task_id": d["task_id"], "role": d["role"], "phase": d["kind"], "attribution": attribution}))
     for b in con.execute("SELECT harness, session_id, bound_at, ended_at FROM session_bindings WHERE run_id=?",
                          (run["id"],)):
         end = b["ended_at"] or run.get("terminal_at")
@@ -352,7 +369,7 @@ def inspect(con, run: dict) -> Result:
                  "missing fields " + ", ".join(f"{f.replace('_tokens', '')} {n}" for f, n in missing.items()))
     outside = len(rows) - len(office_rows)
     if outside:
-        lines.append(f"{outside} root-session turn(s) outside the run window are excluded")
+        lines.append(f"{outside} turn(s) outside their run or dispatch window are excluded")
     return Result(lines=lines, data={"enabled": on, "rows": len(office_rows), "outside_rows": outside,
                                      "groups": by_group, "missing": missing, "cold_resumes": cold,
                                      "coverage": {"dispatches": total_d, "measured_dispatches": measured_d}})

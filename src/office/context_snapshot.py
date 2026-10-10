@@ -28,6 +28,8 @@ MAX_TASKS = 40
 MAX_TEXT = 200
 MAX_CHARS = 16000
 HASH_LIMIT_BYTES = 8 << 20
+HASH_BUDGET_BYTES = 32 << 20  # total bytes hashed per call; artifacts past it are `unhashed`
+MAX_JSON_CHARS = 24000
 
 
 def _clip(text, n: int = MAX_TEXT) -> str:
@@ -35,7 +37,7 @@ def _clip(text, n: int = MAX_TEXT) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
-def _artifact(path: str | None, digest: str | None) -> str:
+def _artifact(path: str | None, digest: str | None, budget: list[int]) -> str:
     if not path:
         return "no-path"
     p = Path(path)
@@ -44,8 +46,12 @@ def _artifact(path: str | None, digest: str | None) -> str:
     if not digest:
         return "unhashed"
     try:
-        if p.stat().st_size > HASH_LIMIT_BYTES:
+        size = p.stat().st_size
+        if size > HASH_LIMIT_BYTES:
             return "unverified"
+        if size > budget[0]:
+            return "unhashed"
+        budget[0] -= size
         return "ok" if sha256_file(p) == digest else "stale"
     except OSError:
         return "missing"
@@ -78,9 +84,16 @@ def _read(con, run_id: str, since: int | None) -> dict:
     req = con.execute("SELECT version, frozen_json, created_at FROM requirements WHERE run_id=? ORDER BY version DESC "
                       "LIMIT 1", (rid,)).fetchone()
     plan = state.current_plan(con, rid)
-    tasks = [dict(r) for r in con.execute(
+    terminal = ",".join("?" * len(state.TASK_TERMINAL))
+    open_tasks = [dict(r) for r in con.execute(
         "SELECT id, title, role, status, pause_reason, current_dispatch_id, accepted_revision_id FROM tasks "
-        "WHERE run_id=? ORDER BY id", (rid,))]
+        f"WHERE run_id=? AND status NOT IN ({terminal}) ORDER BY id LIMIT ?",
+        (rid, *state.TASK_TERMINAL, MAX_TASKS + 1))]
+    done_tasks = [r[0] for r in con.execute(
+        f"SELECT id FROM tasks WHERE run_id=? AND status IN ({terminal}) ORDER BY id LIMIT ?",
+        (rid, *state.TASK_TERMINAL, MAX_TASKS + 1))]
+    total = con.execute("SELECT COUNT(*) FROM tasks WHERE run_id=?", (rid,)).fetchone()[0]
+    tasks = {"open": open_tasks, "done": done_tasks, "total": total}
     gates = [dict(r) for r in con.execute(
         "SELECT id, kind, subject, task_id, status, verdict, round FROM gates WHERE run_id=? "
         "AND status NOT IN ('done','stale') ORDER BY created_at DESC LIMIT ?", (rid, MAX_ITEMS + 1))]
@@ -139,19 +152,17 @@ def snapshot(con, run: dict, *, since: int | None = None) -> dict:
         stale.append(f"run names plan p{r['plan_version']} but the latest stored plan is p{plan['version']}")
     if raw["req"] and r.get("requirements_version") and raw["req"]["version"] != r["requirements_version"]:
         stale.append(f"run names requirements r{r['requirements_version']}, latest stored r{raw['req']['version']}")
-    artifacts = []
+    artifacts, budget = [], [HASH_BUDGET_BYTES]
     for kind, rows in (("evidence", raw["evidence"]), ("visual", raw["visuals"])):
         for row in rows[:MAX_ITEMS]:
-            status = _artifact(row["path"], row["sha256"])
+            status = _artifact(row["path"], row["sha256"], budget)
             artifacts.append({"kind": kind, "id": row["id"], "path": row["path"], "sha256": row["sha256"],
                               "status": status})
             if status in ("missing", "stale"):
                 stale.append(f"{kind} {row['id']} {status}: {row['path']}")
-    tasks = raw["tasks"]
-    open_tasks = [t for t in tasks if t["status"] not in state.TASK_TERMINAL]
-    done_tasks = [t["id"] for t in tasks if t["status"] in state.TASK_TERMINAL]
+    open_tasks, done_tasks = raw["tasks"]["open"], raw["tasks"]["done"]
     req = raw["req"]
-    return {
+    return _bound({
         "run": {"id": r["id"], "goal": _clip(r.get("goal"), 400), "phase": r.get("phase"), "gear": r.get("gear"),
                 "office_version": pinned, "runtime_version": current},
         "requirements": ({"version": req["version"], "sha256": sha256_bytes(req["frozen_json"].encode()),
@@ -161,7 +172,7 @@ def snapshot(con, run: dict, *, since: int | None = None) -> dict:
         "plan_draft": draft,
         "tasks": {"open": [{k: (_clip(v) if k == "title" else v) for k, v in t.items() if v is not None}
                            for t in open_tasks[:MAX_TASKS]],
-                  "accepted_or_cancelled": done_tasks[:MAX_TASKS], "total": len(tasks)},
+                  "accepted_or_cancelled": done_tasks[:MAX_TASKS], "total": raw["tasks"]["total"]},
         "pending_gates": raw["gates"][:MAX_ITEMS],
         "blocking_findings": [{**f, "summary": _clip(f["summary"])} for f in raw["findings"][:MAX_ITEMS]],
         "amendments": raw["amendments"],
@@ -171,12 +182,48 @@ def snapshot(con, run: dict, *, since: int | None = None) -> dict:
         "events_truncated": len(raw["events"]) > MAX_ITEMS,
         "truncated": {k: True for k, rows in (("gates", raw["gates"]), ("findings", raw["findings"]),
                                               ("evidence", raw["evidence"]), ("visuals", raw["visuals"]))
-                      if len(rows) > MAX_ITEMS} | ({"tasks": True} if len(open_tasks) > MAX_TASKS else {}),
+                      if len(rows) > MAX_ITEMS} | ({"tasks": True} if len(open_tasks) > MAX_TASKS or len(done_tasks) > MAX_TASKS else {}),
         "next": nxt,
         "cursor": {"event_seq": raw["seq"], "since": since, "run_updated_at": raw["updated"]},
         "generated_at": now_iso(),
-        "stale": stale,
-    }
+        "stale": stale[:MAX_ITEMS * 2] + ([f"{len(stale) - MAX_ITEMS * 2} more stale reference(s)"]
+                                          if len(stale) > MAX_ITEMS * 2 else []),
+    })
+
+
+def _clip_all(obj):
+    if isinstance(obj, str):
+        return _clip(obj, 400)
+    if isinstance(obj, list):
+        return [_clip_all(v) for v in obj]
+    if isinstance(obj, dict):
+        return {k: _clip_all(v) for k, v in obj.items()}
+    return obj
+
+
+def _bound(snap: dict) -> dict:
+    """The --json payload obeys the same bounds as the text: every string clipped,
+    and the longest lists halved (and marked truncated) until the whole fits."""
+    import json
+    snap = _clip_all(snap)
+    lists = (("events",), ("artifacts",), ("tasks", "open"), ("tasks", "accepted_or_cancelled"),
+             ("pending_gates",), ("blocking_findings",), ("authorizations",), ("stale",))
+    while len(json.dumps(snap, default=str)) > MAX_JSON_CHARS:
+        keys = max(lists, key=lambda ks: len(json.dumps(_get(snap, ks), default=str)))
+        items = _get(snap, keys)
+        if len(items) <= 1:
+            break
+        parent = snap if len(keys) == 1 else snap[keys[0]]
+        parent[keys[-1]] = items[: len(items) // 2]
+        snap["truncated"]["/".join(keys)] = True
+    return snap
+
+
+def _get(snap: dict, keys: tuple):
+    node = snap
+    for k in keys:
+        node = node[k]
+    return node
 
 
 def render(snap: dict) -> list[str]:

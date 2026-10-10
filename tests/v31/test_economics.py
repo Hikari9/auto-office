@@ -239,3 +239,43 @@ def test_hook_hot_path_never_touches_the_ledger(env):
         assert proc.returncode == 0, proc.stderr
     assert best < 2.0, f"hook took {best:.2f}s"
     assert not _table(env)
+
+
+def test_resume_sharing_a_session_owns_only_its_window(env):
+    run_id = _run_id(env)
+    con = env.con()
+    try:
+        for did, start, end, prev in (("D-a", "2030-01-01T00:00:00+00:00", "2030-01-01T00:10:00+00:00", None),
+                                      ("D-b", "2030-01-01T00:20:00+00:00", None, "D-a")):
+            con.execute("INSERT INTO dispatches(id, run_id, role, kind, task_id, harness, session_id, resumed_from, "
+                        "status, started_at, ended_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                        (did, run_id, "executor", "executor", "T1", "claude", SID, prev, "ended", start, end))
+    finally:
+        con.close()
+    _enable(env)
+    _write_claude(env, SID, [
+        _claude_entry("first", ts="2030-01-01T00:05:00Z", input_tokens=5, output_tokens=1,
+                      cache_read_input_tokens=0, cache_creation_input_tokens=50),
+        _claude_entry("resumed", req="r2", ts="2030-01-01T00:25:00Z", input_tokens=5, output_tokens=1,
+                      cache_read_input_tokens=0, cache_creation_input_tokens=900)])
+    env.office("economics", "ingest", check=0)
+    owners = {r["event_id"]: (r["dispatch_id"], r["attribution"]) for r in _rows(env)}
+    assert owners == {"first": ("D-a", "office"), "resumed": ("D-b", "office")}, owners
+    code, data = env.ojson("inspect", "economics")
+    assert data["data"]["cold_resumes"] == ["D-b"]
+
+
+def test_cost_merge_is_order_independent(env, tmp_path):
+    _enable(env)
+    rows = [{"cost_kind": "estimated-nominal", "cost_usd": 0.5}, {"cost_kind": "actual", "cost_usd": 0.2},
+            {"cost_kind": "quota", "cost_usd": 0.9}, {"cost_kind": "actual", "cost_usd": 0.3},
+            {"cost_kind": "unknown"}]
+    results = set()
+    for n, order in enumerate((rows, rows[::-1], rows[2:] + rows[:2])):
+        for i, extra in enumerate(order):
+            f = tmp_path / f"c{n}-{i}.jsonl"
+            f.write_text(json.dumps({"harness": "api", "session_id": f"s{n}", "event_id": "e", **extra}) + "\n")
+            env.office("economics", "ingest", "--file", str(f), check=0)
+    for row in _rows(env):
+        results.add((row["cost_kind"], row["cost_usd"]))
+    assert results == {("actual", 0.3)}

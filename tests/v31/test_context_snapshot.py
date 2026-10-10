@@ -104,3 +104,66 @@ def test_pinned_runtime_mismatch_is_visible(env):
     finally:
         con.close()
     assert any("pinned to office 2.9" in s for s in snap["stale"]), snap["stale"]
+
+
+def _dump(env) -> str:
+    con = env.con()
+    try:
+        return "\n".join(con.iterdump())
+    finally:
+        con.close()
+
+
+def test_context_writes_nothing_on_a_self_improve_armed_run(env):
+    con, run = _con_run(env)
+    try:
+        from office import bugwatch
+        bugwatch.arm(con, run["id"])
+        con.execute("INSERT INTO events(run_id, kind, audience, summary, office_version, created_at) "
+                    "VALUES(?,?,?,?,?,?)", (run["id"], "worker.failed", "orchestrator", "boom", "t", "2030"))
+    finally:
+        con.close()
+    before = _dump(env)
+    env.office("context", check=0)
+    env.ojson("context", "--since", "0")
+    assert _dump(env) == before
+
+
+def test_hash_budget_leaves_later_artifacts_unhashed_not_stale(env, monkeypatch):
+    from office import context_snapshot, state
+    con, run = _con_run(env)
+    try:
+        paths = []
+        for i in range(3):
+            p = env.tmp / f"big-{i}.bin"
+            p.write_bytes(b"x" * 1000)
+            state.record_evidence(con, run["id"], "note", p)
+            paths.append(p)
+        monkeypatch.setattr(context_snapshot, "HASH_BUDGET_BYTES", 1500)
+        snap = context_snapshot.snapshot(con, state.get_run(con, run["id"]))
+    finally:
+        con.close()
+    statuses = sorted(a["status"] for a in snap["artifacts"] if a["path"] in map(str, paths))
+    assert statuses == ["ok", "unhashed", "unhashed"], statuses
+    assert not any("big-" in s for s in snap["stale"])
+
+
+def test_many_tasks_and_json_payload_stay_bounded(env):
+    import json
+    con, run = _con_run(env)
+    try:
+        for i in range(200):
+            con.execute("INSERT INTO tasks(run_id, id, title, role, scope_json, depends_json, accept_json, checks_json, "
+                        "status, introduced_plan_version, contract_version, acceptance_version, created_at, updated_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (run["id"], f"X{i:03}", "t" * 3000, "executor", "[]", "[]", "[]", "[]",
+                         "accepted" if i % 2 else "pending", 1, 1, 1, "2030", "2030"))
+        for i in range(30):
+            con.execute("INSERT INTO authorizations(id, run_id, kind, target, authorized_by, quote, created_at) "
+                        "VALUES(?,?,?,?,?,?,?)", (f"A{i}", run["id"], "plan", "z" * 5000, "u", "q", "2030"))
+    finally:
+        con.close()
+    code, data = env.ojson("context", "--since", "0")
+    snap = data["data"]
+    assert len(json.dumps(snap)) <= 24000 and snap["tasks"]["total"] == 201
+    assert len(snap["tasks"]["open"]) <= 40 and snap["truncated"].get("tasks")

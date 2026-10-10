@@ -733,7 +733,7 @@ def _run(args, unknown) -> int:
             notice = bugwatch.lifecycle_attempt(run["id"], cmd, "completed")
             if notice:
                 res.notices.append(notice)
-        else:
+        elif cmd != "context":  # office context is read-only: no audit capture or reporter (#502)
             # Observe worker/subagent events without requiring any special agent hook.
             try:
                 if bugwatch.armed(con, run["id"]):
