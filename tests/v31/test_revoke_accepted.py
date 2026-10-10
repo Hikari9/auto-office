@@ -81,7 +81,7 @@ def test_a_revoke_after_a_refused_amendment_submit_keeps_the_task_accepted(env):
     (wt / "calc.py").write_text(GOOD_ADD + "\n")
     self_reviewed(wt, "calc.py")
     code, out = env.office("submit", cwd=wt, env=w)
-    assert code == 4 and ("lease-lost" in out or "superseded" in out or "not the current" in out), out
+    assert code == 4 and "lease-lost" in out, out
     assert task_row(env, "T1")["status"] == "accepted"
 
 
