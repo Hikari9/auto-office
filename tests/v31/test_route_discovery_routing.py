@@ -770,6 +770,19 @@ def test_route_role_drives_cold_start_probe_then_trial_without_minting_trust(env
     assert scoring.evaluate_trust_state(con, pooled)[1] == "valid-unverified"
 
 
+def test_a_mistyped_value_outside_the_denial_subtree_does_not_hide_or_refuse_a_policy(monkeypatch, tmp_path):
+    user = tmp_path / "user.yaml"
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(user))
+    user.write_text("routing:\n  adaptive:\n    competitive_band: high\n")
+    assert candidates.live_user_policies() == []
+    user.write_text("routing:\n  adaptive:\n    competitive_band: high\n  user_policy:\n"
+                    "    denied_models: [harness:codex]\n")
+    assert candidates.live_user_policies()[0]["denied"] == ["harness:codex"]
+    user.write_text("routing:\n  user_policy:\n    overkill_rules: bad\n")
+    with pytest.raises(ValueError, match="routing.user_policy.overkill_rules"):
+        candidates.live_user_policies()
+
+
 def test_route_role_honors_a_live_denial_and_fails_closed_on_an_unreadable_policy(env, monkeypatch, tmp_path):
     from conftest import start_inline
     from office import state

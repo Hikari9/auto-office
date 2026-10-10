@@ -953,7 +953,7 @@ def test_the_environment_tag_and_remembered_lineage_attribute_descendants(world,
 def test_a_setsid_escapee_with_no_workspace_handle_is_attributed_by_the_real_ps_environment(world):
     nonce = "nonce-real-ps-" + uuid.uuid4().hex
     escapee = subprocess.Popen([sys.executable, "-c", "import os, time; os.chdir('/'); time.sleep(60)"], cwd="/",
-                               env={**os.environ, route_probe.NONCE_ENV: nonce}, start_new_session=True)
+                               env={"PATH": os.environ.get("PATH", ""), route_probe.NONCE_ENV: nonce}, start_new_session=True)
     try:
         deadline = time.monotonic() + 10
         found: set[int] = set()

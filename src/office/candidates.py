@@ -147,7 +147,7 @@ def live_user_policies(repo_root=None) -> list[dict]:
     if policy is None:  # held in a local: concurrent probes share this cache and may clear it
         effective, warnings = cfg.resolve(repo_root, files=files)
         ignored = [w for w in warnings if w["reason"] == "type-mismatch-ignored"
-                   and (w["key"] == "routing" or w["key"].startswith("routing."))]
+                   and (w["key"] in ("routing", "routing.user_policy") or w["key"].startswith("routing.user_policy."))]
         if ignored:  # a malformed routing value is dropped by the merge: it may have been a denial
             raise ValueError(f"{ignored[0]['tier']} config {ignored[0]['key']} has the wrong type "
                              f"(expected {ignored[0]['expected']}, got {ignored[0]['got']})")
