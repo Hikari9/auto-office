@@ -188,8 +188,10 @@ def _enter_wal(con: sqlite3.Connection, attempts: int = 40) -> None:
             if str(mode).lower() != "wal":
                 mode = con.execute("PRAGMA journal_mode=WAL").fetchone()[0]
         except sqlite3.OperationalError as exc:
-            if ("locked" not in str(exc) and "busy" not in str(exc)) or attempt == attempts - 1:
+            if "locked" not in str(exc) and "busy" not in str(exc):
                 raise
+            if attempt == attempts - 1:
+                raise RuntimeError(f"runs.db could not enter WAL mode (still locked after {attempts} tries)") from exc
             time.sleep(delay * (0.5 + random.random()))
             delay = min(delay * 2, 0.5)
             continue
