@@ -90,7 +90,7 @@ No production code changed. Every change is under `tests/`, `docs/`, `pyproject.
 
 ### Added
 
-65 property tests (`@given`) across 12 files, listed in the pull request. New coverage: route qualification, rejection stage,
+66 property tests (`@given`) across 12 files, listed in the pull request. New coverage: route qualification, rejection stage,
 quota reserve, advisory anchor and money band (`test_routing_properties.py`); the capability floor, reward tie-break,
 harness major and preferred seed for both the packaged and the retained 3.0 scorer; admission capacity (exactly full, never over),
 ready order, and reserve handling in the scheduler; well-formed ledgers round-trip; and boundary examples the mutation run showed
