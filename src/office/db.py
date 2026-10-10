@@ -94,6 +94,9 @@ SHARED_COLUMNS = {
         # dismissed | follow-up | fix while its repair runs).
         "contract TEXT", "scope TEXT", "blocking INTEGER", "seam TEXT", "root_cause TEXT", "owners TEXT",
         "disposition TEXT", "disposition_note TEXT", "disposition_by TEXT", "disposition_at TEXT",
+        # v12: evidence-only attribution (never read by repair routing): how the finding maps to a
+        # member task, that task, and the first row of a finding recorded once per repair owner.
+        "attribution_basis TEXT", "attributed_task TEXT", "clone_of TEXT",
     ],
     # v5 (#337): the contract a gate row was judged under, the lane or shared
     # scope it reviews, its runtime/evidence status (separate from the verdict),
@@ -102,6 +105,9 @@ SHARED_COLUMNS = {
     "gates": [
         "contract TEXT", "scope TEXT", "review_status TEXT", "independence TEXT", "reviewer_dispatch_id TEXT",
         "next_action TEXT", "cycle INTEGER",
+        # v12: the sorted member task ids of a convergence lane or shared scope, frozen when the gate
+        # is created. NULL on a gate that predates it: unknown, never backfilled.
+        "members_json TEXT",
     ],
     "leases": [
         "task_id TEXT", "fencing INTEGER", "pid INTEGER", "dispatch_id TEXT", "renewed_at TEXT",
