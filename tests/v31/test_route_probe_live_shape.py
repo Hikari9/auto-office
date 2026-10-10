@@ -91,7 +91,7 @@ def test_archived_unsupported_and_malformed_routes_are_refused_before_any_launch
     code, out = probe_env.office("doctor", "--probe-route", "claude/claude-fable-5-1@max")
     assert code == 2 and "archived" in out
     code, out = probe_env.office("doctor", "--probe-route", "codex/gpt-6-luna@none")
-    assert code == 1 and "refused (unsupported" in out
+    assert code == 1 and "refused (not-eligible" in out
     code, out = probe_env.office("doctor", "--probe-route", "codex/gpt-6.1-sol")
     assert code == 2 and "expected <harness>/<model>@<effort>" in out
     assert probe_env.launches() == 0

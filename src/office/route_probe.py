@@ -11,6 +11,14 @@ quality and not evidence about any sibling effort or model. Nothing here writes
 `adapter_trust_acts` or `recorded_overrides`, installs anything, widens a
 permission or probes a denied, archived or unsupported row.
 
+Cache semantics. Keys are exact fingerprints. A pass expires after
+`probe_ttl_days`. A transient or auth/quota failure expires after at most an
+hour so it can be retried. A conformance or isolation failure keeps its own
+reason class and expires after `probe_ttl_days`; it says the harness path did
+not prove out, never that the model is weak. A confirmed `unsupported-model-effort`
+negative does not expire by time for the same exact fingerprint: only a material
+fingerprint change lifts it.
+
 State lives in the T1 tables. `route_probes` is a mutable fingerprint cache,
 `route_probe_reservations` is the atomic allocation, and every attempt appends
 immutable `route_discovery_events` in the transaction that changes state.
@@ -125,6 +133,14 @@ def _cache_row(con, probe_key: str) -> dict | None:
 
 
 def _is_fresh(rec: dict, ttl_days: float, timeout_s: float, now: datetime) -> bool:
+    """Whether a cache row still speaks for its exact fingerprint.
+
+    A pass, a conformance or isolation failure and (more briefly) a transient or
+    auth/quota failure expire. A confirmed `unsupported-model-effort` negative
+    never expires by time: only a material fingerprint change (harness version,
+    adapter hash, profile, model or effort) is a new key and so lifts it."""
+    if rec.get("result") == "fail" and rec.get("reason_class") == "unsupported-model-effort":
+        return True
     at = _parsed(rec.get("probed_at"))
     if at is None:
         return False
@@ -295,7 +311,9 @@ def _static_refusal(cand: dict, adapter: dict | None, fp: dict, ctx: dict, confi
         return "unknown-route", "no active catalog row names this harness, model and effort"
     state = row_state(row)
     if state["status"] == "confirmed-unsupported":
-        return "unsupported", state["reason"]
+        # Fail closed, but say only what is known: no discovery eligibility (or no invocation id) was
+        # declared. That is not evidence the model or effort is unsupported; only a probe can show that.
+        return "not-eligible", f"not explicitly discovery-eligible in the catalog ({state['reason']})"
     if state["status"] == "available" and ctx["origin"] != "manual":
         return "already-available", "this route is dispatchable and needs no discovery"
     if adapter is None or not adapters.profile(adapter, fp["profile"]):

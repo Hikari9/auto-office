@@ -137,6 +137,42 @@ def test_records_expire_after_the_ttl(world):
     assert route_probe.status(con, cand(), ttl_days=30)["result"] == "pass"
 
 
+def test_an_unsupported_effort_negative_is_not_resurrected_by_ttl_expiry(world):
+    con = world.con()
+    world.script(mode="unsupported_effort")
+    run = world.run(max_probes_per_run=4)
+    first = ensure(world, con, run, attempt="neg-1")
+    assert first["reason_class"] == "unsupported-model-effort"
+    con.execute("UPDATE route_probes SET probed_at=?", ((datetime.now(timezone.utc) - timedelta(days=900)).isoformat(),))
+    assert route_probe.status(con, cand())["reason_class"] == "unsupported-model-effort"
+    world.script(mode="pass")  # a harness that would now pass is never asked: the negative still blocks
+    again = ensure(world, con, run, attempt="neg-2")
+    assert again["cached"] and again["result"] == "fail" and again["source_attempt_id"] == "neg-1"
+    assert len(world.launches()) == 1
+    assert kinds(con, "neg-2") == ["probe-cache-hit"]
+    # only a material fingerprint change is a new key and may be probed
+    changed = route_probe.ensure(con, run, {**cand(), "harness_version": "9.9.9"}, attempt_id="neg-3", context=ctx(world))
+    assert changed["result"] == "pass" and len(world.launches()) == 2
+    # the sibling effort was never blocked
+    assert ensure(world, con, run, "codex/gpt-6.1-sol@low")["result"] == "pass"
+
+
+@pytest.mark.parametrize("mode,reason_class,expires", [
+    ("transient", "transient", True), ("auth", "auth-quota-blocked", True), ("pass", None, True),
+    ("no_write", "isolation-missing", True), ("malformed", "conformance-failed", True),
+    ("unsupported_effort", "unsupported-model-effort", False)])
+def test_only_the_unsupported_negative_survives_expiry_and_classes_stay_distinct(world, mode, reason_class, expires):
+    con = world.con()
+    world.script(mode=mode)
+    rec = ensure(world, con, world.run())
+    assert rec["reason_class"] == reason_class
+    con.execute("UPDATE route_probes SET probed_at=?", ((datetime.now(timezone.utc) - timedelta(days=60)).isoformat(),))
+    survivor = route_probe.status(con, cand())
+    assert (survivor is None) is expires
+    if survivor:
+        assert survivor["reason_class"] == reason_class
+
+
 def test_transient_failures_are_retried_sooner_than_the_ttl(world):
     con = world.con()
     world.script(mode="transient")
@@ -418,14 +454,14 @@ def test_archived_and_unsupported_rows_are_never_probed(world):
                 "harness": "claude", "adapter_id": "claude", "effort": "max"}
     assert route_probe.ensure(con, run, archived, attempt_id="A-arch", context=ctx(world)) == Refused("archived")
     luna = cand("codex/gpt-6-luna@none")
-    assert luna["route_status"] == "confirmed-unsupported"
-    assert route_probe.ensure(con, run, luna, attempt_id="A-luna", context=ctx(world)) == Refused("unsupported")
+    assert route_probe.ensure(con, run, luna, attempt_id="A-luna", context=ctx(world)) == Refused("not-eligible")
     from office import candidates
     row = next(r for r in candidates.catalog_rows() if r.get("model_id") == "claude-sonnet-5-5"
                and r.get("dispatchable") is False)  # benchmark-only: no invocation id, never probe-able
     sonnet = {**cand("claude/claude-haiku-5-5@high"), "model_id": row["model_id"], "invocation_model_id": None,
               "effort": row["effort"]}
-    assert route_probe.ensure(con, run, sonnet, attempt_id="A-son", context=ctx(world)) == Refused("unsupported")
+    refused = route_probe.ensure(con, run, sonnet, attempt_id="A-son", context=ctx(world))
+    assert refused == Refused("not-eligible") and "not explicitly discovery-eligible" in refused.detail
     assert world.launches() == []
     assert [e["kind"] for e in events(con)] == ["probe-refused"] * 3
 
@@ -433,7 +469,7 @@ def test_archived_and_unsupported_rows_are_never_probed(world):
 def test_a_forged_candidate_cannot_widen_what_the_catalog_allows(world):
     con = world.con()
     forged = {**cand("codex/gpt-6-luna@none"), "discovery": True, "route_status": "discovered-unconfirmed"}
-    assert route_probe.ensure(con, world.run(), forged, attempt_id="A-forge", context=ctx(world)) == Refused("unsupported")
+    assert route_probe.ensure(con, world.run(), forged, attempt_id="A-forge", context=ctx(world)) == Refused("not-eligible")
     assert world.launches() == []
 
 
