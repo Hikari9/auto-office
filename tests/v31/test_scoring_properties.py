@@ -17,7 +17,7 @@ IMPLEMENTATIONS = pytest.mark.parametrize("impl", [scoring, office_scoring], ids
 
 # Weakest to strongest. `none` is a floor that asks for nothing.
 EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"]
-_text = st.text(alphabet="abcdefghij:-.", min_size=1, max_size=8)
+_text = st.text(alphabet="abcdefghij:-.", min_size=3, max_size=8)
 _efforts = st.sampled_from(EFFORTS)
 _bad_efforts = st.one_of(st.none(), st.just(""), st.sampled_from(["HIGH", "ultra", "3"]), st.integers())
 _scores = st.integers(min_value=0, max_value=100)

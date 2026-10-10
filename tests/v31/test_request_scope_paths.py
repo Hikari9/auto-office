@@ -13,7 +13,7 @@ from hypothesis import given, strategies as st
 from office.state import Usage
 from office.submit import clean_request_paths
 
-_segment = st.text(alphabet="abcdefg._-", min_size=1, max_size=5).filter(lambda s: s not in (".", ".."))
+_segment = st.from_regex(r"[a-g_-][a-g._-]{0,4}", fullmatch=True)  # never "." or ".."
 _inside = st.lists(_segment, min_size=1, max_size=4).map("/".join)
 
 

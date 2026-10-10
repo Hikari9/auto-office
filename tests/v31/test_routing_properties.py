@@ -38,6 +38,20 @@ def _candidate(draw):
 _slates = st.lists(_candidate(), min_size=1, max_size=6, unique_by=routing.candidate_id)
 
 
+@st.composite
+def _slates_with_a_reviewer(draw):
+    """A slate in which at least one candidate passes every reviewer gate, so the choice is always between real options."""
+    others = draw(st.lists(_candidate(), max_size=5))
+    chosen = {**draw(_candidate()), "hard_excluded": False, "effort": draw(st.sampled_from(["medium", "high"])),
+              "supported_playbooks": None}
+    chosen["capabilities"] = sorted({*chosen["capabilities"], "review"})
+    slate = [chosen]
+    for c in others:
+        if routing.candidate_id(c) not in {routing.candidate_id(x) for x in slate}:
+            slate.append(c)
+    return draw(st.permutations(slate))
+
+
 def _qualifies(c, capability):
     """The documented gates: not excluded, has the capability, meets the effort floor, supports the task shape."""
     return (not c["hard_excluded"] and capability in c["capabilities"] and c["effort"] in ("medium", "high")
@@ -107,12 +121,11 @@ def test_a_reviewer_is_chosen_from_the_candidates_that_pass_every_gate(cands, po
         assert decision["status"] == "no_qualifying_candidate"
 
 
-@given(cands=_slates, seed=st.lists(st.fixed_dictionaries({"model_id": st.sampled_from(["m1", "m2", "m3", "m4"])},
-                                                          optional={"effort": st.sampled_from(["medium", "high"])}),
-                                    min_size=1, max_size=4))
+@given(cands=_slates_with_a_reviewer(), seed=st.lists(st.fixed_dictionaries({"model_id": st.sampled_from(["m1", "m2", "m3", "m4"])},
+                                                                           optional={"effort": st.sampled_from(["medium", "high"])}),
+                                                     min_size=1, max_size=4))
 def test_a_preferred_reviewer_is_never_passed_over_for_one_further_down_the_seed(cands, seed):
     eligible = _eligible(cands)
-    assume(eligible)
     rank = {routing.candidate_id(c): routing.preferred_rank(c, seed) for c in eligible}
     decision = routing.route(_reviewer(cands, preferred_seed=seed))
     worst = len(seed)
@@ -120,10 +133,9 @@ def test_a_preferred_reviewer_is_never_passed_over_for_one_further_down_the_seed
     assert chosen == min(r if r is not None else worst for r in rank.values())
 
 
-@given(cands=_slates)
+@given(cands=_slates_with_a_reviewer())
 def test_money_saver_picks_a_cheapest_route_and_quota_saver_a_lightest_one(cands):
     eligible = _eligible(cands)
-    assume(eligible)
     by_id = {routing.candidate_id(c): c for c in eligible}
     cheapest = routing.route(_reviewer(cands, {"cost_policy": "money_saver"}))["selected"]
     assert by_id[cheapest]["cost"]["money_estimate"] == min(c["cost"]["money_estimate"] for c in eligible)
@@ -195,10 +207,9 @@ def test_the_quota_reserve_is_never_spent_while_a_safe_or_unknown_route_exists(c
 _SEEDS = st.lists(st.fixed_dictionaries({"model_id": st.sampled_from(["m1", "m2", "m3", "m4"])}), min_size=1, max_size=3)
 
 
-@given(cands=_slates, seed=_SEEDS)
+@given(cands=_slates_with_a_reviewer(), seed=_SEEDS)
 def test_a_seed_the_policy_will_not_undercut_keeps_the_choice_inside_it(cands, seed):
     eligible = _eligible(cands)
-    assume(eligible)
     wanted = {e["model_id"] for e in seed}
     inside = {routing.candidate_id(c) for c in eligible if c["model_id"] in wanted}
     decision = routing.route(_reviewer(cands, preferred_seed=seed, allow_advisory_undercut=False))
@@ -208,10 +219,9 @@ def test_a_seed_the_policy_will_not_undercut_keeps_the_choice_inside_it(cands, s
         assert {r["candidate"] for r in decision["rejected"] if r["stage"] == 7} == outside
 
 
-@given(cands=_slates)
+@given(cands=_slates_with_a_reviewer())
 def test_balanced_cost_keeps_only_routes_within_a_fifth_of_the_cheapest(cands):
     eligible = _eligible(cands)
-    assume(eligible)
     decision = routing.route(_reviewer(cands, {"cost_policy": "balanced"}))
     cheapest = min(c["cost"]["money_estimate"] for c in eligible)
     by_id = {routing.candidate_id(c): c for c in eligible}
