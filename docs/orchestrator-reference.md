@@ -116,6 +116,15 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
   or `myaccount/.env` passed to a sourced script). Fix it by listing the path under `deploy.env_files` in the config: Office copies each
   listed file into the deploy checkout with its mode preserved, never stages or commits it, and refuses an entry outside the repo.
 
+## Root context snapshot
+
+`office context [--json] [--since SEQ]` prints a bounded, read-only snapshot of the run for a root that restarted or compacted: goal,
+requirements and plan versions with hashes, open tasks, pending gates, blocking findings, recent amendments and authorizations,
+referenced evidence with its hash status, the `next:` action, and the event cursor (`--since` lists up to 20 later events). It is
+assembled from runs.db on each call and writes nothing; `office status` stays the lean default. Every `stale:` line is a reference
+that no longer matches: a PLAN.md draft that differs from the stored plan, evidence that is missing or re-hashes differently, a run
+pinned to another release line, or state that changed while the snapshot was read (rerun it).
+
 ## Orchestrator economics (opt-in)
 
 Usage collection is off by default (`economics.collect: false`); while off nothing reads session logs or writes usage rows,

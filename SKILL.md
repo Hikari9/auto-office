@@ -200,7 +200,7 @@ it. It composes one integration branch, runs file-disjoint Herdr lanes and exits
 ## Resume
 
 After a restart or compaction: `office resume` (or `office resume <id>` when several runs exist). It reconstructs pending
-work from runs.db; never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract.
+work from runs.db (`office context` adds a bounded snapshot with stale references flagged); never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract.
 
 ## Diagnostics
 

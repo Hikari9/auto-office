@@ -56,6 +56,7 @@ Auto Office {ver}
 
   office list                       runs in this repository (--all for every run)
   office inspect [run|task|gate|evidence|events|route|learner|trust|convergence|economics] [id]
+  office context [--since SEQ]       bounded root snapshot from runs.db (goal, plan, tasks, gates, next, stale refs)
   office economics ingest [--file F [--from-harness H] [--from-session S] [--role R]]
                                     opt-in (economics.collect): record measured token/cache usage
   office decide <lane> escalate|continue|waive|stop --quote "<user's words>"
@@ -319,6 +320,8 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("benchmarks", parents=[common])
     s.add_argument("action", choices=["brief", "submit"])
     s.add_argument("file", nargs="?")
+    s = sp.add_parser("context", parents=[common])
+    s.add_argument("--since", type=int, metavar="SEQ", help="also list run events after this event cursor (bounded)")
     s = sp.add_parser("economics", parents=[common])
     s.add_argument("action", choices=["ingest"])
     s.add_argument("--file", help="a transcript or normalized usage JSONL to ingest instead of the run's sessions")
@@ -740,7 +743,7 @@ def _run(args, unknown) -> int:
                 res.notices.append("self-improve audit unavailable; retry on next command")
         if target.note:
             res.notices.append(target.note)
-        if cmd not in ("status", "resume", "preflight"):
+        if cmd not in ("status", "resume", "preflight", "context"):
             from office import guide, state
             guide.piggyback(con, state.get_run(con, run["id"]), res)
         return emit(res, args)
@@ -829,6 +832,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         if not args.file:
             raise OfficeError("usage", "name the delta file", next_step=benchmarks.SUBMIT_FORM, exit_code=2)
         return benchmarks.submit(con, run, args.file)
+    if cmd == "context":
+        from office import context_snapshot
+        return context_snapshot.context(con, run, since=args.since)
     if cmd == "economics":
         from office import economics
         return economics.ingest(con, run, file=args.file, harness=args.usage_harness,
