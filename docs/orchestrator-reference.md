@@ -27,6 +27,12 @@ names, never by matching screen text, and never your own (`$HERDR_PANE_ID`). The
 pane, `office resume`, `office rerun <task> --resume|--fresh`, `office dispatch <task> --reroute`, or the documented
 external/manual launch. Stop only when those are exhausted or a user decision is required.
 
+## Route discovery and trial recovery
+
+Read [route discovery](route-discovery.md) when inspecting a probe/trial decision, changing user routing preferences or disabling discovery. Invocation support, learned effectiveness and adapter trust are separate evidence; a probe pass grants no trust or final gate authority. Automatic trials are builder-only, bounded and reversible, with the recorded known-working fallback and normal independent review/verification.
+
+For a trial launch failure before meaningful work, confirm the entire failed worker process tree has exited before releasing its lease/session and starting the recorded fallback. An unconfirmed exit blocks replacement; preserve work already started for explicit recovery. Manual pins skip discovery and never silently fall back. Use `office inspect route <task>` and `--json` for immutable attempt evidence, cap state, preference source and recovered launches. Config edits affect future runs; changing a live run's pinned routing remains an explicit opt-in.
+
 ## Waiting, questions, stalls
 
 - `office wait` exits 0 (act), 3 (stall), 5 (an agent asked a question), 124 (nothing new). Key on the exit code.
