@@ -11,6 +11,7 @@ the same file without schema errors.
 """
 from __future__ import annotations
 
+import random
 import re
 import sqlite3
 import time
@@ -172,15 +173,40 @@ BEGIN SELECT RAISE(ABORT, 'route discovery events are append-only'); END;
 """)
 
 
+def _enter_wal(con: sqlite3.Connection, attempts: int = 40) -> None:
+    """Put the database in WAL mode, once.
+
+    Switching the journal mode needs a lock SQLite can refuse with `database is
+    locked` without consulting the busy timeout while another connection is
+    creating the file or converting it, so concurrent first opens could crash here.
+    A file already in WAL mode needs no switch, so that is read first. Otherwise
+    the switch is retried with jittered backoff, bounded; any other error raises."""
+    delay = 0.02
+    for attempt in range(attempts):
+        try:
+            mode = con.execute("PRAGMA journal_mode").fetchone()[0]
+            if str(mode).lower() != "wal":
+                mode = con.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) and "busy" not in str(exc):
+                raise
+            if attempt == attempts - 1:
+                raise RuntimeError(f"runs.db could not enter WAL mode (still locked after {attempts} tries)") from exc
+            time.sleep(delay * (0.5 + random.random()))
+            delay = min(delay * 2, 0.5)
+            continue
+        if str(mode).lower() != "wal":  # pragma: no cover - platform specific
+            raise RuntimeError(f"runs.db could not enter WAL mode ({mode})")
+        return
+
+
 def connect(path: Path | None = None) -> sqlite3.Connection:
     db_path = Path(path) if path else paths.runs_db()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(db_path), timeout=30, isolation_level=None)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA busy_timeout=30000")
-    mode = con.execute("PRAGMA journal_mode=WAL").fetchone()[0]
-    if str(mode).lower() != "wal":  # pragma: no cover - platform specific
-        raise RuntimeError(f"runs.db could not enter WAL mode ({mode})")
+    _enter_wal(con)
     con.execute("PRAGMA foreign_keys=ON")
     migrate(con)
     return con
