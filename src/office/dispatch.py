@@ -237,9 +237,11 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     planned slate (`--route`, `--reroute`, a pre-#300 plan) the fresh decision stands."""
     tid = task["id"]
     kind = "fix" if task.get("current_dispatch_id") else "fresh"
-    fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
-                                  dispatch_kind=kind)
     planned = None if (override or reroute) else _effective_slate(con, run, task)
+    # A declared route is a manual one: overkill rules never remove it. Denial, quarantine,
+    # capability, permission, archive and quota gates still apply to the fresh evidence.
+    fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
+                                  dispatch_kind=kind, manual=bool(planned) and planned.get("chooser") == "declared")
     if reroute and fresh.get("status") == "selected":
         fresh["route_source"], fresh["route_note"] = "reroute", "rerouted from current evidence"
     if not planned:

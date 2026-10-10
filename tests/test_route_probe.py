@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -457,6 +458,84 @@ def test_denying_a_harness_blocks_every_route_on_it(world):
     run = world.run()
     run["policy"]["routing"]["user_policy"]["denied_models"] = ["harness:codex"]
     assert ensure(world, con, run) == Refused("route-denied")
+
+
+def _write_policy(path: Path, denied) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump({"routing": {"user_policy": {"denied_models": denied}}}), encoding="utf-8")
+
+
+def _assert_nothing_allocated(world, con, run, attempt: str, reason: str):
+    """A live-policy refusal is decided before any reservation, cap use or launch, and is audited."""
+    assert world.launches() == []
+    assert con.execute("SELECT COUNT(*) FROM route_probe_reservations").fetchone()[0] == 0
+    assert con.execute("SELECT COUNT(*) FROM route_probes").fetchone()[0] == 0
+    assert kinds(con, attempt) == ["probe-refused"]
+    (event,) = events(con, attempt_id=attempt)
+    assert event["outcome"] == "refused" and event["detail"].startswith(reason)
+    assert route_probe.allocation(con, "run-A", route_probe._settings(run["policy"], None))["probes"]["used"] == 0
+    return event
+
+
+def test_a_user_denial_written_after_start_refuses_the_probe(world):
+    """B1 (D11): the run's pinned config does not deny this route; the live user policy does."""
+    con = world.con()
+    run = world.run()
+    assert not run["policy"]["routing"]["user_policy"]["denied_models"]
+    _write_policy(Path(os.environ["OFFICE_USER_CONFIG"]), ["codex/gpt-6.1-sol@high"])
+    refused = ensure(world, con, run, attempt="A-live-user")
+    assert refused == Refused("route-denied")
+    assert "user routing.user_policy.denied_models: codex/gpt-6.1-sol@high" in refused.detail
+    _assert_nothing_allocated(world, con, run, "A-live-user", "route-denied")
+    # the denial is exact: a sibling effort the policy does not name still probes
+    assert ensure(world, con, run, "codex/gpt-6.1-sol@low")["result"] == "pass"
+
+
+def test_a_repo_denial_written_after_start_refuses_the_probe(world, tmp_path):
+    repo = tmp_path / "repo"
+    _write_policy(cfg.config_paths(repo)["repo"], ["harness:codex"])
+    con = world.con()
+    run = {**world.run(), "repo_root": str(repo)}
+    refused = ensure(world, con, run, attempt="A-live-repo")
+    assert refused == Refused("route-denied")
+    assert "repo routing.user_policy.denied_models: harness:codex" in refused.detail
+    _assert_nothing_allocated(world, con, run, "A-live-repo", "route-denied")
+
+
+def test_an_unbound_manual_probe_also_honors_the_live_denial(world):
+    con = world.con()
+    pinned = world.config()  # resolved before the denial exists, as a bound run's pin would be
+    _write_policy(Path(os.environ["OFFICE_USER_CONFIG"]), ["codex/gpt-6.1-sol@high"])
+    refused = route_probe.ensure(con, None, cand(), attempt_id="A-live-manual",
+                                 context={"origin": "manual", "config": pinned})
+    assert refused == Refused("route-denied") and "user routing.user_policy" in refused.detail
+    assert world.launches() == []
+    assert kinds(con, "A-live-manual") == ["probe-refused"]
+
+
+def test_the_live_policy_cache_survives_a_concurrent_clear(world, monkeypatch):
+    """Probes read the live policy from threads. Another reader clearing the shared cache between
+    this one's store and read must not turn a readable policy into a KeyError."""
+    from office import candidates
+
+    class Cleared(dict):
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+            self.clear()  # the other thread's `clear()`, landing right after this store
+
+    monkeypatch.setattr(candidates, "_POLICY_CACHE", Cleared())
+    _write_policy(Path(os.environ["OFFICE_USER_CONFIG"]), ["harness:codex"])
+    (policy,) = candidates.live_user_policies(None)
+    assert policy["denied"] == ["harness:codex"]
+
+
+def test_an_unreadable_live_policy_refuses_the_probe(world):
+    con = world.con()
+    run = world.run()
+    Path(os.environ["OFFICE_USER_CONFIG"]).write_text("routing: [unclosed\n  - : :\n", encoding="utf-8")
+    refused = ensure(world, con, run, attempt="A-live-bad")
+    assert refused == Refused("policy-unreadable") and "cannot be read" in refused.detail
+    _assert_nothing_allocated(world, con, run, "A-live-bad", "policy-unreadable")
 
 
 def test_archived_and_unsupported_rows_are_never_probed(world):

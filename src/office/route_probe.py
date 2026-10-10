@@ -312,12 +312,28 @@ def row_state(row: dict) -> dict:
     return route_policy.row_status(row)
 
 
-def _static_refusal(cand: dict, adapter: dict | None, fp: dict, ctx: dict, config: dict) -> tuple[str, str] | None:
+def _denial(cand: dict, run: dict | None, config: dict) -> tuple[str, str] | None:
+    """A denial in the pinned config or in the live user and repo policy (the path
+    `route_role` and `declared_candidate` read), so a denial written after `office start`
+    stops a probe too. A live policy that cannot be read refuses: it might deny this route."""
+    from office import candidates
+    try:
+        live = candidates.live_user_policies((run or {}).get("repo_root"))
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        return "policy-unreadable", f"the live user or repo policy cannot be read ({exc}), so a denial cannot be ruled out"
+    for policy in (route_policy.user_policy(config), *live):
+        denied = route_policy.is_denied(cand, policy)
+        if denied:
+            return "route-denied", denied
+    return None
+
+
+def _static_refusal(cand: dict, adapter: dict | None, fp: dict, ctx: dict, config: dict,
+                    run: dict | None = None) -> tuple[str, str] | None:
     """Refusals that need no database state: denied, archived, unsupported, not installed."""
-    policy = route_policy.user_policy(config)
-    denied = route_policy.is_denied(cand, policy)
-    if denied:
-        return "route-denied", denied
+    denial = _denial(cand, run, config)
+    if denial:
+        return denial
     row = catalog_row(cand)
     if row is None:
         if _archived(cand.get("harness") or "", cand.get("model_id") or "", cand.get("effort")):
@@ -687,7 +703,7 @@ def _reserve(con, run: dict | None, cand: dict, *, attempt_id: str, context: dic
                        dispatch_id=dispatch_id, outcome="refused", detail=f"{reason}: {detail}" if detail else reason)
                 return Refused(reason, detail, alloc_out, attempt_id)
 
-            problem = _static_refusal(cand, ad, fp, ctx, config)
+            problem = _static_refusal(cand, ad, fp, ctx, config, run)
             if problem:
                 return refuse(*problem)
             if ctx["origin"] != "manual" and not settings["enabled"]:
