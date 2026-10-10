@@ -31,6 +31,9 @@ def inspect(con, run: dict, what: str | None, ident: str | None) -> Result:
         return _evidence(con, run, ident)
     if what in ("amendments", "amendment"):
         return _amendments(con, run, ident)
+    if what in ("startup", "startup-prompts"):
+        from office import startup
+        return startup.inspect(con, run, ident)
     if what == "events":
         return _events(con, run, ident)
     if what == "route":
