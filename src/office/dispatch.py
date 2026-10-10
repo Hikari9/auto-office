@@ -3657,31 +3657,22 @@ class _WorkerTree:
         if table is None:
             return None
         children: dict[int, list[int]] = {}
-        started, parent = {}, {}
-        found: set[int] = set()
+        started, parent, tagged, grouped = {}, {}, set(), set()
         for pid, ppid, pgid, state_, start, command in table:
             if state_.startswith("Z"):
                 continue  # exited and waiting to be reaped: it cannot write
             children.setdefault(ppid, []).append(pid)
             started[pid], parent[pid] = start, ppid
-            if self.tag.search(command) or (self.pgid > 1 and pgid == self.pgid):
-                found.add(pid)
-        mine = set()
-        pid = os.getpid()
+            if self.tag.search(command):
+                tagged.add(pid)
+            if self.pgid > 1 and pgid == self.pgid:
+                grouped.add(pid)
+        mine, pid = set(), os.getpid()
         while pid in parent and pid not in mine:
             mine.add(pid)
             pid = parent[pid]
-        queue = [p for p, st in {**self.seen, **self.roots}.items() if started.get(p) == st]
-        queue.extend(found)  # whatever the tag or the group named has descendants too
-        walked: set[int] = set(mine)  # this process and its ancestors are never walked into, nor their other children
-        while queue:
-            pid = queue.pop()
-            if pid not in walked:
-                walked.add(pid)
-                found.add(pid)
-                queue.extend(children.get(pid, []))
-        def mine_or_started_by_me(pid: int) -> bool:
-            # The `ps` this scan ran, a `git` or `lsof` of ours: they inherit whatever tag this process carries.
+
+        def started_by_me(pid: int) -> bool:
             seen = set()
             while pid in parent and pid not in seen:
                 if pid == os.getpid():
@@ -3690,7 +3681,20 @@ class _WorkerTree:
                 pid = parent[pid]
             return False
 
-        found = {p for p in found if p in started and p > 1 and p not in mine and not mine_or_started_by_me(p)}
+        def with_descendants(seed) -> set[int]:
+            out, queue = set(mine), list(seed)  # this process and its ancestors are never walked into
+            while queue:
+                pid = queue.pop()
+                if pid not in out:
+                    out.add(pid)
+                    queue.extend(children.get(pid, []))
+            return out - mine
+
+        named = {p for p, st in {**self.seen, **self.roots}.items() if started.get(p) == st}
+        # A tag alone is not proof: the `ps`, `lsof` or `git` this process runs inherits the tag it carries. A
+        # recorded identity or the agent's group stays the worker's whoever started it.
+        found = with_descendants(named | grouped) | with_descendants(p for p in tagged if p not in mine and not started_by_me(p))
+        found = {p for p in found if p in started and p > 1}
         self.seen.update({p: started[p] for p in found})
         return found
 
