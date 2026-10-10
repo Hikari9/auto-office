@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import threading
 import sys
@@ -28,16 +30,20 @@ try:
 except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
-from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, scoring, state, version, worktree_setup
+from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, route_policy, route_probe, routing, scoring, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
-from office.util import (atomic_write_json, claim_signalable, dumps, now_iso, parse_iso, pid_alive,
+from office.util import (DEAD, atomic_write_json, claim_signalable, dumps, now_iso, parse_iso, pid_alive, pid_state,
                          process_is, process_start, sha256_obj, short, loads)
 
 LEASE_TTL_SECONDS = 4 * 3600
 # A harness session id lands in a resume argv: plain id characters only, never a leading dash.
 _SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
-IDENTITY_ENV = ("OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE_ROLE", "OFFICE_STATE_DIR",
+# Only an agent carries this: the dispatch id it was launched for, which names every process it starts. Kept apart
+# from OFFICE_DISPATCH_ID, which authority checks read, so no job, supervisor or other command a worker runs
+# passes the tag on to a process that is not the worker's.
+_WORKER_TAG = "OFFICE_WORKER_TAG"
+IDENTITY_ENV = ("OFFICE_WORKER_TAG", "OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE_ROLE", "OFFICE_STATE_DIR",
                 "OFFICE_SESSION", "OFFICE_HARNESS", "OFFICE_VERSION", "OFFICE_FRONT_DOOR_HOPS")
 PLANNER_TASK = "P1"
 
@@ -109,7 +115,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
     prs.settings(con, run)  # detected once, outside the transaction (it asks GitHub)
     # Route before the write transaction: routing reads evidence and probes quota.
     routes = {}
-    for tid in task_ids:
+    for index, tid in enumerate(task_ids):
         task = state.get_task(con, run["id"], tid)
         if task is None or task["role"] == "planner":
             raise Usage("unknown-task", f"{tid} is not a task in plan p{run['plan_version']}",
@@ -123,6 +129,8 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             routes[tid] = candidates.declared_decision(as_model)
         else:
             routes[tid] = planned_route(con, run, task, override=route, reroute=reroute)
+            if not (route or launch_prefs) and (parallel or index == 0):  # a stacked task launches later, not now
+                routes[tid] = preflight_discovery(con, run, task, routes[tid], reroute=reroute)
         if launch_prefs and routes[tid].get("status") == "selected":
             routes[tid]["launch"] = launch_prefs
     res = Result()
@@ -156,10 +164,13 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 state.update_task(con, run["id"], tid, stack_after=None, pause_reason=None)
                 decision = routes.get(tid) if (routes.get(tid) or {}).get("status") == "selected" else None
                 if decision:
+                    decision = settle_discovery(con, run, task, decision, launching=True)
                     _record_routing(con, run, decision)
                     note_route(con, run, task, decision)
                 did = request_launch(con, run, tid, role="executor", decision=decision,
                                      base=_base_for(con, run, task, graph, after))
+                if decision:
+                    record_discovery(con, run, task, decision, did)
                 res.add(f"{tid} was stacked after {after}, which is already accepted -> {did} launching")
                 previous = tid
                 continue
@@ -182,6 +193,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             if decision.get("status") != "selected":
                 raise Refused("no-route", _route_failure(tid, decision), scope=tid,
                               preserved="plan and other dispatches", next_step=_route_next(decision, tid, run))
+            decision = settle_discovery(con, run, task, decision, launching=not stack_after)
             _record_routing(con, run, decision)
             if review_as:
                 state.update_task(con, run["id"], tid, review_override={
@@ -201,6 +213,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                     res.add(drift)
                 note_route(con, run, task, decision)
                 did = request_launch(con, run, tid, role="executor", decision=decision, base=base)
+                record_discovery(con, run, task, decision, did)
                 verb = "prepared for you to start (external; nothing launched)" if external else "launching"
                 res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} {verb}"
                         + (" (user override)" if decision.get("override") else "")
@@ -226,7 +239,8 @@ def _planned_slate(con, run: dict, tid: str) -> dict | None:
         if plan and plan.get("primary") else None
 
 
-def planned_route(con, run: dict, task: dict, *, override: str | None = None, reroute: bool = False) -> dict:
+def planned_route(con, run: dict, task: dict, *, override: str | None = None, reroute: bool = False,
+                  exclude: set[str] | None = None, discovery_input: dict | None = None) -> dict:
     """Route an executor dispatch: the planner's primary, else its fallbacks in order.
 
     Live evidence (quota, availability, trust, learned eligibility) is refreshed
@@ -234,16 +248,25 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     order and the first one that still qualifies runs. A route is never swapped
     for an unplanned one: when every planned route fails, the result is
     `slate_exhausted` and the orchestrator reroutes (`--reroute`). Without a
-    planned slate (`--route`, `--reroute`, a pre-#300 plan) the fresh decision stands."""
+    planned slate (`--route`, `--reroute`, a pre-#300 plan) the fresh decision stands.
+
+    `discovery_input` is the preflight's recompute handle (#494): a decision that comes back
+    with `intent: "trial"` stands whole, because the trial route is the one route a planned
+    slate cannot name. `exclude` keeps routes out of the decision (the trial route, when the
+    known-working fallback is wanted)."""
     tid = task["id"]
     kind = "fix" if task.get("current_dispatch_id") else "fresh"
     planned = None if (override or reroute) else _effective_slate(con, run, task)
     # A declared route is a manual one: overkill rules never remove it. Denial, quarantine,
     # capability, permission, archive and quota gates still apply to the fresh evidence.
     fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
-                                  dispatch_kind=kind, manual=bool(planned) and planned.get("chooser") == "declared")
+                                  dispatch_kind=kind, manual=bool(planned) and planned.get("chooser") == "declared",
+                                  exclude=exclude, discovery_input=discovery_input)
     if reroute and fresh.get("status") == "selected":
         fresh["route_source"], fresh["route_note"] = "reroute", "rerouted from current evidence"
+    if discovery_input and fresh.get("status") == "selected" and (fresh.get("discovery") or {}).get("intent") == "trial":
+        fresh.setdefault("route_source", "router")
+        return fresh
     if not planned:
         fresh.setdefault("route_source", "override" if override else "router")
         return fresh
@@ -338,6 +361,13 @@ def _record_routing(con, run: dict, decision: dict) -> None:
                  "dispatch": {"source": source, "dispatched": decision.get("selected"),
                               "fallbacks_taken": decision.get("fallbacks_taken") or [],
                               "planned_audit_id": planned.get("audit_id")}}
+        link, record = decision.get("discovery_link"), decision.get("trial_record")
+        if link:
+            audit["dispatch"]["discovery"] = {
+                "attempt_id": link["attempt_id"], "probe_key": link["probe_key"], "policy_digest": link["policy_digest"],
+                "intent": "trial" if record else "none", "blocked": link.get("blocked"),
+                "trial_reason": record["reason"] if record else None,
+                "fallback_route": record["fallback_route"] if record else decision.get("selected")}
         explored = source != "plan" and (audit.get("exploration") or {}).get("picked") == decision.get("selected")
         decision["audit_id"] = plan_view.record_audit(con, run, audit, plan_version=run.get("plan_version"),
                                                       dispatched=decision.get("selected"), explored=explored)
@@ -356,6 +386,14 @@ def _route_payload(decision: dict) -> dict:
     if (decision.get("planned") or {}).get("chooser") == "declared" or decision.get("declared") \
             or decision.get("override"):
         out["declared"] = True  # a deliberate route survives the next dispatch of the task
+    link = decision.get("discovery_link")
+    if link:
+        record = decision.get("trial_record") or {}
+        out["discovery"] = {"attempt_id": link["attempt_id"], "intent": "trial" if record else "none",
+                            "blocked": link.get("blocked"), "probe_key": link["probe_key"],
+                            "candidate": link["candidate"], "policy_digest": link["policy_digest"],
+                            "reason": record.get("reason"), "fallback_route": record.get("fallback_route"),
+                            "fallback": record.get("fallback")}
     return out
 
 
@@ -377,6 +415,9 @@ def note_route(con, run: dict, task: dict, decision: dict) -> None:
         before = planned.get("primary")
         kind = "quota" if any("quota" in t["reason"] for t in taken) else "unavailable"
         change = (before, kind, f"fallback: {why}", "office")
+    elif decision.get("trial_record"):
+        before = decision["trial_record"]["fallback_route"]
+        change = (before, "trial", decision["trial_record"]["reason"], "office")
     elif source == "reroute":
         before = recorded or ((state.task_dispatches(con, run["id"], tid) or [{}])[-1].get("triple"))
         change = (before, "reroute", "rerouted from current evidence", "orchestrator")
@@ -389,6 +430,231 @@ def note_route(con, run: dict, task: dict, decision: dict) -> None:
     if change and before and norm(before) != norm(after):
         state.record_route_change(con, run, tid, before, after, kind=change[1], reason=change[2], actor=change[3])
     state.update_task(con, run["id"], tid, route_json=dumps(_route_payload(decision)))
+
+
+# ------------------------------------------------------------------ route discovery (#494)
+
+TRIAL_OPEN = ("reserved", "launched")
+PINNED_CHOOSERS = ("planner", "declared", "recorded")  # a route a person or an approved plan chose is never traded for a trial
+_TRIAL_EVENTS = {"launched": "trial-launched", "launch-failed": "trial-launch-failed", "fell-back": "trial-fell-back",
+                 "submitted": "trial-submitted", "abandoned": "trial-abandoned"}
+_TRIAL_FROM = {"launched": ("reserved",), "launch-failed": TRIAL_OPEN, "abandoned": TRIAL_OPEN,
+               "submitted": TRIAL_OPEN, "fell-back": ("launch-failed",)}
+
+
+def _policy_digest(config: dict) -> str:
+    return config.get(route_policy.DIGEST_KEY) or route_policy.policy_digest(config)
+
+
+def _annotated(decision: dict, link: dict, *, blocked: str | None = None) -> dict:
+    """`decision` with what discovery did to it: the audit's `discovery` block and the link the
+    dispatch transaction records. Never a trial: a decision that carries a link without a
+    `trial_record` dispatches its known-working route."""
+    out = {k: v for k, v in decision.items() if k not in ("trial", "trial_record")}
+    if link.get("attempt_id"):
+        out["discovery_link"] = {**link, "intent": "none", "blocked": blocked}
+    audit = out.get("routing")
+    if audit:
+        block = {**(audit.get("discovery") or {}), "intent": "none", "blocked": blocked}
+        if link.get("attempt_id"):
+            block.update(attempt_id=link["attempt_id"], candidate=link["candidate"], probe_key=link["probe_key"])
+        out["routing"] = {**audit, "discovery": block}
+    return out
+
+
+def preflight_discovery(con, run: dict, task: dict, decision: dict, *, reroute: bool = False) -> dict:
+    """D5 (#494): turn a `probe` intent into a trial or a known-working dispatch, before any lease,
+    worktree claim or session exists. The attempt id is minted first, so the probe's events exist before
+    a dispatch row does. `route_probe.ensure` reserves atomically and then probes (outside any
+    transaction). The route is then decided again with the attempt's handle, and only that recomputed
+    decision is used: a probe that failed or was refused, or a quota, permission or fingerprint that
+    changed since, comes back as a route without a trial, and that route is dispatched."""
+    disc = decision.get("discovery") or {}
+    if decision.get("status") != "selected" or disc.get("intent") != "probe":
+        return decision
+    candidate = next((c for c in (decision.get("request") or {}).get("candidates") or []
+                      if routing.candidate_id(c) == disc.get("candidate")), None)
+    if (decision.get("planned") or {}).get("chooser") in PINNED_CHOOSERS or candidate is None:
+        return _annotated(decision, {}, blocked="pinned-route" if candidate else "candidate-gone")
+    config = state.pinned_config(run)
+    link = {"attempt_id": route_policy.new_attempt_id(), "candidate": disc["candidate"],
+            "probe_key": disc.get("probe_key"), "policy_digest": _policy_digest(config), "primary": decision["selected"]}
+    context = {"origin": "preflight", "role": "executor", "task_id": task["id"],
+               "reason": f"discovery: untried route {link['candidate']} drawn for an exact probe; "
+                         f"{decision['selected']} stays the known-working fallback",
+               "primary_route": decision["selected"], "fallback_route": decision["selected"]}
+    try:
+        outcome = route_probe.ensure(con, run, candidate, attempt_id=link["attempt_id"], context=context)
+        if isinstance(outcome, route_probe.Refused):
+            return _annotated(decision, link, blocked=outcome.reason)
+        handle = {"candidate": link["candidate"], "probe_key": link["probe_key"], "reservation_id": link["attempt_id"],
+                  "attempt_id": link["attempt_id"]}
+        fresh = planned_route(con, run, task, reroute=reroute, discovery_input=handle)
+        block = fresh.get("discovery") or {}
+        if fresh.get("status") != "selected" or block.get("intent") != "trial":
+            return _annotated(fresh, link, blocked=block.get("blocked") or "no-trial")
+        fallback = planned_route(con, run, task, reroute=reroute, exclude={link["candidate"]})
+    except Exception as exc:  # discovery never costs the dispatch: the known-working decision stands
+        return _annotated(decision, link, blocked=f"probe-error: {type(exc).__name__}")
+    if fallback.get("status") != "selected":
+        return _annotated(fallback, link, blocked="no-fallback")
+    reason = (f"discovery trial: a fresh exact conformance probe passed for {link['candidate']} (attempt "
+              f"{link['attempt_id']}); falls back to known-working {fallback['selected']}")
+    return {**fresh, "discovery_link": {**link, "intent": "trial", "blocked": None},
+            "trial": {"fallback": fallback, "reason": reason}}
+
+
+def settle_discovery(con, run: dict, task: dict, decision: dict, *, launching: bool) -> dict:
+    """The dispatch transaction's last word on a trial. Re-reads the caps, task risk, quota reserve, probe
+    record and fallback under the write lock; any failure dispatches the known-working fallback instead
+    and writes no `route_trials` row. Caller holds the transaction."""
+    trial = decision.get("trial")
+    if not trial:
+        return decision
+    fallback, link = trial["fallback"], decision["discovery_link"]
+    blocked = None if launching else "not-launching"
+    blocked = blocked or _trial_blocked(con, run, decision, fallback)
+    if blocked:
+        return _annotated(fallback, link, blocked=blocked)
+    record = {"id": link["attempt_id"], "route": link["candidate"], "probe_key": link["probe_key"],
+              "fallback_route": fallback["selected"], "policy_digest": link["policy_digest"],
+              "reason": trial["reason"], "fallback": _route_payload(fallback)}
+    return {**{k: v for k, v in decision.items() if k != "trial"}, "trial_record": record}
+
+
+def _known_working(con, cand: dict) -> bool:
+    """The routing's own definition (`candidates.discovery_inputs`): an available route that is proven, or
+    learned eligible, and not quarantined."""
+    from office import route_learning
+    _, trust = scoring.evaluate_trust_state(con, routing.candidate_id(cand))
+    if trust == "quarantined" or cand.get("route_status", "available") != "available":
+        return False
+    if trust == "proven":
+        return True
+    learned = route_learning.current_eligibility(con, "executor")
+    return (learned.get(route_learning.candidate_key(cand)) or {}).get("state") == "learned-eligible"
+
+
+def _trial_blocked(con, run: dict, decision: dict, fallback: dict) -> str | None:
+    """Why no trial may be reserved now (a routing `blocked` token), or None."""
+    config = state.pinned_config(run)
+    settings = route_policy.discovery_settings(config)
+    cand, link = decision["candidate"], decision["discovery_link"]
+    risk = run.get("risk") or {}
+    if not (settings["enabled"] and "executor" in settings["roles"]):
+        return "discovery-disabled"
+    if (risk.get("size_class") not in settings["trial_size_classes"]
+            or risk.get("blast_radius") not in settings["trial_blast_radius"] or risk.get("irreversible")):
+        return "risk"
+    alloc = route_probe.allocation(con, run["id"], settings)
+    if alloc["trials"]["used"] >= alloc["trials"]["max"]:
+        return "trial-cap"
+    if alloc["rolling"]["used"] >= alloc["rolling"]["max"]:
+        return "rolling-cap"
+    if route_probe._quota_refusal(cand, config):
+        return "quota-reserve"
+    probe = route_probe.status(con, cand)
+    if not probe or probe.get("result") != "pass" or cand.get("probe_key") != link["probe_key"]:
+        return "probe-stale"
+    if scoring.evaluate_trust_state(con, link["candidate"])[1] == "quarantined":
+        return "quarantined"
+    # No trial without a known-working fallback on record, whoever launched this dispatch.
+    if (fallback.get("status") != "selected" or not fallback.get("candidate")
+            or routing.candidate_id(fallback["candidate"]) == link["candidate"]
+            or not _known_working(con, fallback["candidate"])):
+        return "no-fallback"
+    return None
+
+
+def _discovery_event(con, kind: str, attempt_id: str, *, origin: str, run_id: str, task_id: str | None,
+                     dispatch_id: str | None, reason: str, outcome: str | None = None, detail: str | None = None,
+                     primary: str | None = None, fallback: str | None = None) -> None:
+    """Append one immutable event to an attempt, in the caller's transaction. Identity (fingerprint,
+    candidate, probe key, policy digest) is read off the attempt's own earlier events; no event is updated."""
+    base = con.execute("SELECT * FROM route_discovery_events WHERE attempt_id=? ORDER BY seq DESC LIMIT 1",
+                       (attempt_id,)).fetchone()
+    if base is None:
+        return
+    run = state.get_run(con, run_id)
+    settings = route_policy.discovery_settings(state.pinned_config(run))
+    route_policy.record_event(
+        con, kind=kind, attempt_id=attempt_id, origin=origin, policy_digest=base["policy_digest"],
+        probe_key=base["probe_key"], reason=reason, run_id=run_id, plan_version=run.get("plan_version"),
+        task_id=task_id, dispatch_id=dispatch_id, role="executor", fingerprint_json=base["fingerprint_json"],
+        candidate_route=base["candidate_route"], primary_route=primary or base["primary_route"],
+        fallback_route=fallback or base["fallback_route"], probe_freshness=base["probe_freshness"],
+        allocation_json=route_probe.allocation(con, run_id, settings), outcome=outcome, detail=detail)
+
+
+def record_discovery(con, run: dict, task: dict, decision: dict, dispatch_id: str) -> None:
+    """In the dispatch transaction, right after the dispatch row: `dispatch-linked` names the dispatch an
+    attempt ended in (the fallback's, after a failed or refused probe), and a trial adds its `route_trials`
+    row and `trial-reserved`. Earlier events are never touched. Caller holds the transaction."""
+    link = decision.get("discovery_link")
+    if not link:
+        return
+    record = decision.get("trial_record")
+    tid = task["id"]
+    now = now_iso()
+    if record:
+        con.execute("INSERT INTO route_trials(id, run_id, task_id, dispatch_id, role, route, probe_key, fallback_route, "
+                    "policy_digest, reason, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (record["id"], run["id"], tid, dispatch_id, "executor", record["route"], record["probe_key"],
+                     record["fallback_route"], record["policy_digest"], record["reason"], "reserved", now, now))
+    dispatched = decision.get("selected")
+    detail = (record["reason"] if record else
+              f"no trial: {link.get('blocked') or 'none'}; dispatched known-working {dispatched}")
+    _discovery_event(con, "dispatch-linked", link["attempt_id"], origin="dispatch", run_id=run["id"], task_id=tid,
+                     dispatch_id=dispatch_id, reason=f"attempt linked to dispatch {dispatch_id}",
+                     outcome="trial" if record else "fallback", detail=detail, primary=link.get("primary"),
+                     fallback=record["fallback_route"] if record else dispatched)
+    if record:
+        _discovery_event(con, "trial-reserved", link["attempt_id"], origin="dispatch", run_id=run["id"], task_id=tid,
+                         dispatch_id=dispatch_id, reason=record["reason"], outcome="reserved", detail=record["reason"],
+                         primary=link.get("primary"), fallback=record["fallback_route"])
+
+
+def open_trial(con, dispatch_id: str | None) -> dict | None:
+    """The live trial this dispatch is, or None (an ordinary dispatch, or a trial already settled)."""
+    row = con.execute(f"SELECT * FROM route_trials WHERE dispatch_id=? AND status IN ({','.join('?' * len(TRIAL_OPEN))})",
+                      (dispatch_id, *TRIAL_OPEN)).fetchone() if dispatch_id else None
+    return dict(row) if row else None
+
+
+def set_trial_status(con, trial: dict, status: str, *, origin: str = "dispatch", detail: str = "",
+                     outcome: dict | None = None, dispatch_id: str | None = None) -> bool:
+    """Move a trial to `status` and append its `trial-*` event in the same transaction. A trial that is not
+    in a state this move is allowed from is left alone (False): every status change happens once."""
+    cur = con.execute(f"UPDATE route_trials SET status=?, outcome=COALESCE(?, outcome), updated_at=? WHERE id=? "
+                      f"AND status IN ({','.join('?' * len(_TRIAL_FROM[status]))})",
+                      (status, dumps(outcome) if outcome is not None else None, now_iso(), trial["id"],
+                       *_TRIAL_FROM[status]))
+    if cur.rowcount != 1:
+        return False
+    _discovery_event(con, _TRIAL_EVENTS[status], trial["id"], origin=origin, run_id=trial["run_id"],
+                     task_id=trial["task_id"], dispatch_id=dispatch_id or trial["dispatch_id"],
+                     reason=detail or f"trial {status}", outcome=status, detail=detail or None,
+                     fallback=trial["fallback_route"])
+    return True
+
+
+def trial_submitted(con, dispatch_id: str) -> bool:
+    """A trial dispatch's revision exists. Caller holds the transaction."""
+    trial = open_trial(con, dispatch_id)
+    return bool(trial) and set_trial_status(con, trial, "submitted", detail="a revision was submitted")
+
+
+def abandon_trial(con, dispatch_id: str, why: str) -> bool:
+    """A trial that ends without a revision and without a recovery (revoked, re-routed by the user, ended
+    on a question). Caller holds the transaction."""
+    trial = open_trial(con, dispatch_id)
+    return bool(trial) and set_trial_status(con, trial, "abandoned", detail=why)
+
+
+def _trial_launched(con, dispatch_id: str) -> None:
+    trial = con.execute("SELECT * FROM route_trials WHERE dispatch_id=? AND status='reserved'", (dispatch_id,)).fetchone()
+    if trial:
+        set_trial_status(con, dict(trial), "launched", detail="the dispatch's agent was launched")
 
 
 def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> list[str]:
@@ -552,9 +818,14 @@ def live_lease(con, run_id: str, lease_id: str) -> dict | None:
 
 
 def renew_lease(con, lease_id: str) -> None:
+    """Extend a lease. Submit calls this in the transaction that captures a revision, so it is also where a
+    trial dispatch's first revision settles its trial as `submitted`."""
     now = datetime.now(timezone.utc)
     con.execute("UPDATE leases SET expires_at=?, renewed_at=? WHERE id=?",
                 ((now + timedelta(seconds=LEASE_TTL_SECONDS)).isoformat(), now.isoformat(), lease_id))
+    holder = con.execute("SELECT dispatch_id FROM leases WHERE id=?", (lease_id,)).fetchone()
+    if holder and holder[0] and con.execute("SELECT 1 FROM revisions WHERE dispatch_id=?", (holder[0],)).fetchone():
+        trial_submitted(con, holder[0])
 
 
 def revoke(con, run: dict, target: str, reason: str) -> Result:
@@ -631,6 +902,7 @@ def _cancel_pending_launch(con, run: dict, d: dict, reason: str) -> bool:
         con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, max_attempts=attempts "
                     "WHERE run_id=? AND kind='launch_agent' AND dedup_key=? AND status='queued'",
                     (f"revoked: {reason}"[:200], now_iso(), *key))
+        abandon_trial(con, d["id"], f"revoked before its agent started: {reason}"[:200])
         if ended:
             state.emit(con, run, "dispatch.ended", f"{d.get('task_id') or d['role']} {d['role']} ended: revoked before "
                        "its agent started", audience="runtime", task_id=d.get("task_id"), dispatch_id=d["id"],
@@ -802,12 +1074,26 @@ def _identity_file(run_id: str, dispatch_id: str, which: str) -> Path:
     return paths.run_dir(run_id) / "dispatches" / dispatch_id / f"{which}.identity"
 
 
+def _c_start(pid: int | None) -> str | None:
+    """The process's start time as `ps` prints it in the C locale, whitespace-normalized, or None. Unlike
+    `process_start` it reads the same in any locale, so an identity recorded under one locale still matches
+    when it is checked under another."""
+    if not pid or pid <= 0:
+        return None
+    try:
+        out = subprocess.run([_system_tool("ps", "/bin/ps", "/usr/bin/ps"), "-o", "lstart=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=10, env={**os.environ, "LC_ALL": "C", "LANG": "C"}).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return " ".join(out.split()) or None
+
+
 def _record_identity(run_id: str, dispatch_id: str, which: str, pid: int) -> None:
     """Record which process instance `pid` is (`supervisor` or `agent`), so a
     later stop never signals another process that reused the pid."""
     path = _identity_file(run_id, dispatch_id, which)
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(path, {"pid": pid, "start": process_start(pid)})
+    atomic_write_json(path, {"pid": pid, "start": process_start(pid), "c_start": _c_start(pid)})
 
 
 def _verified(run: dict, dispatch_id: str, which: str, pid: int | None) -> bool:
@@ -817,7 +1103,7 @@ def _verified(run: dict, dispatch_id: str, which: str, pid: int | None) -> bool:
         rec = json.loads(_identity_file(run["id"], dispatch_id, which).read_text())
     except (OSError, ValueError):
         return False
-    return rec.get("pid") == pid and process_is(pid, rec.get("start"))
+    return rec.get("pid") == pid and (_c_start(pid) == rec["c_start"] if rec.get("c_start") else process_is(pid, rec.get("start")))
 
 
 def _killpg(pid, sig=signal.SIGTERM) -> bool:
@@ -1006,6 +1292,11 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     if current["status"] != "launching":
         # Revoked while its worktree was being set up (review F2): start nothing.
         return {"skipped": current["status"]}
+    if role == "executor" and open_trial(con, dispatch["id"]):
+        # What the launch leaves in the worktree, so a failed trial can be told from one that did work.
+        snapshot = _worktree_snapshot(wt)
+        if snapshot is not None:
+            atomic_write_json(ddir / "worktree-baseline.json", snapshot)
     launcher = launch(run, dispatch, "worker", ddir, cwd=wt, cli=payload.get("cli"),
                       external=bool(payload.get("external")), resume=payload.get("resume"))
     return {"dispatch_id": dispatch["id"], **launcher}
@@ -1021,6 +1312,7 @@ def worker_env(run: dict, dispatch: dict, role: str) -> dict:
         "OFFICE_RUN_ID": run["id"],
         "OFFICE_TASK_ID": dispatch["task_id"] or "",
         "OFFICE_DISPATCH_ID": dispatch["id"],
+        _WORKER_TAG: dispatch["id"],
         "OFFICE_ROLE": role,
         "OFFICE_VERSION": version.current(),
     })
@@ -1062,6 +1354,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
     env = dict(os.environ)
     env.update(extra)
     env.pop(frontdoor.HOP_ENV, None)
+    env.pop(_WORKER_TAG, None)  # only the agent carries a dispatch's id (worker_env): it names the processes to stop
     launcher = os.environ.get("OFFICE_LAUNCHER", "auto")
     use_herdr = herdr_usable()
     if cli and not use_herdr:
@@ -1123,7 +1416,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
                 _headless_resume(run, dispatch, kind, spec, resume)
     log = open(ddir / "supervisor.log", "ab")
     try:
-        proc = subprocess.Popen(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
+        proc = subprocess.Popen(sup, cwd=str(paths.run_dir(run["id"])), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
                                 start_new_session=True, close_fds=True)
     finally:
         log.close()
@@ -1188,7 +1481,7 @@ def _launch_external(run: dict, dispatch: dict, kind: str, spec: dict, ddir: Pat
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
     log = open(ddir / "supervisor.log", "ab")
     try:
-        watcher = subprocess.Popen(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
+        watcher = subprocess.Popen(sup, cwd=str(paths.run_dir(run["id"])), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
                                    start_new_session=True, close_fds=True)
     finally:
         log.close()
@@ -1485,8 +1778,8 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
             con.close()
     log = open(ddir / "supervisor.log", "ab")
     try:
-        watcher = subprocess.Popen(frontdoor.current_argv()[0] + ["_supervise", dispatch["id"]], cwd=str(cwd),
-                                   stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
+        watcher = subprocess.Popen(frontdoor.current_argv()[0] + ["_supervise", dispatch["id"]],
+                                   cwd=str(paths.run_dir(run["id"])), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
                                    start_new_session=True, close_fds=True)
     finally:
         log.close()
@@ -2934,6 +3227,7 @@ def _record_launch(run: dict, dispatch_id: str, *, launcher: str, pid: int | Non
                         (launcher, pid, pane_id, now_iso(), dispatch_id))
             if pid:
                 _record_identity(run["id"], dispatch_id, "supervisor", pid)
+            _trial_launched(con, dispatch_id)
             if os.environ.get("OFFICE_KEEP_PANES") == "1":
                 # R10: this dispatch's pane stays open after it ends (snapshot still written).
                 con.execute("UPDATE dispatches SET keep_pane=1 WHERE id=?", (dispatch_id,))
@@ -3140,6 +3434,7 @@ def _mark(dispatch_id: str, pid_child: int) -> None:
         with db.transaction(con):
             con.execute("UPDATE dispatches SET pid=?, status=CASE WHEN status='launching' THEN 'running' ELSE status END, "
                         "last_seen_at=? WHERE id=?", (os.getpid(), now_iso(), dispatch_id))
+            _trial_launched(con, dispatch_id)
             run_id = state.get_dispatch(con, dispatch_id)["run_id"]
     finally:
         con.close()
@@ -3181,7 +3476,14 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> No
 
 
 def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
-    """A worker that exits without submitting leaves a blocker, not a pass."""
+    """A worker that exits without submitting leaves a blocker, not a pass. A trial's worker that ends
+    with no submission, no refusal and no question goes to the trial recovery instead of a relaunch on the
+    route that just failed; any other end settles the trial (`submitted`, or `abandoned`)."""
+    _after_worker_exit(con, run, dispatch_id)
+    _close_trial(con, run, dispatch_id)
+
+
+def _after_worker_exit(con, run: dict, dispatch_id: str) -> None:
     d = state.get_dispatch(con, dispatch_id)
     task = state.get_task(con, run["id"], d["task_id"]) if d.get("task_id") else None
     if task is None or task["current_dispatch_id"] != dispatch_id:
@@ -3208,6 +3510,8 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
                        task_id=task["id"])
             return
         wall = _quota_wall(run, d)
+        if wall and _queue_trial_recovery(con, run, d, f"harness quota wall: {wall}"):
+            return  # a trial that hit a quota wall before any work falls back; one that worked blocks
         if wall:
             # Relaunching on the same route lands in the same exhausted quota
             # (issue #267 A3): block at once and say so, never retry.
@@ -3229,6 +3533,8 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
             state.emit(con, run, "task.blocked", f"{task['id']} worker ended on a question; answer it: "
                        f"{questions.answer_command(d, asked)}; work is preserved in its worktree", task_id=task["id"])
             return
+        if _queue_trial_recovery(con, run, d, f"worker ended ({d['terminal_classification']}) without submitting"):
+            return
         # A dispatch that raised stopped on purpose (an answer, not a retry, resolves it): it is no failed attempt.
         retries = con.execute("SELECT COUNT(*) FROM dispatches d WHERE d.run_id=? AND d.task_id=? AND d.terminal_classification "
                               "IS NOT NULL AND NOT EXISTS (SELECT 1 FROM revisions r WHERE r.dispatch_id=d.id) "
@@ -3244,6 +3550,523 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
                           pause_reason=f"worker ended ({d['terminal_classification']}) without submitting")
         state.emit(con, run, "task.blocked", f"{task['id']} worker ended without submitting "
                    f"({d['terminal_classification']}); work is preserved in its worktree", task_id=task["id"])
+
+
+# ------------------------------------------------------------------ trial launch-failure recovery (#494)
+
+
+
+def trial_launch_failed(con, run: dict, dispatch_id: str | None, why: str) -> bool:
+    """A trial dispatch whose launch job failed for good: queue its recovery instead of a bare blocker.
+    False when the dispatch is not a live trial. Caller holds the transaction."""
+    return _queue_trial_recovery(con, run, state.get_dispatch(con, dispatch_id) if dispatch_id else None, why)
+
+
+def _queue_trial_recovery(con, run: dict, d: dict | None, why: str) -> bool:
+    trial = open_trial(con, (d or {}).get("id"))
+    if not trial:
+        return False
+    # The mark keeps `_close_trial` from abandoning a trial whose recovery is on its way.
+    con.execute("UPDATE route_trials SET outcome=?, updated_at=? WHERE id=?",
+                (dumps({"recovery": "queued", "why": why[:300]}), now_iso(), trial["id"]))
+    state.enqueue(con, run, "trial_recovery", {"dispatch_id": d["id"], "task_id": d["task_id"], "why": why[:300]},
+                  dedup_key=f"trial-recovery:{d['id']}", max_attempts=2)
+    state.emit(con, run, "trial.recovering", f"{d['task_id']} trial route {trial['route']} did not run to a submission "
+               f"({why[:120]}); confirming its worker is gone, then falling back to {trial['fallback_route']} if no "
+               "work started", audience="runtime", task_id=d["task_id"], dispatch_id=d["id"])
+    return True
+
+
+def _close_trial(con, run: dict, dispatch_id: str) -> None:
+    """The end of a trial dispatch the recovery did not take: a revision makes it `submitted`, anything
+    else `abandoned` (revoked, signalled, ended on a question or a refused submit)."""
+    trial = open_trial(con, dispatch_id)
+    if not trial or "recovery" in (loads(trial.get("outcome"), None) or {}):
+        return
+    if con.execute("SELECT 1 FROM revisions WHERE dispatch_id=?", (dispatch_id,)).fetchone():
+        trial_submitted(con, dispatch_id)
+    else:
+        abandon_trial(con, dispatch_id, "the worker ended without a submission and without a recovery")
+
+
+def _system_tool(name: str, *system: str) -> str:
+    """A system tool by absolute path, so a restricted PATH (a sandbox, a test) cannot hide it."""
+    return next((p for p in system if os.access(p, os.X_OK)), shutil.which(name) or name)
+
+
+_PS_ROW = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d+\s+[\d:]{8}\s+\d{4})\s+(.*)$")
+
+
+def _process_table() -> list[tuple[int, int, int, str, str, str]] | None:
+    """(pid, ppid, pgid, state, start, command-and-environment) for every process, or None when the table cannot be
+    trusted. `ps` runs in the C locale, so the start time parses (and matches a recorded identity) whatever the
+    user's locale is; a table that does not contain this very process was misread, and says nothing."""
+    try:
+        listing = subprocess.run([_system_tool("ps", "/bin/ps", "/usr/bin/ps"), "-axeww", "-o", "pid=,ppid=,pgid=,stat=,lstart=,command="],
+                                 capture_output=True,
+                                 text=True, timeout=10, check=True, env={**os.environ, "LC_ALL": "C", "LANG": "C"}).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    rows = [(int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4), " ".join(m.group(5).split()), m.group(6))
+            for m in map(_PS_ROW.match, listing.splitlines()) if m]
+    return rows if any(r[0] == os.getpid() for r in rows) else None
+
+
+def _terminate_worker(pgid: int, tree: "_WorkerTree", *, term_wait: float = 3.0, kill_wait: float = 3.0) -> bool:
+    """SIGTERM, then SIGKILL, the verified agent group (`pgid`, 0 for none) and every process the tree
+    attributes to the worker; True once a scan finds none. A zombie is not a process that can write, and the
+    scan does not count it."""
+    for sig, wait in ((signal.SIGTERM, term_wait), (signal.SIGKILL, kill_wait)):
+        pids = tree.scan()
+        if pids is None:
+            return False
+        if not pids:
+            return True
+        if pgid > 1:
+            with contextlib.suppress(OSError):
+                os.killpg(pgid, sig)
+        for pid in pids:
+            with contextlib.suppress(OSError):
+                os.kill(pid, sig)
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            time.sleep(0.1)
+            pids = tree.scan()
+            if pids is None:
+                return False
+            if not pids:
+                return True
+    pids = tree.scan()
+    return pids is not None and not pids
+
+
+class _WorkerTree:
+    """The processes of one dispatch's worker: a recorded root that is still the process it was recorded as
+    (pid and start time), anything that carries the dispatch's id in its environment, and everything
+    descended from either. A process that left the group (setsid) is still found by its environment.
+    This process and its ancestors are never the worker, whatever they carry."""
+
+    def __init__(self, dispatch_id: str, roots: dict[int, str], pgid: int = 0) -> None:
+        self.tag = re.compile(rf"(?:^|\s){_WORKER_TAG}={re.escape(dispatch_id)}(?:\s|$)")
+        self.roots = roots
+        self.pgid = pgid  # the verified agent's process group: every live member of it is the worker's
+        self.seen: dict[int, str] = {}
+
+    def scan(self, _root=None) -> set[int] | None:
+        table = _process_table()
+        if table is None:
+            return None
+        children: dict[int, list[int]] = {}
+        started, parent, tagged, grouped = {}, {}, set(), set()
+        for pid, ppid, pgid, state_, start, command in table:
+            if state_.startswith("Z"):
+                continue  # exited and waiting to be reaped: it cannot write
+            children.setdefault(ppid, []).append(pid)
+            started[pid], parent[pid] = start, ppid
+            if self.tag.search(command):
+                tagged.add(pid)
+            if self.pgid > 1 and pgid == self.pgid:
+                grouped.add(pid)
+        mine, pid = set(), os.getpid()
+        while pid in parent and pid not in mine:
+            mine.add(pid)
+            pid = parent[pid]
+
+        def started_by_me(pid: int) -> bool:
+            seen = set()
+            while pid in parent and pid not in seen:
+                if pid == os.getpid():
+                    return True
+                seen.add(pid)
+                pid = parent[pid]
+            return False
+
+        def with_descendants(seed) -> set[int]:
+            out, queue = set(mine), list(seed)  # this process and its ancestors are never walked into
+            while queue:
+                pid = queue.pop()
+                if pid not in out:
+                    out.add(pid)
+                    queue.extend(children.get(pid, []))
+            return out - mine
+
+        named = {p for p, st in {**self.seen, **self.roots}.items() if started.get(p) == st}
+        # A tag alone is not proof: the `ps`, `lsof` or `git` this process runs inherits the tag it carries. A
+        # recorded identity or the agent's group stays the worker's whoever started it.
+        found = with_descendants(named | grouped) | with_descendants(p for p in tagged if p not in mine and not started_by_me(p))
+        found = {p for p in found if p in started and p > 1}
+        self.seen.update({p: started[p] for p in found})
+        return found
+
+
+def _recorded_identity(run: dict, dispatch_id: str, which: str) -> dict | None:
+    try:
+        rec = json.loads(_identity_file(run["id"], dispatch_id, which).read_text())
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec.get("pid"), int) else None
+
+
+def stop_worker_tree(run: dict, d: dict) -> tuple[bool, str]:
+    """Terminate the failed dispatch's worker process tree and confirm it is gone: (confirmed, detail).
+
+    Roots come from the identities recorded at launch (supervisor and agent, each a pid and start time)
+    and the pane Herdr hosts. Closing a pane or ending a binding is not proof of exit, so after the
+    signals the tree is scanned again and must be empty. A recorded process whose identity cannot be
+    read (alive but no readable start time, or a live pid with no record), or a process table that cannot
+    be read, is not confirmed: the caller blocks rather than starting a second writer."""
+    notes: list[str] = []
+    if d.get("launcher") == "herdr" and d.get("pane_id") and shutil.which("herdr"):
+        try:
+            notes.append(f"pane {reclaim_pane(run, d['id'], explicit=True)}")
+        except Exception as exc:  # the process scan below still decides
+            notes.append(f"pane close failed: {exc}")
+    roots: dict[int, str] = {}
+    agent_pgid = 0
+    for which in ("supervisor", "agent"):
+        rec = _recorded_identity(run, d["id"], which)
+        if rec is None:
+            continue
+        pid = rec["pid"]
+        if pid_state(pid) == DEAD:
+            continue
+        # A record made by this version carries the C-locale start; an older one only the user-locale start.
+        recorded, now = ((rec["c_start"], _c_start(pid)) if rec.get("c_start") else (rec.get("start"), process_start(pid)))
+        if not recorded or now is None:
+            return False, f"recorded {which} pid {pid} is alive and its identity cannot be proven (start time unreadable)"
+        if now == recorded:
+            roots[pid] = _c_start(pid) or now
+            agent_pgid = pid if which == "agent" else agent_pgid
+    if not agent_pgid:
+        # The leader may be gone while a member of its group is not. A group id cannot be reused while the group has
+        # members, so the recorded one is the worker's unless a live process now has that pid (a new group may have it).
+        try:
+            recorded = int(_agent_pgid_file(run, d["id"]).read_text().strip())
+        except (OSError, ValueError):
+            recorded = 0
+        if recorded > 1 and pid_state(recorded) == DEAD:
+            agent_pgid = recorded
+    pid = d.get("pid")
+    if pid and pid != os.getpid() and not _recorded_identity(run, d["id"], "supervisor") and pid_alive(pid):
+        return False, f"supervisor pid {pid} is alive and has no recorded identity to prove which process it is"
+    tree = _WorkerTree(d["id"], roots, agent_pgid)
+    gone = _terminate_worker(agent_pgid, tree)
+    left = tree.scan()
+    if not gone or left is None or left:
+        return False, ("worker processes remain: " + (", ".join(map(str, sorted(left))) if left else
+                                                      "the process table cannot be read, so exit is unconfirmed"))
+    # A helper that cleared its environment and left the group carries nothing that names the dispatch. If
+    # one still has the worktree as its working directory it may be writing there: not confirmed.
+    if d.get("worktree") and Path(d["worktree"]).is_dir():
+        for attempt in range(3):  # a closing pane's shell takes a moment to go
+            holders = _cwd_holders(Path(d["worktree"]))
+            table = _process_table()
+            if holders is None or table is None:
+                return False, "the processes working in the worktree cannot be listed, so exit is unconfirmed"
+            holders = _foreign(holders, table)
+            if not holders:
+                break
+            time.sleep(0.5)
+        else:
+            names = {row[0]: row[5].split(None, 1)[0] for row in table if row[0] in holders}
+            return False, ("processes with an unattributed working directory in the worktree remain: "
+                           + ", ".join(f"{pid} ({names.get(pid, '?')})" for pid in sorted(holders)))
+    return True, "; ".join([*notes, f"confirmed no process of {d['id']} remains"
+                            + (f" (terminated {len(roots)} recorded)" if roots else "")])
+
+
+def _file_stamp(path: Path) -> str:
+    """What changes when a file does: link text for a symlink (never followed), else size and mtime."""
+    try:
+        st = path.lstat()
+    except OSError:
+        return "gone"
+    return "link:" + os.readlink(path) if stat.S_ISLNK(st.st_mode) else f"{st.st_size}:{st.st_mtime_ns}"
+
+
+def _worktree_snapshot(wt: Path) -> dict | None:
+    """HEAD, the index, and a stamp for every tracked and every non-ignored untracked path. Taken until two
+    consecutive reads agree, so it describes a worktree nothing is writing. None when it never settles or git
+    cannot say. The worktree is the failed agent's, so this reads names and stamps only: `git status` would
+    hash content through whatever filter drivers the agent configured, and run them here."""
+    def git_z(*args: str) -> list[str]:
+        raw = subprocess.run(["git", "-C", str(wt), "-c", "core.fsmonitor=false", *args], capture_output=True, timeout=120)
+        if raw.returncode != 0:
+            raise OSError(raw.stderr.decode("utf-8", "replace"))
+        return [x for x in raw.stdout.decode("utf-8", "surrogateescape").split("\0") if x]
+
+    def once() -> dict | None:
+        try:
+            head = paths.git(wt, "rev-parse", "HEAD")
+            index = hashlib.sha256("\0".join(git_z("ls-files", "-s", "-z")).encode("utf-8", "surrogateescape")).hexdigest()
+            names = sorted({*git_z("ls-files", "-z"), *git_z("ls-files", "-o", "-z", "--exclude-standard")})
+        except (OSError, subprocess.SubprocessError, paths.GitError):
+            return None
+        return {"head": head, "index": index, "files": {name: _file_stamp(wt / name) for name in names}}
+
+    previous = once()
+    for _ in range(4):
+        time.sleep(0.2)
+        current = once()
+        if current is not None and current == previous:
+            return current
+        previous = current
+    return None
+
+
+def _foreign(pids: set[int], table: list[tuple]) -> set[int]:
+    """`pids` that are neither this process, its ancestors, nor something this process started (the `lsof`
+    that listed them, a `git` it ran: a supervisor that works from the worktree gives them that directory), and
+    that still exist in `table`."""
+    parent = {row[0]: row[1] for row in table}
+    me, mine = os.getpid(), set()
+    pid = me
+    while pid in parent and pid not in mine:
+        mine.add(pid)
+        pid = parent[pid]
+
+    def ours(pid: int) -> bool:
+        seen = set()
+        while pid in parent and pid not in seen:
+            seen.add(pid)
+            pid = parent[pid]
+            if pid == me:
+                return True
+        return False
+
+    return {p for p in pids if p in parent and p not in mine and not ours(p)}
+
+
+def _cwd_holders(wt: Path) -> set[int] | None:
+    """Processes whose working directory is inside `wt`, or None when they cannot be listed. Linux reads
+    /proc; elsewhere `lsof`, whose failure (nonzero beyond its "nothing found", or no listing at all) is not
+    an empty answer."""
+    root = str(wt.resolve())
+    inside = lambda path: path == root or path.startswith(root + os.sep)
+    if Path("/proc/self/cwd").exists():
+        holders = set()
+        for entry in Path("/proc").iterdir():
+            if entry.name.isdigit():
+                try:
+                    if inside(os.readlink(entry / "cwd")):
+                        holders.add(int(entry.name))
+                except (FileNotFoundError, ProcessLookupError):
+                    continue  # gone since the listing
+                except OSError:
+                    return None  # a process whose directory cannot be read may be the one writing
+        return holders
+    try:
+        proc = subprocess.run([_system_tool("lsof", "/usr/sbin/lsof", "/usr/bin/lsof"), "-nP", "-a", "-d", "cwd", "-F", "pn"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode not in (0, 1) or not proc.stdout.strip():
+        return None
+    holders, pid = set(), None
+    for line in proc.stdout.splitlines():
+        if line[:1] == "p" and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line[:1] == "n" and pid and inside(line[1:]):
+            holders.add(pid)
+    return holders
+
+
+def work_started(con, d: dict, ddir: Path) -> tuple[bool, str]:
+    """Whether the failed worker did meaningful work, once its process tree is confirmed gone: a submitted
+    revision, a commit past the dispatch's base, or a worktree that now differs from the one the launch left
+    (any tracked change or non-ignored untracked file). Ambiguity counts as work: an unreadable snapshot, or
+    a worktree that was launched on with no baseline recorded, blocks the fallback."""
+    if con.execute("SELECT 1 FROM revisions WHERE dispatch_id=?", (d["id"],)).fetchone():
+        return True, "a revision was submitted"
+    if not d.get("worktree") or not (Path(d["worktree"]) / ".git").exists():
+        return False, "the dispatch never got a worktree"
+    wt = Path(d["worktree"])
+    after = _worktree_snapshot(wt)
+    if after is None:
+        return True, "the worktree could not be snapshotted, so work cannot be ruled out"
+    try:
+        before = json.loads((ddir / "worktree-baseline.json").read_text())
+    except (OSError, ValueError):
+        started = [n for n in ("launch.json", "agent.identity", "supervisor.identity", "agent.pgid") if (ddir / n).exists()]
+        if d.get("launcher") or d.get("pid") or started:
+            return True, "the worktree has no launch baseline to compare against, so work cannot be ruled out"
+        return False, "no agent was ever launched in this dispatch"
+    if after["head"] != before["head"]:
+        return True, f"the branch moved from {str(before['head'])[:8]} to {after['head'][:8]}"
+    changed = sorted(p for p in {*after["files"], *before["files"]} if after["files"].get(p) != before["files"].get(p))
+    if after["index"] != before.get("index", after["index"]):
+        changed.insert(0, "the index")
+    if changed:
+        return True, "the worktree changed after launch: " + ", ".join(changed[:5]) + (" ..." if len(changed) > 5 else "")
+    return False, "no revision, no commit and no worktree change since the launch"
+
+
+def _recovery_blocked(con, run: dict, d: dict, trial: dict, status: str, reason: str, next_step: str, *,
+                      exited: bool = False) -> dict:
+    """Stop here: the worktree and the lease stay as they are, the trial is settled and the task blocks with
+    a next step. Nothing is launched and no lease moves. A dispatch whose worker is confirmed gone is ended,
+    so it does not stay a live session for the next dispatch to refuse on; one whose exit is not confirmed is
+    left as it is."""
+    with db.transaction(con):
+        task = state.get_task(con, run["id"], d["task_id"])
+        if exited:
+            _end_failed_dispatch(con, run, d["id"], "launch_failed")
+        set_trial_status(con, trial, status, origin="recovery", detail=reason, outcome={"recovery": "blocked", "why": reason})
+        if task and task["current_dispatch_id"] == d["id"] and task["status"] in ("running", "launching"):
+            state.update_task(con, run["id"], task["id"], status="blocked", pause_reason=f"trial {trial['route']}: {reason}"[:300])
+            state.emit(con, run, "task.blocked", f"{d['task_id']} trial route {trial['route']} failed: {reason}; no fallback "
+                       f"was started. {next_step}", task_id=d["task_id"], dispatch_id=d["id"])
+    return {"recovery": "blocked", "reason": reason}
+
+
+def _end_failed_dispatch(con, run: dict, dispatch_id: str, classification: str) -> None:
+    """Record the end of a dispatch whose worker is confirmed gone and never reported one. Caller holds the tx."""
+    ended = con.execute("UPDATE dispatches SET status=CASE WHEN status='cancelled' THEN status ELSE 'failed' END, "
+                        "terminal_classification=COALESCE(terminal_classification, ?), ended_at=? "
+                        "WHERE id=? AND ended_at IS NULL", (classification, now_iso(), dispatch_id)).rowcount
+    if ended:
+        d = state.get_dispatch(con, dispatch_id)
+        state.emit(con, run, "dispatch.ended", f"{d.get('task_id') or d['role']} {d['role']} ended: {classification}",
+                   audience="runtime", task_id=d.get("task_id"), dispatch_id=dispatch_id,
+                   payload={"exit_code": None, "signal": None, "classification": classification})
+
+
+def _recovery_fallback(con, run: dict, task: dict, d: dict, trial: dict) -> tuple[dict | None, str]:
+    """The recorded fallback route, decided again from live evidence (quota, trust, permission, floors)."""
+    recorded = (d.get("route") or {}).get("discovery") or {}
+    route = trial["fallback_route"]
+    if not recorded.get("fallback"):
+        return None, f"the dispatch recorded no fallback payload for {route}"
+    fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=task["id"], exact=route,
+                                  dispatch_kind="fix" if task.get("current_dispatch_id") else "fresh")
+    if fresh.get("status") != "selected" or fresh.get("selected") != route:
+        why = "; ".join(f"{r['candidate']}: {r['reason']}" for r in (fresh.get("rejected") or [])[:2]) or fresh.get("status")
+        return None, f"the recorded fallback {route} no longer qualifies ({why})"
+    fresh["route_source"] = "router"
+    return fresh, ""
+
+
+def job_trial_recovery(con, run: dict, job: dict) -> dict:
+    """A failure inside the recovery blocks the task with its reason: a dead worker and a trial left open
+    would otherwise wait for nobody."""
+    progress = {"exited": False}
+    try:
+        return _trial_recovery(con, run, job, progress)
+    except db.StaleAttempt:
+        raise
+    except Exception as exc:
+        return _recovery_crashed(con, run, job["payload"]["dispatch_id"], f"{type(exc).__name__}: {exc}",
+                                 exited=progress["exited"]) or _reraise(exc)
+
+
+def _reraise(exc: BaseException):
+    raise exc
+
+
+def _recovery_crashed(con, run: dict, dispatch_id: str, err: str, *, exited: bool = False) -> dict | None:
+    """The recovery failed (an exception in it, or its job failed for good): block the task and settle the
+    trial, so neither waits for a recovery that is not coming. None when there is no open trial."""
+    d = state.get_dispatch(con, dispatch_id)
+    trial = open_trial(con, dispatch_id) if d else None
+    if not trial:
+        return None
+    return _recovery_blocked(con, run, d, trial, "abandoned", f"the recovery itself failed ({err[:200]})",
+                             f"The worktree is preserved; office rerun {d['task_id']} --fresh, or office dispatch "
+                             f"{d['task_id']} --reroute", exited=exited)
+
+
+def trial_recovery_failed(con, run: dict, job: dict, err: str) -> None:
+    """A trial_recovery job that failed for good (killed twice, a version mismatch): the same block. Caller holds
+    the transaction."""
+    _recovery_crashed(con, run, job["payload"].get("dispatch_id"), err)
+
+
+def _trial_recovery(con, run: dict, job: dict, progress: dict) -> dict:
+    """The outbox job behind a trial's launch failure (#494). In order: end the failed worker's process
+    tree and confirm it is gone; decide from the revisions, commits and a stable worktree snapshot whether
+    work started; and only for a confirmed pre-work failure release the trial's lease, end its binding, mark
+    `launch-failed` and dispatch the recorded fallback, after re-checking the gates a dispatch checks. Any
+    other outcome blocks with a next step and leaves the worktree and lease alone."""
+    d = state.get_dispatch(con, job["payload"]["dispatch_id"])
+    trial = open_trial(con, d["id"]) if d else None
+    if not trial:
+        return {"skipped": "not an open trial"}
+    task = state.get_task(con, run["id"], d["task_id"])
+    if task is None or task["current_dispatch_id"] != d["id"] or task["status"] not in ("running", "launching"):
+        with db.transaction(con):
+            abandon_trial(con, d["id"], "the task no longer belongs to this dispatch")
+        return {"skipped": "superseded"}
+    tid = task["id"]
+    rerun_hint = f"office rerun {tid} --fresh (after reading the worktree), or office dispatch {tid} --reroute"
+    exited, detail = stop_worker_tree(run, state.get_dispatch(con, d["id"]))
+    if not exited:
+        return _recovery_blocked(con, run, d, trial, "abandoned", f"its worker process could not be confirmed gone ({detail})",
+                                 f"Stop the process by hand and confirm it with ps, then {rerun_hint}. The worktree and "
+                                 f"lease {d.get('lease_id')} are preserved")
+    progress["exited"] = True
+    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    meaningful, evidence = work_started(con, state.get_dispatch(con, d["id"]), ddir)
+    if meaningful:
+        return _recovery_blocked(con, run, d, trial, "abandoned", f"work had started ({evidence})",
+                                 f"The worktree {d.get('worktree')} is preserved; {rerun_hint}", exited=True)
+    fallback, why = _recovery_fallback(con, run, task, d, trial)
+    if fallback is None:
+        return _recovery_blocked(con, run, d, trial, "launch-failed", why,
+                                 f"The worker is gone and no work started; route it again: office dispatch {tid} --reroute",
+                                 exited=True)
+    from office import plans, queuecmd
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        task = state.get_task(con, run["id"], tid)
+        cur = state.get_dispatch(con, d["id"])
+        try:
+            if task["current_dispatch_id"] != d["id"] or task["status"] not in ("running", "launching") or not open_trial(con, d["id"]):
+                raise Refused("state-changed", f"{tid} changed during the recovery")
+            if state.is_terminal(run):
+                raise Refused("run-terminal", f"run is {run['phase']}")
+            plans.require_dispatchable(con, run)
+            plans.require_scope_clear(con, run, tid)
+            held = queuecmd.paused_block(con, run["id"], tid)
+            if held:
+                raise Refused("scheduler-paused", f"{held['id']} is paused by the operator")
+            fresh_lease = live_lease(con, run["id"], cur["lease_id"]) if cur.get("lease_id") else None
+            if cur.get("lease_id") and not fresh_lease:
+                raise Refused("lease-lost", f"{cur['lease_id']} is no longer this dispatch's live lease")
+        except Refused as refused:
+            reason = f"a gate no longer allows the fallback ({refused.message})"
+        else:
+            reason = None
+            now = now_iso()
+            _end_failed_dispatch(con, run, d["id"], "launch_failed")
+            if cur.get("lease_id"):
+                con.execute("UPDATE leases SET released_at=?, revoke_reason='trial launch failed before any work' "
+                            "WHERE id=? AND released_at IS NULL AND revoked_at IS NULL", (now, cur["lease_id"]))
+                con.execute("INSERT INTO ownership_events(id, run_id, role, scope, prior_holder, new_holder, event, created_at) "
+                            "VALUES(?,?,?,?,?,?,?,?)", (uuid.uuid4().hex, run["id"], "executor", tid, d["id"], None,
+                                                        "release", now))
+            if cur.get("session_id") and cur.get("harness"):
+                con.execute("UPDATE session_bindings SET ended_at=? WHERE harness=? AND session_id=? AND run_id=? "
+                            "AND ended_at IS NULL", (now, cur["harness"], cur["session_id"], run["id"]))
+            set_trial_status(con, trial, "launch-failed", origin="recovery", detail=f"pre-work launch failure: {evidence}")
+            _record_routing(con, run, fallback)
+            note_route(con, run, task, fallback)
+            new = request_launch(con, run, tid, role="executor", decision=fallback, base=cur.get("base_commit"))
+            state.record_route_change(con, run, tid, trial["route"], fallback["selected"], kind="trial-fallback",
+                                      actor="office", dispatch_id=new,
+                                      reason=f"trial launch failed before any work ({job['payload'].get('why')})")
+            set_trial_status(con, trial, "fell-back", origin="recovery", dispatch_id=new,
+                             detail=f"dispatched known-working {fallback['selected']} as {new}",
+                             outcome={"recovery": "fell-back", "fallback_dispatch": new})
+            state.emit(con, run, "trial.fell_back", f"{tid} trial route {trial['route']} failed before any work; "
+                       f"dispatched {fallback['selected']} as {new}", task_id=tid, dispatch_id=new)
+    if reason:
+        return _recovery_blocked(con, run, d, trial, "launch-failed", reason,
+                                 f"The worker is gone and no work started; resolve that, then office dispatch {tid} --reroute",
+                                 exited=True)
+    if cur.get("launcher") == "herdr" and cur.get("pane_id"):
+        with _pane_lock(run):
+            _unreserve_pane(run, cur["pane_id"])
+    return {"recovery": "fell-back", "fallback_dispatch": new}
 
 
 def _may_end_on_question(d: dict) -> bool:
