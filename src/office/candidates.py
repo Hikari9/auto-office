@@ -128,29 +128,37 @@ def _repo_root_here() -> Path | None:
     return _REPO_ROOTS[here]
 
 
-def current_user_policies(repo_root=None) -> list[dict]:
+def live_user_policies(repo_root=None) -> list[dict]:
     """The user's denied/overkill policy as the user and repo config files say now.
 
     A denial applies the moment the user writes it, even to a run pinned earlier, so
     it can never be bypassed by a stale pin. `repo_root` defaults to the cwd's
-    repository. Returns [] when nothing is set (the shipped default) or the config
-    cannot be read; an unreadable config already stops `office` elsewhere."""
+    repository. Returns [] when nothing is set (the shipped default). Raises
+    OSError, ValueError or yaml.YAMLError when the config cannot be read, so a
+    caller that must fail closed (the probe) can tell that from "no denials"."""
     from office import config as cfg
+    repo_root = repo_root if repo_root is not None else _repo_root_here()
+    # Read here, not through `cfg.read_files`: this feeds only the denial lookup and must not
+    # add a second read to the snapshot `office start` pins and baselines its drift check on.
+    files = {tier: (path.read_text(encoding="utf-8") if path.is_file() else None)
+             for tier, path in cfg.config_paths(repo_root).items()}
+    cache_key = (str(repo_root), tuple(sorted(files.items(), key=lambda kv: kv[0])))
+    policy = _POLICY_CACHE.get(cache_key)
+    if policy is None:  # held in a local: concurrent probes share this cache and may clear it
+        effective, _ = cfg.resolve(repo_root, files=files)
+        policy = route_policy.user_policy(effective)
+        _POLICY_CACHE.clear()
+        _POLICY_CACHE[cache_key] = policy
+    return [policy] if policy["denied"] or policy["overkill"] else []
+
+
+def current_user_policies(repo_root=None) -> list[dict]:
+    """`live_user_policies`, or [] when the config cannot be read: an unreadable
+    config already stops `office` elsewhere."""
     try:
-        repo_root = repo_root if repo_root is not None else _repo_root_here()
-        # Read here, not through `cfg.read_files`: this feeds only the denial lookup and must not
-        # add a second read to the snapshot `office start` pins and baselines its drift check on.
-        files = {tier: (path.read_text(encoding="utf-8") if path.is_file() else None)
-                 for tier, path in cfg.config_paths(repo_root).items()}
-        cache_key = (str(repo_root), tuple(sorted(files.items(), key=lambda kv: kv[0])))
-        if cache_key not in _POLICY_CACHE:
-            effective, _ = cfg.resolve(repo_root, files=files)
-            _POLICY_CACHE.clear()
-            _POLICY_CACHE[cache_key] = route_policy.user_policy(effective)
-        policy = _POLICY_CACHE[cache_key]
+        return live_user_policies(repo_root)
     except (OSError, ValueError, yaml.YAMLError):
         return []
-    return [policy] if policy["denied"] or policy["overkill"] else []
 
 
 def role_policy(config: dict, role: str) -> dict:
@@ -653,10 +661,13 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                exclude: set[str] | None = None, probe: bool = True, exact: str | None = None,
                dispatch_kind: str = "fresh", wave_load: dict | None = None, pending_explorations: int = 0,
                quota_snapshot: dict[str, dict] | None = None,
-               quota_event_seen: set[str] | None = None, discovery_input: dict | None = None) -> dict:
+               quota_event_seen: set[str] | None = None, discovery_input: dict | None = None,
+               manual: bool = False) -> dict:
     """Build the request and route. Returns the routing result plus request.
     `discovery_input` is the dispatch preflight's recompute handle (#494); a manual
-    `override` or a non-builder role never discovers.
+    `override` or a non-builder role never discovers. `manual` marks a recorded
+    declared route being re-qualified: like `override` it is exempt from overkill
+    rules, but it keeps the ordinary candidate set, floors and discovery inputs.
     `exact` keeps only the candidate with that route identity (harness@major/model@effort).
     Executor and worker requests carry the adaptive inputs (#300); `wave_load`
     counts routes already planned for other tasks of the same wave."""
@@ -746,7 +757,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     if policies:
         request["user_policies"] = policies
         request["size_class"] = (run.get("risk") or {}).get("size_class")
-        if override:
+        if override or manual:
             request["manual_route"] = True
     result = routing.route(request)
     result["benchmark_snapshot"] = snapshot
