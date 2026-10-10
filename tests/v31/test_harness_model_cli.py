@@ -207,7 +207,7 @@ def test_validate_catches_the_semantic_mistakes(unit):
 
 def test_shipped_seed_adapters_pass_the_semantic_checks(unit):
     for aid in adapters.harness_ids():
-        problems = [p for p in harnesscmd.check(adapters.load_all()[aid]) if "not resolvable" not in p]
+        problems = harnesscmd.check(adapters.load_all()[aid])
         assert problems == [], (aid, problems)
 
 
@@ -275,3 +275,18 @@ def test_run_pins_include_user_overlays_only_when_present(env):
     pinned = config.snapshot_hashes()
     assert pinned["adapter_hash"] != base["adapter_hash"] and pinned["catalog_hash"] != base["catalog_hash"]
     assert pinned["policy_hash"] == base["policy_hash"]
+
+
+def test_a_missing_harness_binary_warns_but_a_malformed_command_fails(unit):
+    absent = _with(invocation__executable="kilo-absent", version_fingerprint={"command": ["kilo-absent", "--version"]},
+                   model_source={"type": "cli", "command": ["kilo-absent", "models"]},
+                   preflight={"model_check": ["kilo-absent", "models"]})
+    problems, warnings = harnesscmd.check_full(absent, rows=[])
+    assert problems == [] and len(warnings) == 3
+    assert any("not resolvable" in p for p in harnesscmd.check(_with(preflight={"model_check": []}), rows=[]))
+    assert any("not resolvable" in p for p in harnesscmd.check(_with(preflight={"auth_check": ["other-tool"]}), rows=[]))
+
+
+def test_seed_justifications_live_outside_the_seed_adapters(unit):
+    assert "trust_justifications" not in adapters.load_all()["codex"]
+    assert "--yolo" in harnesscmd.packaged_justifications("codex")

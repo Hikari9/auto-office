@@ -286,14 +286,34 @@ def _profile_argvs(prof: dict) -> list[tuple[str, list]]:
     return [(name, form) for name, form in forms if isinstance(form, list)]
 
 
+_MISSING = " (harness missing here; resolvability unchecked)"
+
+
+def packaged_justifications(aid: str | None) -> dict:
+    """`adapters/trust_justifications.yaml` entries for a shipped seed adapter, kept
+    outside adapters/seed/ so seed adapter hashes (run pins) never change."""
+    try:
+        data = yaml.safe_load((paths.resources_root() / "adapters" / "trust_justifications.yaml").read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+    entry = data.get(aid) if isinstance(data, dict) else None
+    return entry if isinstance(entry, dict) else {}
+
+
+def _is_seed(adapter: dict) -> bool:
+    entry = adapters.load_sources().get(adapter.get("id"))
+    return bool(entry and entry[1] == "seed" and entry[0] == adapter)
+
+
 def _resolvable(argv, exe: str | None) -> str | None:
     """None when `argv` can run here, else why not."""
     if not isinstance(argv, list) or not argv:
         return "not a non-empty argv list"
     head = str(argv[0])
     if not (shutil.which(head) or (os.sep in head and Path(head).expanduser().is_file())):
-        hint = " (the harness is not installed on this host)" if exe and head == exe else ""
-        return f"{head} is not on PATH{hint}"
+        if exe and head == exe:
+            return f"{head} is not installed on this host" + _MISSING
+        return f"{head} is not on PATH"
     for piece in argv[1:]:
         piece = str(piece)
         if piece.startswith("scripts/") and not (paths.resources_root() / piece).is_file():
@@ -303,6 +323,13 @@ def _resolvable(argv, exe: str | None) -> str | None:
 
 def check(adapter: dict, rows: list[dict] | None = None) -> list[str]:
     """Every problem that stops `adapter` from being registered; empty means valid."""
+    return check_full(adapter, rows)[0]
+
+
+def check_full(adapter: dict, rows: list[dict] | None = None) -> tuple[list[str], list[str]]:
+    """(problems, warnings). A harness binary missing on this host is a warning:
+    the commands that call it cannot be resolved here, but are not malformed."""
+    warnings: list[str] = []
     problems = list(_schema_problems(adapter))
     aid = adapter.get("id")
     problems += [f"unfilled TODO at {p}" for p in _walk_todos(adapter)]
@@ -329,6 +356,8 @@ def check(adapter: dict, rows: list[dict] | None = None) -> list[str]:
     efforts = sorted(set(mapping) | {str(r.get("effort")) for r in mine if r.get("effort")} or {"medium"})
     justified = adapter.get("trust_justifications") or {}
     justified = justified if isinstance(justified, dict) else {}
+    if _is_seed(adapter):
+        justified = {**packaged_justifications(aid), **justified}
     flagged: dict[str, str] = {}
     with tempfile.TemporaryDirectory(prefix="office-validate-") as tmp:
         cwd = Path(tmp)
@@ -391,20 +420,23 @@ def check(adapter: dict, rows: list[dict] | None = None) -> list[str]:
         if argv is None or (isinstance(argv, str) and "TODO" in argv):
             continue
         why = _resolvable(argv, exe)
-        if why:
+        if why and why.endswith(_MISSING):
+            warnings.append(f"{name}: {why}")
+        elif why:
             problems.append(f"{name} is not resolvable: {why}")
-    return problems
+    return problems, warnings
 
 
 def validate(ident: str | None, *, file: str | None = None) -> Result:
     adapter, origin, where = _resolve_adapter(ident, file)
     aid = adapter.get("id") or ident
-    problems = check(adapter)
+    problems, warnings = check_full(adapter)
     head = f"harness {aid} ({origin}, {where})"
     notes = []
     shadow = adapters.user_adapter_dir() / f"{aid}.yaml"
     if origin == "seed" and shadow.is_file():
         notes.append(f"{shadow} is ignored: {aid} is a seed adapter and the user file does not set override_seed: true")
+    notes += [f"warning: {w}" for w in warnings]
     trust = "trust: unchanged (only a recorded trust act moves a route past valid-unverified)"
     if problems:
         return Result(lines=[f"{head}: {len(problems)} problem(s)"] + [f"  - {p}" for p in problems] + notes + [trust],
