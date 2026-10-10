@@ -196,6 +196,8 @@ models:
     invocation_harness: claude
     invocation_source: 'documented: official Claude Code --model claude-haiku-5-5; maintainer confirmed model available 2026-10-08; specific effort conformance pending'
     dispatchable: false
+    discovery: eligible
+    discovery_reason: 'Documented model invocation; exact effort conformance probe required'
     source_identifier: claude-haiku-5-5
     source_name: artificial-analysis+anthropic
     effort: max
@@ -213,6 +215,8 @@ models:
     invocation_harness: claude
     invocation_source: 'documented: official Claude Code --model claude-haiku-5-5; maintainer confirmed model available 2026-10-08; specific effort conformance pending'
     dispatchable: false
+    discovery: eligible
+    discovery_reason: 'Documented model invocation; exact effort conformance probe required'
     source_identifier: claude-haiku-5-5-xhigh
     source_name: artificial-analysis+anthropic
     effort: xhigh
@@ -230,6 +234,8 @@ models:
     invocation_harness: claude
     invocation_source: 'documented: official Claude Code --model claude-haiku-5-5; maintainer confirmed model available 2026-10-08; specific effort conformance pending'
     dispatchable: false
+    discovery: eligible
+    discovery_reason: 'Documented model invocation; exact effort conformance probe required'
     source_identifier: claude-haiku-5-5-high
     source_name: artificial-analysis+anthropic
     effort: high
@@ -247,6 +253,8 @@ models:
     invocation_harness: claude
     invocation_source: 'documented: official Claude Code --model claude-haiku-5-5; maintainer confirmed model available 2026-10-08; specific effort conformance pending'
     dispatchable: false
+    discovery: eligible
+    discovery_reason: 'Documented model invocation; exact effort conformance probe required'
     source_identifier: claude-haiku-5-5-medium
     source_name: artificial-analysis+anthropic
     effort: medium
@@ -264,6 +272,8 @@ models:
     invocation_harness: claude
     invocation_source: 'documented: official Claude Code --model claude-haiku-5-5; maintainer confirmed model available 2026-10-08; specific effort conformance pending'
     dispatchable: false
+    discovery: eligible
+    discovery_reason: 'Documented model invocation; exact effort conformance probe required'
     source_identifier: claude-haiku-5-5-low
     source_name: artificial-analysis+anthropic
     effort: low
@@ -612,6 +622,8 @@ models:
     # stronger than recollection.
     dispatchable: false
     source_identifier: gemini-3-8-flash
+    discovery: eligible
+    discovery_reason: 'Local evidence for in-session high effort; exact isolated conformance probe required'
     source_name: artificial-analysis
     effort: high
     source_effort: high
@@ -1012,6 +1024,8 @@ models:
     invocation_harness: codex
     invocation_source: 'documented: OpenAI gpt-6.1-sol; maintainer confirmed successful Codex CLI use on 2026-10-08; exact effort-specific launch receipt pending'
     dispatchable: false
+    discovery: eligible
+    discovery_reason: 'Documented Codex invocation; exact effort conformance probe required'
     source_identifier: gpt-6-1-sol-max
     source_name: artificial-analysis
     effort: max
@@ -1029,6 +1043,8 @@ models:
     invocation_harness: codex
     invocation_source: 'documented: OpenAI gpt-6.1-sol; maintainer confirmed successful Codex CLI use on 2026-10-08; exact effort-specific launch receipt pending'
     dispatchable: false
+    discovery: eligible
+    discovery_reason: 'Documented Codex invocation; exact effort conformance probe required'
     source_identifier: gpt-6-1-sol-xhigh
     source_name: artificial-analysis
     effort: xhigh
@@ -1046,6 +1062,8 @@ models:
     invocation_harness: codex
     invocation_source: 'documented: OpenAI gpt-6.1-sol; maintainer confirmed successful Codex CLI use on 2026-10-08; exact effort-specific launch receipt pending'
     dispatchable: false
+    discovery: eligible
+    discovery_reason: 'Documented Codex invocation; exact effort conformance probe required'
     source_identifier: gpt-6-1-sol-high
     source_name: artificial-analysis
     effort: high
@@ -1063,6 +1081,8 @@ models:
     invocation_harness: codex
     invocation_source: 'documented: OpenAI gpt-6.1-sol; maintainer confirmed successful Codex CLI use on 2026-10-08; exact effort-specific launch receipt pending'
     dispatchable: false
+    discovery: eligible
+    discovery_reason: 'Documented Codex invocation; exact effort conformance probe required'
     source_identifier: gpt-6-1-sol-medium
     source_name: artificial-analysis
     effort: medium
@@ -1080,6 +1100,8 @@ models:
     invocation_harness: codex
     invocation_source: 'documented: OpenAI gpt-6.1-sol; maintainer confirmed successful Codex CLI use on 2026-10-08; exact effort-specific launch receipt pending'
     dispatchable: false
+    discovery: eligible
+    discovery_reason: 'Documented Codex invocation; exact effort conformance probe required'
     source_identifier: gpt-6-1-sol-low
     source_name: artificial-analysis
     effort: low

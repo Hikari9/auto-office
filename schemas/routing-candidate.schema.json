@@ -13,6 +13,12 @@
     "cost"
   ],
   "properties": {
+    "route_status": {
+      "enum": ["available", "discovered-unconfirmed", "probe-pending", "probe-passed", "temporarily-unavailable", "confirmed-unsupported"]
+    },
+    "status_reason": {"type": "string"},
+    "discovery": {"type": "boolean"},
+    "probe_key": {"type": ["string", "null"]},
     "harness": {
       "type": "string"
     },
