@@ -34,7 +34,6 @@ from test_route_discovery_routing import failed as failed_probe, passed as passe
 from test_route_learning_discovery import FALLBACK, ROUTE, Seed, TRIPLE, evidence, outcome
 
 ASTRA = "gpt-6-astra"  # the fake world's known-working route: every installed available route is user-trusted
-AUTHORITY = ("adapter_trust_acts", "recorded_overrides")
 
 
 def trial_route(cold):
@@ -193,9 +192,13 @@ def test_s03_a_pass_qualifies_only_its_exact_fingerprint(world):
                "probe_key": world.candidate(probe_med, world.sol["medium"])["probe_key"]}
     blocked = world.decide("medium", discovery_input=handle_)
     assert blocked["discovery"]["intent"] == "none" and blocked["discovery"]["blocked"] == "probe-missing"
-    # no model-family inference: a sibling model in the catalog is not qualified by the sol pass either
-    other = [c for c in world.decide(None)["request"]["candidates"] if c["invocation_model_id"] != SOL and c["discovery"]]
-    assert all(c["probe"] is None for c in other)
+    # no model-family inference: the pass is on exactly one cache row, and every other discovery candidate in the
+    # request (any model) still has no record of its own
+    assert [(c["invocation_model_id"], c["effort"]) for c in world.cache()] == [(SOL, "high")]
+    pool = [c for c in world.decide(None)["request"]["candidates"] if c["discovery"]]
+    assert len(pool) == len(EFFORTS) and {c["invocation_model_id"] for c in pool} == {SOL}
+    assert all(c["probe"] is None for c in pool if c["effort"] != "high")
+    assert [c["probe"]["attempt_id"] for c in pool if c["effort"] == "high"] == [attempt]
 
 
 def test_s03_a_changed_harness_version_adapter_or_launch_profile_invalidates_the_cached_pass(world):
@@ -545,10 +548,6 @@ def always_draw(monkeypatch):
     caps are what these tests are about. The draw itself is pinned by the routing suite."""
     real = adaptive._draw
     monkeypatch.setattr(adaptive, "_draw", lambda seed, label: 0.0 if label == "discovery" else real(seed, label))
-
-
-def rolling(cold):
-    return route_probe.rolling(cold.con, route_policy.discovery_settings(cold.config))
 
 
 def test_s08_per_run_caps_hold_across_a_parallel_wave(cold):
