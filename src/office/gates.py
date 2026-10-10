@@ -1607,13 +1607,12 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
     return True
 
 
-def reopen_stale_dependents(con, run: dict, task_id: str, rev) -> list[str]:
+def reopen_stale_dependents(con, run: dict, task_id: str, rev) -> None:
     """`task_id` was just accepted on `rev`. Every transitive dependent that is
     accepted on a revision without it was built on the superseded one and can
     no longer land: reopen it to changes_required, naming the restack. Its
     accepted revision stays recorded (#294), and `office rerun <T> --resume`
-    merges the new revision into its worktree. Returns the tasks reopened.
-    Caller holds the tx."""
+    merges the new revision into its worktree. Caller holds the tx."""
     tasks = state.tasks(con, run["id"])
     downstream = {task_id}
     grew = True
@@ -1624,7 +1623,6 @@ def reopen_stale_dependents(con, run: dict, task_id: str, rev) -> list[str]:
                 downstream.add(t["id"])
                 grew = True
     reason = f"restack: {task_id} re-accepted on {rev['id']}"
-    reopened = []
     for t in tasks:
         if t["id"] == task_id or t["id"] not in downstream or t["status"] != "accepted" or not t.get("accepted_revision_id"):
             continue
@@ -1634,8 +1632,6 @@ def reopen_stale_dependents(con, run: dict, task_id: str, rev) -> list[str]:
         state.update_task(con, run["id"], t["id"], status="changes_required", pause_reason=reason)
         state.emit(con, run, "task.restack_needed", f"{t['id']} {t['accepted_revision_id']} {reason}; reopened: "
                    f"office rerun {t['id']} --resume merges it into the worktree first", task_id=t["id"])
-        reopened.append(t["id"])
-    return reopened
 
 
 def reevaluate_submitted(con, run: dict) -> list[str]:
