@@ -12,9 +12,9 @@ from office.util import loads, short
 
 
 def _optional_cols(con) -> str:
-    """session_id / resumed_from / harness, or NULL stand-ins on a schema that predates them."""
+    """Optional dispatch columns, or NULL stand-ins on earlier schemas."""
     have = {r[1] for r in con.execute("PRAGMA table_info(dispatches)")}
-    return ", ".join(c if c in have else f"NULL AS {c}" for c in ("session_id", "resumed_from", "harness"))
+    return ", ".join(c if c in have else f"NULL AS {c}" for c in ("session_id", "resumed_from", "harness", "pane_id"))
 
 
 def inspect(con, run: dict, what: str | None, ident: str | None) -> Result:
@@ -111,6 +111,7 @@ def _task(con, run, tid) -> Result:
                      + (" | user override" + (f" --cli {ov['cli']}" if ov.get("cli") else "") if ov.get("by") else "")
                      + (f" | resumed from {d['resumed_from'] or ov.get('resumed_from')}"
                         if (d["resumed_from"] or ov.get("resumed_from")) else "")
+                     + (f" | pane {d['pane_id']}" if d['pane_id'] else "")
                      + (f" | session {d['session_id']}" if d["session_id"]
                         else f" | session unavailable: {d['harness'] or 'harness'} exposes none"))
     for d in con.execute("SELECT id FROM dispatches WHERE run_id=? AND task_id=? ORDER BY started_at",
@@ -120,6 +121,17 @@ def _task(con, run, tid) -> Result:
             receipt = json.loads(launch_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
+        evidence = receipt.get("pane_evidence") or {}
+        if evidence:
+            def safe(value):
+                return " ".join("".join(c if c.isprintable() else " " for c in str(value or "")).split())[:200]
+            lines.append(f"  pane {safe(evidence.get('pane'))} owned by {safe(evidence.get('dispatch'))} "
+                         f"task {safe(evidence.get('task'))} | expected {safe(evidence.get('expected_worktree'))} "
+                         f"reported cwd {safe(evidence.get('reported_cwd')) or 'not reported'} "
+                         f"agent {safe(evidence.get('reported_agent')) or 'not reported'} "
+                         f"session {safe(evidence.get('reported_session')) or 'not reported'} "
+                         f"| prompt_landed {bool(receipt.get('prompt_landed'))}"
+                         + (f" | MISMATCH {safe(evidence['mismatch'])}" if evidence.get('mismatch') else ""))
         for form, info in (receipt.get("rendered_launches") or {}).items():
             lines.append(f"  launch {d['id']} {form} argv={json.dumps(info.get('argv') or [])} "
                          f"transport={info.get('prompt_transport')} adapter={info.get('adapter_hash')} "
