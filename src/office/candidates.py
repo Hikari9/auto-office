@@ -111,15 +111,33 @@ def resolve_aliases(rows: list[dict]) -> list[dict]:
 _POLICY_CACHE: dict = {}
 
 
+_REPO_ROOTS: dict[str, Path] = {}
+
+
+def _repo_root_here() -> Path | None:
+    """The repository holding the cwd, remembered per directory so routing does not fork git each call."""
+    try:
+        here = os.getcwd()
+    except OSError:
+        return None
+    if here not in _REPO_ROOTS:
+        ident = paths.repo_identity(here)
+        if ident is None:
+            return None  # not remembered: a repository may be created here later
+        _REPO_ROOTS[here] = ident[0]
+    return _REPO_ROOTS[here]
+
+
 def current_user_policies(repo_root=None) -> list[dict]:
     """The user's denied/overkill policy as the user and repo config files say now.
 
     A denial applies the moment the user writes it, even to a run pinned earlier, so
-    it can never be bypassed by a stale pin. Returns [] when nothing is set (the
-    shipped default) or the config cannot be read; an unreadable config already
-    stops `office` elsewhere."""
+    it can never be bypassed by a stale pin. `repo_root` defaults to the cwd's
+    repository. Returns [] when nothing is set (the shipped default) or the config
+    cannot be read; an unreadable config already stops `office` elsewhere."""
     from office import config as cfg
     try:
+        repo_root = repo_root if repo_root is not None else _repo_root_here()
         files = cfg.read_files(repo_root)
         cache_key = (str(repo_root), tuple(sorted(files.items(), key=lambda kv: kv[0])))
         if cache_key not in _POLICY_CACHE:
@@ -127,7 +145,7 @@ def current_user_policies(repo_root=None) -> list[dict]:
             _POLICY_CACHE.clear()
             _POLICY_CACHE[cache_key] = route_policy.user_policy(effective)
         policy = _POLICY_CACHE[cache_key]
-    except (OSError, ValueError):
+    except (OSError, ValueError, yaml.YAMLError):
         return []
     return [policy] if policy["denied"] or policy["overkill"] else []
 
@@ -489,12 +507,11 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
     row = rows[0] if len(rows) == 1 or (rows and effort) else None
     # A user-denied route is not selectable by any manual route either (--as, --review-as,
     # amend route). Overkill is automatic-only and never blocks a declared route (#494).
-    ident = paths.repo_identity()
     named = {"harness": harness, "model_id": (row or {}).get("model_id") or model,
              "invocation_model_id": (row or {}).get("invocation_model_id") or model,
              "alias_resolved_to": (row or {}).get("alias_resolved_to"),
              "effort": effort or (row or {}).get("effort") or "none"}
-    for policy in current_user_policies(ident[0] if ident else None):
+    for policy in current_user_policies():
         denied = route_policy.is_denied(named, policy)
         if denied:
             raise state.Refused("route-denied", denied, next_step=(

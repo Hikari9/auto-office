@@ -187,7 +187,10 @@ def probe_route_record(spec: str, *, run: dict | None = None) -> Result:
     cand = route_probe.candidate_from_spec(spec)
     adapter = adapters.load_all()[cand["adapter_id"]]
     repo = paths.repo_identity()
-    config = run.get("policy") if run else resolve(repo[0] if repo else None)[0]
+    try:
+        config = run.get("policy") if run else resolve(repo[0] if repo else None)[0]
+    except ValueError as exc:
+        return Result(lines=[f"probe {spec}: not run; config is invalid: {exc}"], exit_code=1)
     if adapters.installed(adapter):
         cand["quota"] = candidates.probe_quota(adapter)
     attempt_id = route_policy.new_attempt_id()
