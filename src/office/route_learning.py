@@ -12,6 +12,14 @@ the success definition (`derive_outcomes`), the attribution classes and their
 learning weights (`ATTRIBUTION_WEIGHT`), and the maturity and replay rules that
 gate an automatic eligibility change (`eligibility_transitions`). A change to
 any of them is a code change that goes through review.
+
+Discovery trials (#494) are ordinary executor dispatches to the learner. What a
+trial adds is attribution: `trial_attempts` reads the immutable
+`route_discovery_events` by `attempt_id` (never the mutable probe cache), so a
+launch failure, a probe or quota block, or an unsupported effort is not charged
+to the model, and a later probe of the same key cannot change how an earlier
+trial is read. Nothing here writes `adapter_trust_acts` or lifts quarantine:
+an accepted trial is quality evidence, not trust.
 """
 from __future__ import annotations
 
@@ -26,6 +34,14 @@ from office import scoring, task_descriptors
 LEARNER_VERSION = "route-learner-2-task"
 
 ADAPTIVE_ROLES = ("executor", "worker")
+
+# A trial that ended before any work is the invocation's or the environment's,
+# never the model's. Every probe reason class (`route_probe.REASON_CLASSES`)
+# lands here, and so does a class this table does not know.
+TRIAL_LAUNCH_STATES = ("launch-failed", "fell-back")
+# Trial states that need no gate result: the trial already ended.
+_TRIAL_ENDED = {"accepted", "rejected", "launch-failed", "fell-back", "abandoned"}
+UNSUPPORTED_EFFORT = "unsupported-model-effort"
 
 # Learning authority per attribution class. A plan, environment, or reviewer
 # defect is not the route's failure; mixed and unknown teach at reduced weight.
@@ -101,6 +117,203 @@ def _split_triple(triple: str) -> tuple[str | None, str | None, str | None, str 
         return None, None, None, None
 
 
+# ------------------------------------------------------------------ discovery trials (#494)
+
+def _table(con, name: str) -> bool:
+    return con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+
+def _dicts(cursor) -> list[dict]:
+    names = [d[0] for d in cursor.description]
+    return [dict(zip(names, row)) for row in cursor.fetchall()]
+
+
+def fingerprint_route(event: dict) -> str | None:
+    """The exact route an event's recorded fingerprint names: harness x invocation model x effort."""
+    try:
+        fp = json.loads(event.get("fingerprint_json") or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(fp, dict) or not fp.get("harness") or not fp.get("invocation_model_id"):
+        return None
+    return route_key(fp["harness"], fp["invocation_model_id"], fp.get("effort"))
+
+
+def trial_attempts(con: sqlite3.Connection, run_id: str | None = None) -> dict[str, dict]:
+    """attempt_id -> one discovery trial, read from the append-only `route_discovery_events`.
+
+    A trial is an attempt that has a `trial-*` event. Everything the learner knows
+    about it (its dispatch, route, fallback, probe outcome, launch failure and
+    whether it already ended) comes from the events under that attempt id, with
+    the `route_trials` row joined only for its id and status. The probe cache is
+    never read: it is mutable, and a later probe of the same key must not change
+    how an earlier trial is attributed."""
+    if not _table(con, "route_discovery_events"):
+        return {}
+    where, args = "", ()
+    if run_id is not None:
+        where, args = " AND run_id=?", (run_id,)
+    events = _dicts(con.execute(
+        "SELECT * FROM route_discovery_events WHERE attempt_id IN (SELECT attempt_id FROM route_discovery_events "
+        f"WHERE kind LIKE 'trial-%'{where}) ORDER BY seq", args))
+    attempts: dict[str, dict] = {}
+    for e in events:
+        attempts.setdefault(e["attempt_id"], {"attempt_id": e["attempt_id"], "events": []})["events"].append(e)
+    rows = {}
+    if _table(con, "route_trials"):
+        for r in _dicts(con.execute("SELECT id, dispatch_id, status, outcome, fallback_route FROM route_trials")):
+            rows[r["dispatch_id"]] = r
+            rows.setdefault(r["id"], r)
+    for a in attempts.values():
+        evs = a["events"]
+        trial = [e for e in evs if e["kind"].startswith("trial-")]
+        probes = [e for e in evs if e["kind"] in ("probe-result", "probe-cache-hit")]
+        last, first = trial[-1], trial[0]
+        dispatch_id = next((e["dispatch_id"] for e in trial if e["dispatch_id"]), None)
+        row = rows.get(dispatch_id) or rows.get(a["attempt_id"])
+        failed = next((e for e in reversed(trial) if e["kind"] == "trial-launch-failed"), None)
+        probe = probes[-1] if probes else None
+        reason_class = (failed or {}).get("reason_class") or (
+            probe.get("reason_class") if probe and probe.get("outcome") == "fail" else None)
+        a.update(
+            run_id=first["run_id"], task_id=first["task_id"], role=first["role"], dispatch_id=dispatch_id,
+            route=first["candidate_route"], learner_route=fingerprint_route(first), probe_key=first["probe_key"],
+            primary_route=first["primary_route"], fallback_route=first["fallback_route"] or (row or {}).get("fallback_route"),
+            policy_digest=first["policy_digest"], state=last["kind"][len("trial-"):],
+            terminal=any(e["kind"] in ("trial-accepted", "trial-rejected") for e in trial),
+            reason_class=reason_class, trial_row=row,
+            probe={"outcome": probe["outcome"], "reason_class": probe["reason_class"],
+                   "freshness": probe["probe_freshness"], "source_attempt_id": probe["source_attempt_id"]} if probe else None)
+    return attempts
+
+
+def trial_by_dispatch(con: sqlite3.Connection, run_id: str | None = None) -> dict[str, dict]:
+    return {a["dispatch_id"]: a for a in trial_attempts(con, run_id).values() if a["dispatch_id"]}
+
+
+def launch_failure_attribution(trial: dict) -> tuple[str, float, str]:
+    """(class, confidence, provenance) for a trial that ended before any work.
+
+    The model never ran its task, so none of these is a model failure: a launch
+    failure, a probe transient, an auth or quota block, a missing permission or
+    isolation, an unsupported model/effort and a conformance failure of the
+    invocation are all the invocation's or the environment's."""
+    reason = trial.get("reason_class")
+    return "environment", 0.9, "trial ended before any work" + (f" ({reason})" if reason else "")
+
+
+def unsupported_routes(con: sqlite3.Connection) -> dict[str, dict]:
+    """Exact routes a recorded attempt confirmed unsupported, route key -> evidence.
+
+    Read from the events, one key per harness x model x effort: an unsupported
+    `high` says nothing about `medium`, and the key carries the effort."""
+    if not _table(con, "route_discovery_events"):
+        return {}
+    out: dict[str, dict] = {}
+    for e in _dicts(con.execute(
+            "SELECT * FROM route_discovery_events WHERE reason_class=? AND (kind='trial-launch-failed' OR "
+            "(kind='probe-result' AND outcome='fail')) ORDER BY seq", (UNSUPPORTED_EFFORT,))):
+        route = fingerprint_route(e)
+        if route:
+            out[route] = {"attempt_id": e["attempt_id"], "event_id": e["id"], "kind": e["kind"], "at": e["created_at"],
+                          "probe_key": e["probe_key"]}
+    return out
+
+
+def record_trial_outcomes(con: sqlite3.Connection, outcomes: list[dict] | None = None) -> list[dict]:
+    """Append `trial-accepted` / `trial-rejected` for each trial whose gate result is now recorded.
+
+    `gates.py` does not know about trials, so the learner records a trial's
+    terminal outcome the first time it observes the result: the trial dispatch's
+    work was accepted, or it was settled without being accepted. The terminal
+    event and the `route_trials` status are written in one savepoint inside the
+    caller's transaction. The unique terminal index makes a second observation a
+    no-op, never a second event, and no existing event is updated or deleted.
+    A trial that ended before any work (launch failure, fallback, abandonment)
+    has no gate result and is left as its own events recorded it."""
+    from office import route_policy
+    trials = trial_by_dispatch(con)
+    if not trials:
+        return []
+    by_dispatch = {o["dispatch_id"]: o for o in (derive_outcomes(con) if outcomes is None else outcomes)}
+    written = []
+    for dispatch_id, trial in trials.items():
+        outcome = by_dispatch.get(dispatch_id)
+        row = trial["trial_row"] or {}
+        if (trial["terminal"] or trial["state"] in _TRIAL_ENDED or row.get("status") in _TRIAL_ENDED
+                or outcome is None or not outcome["work"]):
+            continue
+        if not con.in_transaction:
+            raise ValueError("record_trial_outcomes requires the caller's db.transaction")
+        kind = "trial-accepted" if outcome["success"] else "trial-rejected"
+        last = trial["events"][-1]
+        con.execute("SAVEPOINT trial_terminal")
+        try:
+            event_id = route_policy.record_event(
+                con, kind=kind, attempt_id=trial["attempt_id"], origin="job", policy_digest=trial["policy_digest"],
+                probe_key=trial["probe_key"], reason=f"trial gate result observed: {outcome['attribution_provenance']}",
+                run_id=trial["run_id"], plan_version=last["plan_version"], task_id=trial["task_id"],
+                dispatch_id=dispatch_id, role=trial["role"], fingerprint_json=last["fingerprint_json"],
+                candidate_route=trial["route"], primary_route=trial["primary_route"],
+                fallback_route=trial["fallback_route"], probe_freshness=last["probe_freshness"],
+                allocation_json=last["allocation_json"], outcome="accepted" if outcome["success"] else "rejected",
+                detail=f"{outcome['attribution']} attribution, learn weight {outcome['learn_weight']}")
+            if row:
+                con.execute("UPDATE route_trials SET status=?, outcome=?, updated_at=? WHERE id=?",
+                            ("accepted" if outcome["success"] else "rejected", kind[len("trial-"):],
+                             datetime.now(timezone.utc).isoformat(), row["id"]))
+        except sqlite3.IntegrityError:
+            con.execute("ROLLBACK TO trial_terminal")  # observed already: a second observation is a no-op
+            con.execute("RELEASE trial_terminal")
+            continue
+        con.execute("RELEASE trial_terminal")
+        written.append({"event_id": event_id, "kind": kind, "attempt_id": trial["attempt_id"], "dispatch_id": dispatch_id})
+    return written
+
+
+def attempt_history(con: sqlite3.Connection, *, run_id: str | None = None, task_id: str | None = None,
+                    include_unbound: bool = False, limit: int = 20) -> list[dict]:
+    """Per-attempt audit history, newest attempt last: every event under each attempt id.
+
+    `run_id`/`task_id` scope it to one run's attempts. `include_unbound` adds attempts
+    with no run (a manual probe). Read-only."""
+    if not _table(con, "route_discovery_events"):
+        return []
+    clauses, args = [], []
+    if run_id is not None:
+        clauses.append("(run_id=?" + (" OR run_id IS NULL" if include_unbound else "") + ")")
+        args.append(run_id)
+    if task_id is not None:
+        clauses.append("(task_id=?" + (" OR task_id IS NULL" if include_unbound else "") + ")")
+        args.append(task_id)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    ids = [r[0] for r in con.execute(
+        f"SELECT attempt_id FROM route_discovery_events{where} GROUP BY attempt_id ORDER BY MIN(seq) DESC LIMIT ?",
+        (*args, limit)).fetchall()]
+    attempts = []
+    for attempt_id in reversed(ids):
+        events = _dicts(con.execute("SELECT * FROM route_discovery_events WHERE attempt_id=? ORDER BY seq", (attempt_id,)))
+        first = events[0]
+        attempts.append({
+            "attempt_id": attempt_id, "run_id": first["run_id"], "plan_version": first["plan_version"],
+            "task_id": first["task_id"], "origin": first["origin"], "policy_digest": first["policy_digest"],
+            "probe_key": first["probe_key"], "route": first["candidate_route"], "reason": first["reason"],
+            "dispatches": sorted({e["dispatch_id"] for e in events if e["dispatch_id"]}),
+            "events": [{k: e[k] for k in ("id", "kind", "origin", "dispatch_id", "probe_freshness", "outcome",
+                                          "reason_class", "detail", "source_attempt_id", "created_at")}
+                       for e in events]})
+    return attempts
+
+
+def live_trial(con: sqlite3.Connection, dispatch_id: str | None) -> dict | None:
+    """The trial a dispatch is running, while it is still in flight: {route, fallback, status}."""
+    if not dispatch_id or not _table(con, "route_trials"):
+        return None
+    row = con.execute("SELECT route, fallback_route, status FROM route_trials WHERE dispatch_id=? "
+                      "AND status IN ('reserved','launched','submitted')", (dispatch_id,)).fetchone()
+    return {"route": row[0], "fallback": row[1], "status": row[2]} if row else None
+
+
 # ------------------------------------------------------------------ outcomes
 
 def derive_outcomes(con: sqlite3.Connection) -> list[dict]:
@@ -110,6 +323,11 @@ def derive_outcomes(con: sqlite3.Connection) -> list[dict]:
     failure: it did not, and the task has since moved on (accepted through another
     dispatch, cancelled, relaunched) or the run ended. A dispatch whose task is
     still in flight is undetermined and yields nothing.
+
+    A discovery trial dispatch (#494) is read the same way, with one addition: a
+    trial that ended before any work is attributed from its recorded events to the
+    invocation or environment, at zero learning weight, whatever the dispatch's
+    own exit looked like. `trial` names the attempt on an outcome that was one.
     """
     dcols = _cols(con, "dispatches")
     if "task_id" not in dcols:
@@ -169,6 +387,7 @@ def derive_outcomes(con: sqlite3.Connection) -> list[dict]:
     starts: dict[tuple, list[str]] = {}
     for r in rows:
         starts.setdefault((r[1], r[3]), []).append(r[8] or "")
+    trials = trial_by_dispatch(con)
 
     out = []
     for (did, run_id, role, task_id, triple, harness, model, effort, started, ended, term, exit_code, outcome,
@@ -190,8 +409,11 @@ def derive_outcomes(con: sqlite3.Connection) -> list[dict]:
                      if kind == "code_review" and verdict == "CHANGES_REQUIRED")
         checks_failed = sum(1 for rid in my_revs for kind, verdict in gates.get(rid, [])
                             if kind == "checks" and verdict in ("CHANGES_REQUIRED", "RECHECK"))
+        trial = trials.get(did)
         if success:
             attr, conf, prov = "route", 1.0, "accepted revision"
+        elif trial and not my_revs and trial["state"] in TRIAL_LAUNCH_STATES:
+            attr, conf, prov = launch_failure_attribution(trial)
         else:
             attr, conf, prov = attribute_failure(
                 label=labels.get(did), task_status=task.get("status"), run_phase=run.get("phase"),
@@ -218,7 +440,9 @@ def derive_outcomes(con: sqlite3.Connection) -> list[dict]:
             "attribution_provenance": prov, "learn_weight": round(weight, 4),
             "review_rounds": rounds, "wall_seconds": wall,
             "money_actual": float(money) if isinstance(money, (int, float)) else None,
-            "ended_at": ended,
+            "ended_at": ended, "work": bool(my_revs),
+            "trial": {"attempt_id": trial["attempt_id"], "state": trial["state"], "reason_class": trial["reason_class"],
+                      "fallback_route": trial["fallback_route"], "probe_key": trial["probe_key"]} if trial else None,
         })
     return out
 
@@ -293,6 +517,7 @@ def episodes(outcomes: list[dict]) -> list[dict]:
             "descriptor": last.get("descriptor") if all(o.get("descriptor") == last.get("descriptor") for o in rows) else {},
             "success": success, "attribution": attr, "attribution_confidence": conf,
             "attribution_provenance": prov, "learn_weight": round(weight, 4),
+            "trial": next((o["trial"] for o in rows if o.get("trial")), None),
             "attempts": len(rows), "review_rounds": sum(o["review_rounds"] for o in rows),
             "wall_seconds": sum(walls) if walls else None, "money_actual": sum(money) if money else None,
             "dispatch_ids": [o["dispatch_id"] for o in rows], "ended_at": last.get("ended_at"),
@@ -519,12 +744,17 @@ def eligibility_transitions(outcomes: list[dict], routes: dict[str, dict], curre
 def refresh(con: sqlite3.Connection, role_priors: dict[str, dict[str, dict]] | None = None) -> list[dict]:
     """Persist derived attributions and apply validated eligibility transitions.
 
-    Called at run close/abandon inside the caller's transaction. Every
+    Called at run close/abandon inside the caller's transaction. It first records
+    the terminal outcome of every trial whose gate result is now in (see
+    `record_trial_outcomes`). It never touches `adapter_trust_acts`: learned
+    eligibility is a separate, replay-validated state, and trust and quarantine
+    stay with the user. Every
     transition is an append-only `learned_eligibility` row (auditable); a later
     row reverses it. `role_priors`: role -> route key -> {"prior_p"}; when omitted
     the routes seen in outcomes get a neutral 0.5 prior."""
     ensure_schema(con)
     outcomes = derive_outcomes(con)
+    record_trial_outcomes(con, outcomes)
     now = datetime.now(timezone.utc).isoformat()
     for o in outcomes:
         con.execute("INSERT OR REPLACE INTO route_attributions VALUES(?,?,?,?,?,?,?,?,?,?)",
