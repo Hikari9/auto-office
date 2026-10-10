@@ -138,6 +138,7 @@ def _stall_t2_on_a_real_conflict(env, monkeypatch):
     _conflict(env, 2, t2_head)
     code, out = env.office("land")
     assert code == 4 and "merge-conflict" in out and "mul.py" in out, out
+    assert "merged so far: T1" in out, out  # the refusal names what the land already merged
     return bare, t2_head
 
 
@@ -364,3 +365,30 @@ def test_a_competing_push_between_the_proof_and_the_push_is_refused_by_the_lease
     code, out = env.office("land")
     assert code == 4 and "recovery-push-failed" in out, out
     assert _head_of(env, bare, "T1") == raced[0] and "recovered" not in _task_pr(env, "T1")
+
+
+def test_a_failed_retarget_after_the_restack_push_does_not_restack_again(env, monkeypatch):
+    bare, _, _ = _run(env, monkeypatch, _plan("merge"), repo=SQUASH_ONLY)
+    real, forced = prs.push, []
+    monkeypatch.setattr(prs, "push", lambda run, d, **kw: (forced.append(d["branch"]) if kw.get("force") else None,
+                                                           real(run, d, **kw))[1])
+    s = gh(env)
+    s["edit_failures"] = {"2": 1}
+    (env.tmp / "gh.json").write_text(json.dumps(s))
+    code, out = env.office("land")
+    assert code == 4 and "retarget-failed" in out, out
+    restacked = _task_pr(env, "T2")["restacked"]["commit"]
+    assert restacked == _head_of(env, bare, "T2") and _task_pr(env, "T2")["base"] != "main"
+    code, out = env.office("land")
+    assert code == 0 and "T2 #2 merged (squash)" in out, out
+    assert _main_tree(env, bare) == _integration_tree(env)
+    assert len(forced) == 1, forced  # the retry only retargets
+
+
+def test_a_git_without_merge_tree_write_tree_refuses_with_the_by_hand_steps(monkeypatch, tmp_path):
+    from office import land
+    from office.state import Refused
+    monkeypatch.setattr(land, "_git", lambda *a, **k: subprocess.CompletedProcess(a, 129, "", "usage: git merge-tree"))
+    with pytest.raises(Refused) as exc:
+        land._merge_tree(tmp_path, "a" * 40, "b" * 40)
+    assert exc.value.category == "recovery-failed" and "git >= 2.38" in exc.value.message and "compose by hand" in exc.value.next_step

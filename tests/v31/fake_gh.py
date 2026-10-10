@@ -77,6 +77,9 @@ def main(argv: list[str]) -> int:
         pr = next((p for p in s["prs"] if len(argv) > 2 and str(p["number"]) == argv[2]), None)
         if pr is None:
             code, out = 1, "no such pull request"
+        elif argv[1] == "edit" and (s.get("edit_failures") or {}).get(str(pr["number"]), 0) > 0:
+            s["edit_failures"][str(pr["number"])] -= 1  # `edit_failures: {"<n>": times}`
+            code, out = 1, "error connecting to api.github.com"
         elif argv[1] == "edit":
             if "--base" in argv:
                 pr["base"] = opt(argv, "--base")
