@@ -107,20 +107,30 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
     never be accepted (gates.stale_dependency). Office merges each accepted
     revision the worktree lacks; a merge is never a rebase, so the pushed
     branch needs no force-push. On a conflict the merge is aborted and the
-    executor is told to make it. Returns {"base", "merged", "conflict", "line"}."""
+    executor is told to make it. A dependency reopened for changes is not merged
+    and is reported. Returns {"base", "merged", "conflict", "reopened", "line"}
+    where `base` is every accepted dependency revision combined (the base the
+    new dispatch records), or None when a merge conflicted or they cannot combine."""
     if not worktree or not (Path(worktree) / ".git").exists():
         return None
     wt = Path(worktree)
-    pending = []
+    head = paths.git(wt, "rev-parse", "HEAD")
+    accepted, pending, reopened = [], [], []
     for dep in task["depends"]:
         dt = state.get_task(con, run["id"], dep)
-        if not dt or dt["status"] != "accepted" or not dt.get("accepted_revision_id"):
-            continue
-        row = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (dt["accepted_revision_id"],)).fetchone()
-        if row and not gates._is_ancestor(run, row["commit_sha"], paths.git(wt, "rev-parse", "HEAD")):
-            pending.append((dep, dt["accepted_revision_id"], row["commit_sha"]))
+        rev_id = (dt or {}).get("accepted_revision_id")
+        if dt and dt["status"] == "accepted" and rev_id:
+            row = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (rev_id,)).fetchone()
+            if row:
+                accepted.append((dep, row["commit_sha"]))
+                if not gates._is_ancestor(run, row["commit_sha"], head):
+                    pending.append((dep, rev_id, row["commit_sha"]))
+        elif dt and (rev_id or dt["status"] == "changes_required"):
+            reopened.append({"task": dep, "status": dt["status"], "revision": rev_id})
+    note = ("; " + ", ".join(f"{r['task']} is {r['status']} and was not restacked" for r in reopened)) if reopened else ""
     if not pending:
-        return None
+        return {"base": None, "merged": [], "conflict": None, "reopened": reopened,
+                "line": note[2:]} if reopened else None
     env = {**os.environ, **paths.commit_identity_env(wt)}
     merged = []
     for i, (dep, rev_id, sha) in enumerate(pending):
@@ -132,12 +142,16 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
             # Every dependency still to merge, the conflicting one first: the executor makes all of them.
             unmerged = [{"task": t, "revision": r, "commit": c} for t, r, c in pending[i:]]
             return {"base": None, "merged": merged, "conflict": {"task": dep, "revision": rev_id, "commit": sha},
-                    "unmerged": unmerged,
-                    "line": f"restack onto {dep} {rev_id} conflicts; the executor merges {sha[:7]} first"}
+                    "unmerged": unmerged, "reopened": reopened,
+                    "line": f"restack onto {dep} {rev_id} conflicts; the executor merges {sha[:7]} first" + note}
         merged.append({"task": dep, "revision": rev_id, "commit": sha})
-    base = merged[-1]["commit"] if len(task["depends"]) == 1 else None
-    return {"base": base, "merged": merged, "conflict": None,
-            "line": "restacked onto " + ", ".join(f"{m['task']} {m['revision']}" for m in merged)}
+    from office import integration
+    try:
+        base = integration.combine(run, accepted)
+    except (integration.CombineConflict, paths.GitError):
+        base = None  # the dispatch keeps the base it had
+    return {"base": base, "merged": merged, "conflict": None, "reopened": reopened,
+            "line": "restacked onto " + ", ".join(f"{m['task']} {m['revision']}" for m in merged) + note}
 
 
 def _sticky_check(con, run: dict, task: dict, parent: dict) -> str | None:
@@ -300,7 +314,7 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         launch = {**launch, "launch": launch_prefs}
     restack = _restack(con, run, task, parent.get("worktree"))
     if restack:
-        extra = {**(extra or {}), "restack": {k: restack.get(k) for k in ("merged", "conflict", "unmerged")}}
+        extra = {**(extra or {}), "restack": {k: restack.get(k) for k in ("merged", "conflict", "unmerged", "reopened")}}
         if resume:
             # A resumed session reads only its prompt pointer first: name the restack there.
             extra["resume"]["findings"] = "; ".join(x for x in (restack["line"], extra["resume"]["findings"]) if x)
@@ -313,7 +327,7 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
                 "as": review_as, "cli": review_cli, "external": bool(review_external), "by": "user"})
         did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
                                       extra=extra, base=(restack or {}).get("base"), decision=launch)
-        if restack:
+        if restack and (restack["merged"] or restack["conflict"]):
             state.emit(con, run, "task.restacked", f"{tid} {restack['line']}", task_id=tid, dispatch_id=did)
         if resume:
             _set_resumed_from(con, did, parent["id"], session)

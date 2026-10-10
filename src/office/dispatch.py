@@ -30,7 +30,7 @@ try:
 except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
-from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, route_policy, route_probe, routing, scoring, state, version, worktree_setup
+from office import adapters, briefs, candidates, contract, db, frontdoor, jobs, paths, planfile, planpath, read_scope, route_policy, route_probe, routing, scoring, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (DEAD, atomic_write_json, atomic_write_text, claim_signalable, dumps, now_iso, parse_iso,
@@ -260,8 +260,10 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                     decision = settle_discovery(con, run, task, decision, launching=True)
                     _record_routing(con, run, decision)
                     note_route(con, run, task, decision)
+                parts: list = []
                 did = request_launch(con, run, tid, role="executor", decision=decision,
-                                     base=_base_for(con, run, task, graph, after))
+                                     base=_base_for(con, run, task, graph, after, parents=parts),
+                                     extra={"base_parents": parts})
                 if decision:
                     record_discovery(con, run, task, decision, did)
                 res.add(f"{tid} was stacked after {after}, which {released} -> {did} launching")
@@ -277,8 +279,10 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 continue
             plans.require_scope_clear(con, run, tid)
             stack_after = None if parallel or previous is None else previous
-            base = _base_for(con, run, task, graph, stack_after)
-            if stack_after and (state.get_task(con, run["id"], stack_after) or {}).get("status") == "accepted":
+            released = bool(stack_after) and (state.get_task(con, run["id"], stack_after) or {}).get("status") == "accepted"
+            parts = []
+            base = _base_for(con, run, task, graph, stack_after, queued=bool(stack_after) and not released, parents=parts)
+            if released:
                 # Nothing would release a stack on an accepted task: launch now,
                 # based on its accepted revision (base above).
                 stack_after = None
@@ -305,7 +309,8 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 if drift:
                     res.add(drift)
                 note_route(con, run, task, decision)
-                did = request_launch(con, run, tid, role="executor", decision=decision, base=base)
+                did = request_launch(con, run, tid, role="executor", decision=decision, base=base,
+                                     extra={"base_parents": parts})
                 record_discovery(con, run, task, decision, did)
                 verb = "prepared for you to start (external; nothing launched)" if external else "launching"
                 res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} {verb}"
@@ -805,21 +810,51 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
             f"       herdr agent prompt {name} {shlex.quote(pointer)}"]
 
 
-def _base_for(con, run: dict, task: dict, graph: dict, stack_after: str | None) -> str:
-    """Base commit: run base, or the dependency revision this task builds on."""
-    deps = list(task["depends"]) + ([stack_after] if stack_after else [])
-    base = run["base_sha"]
-    for dep in deps:
-        d = state.get_task(con, run["id"], dep)
-        rev_id = (d or {}).get("accepted_revision_id") or (d or {}).get("current_revision_id")
+def _base_for(con, run: dict, task: dict, graph: dict, stack_after: str | None, *, queued: bool = False,
+              parents: list | None = None) -> str | None:
+    """Base commit: the run base, or one commit combining every dependency revision this task builds on.
+
+    Each dependency contributes its accepted revision. One with none is not used silently: only the
+    `stack_after` holder released while submitted (#398) and a v3.1 run (a dependant may start on a
+    submitted revision, Q16) build on its current one, and the brief names that revision unaccepted.
+    A dependency with no revision at all refuses. Heads that are ancestors of another drop out and the
+    rest combine; heads that conflict refuse naming both tasks and the paths (#489). `queued` is a task
+    that only waits for its holder: its base is computed when it starts, so only the existence check runs.
+    `parents` receives {"task", "revision", "commit", "accepted"} for each dependency used."""
+    from office import integration
+    heads = []
+    for dep in dict.fromkeys([*task["depends"], *([stack_after] if stack_after else [])]):
+        d = state.get_task(con, run["id"], dep) or {}
+        rev_id = d.get("accepted_revision_id")
+        accepted = bool(rev_id)
+        if not accepted and (queued or dep == stack_after or contract.of(run) == contract.LEGACY):
+            rev_id = d.get("current_revision_id")
         if not rev_id:
             if dep == stack_after:
                 continue
+            if d.get("current_revision_id"):
+                raise Refused("dependency-not-ready", f"{task['id']} depends on {dep}, which is {d['status']} on "
+                              f"{d['current_revision_id']} and not accepted; a base must not carry unreviewed work",
+                              scope=task["id"], next_step=f"wait for {dep} to be accepted, or office dispatch {dep} "
+                                                          f"{task['id']} (stacked)")
             raise Refused("dependency-not-ready", f"{task['id']} depends on {dep}, which has no submitted revision",
                           scope=task["id"], next_step=f"dispatch {dep} first, or office dispatch {dep} {task['id']} (stacked)")
-        rev = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (rev_id,)).fetchone()
-        base = rev["commit_sha"]
-    return base
+        sha = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (rev_id,)).fetchone()["commit_sha"]
+        heads.append({"task": dep, "revision": rev_id, "commit": sha, "accepted": accepted})
+    if queued:
+        return None
+    if parents is not None:
+        parents.extend(heads)
+    if not heads:
+        return run["base_sha"]
+    try:
+        return integration.combine(run, [(h["task"], h["commit"]) for h in heads])
+    except integration.CombineConflict as exc:
+        raise Refused("dependency-conflict", f"{task['id']} cannot build on both {exc.left} and {exc.right}: their "
+                      f"accepted revisions conflict on {', '.join(exc.paths[:6])}", scope=task["id"],
+                      preserved="both tasks' revisions",
+                      next_step=f"amend the plan so {exc.left} and {exc.right} do not edit the same lines, or "
+                                f"depend {task['id']} on one of them") from exc
 
 
 # ------------------------------------------------------------------ launch request
@@ -1422,6 +1457,15 @@ def ensure_worktree(run: dict, dispatch: dict) -> Path:
     wt.parent.mkdir(parents=True, exist_ok=True)
     branches = paths.git(repo, "branch", "--list", dispatch["branch"])
     if branches.strip():
+        from office import integration
+        head = paths.git(repo, "rev-parse", dispatch["branch"])
+        if not integration.contains(run, head, dispatch["base_commit"]):
+            # An existing branch is reused as it is: it must hold the base this dispatch recorded.
+            raise Refused("base-mismatch", f"branch {dispatch['branch']} ({head[:12]}) does not contain the base "
+                          f"{dispatch['base_commit'][:12]} dispatch {dispatch['id']} recorded", scope=dispatch.get("task_id"),
+                          preserved="the branch and its commits",
+                          next_step=f"merge {dispatch['base_commit'][:12]} into {dispatch['branch']}, or remove the branch "
+                                    f"and office rerun {dispatch.get('task_id')} --fresh")
         paths.git(repo, "worktree", "add", str(wt), dispatch["branch"])
     else:
         paths.git(repo, "worktree", "add", "-b", dispatch["branch"], str(wt), dispatch["base_commit"])
@@ -1472,6 +1516,7 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
         "contract_request": contract_request,
         "contract_request_max_seq": contract_request_max_seq,
         "restack": extra.get("restack"),
+        "base_parents": extra.get("base_parents"),
     }
     return state.packet_envelope(run, f"{role}-dispatch", body)
 
@@ -4715,7 +4760,15 @@ def start_stacked(con, run: dict, holder_task: str) -> list[str]:
             if scope_holder(con, run, t):
                 continue
             graph = {x["id"]: x["depends"] for x in state.tasks(con, run["id"])}
-            base = _base_for(con, run, t, graph, holder_task)
-            if _launch_or_block(con, run, t["id"], role="executor", base=base):
+            parts: list = []
+            try:
+                base = _base_for(con, run, t, graph, holder_task, parents=parts)
+            except Refused as err:
+                # Acceptance must not raise out of its own transition: pause the dependent with the reason.
+                state.update_task(con, run["id"], t["id"], status="paused", pause_reason=err.message)
+                state.emit(con, run, "task.paused", f"PAUSED {t['id']}: {err.message}; {err.next_step or ''}".strip(),
+                           task_id=t["id"], payload={"reason": err.message})
+                continue
+            if _launch_or_block(con, run, t["id"], role="executor", base=base, extra={"base_parents": parts}):
                 started.append(t["id"])
     return started

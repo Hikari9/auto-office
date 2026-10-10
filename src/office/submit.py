@@ -335,6 +335,37 @@ def _dependency_bases(con, run: dict, task: dict, commit: str) -> list[str]:
     return out
 
 
+def inherited_base(con, run: dict, task: dict, d: dict, head: str) -> str | None:
+    """M: the commit holding everything this task inherited, or None when it cannot be composed.
+
+    M merges the dispatch's recorded base with every other task's accepted revision that `head`
+    contains, declared dependency or not, and the newest revision of each declared dependency
+    (_dependency_bases). What differs between M and HEAD is the task's own work, whatever its
+    parents edited in common (#490)."""
+    from office import integration
+    heads = [("base", d["base_commit"]), *(("dependency", c) for c in _dependency_bases(con, run, task, head))]
+    for other in state.tasks(con, run["id"]):
+        if other["id"] == task["id"] or other["id"] in task["depends"] or not other.get("accepted_revision_id"):
+            continue
+        row = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (other["accepted_revision_id"],)).fetchone()
+        if row and gates._is_ancestor(run, row["commit_sha"], head):
+            heads.append((other["id"], row["commit_sha"]))
+    try:
+        return integration.combine(run, heads)
+    except (integration.CombineConflict, paths.GitError):
+        return None
+
+
+def attribution(con, run: dict, task: dict, d: dict, head: str) -> tuple[str, list[str]]:
+    """(base, dep_bases) the task's own files are measured against: M and no dependency bases, or,
+    when M cannot be composed, the recorded base narrowed by every dependency base it contains."""
+    merged = inherited_base(con, run, task, d, head)
+    if merged:
+        return merged, []
+    base = d["base_commit"]
+    return base, [b for b in _dependency_bases(con, run, task, head) if b != base]
+
+
 def capture_tree(worktree: Path, scratch: Path, leave_out: list[str] | None = None,
                  restore: list[str] | None = None) -> tuple[str, str]:
     """(tree_sha, head_sha) of the worktree including uncommitted edits,
@@ -518,8 +549,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
     # A duplicate submission is returned above before this check. For a new revision,
     # use the same ledger gate as preflight against committed and pending work.
     from office import preflight
-    base = d["base_commit"]
-    dep_bases = [b for b in _dependency_bases(con, run, task, head) if b != base]
+    base, dep_bases = attribution(con, run, task, d, head)  # `commit` below is HEAD plus the worktree: same ancestry
     tier = briefs.self_review_tier(run.get("gear"), run.get("risk_json"))
     enforced = contract.of(run) != contract.LEGACY  # runs pinned to v3.1 keep ledger-less submissions (#421)
     has_ledger = _read_untracked_text(wt, briefs.LEDGER_FILE, briefs.LEDGER_MAX_CHARS) is not None
@@ -549,9 +579,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
     commit = make_commit(wt, tree, head, f"office: {task['id']} submission\n\nrun {run['id'][:8]} task {task['id']}\n\n"
                          f"{paths.office_trailer(run['id'])}")
     from office import planfile, prs
-    base = d["base_commit"]
     touched = paths.git(wt, "diff", "--no-renames", "--name-only", base, commit).split()
-    dep_bases = [b for b in _dependency_bases(con, run, task, commit) if b != base]
     for b in dep_bases:
         # A file counts only if it differs from every base the task builds on,
         # so a dependency's own later files are not this task's changes.
@@ -621,6 +649,8 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
                      base, run["requirements_version"], run["plan_version"], applied, env_fp, op_id, status,
                      prev, dumps(changed), now_iso(), dumps(receipt) if receipt else None))
         paths.git(wt, "update-ref", f"refs/office/{run['id'][:8]}/{task['id']}/{rev_id}", commit)
+        if base != d["base_commit"]:
+            paths.git(wt, "update-ref", f"refs/office/{run['id'][:8]}/{task['id']}/{rev_id}.base", base)  # M is no one's ancestor
         if evidence:
             dest = _stage_evidence(run, d, rev_id, evidence, staged)
             # The digest is the duplicate guard for every later submit of this task.
