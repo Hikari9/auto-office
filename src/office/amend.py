@@ -26,52 +26,22 @@ from office.util import dumps, loads, now_iso, sha256_bytes
 # `force-push` still do.
 # A `send` addressed only to the orchestrator is a report, not an external action:
 #   `send <it | the report/result/status/summary/reply/review> [back] to the orchestrator/Office`, or
-#   an all-caps compound protocol word (`send READY-FOR-LIVE`).
-# Whatever follows, up to the next newline, is parsed as clauses split on `and`, `then`, `,`, `;`,
-# `:` and `.`. Every clause must be a done word, a bounded purpose or condition (`for review`,
-# `when done`, `after tests pass`, `so it can review`) or a next action (`stop`, `run tests`,
-# `open the PR`) that names no recipient. Anything else (`parents too`, `and update members`,
-# `check with parents`, `for review by parents`) makes it an external send. Default-deny.
+#   an all-caps compound protocol word (`send READY-FOR-LIVE`, optionally `to the orchestrator`).
+# Nothing after it is interpreted: the rest of the text, to the end of the string (across lines),
+# with whitespace normalized and surrounding punctuation trimmed, must be empty or exactly one of
+# _REPORT_ENDINGS. Anything else is an external send; a false refusal only routes the amendment
+# to review, which is safe.
 _REPORT_OBJECT = re.compile(r"(?:it|(?:the|a|an|your)\s+(?:report|result|status|summary|reply|review))(?:\s+back)?\s+",
                             re.I)
 _TO_ORCHESTRATOR = re.compile(r"to\s+(?:the\s+)?(?:orchestrator|office)(?![\w@-]|\.\w)", re.I)
 _PROTOCOL_WORD = re.compile(r"(?-i:[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+)\b")
-_CLAUSE_SPLIT = re.compile(r"\s*(?:,|;|:|\.(?!\w)|\band\s+then\b|\band\b|\bthen\b|&)\s*", re.I)
-_DONE_CLAUSE = re.compile(r"^(?:\(?\s*(?:done|ready|finished|complete|completed|nothing else|that'?s it)\s*\)?|again|now"
-                          r"|(?:for|pending)\s+(?:review|approval|sign-?off|checking|the\s+record)"
-                          r"|(?:when|once)\s+(?:done|finished|ready)"
-                          r"|(?:after|once|if|when|before|unless)\s+(?:the\s+)?(?:tests?|checks?|ci|lint|the\s+build|build)"
-                          r"(?:\s+\w+){0,3}"
-                          r"|so\s+(?:it|they|the\s+orchestrator|office|you)\s+can\s+(?:review|check|decide|merge|confirm))$",
-                          re.I)
-_NEXT_VERBS = (r"stop|wait|exit|run|rerun|re-run|merge|submit|resubmit|commit|push|continue|finish|retry|rebase|test|check"
-               r"|fix|ack|pause|end|halt|resume|apply|update|proceed|close|rest|request|keep|start|move|open|report|await"
-               r"|mark|do|idle|go|verify|build|lint|wrap|hand|leave|skip|repeat")
-_ACTION_CLAUSE = re.compile(r"^(?:" + _NEXT_VERBS + r")\b(.*)$", re.I)
-# In an action, a preposition must point at work, not people (`move on to T2`, not `check with parents`).
-_RECIPIENT_PREP = re.compile(r"\b(?:to|with|past|on|for|by|via|over|through|into|at|toward|towards)\s+(?!"
-                             r"(?:the\s+)?(?:orchestrator|office|T\d+|next\s+task|branch|pr|worktree|tests?|checks?|ci"
-                             r"|main|repo|task|build|lint|review|it|to)\b)", re.I)
-_AUDIENCE = re.compile(r"\b(?:members?|parents?|famil(?:y|ies)|staff|team|users?|customers?|people|volunteers?"
-                       r"|subscribers?|guests?|leaders?|everyone|anyone|donors?|congregants?|church|list|group|public"
-                       r"|attendees?|parishioners?|students?|kids?|community|audience|nobody|everybody)\b", re.I)
+_REPORT_ENDINGS = {"and stop", "then stop", "and wait", "then run tests", "and run tests", "when done", "(done)",
+                   "for review"}
 
 
-def _clause_ok(clause: str) -> bool:
-    c = clause.strip().strip("()").strip()
-    if not c or _DONE_CLAUSE.match(c):
-        return True
-    m = _ACTION_CLAUSE.match(c)
-    return bool(m) and not _RECIPIENT_PREP.search(m.group(1)) and not _AUDIENCE.search(m.group(1)) \
-        and "@" not in m.group(1)
-
-
-def _tail_ok(tail: str) -> bool:
-    """Everything after the recipient, up to the next newline: each clause is allowed."""
-    line = tail.split("\n", 1)[0]
-    if "@" in line:
-        return False
-    return all(_clause_ok(c) for c in _CLAUSE_SPLIT.split(line))
+def _ending_ok(rest: str) -> bool:
+    text = " ".join(rest.split()).lower().rstrip(".!?;:,").lstrip(",;: ").strip()
+    return text == "" or text in _REPORT_ENDINGS
 
 
 def _send_is_report(after: str) -> bool:
@@ -79,14 +49,14 @@ def _send_is_report(after: str) -> bool:
     m = _REPORT_OBJECT.match(after)
     if m:
         r = _TO_ORCHESTRATOR.match(after, m.end())
-        return bool(r) and _tail_ok(after[r.end():])
+        return bool(r) and _ending_ok(after[r.end():])
     m = _PROTOCOL_WORD.match(after)
     if m:
         rest = after[m.end():]
         r = _TO_ORCHESTRATOR.match(rest.lstrip())
         if r:
             rest = rest.lstrip()[r.end():]
-        return _tail_ok(rest)
+        return _ending_ok(rest)
     return False
 
 
