@@ -47,8 +47,14 @@ def _race(path: Path, n: int) -> list[str]:
 
 def test_concurrent_first_opens_of_one_database_all_succeed_in_wal_mode(tmp_path):
     for round_ in range(3):  # a fresh file each round: only a first open races the switch
-        outcomes = _race(tmp_path / f"round{round_}" / "runs.db", 8)
+        path = tmp_path / f"round{round_}" / "runs.db"
+        outcomes = _race(path, 8)
         assert outcomes == ["wal"] * 8, outcomes
+        con = db.connect(path)  # migration ran to one correct schema, triggers included
+        assert db._schema_version(con) == db.SCHEMA_VERSION and not db._drifted(con)
+        assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
+                           "AND tbl_name='route_discovery_events'").fetchone()[0] >= 1
+        con.close()
 
 
 class _FlakyConnection:
@@ -98,9 +104,24 @@ def test_a_locked_wal_switch_is_retried_until_it_succeeds(tmp_path, monkeypatch)
 
 def test_a_database_that_stays_locked_raises_after_a_bounded_number_of_tries(tmp_path, monkeypatch):
     made = _flaky(monkeypatch, refusals=10 ** 6)
-    with pytest.raises(sqlite3.OperationalError, match="locked"):
+    with pytest.raises(RuntimeError, match="could not enter WAL mode") as raised:
         db.connect(tmp_path / "runs.db")
+    assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
     assert made[0].switches == 40
+
+
+def test_a_database_that_will_not_switch_to_wal_raises_runtime_error(tmp_path, monkeypatch):
+    real = sqlite3.connect
+
+    class Stuck(_FlakyConnection):
+        def execute(self, sql, *args):
+            if sql.strip().upper() == "PRAGMA JOURNAL_MODE=WAL":
+                return self._con.execute("PRAGMA journal_mode=DELETE")
+            return self._con.execute(sql, *args)
+
+    monkeypatch.setattr(db.sqlite3, "connect", lambda *a, **kw: Stuck(real(*a, **kw), 0))
+    with pytest.raises(RuntimeError, match="could not enter WAL mode"):
+        db.connect(tmp_path / "runs.db")
 
 
 def test_an_unrelated_error_is_not_retried(tmp_path, monkeypatch):

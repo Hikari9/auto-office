@@ -452,6 +452,8 @@ def _group_alive(pgid: int) -> bool:
     return True
 
 
+# macOS ps shows the environment with -E (its -e is a no-op); procps takes the BSD-style `e` letter.
+_PS_ENV_FLAGS = "-axEww" if sys.platform == "darwin" else "axeww"
 _PS_LINE = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\w{3}\s+\w+\s+\w+\s+[\d:]{8}\s+\d{4})\s+(.*)$")
 
 
@@ -464,7 +466,7 @@ def _process_table() -> list[tuple[int, int, str, str]] | None:
     """(pid, ppid, start time, command and, where the OS shows it, environment) for
     every process, or None when it cannot be read."""
     try:
-        listing = subprocess.run([_tool("ps", "/bin/ps", "/usr/bin/ps"), "-axeww", "-o", "pid=,ppid=,lstart=,command="], capture_output=True,
+        listing = subprocess.run([_tool("ps", "/bin/ps", "/usr/bin/ps"), _PS_ENV_FLAGS, "-o", "pid=,ppid=,lstart=,command="], capture_output=True,
                                  text=True, timeout=10, check=True).stdout
     except (OSError, subprocess.SubprocessError):
         return None
@@ -872,7 +874,7 @@ _PATTERNS = (
         r"(?:effort|reasoning_effort)[^\n]{0,60}(?:not supported|invalid|unsupported|unknown)|"
         r"(?:not supported|does not support)[^\n]{0,60}(?:effort|reasoning)|"
         r"(?:unknown|unrecognized|no such) model|"
-        r"model[^\n]{0,60}(?:not found|does not exist|not supported|is not available|unavailable)", re.I)),
+        r"model[^\n]{0,60}(?:not found|does not exist|not supported|is not available)", re.I)),
     ("transient", re.compile(
         r"timed? ?out|connection (?:reset|refused|closed|error)|network (?:error|unreachable)|temporar(?:y|ily)|"
         r"\b50[234]\b|overloaded|try again|econn|eai_again|socket hang up|service unavailable", re.I)),

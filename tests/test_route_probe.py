@@ -7,9 +7,11 @@ import copy
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -219,6 +221,14 @@ def test_each_failure_class_is_recorded_precisely(world, mode, reason_class):
     rec = ensure(world, con, world.run())
     assert (rec["result"], rec["reason_class"]) == ("fail", reason_class), rec["detail"]
     assert route_probe.status(con, cand())["reason_class"] == reason_class
+
+
+@pytest.mark.parametrize("text", [
+    "Error: model overloaded (service unavailable)",
+    "model gpt-x is temporarily unavailable, please try again",
+])
+def test_a_capacity_message_that_mentions_the_model_is_transient_never_terminal(text):
+    assert route_probe.classify_text(text) == "transient"
 
 
 def test_an_unsupported_effort_leaves_the_models_other_effort_routable(world):
@@ -938,6 +948,24 @@ def test_the_environment_tag_and_remembered_lineage_attribute_descendants(world,
     # a new process that reuses a remembered pid is not that process
     table[0] = (11, 1, "Sat Oct 10 11:11:11 2026", "/bin/other")
     assert tracker.observe(None) == {12}
+
+
+def test_a_setsid_escapee_with_no_workspace_handle_is_attributed_by_the_real_ps_environment(world):
+    nonce = "nonce-real-ps-" + uuid.uuid4().hex
+    escapee = subprocess.Popen([sys.executable, "-c", "import os, time; os.chdir('/'); time.sleep(60)"], cwd="/",
+                               env={**os.environ, route_probe.NONCE_ENV: nonce}, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10
+        found: set[int] = set()
+        while escapee.pid not in found and time.monotonic() < deadline:
+            time.sleep(0.2)
+            found = route_probe._Tracker(nonce, None).observe(None) or set()
+        assert escapee.pid in found
+        assert route_probe._Tracker(nonce + "x", None).observe(None) is not None
+        assert escapee.pid not in route_probe._Tracker(nonce + "x", None).observe(None)
+    finally:
+        escapee.kill()
+        escapee.wait(timeout=5)
 
 
 def test_a_recorded_workspace_outside_the_probe_temp_area_is_ignored(world, tmp_path):
