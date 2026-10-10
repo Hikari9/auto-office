@@ -661,7 +661,8 @@ def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], 
     kept = []
     for c in survivors:
         b = bounds.get(candidate_id(c))
-        if b is None:  # deduplicated into another row of the same invocation
+        if b is None:  # an alias row folded into the concrete row of the same invocation
+            other(c)
             continue
         if b["reason"]:
             drop(c, "margin" if not b["within_margin"] else "cost" if not b["within_cost"] else "ceiling",
