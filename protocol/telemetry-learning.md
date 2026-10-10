@@ -18,6 +18,12 @@ Learned eligibility changes automatically, at run close or abandon, when all of 
 
 The learner cannot redefine success, the attribution classes or weights, the maturity and replay rules, factual gates (capabilities, floors, quota, quarantine), or adapter trust acts: those are code, changed only through review. `office inspect learner` shows outcomes, standing changes, and the changes the evidence would make at the next close. `eval/routing_replay.py --runs-db` replays local history read-only and prints aggregates.
 
+## Discovery attempt evidence (#494)
+
+Invocation evidence, learned task quality and adapter trust have independent meanings. Probe passes never teach task success. An accepted trial revision feeds the existing route-learning episodes, attribution, maturity and held-out replay; a pass or a single accepted trial cannot grant learned eligibility by itself. Trial launch, harness, adapter, environment/network, quota/account and brief failures retain their actual attribution and do not penalize model effectiveness. Discovery and outcome learning never mint `adapter_trust_acts` or clear quarantine.
+
+`route_discovery_events` is append-only per-attempt evidence, keyed by an `attempt_id` minted before dispatch. It records probe allocation/results/cache reuse/refusals/expiry and trial reservation/launch/recovery/submission/outcomes with policy digest/version, exact fingerprint, freshness, reason, allocation snapshot, primary/fallback and available run/plan/task/dispatch context. State changes and their events commit atomically. Cache reuse names the producing attempt; dispatch linking appends an event. A later probe or policy does not rewrite earlier evidence. `route_probes` is only the latest fingerprint cache and `route_trials` only a mutable lifecycle projection. Inspect and replay use the recorded decision and attempt evidence, not today's cache. See [route discovery](../docs/route-discovery.md).
+
 ## Memory and maturity
 
 Memory tiers: hot = current triple/generation/full authority; warm = once-superseded/stale/reduced authority; dreamt = superseded twice, >90 days, or compacted/no numeric routing authority.
