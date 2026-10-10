@@ -189,6 +189,8 @@ Run in this worktree with `.venv` (Python 3.12, `uv pip install -e '.[test,visua
 | `scripts/validate.sh` | shipped default `true`, A10 applied (`25d0280`) | 1990 passed, 1 skipped, 0 failed |
 | `pytest -n 2 --all` | shipped default `true`, A10 applied (`25d0280`) | 3614 passed, 2 skipped, 0 failed (`[hup]` passed) |
 | `pytest -n 2 tests/v31/test_issue_494_scenarios.py`, `scripts/route_replay.py --self-test` | shipped default `true` | 79 passed; self-test passed |
+| `scripts/validate.sh` | after restack onto T4 R15 / T5 R14 and A14 (`cc4956e`) | passed |
+| `pytest -n 2 --all` | after restack and A14 (`cc4956e`) | 3632 passed, 2 skipped, 1 failed: a browser test worker crashed (`test_layout.py::test_scroll_buttons_...`); it and the other four files that failed in an earlier run overlapping another suite pass on rerun (89 passed) |
 
 The three failures in the trial flip were the same three tests, each pinning the old shipped default `off` (listed
 under "Default activation"). A10 updated exactly those, and nothing else in the repository depends on the default.
