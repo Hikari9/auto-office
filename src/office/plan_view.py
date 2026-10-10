@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from office import adaptive, candidates, contract, convergence, planfile, state, visual
+from office import adaptive, candidates, contract, convergence, planfile, route_learning, state, visual
 from office.util import dumps, loads
 
 # ------------------------------------------------------------------ layout
@@ -84,6 +84,9 @@ def _preview_one(con, config: dict, run: dict, role: str, tid: str, *,
         return {"route": None, "why": why[:160]}
     d = decision["selection_disclosure"]
     out = {"route": route_label(d), "triple": decision.get("selected"), "why": short_why(d)}
+    disc = decision.get("discovery")
+    if disc and disc.get("intent") in ("probe", "trial"):
+        out["discovery"] = {k: disc.get(k) for k in ("intent", "candidate", "fallback")}
     audit = decision.get("routing")
     if audit:
         # #300: the planner's primary + fallbacks over the router's slate.
@@ -113,6 +116,14 @@ def _dispatched_routes(con, run_id: str, tasks: list[dict]) -> dict[str, str]:
     return routes
 
 
+def _dispatched_trials(con, run_id: str, routes: dict[str, str]) -> dict[str, dict]:
+    """The live discovery trial (route and fallback) among the dispatched tasks, keyed by task id."""
+    if not routes:
+        return {}
+    current = {t["id"]: t.get("current_dispatch_id") for t in state.tasks(con, run_id)}
+    return {tid: trial for tid in routes if (trial := route_learning.live_trial(con, current.get(tid)))}
+
+
 def preview(con, run: dict, tasks: list[dict]) -> dict:
     """Route every executor task and its code reviewer as a non-binding preview."""
     config = state.pinned_config(run)
@@ -123,6 +134,7 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
         con, roles, family_floors=config.get("model_family_floors")) if tasks else {}
     quota_event_seen: set[str] = set()
     dispatched_routes = _dispatched_routes(con, run["id"], tasks)
+    dispatched_trials = _dispatched_trials(con, run["id"], dispatched_routes)
     out = {}
     audits = []
     loads: dict[int, dict[str, int]] = {}
@@ -150,6 +162,8 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
                 + (["ui review"] if visual_gate else [])
         out[t["id"]] = {"title": t["title"], "depends": list(t.get("depends") or []), **lay[t["id"]],
                         "route": dispatched_route or ex.get("route"), "dispatched_route": dispatched_route,
+                        **({"trial": dispatched_trials[t["id"]]} if t["id"] in dispatched_trials else {}),
+                        **({"discovery": ex["discovery"]} if "discovery" in ex else {}),
                         "why": ex.get("why"), "gates": task_gates,
                         "lane": t.get("lane"), "converge": list(t.get("converge") or []),
                         "visual_gate": visual_gate,
@@ -311,14 +325,21 @@ def _slate_notes(entry: dict) -> list[str]:
         notes.append("planner choice" + (", departs from ranking" if plan.get("departs_from_ranking") else ""))
     if plan.get("planner_error"):
         notes.append(f"planner route ignored: {plan['planner_error']}")
+    disc = entry.get("discovery") or {}
+    if disc.get("intent") == "trial":
+        notes.append(f"trial route {disc.get('candidate')}, fallback {disc.get('fallback')}")
+    elif disc.get("intent") == "probe":
+        notes.append(f"probe candidate {disc.get('candidate')}: a trial only if a fresh exact probe passes, "
+                     f"fallback {disc.get('fallback')}")
     return notes
 
 
 def _display_route(entry: dict) -> str:
-    route = entry.get("dispatched_route")
+    route, trial, disc = entry.get("dispatched_route"), entry.get("trial"), entry.get("discovery") or {}
     if route:
-        return f"dispatched: {route}"
-    return entry.get("route") or "no route"
+        return f"dispatched: {route}" + (f" (trial, fallback {trial['fallback'] or 'none'})" if trial else "")
+    label = entry.get("route") or "no route"
+    return f"{label} (trial, fallback {disc.get('fallback')})" if disc.get("intent") == "trial" else label
 
 
 def diff(prev: dict | None, cur: dict, prev_version: int) -> list[str]:

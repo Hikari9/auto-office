@@ -11,7 +11,7 @@ import re
 import os
 from pathlib import Path
 
-from office import amend, contract, paths, planpath, plans, state
+from office import amend, contract, paths, planpath, plans, route_learning, state
 from office.result import Result
 from office.util import atomic_write_text, short
 
@@ -54,6 +54,17 @@ def ready_tasks(con, run: dict) -> list[str]:
     tasks = state.tasks(con, run["id"])
     by_id = {t["id"]: t for t in tasks}
     return [t["id"] for t in tasks if t["status"] == "planned" and not unaccepted_dependencies(t, by_id)]
+
+
+def trial_notes(con, tasks: list[dict]) -> list[str]:
+    """One note per task whose current dispatch is a live discovery trial (#494): the route is
+    named as a trial, with the known-working route it falls back to."""
+    notes = []
+    for t in tasks:
+        trial = route_learning.live_trial(con, t.get("current_dispatch_id"))
+        if trial:
+            notes.append(f"{t['id']} runs a discovery trial of {trial['route']}, fallback {trial['fallback'] or 'none'}")
+    return notes
 
 
 def held_by_dependencies(con, run: dict) -> list[str]:
@@ -150,8 +161,8 @@ def next_action(con, run: dict) -> str:
         return "choose execution strategy; office dispatch " + " ".join(ready) + (" --parallel" if len(ready) > 1 else "")
     live = [t for t in tasks if t["status"] not in ("accepted", "cancelled", "planned")]
     if live:
-        held = held_by_dependencies(con, run)
-        return "exceptions only; office status" + (f" ({held[0]})" if held else "")
+        notes = [*trial_notes(con, live), *held_by_dependencies(con, run)[:1]]
+        return "exceptions only; office status" + (f" ({'; '.join(notes)})" if notes else "")
     if contract.is_convergence(run):
         from office import convergence
         nxt = convergence.next_action(con, run, dispositions=True)
@@ -325,6 +336,10 @@ def effective_routes(con, run: dict, tasks: list[dict]) -> dict[str, str]:
     out = {}
     for t in tasks:
         if t["status"] in ("accepted", "cancelled"):
+            continue
+        trial = route_learning.live_trial(con, t.get("current_dispatch_id"))
+        if trial:
+            out[t["id"]] = f"{trial['route']} (trial, fallback {trial['fallback'] or 'none'})"
             continue
         rec = state.recorded_route(t)
         if rec:
