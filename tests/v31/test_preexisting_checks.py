@@ -143,6 +143,17 @@ def test_v31_a_test_runner_timeout_is_never_preexisting(env):
     assert not _preexisting_events(env) and not _base_evidence(env)
 
 
+@V31
+def test_v31_a_revision_that_changes_no_file_is_never_preexisting(env):
+    # The failing check is the work this task owes; an empty revision did none of it.
+    approved_run(env, gear="direct+review", executor=[{"write": {}, "submit": True}],
+                 code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    assert _checks_gate(env)["verdict"] == "CHANGES_REQUIRED"
+    assert not _preexisting_events(env) and not _base_evidence(env)
+    assert task_row(env)["status"] != "accepted"
+
+
 # ------------------------------------------------------------------ convergence-v1
 
 def test_convergence_preexisting_failure_is_a_nonblocking_note_and_lane_review_runs(env):

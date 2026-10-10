@@ -69,7 +69,7 @@ Every row is one command and one SQLite transaction. "Who" is the only role that
 
 ### Pre-existing check failures
 
-When a task check fails, Office runs the same command on a checkout of the revision's `base_commit`. The failure is pre-existing only when it fails the same way there: the same nonzero exit status and the same failures. It is never pre-existing when the task's output names a file the task changed, or when either run timed out. The base output is recorded as evidence on the checks gate and a `gate.preexisting` event is emitted.
+When a task check fails, Office runs the same command on a checkout of the revision's `base_commit`. The failure is pre-existing only when it fails the same way there: the same nonzero exit status and the same failures. It is never pre-existing when the task's output names a file the task changed, when the revision changes no file, or when either run timed out. The base output is recorded as evidence on the checks gate and a `gate.preexisting` event is emitted.
 
 - A checks gate that fails only for pre-existing reasons records `PASS` with the pre-existing failures named in its summary. It does not cancel the waiting code or visual review (the cancel in `ingest_task_gate` applies to failures the task introduced), so independent review still runs and the task is accepted on review, not on a skipped gate.
 - A failure introduced by the task behaves as before: the checks gate is `CHANGES_REQUIRED`, waiting reviews are cancelled, and fix rounds converge. If a task has both kinds, only the introduced failures are findings.

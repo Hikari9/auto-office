@@ -245,7 +245,10 @@ def job_run_checks(con, run: dict, job: dict) -> dict:
             return {"skipped": "gate already decided"}
     outcome = run_commands(con, run, task["checks"], Path(d["worktree"]), rev, gate)
     if outcome["verdict"] == "CHANGES_REQUIRED":
-        outcome["preexisting"] = preexisting_failures(con, run, rev, gate, outcome)
+        try:
+            outcome["preexisting"] = preexisting_failures(con, run, rev, gate, outcome)
+        except Exception:  # a failure to classify must not lose the checks result: it counts against the task
+            outcome["preexisting"] = []
     with db.transaction(con):
         ingest_task_gate(con, state.get_run(con, run["id"]), gate["id"], outcome)
     return {"verdict": outcome["verdict"]}
@@ -269,12 +272,18 @@ def failure_signature(out: str, roots: tuple[str, ...]) -> frozenset[str]:
     return frozenset(line for line in lines if _FAILURE_LINE.search(line)) or frozenset(lines[-12:])
 
 
+def _roots(path: Path) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((str(path.resolve()), str(path))))
+
+
 def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict) -> list[dict]:
     """Which failing checks of this revision fail the same way on its base
     commit. A check is pre-existing only when the base run has the same nonzero
     exit status and the same failures, neither run timed out, and the task's
     output names no file the task changed. Base output is kept as evidence on
-    the gate. Anything not proven pre-existing counts against the task."""
+    the gate. A revision that changes no file is never pre-existing: it did
+    nothing to the failing check. Anything not proven pre-existing counts
+    against the task."""
     base = rev.get("base_commit")
     failing = [(f"C{i}", r) for i, r in enumerate(outcome.get("results") or [], start=1) if r["exit"] != 0]
     if not base or not failing:
@@ -282,6 +291,8 @@ def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict) -
     repo = Path(run["repo_root"])
     changed = [p for p in paths.git(repo, "diff", "--name-only", "--no-renames", "-z", base, rev["commit_sha"],
                                     check=False).split("\0") if p]
+    if not changed:
+        return []
     cfgv = state.pinned_config(run).get("verification") or {}
     timeout = int(cfgv.get("check_timeout_seconds", 1800))
     evdir = paths.run_dir(run["id"]) / "evidence" / (gate.get("task_id") or "integration") / rev["id"]
@@ -301,7 +312,7 @@ def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict) -
                 log.write_text(out, encoding="utf-8")
                 os.chmod(log, 0o600)
                 same = (code == r["exit"] and not runner_timeout(out)
-                        and failure_signature(out, (str(checkout),)) == failure_signature(head, (r["cwd"],)))
+                        and failure_signature(out, _roots(checkout)) == failure_signature(head, _roots(Path(r["cwd"]))))
                 with db.transaction(con):
                     state.record_evidence(con, run["id"], "preexisting_check_output", log, task_id=gate.get("task_id"),
                                           revision_id=rev["id"], gate_id=gate["id"],
@@ -982,7 +993,7 @@ def checks_outcome(outcome: dict) -> dict:
     parsed = outcome.get("parsed")
     old_codes = preexisting_codes(outcome)
     findings = [{**f, "severity": "high", "level": "high", "blocking": f["code"] not in old_codes,
-                 **({} if f["code"] not in old_codes else {"summary": f"pre-existing on base: {f['summary']}"})}
+                 "summary": ("pre-existing on base: " if f["code"] in old_codes else "") + f["summary"]}
                 for f in (parsed.findings if parsed else [])]
     old = [f for f in findings if not f["blocking"]]
     verdict = "RECHECK" if len(old) < len(findings) else "APPROVED"

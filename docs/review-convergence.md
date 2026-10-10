@@ -240,7 +240,8 @@ Plan findings are dispositioned with `office disposition plan:<P-id> fixed|dismi
 - **Pre-existing check failures.** When a task check fails, Office runs the same command on a checkout
   of the revision's `base_commit`. The failure is pre-existing only when it fails the same way there:
   the same nonzero exit status and the same failures. It is never pre-existing when the task's output
-  names a file the task changed, or when either run timed out (Office's timeout or a test runner's).
+  names a file the task changed, when the revision changes no file, or when either run timed out (Office's
+  timeout or a test runner's).
   A pre-existing-only failure is not a blocking repair finding: the checks gate is `APPROVED`, no repair
   round is delivered, and the failure is recorded as a nonblocking pre-existing note. The base output is
   kept as evidence on the gate and a `gate.preexisting` event is emitted. Lane review still runs. When a
