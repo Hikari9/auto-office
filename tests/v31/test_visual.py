@@ -359,6 +359,7 @@ def test_visual_preflight_navigate_rejected_and_allowed_forms():
     assert errors == []
 
 
+@requires_playwright
 def test_playwright_empty_error_splitlines_does_not_raise(monkeypatch, tmp_path):
     from office import visual
 
@@ -403,6 +404,7 @@ def test_playwright_empty_error_splitlines_does_not_raise(monkeypatch, tmp_path)
     assert res["failures"][0]["summary"] == "interaction 'click #btn' failed: "
 
 
+@requires_playwright
 def test_capture_one_navigate_rejected_and_allowed_forms(tmp_path):
     from office import visual
 

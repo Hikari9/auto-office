@@ -13,7 +13,7 @@
       "name": "auto-office",
       "source": "./",
       "description": "One `office` CLI over a single transactional runs.db authority. Adaptive harness/model/effort routing, one-submit verification with independent code and visual review, rolling plan review, durable amendments, version-pinned runs, and human merge-to-main.",
-      "version": "3.6.0",
+      "version": "3.6.1",
       "category": "productivity",
       "homepage": "https://github.com/Hikari9/auto-office",
       "repository": "https://github.com/Hikari9/auto-office",
