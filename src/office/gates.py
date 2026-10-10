@@ -968,7 +968,8 @@ def remove_checkout(run: dict, path: Path) -> None:
 
 def _fingerprint(f: dict) -> str:
     words = re.findall(r"[a-z0-9_./]+", ((f.get("location") or "") + " " + (f.get("summary") or "")).lower())
-    return sha256_obj(sorted(set(w for w in words if len(w) > 2))[:40])
+    # Bare numbers (line numbers, counts) are noise: a finding that only moved is the same finding.
+    return sha256_obj(sorted(set(w for w in words if len(w) > 2 and not w.isdigit()))[:40])
 
 
 # A finding is identified by its scope, its code and its fingerprint: the code names it and the
@@ -980,15 +981,27 @@ CARRIED_DISPOSITIONS = ("fixed", "dismissed", "follow-up")
 _FRESH_EXEMPT_KINDS = ("checks",)  # the runtime names these (C1, C2, ...); the code is the check, not a reviewer's id
 
 
+def _split_code(code: str) -> tuple[str, str]:
+    prefix = code.rstrip("0123456789")
+    return prefix, code[len(prefix):]
+
+
+def _code_key(code: str) -> tuple[str, int, str]:
+    """Natural order without int() on the digits: a reviewer chooses the code, and a huge digit run must not raise."""
+    prefix, digits = _split_code(code)
+    digits = digits.lstrip("0")
+    return prefix, len(digits), digits
+
+
 def finding_codes(con, where: str, params: tuple) -> list[str]:
     """Every code a scope has used, in any state: a reviewer must not reuse one for a different finding."""
     codes = {r[0] for r in con.execute(f"SELECT DISTINCT code FROM findings WHERE {where} AND code IS NOT NULL", params)}
-    return sorted(codes, key=lambda c: (c.rstrip("0123456789"), int(c[len(c.rstrip("0123456789")):] or 0)))
+    return sorted(codes, key=_code_key)
 
 
 def _fresh_code(code: str, taken: set[str]) -> str:
-    prefix = code.rstrip("0123456789")
-    top = max((int(c[len(prefix):]) for c in taken if c.startswith(prefix) and c[len(prefix):].isdigit()), default=1)
+    prefix = _split_code(code)[0]
+    top = max((int(n) for p, n in map(_split_code, taken) if p == prefix and n and len(n) <= 15), default=1)
     n = top + 1
     while f"{prefix}{n}" in taken:
         n += 1
@@ -1002,6 +1015,7 @@ def stable_codes(con, run: dict, where: str, params: tuple, findings: list[dict]
     `reserved` are codes the same reply uses elsewhere, which a fresh code must not take."""
     taken = set(finding_codes(con, where, params)) | {f["code"] for f in findings} | set(reserved)
     seen: dict[str, str] = {}
+    renamed: dict[tuple[str, str], str] = {}  # (code, fingerprint) -> the fresh code this reply already gave it
     out = []
     for f in findings:
         fp = _fingerprint(f)
@@ -1010,8 +1024,10 @@ def stable_codes(con, run: dict, where: str, params: tuple, findings: list[dict]
             row = con.execute(f"SELECT fingerprint FROM findings WHERE {where} AND code=? AND fingerprint IS NOT NULL "
                               "ORDER BY rowid DESC LIMIT 1", (*params, f["code"])).fetchone()
             known = row[0] if row else None
-        if known is not None and known != fp:
-            fresh = _fresh_code(f["code"], taken)
+        if known is not None and known != fp and (f["code"], fp) in renamed:
+            f = {**f, "code": renamed[(f["code"], fp)]}
+        elif known is not None and known != fp:
+            fresh = renamed[(f["code"], fp)] = _fresh_code(f["code"], taken)
             taken.add(fresh)
             state.emit(con, run, "finding.recoded", f"{f['code']} was already used for a different finding in this scope; "
                        f"the new finding ({(f.get('location') or '').strip()} {f['summary'][:80]}) is recorded as {fresh}",

@@ -121,6 +121,18 @@ def test_a_code_reused_for_a_different_finding_is_recorded_under_a_fresh_code(wo
     assert rows[0]["fingerprint"] != rows[1]["fingerprint"]
 
 
+def test_a_finding_that_only_moved_keeps_its_code(world):
+    """Line numbers are not identity: a carried finding re-raised after the code shifted is the same finding."""
+    lane_round(world, f("F1", where="calc.py:142"))
+    assert lane_round(world, f("F1", where="calc.py:147"))["codes"] == ["F1"]
+
+
+def test_one_finding_repeated_in_a_reply_under_a_reused_code_is_recorded_once(world):
+    lane_round(world, f("F1", "add is wrong"))
+    got = lane_round(world, f("F1", "mul leaks a handle", where="mul.py:4"), f("F1", "mul leaks a handle", where="mul.py:4"))
+    assert got["codes"] == ["F2", "F2"]
+
+
 def test_the_same_finding_keeps_its_code(world):
     lane_round(world, f("F1"))
     again = lane_round(world, f("F1"))
@@ -145,6 +157,16 @@ def test_codes_without_a_number_get_one(world):
     assert lane_round(world, f("SEAM", "another seam"))["codes"] == ["SEAM2"]
 
 
+def test_a_code_with_a_huge_digit_run_does_not_break_the_next_brief_or_fresh_code(world):
+    """A reviewer chooses the code; 5000 digits must neither raise while listing used codes nor while recoding."""
+    from office import gates
+    huge = "F" + "9" * 5000
+    lane_round(world, f(huge, "one"), f("F1", "two"))
+    codes = gates.finding_codes(world.con, "run_id=?", (world.run_id,))
+    assert codes == ["F1", huge]
+    assert lane_round(world, f("F1", "an unrelated finding"))["codes"] == ["F2"]
+
+
 def test_a_finding_recorded_before_fingerprints_existed_keeps_its_code(world):
     lane_round(world, f("F1"))
     world.con.execute("UPDATE findings SET fingerprint=NULL WHERE run_id=?", (world.run_id,))
@@ -163,12 +185,15 @@ def test_checks_findings_keep_their_runtime_codes(world):
     """The runtime names check findings C1, C2: the code is the check, not a reviewer's id."""
     from office import gates
     task = {"id": "T1"}
-    first = gates._stable_task_findings(world.con, world.run, task, "checks", [f("C1", "pytest failed: 3 errors")])
+    first, other = f("C1", "pytest failed: test_add assertion"), f("C1", "ruff failed: unused import", where="calc.py:3")
+    assert gates._fingerprint(first) != gates._fingerprint(other)
     world.con.execute("INSERT INTO findings(id, status, summary, run_id, task_id, gate_kind, code, fingerprint, state, "
                       "created_at) VALUES('Fx', 'x', 's', ?, 'T1', 'checks', 'C1', ?, 'open', 'now')",
-                      (world.run_id, gates._fingerprint(first[0])))
-    again = gates._stable_task_findings(world.con, world.run, task, "checks", [f("C1", "pytest failed: 5 errors")])
-    assert [x["code"] for x in again] == ["C1"]
+                      (world.run_id, gates._fingerprint(first)))
+    assert [x["code"] for x in gates._stable_task_findings(world.con, world.run, task, "checks", [other])] == ["C1"]
+    assert [x["code"] for x in gates._stable_task_findings(world.con, world.run, task, "code_review", [other])] == ["C1"]
+    world.con.execute("UPDATE findings SET gate_kind='code_review' WHERE id='Fx'")
+    assert [x["code"] for x in gates._stable_task_findings(world.con, world.run, task, "code_review", [other])] == ["C2"]
 
 
 # ------------------------------------------------------------------ dispositions follow identity
@@ -285,6 +310,9 @@ def test_no_disposition_is_attached_to_a_finding_whose_fingerprint_differs(round
                     if r["id"] not in before and r["disposition"]:
                         assert r["disposition"] in given.get(r["fingerprint"], ()), (
                             f"{r['code']} {r['fingerprint'][:12]} carries {r['disposition']} from a different finding")
+                    if r["id"] not in before and r["state"] == "nonblocking" and not r["disposition"]:
+                        assert not given.get(r["fingerprint"], set()) - {"fix"}, (
+                            f"{r['code']} was dispositioned under this fingerprint but the re-raise carries none")
                 for code, how in actions:
                     rows = w.rows("code=?", (code,))
                     if not rows:
@@ -392,6 +420,65 @@ def test_v31_a_defect_line_reusing_a_findings_code_in_the_same_reply_still_upgra
     assert [(r["code"], r["category"], r["state"]) for r in rows] == [("P2", "requirement-contradiction", "open")]
 
 
+def _task_gate_reply(w: World, reply: str, *, current: bool = True):
+    """One v3.1 code-review result through gates.ingest_task_gate (a task, its revision and gate are inserted)."""
+    from office import gates, review_parse
+    gid = f"C{uuid.uuid4().hex[:8]}"
+    w.n += 1
+    if not w.con.execute("SELECT 1 FROM tasks WHERE run_id=? AND id='T1'", (w.run_id,)).fetchone():
+        w.con.execute("INSERT INTO tasks(run_id, id, title, role, scope_json, depends_json, accept_json, checks_json, status, "
+                      "introduced_plan_version, contract_version, acceptance_version, created_at, updated_at) "
+                      "VALUES(?, 'T1', 't', 'executor', '[]', '[]', '[]', '[]', 'submitted', 1, 1, 1, 'n', 'n')", (w.run_id,))
+    w.con.execute("UPDATE tasks SET current_revision_id=? WHERE run_id=? AND id='T1'", ("REV-OLD" if not current else "REV1", w.run_id))
+    w.con.execute("INSERT INTO gates(id, run_id, subject, task_id, revision_id, kind, input_key, status, created_at, round, plan_version) "
+                  "VALUES(?,?,'task','T1','REV1','code_review',?, 'running', ?, ?, 1)",
+                  (gid, w.run_id, f"k{w.n}", f"2026-01-01T00:00:{w.n:02d}", w.n))
+    parsed = review_parse.parse(reply)
+    assert parsed.valid, parsed.errors
+    with _tx(w.con):
+        gates.ingest_task_gate(w.con, w.run, gid, {"verdict": parsed.verdict, "parsed": parsed, "route": "fake/r",
+                                                   "dispatch_id": None, "summary": "v3.1"})
+
+
+def test_v31_code_review_records_a_reused_code_for_a_different_finding_under_a_fresh_code(world):
+    _task_gate_reply(world, "VERDICT: CHANGES_REQUIRED\nFINDING F1 | material | calc.py:1 | add is wrong | fix it")
+    _task_gate_reply(world, "VERDICT: CHANGES_REQUIRED\nFINDING F1 | material | mul.py:4 | mul leaks a handle | fix it")
+    rows = {r["code"]: r for r in world.rows("gate_kind='code_review'")}
+    assert set(rows) == {"F1", "F2"}
+    assert rows["F1"]["summary"] == "add is wrong" and rows["F1"]["state"] == "open", "the old finding is not overwritten"
+    assert rows["F2"]["summary"] == "mul leaks a handle" and rows["F2"]["state"] == "open"
+    _task_gate_reply(world, "VERDICT: CHANGES_REQUIRED\nFINDING F1 | material | calc.py:1 | add is wrong | fix it")
+    assert len(world.rows("gate_kind='code_review' AND code='F1'")) == 1, "the same finding keeps its row and its code"
+
+
+def test_v31_a_stale_code_review_result_carries_a_reused_code_under_a_fresh_code(world):
+    _task_gate_reply(world, "VERDICT: CHANGES_REQUIRED\nFINDING F1 | material | calc.py:1 | add is wrong | fix it")
+    _task_gate_reply(world, "VERDICT: CHANGES_REQUIRED\nFINDING F1 | material | mul.py:4 | mul leaks a handle | fix it",
+                     current=False)
+    assert sorted(r["code"] for r in world.rows("gate_kind='code_review'")) == ["F1", "F2"]
+
+
+def test_v31_plan_defect_reusing_a_code_with_new_content_is_renamed_and_its_finding_follows(world):
+    first = v31_reply("DEFECT P2 | requirement-contradiction | T2 | mul must reuse calc.add | evidence: calc.py:1",
+                      verdict="PLAN_DEFECT")
+    second = v31_reply("FINDING P2 | material | T3 | sub is missing | add it",
+                       "DEFECT P2 | requirement-contradiction | T3 | sub must not depend on mul | evidence: sub.py:1",
+                       verdict="PLAN_DEFECT")
+    v31_plan_round(world, first)
+    v31_plan_round(world, second)
+    rows = world.rows("gate_kind='plan_review'")
+    assert [(r["code"], r["category"], r["location"]) for r in rows] == [
+        ("P2", "requirement-contradiction", "T2"), ("P3", "requirement-contradiction", "T3")], rows
+
+
+def test_v31_a_fresh_defect_code_never_collides_with_a_code_the_same_reply_uses(world):
+    v31_plan_round(world, v31_reply("DEFECT P2 | requirement-contradiction | T2 | one | evidence: a", verdict="PLAN_DEFECT"))
+    v31_plan_round(world, v31_reply("FINDING P3 | material | T9 | unrelated | x",
+                                    "DEFECT P2 | requirement-contradiction | T3 | two | evidence: b", verdict="PLAN_DEFECT"))
+    codes = [r["code"] for r in world.rows("gate_kind='plan_review'")]
+    assert sorted(codes) == ["P2", "P3", "P4"], codes
+
+
 # ------------------------------------------------------------------ briefs
 
 def test_review_briefs_list_the_codes_already_used():
@@ -497,3 +584,49 @@ def test_v31_unavailable_code_review_spends_no_round(env):
     env.office("dispatch", "T1", "--review-as", reviewer, check=0)
     rows = _q(env, "SELECT round, verdict FROM gates WHERE kind='code_review' ORDER BY created_at")
     assert [(r["round"], r["verdict"]) for r in rows] == [(1, "UNAVAILABLE"), (1, "PASS")], rows
+
+
+def test_lane_retract_in_ingest_touches_only_the_current_finding(env):
+    """convergence.ingest, not just its helpers: with two generations of F1 (the first dispositioned, the
+    second its re-raise), a later RETRACT F1 changes the newest row only."""
+    note = finding("F1", severity="low", blocking=False, where="calc.py:1", what="comment wording only")
+    _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}, {"write": {"calc.py": GOOD_ADD2}, "submit": True},
+                          {"write": {"calc.py": GOOD_ADD2 + "# again\n"}, "submit": True},
+                          {"write": {"calc.py": GOOD_ADD2 + "# and again\n"}, "submit": True}],
+           convergence_reviewer=[{"reply": approved_with(note)}, {"reply": approved_with(note)},
+                                 {"reply": APPROVED + "\nRETRACT F1 | wrong"}])
+    env.office("dispatch", "T1", check=0)
+    env.office("disposition", "L-T1:F1", "dismissed", "--", "comment wording only", check=0)
+    for n, widened in enumerate(("calc.py, a.py", "calc.py, a.py, b.py", "calc.py, b.py, c.py")):
+        env.write_plan(PLAN_ONE.replace("scope: calc.py", f"scope: {widened}"))
+        env.office("amend", "T1", "--contract", "--", f"widen {n}", check=0)
+        env.office("rerun", "T1", "--fresh", check=0)
+        if n == 0:
+            first = _q(env, "SELECT * FROM findings WHERE scope='L-T1' ORDER BY rowid")
+            assert len(first) == 2 and first[1]["disposition"] == "dismissed", first
+    rows = _q(env, "SELECT * FROM findings WHERE scope='L-T1' ORDER BY rowid")
+    assert len(_q(env, "SELECT 1 FROM gates WHERE kind='convergence_review'")) == 3
+    assert [r["state"] for r in rows] == ["nonblocking", "retracted"], rows
+    assert rows[0] == first[0], "the older generation is never rewritten"
+    moved = {"state", "updated_at"}
+    assert rows[1]["state"] == "retracted" and {k: v for k, v in rows[1].items() if k not in moved} == {
+        k: v for k, v in first[1].items() if k not in moved}
+
+
+@pytest.mark.review_contract("v3.1")
+def test_v31_code_review_brief_lists_the_codes_the_task_already_used(env, monkeypatch):
+    from office import briefs
+    seen = []
+    real = briefs.code_review_brief
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("used_codes"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(briefs, "code_review_brief", spy)
+    _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}, {"write": {"calc.py": GOOD_ADD2}, "submit": True}],
+           code_reviewer=[{"reply": "VERDICT: CHANGES_REQUIRED\nFINDING F1 | material | calc.py:1 | add is wrong | fix it"},
+                          {"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    env.office("rerun", "T1", "--fresh", check=0)
+    assert seen and seen[0] == [] and seen[-1] == ["F1"], seen
