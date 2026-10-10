@@ -221,6 +221,14 @@ def test_seed_wins_on_id_collision_unless_overridden(unit):
     assert adapters.load_all()["codex"]["invocation"]["executable"] == "kilo"
 
 
+def test_editing_a_loaded_adapter_never_changes_the_next_load(unit):
+    # A caller that edits what it loaded (a test pointing codex at a fake binary) must not
+    # leave the per-process cache pointing every later caller at it.
+    adapters.load_all()["codex"]["invocation"]["executable"] = "/nowhere/codex"
+    adapters.load_sources()["codex"][0]["invocation"]["executable"] = "/nowhere/codex"
+    assert adapters.load_all()["codex"]["invocation"]["executable"] == "codex"
+
+
 def test_a_broken_user_adapter_never_breaks_the_seed_set(env):
     d = adapters.user_adapter_dir()
     d.mkdir(parents=True, exist_ok=True)
