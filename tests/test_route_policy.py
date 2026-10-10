@@ -30,9 +30,9 @@ def eligible(**extra):
     (eligible(), {"result": "fail", "reason_class": "transient"}, "temporarily-unavailable", True),
     (eligible(), {"result": "fail", "reason_class": "isolation-missing"}, "temporarily-unavailable", True),
     (eligible(), {"result": "unknown"}, "discovered-unconfirmed", True),
-    (eligible(discovery="ineligible"), {"result": "pass"}, "confirmed-unsupported", False),
-    (eligible(invocation_model_id=None), {"result": "pass"}, "confirmed-unsupported", False),
-    ({"dispatchable": False, "invocation_source": "benchmark only"}, None, "confirmed-unsupported", False),
+    (eligible(discovery="ineligible"), {"result": "pass"}, "discovered-unconfirmed", False),
+    (eligible(invocation_model_id=None), {"result": "pass"}, "discovered-unconfirmed", False),
+    ({"dispatchable": False, "invocation_source": "benchmark only"}, None, "discovered-unconfirmed", False),
 ])
 def test_status_derivations(row, probe, status, can_probe):
     result = policy.row_status(row, probe)
@@ -53,7 +53,8 @@ def test_alias_inherits_target_status_with_target_reason(status):
 
 def test_alias_cannot_enable_disabled_target():
     result = policy.alias_status({"model_id": "alias"}, eligible(discovery="ineligible"))
-    assert result["status"] == "confirmed-unsupported"
+    assert result["status"] == "discovered-unconfirmed"
+    assert result["discovery_eligible"] is False
     assert "new-model" in result["reason"]
 
 
@@ -93,10 +94,15 @@ def test_shipped_discovery_catalog_exactly_matches_locked_choices():
     assert actual == expected
     for row in rows:
         if row.get("dispatchable") is False:
-            assert policy.row_status(row)["status"] == ("discovered-unconfirmed" if
-                                                        row.get("discovery") == "eligible" else "confirmed-unsupported")
+            assert policy.row_status(row)["status"] == "discovered-unconfirmed"
         if row.get("discovery") == "eligible":
             assert row["discovery_reason"] and row["invocation_model_id"]
+
+
+def test_missing_invocation_evidence_is_unknown_and_not_probe_eligible():
+    result = policy.row_status({"dispatchable": False})
+    assert result == {"status": "discovered-unconfirmed",
+                      "reason": "catalog invocation unconfirmed", "discovery_eligible": False}
 
 
 def _columns(con):
@@ -172,7 +178,9 @@ def test_migration_repairs_missing_reservation_constraint_at_current_version(tmp
 @pytest.mark.parametrize("annotation", policy.ROUTE_STATUSES)
 def test_alias_cannot_launder_disabled_target_status_metadata(annotation):
     target = eligible(discovery="ineligible", route_status=annotation)
-    assert policy.alias_status({"model_id": "alias"}, target)["status"] == "confirmed-unsupported"
+    result = policy.alias_status({"model_id": "alias"}, target)
+    assert result["status"] == "discovered-unconfirmed"
+    assert result["discovery_eligible"] is False
     target = eligible(route_status="available")
     assert policy.alias_status({"model_id": "alias"}, target)["status"] == "discovered-unconfirmed"
 

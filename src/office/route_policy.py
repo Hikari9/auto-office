@@ -40,11 +40,11 @@ _EVENT_FIELDS = ("run_id", "plan_version", "task_id", "dispatch_id", "role", "fi
 def row_status(row: dict, probe: dict | None = None) -> dict:
     eligible = (row.get("dispatchable") is False and row.get("discovery") == "eligible"
                 and bool(row.get("invocation_model_id")))
-    reason = row.get("discovery_reason") or row.get("invocation_source") or "catalog invocation unsupported"
+    reason = row.get("discovery_reason") or row.get("invocation_source") or "catalog invocation unconfirmed"
     if row.get("dispatchable") is not False:
         status, reason = "available", "catalog invocation available"
     elif not eligible:
-        status = "confirmed-unsupported"
+        status = "discovered-unconfirmed"
     else:
         status = "discovered-unconfirmed"
         if probe:
