@@ -25,6 +25,16 @@ def opt(args: list[str], name: str, default=None):
     return args[args.index(name) + 1] if name in args else default
 
 
+def remote_head(pr: dict) -> str:
+    out = subprocess.run(["git", "ls-remote", "origin", f"refs/heads/{pr['head']}"], capture_output=True, text=True).stdout
+    return out.split()[0] if out.strip() else ""
+
+
+def conflicting(s: dict, pr: dict) -> bool:
+    """`conflicting: {"<n>": "<head sha>"}`: GitHub reports PR n unmergeable while its branch head is that sha."""
+    return remote_head(pr) == (s.get("conflicting") or {}).get(str(pr["number"]))
+
+
 def git_merge(pr: dict, method: str) -> None:
     """Really merge the PR head into its base on the bare origin."""
     origin = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
@@ -79,6 +89,8 @@ def main(argv: list[str]) -> int:
         elif argv[1] == "merge":
             if s.get("fail_merge"):
                 code, out = 1, "merge blocked"
+            elif conflicting(s, pr):
+                code, out = 1, f"X Pull request #{pr['number']} is not mergeable: the merge commit cannot be cleanly created."
             else:
                 method = next(a for a in argv if a in ("--merge", "--squash", "--rebase"))
                 git_merge(pr, method)

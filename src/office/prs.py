@@ -206,11 +206,19 @@ def advance_branch(run: dict, dispatch: dict, commit: str) -> None:
         paths.git(wt, "reset", "-q", commit)
 
 
-def push(run: dict, dispatch: dict, *, commit: str = "HEAD", force: bool = False) -> tuple[bool, str]:
-    """Push `commit` (the reviewed revision, not whatever the worker made since) to the task branch."""
-    args = ["git", "-C", dispatch["worktree"], "push", "origin", f"{commit}:refs/heads/{dispatch['branch']}"]
+def push(run: dict, dispatch: dict, *, commit: str = "HEAD", force: bool = False,
+         expected: str | None = None) -> tuple[bool, str]:
+    """Push `commit` (the reviewed revision, not whatever the worker made since) to the task branch.
+
+    A forced push is leased to `expected`, the remote head the caller read: a
+    bare `--force-with-lease` trusts a remote-tracking ref that a fetch may
+    have refreshed, so a forced push without an explicit sha is refused."""
+    if force and not expected:
+        raise ValueError("a forced push needs the expected remote sha")
+    branch = dispatch["branch"]
+    args = ["git", "-C", dispatch["worktree"], "push", "origin", f"{commit}:refs/heads/{branch}"]
     if force:
-        args.insert(4, "--force-with-lease")
+        args.insert(4, f"--force-with-lease=refs/heads/{branch}:{expected}")
     proc = subprocess.run(args, capture_output=True, text=True, timeout=120)
     return proc.returncode == 0, (proc.stderr or proc.stdout).strip()
 

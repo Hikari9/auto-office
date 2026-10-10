@@ -25,6 +25,11 @@ and its `next:` line; never run the 3.0 `office_runtime.py` helpers for a 3.x ru
 2. **PR state and the merge boundary.** `main` stays the human's unless the user chose `merge` or `e2e` at intake (or answered
    `office land --merge|--e2e --quote`). Plan approval alone never authorizes a merge; `office close` never merges or arms automerge.
    - Merged by `office land`: `office close`.
+   - A land that stopped after merging some task PRs: rerun `office land` (merged PRs are skipped; `--rebase` refuses
+     `already-merging`). When GitHub reports a PR not mergeable, land recovers it by merging the default branch into the task branch
+     (leased push, `pr.recovered` event) only if the remote head is the recorded one, the merge is conflict-free, and the open PRs
+     compose to the reviewed integration tree. `merge-conflict`, `branch-moved` or `recovery-tree-mismatch` push nothing: compose by hand
+     as the refusal says, then `office close --landed-externally <pr-url>`.
    - Merged through a PR Office did not open: `office close --landed-externally <pr-url>` (add `--quote` when the merge lacks an accepted revision).
    - Not authorized to merge: `office close --handoff <pr-url>`; the PR is marked ready, and base sync and worktree removal wait for the user.
 3. **Document.** Update the docs the repo already maintains (CHANGELOG, README, doc comments) and make the PR body accurate. Do not invent a
