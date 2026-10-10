@@ -173,14 +173,19 @@ def populate(con) -> None:
 
 
 def _migrated(path: Path, *, v12: bool = True):
-    """An empty current-schema database, with the v12 evidence columns unless `v12` is False."""
+    """An empty current-schema database. With `v12` False the v12 evidence columns are dropped again and the
+    schema version rolled back, which is what a database last opened by an older runtime looks like."""
     con = db.connect(path)
-    if v12:
-        for table, columns in V12_COLUMNS.items():
-            have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
-            for column in columns:
-                if column.split()[0] not in have:
-                    con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+    for table, columns in V12_COLUMNS.items():
+        have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+        for column in columns:
+            name = column.split()[0]
+            if v12 and name not in have:
+                con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+            elif not v12 and name in have:
+                con.execute(f"ALTER TABLE {table} DROP COLUMN {name}")
+    if not v12:
+        con.execute("UPDATE schema_meta SET value=? WHERE key='office_schema'", (str(db.SCHEMA_VERSION - 1),))
     con.execute("PRAGMA foreign_keys=OFF")
     return con
 
