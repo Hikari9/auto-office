@@ -48,8 +48,10 @@ class World:
         self.user_config = tmp / "user-config.yaml"
         self.repo_config = tmp / "repo" / ".auto-office" / "config.yaml"
         for key, value in (("OFFICE_DATA_HOME", tmp / "data"), ("OFFICE_STATE_HOME", tmp / "state"),
-                           ("OFFICE_USER_CONFIG", self.user_config), ("OFFICE_QUOTA_PROBE", "off")):
+                           ("OFFICE_USER_CONFIG", self.user_config), ("OFFICE_QUOTA_PROBE", "off"),
+                           ("CODEX_HOME", tmp / "codex-home"), ("CLAUDE_CONFIG_DIR", tmp / "claude-home")):
             monkeypatch.setenv(key, str(value))
+        monkeypatch.chdir(tmp / "repo")  # manual-route denial reads the repo tier from the repository it runs in
         system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
         monkeypatch.setenv("PATH", os.pathsep.join([str(tmp / "bin")] + system))
         self.codex = tmp / "bin" / "codex"
@@ -384,7 +386,8 @@ def test_the_probe_refuses_a_route_the_runs_pinned_policy_denies_without_reservi
 @pytest.mark.parametrize("tier", ["user", "repo"])
 def test_the_probe_refuses_a_route_denied_after_the_run_pinned_its_config(world, tier):
     """A denial applies the moment the user writes it, even to a run pinned earlier (candidates.current_user_policies):
-    a candidate the preflight decided on before the denial must not be probed once it is in force."""
+    a candidate the preflight decided on before the denial must not be probed once it is in force. The repo tier is
+    reachable from the run's `repo_root` and from the cwd, which is the run's repository here."""
     pre = world.decide("high")
     world.write_policy(tier, denied=[f"codex/{SOL}@high"])
     attempt, refused = world.ensure(pre, route=world.sol["high"])
@@ -395,7 +398,7 @@ def test_the_probe_refuses_a_route_denied_after_the_run_pinned_its_config(world,
 
 
 @pytest.mark.parametrize("tier", ["shipped", "user", "repo"])
-def test_the_budget_ceiling_source_tier_is_disclosed_and_only_a_user_ceiling_is_hard(world, tier):
+def test_the_budget_ceiling_and_its_source_tier_are_disclosed_and_shipped_sets_none(world, tier):
     if tier != "shipped":
         path = world.user_config if tier == "user" else world.repo_config
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -575,15 +578,14 @@ def deny(world, tier="user", spec=DENIED):
 
 @pytest.mark.parametrize("tier", ["user", "repo"])
 @pytest.mark.parametrize("spec", [f"codex/{SOL}@high", f"codex/{SOL}", SOL, "harness:codex"])
-@pytest.mark.parametrize("flag", ["--as", "--review-as"])
-def test_a_denied_route_is_refused_for_as_and_review_as(world, flag, spec, tier, monkeypatch):
+def test_a_denied_route_is_refused_for_as_and_review_as(world, spec, tier):
     deny(world, tier, spec)
-    monkeypatch.chdir(world.tmp / "repo")  # the repo tier is read from the repository the command runs in
-    with pytest.raises(state.Refused) as err:
-        candidates.declared_decision(DENIED, flag=flag)
-    assert err.value.category == "route-denied"
-    assert f"denied by {tier} routing.user_policy.denied_models: {spec}" in err.value.message
-    assert "office config routing.user_policy.denied_models" in err.value.next_step
+    for flag in ("--as", "--review-as"):
+        with pytest.raises(state.Refused) as err:
+            candidates.declared_decision(DENIED, flag=flag)
+        assert err.value.category == "route-denied"
+        assert f"denied by {tier} routing.user_policy.denied_models: {spec}" in err.value.message
+        assert "office config routing.user_policy.denied_models" in err.value.next_step
 
 
 def test_amend_route_and_dispatch_declare_through_the_same_denial_seam(world):
@@ -601,6 +603,9 @@ def test_route_flag_refuses_a_denied_route_and_a_plan_route_choice_is_ignored_wi
     deny(world)
     forced = world.decide("high", override=DENIED)
     assert forced["status"] != "selected" and forced["selected"] is None
+    world.user_config.write_text("routing: {}\n")  # the same `--route`, undenied, selects: the denial is the cause
+    assert world.decide(None, override="codex/gpt-6-astra@low")["selected"] == "codex@0/gpt-6-astra@low"
+    deny(world)
     auto = world.decide(None)
     audit, denied = auto["routing"], [e for e in auto["rejected"] if e.get("category") == "denied"]
     assert {e["candidate"] for e in denied} == {world.sol["high"]}
@@ -610,6 +615,7 @@ def test_route_flag_refuses_a_denied_route_and_a_plan_route_choice_is_ignored_wi
 
 
 def test_shipped_defaults_contain_no_denied_or_overkill_entries(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "none.yaml"))
     assert cfg.resolve(None)[0]["routing"]["user_policy"] == {"denied_models": [], "overkill_rules": []}
     assert candidates.current_user_policies() == []
@@ -681,6 +687,7 @@ def test_cli_manual_routes_refuse_a_denied_route_and_change_nothing(env):
     routes = con.execute("SELECT COUNT(*) FROM events WHERE kind='route.changed'").fetchone()[0]
     for args in (("dispatch", "T1", "--as", CLI_DENIED),
                  ("dispatch", "T1", "--as", "claude/claude-sonnet-5-5@high", "--review-as", CLI_DENIED),
+                 ("dispatch", "T1", "--review-as", CLI_DENIED),
                  ("dispatch", "T1", "--route", CLI_DENIED),
                  ("amend", "route", "T1", "--as", CLI_DENIED, "--quote", "use it")):
         code, out = env.office(*args, env=EXTERNAL)
@@ -708,7 +715,8 @@ def test_cli_an_overkill_route_stays_selectable_by_as_and_amend_route(env):
     cli_overkill(env)
     code, out = env.office("amend", "route", "T1", "--as", CLI_DENIED, "--quote", "use astra here")
     assert code == 0 and "declared" in out, out
-    env.office("revoke", "T1", env=EXTERNAL, check=0)
+    (event,) = [json.loads(r[0]) for r in env.con().execute("SELECT payload_json FROM events WHERE kind='route.changed'")]
+    assert event["after"] == CLI_DENIED.replace("codex/", "codex@1/") and event["actor"] == "user"
     code, out = env.office("dispatch", "T1", "--as", CLI_DENIED, env=EXTERNAL)
     assert code == 0 and "(user override)" in out, out
     assert env.con().execute("SELECT triple FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC").fetchone()[0] \
@@ -722,7 +730,8 @@ def test_cli_a_declared_overkill_route_is_still_followed_by_the_next_plain_dispa
     from conftest import approved_run
     approved_run(env)
     cli_overkill(env)
-    env.office("amend", "route", "T1", "--as", CLI_DENIED, "--quote", "use astra here", check=0)
+    code, out = env.office("amend", "route", "T1", "--as", CLI_DENIED, "--quote", "use astra here")
+    assert code == 0, out
     code, out = env.office("dispatch", "T1", env=EXTERNAL)
     assert code == 0 and "overkill" not in out, out
     assert env.con().execute("SELECT triple FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC").fetchone()[0] \
@@ -732,7 +741,9 @@ def test_cli_a_declared_overkill_route_is_still_followed_by_the_next_plain_dispa
 def test_cli_a_plan_route_naming_a_denied_route_is_ignored_and_says_why(env):
     from conftest import start_inline
     env.trust()
+    before = cli_authority(env)
     cli_deny(env)
     out = start_inline(env, plan=PLAN_WITH_ROUTE.format(route=CLI_DENIED))
     assert "T1 route:" in out and "rejected at stage 1" in out and "denied by user" in out, out
     assert "the ranked slate stands" in out, out
+    assert cli_authority(env) == before
