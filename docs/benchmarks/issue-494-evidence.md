@@ -80,7 +80,9 @@ table keeps the scored decision, not the raw request, so each request is rebuilt
 builder (`candidates.route_role`, no quota probe, no model call). It never opens the live file: it refuses it, or takes
 a copy through SQLite's read-only backup API (`--snapshot-live`). Its self-test (`--self-test`) builds a database,
 checks the source is untouched, that discovery-off and pinned pre-change decisions are identical, that the simulated
-caps bind, and that no goal or title text reaches the report.
+caps bind, that an unreadable user or repo policy (T3 refuses every route with `policy-unreadable`, A14) is counted as
+`refused:policy-unreadable` rather than compared, and that no goal or title text reaches the report. A replay that skips
+every recorded decision exits 3.
 
 Policies compared: `pinned` (the run's own), `pinned-off` (the same with discovery forced off), `head-off`, `head-on`
 (HEAD's resolved policy; shipped caps; allocation simulated in recorded order). A trial counts as "would have been"
@@ -262,6 +264,8 @@ Run in this worktree with `.venv` (Python 3.12, `uv pip install -e '.[test,visua
 | T8 checks: `pytest -n 2` on `test_headless_agent_env`, `test_discovery_dispatch`, `test_issue_399_dispatch_recovery`, `test_adaptive_dispatch`, `test_job_ownership`, `test_declared_route_426` | shipped default `true`, T8 fix | 106 passed (unit tier); with `--all` and `test_herdr_agent_launch`, `test_headless_fallback` added: 192 passed |
 | `scripts/validate.sh` | shipped default `true`, T8 fix | passed |
 | new test without the fix (`write_agent_env` call removed from `launch()`) | mutation | `test_a_headless_executor_finds_agent_env_when_it_starts[sync]` and `[process]` fail |
+| `scripts/validate.sh` | after restack onto T4 R15 / T5 R14 and A14 (`cc4956e`) | passed |
+| `pytest -n 2 --all` | after restack and A14 (`cc4956e`) | 3632 passed, 2 skipped, 1 failed: a browser test worker crashed (`test_layout.py::test_scroll_buttons_...`); it and the other four files that failed in an earlier run overlapping another suite pass on rerun (89 passed) |
 
 The three failures in the trial flip were the same three tests, each pinning the old shipped default `off` (listed
 under "Default activation"). A10 updated exactly those, and nothing else in the repository depends on the default.
