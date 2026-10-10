@@ -1148,3 +1148,28 @@ def test_the_package_import_falls_back_to_the_checkout_and_beats_a_stale_office(
                               capture_output=True, text=True, timeout=120)
         assert proc.returncode == 0, proc.stderr
         assert json.loads(proc.stdout)["sections"]["episodes"]["available"] is True, env
+
+
+def test_clamped_rows_merge_whether_or_not_each_recorded_a_statistic(tmp_path):
+    con = _mini(tmp_path)
+    _dispatch(con, "a", None, ("A B", "m", "high"), end="2026-09-01T10:01:00+00:00")  # no start, no cost
+    _dispatch(con, "b", None, ("C D", "m", "high"), start="2026-09-01T10:00:00+00:00",
+              end="2026-09-01T10:01:00+00:00", money=1.5)
+    con.commit()
+    con.close()
+    report = sec(rer.build_report(tmp_path / "mini.db"), "latency_and_cost")
+    (cost,) = report["cost"]
+    assert (cost["terminal"], cost["recorded"], cost["unknown"], cost["total"]) == (2, 1, 1, 1.5)
+    (latency,) = report["latency"]
+    assert (latency["terminal"], latency["recorded"], latency["unknown"]) == (2, 1, 1)
+    assert latency["mean_seconds"] == latency["median_seconds"] == latency["max_seconds"] == "unknown"
+
+
+def test_a_blob_created_at_gives_no_day_and_the_report_still_prints(tmp_path, capsys):
+    con = _mini(tmp_path)
+    _insert(con, "runs", id=R1, created_at=b"2026-09-01\xff\xfe", phase="closed")
+    con.commit()
+    con.close()
+    assert rer.main(["--db", str(tmp_path / "mini.db"), "--format", "json"]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["source"]["run_date_range"] == {"runs": 1, "first": None, "last": None}

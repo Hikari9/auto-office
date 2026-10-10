@@ -76,14 +76,15 @@ Each entry gives the metric id, the denominator, the SQL (run after the prelude)
 
 ### `runs.span`
 
-**Denominator:** every row of runs; a created_at that does not start with YYYY-MM-DD gives no day.
+**Denominator:** every row of runs; a created_at that is not text starting with YYYY-MM-DD gives no day.
 
 **Reported as:** `sections.population.runs`, `source.run_date_range`.
 
 ```sql
-, d AS (SELECT CASE WHEN created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' THEN
-    substr(created_at, 1, 10) END AS day, pruned_at FROM rn) SELECT COUNT(*) AS runs, MIN(day) AS
-    first_day, MAX(day) AS last_day, COALESCE(SUM(pruned_at IS NOT NULL), 0) AS pruned FROM d
+, d AS (SELECT CASE WHEN typeof(created_at) = 'text' AND created_at GLOB
+    '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' THEN substr(created_at, 1, 10) END AS day, pruned_at
+    FROM rn) SELECT COUNT(*) AS runs, MIN(day) AS first_day, MAX(day) AS last_day,
+    COALESCE(SUM(pruned_at IS NOT NULL), 0) AS pruned FROM d
 ```
 
 A `created_at` that does not start with `YYYY-MM-DD` gives no day (the first and last day are `unknown` if none does). `pruned` counts runs Office marked `pruned_at`; the report cannot see anything pruned before the file was copied.

@@ -179,8 +179,8 @@ def prelude(schema: dict) -> str:
 METRICS = {
     "runs.span": {
         "needs": ("runs",),
-        "denominator": "every row of runs; a created_at that does not start with YYYY-MM-DD gives no day",
-        "sql": ", d AS (SELECT CASE WHEN created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' "
+        "denominator": "every row of runs; a created_at that is not text starting with YYYY-MM-DD gives no day",
+        "sql": ", d AS (SELECT CASE WHEN typeof(created_at) = 'text' AND created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' "
                "THEN substr(created_at, 1, 10) END AS day, pruned_at FROM rn) "
                "SELECT COUNT(*) AS runs, MIN(day) AS first_day, MAX(day) AS last_day, "
                "COALESCE(SUM(pruned_at IS NOT NULL), 0) AS pruned FROM d",
@@ -456,7 +456,7 @@ def _merge_clamped(rows: list[dict]) -> list[dict]:
         if "other" not in row.values():
             out.append(row)
             continue
-        key = tuple((k, v) for k, v in row.items() if not isinstance(v, (int, float)) or isinstance(v, bool))
+        key = tuple((k, v) for k, v in row.items() if isinstance(v, str))  # the identity; counts and statistics are not
         into = merged.get(key)
         if into is None:
             merged[key] = into = dict(row)
