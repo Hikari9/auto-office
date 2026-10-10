@@ -138,7 +138,10 @@ def current_user_policies(repo_root=None) -> list[dict]:
     from office import config as cfg
     try:
         repo_root = repo_root if repo_root is not None else _repo_root_here()
-        files = cfg.read_files(repo_root)
+        # Read here, not through `cfg.read_files`: this feeds only the denial lookup and must not
+        # add a second read to the snapshot `office start` pins and baselines its drift check on.
+        files = {tier: (path.read_text(encoding="utf-8") if path.is_file() else None)
+                 for tier, path in cfg.config_paths(repo_root).items()}
         cache_key = (str(repo_root), tuple(sorted(files.items(), key=lambda kv: kv[0])))
         if cache_key not in _POLICY_CACHE:
             effective, _ = cfg.resolve(repo_root, files=files)

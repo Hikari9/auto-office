@@ -5,7 +5,6 @@ Pure tests call `routing.route` with synthetic requests. The wiring tests drive
 """
 import copy
 import json
-from pathlib import Path
 
 import pytest
 

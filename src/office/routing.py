@@ -566,8 +566,8 @@ def _quota_gate(c: dict, reserve: float) -> tuple[int, str, str] | None:
     return None
 
 
-def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], eligibility: dict,
-               required: set, floor, reserve: float, discovery_input: dict | None, rejected: list) -> tuple[dict, dict | None]:
+def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], required: set, floor,
+               reserve: float, discovery_input: dict | None, rejected: list) -> tuple[dict, dict | None]:
     """Discovery allocation for one executor/worker decision (#494). Separate from exploration.
 
     Returns (block, trial). First call: at most one safe candidate wins a seeded draw and
@@ -630,7 +630,7 @@ def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], 
         return block, None
     survivors = []
     for c in scoped:
-        cid, probe = candidate_id(c), c.get("probe")
+        probe = c.get("probe")
         gate = _pool_gate(c, required, floor, playbook, quarantined) or _quota_gate(c, reserve)
         if gate:
             stage, why, token = gate
@@ -745,7 +745,7 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
     disc, trial = None, None
     active = bool((request.get("discovery") or {}).get("settings", {}).get("enabled"))
     if active and (pool or discovery_input):
-        disc, trial = _discovery(request, role, playbook, rec, pool, eligibility, set(required or ()), floor,
+        disc, trial = _discovery(request, role, playbook, rec, pool, set(required or ()), floor,
                                  float(reserve), discovery_input, rejected)
     elif active:
         disc = {"active": True, "intent": "none", "candidate": None, "probe_key": None, "probe": None,
