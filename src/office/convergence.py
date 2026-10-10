@@ -597,10 +597,19 @@ def _carry_over(con, run: dict, scope: dict, st: dict, composed: dict) -> bool:
 def _new_gate(con, run: dict, scope: dict, rev: dict, kind: str, round_no: int, cycle: int) -> tuple[str, str]:
     gid = "G" + uuid.uuid4().hex[:8]
     con.execute("INSERT INTO gates(id, run_id, subject, revision_id, plan_version, kind, input_key, status, round, created_at, "
-                "contract, scope, cycle) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "contract, scope, cycle, members_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (gid, run["id"], "lane", rev["id"], run["plan_version"], kind, f"{scope['id']}:{rev['commit_sha']}",
-                 "queued", round_no, now_iso(), contract.CONVERGENCE, scope["id"], cycle))
+                 "queued", round_no, now_iso(), contract.CONVERGENCE, scope["id"], cycle,
+                 dumps(sorted(scope["tasks"], key=_tid_key))))
     return gid, kind
+
+
+def gate_members(gate: dict) -> list[str] | None:
+    """The member task ids frozen onto a lane or shared-scope gate when it was created.
+    None is unknown: a gate that predates the column is never backfilled. This insert is
+    the only writer, so a populated membership never changes."""
+    raw = gate.get("members_json")
+    return json.loads(raw) if raw else None
 
 
 def scope_gates(con, run: dict, scope_id: str, *, commit: str | None = None) -> list[dict]:
@@ -870,26 +879,55 @@ def _owners(con, run: dict, scope: dict, f: dict) -> list[str]:
     return list(scope["tasks"])  # nobody can tell: every producer in the scope repairs it
 
 
-def _record_finding(con, run: dict, scope: dict, gate: dict, f: dict, reviewer: str | None) -> None:
+UNASSIGNED = "unassigned"
+
+
+def _attribution(con, run: dict, members: list[str] | None, f: dict, owned: dict) -> tuple[str, str | None]:
+    """(attribution_basis, task) for one finding, from evidence only; it never feeds repair routing.
+    `reviewer-declared`: the reviewer named an owner that is a member task owning the finding's path
+    (its scope or accepted revision). `unique-path`: exactly one member owns that path. Anything
+    else, including a gate with no frozen membership, is `unassigned`."""
+    path = (f.get("location") or "").split(":")[0].strip()
+    if not path or not members:
+        return UNASSIGNED, None
+    for tid in members:
+        if tid not in owned:
+            task = state.get_task(con, run["id"], tid) or {}
+            owned[tid] = (task.get("scope") or [], _changed(con, run, task) if task else set())
+    owning = [tid for tid in members if planfile.path_in_scope(path, owned[tid][0]) or path in owned[tid][1]]
+    declared = [o for o in dict.fromkeys(f.get("owners") or []) if o in owning]
+    if len(declared) == 1:
+        return "reviewer-declared", declared[0]
+    if len(owning) == 1:
+        return "unique-path", owning[0]
+    return UNASSIGNED, None
+
+
+def _record_finding(con, run: dict, scope: dict, gate: dict, f: dict, reviewer: str | None, owned: dict) -> None:
     owners = _owners(con, run, scope, f)
+    basis, attributed = _attribution(con, run, gate_members(gate), f, owned)
     state_ = "open" if f.get("blocking") else "nonblocking"
     con.execute("UPDATE findings SET state='superseded', updated_at=? WHERE run_id=? AND scope=? AND gate_kind=? AND code=? "
                 "AND state IN ('open','nonblocking') AND disposition IS NULL",
                 (now_iso(), run["id"], scope["id"], gate["kind"], f["code"]))
+    first = None
     for tid in owners:
         t = state.get_task(con, run["id"], tid) or {}
         producer = con.execute("SELECT dispatch_id FROM revisions WHERE id=?", (t.get("accepted_revision_id"),)).fetchone()
+        fid = "F" + uuid.uuid4().hex[:10]
         con.execute("INSERT INTO findings(id, dispatch_id, reviewer_dispatch_id, status, severity, summary, evidence_hash, "
                     "created_at, run_id, task_id, gate_id, revision_id, gate_kind, code, fingerprint, location, category, "
                     "action, measurement_json, state, origin_gate_id, updated_at, level, contract, scope, blocking, seam, "
-                    "root_cause, owners) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    ("F" + uuid.uuid4().hex[:10], producer["dispatch_id"] if producer else None, reviewer,
+                    "root_cause, owners, attribution_basis, attributed_task, clone_of) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (fid, producer["dispatch_id"] if producer else None, reviewer,
                      "blocking" if f.get("blocking") else "non-blocking", f.get("severity"), f["summary"],
                      sha256_obj(f), now_iso(), run["id"], tid, gate["id"], gate["revision_id"], gate["kind"], f["code"],
                      gates._fingerprint(f), f.get("location"), "convergence", f.get("action"),
                      dumps(f.get("measurement")) if f.get("measurement") else None, state_, gate["id"], now_iso(),
                      f.get("level") or f.get("severity"), contract.CONVERGENCE, scope["id"], int(bool(f.get("blocking"))),
-                     f.get("seam"), f.get("root_cause"), dumps(owners)))
+                     f.get("seam"), f.get("root_cause"), dumps(owners), basis, attributed, first))
+        first = first or fid  # the other repair-owner rows are clones of this one: a report counts it once
 
 
 def ingest(con, run: dict, gate_id: str, outcome: dict, *, independence: str = contract.INDEPENDENT) -> None:
@@ -927,8 +965,9 @@ def ingest(con, run: dict, gate_id: str, outcome: dict, *, independence: str = c
                     "AND state='open' AND code NOT IN (%s)" % ",".join("?" * len(restated)) if restated else
                     "UPDATE findings SET state='resolved', updated_at=? WHERE run_id=? AND scope=? AND gate_kind=? "
                     "AND state='open'", (now_iso(), run["id"], scope["id"], gate["kind"], *sorted(restated)))
+        owned: dict = {}
         for f in parsed.findings:
-            _record_finding(con, run, scope, gate, f, outcome.get("dispatch_id"))
+            _record_finding(con, run, scope, gate, f, outcome.get("dispatch_id"), owned)
     label = "visual" if gate["kind"] == "visual" else "convergence"
     if status != contract.COMPLETED:
         state.emit(con, run, "convergence.unavailable", f"{scope['id']} {label} review {status} (runtime/evidence status, "
