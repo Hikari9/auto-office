@@ -467,6 +467,21 @@ def test_reviewer_failures_walk_the_fallback_chain_without_spending_a_round(env)
     assert _scope(env, "L-T1")["status"] == "approved"
 
 
+def test_unavailable_lane_review_spends_no_round(env):
+    """An UNAVAILABLE attempt is runtime status: the scope stays at round 1, `office resume` retries
+    it, and the retry is round 1 again; only the completed RECHECK moves the lane to round 2."""
+    _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"exit": 1}])
+    env.office("dispatch", "T1", check=0)
+    first = _gates(env, "convergence_review")[0]
+    assert first["review_status"] == "UNAVAILABLE" and first["verdict"] is None and first["round"] == 1
+    assert int(_scope(env, "L-T1").get("round") or 1) == 1
+    env.script(convergence_reviewer=[{"reply": recheck(finding("F1"))}])
+    env.office("resume", check=0)
+    gates = _gates(env, "convergence_review")
+    assert [(g["round"], g["review_status"]) for g in gates] == [(1, "UNAVAILABLE"), (1, "COMPLETED")], gates
+    assert gates[1]["verdict"] == "RECHECK" and int(_scope(env, "L-T1")["round"]) == 2
+
+
 def test_exhausted_specialists_allow_a_degraded_orchestrator_review(env, tmp_path):
     """12, 13, 33, 34: every route failing is UNAVAILABLE status (not a verdict); the
     orchestrator may then review, recorded as degraded when its identity or a producer's is unknown

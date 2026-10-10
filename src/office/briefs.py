@@ -233,6 +233,25 @@ def planner_brief(con, run: dict, packet: dict) -> str:
     return "\n".join(out) + "\n"
 
 
+def _builds_on(con, run: dict, packet: dict) -> list[str]:
+    """The parents the dispatch base contains, so the brief never claims one that is not there. A parent
+    without an accepted revision (a stacked holder that submitted, #398) says so."""
+    from office import integration
+    base = packet.get("base_commit")
+    parents = packet.get("base_parents")
+    if parents is None:  # a rerun or an older packet: the declared dependencies' newest revisions
+        parents = []
+        for dep in packet.get("depends") or []:
+            t = state.get_task(con, run["id"], dep) or {}
+            rev = t.get("accepted_revision_id") or t.get("current_revision_id")
+            row = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (rev,)).fetchone() if rev else None
+            if row:
+                parents.append({"task": dep, "revision": rev, "commit": row["commit_sha"],
+                                "accepted": bool(t.get("accepted_revision_id"))})
+    return [p["task"] if p["accepted"] else f"{p['task']} (unaccepted: submitted {p['revision']}, not yet reviewed)"
+            for p in parents if base and integration.contains(run, base, p["commit"])]
+
+
 def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carried: list | None = None) -> str:
     out = [
         "ROLE executor",
@@ -256,8 +275,9 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
                 "and moves any file left from an earlier dispatch out of this worktree before you start, so write it "
                 "fresh for every submission, including a retry or fix round; submit refuses a file whose content "
                 "matches evidence already submitted for this task."]
-    if packet.get("depends"):
-        out.append(f"BUILDS ON {', '.join(packet['depends'])} (already in this worktree's base)")
+    built_on = _builds_on(con, run, packet)
+    if built_on:
+        out.append(f"BUILDS ON {', '.join(built_on)} (already in this worktree's base)")
     out += _lines("ACCEPT", packet.get("accept"))
     checks = packet.get("checks") or []
     out.append("CHECKS the runtime will run: " + ("; ".join(checks) if checks else "none declared"))
@@ -280,6 +300,9 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
     if restack.get("merged"):
         out.append("RESTACKED Office merged " + ", ".join(f"{m['task']} {m['revision']}" for m in restack["merged"])
                    + " into this worktree; build on it")
+    if restack.get("reopened"):
+        out.append("RESTACK SKIPPED " + ", ".join(f"{r['task']} is {r['status']}" for r in restack["reopened"])
+                   + " again, so Office did not merge it; it needs a restack once it is accepted")
     if restack.get("conflict"):
         c = restack["conflict"]
         out += ["", f"RESTACK FIRST: {c['task']} was accepted on {c['revision']}, which this worktree lacks. Run "
@@ -477,9 +500,18 @@ def worker_brief(con, run: dict, packet: dict, setup: dict | None = None, carrie
     return executor_brief(con, run, packet, setup=setup, carried=carried)
 
 
+def used_codes_line(codes: list[str] | None) -> list[str]:
+    """The finding codes a review scope already holds, in any state. A code names one finding for good: a
+    reviewer who reuses one for different content has it recorded under a fresh code."""
+    if not codes:
+        return []
+    return ["FINDING CODES ALREADY USED in this scope (any state): " + ", ".join(codes)
+            + ". A new finding takes a new code; reuse one only to confirm, resolve or retract that same finding."]
+
+
 def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_summary: str,
                       carried: list[dict], checkout: str, integration: bool = False, evidence: str | None = None,
-                      verify_only: bool = False) -> str:
+                      verify_only: bool = False, used_codes: list[str] | None = None) -> str:
     out = [
         "ROLE independent " + ("integration" if integration else "code") + " reviewer. Change nothing except your reply file. You did not write this change.",
         f"TASK {task['id']} {task['title']}" if task else "COMPOSED RESULT of the run's accepted tasks",
@@ -498,6 +530,7 @@ def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_s
         for f in carried:
             level = f.get("level") or ("high" if f["severity"] == "material" else "low")
             out.append(f"- {f['code']} [{level}] {f['location'] or ''} {f['summary']}")
+    out += used_codes_line(used_codes)
     if verify_only:
         out.append("VERIFY-ONLY ROUND: the final fix round is spent. Confirm or resolve each OPEN FINDING. "
                    "Report a new finding only if it is high; medium and low findings become follow-ups and no "
@@ -512,7 +545,7 @@ def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_s
 def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision: dict, diff: str,
                              checks_summary: str, carried: list[dict], checkout: str, round_no: int,
                              requirements: dict | None = None, evidence: dict | None = None,
-                             max_rounds: int | None = None) -> str:
+                             max_rounds: int | None = None, used_codes: list[str] | None = None) -> str:
     """One independent convergence review of a composed lane or shared scope (#337)."""
     kind = "shared-scope" if scope.get("shared") else "lane"
     out = [
@@ -540,6 +573,7 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
         for f in carried:
             out.append(f"- {f['code']} [{f.get('level') or f.get('severity')}, "
                        f"{'blocking' if f.get('blocking') else 'non-blocking'}] {f.get('location') or ''} {f['summary']}")
+    out += used_codes_line(used_codes)
     for tid, text in (evidence or {}).items():
         out += ["", f"EXECUTOR EVIDENCE for {tid} (no file scope; the posted comment or edit is recorded here):",
                 text or "(none recorded: the executor left no evidence file; report that as a finding)"]
@@ -549,7 +583,7 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
 
 def plan_review_brief(run: dict, plan: dict, requirements: dict, open_defects: list[dict], rereview: bool,
                       carried: list[dict] | None = None, round_no: int | None = None,
-                      max_rounds: int | None = None) -> str:
+                      max_rounds: int | None = None, used_codes: list[str] | None = None) -> str:
     if contract.is_convergence(run):
         out = [
             "ROLE independent plan reviewer. Change nothing except your reply file. You did not write this plan.",
@@ -568,6 +602,7 @@ def plan_review_brief(run: dict, plan: dict, requirements: dict, open_defects: l
                        "repeat the FINDING line:")
             out += [f"- {f['code']} [{f.get('level') or f.get('severity')}] {f.get('location') or ''} {f['summary']}"
                     for f in carried]
+        out += used_codes_line(used_codes)
         out += ["", CONVERGENCE_PLAN_REVIEW_FORMAT, "", "PLAN:", plan["body"]]
         return "\n".join(out) + "\n"
     out = [
@@ -587,5 +622,6 @@ def plan_review_brief(run: dict, plan: dict, requirements: dict, open_defects: l
             out.append(f"- {d['code']} {d['category']}: {d['summary']}")
         from office import redirect
         out += redirect.brief_lines(run, open_defects)
+    out += used_codes_line(used_codes)
     out += ["", PLAN_REVIEW_FORMAT, "", "PLAN:", plan["body"]]
     return "\n".join(out) + "\n"

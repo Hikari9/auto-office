@@ -685,7 +685,8 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
             run, scope, tasks, _rev(scope["id"], commit), diff, "; ".join(checks), _carried(con, run, scope["id"],
                                                                                          "convergence_review"),
             str(checkout), int(gate["round"] or 1), state.current_requirements(con, run["id"])["frozen"],
-            evidence=evidence, max_rounds=contract.round_cap(run))
+            evidence=evidence, max_rounds=contract.round_cap(run),
+            used_codes=gates.finding_codes(con, "run_id=? AND scope=?", (run["id"], scope["id"])))
         exclude = list(st.get("exclude_routes") or [])
         resume = _same_reviewer(con, run, scope["id"], "convergence_review", int(gate.get("cycle") or 1))
         # A user-pinned reviewer (office dispatch --review-as) on any lane task reviews the lane.
@@ -816,6 +817,7 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
         "IMAGES:", *lines,
         "DOM MEASUREMENTS (measured, css-px):" if measurements else "DOM MEASUREMENTS: none",
         *[json.dumps(m, sort_keys=True) for m in measurements[:60]],
+        *briefs.used_codes_line(gates.finding_codes(con, "run_id=? AND scope=?", (run["id"], scope["id"]))),
         "", VISUAL_FORMAT]) + "\n"
     evdir = lane_receipt.parent
     resume = _same_reviewer(con, run, scope["id"], "visual", int(gate.get("cycle") or 1))
@@ -910,6 +912,7 @@ def _record_finding(con, run: dict, scope: dict, gate: dict, f: dict, reviewer: 
     con.execute("UPDATE findings SET state='superseded', updated_at=? WHERE run_id=? AND scope=? AND gate_kind=? AND code=? "
                 "AND state IN ('open','nonblocking') AND disposition IS NULL",
                 (now_iso(), run["id"], scope["id"], gate["kind"], f["code"]))
+    fp = gates._fingerprint(f)
     first = None
     for tid in owners:
         t = state.get_task(con, run["id"], tid) or {}
@@ -923,10 +926,13 @@ def _record_finding(con, run: dict, scope: dict, gate: dict, f: dict, reviewer: 
                     (fid, producer["dispatch_id"] if producer else None, reviewer,
                      "blocking" if f.get("blocking") else "non-blocking", f.get("severity"), f["summary"],
                      sha256_obj(f), now_iso(), run["id"], tid, gate["id"], gate["revision_id"], gate["kind"], f["code"],
-                     gates._fingerprint(f), f.get("location"), "convergence", f.get("action"),
+                     fp, f.get("location"), "convergence", f.get("action"),
                      dumps(f.get("measurement")) if f.get("measurement") else None, state_, gate["id"], now_iso(),
                      f.get("level") or f.get("severity"), contract.CONVERGENCE, scope["id"], int(bool(f.get("blocking"))),
                      f.get("seam"), f.get("root_cause"), dumps(owners), basis, attributed, first))
+        if not f.get("blocking"):
+            gates.carry_disposition(con, "run_id=? AND scope=? AND gate_kind=?", (run["id"], scope["id"], gate["kind"]),
+                                    fid, fp)
         first = first or fid  # the other repair-owner rows are clones of this one: a report counts it once
 
 
@@ -953,13 +959,10 @@ def ingest(con, run: dict, gate_id: str, outcome: dict, *, independence: str = c
     if scope is None:
         return
     if status == contract.COMPLETED and parsed is not None:
-        for code in parsed.resolved:
-            con.execute("UPDATE findings SET state='resolved', updated_at=? WHERE run_id=? AND scope=? AND gate_kind=? "
-                        "AND code=? AND state='open'", (now_iso(), run["id"], scope["id"], gate["kind"], code))
-        for r in parsed.retracted:
-            con.execute("UPDATE findings SET state='retracted', updated_at=? WHERE run_id=? AND scope=? AND gate_kind=? "
-                        "AND code=? AND state IN ('open','nonblocking')", (now_iso(), run["id"], scope["id"], gate["kind"],
-                                                                          r["code"]))
+        where, params = "run_id=? AND scope=? AND gate_kind=?", (run["id"], scope["id"], gate["kind"])
+        parsed.findings[:] = gates.stable_codes(con, run, where, params, parsed.findings)
+        gates.mark_current(con, where, params, parsed.resolved, ("open",), "resolved")
+        gates.mark_current(con, where, params, [r["code"] for r in parsed.retracted], ("open", "nonblocking"), "retracted")
         restated = {f["code"] for f in parsed.findings}
         con.execute("UPDATE findings SET state='resolved', updated_at=? WHERE run_id=? AND scope=? AND gate_kind=? "
                     "AND state='open' AND code NOT IN (%s)" % ",".join("?" * len(restated)) if restated else
@@ -1769,11 +1772,11 @@ def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | 
         # A plan review closed at its round cap leaves its blocking findings to the orchestrator (#418).
         owned = is_plan and plans.owns_outstanding(run)
         states = ("nonblocking", "open") if owned or not is_plan else ("nonblocking",)
+        # Only the current finding for a code: an older row that shares the code is a different generation of it.
+        ids = gates.current_ids(con, "run_id=? AND contract=? AND (scope=? OR (? = 'plan' AND gate_kind='plan_review'))",
+                                (run["id"], contract.CONVERGENCE, scope_id, scope_id.lower()), codes, states)
         rows = [dict(r) for r in con.execute(
-            f"SELECT * FROM findings WHERE run_id=? AND contract=? AND state IN ({','.join('?' * len(states))}) AND "
-            "(scope=? OR (? = 'plan' AND gate_kind='plan_review')) "
-            f"AND code IN ({','.join('?' * len(codes))})",
-            (run["id"], contract.CONVERGENCE, *states, scope_id, scope_id.lower(), *codes)).fetchall()]
+            f"SELECT * FROM findings WHERE id IN ({','.join('?' * len(ids))})", ids).fetchall()]
         if not rows:
             raise Usage("unknown-finding", f"no non-blocking finding {spec}", next_step="office inspect convergence")
         blocking = [r for r in rows if r["state"] == "open" and not owned]

@@ -83,3 +83,41 @@ def test_prompt_reaches_a_reviewer_recorded_exited_whose_agent_still_waits(env, 
     res = prompting.prompt(con, run, d["id"], "Write your complete review to the reply file.")
     assert "landed" in res.lines[0]
     assert len(_sent(_calls(state_file))[0]) == 1
+
+
+@pytest.mark.approved
+def test_prompt_reports_the_cwd_and_agent_herdr_reports_not_only_the_recorded_worktree(env, monkeypatch):
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY, BUSY])
+    from office import dispatch, prompting
+    con.execute("UPDATE dispatches SET worktree=? WHERE id=?", (str(env.repo), d["id"]))
+    con.commit()
+    agent = dispatch.herdr_agent_name(d["id"])
+    reported = {"foreground_cwd": str(env.repo / "src"), "agent": {"name": agent}}
+    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {"pane": reported})
+    res = prompting.prompt(con, run, "T1", TEXT)
+    line = res.lines[0]
+    assert f"herdr reports cwd {env.repo / 'src'}" in line and f"agent {agent}" in line, line
+    assert f"recorded worktree {env.repo}" in line, line
+
+
+@pytest.mark.approved
+def test_prompt_says_so_when_herdr_reports_no_cwd_or_agent(env, monkeypatch):
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY, BUSY])
+    from office import dispatch, prompting
+    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {"pane": {}})
+    res = prompting.prompt(con, run, "T1", TEXT)
+    assert "herdr reports cwd none, agent none" in res.lines[0], res.lines
+
+
+@pytest.mark.approved
+def test_prompt_never_echoes_control_sequences_a_pane_reports(env, monkeypatch):
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY, BUSY])
+    from office import dispatch, prompting
+    escape = chr(27) + "[31m"
+    agent = dispatch.herdr_agent_name(d["id"])
+    con.execute("UPDATE dispatches SET worktree=? WHERE id=?", (str(env.repo), d["id"]))
+    con.commit()
+    reported = {"cwd": f"{env.repo}/sub{escape}", "agent": {"name": agent}}
+    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {"pane": reported})
+    line = prompting.prompt(con, run, "T1", TEXT).lines[0]
+    assert escape not in line and f"herdr reports cwd {env.repo}/sub " in line, line

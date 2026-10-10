@@ -924,7 +924,9 @@ def job_review(con, run: dict, job: dict) -> dict:
             evidence = ev.read_text(encoding="utf-8", errors="replace") if ev.is_file() else None
         brief = briefs.code_review_brief(run, task, rev, diff, checks["summary"] if checks else "none declared",
                                          carried, str(checkout), evidence=evidence,
-                                         verify_only=_verify_only(con, run, gate))
+                                         verify_only=_verify_only(con, run, gate),
+                                         used_codes=finding_codes(con, "run_id=? AND task_id=? AND gate_kind='code_review'",
+                                                                  (run["id"], task["id"])))
         exclude = [job["payload"]["exclude_route"]] if job["payload"].get("exclude_route") else None
         outcome = run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
                                exclude=exclude)
@@ -966,7 +968,104 @@ def remove_checkout(run: dict, path: Path) -> None:
 
 def _fingerprint(f: dict) -> str:
     words = re.findall(r"[a-z0-9_./]+", ((f.get("location") or "") + " " + (f.get("summary") or "")).lower())
-    return sha256_obj(sorted(set(w for w in words if len(w) > 2))[:40])
+    # Bare numbers (line numbers, counts) are noise: a finding that only moved is the same finding.
+    return sha256_obj(sorted(set(w for w in words if len(w) > 2 and not w.isdigit()))[:40])
+
+
+# A finding is identified by its scope, its code and its fingerprint: the code names it and the
+# fingerprint says what it is. A reviewer who reuses a code for different content gets a fresh code, so
+# a disposition (which is keyed by code) can never land on a finding it was not given for. `where` and
+# `params` select one scope's rows of the findings table.
+
+CARRIED_DISPOSITIONS = ("fixed", "dismissed", "follow-up")
+_FRESH_EXEMPT_KINDS = ("checks",)  # the runtime names these (C1, C2, ...); the code is the check, not a reviewer's id
+
+
+def _split_code(code: str) -> tuple[str, str]:
+    prefix = code.rstrip("0123456789")
+    return prefix, code[len(prefix):]
+
+
+def _code_key(code: str) -> tuple[str, int, str]:
+    """Natural order without int() on the digits: a reviewer chooses the code, and a huge digit run must not raise."""
+    prefix, digits = _split_code(code)
+    digits = digits.lstrip("0")
+    return prefix, len(digits), digits
+
+
+def finding_codes(con, where: str, params: tuple) -> list[str]:
+    """Every code a scope has used, in any state: a reviewer must not reuse one for a different finding."""
+    codes = {r[0] for r in con.execute(f"SELECT DISTINCT code FROM findings WHERE {where} AND code IS NOT NULL", params)}
+    return sorted(codes, key=_code_key)
+
+
+def _fresh_code(code: str, taken: set[str]) -> str:
+    prefix = _split_code(code)[0]
+    top = max((int(n) for p, n in map(_split_code, taken) if p == prefix and n and len(n) <= 15), default=1)
+    n = top + 1
+    while f"{prefix}{n}" in taken:
+        n += 1
+    return f"{prefix}{n}"
+
+
+def stable_codes(con, run: dict, where: str, params: tuple, findings: list[dict], reserved=()) -> list[dict]:
+    """One review reply's findings under codes that still name what they named. A code the scope already
+    holds for a finding with a different fingerprint is recorded under a fresh code; a code reused for the
+    same finding keeps it. Findings recorded before fingerprints existed carry none and keep their code.
+    `reserved` are codes the same reply uses elsewhere, which a fresh code must not take."""
+    taken = set(finding_codes(con, where, params)) | {f["code"] for f in findings} | set(reserved)
+    seen: dict[str, str] = {}
+    renamed: dict[tuple[str, str], str] = {}  # (code, fingerprint) -> the fresh code this reply already gave it
+    out = []
+    for f in findings:
+        fp = _fingerprint(f)
+        known = seen.get(f["code"])
+        if known is None:
+            row = con.execute(f"SELECT fingerprint FROM findings WHERE {where} AND code=? AND fingerprint IS NOT NULL "
+                              "ORDER BY rowid DESC LIMIT 1", (*params, f["code"])).fetchone()
+            known = row[0] if row else None
+        if known is not None and known != fp and (f["code"], fp) in renamed:
+            f = {**f, "code": renamed[(f["code"], fp)]}
+        elif known is not None and known != fp:
+            fresh = renamed[(f["code"], fp)] = _fresh_code(f["code"], taken)
+            taken.add(fresh)
+            state.emit(con, run, "finding.recoded", f"{f['code']} was already used for a different finding in this scope; "
+                       f"the new finding ({(f.get('location') or '').strip()} {f['summary'][:80]}) is recorded as {fresh}",
+                       audience="runtime")
+            f = {**f, "code": fresh}
+        seen.setdefault(f["code"], fp)
+        out.append(f)
+    return out
+
+
+def carry_disposition(con, where: str, params: tuple, finding_id: str, fp: str) -> None:
+    """A re-raised finding with the fingerprint of one already dispositioned keeps that disposition."""
+    row = con.execute(f"SELECT disposition, disposition_note, disposition_by, disposition_at FROM findings WHERE {where} "
+                      f"AND fingerprint=? AND disposition IN ({','.join('?' * len(CARRIED_DISPOSITIONS))}) "
+                      "ORDER BY rowid DESC LIMIT 1", (*params, fp, *CARRIED_DISPOSITIONS)).fetchone()
+    if row:
+        con.execute("UPDATE findings SET disposition=?, disposition_note=?, disposition_by=?, disposition_at=? WHERE id=?",
+                    (*row, finding_id))
+
+
+def current_ids(con, where: str, params: tuple, codes, states: tuple[str, ...]) -> list[str]:
+    """Ids of the rows that are the current finding for each code (every row the newest gate wrote for it),
+    narrowed to `states`. An older row that shares the code is a different generation of it and is never
+    rewritten by a disposition, a resolution or a retraction."""
+    codes = list(codes)
+    if not codes:
+        return []
+    rows = con.execute(f"SELECT id, code, gate_id, state FROM findings WHERE {where} AND code IN ({','.join('?' * len(codes))}) "
+                       "ORDER BY rowid", (*params, *codes)).fetchall()
+    newest = {r["code"]: r["gate_id"] for r in rows}
+    return [r["id"] for r in rows if r["gate_id"] == newest[r["code"]] and r["state"] in states]
+
+
+def mark_current(con, where: str, params: tuple, codes, states: tuple[str, ...], new_state: str) -> None:
+    ids = current_ids(con, where, params, codes, states)
+    if ids:
+        con.execute(f"UPDATE findings SET state=?, updated_at=? WHERE id IN ({','.join('?' * len(ids))})",
+                    (new_state, now_iso(), *ids))
 
 
 def preexisting_codes(outcome: dict) -> set[str]:
@@ -1108,7 +1207,7 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
                     "WHERE id=?", (verdict, f"revision {gate['revision_id']} is no longer current", now_iso(),
                                    outcome.get("route"), gate_id))
         if parsed:
-            for f in parsed.findings:
+            for f in _stable_task_findings(con, run, task, gate["kind"], parsed.findings):
                 if f["severity"] == "material":
                     _upsert_finding(con, run, task, gate, f, outcome, carried=True)
         return
@@ -1135,6 +1234,7 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
             _set_state(con, run, task, gate["kind"], code, "resolved")
         for r in parsed.retracted:
             _set_state(con, run, task, gate["kind"], r["code"], "retracted")
+        parsed.findings[:] = _stable_task_findings(con, run, task, gate["kind"], parsed.findings)
         seen = set()
         for f in parsed.findings:
             seen.add(f["code"])
@@ -1181,6 +1281,12 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
         _converge(con, run, task, gate, outcome)
         return
     evaluate_acceptance(con, run, task["id"])
+
+
+def _stable_task_findings(con, run: dict, task: dict, kind: str, findings: list[dict]) -> list[dict]:
+    if kind in _FRESH_EXEMPT_KINDS:
+        return findings
+    return stable_codes(con, run, "run_id=? AND task_id=? AND gate_kind=?", (run["id"], task["id"], kind), findings)
 
 
 def _upsert_finding(con, run, task, gate, f, outcome, carried: bool = False) -> None:

@@ -499,6 +499,15 @@ def preflight(con, run: dict, cwd: Path) -> Result:
     amendments = con.execute("SELECT amendment_id, status FROM deliveries WHERE run_id=? AND task_id=? AND dispatch_id=? "
                              "AND status IN ('queued','delivered','applied') ORDER BY target_version",
                              (run["id"], task["id"], d["id"])).fetchall()
+    fix_rev = (con.execute("SELECT applied_version FROM revisions WHERE run_id=? AND task_id=? AND id=?",
+                           (run["id"], task["id"], packet["fix_of"])).fetchone() if packet.get("fix_of") else None)
+    if fix_rev is not None:
+        # An ack-only session that ended applied its amendment for this task: the rerun inherits that work, so a
+        # delivery above the fix_of revision's applied version counts as this round's amendment.
+        amendments += con.execute("SELECT amendment_id, status FROM deliveries WHERE run_id=? AND task_id=? "
+                                  "AND dispatch_id IS NOT ? AND status='applied' AND target_version>? "
+                                  "ORDER BY target_version",
+                                  (run["id"], task["id"], d["id"], fix_rev["applied_version"] or 0)).fetchall()
     for a in amendments:
         if a["status"] == "applied":
             res.lines.append(f"amendment: {a['amendment_id']} applied")
@@ -519,17 +528,21 @@ def preflight(con, run: dict, cwd: Path) -> Result:
                              + (f"this round brings the worktree onto {merged}; " if merged else "")
                              + ("resolve the merge conflict first; " if restack.get("conflict") else "")
                              + "rerun the checks and resubmit")
-        elif not rows and not amendments:
+        elif not rows and not amendments and (fix_rev is None or task.get("accepted_revision_id") == packet["fix_of"]):
             stop.append(f"findings: fix round for {packet['fix_of']} but no open findings or amendments are recorded; "
                         f"the orchestrator resolves it with: office amend {task['id']} -- \"<what to fix>\" (delivered "
                         f"to this session), or office revoke {task['id']} then office rerun {task['id']} --fresh once "
                         "findings are recorded")
+        elif not rows and not amendments:
+            # A revoked or ended session left the revision unaccepted with nothing open against it: the rerun may
+            # resubmit the tree as it is.
+            res.lines.append(f"resubmit: {packet['fix_of']} is not accepted and has no open findings; resubmit the tree "
+                             "as it is, or with your changes")
 
     # 5. Scope: tracked edits outside the contract are refused at submit.
-    base = d["base_commit"]
     head = _git(wt, "rev-parse", "HEAD")
     # The committed diff: the self-review ledger vouches for HEAD.
-    dep_bases = [b for b in submit._dependency_bases(con, run, task, head) if b != base]
+    base, dep_bases = submit.attribution(con, run, task, d, head)
     # Submit captures uncommitted edits too, so scope is judged on the worktree as it is now.
     touched = [f for f in _git(wt, "diff", "--no-renames", "--name-only", "-z", base).split("\0") if f]
     for b in dep_bases:

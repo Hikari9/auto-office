@@ -128,7 +128,7 @@ def test_revoke_of_a_closed_or_unknown_lane_gate_changes_nothing(env):
 def test_a_task_id_still_routes_to_the_task_revoke(env):
     _unavailable_lane(env)
     code, out = env.office("revoke", "T1")
-    assert code == 0 and "lease revoked" in out, out
+    assert code == 0 and "stays accepted" in out and "lease released" in out, out
 
 
 def test_the_hint_and_the_review_agree_on_the_current_cycle(env, tmp_path):
