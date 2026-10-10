@@ -176,9 +176,11 @@ def prelude(schema: dict) -> str:
 METRICS = {
     "runs.span": {
         "needs": ("runs",),
-        "denominator": "every row of runs",
-        "sql": "SELECT COUNT(*) AS runs, MIN(substr(created_at, 1, 10)) AS first_day, "
-               "MAX(substr(created_at, 1, 10)) AS last_day, COALESCE(SUM(pruned_at IS NOT NULL), 0) AS pruned FROM rn",
+        "denominator": "every row of runs; a created_at that does not start with YYYY-MM-DD gives no day",
+        "sql": ", d AS (SELECT CASE WHEN created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' "
+               "THEN substr(created_at, 1, 10) END AS day, pruned_at FROM rn) "
+               "SELECT COUNT(*) AS runs, MIN(day) AS first_day, MAX(day) AS last_day, "
+               "COALESCE(SUM(pruned_at IS NOT NULL), 0) AS pruned FROM d",
     },
     "runs.by_phase": {
         "needs": ("runs",),
@@ -438,10 +440,38 @@ def label(kind: str, value) -> str:
     return value if isinstance(value, str) and LABEL_RES[kind].fullmatch(value) else "other"
 
 
+# Per-row statistics that cannot be added up when rows merge.
+NOT_ADDITIVE = ("mean_seconds", "median_seconds", "max_seconds")
+
+
+def _merge_clamped(rows: list[dict]) -> list[dict]:
+    """Rows whose labels were clamped to `other` can share a key; they are one row now, so add their counts.
+    A statistic that cannot be added (a median, say) becomes unknown for the merged row."""
+    merged: dict[tuple, dict] = {}
+    out = []
+    for row in rows:
+        if "other" not in row.values():
+            out.append(row)
+            continue
+        key = tuple((k, v) for k, v in row.items() if not isinstance(v, (int, float)) or isinstance(v, bool))
+        into = merged.get(key)
+        if into is None:
+            merged[key] = into = dict(row)
+            out.append(into)
+            continue
+        for k, v in row.items():
+            if k in NOT_ADDITIVE:
+                into[k] = None
+            elif isinstance(v, (int, float)):
+                into[k] = v if into[k] is None else into[k] if v is None else into[k] + v
+    return out
+
+
 def _rows(con: sqlite3.Connection, schema: dict, metric: str) -> list[dict]:
     cursor = con.execute(prelude(schema) + " " + METRICS[metric]["sql"])
     names = [d[0] for d in cursor.description]
-    return [{n: label(n, v) if n in LABEL_RES else v for n, v in zip(names, row)} for row in cursor.fetchall()]
+    return _merge_clamped([{n: label(n, v) if n in LABEL_RES else v for n, v in zip(names, row)}
+                           for row in cursor.fetchall()])
 
 
 def _section(con, schema, metrics: tuple[str, ...], build, optional: tuple[str, ...] = ()) -> dict:
@@ -769,7 +799,7 @@ def main(argv: list[str] | None = None) -> int:
     except sqlite3.Error as exc:
         hint = ("; a WAL-mode database needs a writable directory or existing -wal and -shm files: copy the .db, "
                 "-wal and -shm files to a writable directory" if "readonly" in str(exc) or "unable to open" in str(exc) else "")
-        print(f"routing_evidence_report: cannot read the file as a database ({type(exc).__name__}: {exc}){hint}",
+        print(f"routing_evidence_report: cannot read the file as a database ({type(exc).__name__}){hint}",
               file=sys.stderr)
         return 2
     except RuntimeError as exc:

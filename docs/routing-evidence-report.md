@@ -76,16 +76,17 @@ Each entry gives the metric id, the denominator, the SQL (run after the prelude)
 
 ### `runs.span`
 
-**Denominator:** every row of runs.
+**Denominator:** every row of runs; a created_at that does not start with YYYY-MM-DD gives no day.
 
 **Reported as:** `sections.population.runs`, `source.run_date_range`.
 
 ```sql
-SELECT COUNT(*) AS runs, MIN(substr(created_at, 1, 10)) AS first_day, MAX(substr(created_at, 1, 10)) AS
-    last_day, COALESCE(SUM(pruned_at IS NOT NULL), 0) AS pruned FROM rn
+, d AS (SELECT CASE WHEN created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' THEN
+    substr(created_at, 1, 10) END AS day, pruned_at FROM rn) SELECT COUNT(*) AS runs, MIN(day) AS
+    first_day, MAX(day) AS last_day, COALESCE(SUM(pruned_at IS NOT NULL), 0) AS pruned FROM d
 ```
 
-`pruned` counts runs Office marked `pruned_at`; the report cannot see anything pruned before the file was copied.
+A `created_at` that does not start with `YYYY-MM-DD` gives no day (the first and last day are `unknown` if none does). `pruned` counts runs Office marked `pruned_at`; the report cannot see anything pruned before the file was copied.
 
 ### `runs.by_phase`
 
@@ -399,4 +400,6 @@ See the Provenance section above.
 - **Strict successes vs episodes.** `dispatch.strict_successes` is the raw count of dispatches whose revision was accepted. `episodes` counts task-route pairs. Compare them per route: where a route has retries, episodes are fewer than settled dispatches, and a route that was handed a task and then lost it has a failed episode without a failed task.
 - **Task size vs run size.** `size.task` is what the planner said about each task, `size.dispatch_snapshot` what was copied onto its executor dispatch at launch, and `size.run` the run's risk size. They are three different questions and are printed under three labels.
 - **Lane exposure vs findings.** A finding in a shared reviewed scope is in front of every member task (`lane_exposure`). Attribution (`reviewer-declared`, `unique-path`) names one task; `unassigned` could not. Attribution is evidence only: it did not decide which producer repaired the finding.
+- **NULL effort.** `task.*` metrics treat a route with an unknown harness, model or effort as unknown, so a NULL effort never counts as a mismatch or a handoff. `episodes` and `dispatch.routes` print a NULL effort as the `unknown` effort of an otherwise known route, so the three sections can disagree on whether a NULL-effort dispatch and a later one are the same route.
+- **Merged `other` rows.** Rows whose labels were clamped to `other` that then share a key are one row: counts are added, and a mean, median or maximum is `unknown` for the merged row.
 - **Historical NULL.** Every evidence column was added after runs existed. Runs from before it read as `unknown` in first executor, links, attribution and tags; the report does not guess.

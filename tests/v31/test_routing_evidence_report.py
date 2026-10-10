@@ -1002,3 +1002,55 @@ def test_latency_and_cost_keep_their_precision(tmp_path):
     report = sec(rer.build_report(tmp_path / "mini.db"), "latency_and_cost")
     assert by_route(report["latency"], "executor", A)["mean_seconds"] == 12.346
     assert by_route(report["cost"], "executor", A)["total"] == 0.012346
+
+
+# ------------------------------------------------------------------ round 2
+
+def test_a_created_at_that_is_not_a_date_gives_no_day(tmp_path):
+    con = _mini(tmp_path)
+    _insert(con, "runs", id=R1, created_at=f"SECRET\n{Z}!!xyz", phase="closed")
+    _insert(con, "runs", id=R2, created_at="2026-09-01T09:00:00+00:00", phase="closed")
+    con.commit()
+    con.close()
+    report = rer.build_report(tmp_path / "mini.db")
+    assert report["source"]["run_date_range"] == {"runs": 2, "first": "2026-09-01", "last": "2026-09-01"}
+    assert Z not in json.dumps(report)
+    con = sqlite3.connect(tmp_path / "mini.db")
+    con.execute("UPDATE runs SET created_at=?", (f"SECRET\n{Z}!!xyz",))
+    con.commit()
+    con.close()
+    assert rer.build_report(tmp_path / "mini.db")["source"]["run_date_range"] == {"runs": 2, "first": None, "last": None}
+
+
+def test_dispatch_rows_whose_labels_clamp_to_the_same_key_merge(tmp_path):
+    con = _mini(tmp_path)
+    _insert(con, "runs", id=R1, created_at="2026-09-01T09:00:00+00:00", phase="closed")
+    for tid, harness, model, secs in (("T1", "A B", "m 1", 60), ("T2", "C D", "m 2", 120)):
+        _dispatch(con, tid, tid, (harness, model, "high"), start="2026-09-01T10:00:00+00:00",
+                  end=f"2026-09-01T10:{secs // 60:02d}:00+00:00", money=1.0)
+        _revision(con, tid, tid, 1, tid, LEDGER)
+        _task(con, tid, "accepted", first=tid, rev=tid)
+    con.commit()
+    con.close()
+    report = rer.build_report(tmp_path / "mini.db")
+    routes = sec(report, "dispatches")["routes"]
+    assert [(r["harness"], r["model"], r["dispatches"], r["strict_successes"]) for r in routes] == [("other", "other", 2, 2)]
+    assert sec(report, "dispatches")["totals"]["strict_successes"] == 2
+    (latency,) = sec(report, "latency_and_cost")["latency"]
+    assert (latency["terminal"], latency["recorded"]) == (2, 2)
+    assert (latency["mean_seconds"], latency["median_seconds"], latency["max_seconds"]) == ("unknown",) * 3
+    (cost,) = sec(report, "latency_and_cost")["cost"]
+    assert (cost["recorded"], cost["total"]) == (2, 2.0)
+
+
+def test_a_database_error_names_no_schema_object(tmp_path, capsys):
+    path = tmp_path / "bad.db"
+    con = sqlite3.connect(path)
+    con.execute(f"CREATE TABLE secret_{Z}(a)")
+    con.execute("PRAGMA writable_schema=ON")
+    con.execute("UPDATE sqlite_master SET sql=? WHERE name=?", (f"create table secret_{Z}(", f"secret_{Z}"))
+    con.commit()
+    con.close()
+    assert rer.main(["--db", str(path)]) == 2
+    err = capsys.readouterr().err
+    assert Z not in err and "DatabaseError" in err
