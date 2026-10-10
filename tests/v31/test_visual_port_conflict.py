@@ -317,3 +317,52 @@ def test_pane_launch_records_the_agent_group_and_start(env, live_agent, monkeypa
     assert dispatch._record_pane_agent_group(run, "DP2", "p1") is None
     info["process_info"] = {}
     assert dispatch._record_pane_agent_group(run, "DP3", "p1") is None
+
+
+@pytest.mark.approved
+def test_pane_group_is_read_again_until_the_shell_hands_over(env, live_agent, monkeypatch):
+    from office import dispatch
+    _, run = _run(env)
+    agent = live_agent()
+    seq = [{}, {"shell_pid": 4242, "foreground_process_group_id": 4242},
+           {"shell_pid": 4242, "foreground_process_group_id": agent["pid"]}]
+    calls = []
+
+    def fake(args):
+        calls.append(args)
+        return {"process_info": seq[min(len(calls) - 1, len(seq) - 1)]}
+    monkeypatch.setattr(dispatch, "_herdr_json", fake)
+    monkeypatch.setattr(dispatch.time, "sleep", lambda s: None)
+    assert dispatch._record_pane_agent_group(run, "DP4", "p1") == agent["pid"]
+    assert len(calls) == 3
+
+
+@pytest.mark.approved
+def test_pane_group_wait_is_bounded(env, monkeypatch):
+    from office import dispatch
+    _, run = _run(env)
+    monkeypatch.setattr(dispatch, "_PANE_GROUP_WAIT", 0.3)
+    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {"process_info": {"shell_pid": 7, "foreground_process_group_id": 7}})
+    t = time.time()
+    assert dispatch._record_pane_agent_group(run, "DP5", "p1") is None
+    assert time.time() - t < 2
+
+
+@pytest.mark.approved
+def test_stop_dispatch_never_signals_a_pane_agent_group(env, live_agent, monkeypatch):
+    from office import dispatch
+    _, run = _run(env)
+    agent = live_agent()
+    ddir = paths.run_dir(run["id"]) / "dispatches" / "DP6"
+    ddir.mkdir(parents=True, exist_ok=True)
+    (ddir / "agent.pgid").write_text(str(agent["pid"]))
+    (ddir / "agent.identity").write_text(json.dumps({"pid": agent["pid"], "start": process_start(agent["pid"])}))
+    sent = []
+    monkeypatch.setattr(dispatch, "_killpg", lambda pid, sig=signal.SIGTERM: sent.append(pid) or False)
+    monkeypatch.setattr(dispatch.shutil, "which", lambda name: None)
+    d = {"id": "DP6", "launcher": "herdr", "pid": None, "pane_id": "p1"}
+    try:
+        dispatch.stop_dispatch(run, d, wait=0)
+    except Exception:
+        pass  # the dispatch row is absent; only the signals matter here
+    assert agent["pid"] not in sent and agent["proc"].poll() is None
