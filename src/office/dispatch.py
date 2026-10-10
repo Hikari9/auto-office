@@ -39,7 +39,11 @@ from office.util import (DEAD, atomic_write_json, claim_signalable, dumps, now_i
 LEASE_TTL_SECONDS = 4 * 3600
 # A harness session id lands in a resume argv: plain id characters only, never a leading dash.
 _SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
-IDENTITY_ENV = ("OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE_ROLE", "OFFICE_STATE_DIR",
+# Only an agent carries this: the dispatch id it was launched for, which names every process it starts. Kept apart
+# from OFFICE_DISPATCH_ID, which authority checks read, so no job, supervisor or other command a worker runs
+# passes the tag on to a process that is not the worker's.
+_WORKER_TAG = "OFFICE_WORKER_TAG"
+IDENTITY_ENV = ("OFFICE_WORKER_TAG", "OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE_ROLE", "OFFICE_STATE_DIR",
                 "OFFICE_SESSION", "OFFICE_HARNESS", "OFFICE_VERSION", "OFFICE_FRONT_DOOR_HOPS")
 PLANNER_TASK = "P1"
 
@@ -1308,6 +1312,7 @@ def worker_env(run: dict, dispatch: dict, role: str) -> dict:
         "OFFICE_RUN_ID": run["id"],
         "OFFICE_TASK_ID": dispatch["task_id"] or "",
         "OFFICE_DISPATCH_ID": dispatch["id"],
+        _WORKER_TAG: dispatch["id"],
         "OFFICE_ROLE": role,
         "OFFICE_VERSION": version.current(),
     })
@@ -1411,7 +1416,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
                 _headless_resume(run, dispatch, kind, spec, resume)
     log = open(ddir / "supervisor.log", "ab")
     try:
-        proc = subprocess.Popen(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
+        proc = subprocess.Popen(sup, cwd=str(paths.run_dir(run["id"])), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
                                 start_new_session=True, close_fds=True)
     finally:
         log.close()
@@ -1476,7 +1481,7 @@ def _launch_external(run: dict, dispatch: dict, kind: str, spec: dict, ddir: Pat
     atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
     log = open(ddir / "supervisor.log", "ab")
     try:
-        watcher = subprocess.Popen(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
+        watcher = subprocess.Popen(sup, cwd=str(paths.run_dir(run["id"])), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
                                    start_new_session=True, close_fds=True)
     finally:
         log.close()
@@ -1773,8 +1778,8 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
             con.close()
     log = open(ddir / "supervisor.log", "ab")
     try:
-        watcher = subprocess.Popen(frontdoor.current_argv()[0] + ["_supervise", dispatch["id"]], cwd=str(cwd),
-                                   stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
+        watcher = subprocess.Popen(frontdoor.current_argv()[0] + ["_supervise", dispatch["id"]],
+                                   cwd=str(paths.run_dir(run["id"])), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
                                    start_new_session=True, close_fds=True)
     finally:
         log.close()
@@ -3549,7 +3554,6 @@ def _after_worker_exit(con, run: dict, dispatch_id: str) -> None:
 
 # ------------------------------------------------------------------ trial launch-failure recovery (#494)
 
-_WORKER_TAG = "OFFICE_DISPATCH_ID"
 
 
 def trial_launch_failed(con, run: dict, dispatch_id: str | None, why: str) -> bool:
@@ -3648,16 +3652,6 @@ class _WorkerTree:
         self.pgid = pgid  # the verified agent's process group: every live member of it is the worker's
         self.seen: dict[int, str] = {}
 
-    def mine(self) -> set[int]:
-        """This process and its ancestors."""
-        table = _process_table() or []
-        parent = {row[0]: row[1] for row in table}
-        out, pid = set(), os.getpid()
-        while pid in parent and pid not in out:
-            out.add(pid)
-            pid = parent[pid]
-        return out or {os.getpid()}
-
     def scan(self, _root=None) -> set[int] | None:
         table = _process_table()
         if table is None:
@@ -3677,16 +3671,26 @@ class _WorkerTree:
         while pid in parent and pid not in mine:
             mine.add(pid)
             pid = parent[pid]
-        queue = [p for p, st in {**self.seen, **self.roots}.items() if started.get(p) == st and p not in mine]
+        queue = [p for p, st in {**self.seen, **self.roots}.items() if started.get(p) == st]
         queue.extend(found)  # whatever the tag or the group named has descendants too
-        walked: set[int] = set()
+        walked: set[int] = set(mine)  # this process and its ancestors are never walked into, nor their other children
         while queue:
             pid = queue.pop()
             if pid not in walked:
                 walked.add(pid)
                 found.add(pid)
                 queue.extend(children.get(pid, []))
-        found = {p for p in found if p in started and p > 1 and p not in mine}
+        def mine_or_started_by_me(pid: int) -> bool:
+            # The `ps` this scan ran, a `git` or `lsof` of ours: they inherit whatever tag this process carries.
+            seen = set()
+            while pid in parent and pid not in seen:
+                if pid == os.getpid():
+                    return True
+                seen.add(pid)
+                pid = parent[pid]
+            return False
+
+        found = {p for p in found if p in started and p > 1 and p not in mine and not mine_or_started_by_me(p)}
         self.seen.update({p: started[p] for p in found})
         return found
 
@@ -3729,6 +3733,15 @@ def stop_worker_tree(run: dict, d: dict) -> tuple[bool, str]:
         if now == recorded:
             roots[pid] = _c_start(pid) or now
             agent_pgid = pid if which == "agent" else agent_pgid
+    if not agent_pgid:
+        # The leader may be gone while a member of its group is not. A group id cannot be reused while the group has
+        # members, so the recorded one is the worker's unless a live process now has that pid (a new group may have it).
+        try:
+            recorded = int(_agent_pgid_file(run, d["id"]).read_text().strip())
+        except (OSError, ValueError):
+            recorded = 0
+        if recorded > 1 and pid_state(recorded) == DEAD:
+            agent_pgid = recorded
     pid = d.get("pid")
     if pid and pid != os.getpid() and not _recorded_identity(run, d["id"], "supervisor") and pid_alive(pid):
         return False, f"supervisor pid {pid} is alive and has no recorded identity to prove which process it is"
@@ -3743,14 +3756,15 @@ def stop_worker_tree(run: dict, d: dict) -> tuple[bool, str]:
     if d.get("worktree") and Path(d["worktree"]).is_dir():
         for attempt in range(3):  # a closing pane's shell takes a moment to go
             holders = _cwd_holders(Path(d["worktree"]))
-            if holders is None:
+            table = _process_table()
+            if holders is None or table is None:
                 return False, "the processes working in the worktree cannot be listed, so exit is unconfirmed"
-            holders = _foreign(holders, tree.mine())
+            holders = _foreign(holders, table)
             if not holders:
                 break
             time.sleep(0.5)
         else:
-            names = {row[0]: row[5].split(None, 1)[0] for row in _process_table() or [] if row[0] in holders}
+            names = {row[0]: row[5].split(None, 1)[0] for row in table if row[0] in holders}
             return False, ("processes with an unattributed working directory in the worktree remain: "
                            + ", ".join(f"{pid} ({names.get(pid, '?')})" for pid in sorted(holders)))
     return True, "; ".join([*notes, f"confirmed no process of {d['id']} remains"
@@ -3796,20 +3810,27 @@ def _worktree_snapshot(wt: Path) -> dict | None:
     return None
 
 
-def _foreign(pids: set[int], mine: set[int]) -> set[int]:
+def _foreign(pids: set[int], table: list[tuple]) -> set[int]:
     """`pids` that are neither this process, its ancestors, nor something this process started (the `lsof`
     that listed them, a `git` it ran: a supervisor that works from the worktree gives them that directory), and
-    that still exist."""
-    table = {row[0]: row[1] for row in _process_table() or []}
+    that still exist in `table`."""
+    parent = {row[0]: row[1] for row in table}
+    me, mine = os.getpid(), set()
+    pid = me
+    while pid in parent and pid not in mine:
+        mine.add(pid)
+        pid = parent[pid]
+
     def ours(pid: int) -> bool:
         seen = set()
-        while pid in table and pid not in seen:
-            if pid in mine and pid == os.getpid():
-                return True
+        while pid in parent and pid not in seen:
             seen.add(pid)
-            pid = table[pid]
-        return pid == os.getpid()
-    return {p for p in pids if p in table and p not in mine and not ours(p)}
+            pid = parent[pid]
+            if pid == me:
+                return True
+        return False
+
+    return {p for p in pids if p in parent and p not in mine and not ours(p)}
 
 
 def _cwd_holders(wt: Path) -> set[int] | None:
@@ -3822,9 +3843,13 @@ def _cwd_holders(wt: Path) -> set[int] | None:
         holders = set()
         for entry in Path("/proc").iterdir():
             if entry.name.isdigit():
-                with contextlib.suppress(OSError):
+                try:
                     if inside(os.readlink(entry / "cwd")):
                         holders.add(int(entry.name))
+                except (FileNotFoundError, ProcessLookupError):
+                    continue  # gone since the listing
+                except OSError:
+                    return None  # a process whose directory cannot be read may be the one writing
         return holders
     try:
         proc = subprocess.run([_system_tool("lsof", "/usr/sbin/lsof", "/usr/bin/lsof"), "-nP", "-a", "-d", "cwd", "-F", "pn"],
@@ -3858,7 +3883,8 @@ def work_started(con, d: dict, ddir: Path) -> tuple[bool, str]:
     try:
         before = json.loads((ddir / "worktree-baseline.json").read_text())
     except (OSError, ValueError):
-        if d.get("launcher") or d.get("pid"):
+        started = [n for n in ("launch.json", "agent.identity", "supervisor.identity", "agent.pgid") if (ddir / n).exists()]
+        if d.get("launcher") or d.get("pid") or started:
             return True, "the worktree has no launch baseline to compare against, so work cannot be ruled out"
         return False, "no agent was ever launched in this dispatch"
     if after["head"] != before["head"]:

@@ -325,7 +325,7 @@ def spawn(job_id: str, run_id: str) -> None:
     env.update(extra_env)
     env.pop(frontdoor.HOP_ENV, None)
     env.pop(LOCK_FD_ENV, None)
-    env.pop("OFFICE_DISPATCH_ID", None)  # a job is not the worker that kicked it: its id would tag the job's own processes
+    env.pop("OFFICE_WORKER_TAG", None)  # a job is not the worker that kicked it: the tag would name the job's processes
     path = log_path(run_id, job_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     log = open(path, "ab")
@@ -510,7 +510,7 @@ def _supervise_locked(con, run_id: str, job_id: str, lock_fd: int) -> int:
     env = dict(os.environ)
     env.update(extra_env)
     env.pop(frontdoor.HOP_ENV, None)
-    env.pop("OFFICE_DISPATCH_ID", None)
+    env.pop("OFFICE_WORKER_TAG", None)
     env[LOCK_FD_ENV] = str(lock_fd)
     os.set_inheritable(lock_fd, True)
     log = log_path(run_id, job_id)
