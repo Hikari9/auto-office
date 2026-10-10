@@ -1054,3 +1054,97 @@ def test_a_database_error_names_no_schema_object(tmp_path, capsys):
     assert rer.main(["--db", str(path)]) == 2
     err = capsys.readouterr().err
     assert Z not in err and "DatabaseError" in err
+
+
+# ------------------------------------------------------------------ round 2 test strength
+
+def test_free_text_routes_are_clamped_in_the_episodes_and_merge_with_clamped_phases(tmp_path):
+    con = _mini(tmp_path)
+    for name in (R1, R2):
+        _insert(con, "runs", id=name, created_at="2026-09-01T09:00:00+00:00", phase=f"Free text {name}")
+    _accepted(con, "T1", (f"/Users/{Z}/secret", f"model {Z}/leak", f"hi {Z}"), 1)
+    _accepted(con, "T2", (f"/etc/{Z}", f"other {Z}", f"lo {Z}"), 1)
+    con.execute("UPDATE tasks SET status=? || id", (f"Bad {Z} ",))
+    con.commit()
+    con.close()
+    report = rer.build_report(tmp_path / "mini.db")
+    assert Z not in json.dumps(report)
+    (row,) = sec(report, "episodes")["routes"]
+    assert (row["harness"], row["model"], row["effort"], row["episodes"], row["accepted_episodes"]) == (
+        "other", "other", "other", 2, 2)
+    assert sec(report, "population")["runs_by_phase"] == {"other": 2}
+    assert sec(report, "population")["tasks_by_status"] == {"other": 2}
+    assert sec(report, "dispatches")["totals"]["strict_successes"] == 2  # a strict success does not read the status
+
+
+def test_a_blob_in_a_text_column_is_other(tmp_path):
+    con = _mini(tmp_path)
+    _dispatch(con, "a", None, ("claude", b"\xff\xfe", b"x"), end="2026-09-01T10:01:00+00:00")
+    con.commit()
+    con.close()
+    (row,) = sec(rer.build_report(tmp_path / "mini.db"), "dispatches")["routes"]
+    assert (row["harness"], row["model"], row["effort"]) == ("claude", "other", "other")
+
+
+SECTIONS = ("_population_section", "_dispatch_section", "_episode_section", "_task_path_section", "_self_review_section",
+            "_finding_section", "_latency_cost_section", "_size_section", "_tag_section")
+
+
+@pytest.mark.parametrize("fn", SECTIONS)
+def test_every_section_fails_alone(new_db, monkeypatch, fn):
+    def boom(con, schema):
+        raise KeyError(Z)
+    monkeypatch.setattr(rer, fn, boom)
+    report = rer.build_report(new_db)
+    failed = [n for n, v in report["sections"].items() if v.get("reason") == "KeyError while reading this section"]
+    assert len(failed) == 1 and Z not in json.dumps(report)
+    assert sum(1 for v in report["sections"].values() if v["available"]) == len(report["sections"]) - 1
+
+
+class _Probe:
+    """A connection that lacks one SQLite feature: it fails any probe that uses it."""
+    def __init__(self, missing, message):
+        self.missing, self.message = missing, message
+
+    def execute(self, sql, *a):
+        if self.missing in sql:
+            raise sqlite3.OperationalError(self.message)
+        return sqlite3.connect(":memory:").execute("SELECT 1")
+
+
+@pytest.mark.parametrize("missing,message", [("json_valid", "no such function: json_valid"),
+                                             ("json_type", "no such function: json_type"),
+                                             ("OVER", 'near "(": syntax error')])
+def test_each_part_of_the_feature_probe_is_exercised(missing, message):
+    with pytest.raises(RuntimeError, match=r"3\.25"):
+        rer.require_features(_Probe(missing, message))
+    rer.require_features(_Probe("zzz-absent", "x"))  # a connection that has everything passes
+
+
+def test_another_operational_error_is_not_mistaken_for_a_missing_feature():
+    with pytest.raises(sqlite3.OperationalError, match="unable to open"):
+        rer.require_features(_Probe("json_valid", "unable to open database file"))
+
+
+@pytest.mark.parametrize("error,hint", [(sqlite3.OperationalError("attempt to write a readonly database"), True),
+                                        (sqlite3.OperationalError("unable to open database file"), True),
+                                        (sqlite3.DatabaseError("file is not a database"), False)])
+def test_the_writable_directory_hint_follows_the_error(tmp_path, monkeypatch, capsys, error, hint):
+    path = tmp_path / "x.db"
+    path.write_bytes(b"x")
+    monkeypatch.setattr(rer, "build_report", lambda p: (_ for _ in ()).throw(error))
+    assert rer.main(["--db", str(path)]) == 2
+    assert ("writable directory" in capsys.readouterr().err) is hint
+
+
+def test_the_package_import_falls_back_to_the_checkout_and_beats_a_stale_office(new_db, tmp_path):
+    stale = tmp_path / "stale" / "office"
+    stale.mkdir(parents=True)
+    (stale / "__init__.py").write_text("")
+    script = str(ROOT / "scripts" / "routing_evidence_report.py")
+    for env in ({}, {"PYTHONPATH": str(stale.parent)}):
+        # -S: no site-packages, so the editable install cannot supply `office`; only the src/ fallback can.
+        proc = subprocess.run([sys.executable, "-S", script, "--db", str(new_db), "--format", "json"], env=env,
+                              capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(proc.stdout)["sections"]["episodes"]["available"] is True, env

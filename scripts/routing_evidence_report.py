@@ -37,7 +37,10 @@ from urllib.parse import quote
 try:
     from office import route_learning
 except ImportError:
-    # Run straight from a checkout, the package is under src/ and not on the path.
+    # Run straight from a checkout, the package is under src/ and not on the path. A different `office` that
+    # was already imported (another checkout, a stale wheel) must not shadow it.
+    for _name in [n for n in sys.modules if n == "office" or n.startswith("office.")]:
+        del sys.modules[_name]
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     try:
         from office import route_learning
@@ -520,12 +523,8 @@ def _histogram(rows: list[dict], state: str) -> dict:
 
 def _dispatch_section(con, schema) -> dict:
     def build(routes, strict):
-        by_key = None
-        if strict is not None:
-            by_key = {}
-            for r in strict:  # a clamped label can make two rows share a key
-                key = (r["role"], r["harness"], r["model"], r["effort"])
-                by_key[key] = by_key.get(key, 0) + r["strict_successes"]
+        by_key = None if strict is None else {(r["role"], r["harness"], r["model"], r["effort"]): r["strict_successes"]
+                                              for r in strict}
 
         def successes(r):
             if by_key is None or r["role"] not in ("executor", "worker"):
@@ -556,7 +555,7 @@ def _episode_section(con, schema) -> dict:
     def row(role: str, route: str) -> dict:
         harness, _, rest = route.partition("/")
         model, _, effort = rest.rpartition("@")
-        key = (label("role", role), label("harness", harness), label("model", model),
+        key = (role, label("harness", harness), label("model", model),  # role is executor or worker here
                "unknown" if effort in ("None", "") else label("effort", effort))
         return rows.setdefault(key, {"role": key[0], "harness": key[1], "model": key[2], "effort": key[3],
                                      "settled_dispatches": 0, "settled_strict_successes": 0, "episodes": 0,
@@ -689,15 +688,9 @@ def _tag_section(con, schema) -> dict:
 
 
 def _population_section(con, schema) -> dict:
-    def tally(rows, key, value):  # a clamped label can make two rows share a key
-        out: dict[str, int] = {}
-        for r in rows:
-            out[r[key]] = out.get(r[key], 0) + r[value]
-        return out
-
     def build(span, phases, statuses):
-        return {"runs": span[0], "runs_by_phase": tally(phases, "phase", "runs"),
-                "tasks_by_status": tally(statuses, "status", "tasks") if statuses is not None else None}
+        return {"runs": span[0], "runs_by_phase": {r["phase"]: r["runs"] for r in phases},
+                "tasks_by_status": {r["status"]: r["tasks"] for r in statuses} if statuses is not None else None}
     return _section(con, schema, ("runs.span", "runs.by_phase", "tasks.by_status"), build, optional=("tasks.by_status",))
 
 
