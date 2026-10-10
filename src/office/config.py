@@ -212,14 +212,54 @@ def config_drift(run: dict) -> str | None:
             f"not applied to this run ({_describe(diffs)})")
 
 
+def routing_inputs_drift(run: dict, hashes: dict | None = None) -> str | None:
+    """A warning when the catalog (seed plus user overlay) or the adapter set
+    (seed plus user adapters) no longer hashes to what `run` pinned at start.
+    Warn-only, like config_drift: candidate building reads the live files."""
+    if not run.get("catalog_hash") and not run.get("adapter_hash"):
+        return None
+    try:
+        now = hashes or snapshot_hashes()
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+    changed = [name for name, key in (("catalog", "catalog_hash"), ("adapters", "adapter_hash"))
+               if run.get(key) and run.get(key) != now.get(key)]
+    if not changed:
+        return None
+    return (f"routing {' and '.join(changed)} changed since run {str(run.get('id', ''))[:8]} started "
+            "(office model/harness edits or an upgrade); later dispatches route from the current files")
+
+
+_HASHES_CACHE: dict[tuple, dict] = {}
+
+
 def snapshot_hashes() -> dict:
+    """policy/catalog/adapter hashes a run pins. Never raises on a user file:
+    only user adapters that load (adapters.load_sources) are hashed, and an
+    unparseable catalog overlay is hashed by its bytes. With no user files the
+    hashes are the seed-only values earlier runs recorded. Cached per process,
+    keyed on the input files' mtimes and sizes."""
     root = paths.resources_root()
+    from office import adapters as adapter_mod, user_catalog
+    key = (adapter_mod.files_stamp(),
+           adapter_mod._file_stamp([root / "catalog" / "seed.yaml", user_catalog.path(), default_config_path()]))
+    cached = _HASHES_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
     adapters = {p.name: load_yaml(p) for p in sorted((root / "adapters" / "seed").glob("*.yaml"))}
-    return {
+    for aid, (data, origin, p) in sorted(adapter_mod.load_sources().items()):
+        if origin != "seed" and data.get("office_profiles"):
+            adapters["user/" + p.name] = data
+    catalog = load_yaml(root / "catalog" / "seed.yaml")
+    overlay = user_catalog.raw()
+    out = {
         "policy_hash": sha256_file(default_config_path()),
-        "catalog_hash": sha256_obj(load_yaml(root / "catalog" / "seed.yaml")),
+        "catalog_hash": sha256_obj(catalog if overlay is None else {"seed": catalog, "user": overlay}),
         "adapter_hash": sha256_obj(adapters),
     }
+    _HASHES_CACHE.clear()
+    _HASHES_CACHE[key] = out
+    return dict(out)
 
 
 def resolve_risk(config: dict, blast_radius: str | None, size_class: str | None,

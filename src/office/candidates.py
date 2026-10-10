@@ -38,7 +38,8 @@ _QUOTA_TTL = 60.0
 
 def catalog_rows() -> list[dict]:
     data = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8")) or {}
-    return resolve_aliases(list(data.get("models") or []))
+    from office import user_catalog
+    return resolve_aliases(user_catalog.apply(list(data.get("models") or [])))
 
 
 _ALIAS_FIELDS = ("benchmark_indexes", "task_benchmarks", "price_fields", "speed_fields", "release_date")
@@ -300,7 +301,8 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
     """Return (candidates, skipped). `skipped` explains unavailable harnesses
     and rows under a model_family_floors entry."""
     kind = KIND_FOR_ROLE.get(role, "worker")
-    all_adapters = adapters.load_all()
+    sources = adapters.load_sources()
+    all_adapters = {aid: entry[0] for aid, entry in sources.items()}
     candidates, skipped = [], []
     for row in catalog_rows():
         harness = row.get("invocation_harness")
@@ -318,7 +320,7 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
         if not adapters.installed(adapter):
             skipped.append({"candidate": label, "reason": f"{harness} not installed"})
             continue
-        version = adapters.harness_version(adapter) or "unknown"
+        version = adapters.route_version(harness, adapter, sources)
         cand = {
             "harness": harness,
             "harness_version": version,
@@ -413,7 +415,7 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
     row = rows[0] if len(rows) == 1 or (rows and effort) else None
     return {
         "harness": harness,
-        "harness_version": adapters.harness_version(adapter) or "unknown",
+        "harness_version": adapters.route_version(harness, adapter),
         "model_id": (row or {}).get("model_id") or model,
         "invocation_model_id": (row or {}).get("invocation_model_id") or model,
         "invocation_source": "user-override",

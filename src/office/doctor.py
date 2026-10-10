@@ -55,6 +55,9 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
             drift = cfg.config_drift(state.get_run(con, r["id"]))
             if drift:
                 res.add(drift)
+            routing_drift = cfg.routing_inputs_drift(state.get_run(con, r["id"]))
+            if routing_drift:
+                res.add(routing_drift)
         newest = frontdoor.installed_lines()[0]
         for line, ids in sorted(pinned.items(), key=lambda kv: version.release_key(kv[0])):
             ok = version.same_line(line, ver) or frontdoor.newest_on_line(line)

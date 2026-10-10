@@ -35,7 +35,6 @@ SETUP_ROLES = (
     ("code_reviewer", "Code reviewer"),
     ("visual_reviewer", "Visual reviewer"),
 )
-HARNESSES = ("claude", "codex", "agy", "pi")
 
 
 def _usage(message: str, next_step: str | None = None) -> OfficeError:
@@ -489,7 +488,9 @@ def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
 # ------------------------------------------------------------------ office setup
 
 def _installed() -> dict[str, bool]:
-    return {h: shutil.which(h) is not None for h in HARNESSES}
+    # Derived from the adapters the catalog routes to, not a hand-kept list (#499).
+    all_adapters = adapters.load_all()
+    return {h: adapters.installed(all_adapters[h]) for h in adapters.harness_ids(routed=True)}
 
 
 def known_routes(role: str | None = None, *, config: dict | None = None) -> list[str]:
