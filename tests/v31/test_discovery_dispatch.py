@@ -203,6 +203,23 @@ def test_a_denial_written_between_the_probe_and_the_dispatch_dispatches_the_fall
     assert len(_live_leases(cold)) == 1
 
 
+def test_a_policy_that_becomes_unreadable_after_the_probe_refuses_the_dispatch(cold, monkeypatch):
+    """The primary was decided before the policy broke: it is not dispatched on the strength of that decision."""
+    real = route_probe.ensure
+
+    def then_unreadable(con, run, cand, **kw):
+        out = real(con, run, cand, **kw)
+        cold.user_config.write_text("routing: 5\n")  # a denial can no longer be ruled out
+        return out
+
+    monkeypatch.setattr(route_probe, "ensure", then_unreadable)
+    with pytest.raises(state.Refused) as err:
+        cold.dispatch("T1")
+    assert err.value.category == "policy-unreadable"
+    assert not cold.dispatches() and not cold.leases() and not cold.trials()
+    assert task_row(cold)["status"] == "planned"
+
+
 def cache_pass(cold):
     return [c for c in cold.cache() if c["result"] == "pass"]
 
@@ -663,6 +680,17 @@ def test_a_trial_that_failed_before_any_work_falls_back_to_one_live_writer(cold)
     changes = state.route_changes(cold.con, "run-A", "T1")
     assert changes[-1]["kind"] == "trial-fallback" and changes[-1]["after"] == trial["fallback_route"]
     assert cold.con.execute("SELECT COUNT(*) FROM outbox WHERE kind='launch_agent' AND status='queued'").fetchone()[0] == 2
+
+
+def test_an_unreadable_policy_blocks_the_fallback_without_moving_the_lease(cold):
+    d, wt, ddir = in_flight(cold)
+    cold.user_config.write_text("routing: 5\n")  # the fallback can no longer be shown to be permitted
+    lease = _live_leases(cold)[0]["id"]
+    recover(cold, d["id"])
+    assert len(cold.dispatches()) == 1 and [l["id"] for l in _live_leases(cold)] == [lease] == [d["lease_id"]]
+    task = task_row(cold)
+    assert task["status"] == "blocked" and "cannot be confirmed" in task["pause_reason"]
+    assert "policy" in task["pause_reason"] and cold.trials()[0]["status"] == "launch-failed"
 
 
 def test_a_child_still_able_to_write_is_terminated_before_the_fallback_starts(cold, trees, monkeypatch):

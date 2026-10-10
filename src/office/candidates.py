@@ -145,11 +145,26 @@ def live_user_policies(repo_root=None) -> list[dict]:
     cache_key = (str(repo_root), tuple(sorted(files.items(), key=lambda kv: kv[0])))
     policy = _POLICY_CACHE.get(cache_key)
     if policy is None:  # held in a local: concurrent probes share this cache and may clear it
-        effective, _ = cfg.resolve(repo_root, files=files)
+        effective, warnings = cfg.resolve(repo_root, files=files)
+        ignored = [w for w in warnings if w["reason"] == "type-mismatch-ignored"
+                   and (w["key"] in ("routing", "routing.user_policy") or w["key"].startswith("routing.user_policy."))]
+        if ignored:  # a malformed routing value is dropped by the merge: it may have been a denial
+            raise ValueError(f"{ignored[0]['tier']} config {ignored[0]['key']} has the wrong type "
+                             f"(expected {ignored[0]['expected']}, got {ignored[0]['got']})")
         policy = route_policy.user_policy(effective)
         _POLICY_CACHE.clear()
         _POLICY_CACHE[cache_key] = policy
     return [policy] if policy["denied"] or policy["overkill"] else []
+
+
+def required_user_policies(repo_root=None) -> list[dict]:
+    """`live_user_policies`, refusing when the config cannot be read: a route the
+    unreadable policy might deny is never offered, declared or discovered."""
+    try:
+        return live_user_policies(repo_root)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise state.Refused("policy-unreadable", f"the user or repo routing policy cannot be read ({exc})",
+                            next_step="fix the config (office config --user / --repo) and retry") from exc
 
 
 def current_user_policies(repo_root=None) -> list[dict]:
@@ -522,7 +537,7 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
              "invocation_model_id": (row or {}).get("invocation_model_id") or model,
              "alias_resolved_to": (row or {}).get("alias_resolved_to"),
              "effort": effort or (row or {}).get("effort") or "none"}
-    for policy in current_user_policies():
+    for policy in required_user_policies():
         denied = route_policy.is_denied(named, policy)
         if denied:
             raise state.Refused("route-denied", denied, next_step=(
@@ -671,6 +686,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     `exact` keeps only the candidate with that route identity (harness@major/model@effort).
     Executor and worker requests carry the adaptive inputs (#300); `wave_load`
     counts routes already planned for other tasks of the same wave."""
+    live = required_user_policies(run.get("repo_root"))
     policy_cfg = role_policy(config, role)
     # An explicit --route names its model, so it is not held to the family floor.
     floors = None if override else config.get("model_family_floors")
@@ -752,7 +768,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         request["discovery"] = discovery_inputs(con, run, role, candidates, settings)
         if discovery_input:
             request["discovery_input"] = discovery_input
-    policies = [pol for pol in (route_policy.user_policy(config), *current_user_policies(run.get("repo_root")))
+    policies = [pol for pol in (route_policy.user_policy(config), *live)
                 if pol["denied"] or pol["overkill"]]
     if policies:
         request["user_policies"] = policies

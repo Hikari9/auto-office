@@ -9,7 +9,7 @@ import re
 
 import pytest
 
-from office import candidates, inspect_cmd, plan_view, route_learning, route_probe, route_policy, scoring
+from office import candidates, inspect_cmd, plan_view, route_learning, route_probe, route_policy, scoring, state
 from conftest import approved_run
 from test_route_discovery_consumer_contract import World, categories as decision_categories
 from test_route_learning_discovery import ALLOC, DIGEST, FALLBACK, Seed, at, probe_key
@@ -128,6 +128,16 @@ def test_a_blocked_decision_names_why_it_was_blocked(world):
     head = next(line for line in lines if line.startswith("discovery intent"))
     assert "intent none | blocked: probe-failed:unsupported-model-effort" in head
     assert f"fallback {blocked['slate'][1]['route']}" in head  # nothing is tried: the primary's own fallback stands
+
+
+@pytest.mark.parametrize("text", ["routing: [unclosed\n  - : :\n", "routing: 5\n"])
+def test_an_unreadable_policy_refuses_the_role_view_rather_than_listing_unfiltered_candidates(world, text):
+    """T3's contract: a policy that cannot be read may hold a denial, so no category list is rendered."""
+    role_view(world)
+    world.user_config.write_text(text)
+    with pytest.raises(state.Refused) as err:
+        role_view(world)
+    assert err.value.category == "policy-unreadable"
 
 
 def test_trial_caps_show_what_is_used_and_what_remains(world):

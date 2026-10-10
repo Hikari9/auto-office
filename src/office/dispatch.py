@@ -494,6 +494,10 @@ def preflight_discovery(con, run: dict, task: dict, decision: dict, *, reroute: 
         if fresh.get("status") != "selected" or block.get("intent") != "trial":
             return _annotated(fresh, link, blocked=block.get("blocked") or "no-trial")
         fallback = planned_route(con, run, task, reroute=reroute, exclude={link["candidate"]})
+    except Refused as refused:
+        if refused.category == "policy-unreadable":  # nothing is offered while a denial cannot be ruled out
+            raise
+        return _annotated(decision, link, blocked=f"probe-error: {type(refused).__name__}")
     except Exception as exc:  # discovery never costs the dispatch: the known-working decision stands
         return _annotated(decision, link, blocked=f"probe-error: {type(exc).__name__}")
     if fallback.get("status") != "selected":
@@ -3939,8 +3943,11 @@ def _recovery_fallback(con, run: dict, task: dict, d: dict, trial: dict) -> tupl
     route = trial["fallback_route"]
     if not recorded.get("fallback"):
         return None, f"the dispatch recorded no fallback payload for {route}"
-    fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=task["id"], exact=route,
-                                  dispatch_kind="fix" if task.get("current_dispatch_id") else "fresh")
+    try:
+        fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=task["id"], exact=route,
+                                      dispatch_kind="fix" if task.get("current_dispatch_id") else "fresh")
+    except Refused as refused:  # e.g. policy-unreadable: the fallback cannot be shown to be permitted
+        return None, f"the recorded fallback {route} cannot be confirmed ({refused.message})"
     if fresh.get("status") != "selected" or fresh.get("selected") != route:
         why = "; ".join(f"{r['candidate']}: {r['reason']}" for r in (fresh.get("rejected") or [])[:2]) or fresh.get("status")
         return None, f"the recorded fallback {route} no longer qualifies ({why})"
