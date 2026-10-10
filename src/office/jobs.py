@@ -308,18 +308,30 @@ def kick(con, run_id: str | None = None) -> int:
     return len(rows)
 
 
+def _child_cwd(run_id: str) -> str | None:
+    """Where a job process starts. A command a worker ran in its worktree must not hand that directory to the
+    job it spawns: `python -m office` puts the working directory first on sys.path, so a file the agent left
+    there would run as Office. Inside the worktrees, the job starts in the run's own directory instead."""
+    try:
+        Path.cwd().resolve().relative_to(paths.worktrees_dir().resolve())
+    except (ValueError, OSError):
+        return None
+    return str(paths.run_dir(run_id))
+
+
 def spawn(job_id: str, run_id: str) -> None:
     argv, extra_env = frontdoor.current_argv()
     env = dict(os.environ)
     env.update(extra_env)
     env.pop(frontdoor.HOP_ENV, None)
     env.pop(LOCK_FD_ENV, None)
+    env.pop("OFFICE_DISPATCH_ID", None)  # a job is not the worker that kicked it: its id would tag the job's own processes
     path = log_path(run_id, job_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     log = open(path, "ab")
     try:
         subprocess.Popen(argv + ["_job", job_id], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                         env=env, start_new_session=True, close_fds=True)
+                         env=env, start_new_session=True, close_fds=True, cwd=_child_cwd(run_id))
     finally:
         log.close()
 
@@ -498,6 +510,7 @@ def _supervise_locked(con, run_id: str, job_id: str, lock_fd: int) -> int:
     env = dict(os.environ)
     env.update(extra_env)
     env.pop(frontdoor.HOP_ENV, None)
+    env.pop("OFFICE_DISPATCH_ID", None)
     env[LOCK_FD_ENV] = str(lock_fd)
     os.set_inheritable(lock_fd, True)
     log = log_path(run_id, job_id)
@@ -506,7 +519,7 @@ def _supervise_locked(con, run_id: str, job_id: str, lock_fd: int) -> int:
     _note(run_id, job_id, f"attempt {token}: supervisor pid {os.getpid()} starts a worker")
     try:
         proc = subprocess.Popen(argv + ["_job", job_id, "--attempt", token], stdin=subprocess.DEVNULL, env=env,
-                                pass_fds=(lock_fd,))
+                                pass_fds=(lock_fd,), cwd=_child_cwd(run_id))
     except OSError as exc:
         _note(run_id, job_id, f"attempt {token}: the worker could not start: {exc}")
         return 1

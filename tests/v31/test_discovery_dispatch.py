@@ -579,7 +579,7 @@ class Tree:
 
     def alive(self):
         """Whether either process can still run: a zombie, killed and waiting for its parent, cannot write."""
-        states = {pid: st for pid, _, st, *_ in _REAL_PROCESS_TABLE()}
+        states = {row[0]: row[3] for row in _REAL_PROCESS_TABLE()}
         return any(pid in states and not states[pid].startswith("Z") for pid in (self.child, self.leader.pid))
 
     def close(self):
@@ -1339,22 +1339,44 @@ def test_each_gate_is_rechecked_before_the_fallback_lease(cold, monkeypatch, wha
     assert cold.dispatches()[0]["ended_at"]  # the worker is gone: no phantom live session
 
 
+def _orphan_in(wt, secs=25):
+    """A process in `wt` that nothing here started: its parent has exited, so it belongs to init. No dispatch tag."""
+    code = ("import subprocess, sys; k = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(%d)'], cwd=%r, "
+            "start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+            "print(k.pid, flush=True)" % (secs, str(wt)))
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         env={k: v for k, v in os.environ.items() if not k.startswith("OFFICE_")}).stdout
+    return int(out)
+
+
 def test_a_helper_with_no_dispatch_tag_still_working_in_the_worktree_blocks_the_fallback(cold):
     # A worker that cleared its environment and left its group carries nothing that names the dispatch. It is
     # still in the worktree, so it may be writing there: the exit is not confirmed, and it is not signalled.
     d, wt, ddir = in_flight(cold)
     launched(cold, d)
-    helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(25)"], cwd=wt, start_new_session=True,
-                              env={k: v for k, v in os.environ.items() if not k.startswith("OFFICE_")})
-    threading.Thread(target=helper.wait, daemon=True).start()
+    helper = _orphan_in(wt)
     try:
         recover(cold, d["id"])
-        assert helper.poll() is None
+        assert pid_alive(helper)
         assert len(cold.dispatches()) == 1 and [l["id"] for l in _live_leases(cold)] == [d["lease_id"]]
-        assert "unattributed working directory" in task_row(cold)["pause_reason"] and str(helper.pid) in task_row(cold)["pause_reason"]
+        assert "unattributed working directory" in task_row(cold)["pause_reason"] and str(helper) in task_row(cold)["pause_reason"]
         assert not cold.dispatches()[0]["ended_at"] and cold.trials()[0]["status"] == "abandoned"
     finally:
-        helper.kill()
+        os.kill(helper, 9)
+
+
+def test_what_this_process_started_in_the_worktree_is_not_a_holder(cold):
+    # A supervisor that works from the worktree gives the `lsof` and `git` it runs that directory.
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    mine = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"], cwd=wt)
+    threading.Thread(target=mine.wait, daemon=True).start()
+    try:
+        assert mine.pid in dispatch._cwd_holders(wt)
+        recover(cold, d["id"])
+        assert cold.trials()[0]["status"] == "fell-back"
+    finally:
+        mine.kill()
 
 
 def test_a_killed_worker_that_is_waiting_to_be_reaped_does_not_count_as_running(cold):
@@ -1368,9 +1390,154 @@ def test_a_killed_worker_that_is_waiting_to_be_reaped_does_not_count_as_running(
     (ident / "agent.pgid").write_text(str(zombie.pid))
     try:
         recover(cold, d["id"])  # this test never waits for the process, so once killed it stays a zombie
-        states = {pid: st for pid, _, st, *_ in _REAL_PROCESS_TABLE()}
+        states = {row[0]: row[3] for row in _REAL_PROCESS_TABLE()}
         assert states[zombie.pid].startswith("Z")
         assert cold.trials()[0]["status"] == "fell-back" and len(cold.dispatches()) == 2
     finally:
         zombie.kill()
         zombie.wait()
+
+
+# ------------------------------------------------------------------ round 2
+
+def test_a_dispatch_that_never_launched_has_no_work_whatever_its_worktree_holds(cold):
+    d, wt, ddir = in_flight(cold)
+    (ddir / "worktree-baseline.json").unlink()  # the launch job failed after the worktree and before the baseline
+    (wt / "tracked.txt").write_text("x\n")
+    _git(wt, "add", "tracked.txt")
+    _git(wt, "commit", "-qm", "earlier dispatch's work")
+    assert dispatch.work_started(cold.con, state.get_dispatch(cold.con, d["id"]), ddir) == (
+        False, "no agent was ever launched in this dispatch")
+
+
+def test_a_tagless_member_of_the_agents_group_that_ignores_sigterm_is_still_stopped(cold, trees):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    # leader (tagged, recorded) and a member of its group with no tag that ignores SIGTERM: killing the leader
+    # leaves it reparented but still in the group
+    kid_code = ("import os, signal, sys, time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+                "time.sleep(25)\n")
+    # the member's parent exits at once, so it is reparented to init: only its group (and its working directory)
+    # connect it to the worker. It has no dispatch tag.
+    middle = ("import os, subprocess, sys\n"
+              "subprocess.Popen([sys.executable, '-c', %r, sys.argv[1]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+              "                 stderr=subprocess.DEVNULL, env={k: v for k, v in os.environ.items() if k != 'OFFICE_DISPATCH_ID'},\n"
+              "                 cwd='/')\n" % kid_code)
+    code = ("import subprocess, sys, time\n"
+            "subprocess.run([sys.executable, '-c', %r, sys.argv[1]])\n"
+            "print('up', flush=True)\ntime.sleep(25)\n" % middle)
+    ready = cold.tmp / "kid-ready"
+    leader = subprocess.Popen([sys.executable, "-c", code, str(ready)], stdout=subprocess.PIPE, text=True, start_new_session=True,
+                              env={**os.environ, "OFFICE_DISPATCH_ID": d["id"]})
+    threading.Thread(target=leader.wait, daemon=True).start()
+    assert leader.stdout.readline().strip() == "up"
+    _until(lambda: ready.exists() and ready.read_text().isdigit())  # the member is ignoring SIGTERM before anything is signalled
+    kid = int(ready.read_text())
+    ident = paths.run_dir("run-A") / "dispatches" / d["id"]
+    ident.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(ident / "agent.identity", {"pid": leader.pid, "start": process_start(leader.pid), "c_start": dispatch._c_start(leader.pid)})
+    (ident / "agent.pgid").write_text(str(leader.pid))
+    try:
+        recover(cold, d["id"])
+        states = {row[0]: row[3] for row in _REAL_PROCESS_TABLE()}
+        assert kid not in states or states[kid].startswith("Z")
+        assert cold.trials()[0]["status"] == "fell-back"
+    finally:
+        for pid in (kid, leader.pid):
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+
+
+@pytest.mark.parametrize("listing", [None, set()])
+def test_an_unreadable_holder_listing_is_not_an_empty_one(cold, monkeypatch, listing):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    monkeypatch.setattr(dispatch, "_cwd_holders", lambda path: listing)
+    recover(cold, d["id"])
+    if listing is None:
+        assert len(cold.dispatches()) == 1 and "cannot be listed" in task_row(cold)["pause_reason"]
+    else:
+        assert cold.trials()[0]["status"] == "fell-back"
+
+
+def test_lsof_that_fails_or_prints_nothing_is_unreadable(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    real_exists = dispatch.Path.exists
+    monkeypatch.setattr(dispatch.Path, "exists", lambda self: False if str(self) == "/proc/self/cwd" else real_exists(self))
+    for result in (SimpleNamespace(returncode=2, stdout="p1\nn/x\n"), SimpleNamespace(returncode=1, stdout=""),
+                   SimpleNamespace(returncode=0, stdout="")):
+        monkeypatch.setattr(dispatch.subprocess, "run", lambda *a, **kw: result)
+        assert dispatch._cwd_holders(tmp_path) is None
+    monkeypatch.setattr(dispatch.subprocess, "run", lambda *a, **kw: SimpleNamespace(
+        returncode=0, stdout=f"p7\nfcwd\nn{tmp_path}/sub\np8\nfcwd\nn/elsewhere\n"))
+    assert dispatch._cwd_holders(tmp_path) == {7}
+
+
+def test_a_non_utf8_filename_does_not_break_the_snapshot(cold, monkeypatch):
+    # Linux lets a worker stage a name that is not UTF-8 (macOS refuses to create one): git lists it raw.
+    d, wt, ddir = in_flight(cold)
+    real = dispatch.subprocess.run
+
+    def run(argv, **kw):
+        out = real(argv, **kw)
+        if "ls-files" in argv and "-s" in argv:
+            out.stdout = b"100644 " + b"a" * 40 + b" 0\tbad-\xff.txt\0"
+        return out
+
+    monkeypatch.setattr(dispatch.subprocess, "run", run)
+    assert dispatch._worktree_snapshot(wt) is not None
+
+
+def test_a_scheduler_pause_and_a_task_that_changed_hands_each_stop_the_fallback(cold, monkeypatch):
+    from office import queuecmd
+    d, wt, ddir = in_flight(cold)
+    queuecmd.pause(cold.con, run_arg="run-A", task="T1", reason="hold")
+    recover(cold, d["id"])
+    assert "paused by the operator" in task_row(cold)["pause_reason"] and len(cold.dispatches()) == 1
+
+
+def test_the_recovery_rereads_who_owns_the_task_inside_its_transaction(cold, monkeypatch):
+    d, wt, ddir = in_flight(cold)
+    real = dispatch._recovery_fallback
+
+    def then_handed_on(*a, **kw):
+        out = real(*a, **kw)
+        with db.transaction(cold.con):  # between the fallback routing and the transaction another path took the task
+            cold.con.execute("UPDATE tasks SET current_dispatch_id='Dsomeone' WHERE id='T1'")
+        return out
+
+    monkeypatch.setattr(dispatch, "_recovery_fallback", then_handed_on)
+    recover(cold, d["id"])
+    assert len(cold.dispatches()) == 1 and cold.trials()[0]["status"] == "launch-failed"
+    assert "changed during the recovery" in json.loads(cold.trials()[0]["outcome"])["why"]
+    assert task_row(cold)["current_dispatch_id"] == "Dsomeone" and task_row(cold)["status"] != "blocked"  # not ours to block
+
+
+# ------------------------------------------------------------------ jobs
+
+def test_a_job_spawned_from_inside_a_worktree_starts_elsewhere_and_without_the_dispatch_tag(cold, monkeypatch):
+    seen = {}
+
+    def popen(argv, **kw):
+        seen.update(kw)
+
+    monkeypatch.setattr(jobs.subprocess, "Popen", popen)
+    monkeypatch.setenv("OFFICE_DISPATCH_ID", "Dworker")
+    wt = paths.worktrees_dir() / "run-A" / "T9"
+    wt.mkdir(parents=True)
+    monkeypatch.chdir(wt)
+    jobs.spawn("J1", "run-A")
+    assert seen["cwd"] == str(paths.run_dir("run-A")) and "OFFICE_DISPATCH_ID" not in seen["env"]
+    seen.clear()
+    monkeypatch.chdir(cold.tmp / "repo")
+    jobs.spawn("J1", "run-A")
+    assert seen["cwd"] is None
+
+
+def test_the_supervisor_launch_env_does_not_tag_the_supervisor_with_a_dispatch(cold, monkeypatch):
+    import inspect
+    assert "env.pop(_WORKER_TAG, None)" in inspect.getsource(dispatch.launch)
