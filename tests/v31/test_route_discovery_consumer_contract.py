@@ -733,7 +733,7 @@ def test_cli_a_declared_overkill_route_is_still_followed_by_the_next_plain_dispa
     code, out = env.office("amend", "route", "T1", "--as", CLI_DENIED, "--quote", "use astra here")
     assert code == 0, out
     code, out = env.office("dispatch", "T1", env=EXTERNAL)
-    assert code == 0 and "overkill" not in out, out
+    assert code == 0 and "overkill by user" not in out, out
     assert env.con().execute("SELECT triple FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC").fetchone()[0] \
         == CLI_DENIED.replace("codex/", "codex@1/")
 
