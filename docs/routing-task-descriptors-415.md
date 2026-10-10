@@ -47,7 +47,7 @@ At `office submit`, validate values, attach to **each task** in the versioned pl
 
 ### Evidence-only tags
 
-Four optional tags let the planner record what a task was, so later replay can compare outcomes by task kind. They are **evidence-only**: validated and persisted exactly like the fields above (PLAN.md → `tasks.descriptor_json` → plan amendment → per-dispatch `descriptor_json` snapshot), but `dimensions()`, `benchmark_fit()`, `price_tier()` and the `domain` field never read them, so they add no benchmark dimension, price tier or score adjustment. Omitted is unknown and stays absent. An invalid value is refused at plan submit with the allowed list.
+Four optional tags let the planner record what a task was, so later replay can compare outcomes by task kind. They are **evidence-only**: validated and persisted exactly like the fields above (PLAN.md → `tasks.descriptor_json` → plan amendment → per-dispatch `descriptor_json` snapshot), but `dimensions()`, `benchmark_fit()`, `price_tier()` and the `domain` field never read them, so they add no benchmark dimension, price tier or benchmark score adjustment. Known limit: `route_learning.comparability` treats any non-empty descriptor as "present", so a task whose descriptor holds only these tags discounts history without a descriptor by `descriptor_unknown_weight`; no tag value changes a weight. Omitted is unknown and stays absent. An invalid value is refused at plan submit with the allowed list.
 
 | Tag | Values | Meaning |
 | --- | --- | --- |
