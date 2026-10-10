@@ -107,3 +107,17 @@ def test_prompt_says_so_when_herdr_reports_no_cwd_or_agent(env, monkeypatch):
     monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {"pane": {}})
     res = prompting.prompt(con, run, "T1", TEXT)
     assert "herdr reports cwd none, agent none" in res.lines[0], res.lines
+
+
+@pytest.mark.approved
+def test_prompt_never_echoes_control_sequences_a_pane_reports(env, monkeypatch):
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY, BUSY])
+    from office import dispatch, prompting
+    escape = chr(27) + "[31m"
+    agent = dispatch.herdr_agent_name(d["id"])
+    con.execute("UPDATE dispatches SET worktree=? WHERE id=?", (str(env.repo), d["id"]))
+    con.commit()
+    reported = {"cwd": f"{env.repo}/sub{escape}", "agent": {"name": agent}}
+    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {"pane": reported})
+    line = prompting.prompt(con, run, "T1", TEXT).lines[0]
+    assert escape not in line and f"herdr reports cwd {env.repo}/sub " in line, line

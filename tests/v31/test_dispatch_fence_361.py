@@ -315,6 +315,14 @@ def test_unreadable_ledger_refuses_reserve_and_reserved_panes(monkeypatch, tmp_p
 
 
 @pytest.mark.parametrize("broken", BROKEN_LEDGERS)
+def test_unreserve_leaves_an_unreadable_ledger_alone(monkeypatch, tmp_path, broken):
+    run = _run(monkeypatch, tmp_path)
+    ledger = _break_ledger(run, tmp_path, broken)
+    dispatch._unreserve_pane(run, "w1:p1")
+    assert ledger.is_dir() if broken == "dir" else ledger.read_text() == broken
+
+
+@pytest.mark.parametrize("broken", BROKEN_LEDGERS)
 def test_pane_picks_refuse_before_any_pane_is_touched(monkeypatch, tmp_path, broken):
     run = _run(monkeypatch, tmp_path)
     _break_ledger(run, tmp_path, broken)

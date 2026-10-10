@@ -71,7 +71,9 @@ def prompt(con, run: dict, target: str | None, text: str) -> Result:
         raise Refused("pane-mismatch", f"{exc}; refusing to send the prompt", scope=who,
                       next_step=f"office inspect task {who}, then office revoke {who} if the pane is misassigned") from None
     pane = d["pane_id"]
-    where = (f"pane {pane}: herdr reports cwd {seen['cwd'] or 'none'}, agent {seen['agent'] or 'none'}; "
+    # Herdr relays what the pane's shell reports: never echo its control sequences.
+    where = (f"pane {pane}: herdr reports cwd {dispatch._identity_line(seen['cwd'] or 'none')}, "
+             f"agent {dispatch._identity_line(seen['agent'] or 'none')}; "
              f"recorded worktree {d.get('worktree') or 'none'}")
     outcome = {"landed": "landed", "held": "typed but unsubmitted"}.get(got, "sent, not confirmed")
     with db.transaction(con):
