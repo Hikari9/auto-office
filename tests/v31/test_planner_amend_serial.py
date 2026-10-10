@@ -87,3 +87,22 @@ def test_late_amendment_is_not_silently_marked_included_in_earlier_packet(env, t
     con2 = env.con()
     ids = [r[0] for r in con2.execute("SELECT id FROM dispatches WHERE role='planner' ORDER BY started_at")]
     assert len(ids) == 3 and ids[-1] != did
+    # The follow-up packet carries the late request, so its revision may acknowledge it.
+    follow = dispatch.build_packet(con2, state.get_run(con2, run["id"]), state.get_dispatch(con2, ids[-1]), "planner", {})
+    assert follow["contract_request_max_seq"] == 2 and "late request" in follow["contract_request"]
+    assert "early request" not in follow["contract_request"]
+
+
+def test_running_planner_nudge_does_not_claim_late_request_is_in_this_revision(env, monkeypatch):
+    con, run = _dedicated_existing_plan(env)
+    env.office("amend", "T1", "--contract", "--", "early request", env=MANUAL, check=0)
+    did = state.get_task(con, run["id"], "P1")["current_dispatch_id"]
+    con.execute("UPDATE dispatches SET status='running' WHERE id=?", (did,))
+    con.commit()
+    from office import gates
+    monkeypatch.setattr(gates, "live_task_session", lambda *a, **k: did)
+    with db.transaction(con):
+        assert dispatch.create_planner_task(con, run, contract_request="A2: late request") == did
+    row = con.execute("SELECT payload_json FROM outbox WHERE kind='notify_worker' ORDER BY rowid DESC LIMIT 1").fetchone()
+    text = json.loads(row[0])["text"]
+    assert "follow-up revision" in text and "same PLAN.md revision" not in text

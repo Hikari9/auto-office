@@ -67,16 +67,17 @@ def create_planner_task(con, run: dict, *, contract_request: str | None = None, 
     live = gates.live_task_session(con, run["id"], PLANNER_TASK)
     if live:
         # A planner cannot be superseded while it is writing PLAN.md. The new
-        # amendment is already durable in amendments; the next packet includes
-        # every still-pending request, and a pane-hosted planner gets a nudge.
+        # amendment is already durable in amendments. A queued planner picks it
+        # up when its packet is built; a running one acknowledges only what its
+        # packet carried, so the request waits for the next revision (#506).
         if contract_request:
             d = state.get_dispatch(con, live)
             if d and d.get("status") == "running":
                 state.enqueue(con, run, "notify_worker",
                               {"dispatch_id": live, "task_id": PLANNER_TASK,
-                               "text": f"NEW CONTRACT AMENDMENT: {contract_request}. "
-                                       "Read office inspect amendments, incorporate all pending requests "
-                                       "in the same PLAN.md revision, then office submit."},
+                               "text": f"CONTRACT AMENDMENT QUEUED: {contract_request}. "
+                                       "It is not part of your brief; Office plans it in a follow-up "
+                                       "revision after you submit. Finish the current revision as briefed."},
                               dedup_key=f"planner-amend:{live}:{contract_request.split(':', 1)[0]}",
                               max_attempts=1)
         return live
