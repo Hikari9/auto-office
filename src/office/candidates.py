@@ -358,7 +358,7 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
                      user_policies: list[dict] | None = None) -> tuple[list[dict], list[dict]]:
     """Return (candidates, skipped). Every active catalog row lands in exactly one of
     them: `skipped` names each row that is not a candidate, with a `category`
-    (denied, unsupported, untried, floor, not-installed, no-profile) and a reason.
+    (denied, not-eligible, untried, floor, not-installed, no-profile) and a reason.
 
     `discovery` is the run's pinned `routing.discovery` settings when discovery
     applies to this call (#494). Rows that are not dispatchable but are explicitly
@@ -386,7 +386,7 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
                                      "reason": "discovery-eligible but discovery is off for this role or run: "
                                                + state["reason"]})
             else:
-                not_routable.append({"candidate": label, "category": "unsupported",
+                not_routable.append({"candidate": label, "category": "not-eligible",
                                      "reason": f"not a candidate: {state['reason']}"})
             continue
         floor = below_family_floor(row.get("model_id"), family_floors)

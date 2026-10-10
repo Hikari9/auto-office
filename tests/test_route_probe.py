@@ -461,6 +461,7 @@ def test_archived_and_unsupported_rows_are_never_probed(world):
               "effort": row["effort"]}
     refused = route_probe.ensure(con, run, sonnet, attempt_id="A-son", context=ctx(world))
     assert refused == Refused("not-eligible") and "not explicitly discovery-eligible" in refused.detail
+    assert "unsupported" not in refused.detail.replace("invocation unsupported", "")  # missing metadata is not evidence
     assert world.launches() == []
     assert [e["kind"] for e in events(con)] == ["probe-refused"] * 3
 
