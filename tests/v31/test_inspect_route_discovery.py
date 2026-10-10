@@ -103,10 +103,9 @@ def test_an_in_flight_probe_is_probe_pending(world):
         (disc["probe_key"], "codex", "0.162.0", "x", "worker", "gpt-6.1-sol", "high", route_probe._utcnow().isoformat(),
          "run-A", "Apending"))
     after = world.decide("high")
-    assert inspect_cmd._categories(after)[0]["category"] in ("probe-pending", "untried")
     cats = {c["candidate"]: c["category"] for c in inspect_cmd._categories(after)}
     assert cats[disc["candidate"]] == "probe-pending"
-    assert "probe-pending" in decision_categories(after).values() or cats[disc["candidate"]] == "probe-pending"
+    assert decision_categories(after)[disc["candidate"]] == "untried"  # the router's own word; inspect refines it
 
 
 def test_a_candidate_whose_probe_passed_and_whose_gates_hold_is_trial_eligible_with_its_fallback(world):
@@ -137,8 +136,8 @@ def test_trial_caps_show_what_is_used_and_what_remains(world):
     seed.dispatch("run-A", "D1", "T1")
     seed.trial("A1", "run-A", "T1", "D1")
     lines = role_view(world).lines
-    assert "  caps: probes 0/2 used, 2 left | trials 1/1 used, 0 left | rolling 1/1 of the last 1 decisions" in lines or \
-        any(line.startswith("  caps: probes") and "trials 1/1 used, 0 left" in line for line in lines)
+    (caps,) = [line for line in lines if line.startswith("  caps:")]
+    assert caps == "  caps: probes 0/2 used, 2 left | trials 1/1 used, 0 left | rolling 1/1 of the last 1 decisions"
 
 
 def test_discovery_off_keeps_a_role_view_free_of_discovery_sections(world):
@@ -147,6 +146,7 @@ def test_discovery_off_keeps_a_role_view_free_of_discovery_sections(world):
     text = "\n".join(res.lines)
     assert "discovery intent" not in text and "trials:" not in text and "attempts (" not in text
     assert "discovery" not in res.data and "trials" not in res.data
+    assert inspect_cmd._discovery_lines({}, [], off, []) == []  # nothing to say: not even a blank line
 
 
 # ------------------------------------------------------------------ trials and per-attempt history
@@ -200,6 +200,8 @@ def test_the_task_view_renders_each_attempt_with_its_audit_fields(world):
     text = "\n".join(lines)
     assert any(row.startswith("A2 T2 dispatch D2") for row in block(lines, "trials:"))
     assert "A1 T1" not in text  # the other task's attempt is not here
+    assert [line for line in lines if line.startswith("  attempt ")] == [
+        f"  attempt A2 run run-A plan p3 dispatch D2 origin preflight digest {DIGEST[:19]}"]
     head = next(line for line in lines if line.startswith("  attempt A2"))
     assert head == f"  attempt A2 run run-A plan p3 dispatch D2 origin preflight digest {DIGEST[:19]}"
     attempt = lines[lines.index(head):]
@@ -409,3 +411,243 @@ def test_a_later_retry_that_landed_is_not_credited_to_the_trial(world):
     res = inspect_cmd._learner(world.con, world.run)
     assert res.data["trial_evidence"]["codex/gpt-6.1-sol@high"]["landed"] == 0
     assert res.data["trial_evidence"]["codex/gpt-6.1-sol@high"]["not_the_model"] == 1
+
+
+# ------------------------------------------------------------------ one trial in each state
+
+def _fallback_lands(seed):
+    seed.dispatch("run-A", "D2", "T1", day=2, harness="claude", model="claude-sonnet-5-5")
+    seed.revision("run-A", "V2", "D2", "T1")
+
+
+def _launch_failed(ending):
+    def build(seed):
+        seed.task("run-A", "T1", accepted="V2")
+        seed.dispatch("run-A", "D1", "T1", term="nonzero", exit_code=2)
+        seed.trial("A1", "run-A", "T1", "D1", ending=ending, reason_class="transient")
+        _fallback_lands(seed)
+    return build
+
+
+def _abandoned(seed):
+    seed.task("run-A", "T1", accepted="V2")
+    seed.dispatch("run-A", "D1", "T1", term="nonzero", exit_code=2)
+    seed.event("probe-result", "A1", "run-A", "T1", None, outcome="pass", origin="preflight")
+    seed.event("trial-reserved", "A1", "run-A", "T1", "D1", outcome="reserved")
+    seed.event("trial-abandoned", "A1", "run-A", "T1", "D1", outcome="abandoned", origin="recovery")
+    seed.con.execute("INSERT INTO route_trials(id, run_id, task_id, dispatch_id, role, route, probe_key, fallback_route, "
+                     "policy_digest, reason, status, created_at, updated_at) VALUES('A1','run-A','T1','D1','executor',?,?,?,?,"
+                     "'r','abandoned','t','t')", (TRIPLE, probe_key(), FALLBACK, DIGEST))
+    _fallback_lands(seed)
+
+
+def _rejected(seed):
+    seed.task("run-A", "T1", accepted="V2")
+    seed.dispatch("run-A", "D1", "T1")
+    seed.revision("run-A", "V1", "D1", "T1")
+    seed.finding("run-A", "D1", "T1", "V1", "code_review")
+    seed.trial("A1", "run-A", "T1", "D1")
+    _fallback_lands(seed)
+
+
+def _accepted(seed):
+    seed.task("run-A", "T1", accepted="V1")
+    seed.dispatch("run-A", "D1", "T1")
+    seed.revision("run-A", "V1", "D1", "T1")
+    seed.trial("A1", "run-A", "T1", "D1")
+
+
+def _in_flight(seed):
+    seed.task("run-A", "T1", status="running")
+    seed.dispatch("run-A", "D1", "T1")
+    seed.trial("A1", "run-A", "T1", "D1")
+
+
+@pytest.mark.parametrize("build,outcome,recovered", [
+    (_launch_failed("launch-failed"), "none: ended before any work (transient)", True),
+    (_launch_failed("fell-back"), "none: ended before any work (transient)", True),
+    (_abandoned, "none: abandoned", False),
+    (_rejected, "not accepted, not yet recorded", False),
+    (_accepted, "accepted, not yet recorded", False),
+    (_in_flight, "in flight", False)],
+    ids=["launch-failed", "fell-back", "abandoned", "rejected", "accepted", "in-flight"])
+def test_each_trial_state_reads_as_its_own_outcome(world, build, outcome, recovered):
+    build(Seed(world.con))
+    (row,) = inspect_cmd._trial_rows(world.con, world.run)
+    assert (row["outcome"], row["recovered_launch"]) == (outcome, recovered)
+
+
+def test_a_recorded_rejection_reads_as_rejected(world):
+    from office import db
+    _rejected(Seed(world.con))
+    with db.transaction(world.con):
+        route_learning.record_trial_outcomes(world.con)
+    (row,) = inspect_cmd._trial_rows(world.con, world.run)
+    assert row["outcome"] == "rejected (recorded)"
+
+
+def test_a_trial_with_no_dispatch_and_no_fallback_reads_none(world):
+    row = {"attempt_id": "A1", "task_id": "T1", "dispatch_id": None, "route": TRIPLE, "fallback": None,
+           "status": "reserved", "outcome": "in flight", "recovered_launch": False}
+    assert inspect_cmd._trial_lines([row]) == [
+        "", "trials:", f"  A1 T1 dispatch none {TRIPLE} | fallback none | status reserved | outcome in flight"]
+
+
+def test_trial_rows_are_scoped_to_this_run_role_and_task(world):
+    seed = Seed(world.con)
+    _accepted(seed)
+    seed.event("trial-reserved", "Aworker", "run-A", "T9", None, outcome="reserved", role="worker")
+    seed.run("run-B")
+    seed.task("run-B", "T1", status="running")
+    seed.dispatch("run-B", "D9", "T1")
+    seed.trial("AB", "run-B", "T1", "D9")
+    ids = lambda **kw: sorted(t["attempt_id"] for t in inspect_cmd._trial_rows(world.con, world.run, **kw))  # noqa: E731
+    assert ids() == ["A1", "Aworker"]  # run-B's trial is not run-A's
+    assert ids(role="executor") == ["A1"] and ids(role="worker") == ["Aworker"]
+    assert ids(task_id="T1") == ["A1"]
+
+
+# ------------------------------------------------------------------ preview, learner trust, caps, none-handling
+
+@pytest.fixture
+def preview_world(world, monkeypatch):
+    from office import prs, state, visual
+    monkeypatch.setattr(state, "current_requirements", lambda con, run_id: {"frozen": {"end_state": "ask"}})
+    monkeypatch.setattr(prs, "settings", lambda con, run: {})
+    monkeypatch.setattr(visual, "applicability", lambda con, run, task, files: {"status": "none"})
+    monkeypatch.setattr(candidates, "probe_quota_snapshot", lambda *a, **kw: {})
+    world.run = {**world.run, "gates": {}}
+    return world
+
+
+TASKS = [{"id": "T1", "title": "Build it", "depends": []}]
+
+
+def test_a_real_preview_carries_the_probe_candidate_and_the_diagram_names_it(preview_world):
+    world = preview_world
+    entry = plan_view.preview(world.con, world.run, TASKS)["tasks"]["T1"]
+    disc = world.decide()["discovery"]
+    assert entry["discovery"]["intent"] == "probe" and entry["discovery"]["candidate"] == disc["candidate"]
+    assert entry["discovery"]["fallback"] == disc["fallback"] and "trial" not in entry
+    pv = {"tasks": {"T1": entry}, "end_state": "ask", "deploy": {}, "prs": {"enabled": False, "reason": "off"}}
+    text = "\n".join(plan_view.render(world.run, 1, pv))
+    assert f"probe candidate {disc['candidate']}: a trial only if a fresh exact probe passes, fallback {disc['fallback']}" in text
+
+
+def test_a_real_preview_of_a_trial_decision_names_the_trial_and_its_fallback(preview_world, monkeypatch):
+    world = preview_world
+    _, _, _, second = world.preflight("high")
+    monkeypatch.setattr(candidates, "route_role", lambda *a, **kw: second)
+    entry = plan_view.preview(world.con, world.run, TASKS)["tasks"]["T1"]
+    disc = second["discovery"]
+    assert entry["discovery"] == {"intent": "trial", "candidate": disc["candidate"], "fallback": disc["fallback"]}
+    pv = {"tasks": {"T1": entry}, "end_state": "ask", "deploy": {}, "prs": {"enabled": False, "reason": "off"}}
+    assert f"trial route {disc['candidate']}, fallback {disc['fallback']}" in "\n".join(plan_view.render(world.run, 1, pv))
+
+
+def test_a_real_preview_marks_a_task_whose_dispatch_is_a_live_trial(preview_world):
+    world = preview_world
+    seed = Seed(world.con)
+    _in_flight(seed)
+    world.con.execute("UPDATE tasks SET current_dispatch_id='D1' WHERE id='T1'")
+    entry = plan_view.preview(world.con, world.run, TASKS)["tasks"]["T1"]
+    assert entry["dispatched_route"] == TRIPLE
+    assert entry["trial"] == {"route": TRIPLE, "fallback": FALLBACK, "status": "launched"}
+    pv = {"tasks": {"T1": entry}, "end_state": "ask", "deploy": {}, "prs": {"enabled": False, "reason": "off"}}
+    assert f"dispatched: {TRIPLE} (trial, fallback {FALLBACK})" in "\n".join(plan_view.render(world.run, 1, pv))
+
+
+def test_the_learner_view_reads_trust_from_the_trust_state_not_a_default(world):
+    seed = Seed(world.con)
+    for i, kind in enumerate(("plan", "reviewer", "route"), start=1):
+        rid, did = f"R{i}", f"D{i}"
+        seed.run(rid)
+        # a cancelled task reads as a plan change; an accepted one (through another dispatch) leaves the finding to decide
+        seed.task(rid, "T1", status="cancelled" if kind != "route" else "accepted", accepted="VX" if kind == "route" else None)
+        seed.dispatch(rid, did, "T1")
+        seed.revision(rid, f"V{i}", did, "T1")
+        seed.finding(rid, did, "T1", f"V{i}", {"plan": "brief", "reviewer": "plan", "route": "code_review"}[kind])
+        seed.trial(f"A{i}", rid, "T1", did)
+    db_path = world.con.execute("PRAGMA database_list").fetchone()[2]
+    scoring.record_trust_act(db_path, TRIPLE, "proven", "rico", "verified by hand")
+    res = inspect_cmd._learner(world.con, world.run)
+    row = next(line for line in res.lines if "trial dispatches landed" in line)
+    assert row.endswith("| trust proven") and res.data["trial_evidence"]["codex/gpt-6.1-sol@high"]["trust"] == "proven"
+    ev = res.data["trial_evidence"]["codex/gpt-6.1-sol@high"]
+    assert (ev["dispatches"], ev["landed"], ev["not_the_model"], ev["failed_on_route"]) == (3, 0, 2, 1)
+
+
+@pytest.mark.parametrize("cap,text", [
+    ("probes", {"used": 3, "max": 2}), ("trials", {"used": 0, "max": 0})])
+def test_a_cap_that_is_over_or_zero_never_reads_negative(cap, text):
+    assert "0 left" in inspect_cmd._cap_text(cap, text) and "-" not in inspect_cmd._cap_text(cap, text)
+
+
+def test_a_rolling_cap_that_is_still_warming_up_says_so():
+    line = inspect_cmd._cap_text("rolling", {"used": 0, "max": 0, "window": 3, "warmup": True})
+    assert line == "rolling 0/0 of the last 3 decisions (warming up: too few recorded decisions to allow one)"
+    assert "warming" not in inspect_cmd._cap_text("rolling", {"used": 0, "max": 1, "window": 7})
+
+
+def test_a_trial_with_no_recorded_fallback_says_fallback_none(world):
+    from office import guide, state
+    seed = Seed(world.con)
+    _in_flight(seed)
+    world.con.execute("UPDATE route_trials SET fallback_route=NULL")
+    world.con.execute("UPDATE tasks SET current_dispatch_id='D1' WHERE id='T1'")
+    tasks = state.tasks(world.con, "run-A")
+    assert guide.trial_notes(world.con, tasks) == [f"T1 runs a discovery trial of {TRIPLE}, fallback none"]
+    assert guide.effective_routes(world.con, world.run, tasks) == {"T1": f"{TRIPLE} (trial, fallback none)"}
+    assert "(trial, fallback none)" in "\n".join(render(dispatched_route=TRIPLE,
+                                                         trial={"route": TRIPLE, "fallback": None, "status": "launched"}))
+
+
+@pytest.mark.parametrize("status,live", [("reserved", True), ("launched", True), ("submitted", True), ("accepted", False),
+                                         ("rejected", False), ("launch-failed", False), ("fell-back", False),
+                                         ("abandoned", False)])
+def test_only_an_in_flight_trial_is_live(world, status, live):
+    seed = Seed(world.con)
+    _in_flight(seed)
+    world.con.execute("UPDATE route_trials SET status=?", (status,))
+    assert (route_learning.live_trial(world.con, "D1") is not None) is live
+
+
+PLAN_STACKED = """# Plan
+
+## Requirements
+done:
+- add and mul exist
+blast_radius: repo
+
+## Tasks
+### T1: Implement add
+scope: calc.py
+depends: none
+checks: python3 -c "import calc; assert calc.add(2, 3) == 5"
+accept:
+- calc.add(2, 3) == 5
+visual: none
+
+### T2: Implement mul
+scope: mul.py
+depends: T1
+checks: python3 -c "import mul; assert mul.mul(2, 3) == 6"
+accept:
+- mul.mul(2, 3) == 6
+visual: none
+"""
+
+
+def test_the_next_line_keeps_a_dependency_hold_beside_the_trial_note(env):
+    approved_run(env, plan=PLAN_STACKED)
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    con.execute("INSERT INTO dispatches(id, run_id, role, task_id, triple, harness, model, effort, started_at, status) "
+                "VALUES('Dt',?,'executor','T1',?,'codex','gpt-6.1-sol','high',?,'running')", (run_id, TRIPLE, at(1)))
+    con.execute("UPDATE tasks SET status='running', current_dispatch_id='Dt' WHERE id='T1'")
+    con.execute("INSERT INTO route_trials(id, run_id, task_id, dispatch_id, role, route, probe_key, fallback_route, "
+                "policy_digest, reason, status, created_at, updated_at) VALUES('At',?,'T1','Dt','executor',?,?,?,?,'r',"
+                "'launched','t','t')", (run_id, TRIPLE, probe_key(), FALLBACK, DIGEST))
+    nxt = env.ojson("status")[1]["data"]["next"]
+    assert nxt == (f"exceptions only; office status (T1 runs a discovery trial of {TRIPLE}, fallback {FALLBACK}; "
+                   "T2 waits for T1 to be accepted (T1 running))")

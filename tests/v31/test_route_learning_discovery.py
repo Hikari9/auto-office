@@ -78,14 +78,16 @@ class Seed:
                          (f"F{self.n}", did, rid, tid, rev, category))
 
     def event(self, kind, attempt, rid, tid, did, *, effort="high", outcome=None, reason_class=None, origin="dispatch",
-              freshness="fresh-run"):
+              freshness="fresh-run", role="executor"):
+        source = "Asource" if kind == "probe-cache-hit" else None
         with db.transaction(self.con):
             route_policy.record_event(
                 self.con, kind=kind, attempt_id=attempt, origin=origin, policy_digest=DIGEST, probe_key=probe_key(effort),
                 reason="discovery: untried candidate", run_id=rid, plan_version=3, task_id=tid, dispatch_id=did,
-                role="executor", fingerprint_json=fingerprint(effort),
+                role=role, fingerprint_json=fingerprint(effort),
                 candidate_route=f"codex@2/gpt-6.1-sol@{effort}", primary_route=FALLBACK, fallback_route=FALLBACK,
-                probe_freshness=freshness, allocation_json=ALLOC, outcome=outcome, reason_class=reason_class)
+                probe_freshness=freshness, allocation_json=ALLOC, outcome=outcome, reason_class=reason_class,
+                source_attempt_id=source)
 
     def trial(self, attempt, rid, tid, did, *, ending="launched", reason_class=None, effort="high"):
         """The events and `route_trials` row of one trial, as far as `ending` says it got."""
@@ -209,6 +211,7 @@ def test_a_trial_that_ended_before_work_is_not_charged_to_the_model(con, seed, r
     seed.revision("R1", "V2", "D2", "T1")
     o = outcome(con, "D1")
     assert o["attribution"] == "environment" and o["learn_weight"] == 0 and not o["success"]
+    assert o["attribution_confidence"] == 0.9
     assert o["trial"]["reason_class"] == reason and o["trial"]["state"] == ending
     assert (f"({reason})" in o["attribution_provenance"]) == (reason is not None)
     # the fallback is a different route and is read as any dispatch is
@@ -323,6 +326,7 @@ def test_an_accepted_trial_gets_one_terminal_event_and_its_row_updated(con, seed
     assert (event["kind"], event["outcome"], event["origin"]) == ("trial-accepted", "accepted", "job")
     assert (event["run_id"], event["task_id"], event["dispatch_id"], event["role"]) == ("R1", "T1", "D1", "executor")
     assert (event["policy_digest"], event["probe_key"], event["fallback_route"]) == (DIGEST, probe_key(), FALLBACK)
+    assert (event["primary_route"], event["plan_version"]) == (FALLBACK, 3)
     assert json.loads(event["fingerprint_json"]) == fingerprint() and event["candidate_route"] == TRIPLE
     row = trial_row(con, "A1")
     assert row["status"] == "accepted" and row["outcome"] == "accepted"
@@ -350,6 +354,7 @@ def test_a_rejected_trial_is_recorded_as_rejected(con, seed):
     seed.revision("R1", "V2", "D2", "T1")
     (written,) = observe(con)
     assert written["kind"] == "trial-rejected"
+    assert terminal_events(con)[0]["outcome"] == "rejected"
     assert trial_row(con, "A1")["status"] == "rejected" and trial_row(con, "A1")["outcome"] == "rejected"
 
 
@@ -527,3 +532,137 @@ def test_attempt_history_keeps_this_runs_attempts_among_many_manual_probes(con, 
 def test_attempt_history_does_not_carry_probe_detail_text(con, seed):
     seed.landed_trial(1)
     assert all("detail" not in e for a in route_learning.attempt_history(con) for e in a["events"])
+
+
+def refresh(con):
+    with db.transaction(con):
+        return route_learning.refresh(con, {"executor": {ROUTE: {"prior_p": 0.5}}})
+
+
+def trust_acts(con):
+    return con.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0]
+
+
+def _rejected(seed):
+    seed.run("R1")
+    seed.task("R1", "T1", accepted="V2")
+    seed.dispatch("R1", "D1", "T1")
+    seed.revision("R1", "V1", "D1", "T1")
+    seed.trial("A1", "R1", "T1", "D1")
+    seed.dispatch("R1", "D2", "T1", day=2, harness="claude", model="claude-sonnet-5-5")
+    seed.revision("R1", "V2", "D2", "T1")
+
+
+def _launch_failed(seed, ending):
+    def build(seed):
+        seed.run("R1")
+        seed.task("R1", "T1", accepted="V2")
+        seed.dispatch("R1", "D1", "T1", term="nonzero", exit_code=2)
+        seed.trial("A1", "R1", "T1", "D1", ending=ending, reason_class="transient")
+        seed.dispatch("R1", "D2", "T1", day=2, harness="claude", model="claude-sonnet-5-5")
+        seed.revision("R1", "V2", "D2", "T1")
+    return build
+
+
+@pytest.mark.parametrize("build", [
+    _rejected, _launch_failed(None, "launch-failed"), _launch_failed(None, "fell-back"),
+    lambda seed: [seed.landed_trial(i) for i in (1, 2)]], ids=["rejected", "launch-failed", "fell-back", "thin"])
+def test_no_refresh_ever_writes_trust_whatever_the_trial_did(con, seed, build):
+    build(seed)
+    before = scoring.evaluate_trust_state(con, TRIPLE)
+    refresh(con)
+    refresh(con)  # and a repeat
+    assert trust_acts(con) == 0 and scoring.evaluate_trust_state(con, TRIPLE) == before
+
+
+def test_attribution_reason_comes_from_the_events_never_from_the_probe_cache(con, seed):
+    seed.run("R1")
+    seed.task("R1", "T1", accepted="V2")
+    seed.dispatch("R1", "D1", "T1", term="nonzero", exit_code=2)
+    seed.trial("A1", "R1", "T1", "D1", ending="fell-back", reason_class=None)  # the events name no reason
+    seed.dispatch("R1", "D2", "T1", day=2, harness="claude", model="claude-sonnet-5-5")
+    seed.revision("R1", "V2", "D2", "T1")
+    con.execute("INSERT INTO route_probes(key, harness, harness_version, adapter_hash, profile, invocation_model_id, effort, "
+                "result, reason_class, detail, probed_at, run_id, attempt_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (probe_key(), "codex", "0.162.0", "sha256:adapter", "worker", "gpt-6.1-sol", "high", "fail",
+                 "conformance-failed", "later", at(9), "R9", "Alater"))
+    o = outcome(con, "D1")
+    assert o["trial"]["reason_class"] is None and o["attribution_provenance"] == "trial ended before any work"
+
+
+def test_unsupported_routes_ignore_the_probe_cache_too(con, seed):
+    seed.event("probe-result", "P1", None, None, None, effort="high", outcome="fail",
+               reason_class="unsupported-model-effort", origin="manual")
+    for effort, result, reason in (("medium", "fail", "unsupported-model-effort"), ("high", "pass", None)):
+        con.execute("INSERT INTO route_probes(key, harness, harness_version, adapter_hash, profile, invocation_model_id, "
+                    "effort, result, reason_class, probed_at, attempt_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (probe_key(effort), "codex", "0.162.0", "sha256:adapter", "worker", "gpt-6.1-sol", effort, result,
+                     reason, at(9), "Acache"))
+    marks = route_learning.unsupported_routes(con)
+    assert set(marks) == {"codex/gpt-6.1-sol@high"} and marks["codex/gpt-6.1-sol@high"]["attempt_id"] == "P1"
+
+
+def test_a_failed_probe_reason_names_the_attempt_when_the_launch_event_names_none(con, seed):
+    seed.run("R1")
+    seed.task("R1", "T1", accepted="V2")
+    seed.dispatch("R1", "D1", "T1", term="nonzero", exit_code=2)
+    seed.event("probe-result", "A1", "R1", "T1", None, outcome="fail", reason_class="auth-quota-blocked",
+               origin="preflight")
+    seed.event("trial-reserved", "A1", "R1", "T1", "D1", outcome="reserved")
+    seed.event("trial-launch-failed", "A1", "R1", "T1", "D1", outcome="launch-failed", origin="recovery")
+    seed.dispatch("R1", "D2", "T1", day=2, harness="claude", model="claude-sonnet-5-5")
+    seed.revision("R1", "V2", "D2", "T1")
+    o = outcome(con, "D1")
+    assert o["trial"]["reason_class"] == "auth-quota-blocked" and "(auth-quota-blocked)" in o["attribution_provenance"]
+
+
+def test_a_cached_pass_attempt_still_attributes_a_launch_failure(con, seed):
+    seed.run("R1")
+    seed.task("R1", "T1", accepted="V2")
+    seed.dispatch("R1", "D1", "T1", term="nonzero", exit_code=2)
+    seed.event("probe-cache-hit", "A1", "R1", "T1", None, outcome="cache-hit:pass", origin="preflight",
+               freshness="cached-fresh")
+    seed.event("trial-reserved", "A1", "R1", "T1", "D1", outcome="reserved")
+    seed.event("trial-fell-back", "A1", "R1", "T1", "D1", outcome="fell-back", origin="recovery")
+    seed.dispatch("R1", "D2", "T1", day=2, harness="claude", model="claude-sonnet-5-5")
+    seed.revision("R1", "V2", "D2", "T1")
+    trial = route_learning.trial_attempts(con)["A1"]
+    assert trial["probe"]["outcome"] == "cache-hit:pass" and trial["probe"]["freshness"] == "cached-fresh"
+    assert outcome(con, "D1")["attribution"] == "environment"
+
+
+@pytest.mark.parametrize("lift", [
+    dict(kind="probe-result", outcome="pass"),
+    dict(kind="probe-cache-hit", outcome="cache-hit:pass", freshness="cached-fresh"),
+    dict(kind="trial-accepted", outcome="accepted")])
+def test_each_kind_of_later_success_lifts_the_unsupported_mark(con, seed, lift):
+    seed.event("probe-result", "P1", None, None, None, effort="high", outcome="fail",
+               reason_class="unsupported-model-effort", origin="manual")
+    assert "codex/gpt-6.1-sol@high" in route_learning.unsupported_routes(con)
+    kind = lift.pop("kind")
+    seed.event(kind, "P2", None, None, None, effort="high", origin="manual", **lift)
+    assert route_learning.unsupported_routes(con) == {}
+
+
+@pytest.mark.parametrize("last,row_status", [("trial-launch-failed", "launch-failed"), ("trial-abandoned", "abandoned"),
+                                             ("trial-launched", "abandoned")])
+def test_an_ended_trial_with_work_on_record_gets_no_gate_event(con, seed, last, row_status):
+    """Pre-checks, not the unique index, keep an ended trial from being terminated a second way."""
+    seed.run("R1")
+    seed.task("R1", "T1", accepted="V1")
+    seed.dispatch("R1", "D1", "T1")
+    seed.revision("R1", "V1", "D1", "T1")
+    seed.event("probe-result", "A1", "R1", "T1", None, outcome="pass", origin="preflight")
+    seed.event("trial-reserved", "A1", "R1", "T1", "D1", outcome="reserved")
+    seed.event(last, "A1", "R1", "T1", "D1", outcome=last[len("trial-"):])
+    con.execute("INSERT INTO route_trials(id, run_id, task_id, dispatch_id, role, route, probe_key, fallback_route, "
+                "policy_digest, reason, status, created_at, updated_at) VALUES('A1','R1','T1','D1','executor',?,?,?,?,'r',?,'t','t')",
+                (TRIPLE, probe_key(), FALLBACK, DIGEST, row_status))
+    assert observe(con) == [] and terminal_events(con) == []
+
+
+def test_a_trial_of_another_run_is_not_in_this_runs_attempts(con, seed):
+    seed.landed_trial(1)
+    seed.landed_trial(2)
+    assert set(route_learning.trial_attempts(con, "R1")) == {"A1"}
+    assert set(route_learning.trial_attempts(con)) == {"A1", "A2"}
