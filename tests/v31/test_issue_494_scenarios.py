@@ -1235,6 +1235,12 @@ def test_s12_db_changes_are_additive_and_the_previous_runtime_keeps_working_on_t
     tables_after = {r[0] for r in after.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert db.SCHEMA_VERSION > old_version
     now_dump = dump(after, tables_before)
+    # v12 (T1) appended three nullable evidence columns; every other column and row is unchanged.
+    v12 = {"predecessor_dispatch_id", "first_executor_dispatch_id", "accepted_producer_dispatch_id"}
+    for table, (cols, rows) in now_dump.items():
+        keep = [c[0] for c in cols if c[1] in v12]
+        now_dump[table] = ([c for c in cols if c[1] not in v12],
+                           [tuple(v for i, v in enumerate(r) if i not in keep) for r in rows])
     assert now_dump.pop("schema_meta")[0] == expected.pop("schema_meta")[0]  # the version stamp is the one row that moves
     assert after.execute("SELECT value FROM schema_meta WHERE key='office_schema'").fetchone()[0] == str(db.SCHEMA_VERSION)
     assert now_dump == expected  # no column changed, no row changed, in any pre-existing table

@@ -856,18 +856,27 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
     cand = decision["candidate"]
     dispatch_id = "D" + uuid.uuid4().hex[:8]
     lease = acquire_lease(con, run, task, dispatch_id, role)
+    executor = role == "executor"
+    # Evidence links: the executor this one replaces (same run and task only), and the task's
+    # first executor, recorded once and left NULL on a task whose earlier executors predate it.
+    predecessor = prior["id"] if (executor and prior and prior["run_id"] == run["id"] and prior["task_id"] == task_id
+                                  and prior["role"] == "executor") else None
+    first = executor and not con.execute(
+        "SELECT 1 FROM dispatches WHERE run_id=? AND task_id=? AND role='executor'", (run["id"], task_id)).fetchone()
     worktree = prior["worktree"] if prior and prior.get("worktree") else str(paths.worktrees_dir() / run["id"][:8] / task_id)
     branch = prior["branch"] if prior and prior.get("branch") else f"office/{run['id'][:8]}/{task_id}"
     applied = task["contract_version"] if role != "planner" else run["plan_version"]
     con.execute(
         "INSERT INTO dispatches(id, run_id, role, holder_id, triple, invocation_model_id, selection_reason, task_shape, "
         "started_at, task_id, kind, office_version, status, worktree, branch, base_commit, lease_id, harness, model, effort, "
-        "adapter_id, applied_plan_version, route_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "adapter_id, applied_plan_version, route_json, size_class, predecessor_dispatch_id) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (dispatch_id, run["id"], role, dispatch_id, routing.candidate_id(cand), cand.get("invocation_model_id"),
          (decision.get("selection_disclosure") or {}).get("reason"), run.get("playbook"), now_iso(), task_id, role,
          version.current(), "launching", worktree, branch, base or (prior or {}).get("base_commit") or run["base_sha"],
          lease["id"], cand["harness"], cand.get("invocation_model_id"), cand.get("effort"), cand.get("adapter_id"),
-         applied, dumps(_route_payload(decision))))
+         applied, dumps(_route_payload(decision)),
+         (task.get("descriptor") or {}).get("task_size") if executor else None, predecessor))
     if task.get("descriptor"):
         con.execute("UPDATE dispatches SET descriptor_json=? WHERE id=?",
                     (dumps(task["descriptor"]), dispatch_id))
@@ -889,7 +898,8 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
                 "AND status IN ('queued','delivered') AND dispatch_id IS NOT ?",
                 (dispatch_id, run["id"], task_id, dispatch_id))
     state.update_task(con, run["id"], task_id, status="launching", current_dispatch_id=dispatch_id,
-                      pause_reason=None, stack_after=None)
+                      pause_reason=None, stack_after=None,
+                      **({"first_executor_dispatch_id": dispatch_id} if first else {}))
     payload = {"dispatch_id": dispatch_id, "task_id": task_id, "role": role, "fix_of": fix_of,
                **(decision.get("launch") or {}), **(extra or {})}
     state.enqueue(con, run, "launch_agent", payload, dedup_key=f"launch:{dispatch_id}", max_attempts=2)
