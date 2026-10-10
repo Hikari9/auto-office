@@ -1,0 +1,28 @@
+# Permission/trust flags in the shipped seed adapters' launch forms, with what each
+# grants (#499). Kept outside adapters/seed/ so seed adapter hashes (run pins) do not
+# change. User adapters record theirs in their own `trust_justifications` field.
+claude:
+  bypassPermissions: >-
+    Worker form only: it edits and runs commands unattended in its own Office
+    worktree, and headless -p has no one to answer permission prompts. Grants
+    unprompted tool use. Reviewer and vision forms use dontAsk with a read-only
+    tool allowlist instead.
+agy:
+  --dangerously-skip-permissions: >-
+    agy has no non-interactive approval mode short of skipping permission
+    prompts. Grants unprompted tool use, including edits and commands, in the
+    Office worktree or the include dirs a form is given.
+codex:
+  --yolo: >-
+    Worker form only: codex exec cannot answer approval prompts headlessly.
+    Grants unsandboxed edits and commands in the Office worktree. Reviewer and
+    vision forms use --sandbox workspace-write instead.
+  trust_level=trusted: >-
+    Marks only the dispatch's own worktree or sandbox dir as a trusted codex
+    project so a pane does not stop on codex's project-trust dialog. It trusts
+    no other path.
+gemini:
+  yolo: >-
+    --approval-mode yolo on the worker form only: headless gemini cannot answer
+    approval prompts. Grants unprompted edits and commands in the Office
+    worktree. Reviewer and vision forms use --approval-mode plan (read-only).

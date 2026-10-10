@@ -929,6 +929,45 @@ def _agent_pgid_file(run: dict, dispatch_id: str) -> Path:
     return paths.run_dir(run["id"]) / "dispatches" / dispatch_id / "agent.pgid"
 
 
+def _pane_group_wait() -> float:
+    """How long a pane launch polls for the agent's foreground group (#507)."""
+    try:
+        return max(0.0, float(os.environ.get("OFFICE_PANE_GROUP_WAIT", "3.0")))
+    except ValueError:
+        return 3.0
+
+
+def _record_pane_agent_group(run: dict, dispatch_id: str, pane: str) -> int | None:
+    """Record the pane agent's process group and its leader's start time, as a
+    headless launch does (`agent.pgid`, `agent.identity`), so a server it leaves
+    behind can later be proven Office's (#507). The agent is the pane's
+    foreground job, so it leads that group. Nothing is recorded when the group
+    is unknown, is the shell's own, or its leader's start cannot be read."""
+    deadline = time.time() + _pane_group_wait()
+    while True:
+        # Right after start the shell may still own the terminal, or a short-lived
+        # wrapper may: poll briefly until another group holds the foreground.
+        info = _herdr_json(["pane", "process-info", "--pane", pane]).get("process_info") or {}
+        pgid = info.get("foreground_process_group_id")
+        if (isinstance(pgid, int) and pgid != info.get("shell_pid")
+                and process_start(pgid)) or time.time() >= deadline:
+            break
+        time.sleep(0.2)
+    if not isinstance(pgid, int) or pgid <= 1 or pgid == info.get("shell_pid") \
+            or pgid in (os.getpid(), os.getpgrp()) or not process_start(pgid):
+        return None
+    try:
+        if os.getpgid(pgid) != pgid:
+            return None  # not a group leader: not the agent's own job
+    except OSError:
+        return None
+    path = _agent_pgid_file(run, dispatch_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(pgid))
+    _record_identity(run["id"], dispatch_id, "agent", pgid)
+    return pgid
+
+
 def _identity_file(run_id: str, dispatch_id: str, which: str) -> Path:
     return paths.run_dir(run_id) / "dispatches" / dispatch_id / f"{which}.identity"
 
@@ -975,7 +1014,9 @@ def stop_dispatch(run: dict, d: dict, *, wait: float = 5.0, notes: list[str] | N
     sup = d.get("pid") if pid_alive(d.get("pid")) else None
     pgid_file = _agent_pgid_file(run, d["id"])
     agent = None
-    if pgid_file.is_file():
+    # A pane agent is stopped by snapshot plus close (reclaim_pane below); its
+    # recorded group serves only leftover-port reclaim (#507).
+    if pgid_file.is_file() and d.get("launcher") != "herdr":
         try:
             agent = int(pgid_file.read_text().strip())
         except ValueError:
@@ -1582,6 +1623,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     spec.update({"herdr_agent": name, "pane": pane})
     write_launch_spec(run, dispatch["id"], spec)
     _record_launch(run, dispatch["id"], launcher="herdr", pane_id=pane)
+    _record_pane_agent_group(run, dispatch["id"], pane)
     # A PR recorded between the first label and the pane id landing is missed by relabel_task_panes.
     fresh_label = pane_label(run, dispatch, dispatch.get("kind") or "")
     if fresh_label != label or retried:

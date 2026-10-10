@@ -23,11 +23,13 @@ A dispatch failure is a recovery checkpoint, not permission to abandon the run. 
 attempt and any headless fallback, with prompt transport, adapter hash and harness version. Prompts and credential values are
 redacted there and in the private `launch.json`.
 Before a visual capture starts its server, Office checks the local capture port (#507). It stops a holder only when it can
-prove that holder is a leftover of an ended headless executor. The proof is that the holder runs in the agent process group
-Office recorded for that dispatch and started while the dispatch ran. Even then, Office does not stop it while another
-executor is live in that worktree. The stop is recorded as a `visual.reclaimed` event. Any other holder becomes
-`CAPTURE_BLOCKED` naming the port, PID, command and whether an ended dispatch may own it. Pane-hosted agents record no
-process group, so their leftovers are always reported and never stopped. When Office names a failed Herdr pane, read it yourself with `herdr pane read <pane>`
+prove that holder is a leftover of an ended executor, headless or Herdr pane. The proof is that the holder runs in the agent
+process group Office recorded for that dispatch at launch and started while the dispatch ran. If that group's leader still
+runs, its start time must also equal the one recorded at launch. A pane dispatch with no recorded start is never matched.
+Even then, Office does not stop it while another executor is live in that worktree. The stop is recorded as a
+`visual.reclaimed` event. Any other holder becomes `CAPTURE_BLOCKED` naming the port, PID, command and whether an ended
+dispatch may own it. A server that left the agent's group (for example via `setsid`) is always reported and never stopped.
+When Office names a failed Herdr pane, read it yourself with `herdr pane read <pane>`
 (or the saved `pane-tail.txt` once Office closed it) to find the startup dialog, dead harness, quota wall, or other blocker.
 When a harness opens on an interactive startup screen (an update notice, a trust, login or what's-new screen),
 Office keeps its Herdr pane and records a startup prompt instead of falling back to headless at once (#510). `office status`

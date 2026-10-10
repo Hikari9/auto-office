@@ -243,6 +243,9 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         drift = cfg.config_drift(run)
         if drift:
             res.add(drift)
+        routing_drift = cfg.routing_inputs_drift(run)
+        if routing_drift:
+            res.add(routing_drift)
     if tasks:
         parts = [f"accepted {len(c.get('accepted', []))}/{len([t for t in tasks if t['status'] != 'cancelled'])}"]
         # `live` is a task with a live or launching session. A task whose session ended is
