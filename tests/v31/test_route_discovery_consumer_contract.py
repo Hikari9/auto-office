@@ -397,6 +397,24 @@ def test_the_probe_refuses_a_route_denied_after_the_run_pinned_its_config(world,
     assert world.cache() == [] and [e["kind"] for e in world.events(attempt)] == ["probe-refused"]
 
 
+@pytest.mark.parametrize("text", ["routing: [unclosed\n  - : :\n", "routing: 5\n",
+                                  "routing:\n  user_policy:\n    denied_models: \"codex/x@high\"\n"])
+def test_an_unreadable_policy_offers_no_route_probe_or_declaration(world, text):
+    """A policy that cannot be read may hold a denial, so nothing is offered rather than nothing denied."""
+    pre = world.decide("high")
+    world.user_config.write_text(text)
+    for call in (lambda: candidates.declared_candidate("codex", SOL, "low"),
+                 lambda: candidates.declared_decision(f"codex/{SOL}@low", flag="--as"),
+                 lambda: world.decide("high")):
+        with pytest.raises(state.Refused) as err:
+            call()
+        assert err.value.category == "policy-unreadable"
+    attempt, refused = world.ensure(pre, route=world.sol["high"])
+    assert refused == route_probe.Refused("policy-unreadable") and "denial cannot be ruled out" in refused.detail
+    assert world.con.execute("SELECT COUNT(*) FROM route_probe_reservations").fetchone()[0] == 0
+    assert world.cache() == [] and [e["kind"] for e in world.events(attempt)] == ["probe-refused"]
+
+
 @pytest.mark.parametrize("tier", ["shipped", "user", "repo"])
 def test_the_budget_ceiling_and_its_source_tier_are_disclosed_and_shipped_sets_none(world, tier):
     if tier != "shipped":
