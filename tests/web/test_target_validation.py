@@ -96,6 +96,7 @@ BAD_TARGETS = [
     ("settings_set", {"key": "a.b"}), ("settings_set", {"tier": "machine"}),
     ("settings_unset", {"tier": "machine", "key": "a.b", "item": "x"}),
     ("start_issue", {"repo": "x" * 600, "issue": 3}),
+    ("start_issue", {"repo": REPO, "issue": "3"}), ("set_auto_mode", {"item": "x"}),  # a digit string is no number; `item` is not a scope
 ]
 
 

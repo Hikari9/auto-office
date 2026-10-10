@@ -420,6 +420,31 @@ def test_the_risk_a_run_resolves_drives_the_tier(gear, blast, size, irreversible
         assert tier != "inline"  # no blast radius is unknown, not low
 
 
+@example(blast="LOCAL")
+@example(blast="Repo")
+@example(blast=["local"])
+@example(blast=3)
+@example(blast="")
+@given(blast=st.one_of(st.text(max_size=8), st.integers(), st.lists(st.text(max_size=5), max_size=2)).filter(
+    lambda b: b not in ("local", "repo", "production", "production-data")))
+def test_a_blast_radius_that_is_not_exactly_a_known_value_is_single_never_inline(blast):
+    from office import briefs
+    assert briefs.self_review_tier("direct", _risk(blast)) == "single"
+
+
+@pytest.mark.parametrize("gear, blast, tier", [("direct", "local", "inline"), ("light", "repo", "inline"),
+                                               ("quick", "local", "single"), ("express", "repo", "single"),
+                                               ("full", "production", "deep")])
+def test_initial_and_fix_round_briefs_print_the_tier_the_gear_and_blast_radius_call_for(gear, blast, tier):
+    from office import briefs
+    packet = {"task_id": "T1", "title": "x", "scope": ["a.py"], "plan_version": 1, "requirements_version": 1,
+              "base_commit": "abc123"}
+    run = {"id": "r", "gear": gear, "risk_json": _risk(blast)}
+    initial = briefs.executor_brief(_NoFindings(), run, {**packet, "fix_of": None})
+    fix = briefs.executor_brief(_NoFindings(), run, {**packet, "fix_of": "R1"})
+    assert _tier_of(initial) == _tier_of(fix) == tier
+
+
 def test_pathologically_nested_risk_record_fails_toward_review():
     from office import briefs
     assert briefs.self_review_tier("direct", "[" * 500_000) == "single"

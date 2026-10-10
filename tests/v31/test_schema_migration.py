@@ -11,7 +11,7 @@ import sqlite3
 import subprocess
 import sys
 
-from hypothesis import given, settings, strategies as st
+from hypothesis import example, given, settings, strategies as st
 
 from conftest import SRC
 
@@ -72,6 +72,7 @@ def _every_shared_column():
 
 
 @settings(max_examples=40)  # each example builds and heals a database
+@example(dropped=set(_every_shared_column()), version=_db()[0].SCHEMA_VERSION)  # every column at once, not left to chance
 @given(dropped=st.sets(st.sampled_from(_every_shared_column()), min_size=1),
        version=st.integers(min_value=2, max_value=_db()[0].SCHEMA_VERSION + 5))
 def test_any_shared_columns_missing_at_any_recorded_version_are_added_without_lowering_it(env, dropped, version):

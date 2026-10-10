@@ -56,11 +56,10 @@ def test_an_unrecognised_floor_effort_is_an_error_not_a_pass(impl, bogus):
 
 
 @IMPLEMENTATIONS
-@given(candidate=st.one_of(st.just({}), st.fixed_dictionaries({"effort": _efforts})), minimum=st.sampled_from(EFFORTS[1:]))
-def test_a_candidate_with_no_effort_field_never_meets_an_effort_floor(impl, candidate, minimum):
-    if "effort" not in candidate:
-        passed, reason = impl.evaluate_capability_floor(candidate, {"min_effort": minimum})
-        assert not passed and "effort" in reason
+@given(minimum=st.sampled_from(EFFORTS[1:]))
+def test_a_candidate_with_no_effort_field_never_meets_an_effort_floor(impl, minimum):
+    passed, reason = impl.evaluate_capability_floor({}, {"min_effort": minimum})
+    assert not passed and "effort" in reason
 
 
 @IMPLEMENTATIONS
