@@ -309,3 +309,12 @@ intake:
 # for repositories no run has used yet.
 web:
   checkouts: {}
+# Orchestrator economics ledger (`office economics ingest`, `office inspect
+# economics`). Opt-in: while false nothing reads harness session logs or writes
+# usage rows. When true, `office economics ingest` reads the token/cache usage
+# the harness recorded in its own transcripts for this run's dispatches and the
+# bound root session (root turns outside the run window are kept apart) into
+# runs.db `usage_events`. No prices are assumed: transcript cost is "unknown".
+# Disable with `office config economics.collect false`.
+economics:
+  collect: false

@@ -58,7 +58,10 @@ Auto Office {ver}
   office model add|list|disable     catalog rows in the user overlay (add <harness>/<slug> --effort E)
 
   office list                       runs in this repository (--all for every run)
-  office inspect [run|task|gate|evidence|events|route|learner|trust|convergence] [id]
+  office inspect [run|task|gate|evidence|events|route|learner|trust|convergence|economics] [id]
+  office context [--since SEQ]       bounded root snapshot from runs.db (goal, plan, tasks, gates, next, stale refs)
+  office economics ingest [--file F [--from-harness H] [--from-session S] [--role R]]
+                                    opt-in (economics.collect): record measured token/cache usage
   office decide <lane> escalate|continue|waive|stop --quote "<user's words>"
                                     the user's choice once a lane review spent its 3 RECHECK rounds
   office waive <lane> --reason "<why the open findings are acceptable>"
@@ -320,6 +323,15 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("benchmarks", parents=[common])
     s.add_argument("action", choices=["brief", "submit"])
     s.add_argument("file", nargs="?")
+    s = sp.add_parser("context", parents=[common])
+    s.add_argument("--since", type=int, metavar="SEQ", help="also list run events after this event cursor (bounded)")
+    s = sp.add_parser("economics", parents=[common])
+    s.add_argument("action", choices=["ingest"])
+    s.add_argument("--file", help="a transcript or normalized usage JSONL to ingest instead of the run's sessions")
+    s.add_argument("--from-harness", dest="usage_harness", choices=["claude", "codex"],
+                   help="parse --file as this harness's transcript (default: normalized usage JSONL)")
+    s.add_argument("--from-session", dest="usage_session", help="session id for --file")
+    s.add_argument("--role", dest="usage_role", help="role for --file rows (root, executor, reviewer, planner)")
     s = sp.add_parser("harness", parents=[common])
     s.add_argument("action", choices=["scaffold", "validate", "smoke", "list"])
     s.add_argument("ident", nargs="?", help="harness (adapter) id")
@@ -764,7 +776,7 @@ def _run(args, unknown) -> int:
             notice = bugwatch.lifecycle_attempt(run["id"], cmd, "completed")
             if notice:
                 res.notices.append(notice)
-        else:
+        elif cmd != "context":  # office context is read-only: no audit capture or reporter (#502)
             # Observe worker/subagent events without requiring any special agent hook.
             try:
                 if bugwatch.armed(con, run["id"]):
@@ -774,7 +786,7 @@ def _run(args, unknown) -> int:
                 res.notices.append("self-improve audit unavailable; retry on next command")
         if target.note:
             res.notices.append(target.note)
-        if cmd not in ("status", "resume", "preflight"):
+        if cmd not in ("status", "resume", "preflight", "context"):
             from office import guide, state
             guide.piggyback(con, state.get_run(con, run["id"]), res)
         return emit(res, args)
@@ -863,6 +875,13 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         if not args.file:
             raise OfficeError("usage", "name the delta file", next_step=benchmarks.SUBMIT_FORM, exit_code=2)
         return benchmarks.submit(con, run, args.file)
+    if cmd == "context":
+        from office import context_snapshot
+        return context_snapshot.context(con, run, since=args.since)
+    if cmd == "economics":
+        from office import economics
+        return economics.ingest(con, run, file=args.file, harness=args.usage_harness,
+                                session=args.usage_session, role=args.usage_role)
     if cmd == "inspect":
         from office import inspect_cmd
         return inspect_cmd.inspect(con, run, args.what, args.ident)

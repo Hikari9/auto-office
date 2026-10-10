@@ -20,6 +20,7 @@ EDITABLE = {"machine": "--user", "repository": "--repo"}
 APPLY = {
     "scheduler": "immediate",           # `office queue` and the web queue loop read it on every pass
     "intake": "immediate",              # read when the queue loop admits an item
+    "economics": "immediate",           # read by each `office economics ingest`
     "quota": "before-dispatch",         # re-read and drift-checked at each dispatch (config.config_drift)
     "roles": "before-dispatch",
     "paths": "restart",                 # runs.db and homes are resolved once per process

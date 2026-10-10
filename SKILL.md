@@ -200,11 +200,11 @@ it. It composes one integration branch, runs file-disjoint Herdr lanes and exits
 ## Resume
 
 After a restart or compaction: `office resume` (or `office resume <id>` when several runs exist). It reconstructs pending
-work from runs.db; never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract.
+work from runs.db (`office context` adds a bounded snapshot with stale references flagged); never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract.
 
 ## Diagnostics
 
-`office inspect run|plan|task|gate|evidence|events|route|learner|convergence|startup [id]` and `--verbose`/`--json` show the detail default output hides.
+`office inspect run|plan|task|gate|evidence|events|route|learner|convergence|startup|economics [id]` and `--verbose`/`--json` show the detail default output hides (economics is opt-in: `docs/orchestrator-reference.md`).
 `office doctor` checks the install, hooks, pinned runtimes, and known harness defects. `office list` and `office prune` (dry run; `-f` to delete) maintain runs.
 
 Review semantics live in `docs/review-convergence.md` and the runtime design in `docs/v31-implementation.md`; you need neither to run the lifecycle.
