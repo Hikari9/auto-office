@@ -135,13 +135,15 @@ def _snapshot(ddir: Path, text: str, rnd: int) -> str:
     return str(path)
 
 
-def _update(prompt_id: str, **fields) -> None:
+def _update(prompt_id: str, *, from_states: tuple[str, ...], **fields) -> bool:
+    """Move a prompt only from the states the caller saw, so a concurrent answer is never clobbered."""
     con = db.connect()
     try:
         with db.transaction(con):
             cols = ", ".join(f"{k}=?" for k in fields)
-            con.execute(f"UPDATE startup_prompts SET {cols}, updated_at=? WHERE id=?",
-                        (*fields.values(), now_iso(), prompt_id))
+            marks = ",".join("?" * len(from_states))
+            return con.execute(f"UPDATE startup_prompts SET {cols}, updated_at=? WHERE id=? AND state IN ({marks})",
+                               (*fields.values(), now_iso(), prompt_id, *from_states)).rowcount == 1
     finally:
         con.close()
 
@@ -267,7 +269,8 @@ def _settle(run: dict, dispatch: dict, row: dict, name: str, pane: str, ddir: Pa
         _rerecord(run, dispatch, row, text, ddir, why=f"the answer ({row['answer']}) opened another startup screen")
     else:
         why = "the harness is not ready yet" if moved else "the answer was not taken"
-        _update(row["id"], state="waiting", reported=0)
+        if not _update(row["id"], from_states=("answered",), state="waiting", reported=0):
+            return "waiting"
         _notify(run, dispatch, row["id"], f"{why} after {row['answer']}; the prompt stays open", audience="orchestrator")
     return "waiting"
 
@@ -278,8 +281,11 @@ def _rerecord(run: dict, dispatch: dict, row: dict, text: str, ddir: Path, *, wh
         _close(run, dispatch, row["id"], "expired", f"more than {MAX_ROUNDS} startup screens")
         return
     fp, opts = fingerprint(text), options(text)
-    _update(row["id"], state="waiting", fingerprint=fp, screen=label(text), options_json=dumps(opts),
-            snapshot_path=_snapshot(ddir, text, rnd), round=rnd, answer=None, reported=0)
+    # From the state this launcher read: an answer claimed meanwhile ('answering') wins.
+    if not _update(row["id"], from_states=(row["state"],), state="waiting", fingerprint=fp, screen=label(text),
+                   options_json=dumps(opts), snapshot_path=_snapshot(ddir, text, rnd), round=rnd, answer=None,
+                   reported=0):
+        return
     _notify(run, dispatch, row["id"], f"{why}: {label(text)}; answer: {answer_command(dispatch['id'], opts, fp)}; "
                                       f"{USER_DECISION}", audience="orchestrator")
 
@@ -398,13 +404,18 @@ def answer(con, run: dict, d: dict, *, keys: str | None, choice: int | None, exp
         if not sent:
             break
     with db.transaction(con):
-        con.execute("UPDATE startup_prompts SET state=?, updated_at=? WHERE id=? AND state='answering'",
-                    ("answered" if sent else "waiting", now_iso(), row["id"]))
+        moved = con.execute("UPDATE startup_prompts SET state=?, updated_at=? WHERE id=? AND state='answering'",
+                            ("answered" if sent else "waiting", now_iso(), row["id"])).rowcount
+        if not moved:
+            sent = False
         state.emit(con, run, "startup.answered" if sent else "startup.answer_failed",
                    f"{who} {d['id']}: startup prompt {row['id']} ({row['screen']}) "
                    + (f"answered with {' '.join(seq)}" if sent else "answer could not be sent"),
                    audience="runtime", task_id=d.get("task_id"), dispatch_id=d["id"],
                    payload={"prompt_id": row["id"], "fingerprint": row["fingerprint"], "keys": seq})
+    if not moved:
+        raise Refused("startup-answer-race", f"startup prompt {row['id']} was closed or changed while answering",
+                      scope=who, next_step="office status")
     if not sent:
         raise Refused("startup-send-failed", f"herdr could not send keys to pane {row['pane_id']}", scope=who,
                       next_step=f"herdr pane read {row['pane_id']}")

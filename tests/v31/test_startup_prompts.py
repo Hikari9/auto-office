@@ -300,3 +300,25 @@ def test_fingerprint_ignores_the_selection_cursor_and_options_parse():
     assert startup.fingerprint(UPDATE) == startup.fingerprint(moved)
     assert startup.fingerprint(UPDATE) != startup.fingerprint(WHATSNEW)
     assert [o["n"] for o in startup.options(UPDATE)] == [1, 2, 3]
+
+
+def test_a_rerecord_never_clobbers_a_claimed_answer(env, monkeypatch, update_herdr):
+    results = []
+
+    def claim_then_rerecord(row):
+        con = db.connect()
+        try:
+            with db.transaction(con):
+                con.execute("UPDATE startup_prompts SET state='answering', answer='esc' WHERE id=?", (row["id"],))
+        finally:
+            con.close()
+        results.append(startup._update(row["id"], from_states=("waiting",), state="waiting", answer=None))
+        con = db.connect()
+        try:
+            with db.transaction(con):
+                con.execute("UPDATE startup_prompts SET state='expired' WHERE id=?", (row["id"],))
+        finally:
+            con.close()
+    _on_poll(monkeypatch, claim_then_rerecord)
+    hal.launch_in_herdr(env, monkeypatch, reads=[hal.BUSY], adapter="codex", model="gpt-5.5")
+    assert results == [False]
