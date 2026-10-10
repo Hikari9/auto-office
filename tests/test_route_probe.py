@@ -6,7 +6,6 @@ No real model is called.
 import copy
 import json
 import os
-import signal
 import sqlite3
 import sys
 import threading
