@@ -838,7 +838,10 @@ def test_route_role_with_discovery_off_a_pinned_run_a_manual_route_or_a_reviewer
         assert "discovery" not in result
         assert all(c["route_status"] == "available" for c in result["request"]["candidates"])
 
-    no_pool(candidates.route_role(con, run["policy"], run, "executor", task_id="T1", probe=False))      # shipped: off
+    assert route_policy.discovery_settings(run["policy"])["enabled"] is True                              # shipped: on
+    off = copy.deepcopy(run["policy"])
+    off["routing"]["discovery"]["enabled"] = False
+    no_pool(candidates.route_role(con, off, run, "executor", task_id="T1", probe=False))                # a run with it off
     pinned = copy.deepcopy(on)
     for key in (route_policy.PROVENANCE_KEY, route_policy.DIGEST_KEY):
         pinned.pop(key)
