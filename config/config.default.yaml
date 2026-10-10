@@ -32,17 +32,35 @@ quota:
 cost_policy:
   default: balanced
   # Legacy: planner and reviewer routing only. Executor and worker routing (#300)
-  # never applies a money band; its cost safety valve is
-  # routing.adaptive.budget_ceiling_usd.
+  # never applies a money band. Cost is a ranking factor; only an explicitly
+  # user-set routing.adaptive.budget_ceiling_usd is a hard ceiling.
   balanced_money_band_percent: 20
   available: [money_saver, quota_saver, balanced]
 # Adaptive executor/worker routing (#300). Values are calibration defaults,
 # replayable and inspectable (office inspect route / learner); omit a key to
 # keep its default. Preference is weighted evidence, capped at 0.25.
 routing:
+  discovery:
+    # On for executor and worker only (#494). A route the catalog marks `discovery: eligible` is proven by one
+    # exact conformance probe and then tried once, bounded, with a known-working fallback. A run pins this at
+    # start, so a run started earlier keeps its own setting. Evidence: docs/benchmarks/issue-494-evidence.md.
+    enabled: true
+    roles: [executor, worker]
+    max_probes_per_run: 2
+    max_trials_per_run: 1
+    max_trial_percent_rolling_20: 15
+    trial_size_classes: [S, M]
+    trial_blast_radius: [local, repo]
+    require_known_fallback: true
+    probe_ttl_days: 7
+    probe_timeout_s: 120
+  user_policy:
+    denied_models: []
+    overkill_rules: []
   adaptive:
     competitive_band: 0.05
-    budget_ceiling_usd: 25
+    # Cost ranks routes. Only a user ceiling is hard; the scale is ranking only.
+    budget_ceiling_usd: null
     cost_scale_usd: 25
     spread_penalty: 0.03
     weights:

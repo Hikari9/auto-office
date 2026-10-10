@@ -18,7 +18,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
-from office import adaptive, route_learning, scoring
+from office import adaptive, route_learning, route_policy, scoring
 from office.util import sha256_obj
 
 # Roles whose selection confers mutable or gate authority; they need derived trust.
@@ -249,7 +249,13 @@ def _connect(db_path):
     return con
 
 
-def route(request: dict) -> dict:
+def route(request: dict, discovery_input: dict | None = None) -> dict:
+    """Route one request. `discovery_input` (#494) is the preflight's recompute handle:
+    {"candidate", "probe_key", "reservation_id", "attempt_id"} naming the one discovery
+    candidate whose fresh exact probe record the request now carries. The recompute
+    re-evaluates every gate against the request's current state, never draws again and
+    never swaps in a different untried route."""
+    discovery_input = discovery_input or request.get("discovery_input")
     role = request["role"]
     playbook = request.get("playbook")
     policy = request.get("policy", {})
@@ -298,17 +304,34 @@ def route(request: dict) -> dict:
 
     con = _connect(db_path)
     try:
-        # 1 hard exclusions
+        # 1 hard exclusions, then the user's denied and overkill policy (#494). Denial blocks
+        # every role and every route, manual or automatic. Overkill skips a route only in
+        # automatic selection and only where its role and size scope match.
+        policies = request.get("user_policies") or []
+        size_class = request.get("size_class") or (request.get("context") or {}).get("size_class")
+        pool = []  # discovery candidates: never in the eligible slate, whatever the role
         for c in request.get("candidates", []):
             cid = candidate_id(c)
+            denied = next((why for pol in policies if (why := route_policy.is_denied(c, pol))), None)
+            overkill = None if request.get("manual_route") else next(
+                (why for pol in policies if (why := route_policy.is_overkill(c, role, size_class, pol))), None)
             if c.get("hard_excluded") or c.get("local_hard_excluded"):
                 rejected.append({"candidate": cid, "stage": 1, "reason": "hard exclusion"})
+            elif denied:
+                rejected.append({"candidate": cid, "stage": 1, "reason": denied, "category": "denied"})
+            elif overkill:
+                rejected.append({"candidate": cid, "stage": 1, "reason": overkill, "category": "overkill"})
+            elif c.get("route_status", "available") != "available":
+                pool.append(c)
             else:
                 stage.append(c)
 
         # 2 adapter validity/trust -- derived (§7.1). A caller-supplied `adapter_state`
         # is read nowhere below; only `evaluate_trust_state` against `runs_db` decides.
         adaptive_role = role in ADAPTIVE_ROLES and request.get("adaptive", True) is not False
+        discovering = bool(adaptive_role and pool and (request.get("discovery") or {}).get("settings", {}).get("enabled"))
+        if pool and not discovering:
+            _reject_pool(pool, rejected, "discovery is not enabled for this role or run")
         learned = request.get("learned_eligibility") or {}
         eligibility: dict[str, dict] = {}
         nxt = []
@@ -386,6 +409,7 @@ def route(request: dict) -> dict:
         stage = nxt
 
         if not stage:
+            _reject_pool(pool, rejected, "no known-working route qualified, so no fallback exists")
             return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
 
         # 6 quota safety: unknown quota is scored conservatively downstream, not
@@ -406,6 +430,7 @@ def route(request: dict) -> dict:
                 rejected.append({"candidate": candidate_id(c), "stage": 6, "reason": "known quota crosses reserve; only unknown candidates remain"})
             stage = unknown
         else:
+            _reject_pool(pool, rejected, "protected quota blocks every qualifying route")
             return {
                 "selected": None, "status": "protected_quota_would_be_consumed", "rejected": rejected,
                 "action": "choose a smaller/cheaper valid strategy, propose another route, or obtain explicit user authority",
@@ -413,7 +438,9 @@ def route(request: dict) -> dict:
 
         if adaptive_role:
             return _adaptive(request, role, playbook, policy, stage, rejected, eligibility, learned,
-                             preferred_seed, allow_advisory_undercut, override_applies, override_record)
+                             preferred_seed, allow_advisory_undercut, override_applies, override_record,
+                             pool=pool if discovering else [], discovery_input=discovery_input,
+                             required=required, floor=floor, reserve=reserve)
 
         # 7 advisory quality anchor. A caller-supplied per-candidate `advisory_pass` is
         # read nowhere below: retention is derived purely from `preferred_seed` match,
@@ -495,11 +522,201 @@ def route(request: dict) -> dict:
             con.close()
 
 
+def _pool_category(c: dict) -> tuple[str, str]:
+    """(category, reason) for a discovery candidate that is not being tried now."""
+    probe = c.get("probe") or {}
+    if probe.get("result") == "fail":
+        return "probe-failed", f"exact probe failed: {probe.get('reason_class')}: {probe.get('detail') or ''}".rstrip(": ")
+    if probe.get("result") == "pending":
+        return "untried", "an exact probe is in flight"
+    return "untried", c.get("status_reason") or "no fresh exact probe pass yet"
+
+
+def _reject_pool(pool: list[dict], rejected: list, why: str | None = None) -> None:
+    """Every discovery candidate leaves the eligible slate with a category; none is dropped silently."""
+    for c in pool:
+        category, reason = _pool_category(c)
+        rejected.append({"candidate": candidate_id(c), "stage": 2, "category": category,
+                         "reason": f"{reason}; {why}" if why else reason})
+
+
+def _pool_gate(c: dict, required: set, floor, playbook, quarantined: set) -> tuple[int, str, str] | None:
+    """The non-probe gates for a discovery candidate: (stage, reason, blocked token) or None.
+    An unknown benchmark score is not a failure here (the scorer prices that uncertainty);
+    a known low score, low effort, disallowed source, quarantine, missing capability and a
+    quota that would cross the protected reserve all still reject."""
+    cid = candidate_id(c)
+    if cid in quarantined:
+        return 2, "adapter trust is quarantined; a quarantined route never takes a trial", "quarantine"
+    caps = set(c.get("capabilities", []))
+    if not required.issubset(caps):
+        return 3, f"missing capabilities {sorted(required - caps)}", "permission"
+    passed, reason = scoring.evaluate_capability_floor(c, floor, unbenchmarked_ok=True)
+    if not passed:
+        return 4, reason, "floor"
+    supported = c.get("supported_playbooks")
+    if supported and playbook and playbook not in supported:
+        return 5, "task shape unsupported", "task-shape"
+    return None
+
+
+def _quota_gate(c: dict, reserve: float) -> tuple[int, str, str] | None:
+    q = c.get("quota", {})
+    if q.get("status", "unknown") == "ok" and q.get("tightest_remaining_percent") is not None:
+        remaining, burn = float(q["tightest_remaining_percent"]), float(q.get("projected_burn_percent") or 0)
+        if remaining - burn < reserve:
+            return 6, "projected quota crosses the protected reserve", "quota"
+    return None
+
+
+def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], required: set, floor,
+               reserve: float, discovery_input: dict | None, rejected: list) -> tuple[dict, dict | None]:
+    """Discovery allocation for one executor/worker decision (#494). Separate from exploration.
+
+    Returns (block, trial). First call: at most one safe candidate wins a seeded draw and
+    becomes `intent: "probe"`; the primary stays the known-working route. With
+    `discovery_input` (the preflight recompute): the named candidate becomes
+    `intent: "trial"` only if a fresh exact probe pass is on record and every gate still
+    holds; otherwise it is dropped with the reason. A trial is never drawn twice and
+    never swapped for another untried route.
+    """
+    d = request["discovery"]
+    s, alloc = d["settings"], d["allocation"]
+    known, quarantined = set(d.get("known_working") or []), set(d.get("quarantined") or [])
+    risk = d.get("risk") or {}
+    primary = rec["slate"][0]["route"]
+    block = {"active": True, "intent": "none", "candidate": None, "probe_key": None, "probe": None,
+             "caps": {k: dict(alloc[k]) for k in ("probes", "trials", "rolling")}, "fallback": None}
+    if discovery_input:
+        block["reservation_id"] = discovery_input.get("reservation_id")
+        block["attempt_id"] = discovery_input.get("attempt_id")
+    scoped = [c for c in pool if not discovery_input or candidate_id(c) == discovery_input.get("candidate")]
+
+    def drop(c, blocked, *, category="untried", stage=2, reason=None):
+        block["blocked"] = blocked
+        rejected.append({"candidate": candidate_id(c), "stage": stage, "category": category,
+                         "reason": reason or f"discovery: {blocked}"})
+
+    def other(c):  # a candidate this decision is not trying
+        category, reason = _pool_category(c)
+        rejected.append({"candidate": candidate_id(c), "stage": 2, "category": category, "reason": reason})
+
+    for c in pool:
+        if c not in scoped:
+            other(c)
+    if discovery_input and not scoped:
+        block["blocked"] = "candidate-gone"
+        return block, None
+    # Global gates: the same for every candidate.
+    size_ok = risk.get("size_class") in s["trial_size_classes"]
+    blast_ok = risk.get("blast_radius") in s["trial_blast_radius"]
+    global_block = None
+    if not (size_ok and blast_ok) or risk.get("irreversible"):
+        global_block = "risk"
+    elif alloc["trials"]["used"] >= alloc["trials"]["max"]:
+        global_block = "trial-cap"
+    elif alloc["rolling"]["used"] >= alloc["rolling"]["max"]:
+        global_block = "rolling-cap"
+    elif s.get("require_known_fallback", True) and primary not in known:
+        global_block = "no-fallback"
+    elif rec["audit"].get("exploration", {}).get("active"):
+        global_block = "exploration-active"
+    if discovery_input and scoped:
+        block.update(candidate=candidate_id(scoped[0]), probe_key=scoped[0].get("probe_key"),
+                     probe=_probe_view(scoped[0].get("probe")))
+    if global_block:
+        block["blocked"] = global_block
+        for c in scoped:
+            category, reason = _pool_category(c)
+            rejected.append({"candidate": candidate_id(c), "stage": 2, "category": category,
+                             "reason": f"{reason}; discovery blocked: {global_block}"})
+        return block, None
+    survivors = []
+    for c in scoped:
+        probe = c.get("probe")
+        gate = _pool_gate(c, required, floor, playbook, quarantined) or _quota_gate(c, reserve)
+        if gate:
+            stage, why, token = gate
+            drop(c, token, category="floor" if token == "floor" else "untried", stage=stage, reason=why)
+            continue
+        if discovery_input:
+            if c.get("probe_key") != discovery_input.get("probe_key"):
+                drop(c, "fingerprint-changed")
+                continue
+            if not probe:
+                drop(c, "probe-missing")
+                continue
+            if probe.get("result") != "pass":
+                token = "probe-pending" if probe.get("result") == "pending" else f"probe-failed:{probe.get('reason_class')}"
+                drop(c, token, category="probe-failed" if probe.get("result") == "fail" else "untried")
+                continue
+        else:
+            if probe and probe.get("result") in ("fail", "pending"):
+                other(c)
+                continue
+            if not (probe and probe.get("result") == "pass") and alloc["probes"]["used"] >= alloc["probes"]["max"]:
+                drop(c, "probe-cap")
+                continue
+        survivors.append(c)
+    if not survivors:
+        return block, None
+    bounds = adaptive.trial_rows(survivors, rec, request)
+    kept = []
+    for c in survivors:
+        b = bounds.get(candidate_id(c))
+        if b is None:  # an alias row folded into the concrete row of the same invocation
+            other(c)
+            continue
+        if b["reason"]:
+            drop(c, "margin" if not b["within_margin"] else "cost" if not b["within_cost"] else "ceiling",
+                 reason=f"discovery: {b['reason']}")
+            continue
+        kept.append((c, b))
+    if not kept:
+        return block, None
+    if discovery_input:
+        c, b = kept[0]
+        probe = c["probe"]
+        block.update(intent="trial", candidate=candidate_id(c), probe_key=c.get("probe_key"), probe=_probe_view(probe),
+                     fallback=primary)
+        return block, {"candidate": c, "bounds": b}
+    seed = request.get("routing_seed") or ""
+    rate = float(s["max_trial_percent_rolling_20"]) / 100.0
+    draw = adaptive._draw(seed, "discovery")
+    block["draw"] = round(draw, 6)
+    block["rate"] = rate
+    if draw >= rate:
+        for c, _ in kept:
+            other(c)
+        return block, None
+    kept.sort(key=lambda cb: candidate_id(cb[0]))
+    c, b = kept[int(adaptive._draw(seed, "discovery-pick") * len(kept)) % len(kept)]
+    for other_c, _ in kept:
+        if other_c is not c:
+            other(other_c)
+    probe = c.get("probe")
+    block.update(intent="probe", candidate=candidate_id(c), probe_key=c.get("probe_key"), probe=_probe_view(probe),
+                 fallback=primary)
+    rejected.append({"candidate": candidate_id(c), "stage": 2, "category": "probe-candidate",
+                     "reason": "chosen for an exact conformance probe; not in the eligible slate until a fresh "
+                               "exact probe passes"})
+    return block, None
+
+
+def _probe_view(probe: dict | None) -> dict | None:
+    if not probe:
+        return None
+    return {"result": probe.get("result"), "reason_class": probe.get("reason_class"),
+            "probed_at": probe.get("probed_at"), "fresh": bool(probe.get("fresh", True))}
+
+
 def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, learned, preferred_seed,
-              allow_advisory_undercut, override_applies, override_record) -> dict:
+              allow_advisory_undercut, override_applies, override_record, *, pool=None, discovery_input=None,
+              required=None, floor=None, reserve=5.0) -> dict:
     """Stages 7-8 for executor/worker routes: learned eligibility, then the
     adaptive comparison (`office.adaptive`). Preference is weighted evidence; a
     gear that forbids advisory undercut still holds routes to its seed chain."""
+    pool = pool or []
     if preferred_seed and not allow_advisory_undercut:
         matched = [c for c in stage if preferred_rank(c, preferred_seed) is not None]
         if matched:
@@ -518,26 +735,59 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
             continue
         nxt.append(c)
     if not nxt:
+        _reject_pool(pool, rejected, "no qualifying known-working route, so no fallback exists")
         return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected, "slate": []}
     rec = adaptive.recommend(nxt, request, config={"routing": {"adaptive": request.get("adaptive_config") or {}}})
     rejected.extend(rec["rejected"])
     if not rec["slate"]:
+        _reject_pool(pool, rejected, "no qualifying known-working route, so no fallback exists")
         return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected, "slate": []}
     audit = rec["audit"]
+    by_id = dict(rec["by_id"])
+    slate = rec["slate"]
+    disc, trial = None, None
+    active = bool((request.get("discovery") or {}).get("settings", {}).get("enabled"))
+    if active and (pool or discovery_input):
+        disc, trial = _discovery(request, role, playbook, rec, pool, set(required or ()), floor,
+                                 float(reserve), discovery_input, rejected)
+    elif active:
+        disc = {"active": True, "intent": "none", "candidate": None, "probe_key": None, "probe": None,
+                "caps": {k: dict(request["discovery"]["allocation"][k]) for k in ("probes", "trials", "rolling")},
+                "fallback": None}
     audit["rejected"] = rejected
+    if trial:
+        c, b = trial["candidate"], trial["bounds"]
+        tid = candidate_id(c)
+        by_id[tid] = c
+        fallback = next(e for e in slate if e["route"] == disc["fallback"])
+        entry = {"rank": adaptive.RANK_LABELS[0], "route": tid, "label": adaptive.label(c), "utility": b["utility"],
+                 "reason": f"discovery trial: a fresh exact conformance probe passed; falls back to {fallback['label']}",
+                 "strength": "fresh exact probe pass (invocation conformance only)",
+                 "weakness": "no local quality evidence yet"}
+        rest = [e for e in slate if e is not fallback]
+        slate = [entry, fallback, *rest][:adaptive.SLATE_SIZE]
+        for i, e in enumerate(slate):
+            slate[i] = {**e, "rank": adaptive.RANK_LABELS[i]}
+        audit["candidates"] = [*audit["candidates"], {**b["row"], "rank": 0}]
+        audit["slate"] = slate
+        eligibility[tid] = {"trust": "valid-unverified", "source": "trial", "probe_key": disc["probe_key"],
+                            "attempt_id": disc.get("attempt_id")}
+    if disc:
+        audit["discovery"] = disc
     for row in audit["candidates"]:
         row["eligibility"] = eligibility.get(row["route"]) or {"source": "factual gates"}
-    by_id = rec["by_id"]
-    chosen = by_id[rec["slate"][0]["route"]]
+    chosen = by_id[slate[0]["route"]]
     cid = candidate_id(chosen)
     disclosure = selection_disclosure(role, chosen, preferred_seed, policy.get("cost_policy", "balanced"))
-    head = rec["slate"][0]
+    head = slate[0]
     disclosure["reason"] = "; ".join(
         [disclosure["reason"].split("; ")[0], head["reason"], f"+ {head['strength']}", f"- {head['weakness']}"]
         + [p for p in disclosure["reason"].split("; ")[1:] if "slug" in p])
     disclosure["adaptive"] = True
     disclosure["slate"] = [{k: e[k] for k in ("rank", "route", "label", "reason", "strength", "weakness")}
-                           for e in rec["slate"]]
+                           for e in slate]
+    if trial:
+        disclosure["trial"] = {"fallback": disc["fallback"], "probe_key": disc["probe_key"]}
     for stage_no in (2, 4, 7):
         if override_applies(cid, stage_no):
             disclosure["override"] = {
@@ -545,20 +795,26 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
                 "authorized_by": override_record["authorized_by"], "rationale": override_record["rationale"],
             }
             break
-    decision_hash = sha256_obj({"role": role, "playbook": playbook, "policy": policy, "selected": cid,
-                                **({"task_descriptor": (request.get("context") or {}).get("task_descriptor")}
-                                   if (request.get("context") or {}).get("task_descriptor") else {}),
-                                "slate": [e["route"] for e in rec["slate"]],
-                                "inputs": [{k: r[k] for k in ("route", "p_success", "cost_to_success",
-                                                              "time_to_success_seconds", "quota", "preference",
-                                                              "utility")} for r in audit["candidates"]],
-                                "clincher": audit["clincher"], "exploration": audit["exploration"],
-                                "policy_version": audit["policy_version"], "evidence_digest": audit["evidence_digest"]})
+    hashed = {"role": role, "playbook": playbook, "policy": policy, "selected": cid,
+              **({"task_descriptor": (request.get("context") or {}).get("task_descriptor")}
+                 if (request.get("context") or {}).get("task_descriptor") else {}),
+              "slate": [e["route"] for e in slate],
+              "inputs": [{k: r[k] for k in ("route", "p_success", "cost_to_success",
+                                            "time_to_success_seconds", "quota", "preference",
+                                            "utility")} for r in audit["candidates"]],
+              "clincher": audit["clincher"], "exploration": audit["exploration"],
+              "policy_version": audit["policy_version"], "evidence_digest": audit["evidence_digest"]}
+    if disc:
+        # In the hash only when discovery is active, so discovery-off decisions hash exactly as before.
+        hashed["discovery"] = disc
+    decision_hash = sha256_obj(hashed)
     audit["decision_hash"] = decision_hash
+    qualifying = [r["route"] for r in audit["candidates"]]
     return {
         "selected": cid, "status": "selected", "candidate": chosen, "rejected": rejected,
         "selection_disclosure": disclosure, "decision_hash": decision_hash,
-        "slate": rec["slate"], "qualifying": [r["route"] for r in audit["candidates"]],
+        "slate": slate, "qualifying": qualifying,
         "qualifying_candidates": by_id,
         "routing": audit,
+        **({"discovery": disc} if disc else {}),
     }
