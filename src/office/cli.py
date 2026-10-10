@@ -362,6 +362,8 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("doctor", parents=[common])
     s.add_argument("--fix", action="store_true")
     s.add_argument("--probe-vision", action="store_true", help="run image-capability probes on visual routes (uses quota)")
+    s.add_argument("--probe-route", metavar="HARNESS/MODEL@EFFORT",
+                   help="run one exact-route conformance probe (uses quota; counts against --run's probe cap)")
     s = sp.add_parser("update", parents=[common])
     s.add_argument("--check", action="store_true", help="check PyPI and a source checkout's upstream without installing updates")
     s = sp.add_parser("upgrade", parents=[common])
@@ -585,6 +587,10 @@ def _legacy_result(target) -> Result:
     return res
 
 
+# Commands that never read runs.db, so they never sweep it either.
+_NO_SWEEP = ("config", "setup", "onboard", "update", "install", "uninstall", "web")
+
+
 def _run(args, unknown) -> int:
     cmd = args.cmd
     cwd = Path.cwd()
@@ -598,6 +604,10 @@ def _run(args, unknown) -> int:
         from office import dispatch
         return dispatch.supervise(args.dispatch_id)
     from office.state import OfficeError
+    if cmd not in _NO_SWEEP:
+        # Expire probe reservations whose owner died (the outbox dead-claim pattern). Never fails a command.
+        from office import route_probe
+        route_probe.sweep()
     if cmd == "start":
         from office import lifecycle, runtime_default
         if not args.goal and not args.from_run:
@@ -677,7 +687,19 @@ def _run(args, unknown) -> int:
         return emit(onboarding.status(harness=args.harness, cwd=cwd), args)
     if cmd == "doctor":
         from office import doctor
-        return emit(doctor.doctor(fix=args.fix, probe_vision=args.probe_vision), args)
+        run = None
+        named = getattr(args, "run_arg", None) or os.environ.get("OFFICE_RUN_ID")
+        if args.probe_route and named:
+            # Only an explicitly named run is bound, so a casual doctor call never spends a run's probe cap.
+            from office import state
+            con = _con()
+            try:
+                run = state.find_run(con, named)
+            finally:
+                con.close()
+            if run is None or not run.get("office_version"):
+                raise OfficeError("no-such-run", f"--probe-route: {named!r} is not a 3.1+ Office run", next_step="office list")
+        return emit(doctor.doctor(fix=args.fix, probe_vision=args.probe_vision, probe_route=args.probe_route, run=run), args)
     if cmd == "update":
         from office import self_update
         return emit(self_update.check() if args.check else self_update.update(), args)
