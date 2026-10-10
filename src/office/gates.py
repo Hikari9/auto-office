@@ -1337,7 +1337,8 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
                            "AND summary LIKE ?", (run["id"], task_id, f"{task_id} {rev_id} %")).fetchone():
             state.emit(con, run, "task.restack_needed", f"{task_id} {rev_id} {stale}", task_id=task_id)
         return False
-    state.update_task(con, run["id"], task_id, status="accepted", accepted_revision_id=rev_id, pause_reason=None)
+    state.update_task(con, run["id"], task_id, status="accepted", accepted_revision_id=rev_id,
+                      accepted_producer_dispatch_id=rev["dispatch_id"], pause_reason=None)
     con.execute("UPDATE leases SET released_at=? WHERE run_id=? AND task_id=? AND released_at IS NULL AND revoked_at IS NULL",
                 (now_iso(), run["id"], task_id))
     con.execute("UPDATE dispatches SET outcome='pending' WHERE id=? AND outcome IS NULL", (rev["dispatch_id"],))

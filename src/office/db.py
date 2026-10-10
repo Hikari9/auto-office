@@ -24,7 +24,7 @@ from office import paths
 # Bump when SHARED_COLUMNS or the DDL changes. The version is a record, not the
 # gate: every open also runs the additive column pass (see `migrate`), so a
 # column added without a bump still reaches existing databases.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -71,9 +71,15 @@ SHARED_COLUMNS = {
         # #253: a Claude usage-limit stop: kind, when it resets (UTC), the pane's
         # own reset text, and a hash of the screen above the limit line.
         "stall_kind TEXT", "resets_at TEXT", "limit_label TEXT", "limit_fingerprint TEXT",
+        # v12: the executor dispatch this one replaced (same run, same task).
+        "predecessor_dispatch_id TEXT",
     ],
     # v2 (#185): user-declared model overrides.
-    "tasks": ["review_override_json TEXT", "pr_json TEXT", "descriptor_json TEXT"],
+    "tasks": [
+        "review_override_json TEXT", "pr_json TEXT", "descriptor_json TEXT",
+        # v12: the task's first executor dispatch, and the dispatch that produced the accepted revision.
+        "first_executor_dispatch_id TEXT", "accepted_producer_dispatch_id TEXT",
+    ],
     # v3 (3.2): the route preview shown in the plan diagram; a task's GitHub PR.
     "plans": ["preview_json TEXT"],
     "findings": [
