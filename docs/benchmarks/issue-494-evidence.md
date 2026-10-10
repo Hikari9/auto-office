@@ -5,6 +5,8 @@ route is proven by one exact conformance probe and then tried once, bounded, wit
 It lists what was run, what it showed, and what was not achieved. Nothing here is a trust grant.
 
 Run branch `office/d9f6f6d3/T6`, stacked on T5 (#512) and T4. Reference tree for the old behaviour: `eaf155a`.
+T8 (branch `office/d9f6f6d3/T8`, stacked on T6) fixed the headless `agent.env` gap the first live attempt found and
+reran the live trial; both attempts are below.
 
 ## Result
 
@@ -15,7 +17,7 @@ Run branch `office/d9f6f6d3/T6`, stacked on T5 (#512) and T4. Reference tree for
 | S2 and S9 include the cold-start probe-fail path with no trial row | `test_s02_a_failed_probe_never_becomes_a_trial_...` (5 reason classes), `test_s09_a_cold_start_probe_failure_...` | pass |
 | S11 repeated same-key probes keep separate histories | `test_s11_repeated_probes_of_one_fingerprint_keep_separate_histories` | pass |
 | `scripts/route_replay.py` on a copy of the operator's runs.db | see "Routing replay" | run, counts below |
-| Live exact probe and one real reversible trial reaching an accepted revision | see "Live evidence" | probe pass; task accepted through Office's review; trial row ended `abandoned` (defect found, below) |
+| Live exact probe and one real reversible trial reaching an accepted revision | see "Live evidence" (T8 rerun) | pass: `trial-submitted` then `trial-accepted`, no manual `agent.env` write or `office submit`. The first attempt (T6) ended `abandoned` on a headless `agent.env` defect, fixed in T8 |
 | `scripts/validate.sh` and `pytest -n 2 --all` | see "Gates" | pass with the default `false` and with the shipped default `true` (after A10's three test edits) |
 | Default flip to `true` | see "Default activation" | applied after S1-S12, `validate.sh` and `--all` passed; amendment A10 (plan p8) widened scope to the three default-pinning tests |
 
@@ -107,6 +109,76 @@ window, then the per-run caps; no run in the history would have reached either.
 
 ## Live evidence
 
+Two attempts. The first (T6) found a defect and its trial row ended `abandoned`; T8 fixed it and ran one more
+trial, which reached `trial-accepted`. The T8 rerun comes first, the T6 attempt follows unchanged in substance.
+
+### T8 rerun: clean trial after the headless `agent.env` fix
+
+Cause fixed. `launch()` in `src/office/dispatch.py` wrote `agent.env` only for the Herdr and external paths, so a
+headless executor (`OFFICE_LAUNCHER=sync` or the detached process) was told to source a file that did not exist. It now
+calls the existing `write_agent_env` before the sync and detached starts (the Herdr path rewrites the same content).
+`tests/v31/test_headless_agent_env.py` drives sync, detached process and external launches with a fake harness that
+records whether `agent.env` exists, and with what content, when the agent starts; the sync and process cases fail
+without the fix.
+
+Isolation (the T6 limits, a fresh directory `/tmp/t8-live`): a venv built from `git archive` of the run branch at
+`66632d5` (no `uv tool install`, `office install` or `office upgrade`), a scratch git repo, and a wrapper with a scrubbed
+environment and `OFFICE_DATA_HOME`, `OFFICE_STATE_HOME`, `OFFICE_USER_CONFIG` and `AUTO_OFFICE_RUNS_DB` under
+`/tmp/t8-live`. The operator's runs.db was not opened. The isolated DB started empty, so no earlier probe existed.
+The user policy was the T6 one (discovery on, `max_trial_percent_rolling_20: 100`, exploration off, denials that keep
+the draw on `codex/gpt-6.1-sol` at medium). `OFFICE_LAUNCHER=sync` and `OFFICE_JOBS=inline`: the executor ran headless.
+
+Commands, in order (each through the wrapper, from `/tmp/t8-live/repo`):
+
+```
+office start "add() returns the sum" --gear direct+review --planner inline --size-class S
+office submit                      # plan p1 (PLAN.md written by hand), blast_radius: repo
+office doctor --probe-route codex/gpt-6.1-sol@medium
+office approve plan --quote "pre-authorized in requirements r4 (T8 brief: exactly one more isolated live trial, at most one probe, headless, isolated scratch run)"
+office dispatch T1
+office close --handoff office/8aa2c08b/integration   # scratch branch only; nothing pushed
+```
+
+Route and fingerprint: `codex@0/gpt-6.1-sol@medium`, fallback `codex@0/gpt-6-luna@xhigh`, fingerprint
+`codex|0.162.0|gpt-6.1-sol|medium|sha256:ee59ad067edd78b178e82a8c71242af79a585969c1f498870aa48498c9038514|worker`.
+Probe freshness: one probe ran (`fresh-run`, pass in about 21 s, model and effort read back from the harness metadata;
+reply, write, write boundary and process cleanup verified). The D5 preflight at dispatch found it fresh
+(`cached-fresh`), so no second probe ran.
+
+`route_discovery_events` for the trial (`/tmp/t8-live/runs.db`, UTC times):
+
+| seq | attempt | kind | origin | freshness | outcome |
+|---|---|---|---|---|---|
+| 1 | b5d25ea3 | `probe-reserved` | manual | none | reserved |
+| 2 | b5d25ea3 | `probe-result` | manual | fresh-run | pass |
+| 3 | 761f3dd7 | `probe-cache-hit` | preflight | cached-fresh | cache-hit:pass |
+| 4 | 761f3dd7 | `dispatch-linked` | dispatch | cached-fresh | trial (dispatch `Ddc43b5ea`) |
+| 5 | 761f3dd7 | `trial-reserved` | dispatch | cached-fresh | reserved |
+| 6 | 761f3dd7 | `trial-launched` | dispatch | cached-fresh | launched (07:09:35) |
+| 7 | 761f3dd7 | `trial-submitted` | dispatch | cached-fresh | submitted (07:10:32) |
+| 8 | 761f3dd7 | `trial-accepted` | job | cached-fresh | accepted (`trial gate result observed: accepted revision`) |
+
+What happened:
+
+* `agent.env` was written by `launch()` at launch (its mtime is the second of `trial-launched`); no one wrote it by hand.
+* The executor (dispatch `Ddc43b5ea`, headless, codex `gpt-6.1-sol` at medium) committed `6a67256` (`calc.add`: `a + b`),
+  ran `office preflight` (ready), then its own `. <agent.env> && office submit` from `next:`. That submit captured
+  `R1-8aa2c08b` at the second of `trial-submitted`. No operator `office submit`.
+* Office's checks passed and the independent review (`D5cee55c8`, `code_reviewer` on `codex@0/gpt-6-luna@high`, not the
+  trial route) approved the lane. T1 `accepted`, lane `L-T1` converged, integration verified on `office/8aa2c08b/integration`.
+* `trial-accepted` is written by the learner when the run closes (`route_learning.refresh` at close), so the scratch run
+  was closed with a local handoff to get it. `route_trials` reads accepted.
+* Authority: `adapter_trust_acts` 0 rows, `recorded_overrides` 0 rows. One probe and one trial ran, as bounded.
+* Not achieved or not exercised: nothing in the acceptance list was missed. A quota probe for `claude` timed out (20 s)
+  and was reported as unknown; it did not affect the route. A failing probe, an unsupported effort and the fallback
+  launch were not exercised live (scripted S2 and S9 cover them). The `trial-abandoned` handling for a worker that ends
+  without submitting is unchanged and still has no live run.
+
+### First attempt (T6): trial row ended `abandoned`
+
+This attempt ran before the fix, on a venv built from `2112889`. Its cause was the headless `agent.env` gap that T8
+fixed above. It is kept as recorded.
+
 Goal: one real exact probe of a discovery-eligible route and one real reversible trial, reaching an accepted revision
 through an isolated Office's normal review. Authority: requirements r3 named action, at most 2 probes and 1 trial.
 
@@ -147,7 +219,7 @@ Receipts (`/tmp/t6-live/runs.db`, read back with sqlite3):
 | authority | `adapter_trust_acts` 0 rows, `recorded_overrides` 0 rows; trust for the trial route reads `valid-unverified` |
 | learner | `office inspect learner`: `codex/gpt-6.1-sol@medium 1/1 landed`; "trial evidence (quality only; trials never change adapter trust): 1/1 trial dispatches landed, trust valid-unverified" |
 
-What did not go cleanly, and why:
+What did not go cleanly in the first attempt, and why:
 
 1. The trial row ended `abandoned`, not `submitted`/`accepted`. The headless launch (no Herdr pane) never writes the
    dispatch's `agent.env`, but the brief and `office preflight` tell the executor to run `. <agent.env> && office submit`.
@@ -156,7 +228,7 @@ What did not go cleanly, and why:
    without a submission and without a recovery"). This is not specific to trials or to `OFFICE_LAUNCHER=sync`: any
    executor launched headless is told to source a file the headless path does not create
    (`dispatch._launch_external` and the Herdr path call `write_agent_env`; `launch` with `sync` or the detached
-   process does not). It is outside T6's scope and is reported, not fixed.
+   process did not). It was outside T6's scope; T8 fixed it (see the rerun above).
 2. To finish the evidence, the operator wrote the missing file with Office's own `dispatch.write_agent_env` (what a pane
    launch does), ran `office preflight` (ready) and the printed `. agent.env && office submit` from the worktree. That
    submit, not the executor's, captured `R1-18c727ac`. Everything after it was Office's: checks, the independent
@@ -165,7 +237,7 @@ What did not go cleanly, and why:
    (`record_trial_outcomes` skips an abandoned trial). S10's scripted CLI test covers the clean path
    (`probe-reserved` ... `trial-submitted`, `trial-accepted`); the live run shows the learner's route-attributed
    evidence without it.
-4. A second trial was not run to get a clean row: the named action allows one trial.
+4. A second trial was not run in T6 to get a clean row: its named action allowed one trial. T8's own named action ran one more.
 5. Not exercised live: a failing probe, an unsupported effort and the fallback launch. Those are covered by the
    scripted suite (S2, S9). The quota probe for `agy` timed out (20 s) during the run and was reported as unknown;
    `codex` and `claude` quotas read fine.
@@ -187,6 +259,9 @@ Run in this worktree with `.venv` (Python 3.12, `uv pip install -e '.[test,visua
 | `scripts/validate.sh` | shipped default `true`, A10 applied (`25d0280`) | 1990 passed, 1 skipped, 0 failed |
 | `pytest -n 2 --all` | shipped default `true`, A10 applied (`25d0280`) | 3614 passed, 2 skipped, 0 failed (`[hup]` passed) |
 | `pytest -n 2 tests/v31/test_issue_494_scenarios.py`, `scripts/route_replay.py --self-test` | shipped default `true` | 79 passed; self-test passed |
+| T8 checks: `pytest -n 2` on `test_headless_agent_env`, `test_discovery_dispatch`, `test_issue_399_dispatch_recovery`, `test_adaptive_dispatch`, `test_job_ownership`, `test_declared_route_426` | shipped default `true`, T8 fix | 106 passed (unit tier); with `--all` and `test_herdr_agent_launch`, `test_headless_fallback` added: 192 passed |
+| `scripts/validate.sh` | shipped default `true`, T8 fix | passed |
+| new test without the fix (`write_agent_env` call removed from `launch()`) | mutation | `test_a_headless_executor_finds_agent_env_when_it_starts[sync]` and `[process]` fail |
 
 The three failures in the trial flip were the same three tests, each pinning the old shipped default `off` (listed
 under "Default activation"). A10 updated exactly those, and nothing else in the repository depends on the default.
@@ -217,16 +292,16 @@ then draws at most 15 percent of recent executor/worker decisions, 2 probes and 
 before it, a `v3.1` review-contract run and a 3.0 legacy run keep their pinned policy and never discover (S12). The
 replay above shows the effect on the operator's history: none of the 64 recorded dispatch decisions would have drawn a probe.
 
-Not achieved, with cause: the live trial row ended `abandoned` rather than `accepted` (the headless `agent.env` gap
-in "Live evidence" and "Findings outside T6's scope"). The task itself was accepted through Office's review, and the
-clean `trial-accepted` path is covered by S10's scripted test only.
+Live outcome: the first attempt (T6) ended `abandoned` because of the headless `agent.env` gap. After T8's fix a
+second isolated live trial reached `trial-submitted` and `trial-accepted` on the default-on configuration (see "Live
+evidence"). Nothing in this section is a trust grant.
 
 ## Findings outside T6's scope
 
-* A headless launch (no Herdr pane) never writes the dispatch's `agent.env`, which the brief and `office preflight`
-  tell the executor to source before `office submit` (`src/office/dispatch.py`, `launch()` outside the Herdr and
-  external paths; the brief text is in `briefs.py`). A headless executor cannot submit. Found in the live run.
+* Fixed in T8: a headless launch (no Herdr pane) never wrote the dispatch's `agent.env`, which the brief and
+  `office preflight` tell the executor to source before `office submit`. A headless executor could not submit. Found in
+  the first live run.
 * When a trial's worker ends without submitting, the trial is recorded `abandoned`. If the revision is then submitted
   by someone else (as in the live run), the task is accepted but the trial row stays `abandoned` and gets no
-  `trial-accepted` event. The learner still reads the dispatch as landed.
+  `trial-accepted` event. The learner still reads the dispatch as landed. Still open; no change in T8.
 
