@@ -244,9 +244,75 @@ def job_run_checks(con, run: dict, job: dict) -> dict:
         if cur.rowcount == 0:
             return {"skipped": "gate already decided"}
     outcome = run_commands(con, run, task["checks"], Path(d["worktree"]), rev, gate)
+    if outcome["verdict"] == "CHANGES_REQUIRED":
+        outcome["preexisting"] = preexisting_failures(con, run, rev, gate, outcome)
     with db.transaction(con):
         ingest_task_gate(con, state.get_run(con, run["id"]), gate["id"], outcome)
     return {"verdict": outcome["verdict"]}
+
+
+# ------------------------------------------------------------------ pre-existing failures
+
+_FAILURE_LINE = re.compile(r"\b(?:FAILED|FAIL|ERROR|FAILURES?)\b|✕|×|--- FAIL|^not ok\b")
+_VOLATILE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|seconds)\b|0x[0-9a-f]+", re.I)
+
+
+def failure_signature(out: str, roots: tuple[str, ...]) -> frozenset[str]:
+    """The failures a check printed, with checkout paths and timings removed so
+    the same failure on two checkouts compares equal. Output with no
+    recognizable failure line is compared by its last lines."""
+    def norm(line: str) -> str:
+        for root in roots:
+            line = line.replace(root, "<root>")
+        return " ".join(_VOLATILE.sub("<n>", line).split())
+    lines = [norm(line) for line in out.splitlines() if line.strip()]
+    return frozenset(line for line in lines if _FAILURE_LINE.search(line)) or frozenset(lines[-12:])
+
+
+def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict) -> list[dict]:
+    """Which failing checks of this revision fail the same way on its base
+    commit. A check is pre-existing only when the base run has the same nonzero
+    exit status and the same failures, neither run timed out, and the task's
+    output names no file the task changed. Base output is kept as evidence on
+    the gate. Anything not proven pre-existing counts against the task."""
+    base = rev.get("base_commit")
+    failing = [(f"C{i}", r) for i, r in enumerate(outcome.get("results") or [], start=1) if r["exit"] != 0]
+    if not base or not failing:
+        return []
+    repo = Path(run["repo_root"])
+    changed = [p for p in paths.git(repo, "diff", "--name-only", "--no-renames", "-z", base, rev["commit_sha"],
+                                    check=False).split("\0") if p]
+    cfgv = state.pinned_config(run).get("verification") or {}
+    timeout = int(cfgv.get("check_timeout_seconds", 1800))
+    evdir = paths.run_dir(run["id"]) / "evidence" / (gate.get("task_id") or "integration") / rev["id"]
+    found = []
+    with check_slot(check_concurrency(cfgv)):
+        try:
+            checkout = detached_checkout(run, base, f"preexisting-{gate['id']}", purpose="check")
+        except Exception:  # no base checkout, no proof: the failure counts against the task
+            return []
+        try:
+            for code_id, r in failing:
+                head = Path(r["log"]).read_text(encoding="utf-8", errors="replace")
+                if r["exit"] == 124 or runner_timeout(head) or any(p in head for p in changed):
+                    continue
+                code, out = _run_check(r["command"], checkout, timeout, _check_env(run))
+                log = evdir / (Path(r["log"]).stem + ".base.log")
+                log.write_text(out, encoding="utf-8")
+                os.chmod(log, 0o600)
+                same = (code == r["exit"] and not runner_timeout(out)
+                        and failure_signature(out, (str(checkout),)) == failure_signature(head, (r["cwd"],)))
+                with db.transaction(con):
+                    state.record_evidence(con, run["id"], "preexisting_check_output", log, task_id=gate.get("task_id"),
+                                          revision_id=rev["id"], gate_id=gate["id"],
+                                          meta={"command": r["command"], "exit": code, "base_commit": base,
+                                                "preexisting": same})
+                if same:
+                    found.append({"code": code_id, "command": r["command"], "exit": code, "base_commit": base,
+                                  "log": str(log)})
+        finally:
+            remove_checkout(run, checkout)
+    return found
 
 
 def run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate: dict, *, check_tree: bool = True) -> dict:
@@ -307,7 +373,8 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
         log.write_text(out, encoding="utf-8")
         os.chmod(log, 0o600)
         passed = code == 0
-        results.append({"command": command, "exit": code, "seconds": round(time.time() - started, 2), "log": str(log)})
+        results.append({"command": command, "exit": code, "seconds": round(time.time() - started, 2), "log": str(log),
+                        "cwd": str(cwd)})
         with db.transaction(con):
             state.record_evidence(con, run["id"], "check_output", log, task_id=gate.get("task_id"),
                                   revision_id=rev["id"], gate_id=gate["id"], meta={"command": command, "exit": code})
@@ -891,21 +958,50 @@ def _fingerprint(f: dict) -> str:
     return sha256_obj(sorted(set(w for w in words if len(w) > 2))[:40])
 
 
+def preexisting_codes(outcome: dict) -> set[str]:
+    return {p["code"] for p in outcome.get("preexisting") or []}
+
+
+def _preexisting_summary(outcome: dict, old: list[dict]) -> str:
+    base = (outcome.get("preexisting") or [{}])[0].get("base_commit") or ""
+    return (f"{outcome.get('summary', '')}; {len(old)} failing check(s) also fail the same way on base {base[:7]} "
+            f"({', '.join(f['code'] for f in old)}): pre-existing, not caused by this task")
+
+
 def checks_outcome(outcome: dict) -> dict:
     """A run_commands result in convergence-contract terms: all checks passed is
     APPROVED, a failing check is RECHECK (a blocking finding), and a check that
-    could not run is UNAVAILABLE status with no verdict. STALE stays STALE."""
+    could not run is UNAVAILABLE status with no verdict. STALE stays STALE. A
+    failure that is pre-existing on the base commit is a nonblocking note, not a
+    blocking finding."""
     v = outcome.get("verdict")
     if v == "STALE":
         return outcome
     if v == "UNAVAILABLE":
         return {**outcome, "status": contract.UNAVAILABLE, "verdict": None}
     parsed = outcome.get("parsed")
-    findings = [{**f, "severity": "high", "level": "high", "blocking": True} for f in (parsed.findings if parsed else [])]
-    verdict = "RECHECK" if findings else "APPROVED"
-    return {**outcome, "status": contract.COMPLETED, "verdict": verdict,
+    old_codes = preexisting_codes(outcome)
+    findings = [{**f, "severity": "high", "level": "high", "blocking": f["code"] not in old_codes,
+                 **({} if f["code"] not in old_codes else {"summary": f"pre-existing on base: {f['summary']}"})}
+                for f in (parsed.findings if parsed else [])]
+    old = [f for f in findings if not f["blocking"]]
+    verdict = "RECHECK" if len(old) < len(findings) else "APPROVED"
+    summary = _preexisting_summary(outcome, old) if old else outcome.get("summary")
+    return {**outcome, "status": contract.COMPLETED, "verdict": verdict, "summary": summary,
             "parsed": review_parse.Parsed(verdict=verdict, findings=findings, contract=contract.CONVERGENCE,
-                                          next_action="make the failing check pass" if findings else "proceed")}
+                                          next_action="make the failing check pass" if verdict == "RECHECK" else "proceed")}
+
+
+def _note_preexisting(con, run: dict, task: dict, gate: dict, outcome: dict, old: list[dict]) -> None:
+    """Record that failing checks of the current revision also fail on its base
+    commit. The base output is already evidence on the gate. Caller holds tx."""
+    if not old:
+        return
+    first = outcome["preexisting"][0]
+    state.emit(con, run, "gate.preexisting",
+               f"{task['id']} checks {', '.join(f['code'] for f in old)} fail the same way on base "
+               f"{first['base_commit'][:7]}: pre-existing, not caused by this task", task_id=task["id"],
+               payload={"gate": gate["id"], "revision": gate["revision_id"], "preexisting": outcome["preexisting"]})
 
 
 TERMINAL_GATE = ("done", "stale")
@@ -956,9 +1052,13 @@ def _ingest_checks_convergence(con, run: dict, gate: dict, task: dict, outcome: 
                           pause_reason=f"checks gate unavailable: {outcome.get('summary', '')[:400]}")
         return
     parsed = outcome["parsed"]
+    old = [f for f in parsed.findings if not f["blocking"]]
+    _note_preexisting(con, run, task, gate, outcome, old)
     if verdict == "APPROVED":
         con.execute("UPDATE findings SET state='resolved', updated_at=? WHERE run_id=? AND task_id=? AND gate_kind='checks' "
-                    "AND state='open'", (now_iso(), run["id"], task["id"]))
+                    "AND state IN ('open','minor')", (now_iso(), run["id"], task["id"]))
+        for f in old:
+            _upsert_finding(con, run, task, gate, f, outcome)
         state.emit(con, run, "gate.approved", f"{task['id']} checks APPROVED on {gate['revision_id']}", audience="runtime",
                    task_id=task["id"])
         evaluate_acceptance(con, run, task["id"])
@@ -1001,6 +1101,16 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
                 if f["severity"] == "material":
                     _upsert_finding(con, run, task, gate, f, outcome, carried=True)
         return
+    if gate["kind"] == "checks" and verdict == "CHANGES_REQUIRED" and outcome.get("preexisting"):
+        # Failures that also occur on the base commit are not this task's to fix:
+        # with nothing else failing the checks gate passes and review still runs.
+        old_codes = preexisting_codes(outcome)
+        old = [f for f in parsed.findings if f["code"] in old_codes]
+        new = [f for f in parsed.findings if f["code"] not in old_codes]
+        _note_preexisting(con, run, task, gate, outcome, old)
+        outcome = {**outcome, "summary": _preexisting_summary(outcome, old)}
+        parsed = review_parse.Parsed(verdict="CHANGES_REQUIRED" if new else "PASS", findings=new)
+        verdict = parsed.verdict
     evidence_status = outcome.get("evidence_status")
     con.execute("UPDATE gates SET status='done', verdict=?, evidence_status=COALESCE(?, evidence_status), summary=?, "
                 "finished_at=?, route=COALESCE(?, route) WHERE id=?",
@@ -1279,6 +1389,22 @@ def required_gates(con, run: dict, task: dict, rev_id: str) -> list[dict]:
     return list(latest.values())
 
 
+def _requeue_reviews_cancelled_by_checks(con, run: dict, task_id: str, rev_id: str) -> bool:
+    """A failed or unavailable checks gate cancels the waiting reviews of its
+    revision. Waiving checks lifts that reason, so those reviews run now: a
+    waiver of checks never accepts a task with no independent review. Caller
+    holds the tx."""
+    cur = con.execute("UPDATE gates SET status='waiting', stale_reason=NULL WHERE run_id=? AND task_id=? AND revision_id=? "
+                      "AND kind IN ('code_review','visual') AND status='cancelled' "
+                      "AND stale_reason IN ('checks failed','checks unavailable')", (run["id"], task_id, rev_id))
+    if cur.rowcount == 0:
+        return False
+    start_waiting(con, run, task_id, rev_id)
+    state.emit(con, run, "gate.rerun", f"{task_id} review queued on {rev_id}: checks were waived, review is still required",
+               task_id=task_id)
+    return True
+
+
 def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
     """The one acceptance evaluator. Caller holds the tx."""
     from office import dispatch as dispatch_mod, plans
@@ -1292,6 +1418,8 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
     from office import authority
     convergence = contract.is_convergence(run)
     waived = authority.waived(con, run["id"], task_id) if not convergence else set()
+    if "checks" in waived and _requeue_reviews_cancelled_by_checks(con, run, task_id, rev_id):
+        return False
     gates_now = [g for g in required_gates(con, run, task, rev_id) if g["kind"] not in waived]
     basis = "all required gates PASS"
     if convergence:

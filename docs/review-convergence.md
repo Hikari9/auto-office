@@ -237,6 +237,14 @@ Plan findings are dispositioned with `office disposition plan:<P-id> fixed|dismi
   the cap; this mechanism is unchanged from 3.2.
 - A task is accepted on its own deterministic checks. There is no routine per-task independent code
   review and no per-task visual gate; both moved to the lane.
+- **Pre-existing check failures.** When a task check fails, Office runs the same command on a checkout
+  of the revision's `base_commit`. The failure is pre-existing only when it fails the same way there:
+  the same nonzero exit status and the same failures. It is never pre-existing when the task's output
+  names a file the task changed, or when either run timed out (Office's timeout or a test runner's).
+  A pre-existing-only failure is not a blocking repair finding: the checks gate is `APPROVED`, no repair
+  round is delivered, and the failure is recorded as a nonblocking pre-existing note. The base output is
+  kept as evidence on the gate and a `gate.preexisting` event is emitted. Lane review still runs. When a
+  task also introduces a failure, only that failure blocks and loops rounds, exactly as before.
 
 ## 7. Lanes and shared scopes
 
