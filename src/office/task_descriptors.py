@@ -13,16 +13,25 @@ OPTIONS = {
  "bounds": ("bounded", "open"),
  "task_size": ("S", "M", "L", "XL"),
 }
+# Evidence-only planner tags: persisted and snapshotted with the descriptor, but never read by
+# dimensions(), benchmark_fit() or price_tier(). Omitted stays absent (unknown), never defaulted.
+EVIDENCE_OPTIONS = {
+ "evidence_domain": ("frontend", "backend", "infra", "docs", "tests"),
+ "intent": ("feature", "fix", "refactor", "test-pruning", "migration"),
+ "difficulty_estimate": ("low", "medium", "high", "very-high", "unknown"),
+ "brief_shape": ("deliverables-enumerated", "checks-only", "unknown"),
+}
 TOKENS = ("estimated_input_tokens", "estimated_output_tokens")
-PLAN_KEYS = frozenset((*OPTIONS, *TOKENS))
+PLAN_KEYS = frozenset((*OPTIONS, *EVIDENCE_OPTIONS, *TOKENS))
 VERSION = "task-descriptor-1"
 
 
 def parse_field(key: str, value: str):
-    if key in OPTIONS:
+    options = OPTIONS.get(key) or EVIDENCE_OPTIONS.get(key)
+    if options:
         value = value.strip() if key == "task_size" else value.strip().lower()
-        if value not in OPTIONS[key]:
-            raise ValueError(f"{key} must be one of {', '.join(OPTIONS[key])}")
+        if value not in options:
+            raise ValueError(f"{key} must be one of {', '.join(options)}")
         return value
     if key in TOKENS:
         if not value.isdecimal() or int(value) > 100000000:
