@@ -566,9 +566,11 @@ def job_plan_review(con, run: dict, job: dict) -> dict:
     if contract.is_convergence(run):
         carried = [f for f in blocking_findings(con, run) if f["code"] != "INTAKE_GAP"]
         brief = briefs.plan_review_brief(run, plan, req["frozen"], [], rereview, carried=carried, round_no=gate["round"],
-                                         max_rounds=round_cap(run))
+                                         max_rounds=round_cap(run),
+                                         used_codes=gate_engine.finding_codes(con, *_convergence_plan_scope(run)))
     else:
-        brief = briefs.plan_review_brief(run, plan, req["frozen"], open_defects(con, run["id"]), rereview)
+        brief = briefs.plan_review_brief(run, plan, req["frozen"], open_defects(con, run["id"]), rereview,
+                                         used_codes=gate_engine.finding_codes(con, *_defect_plan_scope(run)))
     outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
                                        plan_review=True, exclude=job["payload"].get("exclude"),
                                        resume_from=job["payload"].get("resume_from"))
@@ -603,6 +605,7 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
     if parsed is not None:
         for code in parsed.cleared:
             _clear_defect(con, run, code, gate)
+        _stable_plan_codes(con, run, parsed)
         for f in parsed.findings:
             _record_plan_finding(con, run, gate, f, reviewer, defect=False)
         for d in parsed.defects:
@@ -643,28 +646,57 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
     state.update_run(con, run["id"], plan_review=pr)
 
 
+def _convergence_plan_scope(run: dict) -> tuple[str, tuple]:
+    return "run_id=? AND gate_kind='plan_review' AND contract=?", (run["id"], contract.CONVERGENCE)
+
+
+def _defect_plan_scope(run: dict) -> tuple[str, tuple]:
+    return "run_id=? AND gate_kind='plan_review' AND COALESCE(contract, '')!=?", (run["id"], contract.CONVERGENCE)
+
+
+def _stable_plan_codes(con, run: dict, parsed) -> None:
+    """v3.1 findings and defects share one code space. A DEFECT line that reuses a FINDING line's code in
+    the same reply makes that finding a defect: the pair is one finding, identified by its defect line, so
+    the finding follows the defect's code, renamed or not."""
+    from office import gates as gate_engine
+    scope = _defect_plan_scope(run)
+    defects = gate_engine.stable_codes(con, run, *scope, parsed.defects, reserved={f["code"] for f in parsed.findings})
+    follow: dict[str, str] = {}
+    for old, new in zip(parsed.defects, defects):
+        follow.setdefault(old["code"], new["code"])
+    alone = iter(gate_engine.stable_codes(con, run, *scope, [f for f in parsed.findings if f["code"] not in follow],
+                                          reserved={d["code"] for d in defects}))
+    parsed.findings[:] = [{**f, "code": follow[f["code"]]} if f["code"] in follow else next(alone) for f in parsed.findings]
+    parsed.defects[:] = defects
+
+
 def _record_plan_finding(con, run, gate, f, reviewer, *, defect: bool) -> None:
+    from office import gates as gate_engine
     fid = "F" + uuid.uuid4().hex[:10]
     category = f.get("category") if defect else "plan"
     if defect and gate.get("kind") == "plan_review" and f.get("category") not in review_parse.DEFECT_CLASSES:
         category = "brief"
     existing = con.execute("SELECT id FROM findings WHERE run_id=? AND gate_kind='plan_review' AND code=? AND state='open'",
                            (run["id"], f["code"])).fetchone()
+    fp = gate_engine._fingerprint(f)
     if existing:
-        con.execute("UPDATE findings SET summary=?, location=?, updated_at=?, gate_id=? WHERE id=?",
-                    (f["summary"], f.get("location"), now_iso(), gate["id"], existing["id"]))
+        con.execute("UPDATE findings SET summary=?, location=?, updated_at=?, gate_id=?, "
+                    "fingerprint=COALESCE(fingerprint, ?) WHERE id=?",
+                    (f["summary"], f.get("location"), now_iso(), gate["id"], fp, existing["id"]))
         if defect:
             # A DEFECT line that reuses an open finding's code makes it a defect;
-            # left as a plain finding, --redirect and waive could not name it.
-            con.execute("UPDATE findings SET category=?, severity='material', evidence=?, action=? WHERE id=?",
-                        (category, f.get("evidence"), f.get("action"), existing["id"]))
+            # left as a plain finding, --redirect and waive could not name it. The row is then
+            # identified by its defect line.
+            con.execute("UPDATE findings SET category=?, severity='material', evidence=?, action=?, fingerprint=? WHERE id=?",
+                        (category, f.get("evidence"), f.get("action"), fp, existing["id"]))
         return
     con.execute("INSERT INTO findings(id, dispatch_id, reviewer_dispatch_id, status, severity, summary, evidence_hash, created_at, "
-                "run_id, gate_id, gate_kind, code, location, category, action, state, origin_gate_id, evidence, updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "run_id, gate_id, gate_kind, code, location, category, action, state, origin_gate_id, evidence, updated_at, "
+                "fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (fid, reviewer, reviewer, "open", f.get("severity", "material"), f["summary"], None, now_iso(),
                  run["id"], gate["id"], "plan_review", f["code"], f.get("location"), category, f.get("action"),
-                 "open" if (defect or f.get("severity") == "material") else "minor", gate["id"], f.get("evidence"), now_iso()))
+                 "open" if (defect or f.get("severity") == "material") else "minor", gate["id"], f.get("evidence"), now_iso(),
+                 fp))
 
 
 def _clear_defect(con, run, code: str, gate: dict) -> None:
@@ -979,23 +1011,28 @@ def _require_dispatchable_convergence(con, run: dict) -> None:
 
 
 def _plan_finding(con, run: dict, gate: dict, f: dict, reviewer: str | None, *, state_: str) -> None:
+    from office import gates as gate_engine
+    fp = gate_engine._fingerprint(f)
     existing = con.execute("SELECT id FROM findings WHERE run_id=? AND gate_kind='plan_review' AND code=? "
                            "AND state IN ('open','nonblocking') AND contract=?",
                            (run["id"], f["code"], contract.CONVERGENCE)).fetchone()
     cols = dict(summary=f["summary"], location=f.get("location"), action=f.get("action"), level=f.get("level"),
                 severity=f.get("severity"), blocking=int(bool(f.get("blocking"))), seam=f.get("seam"),
-                root_cause=f.get("root_cause"), state=state_, gate_id=gate["id"], updated_at=now_iso())
+                root_cause=f.get("root_cause"), state=state_, gate_id=gate["id"], updated_at=now_iso(), fingerprint=fp)
     if existing:
         sets = ", ".join(f"{k}=?" for k in cols)
         con.execute(f"UPDATE findings SET {sets} WHERE id=?", (*cols.values(), existing["id"]))
         return
+    fid = "F" + uuid.uuid4().hex[:10]
     con.execute("INSERT INTO findings(id, dispatch_id, reviewer_dispatch_id, status, severity, summary, created_at, run_id, "
                 "gate_id, gate_kind, code, location, category, action, state, origin_gate_id, updated_at, level, contract, "
-                "scope, blocking, seam, root_cause) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                ("F" + uuid.uuid4().hex[:10], reviewer, reviewer, "open", f.get("severity"), f["summary"], now_iso(),
+                "scope, blocking, seam, root_cause, fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (fid, reviewer, reviewer, "open", f.get("severity"), f["summary"], now_iso(),
                  run["id"], gate["id"], "plan_review", f["code"], f.get("location"), "plan", f.get("action"), state_,
                  gate["id"], now_iso(), f.get("level"), contract.CONVERGENCE, PLAN_SCOPE, int(bool(f.get("blocking"))),
-                 f.get("seam"), f.get("root_cause")))
+                 f.get("seam"), f.get("root_cause"), fp))
+    if not f.get("blocking"):
+        gate_engine.carry_disposition(con, *_convergence_plan_scope(run), fid, fp)
 
 
 def _pause_affected(con, run: dict, findings: list[dict], reason: str) -> list[str]:
@@ -1043,12 +1080,11 @@ def _ingest_convergence(con, run: dict, gate_id: str, outcome: dict) -> None:
         state.emit(con, run, kind, f"PLAN REVIEW {status} {v} (runtime status, not a verdict; no round spent): "
                    f"{(outcome.get('summary') or 'no qualifying reviewer answered')[:240]}")
         return
-    for code in parsed.resolved:
-        con.execute("UPDATE findings SET state='resolved', updated_at=? WHERE run_id=? AND gate_kind='plan_review' AND code=? "
-                    "AND state='open'", (now_iso(), run["id"], code))
-    for r in parsed.retracted:
-        con.execute("UPDATE findings SET state='retracted', updated_at=? WHERE run_id=? AND gate_kind='plan_review' "
-                    "AND code=? AND state IN ('open','nonblocking')", (now_iso(), run["id"], r["code"]))
+    from office import gates as gate_engine
+    where, params = _convergence_plan_scope(run)
+    parsed.findings[:] = gate_engine.stable_codes(con, run, where, params, parsed.findings)
+    gate_engine.mark_current(con, where, params, parsed.resolved, ("open",), "resolved")
+    gate_engine.mark_current(con, where, params, [r["code"] for r in parsed.retracted], ("open", "nonblocking"), "retracted")
     restated = {f["code"] for f in parsed.findings}
     for f in parsed.findings:
         _plan_finding(con, run, gate, f, reviewer, state_="open" if f.get("blocking") else "nonblocking")

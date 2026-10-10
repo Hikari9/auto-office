@@ -477,9 +477,18 @@ def worker_brief(con, run: dict, packet: dict, setup: dict | None = None, carrie
     return executor_brief(con, run, packet, setup=setup, carried=carried)
 
 
+def used_codes_line(codes: list[str] | None) -> list[str]:
+    """The finding codes a review scope already holds, in any state. A code names one finding for good: a
+    reviewer who reuses one for different content has it recorded under a fresh code."""
+    if not codes:
+        return []
+    return ["FINDING CODES ALREADY USED in this scope (any state): " + ", ".join(codes)
+            + ". A new finding takes a new code; reuse one only to confirm, resolve or retract that same finding."]
+
+
 def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_summary: str,
                       carried: list[dict], checkout: str, integration: bool = False, evidence: str | None = None,
-                      verify_only: bool = False) -> str:
+                      verify_only: bool = False, used_codes: list[str] | None = None) -> str:
     out = [
         "ROLE independent " + ("integration" if integration else "code") + " reviewer. Change nothing except your reply file. You did not write this change.",
         f"TASK {task['id']} {task['title']}" if task else "COMPOSED RESULT of the run's accepted tasks",
@@ -498,6 +507,7 @@ def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_s
         for f in carried:
             level = f.get("level") or ("high" if f["severity"] == "material" else "low")
             out.append(f"- {f['code']} [{level}] {f['location'] or ''} {f['summary']}")
+    out += used_codes_line(used_codes)
     if verify_only:
         out.append("VERIFY-ONLY ROUND: the final fix round is spent. Confirm or resolve each OPEN FINDING. "
                    "Report a new finding only if it is high; medium and low findings become follow-ups and no "
@@ -512,7 +522,7 @@ def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_s
 def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision: dict, diff: str,
                              checks_summary: str, carried: list[dict], checkout: str, round_no: int,
                              requirements: dict | None = None, evidence: dict | None = None,
-                             max_rounds: int | None = None) -> str:
+                             max_rounds: int | None = None, used_codes: list[str] | None = None) -> str:
     """One independent convergence review of a composed lane or shared scope (#337)."""
     kind = "shared-scope" if scope.get("shared") else "lane"
     out = [
@@ -540,6 +550,7 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
         for f in carried:
             out.append(f"- {f['code']} [{f.get('level') or f.get('severity')}, "
                        f"{'blocking' if f.get('blocking') else 'non-blocking'}] {f.get('location') or ''} {f['summary']}")
+    out += used_codes_line(used_codes)
     for tid, text in (evidence or {}).items():
         out += ["", f"EXECUTOR EVIDENCE for {tid} (no file scope; the posted comment or edit is recorded here):",
                 text or "(none recorded: the executor left no evidence file; report that as a finding)"]
@@ -549,7 +560,7 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
 
 def plan_review_brief(run: dict, plan: dict, requirements: dict, open_defects: list[dict], rereview: bool,
                       carried: list[dict] | None = None, round_no: int | None = None,
-                      max_rounds: int | None = None) -> str:
+                      max_rounds: int | None = None, used_codes: list[str] | None = None) -> str:
     if contract.is_convergence(run):
         out = [
             "ROLE independent plan reviewer. Change nothing except your reply file. You did not write this plan.",
@@ -568,6 +579,7 @@ def plan_review_brief(run: dict, plan: dict, requirements: dict, open_defects: l
                        "repeat the FINDING line:")
             out += [f"- {f['code']} [{f.get('level') or f.get('severity')}] {f.get('location') or ''} {f['summary']}"
                     for f in carried]
+        out += used_codes_line(used_codes)
         out += ["", CONVERGENCE_PLAN_REVIEW_FORMAT, "", "PLAN:", plan["body"]]
         return "\n".join(out) + "\n"
     out = [
@@ -587,5 +599,6 @@ def plan_review_brief(run: dict, plan: dict, requirements: dict, open_defects: l
             out.append(f"- {d['code']} {d['category']}: {d['summary']}")
         from office import redirect
         out += redirect.brief_lines(run, open_defects)
+    out += used_codes_line(used_codes)
     out += ["", PLAN_REVIEW_FORMAT, "", "PLAN:", plan["body"]]
     return "\n".join(out) + "\n"
