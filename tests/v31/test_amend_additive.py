@@ -100,7 +100,7 @@ def test_a_delta_naming_a_standalone_action_is_refused_as_contract_level(env):
 
 
 @pytest.mark.parametrize("text", [
-    "re-run root test and build, then send READY-FOR-LIVE again", "send the report to the orchestrator",
+    "re-run root test and build, then send READY-FOR-LIVE", "send the report to the orchestrator",
     "send it back to the orchestrator for review", "send READY_FOR_REVIEW when done",
     "send READY_FOR_REVIEW to the orchestrator",
 ])
@@ -113,7 +113,120 @@ def test_authority_terms_ignore_a_send_to_the_orchestrator(text):
 @pytest.mark.parametrize("text", ["send SMS to members", "send the invitations", "send a newsletter",
                                   # review #446 F1: an exempt object sent to anyone but the orchestrator counts
                                   "send it to all members", "send the summary to every parent",
-                                  "send NEWSLETTER_2026 to members", "send it back"])
+                                  "send NEWSLETTER_2026 to members", "send it back",
+                                  # R3-2: the orchestrator must be the whole recipient, and a protocol
+                                  # word must name no recipient or channel
+                                  "send the report to the office team",
+                                  "send the summary to Office staff and every parent",
+                                  "send it to the orchestrator and to all members", "send it to office@example.org",
+                                  "send NEWSLETTER_2026 out tonight", "send PROMO-CODE via sms"])
 def test_authority_terms_still_match_external_sends(text):
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is not None, text
+
+
+@pytest.mark.parametrize("text", [
+    "send the status to the orchestrator.", "send it to the orchestrator and stop", "send READY-FOR-LIVE and stop",
+    "send the report to the orchestrator, then run tests", "send the summary to the orchestrator (done)",
+])
+def test_a_report_to_the_orchestrator_followed_by_a_next_step_is_exempt(text):
+    # R4-1: sentence ends and new actions after the orchestrator are not other recipients.
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is None, text
+
+
+@pytest.mark.parametrize("text", ["send the report to the office for parents", "send it to the office, members too"])
+def test_an_audience_after_the_office_still_counts(text):
+    # R4-2.
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is not None, text
+
+
+@pytest.mark.parametrize("text", [
+    # PR #492 review item 1: an action word must not let a later recipient through
+    "send it to the office and then to all members", "send it to the office and post it to members",
+    # item 2: default-deny after the recipient (unlisted audiences, purpose then audience, clause after comma)
+    "send the report to the office and donors", "send the report to the office and congregants",
+    "send the report to the office for review by parents",
+    "send the report to the office for approval, then to all members",
+    "send READY-FOR-LIVE and donors", "send it to office.example.org",
+])
+def test_anything_after_the_orchestrator_but_an_end_or_next_action_is_external(text):
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is not None, text
+
+
+def test_a_done_note_after_the_orchestrator_is_exempt():
+    # Item 6: "(done)" ends the report; "and to nobody else" stays refused (stricter, by design).
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search("send the status to the orchestrator (done)") is None
+    assert AUTHORITY_TERMS.search("send the status to the orchestrator and to nobody else") is not None
+
+
+_TO_ORCH = "send the report to the orchestrator"
+
+
+@pytest.mark.parametrize("text", [
+    # a071c74 re-verify item 1: an audience after punctuation
+    "send the report to the office: parents and staff", "send it to the office (done). parents too",
+    "send it to the office: parents too", "send it to the office; and to parents", "send it to the office. Members too",
+    "send READY-FOR-LIVE: all members",
+    # item 2: a recipient after a next-action verb
+    _TO_ORCH + " and update members", _TO_ORCH + " and then push it to all members",
+    _TO_ORCH + " and continue to all members", _TO_ORCH + " and check with parents",
+    _TO_ORCH + " and test it on members", _TO_ORCH + " then run it past parents",
+])
+def test_every_clause_after_the_orchestrator_is_checked(text):
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is not None, text
+
+
+@pytest.mark.parametrize("tail", [
+    # item 4: ordinary report-back lines
+    " and request review", " and keep going", " and start T2", " and move on to T2", " and open the PR",
+    " and report back", " and await instructions", " and mark T1 done", " and do nothing else",
+    " after tests pass", " once tests pass", " if tests fail", ", stop",
+])
+def test_richer_next_steps_after_a_report_are_refused(tail):
+    # Maintainer decision on #492: nothing after the orchestrator is interpreted; only a fixed set
+    # of endings is exempt. These ordinary phrasings are now refused (routed to review), which is safe.
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(_TO_ORCH + tail) is not None, tail
+
+
+
+@pytest.mark.parametrize("text", [
+    "re-run root test and build, then send READY-FOR-LIVE again",
+    "send the report to the orchestrator, then run tests and merge", "send the summary to the orchestrator: done",
+])
+def test_phrasings_outside_the_fixed_endings_are_refused(text):
+    # Earlier rounds exempted these richer phrasings; the fixed-ending rule refuses them.
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is not None, text
+
+
+@pytest.mark.parametrize("ending", ["", ".", " and stop", " then stop", " and wait", " then run tests", " and run tests",
+                                    " when done", " (done)", " for review", "  AND   STOP. "])
+def test_the_fixed_report_endings_are_exempt(ending):
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(_TO_ORCH + ending) is None, ending
+    assert AUTHORITY_TERMS.search("send READY-FOR-LIVE" + ending) is None, ending
+
+
+@pytest.mark.parametrize("text", [
+    # 52fb0a1 re-verify item 1: words after a condition
+    "send it to the office after tests pass notify parents", "send it to the office if tests pass tell members",
+    "send it to the office if tests pass for parents",
+    # item 2: a recipient as the direct object of a next action
+    _TO_ORCH + " and update the congregation", _TO_ORCH + " and update Sarah",
+    _TO_ORCH + " and keep the congregation posted", _TO_ORCH + " and mark Sarah done",
+    # item 3
+    _TO_ORCH + " and go live", _TO_ORCH + " then push live",
+    # item 4: a hard-wrapped amendment
+    "Send the report to the office\nand to all members",
+    # item 5: prefix-matched targets
+    _TO_ORCH + " and hand it to main contributors", _TO_ORCH + " check with task owners",
+])
+def test_reverify_52fb0a1_leaks_are_refused(text):
     from office.amend import AUTHORITY_TERMS
     assert AUTHORITY_TERMS.search(text) is not None, text

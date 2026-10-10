@@ -1019,8 +1019,19 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
                     (packet["packet_hash"], str(ddir / "packet.json"), str(ddir / "output.log"), dispatch["id"]))
     current = state.get_dispatch(con, dispatch["id"])
     if current["status"] != "launching":
-        # Revoked while its worktree was being set up (review F2): start nothing.
         return {"skipped": current["status"]}
+    lease = con.execute("SELECT revoked_at FROM leases WHERE id=?", (current.get("lease_id"),)).fetchone() \
+        if current.get("lease_id") else None
+    if lease and lease["revoked_at"]:
+        # Revoked while its worktree was being set up: this job owns the claim, so it ends the
+        # dispatch itself instead of starting an agent whose submits are fenced (R3-4).
+        with db.transaction(con):
+            con.execute("UPDATE dispatches SET status='cancelled', terminal_classification='revoked', ended_at=? "
+                        "WHERE id=? AND ended_at IS NULL AND status='launching'", (now_iso(), dispatch["id"]))
+            state.emit(con, run, "dispatch.ended", f"{dispatch.get('task_id')} {role} ended: revoked before its agent "
+                       "started", audience="runtime", task_id=dispatch.get("task_id"), dispatch_id=dispatch["id"],
+                       payload={"exit_code": None, "signal": None, "classification": "revoked"})
+        return {"skipped": "revoked"}
     launcher = launch(run, dispatch, "worker", ddir, cwd=wt, cli=payload.get("cli"),
                       external=bool(payload.get("external")), resume=payload.get("resume"))
     return {"dispatch_id": dispatch["id"], **launcher}
@@ -1777,6 +1788,9 @@ def _confirm_trust(pane: str, read, herdr, text: str | None = None) -> bool:
     Current Claude Code preselects "No, exit", so a bare Enter would quit the
     agent; Enter is pressed only once the selected option is the trust one.
     `text` is a screen the caller already read."""
+    if text is None or _selected_option(text) is None or not _trust_dialog(text):
+        # The first frame may be blank, unreadable or half-drawn too (R3-11).
+        text = _settled(read, None)
     for key in ("down", "down", "up", "up", "up", None):
         text = read() if text is None else text
         if not _trust_dialog(text):
@@ -2278,6 +2292,15 @@ def _unreserve_pane(run: dict, pane: str) -> None:
         atomic_write_json(f, held)
 
 
+def _tab_exists(tab_id: str) -> bool:
+    """False only when herdr says the tab is gone; an unreachable herdr counts as present."""
+    try:
+        proc = subprocess.run(["herdr", "tab", "get", tab_id], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return proc.returncode == 0 or "not_found" not in (proc.stdout or "") + (proc.stderr or "")
+
+
 def _live_panes(panes: list) -> list:
     """The recorded panes herdr has not reported gone (an unreachable herdr keeps them)."""
     return [p for p in panes if _pane_exists(p)]
@@ -2431,16 +2454,16 @@ def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None,
 
 def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None) -> str | None:
     """No caller pane to split (or a run begun before split mode): a tab owned by the run."""
-    orphans: list = []
-    if tab and not _herdr_json(["tab", "get", tab["tab_id"]]):
-        tab = None  # the user closed it
+    orphans: list = list((tab or {}).get("orphan_tabs") or [])  # carried whenever the record is replaced
+    if tab and not _tab_exists(tab["tab_id"]):
+        tab = None  # the user closed it (an unreachable herdr keeps it)
     if tab is not None:
         # Panes closed since (by the user or as abandoned) are never split from (review F1).
         tab["panes"] = _live_panes(tab.get("panes") or [])
         if not tab["panes"]:
             # The tab outlived its recorded panes: open a new one, and keep the old id so
             # close_herdr_tab still closes it.
-            orphans = [*(tab.get("orphan_tabs") or []), tab["tab_id"]]
+            orphans.append(tab["tab_id"])
             tab = None
     if tab is None:
         workspace = (os.environ.get("HERDR_WORKSPACE_ID") or os.environ.get("HERDR_PANE_ID") or "").split(":")[0]
@@ -2545,7 +2568,7 @@ def _pane_ledger(run: dict, dispatch: dict, pane: str, *, agent: str | None = No
 # A harness's startup header block opens and closes with a rule line: dashes
 # (`codex exec`'s stream) or a box edge (codex's interactive banner, whose
 # lines sit between box sides). Session ids are read only inside one (#406).
-_ANSI_SEQ = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_ANSI_SEQ = _CSI  # one stripper (OSC included)
 _HEADER_RULE = re.compile(r"-{8,}|[╭┌][─━].*[─━][╮┐]|[╰└][─━].*[─━][╯┘]")
 
 
@@ -2737,7 +2760,7 @@ class _SessionSniffer:
     HEADER_BYTES = 16384
     BANNER_LINES = 3  # lines allowed before the opening rule
     ATTEMPTS = 2
-    _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+    _ANSI = _CSI
 
     def __init__(self, run: dict, dispatch: dict, adapter: dict | None, log_path=None):
         self.run, self.dispatch, self.log_path = run, dispatch, log_path
@@ -3269,7 +3292,7 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
         if retries <= limit:
             state.emit(con, run, "task.relaunch", f"{task['id']} worker ended ({d['terminal_classification']}) "
                        f"without submitting; relaunching {retries}/{limit}", audience="runtime", task_id=task["id"])
-            request_launch(con, run, task["id"], role=d["role"])
+            _launch_or_block(con, run, task["id"], role=d["role"])
             return
         state.update_task(con, run["id"], task["id"], status="blocked",
                           pause_reason=f"worker ended ({d['terminal_classification']}) without submitting")
@@ -3373,6 +3396,18 @@ def _amendment_undelivered(con, run: dict, payload: dict, d: dict) -> None:
                    f"to {d['id']}; its blocker stays: office revoke {tid}, then office rerun {tid} --resume|--fresh", task_id=tid, dispatch_id=d["id"])
 
 
+def _launch_or_block(con, run: dict, task_id: str, **kw) -> str | None:
+    """An internal relaunch (auto-relaunch, stacked start): a refusal blocks the task with
+    its reason instead of rolling back the transition that asked for it."""
+    try:
+        return request_launch(con, run, task_id, **kw)
+    except Refused as err:
+        state.update_task(con, run["id"], task_id, status="blocked", pause_reason=f"relaunch refused: {err.message}")
+        state.emit(con, run, "task.blocked", f"{task_id} not relaunched: {err.message}; {err.next_step or ''}".strip(),
+                   task_id=task_id)
+        return None
+
+
 def start_stacked(con, run: dict, accepted_task: str) -> list[str]:
     """Launch tasks the orchestrator stacked after `accepted_task`. Caller holds tx."""
     started = []
@@ -3380,6 +3415,6 @@ def start_stacked(con, run: dict, accepted_task: str) -> list[str]:
         if t["status"] == "queued" and t.get("stack_after") == accepted_task:
             graph = {x["id"]: x["depends"] for x in state.tasks(con, run["id"])}
             base = _base_for(con, run, t, graph, accepted_task)
-            request_launch(con, run, t["id"], role="executor", base=base)
-            started.append(t["id"])
+            if _launch_or_block(con, run, t["id"], role="executor", base=base):
+                started.append(t["id"])
     return started
