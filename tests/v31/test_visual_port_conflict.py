@@ -313,7 +313,9 @@ def test_pane_launch_records_the_agent_group_and_start(env, live_agent, monkeypa
     assert dispatch._record_pane_agent_group(run, "DP1", "p1") == agent["pid"]
     ddir = paths.run_dir(run["id"]) / "dispatches" / "DP1"
     assert (ddir / "agent.pgid").read_text() == str(agent["pid"])
-    assert json.loads((ddir / "agent.identity").read_text()) == {"pid": agent["pid"], "start": process_start(agent["pid"])}
+    # #494 adds the C-locale start, the one exit confirmation reads; the ps start stays for older readers.
+    assert json.loads((ddir / "agent.identity").read_text()) == {"pid": agent["pid"], "start": process_start(agent["pid"]),
+                                                                 "c_start": dispatch._c_start(agent["pid"])}
     # The shell's own group, or an unknown one, is never recorded.
     info["process_info"]["foreground_process_group_id"] = os.getpid()
     assert dispatch._record_pane_agent_group(run, "DP2", "p1") is None
