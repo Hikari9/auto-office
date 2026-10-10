@@ -495,3 +495,470 @@ def test_a_task_stacked_behind_another_is_not_probed_for_a_launch_it_will_not_ma
     assert state.get_task(cold.con, "run-A", "T2")["status"] == "queued"
 
 
+
+
+# ------------------------------------------------------------------ launch-failure recovery
+
+import os
+import sys
+import threading
+import time
+
+from office import jobs
+from office.util import atomic_write_json, pid_alive, process_start
+
+LEADER = r"""
+import os, subprocess, sys, time
+did, log, secs = sys.argv[1], sys.argv[2], float(sys.argv[3])
+child = ("import sys, time\nend = time.time() + %s\nwhile time.time() < end:\n"
+         "    open(sys.argv[1], 'a').write('x')\n    time.sleep(0.05)\n" % secs)
+kid = subprocess.Popen([sys.executable, '-c', child, log], start_new_session=True)
+print(kid.pid, flush=True)
+time.sleep(secs)
+"""
+
+
+class Tree:
+    """A fake worker: a leader and a child in its own session, both tagged with the dispatch id, the child
+    appending to `log` every 50 ms. Both live at most `secs` seconds whatever the test does."""
+
+    def __init__(self, did, log, secs=30):
+        env = {**os.environ, "OFFICE_DISPATCH_ID": did}
+        self.leader = subprocess.Popen([sys.executable, "-c", LEADER, did, str(log), str(secs)], stdout=subprocess.PIPE,
+                                       text=True, env=env, start_new_session=True)
+        self.child = int(self.leader.stdout.readline())
+        threading.Thread(target=self.leader.wait, daemon=True).start()  # reaps the leader the moment it dies
+
+    def record(self, run_id, did):
+        ddir = paths.run_dir(run_id) / "dispatches" / did
+        ddir.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(ddir / "agent.identity", {"pid": self.leader.pid, "start": process_start(self.leader.pid)})
+        (ddir / "agent.pgid").write_text(str(self.leader.pid))
+
+    def alive(self):
+        return pid_alive(self.child) or self.leader.poll() is None
+
+    def close(self):
+        for pid in (self.child, self.leader.pid):
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+
+
+@pytest.fixture
+def trees():
+    made = []
+    yield made
+    for t in made:
+        t.close()
+
+
+def in_flight(cold):
+    """T1 dispatched as a trial, its worktree created and its launch baseline taken: an agent about to run."""
+    cold.dispatch("T1")
+    d = cold.dispatches()[0]
+    assert cold.trials()[0]["dispatch_id"] == d["id"]
+    run = state.get_run(cold.con, "run-A")
+    wt = dispatch.ensure_worktree(run, d)
+    ddir = paths.run_dir("run-A") / "dispatches" / d["id"]
+    ddir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(ddir / "worktree-baseline.json", dispatch._worktree_snapshot(wt))
+    return d, wt, ddir
+
+
+def launched(cold, d):
+    dispatch._record_launch(state.get_run(cold.con, "run-A"), d["id"], launcher="process", pid=None)
+
+
+def recover(cold, did, why="launch failed"):
+    with db.transaction(cold.con):
+        assert dispatch.trial_launch_failed(cold.con, state.get_run(cold.con, "run-A"), did, why)
+    job = cold.con.execute("SELECT id FROM outbox WHERE kind='trial_recovery'").fetchone()
+    assert jobs.execute(cold.con, job["id"]) == 0
+    return state.get_job(cold.con, job["id"])
+
+
+def task_row(cold, tid="T1"):
+    return state.get_task(cold.con, "run-A", tid)
+
+
+def test_a_trial_that_failed_before_any_work_falls_back_to_one_live_writer(cold):
+    d, wt, ddir = in_flight(cold)
+    trial = cold.trials()[0]
+    launch_job = cold.con.execute("SELECT id FROM outbox WHERE kind='launch_agent'").fetchone()[0]
+    recover(cold, d["id"])
+    old, new = cold.dispatches()
+    assert new["triple"] == trial["fallback_route"] and new["status"] == "launching" and new["worktree"] == d["worktree"]
+    assert old["ended_at"] and old["status"] == "failed" and old["terminal_classification"] == "launch_failed"
+    leases = cold.leases()
+    assert [bool(l["released_at"]) for l in leases] == [True, False] and not any(l["revoked_at"] for l in leases)
+    assert _live_leases(cold)[0]["id"] == new["lease_id"] != old["lease_id"]
+    assert cold.trials()[0]["status"] == "fell-back" and task_row(cold)["current_dispatch_id"] == new["id"]
+    assert task_row(cold)["status"] == "launching"
+    (attempt,) = cold.attempts()
+    assert cold.kinds(attempt) == ["probe-reserved", "probe-result", "dispatch-linked", "trial-reserved",
+                                   "trial-launch-failed", "trial-fell-back"]
+    failed, fell = cold.events(attempt)[-2:]
+    assert failed["dispatch_id"] == old["id"] and fell["dispatch_id"] == new["id"] and fell["origin"] == "recovery"
+    assert json.loads(cold.trials()[0]["outcome"])["fallback_dispatch"] == new["id"]
+    # the failed dispatch's own launch job can no longer start a second agent in the same worktree
+    job = state.get_job(cold.con, launch_job)
+    assert dispatch.job_launch_agent(cold.con, state.get_run(cold.con, "run-A"), job) == {"skipped": "failed"}
+    # the route change is on the record, and the fallback is a queued launch, not a started agent
+    changes = state.route_changes(cold.con, "run-A", "T1")
+    assert changes[-1]["kind"] == "trial-fallback" and changes[-1]["after"] == trial["fallback_route"]
+    assert cold.con.execute("SELECT COUNT(*) FROM outbox WHERE kind='launch_agent' AND status='queued'").fetchone()[0] == 2
+
+
+def test_a_child_still_able_to_write_is_terminated_before_the_fallback_starts(cold, trees, monkeypatch):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    log = cold.tmp / "child.log"
+    tree = Tree(d["id"], log)
+    trees.append(tree)
+    tree.record("run-A", d["id"])
+    time.sleep(0.3)
+    assert tree.alive() and log.stat().st_size > 0
+    seen = {}
+    real = dispatch.request_launch
+
+    def spy(*a, **kw):
+        seen["alive_when_the_fallback_launches"] = tree.alive()
+        return real(*a, **kw)
+
+    monkeypatch.setattr(dispatch, "request_launch", spy)
+    recover(cold, d["id"])
+    assert seen == {"alive_when_the_fallback_launches": False}
+    size = log.stat().st_size
+    time.sleep(0.4)
+    assert log.stat().st_size == size  # nothing is writing any more
+    assert cold.trials()[0]["status"] == "fell-back" and len(_live_leases(cold)) == 1
+
+
+def test_untracked_meaningful_work_is_preserved_and_blocks_the_fallback(cold, trees):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    work = wt / "new_module.py"
+    tree = Tree(d["id"], work)  # the worker's child is writing a new, untracked file in the worktree
+    trees.append(tree)
+    tree.record("run-A", d["id"])
+    time.sleep(0.3)
+    recover(cold, d["id"])
+    assert not tree.alive() and work.exists() and work.stat().st_size > 0
+    assert len(cold.dispatches()) == 1 and cold.trials()[0]["status"] == "abandoned"
+    assert [bool(l["released_at"] or l["revoked_at"]) for l in cold.leases()] == [False]  # the lease stays with the work
+    task = task_row(cold)
+    assert task["status"] == "blocked" and "work had started" in task["pause_reason"] and "new_module.py" in task["pause_reason"]
+    blocked = [e for e in cold.con.execute("SELECT summary FROM events WHERE kind='task.blocked'")][-1][0]
+    assert "no fallback was started" in blocked and "office rerun T1 --fresh" in blocked and d["worktree"] in blocked
+    (attempt,) = cold.attempts()
+    assert cold.kinds(attempt)[-1] == "trial-abandoned" and "trial-fell-back" not in cold.kinds(attempt)
+
+
+def test_a_worker_that_survives_the_termination_blocks_the_fallback_without_moving_the_lease(cold, trees, monkeypatch):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    tree = Tree(d["id"], cold.tmp / "child.log")
+    trees.append(tree)
+    tree.record("run-A", d["id"])
+    monkeypatch.setattr(route_probe, "_terminate_tree", lambda *a, **kw: False)  # it ignored every signal
+    lease = _live_leases(cold)[0]["id"]
+    recover(cold, d["id"])
+    assert tree.alive()
+    assert len(cold.dispatches()) == 1 and [l["id"] for l in _live_leases(cold)] == [lease] == [d["lease_id"]]
+    assert cold.trials()[0]["status"] == "abandoned"
+    task = task_row(cold)
+    assert task["status"] == "blocked" and "could not be confirmed gone" in task["pause_reason"]
+    summary = [e for e in cold.con.execute("SELECT summary FROM events WHERE kind='task.blocked'")][-1][0]
+    assert "Stop the process by hand" in summary and "office rerun T1 --fresh" in summary and lease in summary
+
+
+@pytest.mark.parametrize("what", ["identity", "process-table"])
+def test_an_unconfirmable_identity_or_process_table_blocks_the_fallback(cold, trees, monkeypatch, what):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    tree = Tree(d["id"], cold.tmp / "child.log")
+    trees.append(tree)
+    tree.record("run-A", d["id"])
+    if what == "identity":
+        monkeypatch.setattr(dispatch, "process_start", lambda pid: None)  # ps cannot say which process this is
+    else:
+        monkeypatch.setattr(route_probe, "_process_table", lambda: None)
+    recover(cold, d["id"])
+    assert len(cold.dispatches()) == 1 and len(_live_leases(cold)) == 1 and task_row(cold)["status"] == "blocked"
+    assert tree.alive() or what == "process-table"  # an unreadable identity is never signalled
+    assert cold.trials()[0]["status"] == "abandoned"
+
+
+def test_a_commit_or_a_changed_tracked_file_is_work(cold):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    (wt / "mod.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", str(wt), "add", "mod.py"], check=True)
+    subprocess.run(["git", "-C", str(wt), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "w"], check=True)
+    recover(cold, d["id"])
+    assert len(cold.dispatches()) == 1 and "branch moved" in task_row(cold)["pause_reason"]
+
+
+def test_an_ignored_generated_file_alone_is_not_work(cold):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    (wt / ".git" / "info" / "exclude").write_text(".office/\n") if False else None
+    exclude = subprocess.run(["git", "-C", str(wt), "rev-parse", "--git-path", "info/exclude"], check=True, capture_output=True,
+                             text=True).stdout.strip()
+    with open(wt / exclude if not os.path.isabs(exclude) else exclude, "a") as fh:
+        fh.write("generated/\n")
+    (wt / "generated").mkdir()
+    (wt / "generated" / "cache.bin").write_text("x")
+    recover(cold, d["id"])
+    assert cold.trials()[0]["status"] == "fell-back" and len(cold.dispatches()) == 2
+
+
+def test_a_submitted_revision_is_work(cold):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    with db.transaction(cold.con):
+        cold.con.execute("INSERT INTO revisions(id, run_id, task_id, seq, dispatch_id, commit_sha, tree_sha, "
+                         "requirements_version, plan_version, applied_version, env_fingerprint, operation_id, status, created_at) "
+                         "VALUES('R1','run-A','T1',1,?,?,?,1,3,3,'e','op1','submitted',?)", (d["id"], "a" * 40, "b" * 40, now_iso()))
+    recover(cold, d["id"])
+    assert len(cold.dispatches()) == 1 and "a revision was submitted" in task_row(cold)["pause_reason"]
+
+
+# ------------------------------------------------------------------ what starts a recovery, and what never does
+
+def _kinds(cold):
+    return [r[0] for r in cold.con.execute("SELECT kind FROM outbox ORDER BY created_at, rowid")]
+
+
+@pytest.mark.parametrize("classification,code", [("launch_failed", 127), ("nonzero", 1), ("supervisor_error", None)])
+def test_a_trial_worker_that_ends_without_submitting_is_recovered_not_relaunched_on_the_same_route(cold, classification, code):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    dispatch._finish(d["id"], code, None, classification, 0.1)
+    assert _kinds(cold).count("trial_recovery") == 1 and _kinds(cold).count("launch_agent") == 1  # no same-route relaunch
+    assert task_row(cold)["status"] == "running" and len(cold.dispatches()) == 1
+    assert "recovery" in json.loads(cold.trials()[0]["outcome"]) and cold.trials()[0]["status"] == "launched"
+    job = cold.con.execute("SELECT id FROM outbox WHERE kind='trial_recovery'").fetchone()
+    assert jobs.execute(cold.con, job["id"]) == 0
+    assert cold.trials()[0]["status"] == "fell-back" and len(cold.dispatches()) == 2
+    assert cold.dispatches()[1]["triple"] == cold.trials()[0]["fallback_route"] and len(_live_leases(cold)) == 1
+
+
+def test_a_trial_worker_that_hit_a_quota_wall_before_any_work_falls_back(cold, monkeypatch):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    monkeypatch.setattr(dispatch, "_quota_wall", lambda run, dd: "you have hit your usage limit")
+    dispatch._finish(d["id"], 1, None, "nonzero", 0.1)
+    assert _kinds(cold).count("trial_recovery") == 1 and task_row(cold)["status"] == "running"
+
+
+def test_a_trial_worker_that_submitted_settles_the_trial_without_a_recovery(cold):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    with db.transaction(cold.con):
+        cold.con.execute("INSERT INTO revisions(id, run_id, task_id, seq, dispatch_id, commit_sha, tree_sha, "
+                         "requirements_version, plan_version, applied_version, env_fingerprint, operation_id, status, created_at) "
+                         "VALUES('R1','run-A','T1',1,?,?,?,1,3,3,'e','op1','submitted',?)", (d["id"], "a" * 40, "b" * 40, now_iso()))
+    dispatch._finish(d["id"], 0, None, "success", 0.1)
+    assert "trial_recovery" not in _kinds(cold) and cold.trials()[0]["status"] == "submitted"
+    (attempt,) = cold.attempts()
+    assert cold.kinds(attempt)[-1] == "trial-submitted"
+
+
+def test_a_trial_worker_that_ended_on_a_signal_is_abandoned_when_the_task_moved_on(cold):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    with db.transaction(cold.con):
+        state.update_task(cold.con, "run-A", "T1", status="paused", pause_reason="lease revoked: x")
+    dispatch._finish(d["id"], None, 15, "signal", 0.1)
+    assert "trial_recovery" not in _kinds(cold) and cold.trials()[0]["status"] == "abandoned"
+
+
+def test_the_launch_job_failing_for_good_recovers_a_trial_and_still_blocks_an_ordinary_dispatch(cold):
+    d, wt, ddir = in_flight(cold)
+    run = state.get_run(cold.con, "run-A")
+    job = state.get_job(cold.con, cold.con.execute("SELECT id FROM outbox WHERE kind='launch_agent'").fetchone()[0])
+    with db.transaction(cold.con):
+        jobs.on_permanent_failure(cold.con, run, job, "RuntimeError: worktree setup exploded")
+    assert _kinds(cold).count("trial_recovery") == 1 and task_row(cold)["status"] == "launching"
+    # an ordinary dispatch keeps today's behavior: the task blocks
+    dispatch.dispatch(cold.con, state.get_run(cold.con, "run-A"), ["T2"], as_model="codex/gpt-6-astra@low")
+    plain = [x for x in cold.dispatches() if x["task_id"] == "T2"][0]
+    plain_job = state.get_job(cold.con, cold.con.execute(
+        "SELECT id FROM outbox WHERE kind='launch_agent' AND dedup_key=?", (f"launch:{plain['id']}",)).fetchone()[0])
+    with db.transaction(cold.con):
+        jobs.on_permanent_failure(cold.con, state.get_run(cold.con, "run-A"), plain_job, "RuntimeError: boom")
+    assert task_row(cold, "T2")["status"] == "blocked" and "launch failed" in task_row(cold, "T2")["pause_reason"]
+    assert _kinds(cold).count("trial_recovery") == 1
+
+
+def test_a_declared_route_that_fails_surfaces_as_it_does_today(cold):
+    dispatch.dispatch(cold.con, state.get_run(cold.con, "run-A"), ["T1"], as_model=f"codex/{SOL}@high")
+    (d,) = cold.dispatches()
+    launched(cold, d)
+    dispatch._finish(d["id"], 1, None, "nonzero", 0.1)
+    assert "trial_recovery" not in _kinds(cold) and not cold.trials()
+    relaunch = cold.dispatches()[-1]  # the existing environment-retry relaunch, on the route the user declared
+    assert relaunch["id"] != d["id"] and relaunch["triple"] == cold.sol["high"]
+
+
+def test_amending_a_trial_dispatchs_route_ends_the_trial_and_its_fallback(cold):
+    from office import routechange
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    routechange.change_route(cold.con, state.get_run(cold.con, "run-A"), "T1", "codex/gpt-6-astra@high", "switch it")
+    assert cold.trials()[0]["status"] == "abandoned"
+    assert "discovery" not in _route_json(cold.dispatches()[0]) and json.loads(task_row(cold)["route_json"])["declared"]
+    (attempt,) = cold.attempts()
+    assert cold.kinds(attempt)[-1] == "trial-abandoned"
+    dispatch._finish(d["id"], 1, None, "nonzero", 0.1)  # its failure is the user's route failing
+    assert "trial_recovery" not in _kinds(cold)
+
+
+# ------------------------------------------------------------------ gates and a fallback that no longer holds
+
+def test_a_gate_that_closes_during_the_recovery_blocks_the_fallback_and_keeps_the_lease(cold, monkeypatch):
+    from office.state import Refused
+    d, wt, ddir = in_flight(cold)
+
+    def closed(con, run):
+        raise Refused("plan-review-pending", "the plan is being reviewed again")
+
+    monkeypatch.setattr(plans, "require_dispatchable", closed)
+    recover(cold, d["id"])
+    assert len(cold.dispatches()) == 1 and [l["id"] for l in _live_leases(cold)] == [d["lease_id"]]
+    assert cold.trials()[0]["status"] == "launch-failed" and task_row(cold)["status"] == "blocked"
+    assert "a gate no longer allows the fallback" in task_row(cold)["pause_reason"]
+
+
+def test_a_task_the_operator_paused_gets_no_fallback(cold):
+    from office import queuecmd
+    d, wt, ddir = in_flight(cold)
+    queuecmd.pause(cold.con, run_arg="run-A", task="T1", reason="hold")
+    recover(cold, d["id"])
+    assert len(cold.dispatches()) == 1 and "paused by the operator" in task_row(cold)["pause_reason"]
+
+
+def test_a_fallback_that_no_longer_qualifies_blocks_with_a_next_step(cold, monkeypatch):
+    d, wt, ddir = in_flight(cold)
+    cold.monkeypatch.setenv("OFFICE_QUOTA_FIXTURE", json.dumps({"codex": 1}))
+    recover(cold, d["id"])
+    assert len(cold.dispatches()) == 1 and cold.trials()[0]["status"] == "launch-failed"
+    assert "no longer qualifies" in task_row(cold)["pause_reason"]
+    summary = [e for e in cold.con.execute("SELECT summary FROM events WHERE kind='task.blocked'")][-1][0]
+    assert "office dispatch T1 --reroute" in summary
+
+
+def test_a_recovery_that_itself_fails_blocks_with_its_reason(cold, monkeypatch):
+    d, wt, ddir = in_flight(cold)
+    monkeypatch.setattr(dispatch, "stop_worker_tree", lambda run, dd: (_ for _ in ()).throw(RuntimeError("ps exploded")))
+    recover(cold, d["id"])
+    assert len(cold.dispatches()) == 1 and task_row(cold)["status"] == "blocked"
+    assert "the recovery itself failed" in task_row(cold)["pause_reason"] and cold.trials()[0]["status"] == "abandoned"
+
+
+def test_a_recovery_for_a_task_that_moved_on_starts_nothing(cold):
+    d, wt, ddir = in_flight(cold)
+    with db.transaction(cold.con):
+        state.update_task(cold.con, "run-A", "T1", status="paused", pause_reason="lease revoked: x")
+        assert dispatch._queue_trial_recovery(cold.con, state.get_run(cold.con, "run-A"), d, "late")
+    job = cold.con.execute("SELECT id FROM outbox WHERE kind='trial_recovery'").fetchone()
+    assert jobs.execute(cold.con, job["id"]) == 0
+    assert len(cold.dispatches()) == 1 and cold.trials()[0]["status"] == "abandoned"
+
+
+# ------------------------------------------------------------------ through the CLI (integration tier: runs with --all)
+
+from pathlib import Path
+
+from conftest import GOOD_ADD, PLAN_ONE
+
+TESTS = Path(__file__).resolve().parents[1]
+
+
+def _discovery_env(env, monkeypatch, **probe):
+    """The Env's fake `codex` answers a route probe (it is launched with a probe nonce, or asked its version) like
+    the probe suites' fake harness, and anything else like the Env's scripted agent: one binary serves the probe,
+    the trial worker and the fallback worker."""
+    for other in ("claude", "gemini", "agy"):  # one harness: the draw can only land on a route the fake can probe
+        (env.bin / other).unlink()
+        env.fakes.pop(env.bin / other, None)
+    codex = env.bin / "codex"
+    codex.write_text("\n".join([
+        f"#!{sys.executable}",
+        "import os, runpy, sys",
+        "if os.environ.get('OFFICE_PROBE_NONCE') or sys.argv[1:] == ['--version']:",
+        f"    runpy.run_path({str(TESTS / 'fixtures' / 'route_probe' / 'fake_harness.py')!r}, run_name='__main__')",
+        "os.environ['FAKE_HARNESS'] = 'codex'",
+        f"runpy.run_path({str(TESTS / 'v31' / 'fake_agent.py')!r}, run_name='__main__')", ""]))
+    codex.chmod(0o755)
+    monkeypatch.setenv("FAKE_PROBE", json.dumps(probe))
+    # No exploration draw (it would, at random, hold the discovery draw back), and a window that admits one trial.
+    (env.tmp / "user-config.yaml").write_text("\n".join([
+        "routing:", "  discovery:", "    enabled: true", "    max_trial_percent_rolling_20: 100",
+        "  adaptive:", "    exploration: {rate: 0.0, margin: 1.0, max_cost_vs_primary_percent: 100000}", ""]))
+    if route_probe.write_boundary_reason() is not None:
+        monkeypatch.setattr(route_probe, "write_boundary_reason", lambda: None)
+        monkeypatch.setattr(route_probe, "_boundary_argv", lambda ws: [])
+
+
+def _cli_run(env, monkeypatch, *steps, **probe):
+    _discovery_env(env, monkeypatch, **probe)
+    env.trust()
+    env.script(executor=list(steps))
+    from conftest import start_inline
+    start_inline(env, extra=("--size-class", "S"))
+    env.office("approve", "plan", "--quote", "approved", check=0)
+
+
+def test_cli_cold_start_trial_worker_fails_to_start_and_the_fallback_worker_submits(env, monkeypatch):
+    _cli_run(env, monkeypatch, {"exit": 127, "stderr": "codex: model unavailable"},
+             {"write": {"calc.py": GOOD_ADD}, "submit": True})
+    code, out = env.office("dispatch", "T1")
+    assert code == 0, out
+    con = env.con()
+    trial = dict(con.execute("SELECT * FROM route_trials").fetchone())
+    dispatches = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE role='executor' ORDER BY started_at, rowid")]
+    assert [x["triple"] for x in dispatches] == [trial["route"], trial["fallback_route"]], out
+    first, second = dispatches
+    assert first["terminal_classification"] == "nonzero" and first["ended_at"]
+    assert trial["status"] == "fell-back" and json.loads(trial["outcome"])["fallback_dispatch"] == second["id"]
+    leases = [dict(r) for r in con.execute("SELECT * FROM leases WHERE task_id='T1' ORDER BY acquired_at, rowid")]
+    # one writer at a time: the trial's lease was released before the fallback's was acquired, and neither was revoked
+    assert len(leases) == 2 and not any(l["revoked_at"] for l in leases)
+    assert leases[0]["released_at"] <= leases[1]["acquired_at"] and leases[0]["id"] == first["lease_id"]
+    assert con.execute("SELECT dispatch_id FROM revisions WHERE task_id='T1'").fetchone()[0] == second["id"]
+    kinds = [r[0] for r in con.execute("SELECT kind FROM route_discovery_events WHERE attempt_id=? ORDER BY seq", (trial["id"],))]
+    assert kinds == ["probe-reserved", "probe-result", "dispatch-linked", "trial-reserved", "trial-launched",
+                     "trial-launch-failed", "trial-fell-back"]
+    assert not con.execute("SELECT 1 FROM adapter_trust_acts WHERE triple=?", (trial["route"],)).fetchone()
+    assert env.calls() and any(c.get("role") == "executor" for c in env.calls())
+
+
+def test_cli_cold_start_probe_failure_dispatches_the_known_working_route_in_the_same_command(env, monkeypatch):
+    _cli_run(env, monkeypatch, {"write": {"calc.py": GOOD_ADD}, "submit": True}, mode="unsupported_effort")
+    code, out = env.office("dispatch", "T1")
+    assert code == 0, out
+    con = env.con()
+    assert not con.execute("SELECT 1 FROM route_trials").fetchone()
+    (d,) = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE role='executor'")]
+    assert "gpt-6.1-sol" not in d["triple"] and con.execute("SELECT COUNT(*) FROM leases WHERE task_id='T1'").fetchone()[0] == 1
+    probe = dict(con.execute("SELECT * FROM route_probes").fetchone())
+    assert (probe["result"], probe["reason_class"]) == ("fail", "unsupported-model-effort")
+    kinds = [r[0] for r in con.execute("SELECT kind FROM route_discovery_events ORDER BY seq")]
+    assert kinds == ["probe-reserved", "probe-result", "dispatch-linked"]
+
+
+def test_cli_cold_start_trial_worker_submits_and_the_trial_settles_as_submitted(env, monkeypatch):
+    _cli_run(env, monkeypatch, {"write": {"calc.py": GOOD_ADD}, "submit": True})
+    code, out = env.office("dispatch", "T1")
+    assert code == 0, out
+    con = env.con()
+    trial = dict(con.execute("SELECT * FROM route_trials").fetchone())
+    (d,) = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE role='executor'")]
+    assert d["triple"] == trial["route"] and trial["status"] == "submitted"
+    kinds = [r[0] for r in con.execute("SELECT kind FROM route_discovery_events WHERE attempt_id=? ORDER BY seq", (trial["id"],))]
+    assert kinds == ["probe-reserved", "probe-result", "dispatch-linked", "trial-reserved", "trial-launched", "trial-submitted"]
+    assert not con.execute("SELECT 1 FROM adapter_trust_acts WHERE triple=?", (trial["route"],)).fetchone()

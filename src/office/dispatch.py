@@ -3589,7 +3589,7 @@ class _WorkerTree:
         while pid in parent and pid not in mine:
             mine.add(pid)
             pid = parent[pid]
-        queue = [p for p, st in {**self.seen, **self.roots}.items() if started.get(p) == st]
+        queue = [p for p, st in {**self.seen, **self.roots}.items() if started.get(p) == st and p not in mine]
         while queue:
             pid = queue.pop()
             if pid not in found:
