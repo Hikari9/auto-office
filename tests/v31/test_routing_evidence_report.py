@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 import routing_evidence_report as rer
-from office import db
+from office import db, route_learning
 
 ROOT = Path(__file__).resolve().parents[2]
 DOC = ROOT / "docs" / "routing-evidence-report.md"
@@ -35,6 +35,13 @@ V12_COLUMNS = {
 A = ("claude", "claude-sonnet-5-5", "high")
 B = ("codex", "gpt-5-codex", "medium")
 R1, R2 = f"run-{Z}-1", f"run-{Z}-2"
+# The populated scenario read by dispatches.started_at alone. T4's first dispatch has no start time, so its order is
+# unknown; T1 and T5 were accepted from their only dispatch; T2 (A -> B -> A) and T3 (A -> A) from a later one.
+CHRONOLOGICAL_POPULATED = {
+    "accepted_tasks": 5, "order_unknown": 1, "producer_unknown": 0, "comparable": 4, "accepted_from_first_dispatch": 2,
+    "later_dispatch_same_route": 2, "first_final_mismatch": 0, "route_unknown": 0, "cross_route_handoffs": 2,
+    "tasks_with_cross_route_handoff": 1, "intermediate_cross_route_handoffs": 1,
+    "tasks_with_intermediate_cross_route_handoff": 1, "route_unknown_handoffs": 0}
 
 
 def did(name: str) -> str:
@@ -83,6 +90,14 @@ def _finding(con, name, gate, code, basis, attributed, task, *, clone_of=None, c
             contract=contract, state="open", summary=f"summary {Z}", location=f"src/{Z}.py:1", scope="lane",
             attribution_basis=basis, attributed_task=attributed,
             clone_of=f"find-{Z}-{clone_of}" if clone_of else None)
+
+
+def _attribution(con, dispatch, route, success, attribution, *, run=R1):
+    """A persisted route_attributions row, as route_learning.refresh writes it at run close."""
+    harness, model, effort = route
+    _insert(con, "route_attributions", dispatch_id=did(dispatch), run_id=run, route=f"{harness}/{model}@{effort}",
+            success=success, attribution=attribution, confidence=0.9, provenance=Z, learn_weight=1.0,
+            learner_version="1", derived_at="2026-10-01T00:00:00+00:00")
 
 
 LEDGER = json.dumps({"kind": "ledger", "sha256": Z, "tree": Z})
@@ -171,11 +186,18 @@ def populate(con) -> None:
     # A finding that is not convergence-v1 is not a lane finding.
     _finding(con, "o1", "k1", "O1", None, None, "T1", contract=None)
 
+    # Persisted attributions: seven executor rows on two routes, plus one whose dispatch row is gone (pruned).
+    for name, route, success, attribution in (("1a", A, 1, "route"), ("2a", A, 0, "mixed"), ("2b", B, 0, "route"),
+                                              ("2c", A, 1, "route"), ("3b", A, 1, "route"), ("4a", A, 0, "unknown"),
+                                              ("4b", B, 1, "route"), ("gone", A, 0, "environment")):
+        _attribution(con, name, route, success, attribution)
+
 
 def _migrated(path: Path, *, v12: bool = True):
     """An empty current-schema database. With `v12` False the v12 evidence columns are dropped again and the
     schema version rolled back, which is what a database last opened by an older runtime looks like."""
     con = db.connect(path)
+    route_learning.ensure_schema(con)  # route_attributions: written by the learner at run close, not by db.connect
     for table, columns in V12_COLUMNS.items():
         have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
         for column in columns:
@@ -406,6 +428,8 @@ def test_same_route_retries_cross_route_handoffs_and_swap_away_and_back(report):
     handoffs = {r["task_state"]: r for r in sec(report, "task_paths")["handoffs_by_task_state"]}
     accepted = handoffs["accepted"]
     assert accepted["tasks"] == 5
+    # T5 has an executor dispatch and no recorded first executor: its handoffs are unknown, the other four are known.
+    assert (accepted["tasks_links_recorded"], accepted["tasks_links_unknown"]) == (4, 1)
     assert (accepted["same_route_retries"], accepted["tasks_with_same_route_retry"]) == (1, 1)
     assert (accepted["cross_route_handoffs"], accepted["tasks_with_cross_route_handoff"]) == (3, 2)
     # T2's A -> B is intermediate; its B -> A and T4's A -> B land on the accepted producer.
@@ -414,7 +438,7 @@ def test_same_route_retries_cross_route_handoffs_and_swap_away_and_back(report):
     assert accepted["swap_away_and_back_tasks"] == 1
     assert accepted["route_unknown_handoffs"] == 0
     unresolved = handoffs["unresolved"]
-    assert unresolved["tasks"] == 3
+    assert unresolved["tasks"] == 3 and unresolved["tasks_links_unknown"] == 0
     assert (unresolved["cross_route_handoffs"], unresolved["swap_away_and_back_tasks"]) == (0, 0)
     assert unresolved["route_unknown_handoffs"] == 1  # T7's relaunch has no recorded route
 
@@ -555,9 +579,20 @@ def test_an_old_schema_reads_every_missing_evidence_column_as_unknown(tmp_path):
     paths = sec(report, "task_paths")
     assert paths["accepted"]["accepted_tasks"] == 5 and paths["accepted"]["first_executor_unknown"] == 5
     assert paths["accepted"]["comparable"] == 0
-    assert paths["executor_dispatch_links"] == {"executor_dispatches": 13, "first": 0, "linked": 0, "unknown": 13}
-    assert all(r["cross_route_handoffs"] == 0 for r in paths["handoffs_by_task_state"])
-    # Nothing is inferred from timestamps: the accepted producer still comes from accepted_revision_id.
+    # No link column exists: first, linked and every handoff figure are unknown, never 0.
+    assert paths["executor_dispatch_links"] == {"executor_dispatches": 13, "first": "unknown", "linked": "unknown",
+                                                "unknown": 13}
+    for key in rer.FIRST_EXECUTOR_COUNTS:
+        assert paths["accepted"][key] == "unknown", key
+    for row in paths["handoffs_by_task_state"]:
+        assert (row["tasks_links_recorded"], row["tasks_links_unknown"]) == (0, row["tasks"])
+        for key in rer.HANDOFF_COUNTS:
+            assert row[key] == "unknown", (row["task_state"], key)
+    # The recorded links stay unread; the chronological section is where an old database's paths are reported.
+    chrono = paths["chronological_derived"]
+    assert chrono["label"] == "chronological (derived from dispatches.started_at, not a recorded link)"
+    assert {k: v for k, v in chrono.items() if k != "label"} == CHRONOLOGICAL_POPULATED
+    # The accepted producer still comes from accepted_revision_id.
     assert paths["revisions_to_accept"]["histogram"] == {"1": 2, "2": 2, "3": 1}
     findings = sec(report, "findings")
     assert findings["lanes"]["membership_unknown_gates"] == 4 and findings["lanes"]["lane_task_pairs"] == 0
@@ -571,7 +606,7 @@ def test_an_old_schema_reads_every_missing_evidence_column_as_unknown(tmp_path):
 def test_the_current_schema_without_v12_columns_matches_the_populated_one_where_both_know(new_db, tmp_path):
     old = rer.build_report(_make(tmp_path / f"{Z}-old.db", v12=False))
     new = rer.build_report(new_db)
-    for name in ("dispatches", "episodes", "self_review", "latency_and_cost", "tags"):
+    for name in ("dispatches", "episodes", "route_attributions", "self_review", "latency_and_cost", "tags"):
         assert sec(old, name) == sec(new, name), name
     assert new["schema_gaps_read_as_unknown"] == []
 
@@ -606,6 +641,138 @@ def test_an_empty_migrated_database_reports_zeros_not_errors(tmp_path):
     assert sec(report, "task_paths")["revisions_to_accept"]["mean"] is None
     assert report["source"]["run_date_range"] == {"runs": 0, "first": None, "last": None}
     assert sec(report, "latency_and_cost")["latency"] == []
+
+
+# ------------------------------------------------------------------ chronological paths and persisted attributions
+
+def _chrono(report):
+    return {k: v for k, v in sec(report, "task_paths")["chronological_derived"].items() if k != "label"}
+
+
+def test_the_chronological_section_is_labelled_and_matches_the_scenario(report):
+    section = sec(report, "task_paths")["chronological_derived"]
+    assert section["label"] == "chronological (derived from dispatches.started_at, not a recorded link)"
+    assert _chrono(report) == CHRONOLOGICAL_POPULATED
+
+
+def test_chronological_paths_are_reported_where_recorded_links_are_unknown(tmp_path):
+    """The old-data failure: recorded handoffs printed 0 while the dispatches showed cross-route handoffs."""
+    old = rer.build_report(_make(tmp_path / f"{Z}-old.db", v12=False))
+    paths = sec(old, "task_paths")
+    assert all(r["cross_route_handoffs"] == "unknown" for r in paths["handoffs_by_task_state"])
+    assert _chrono(old)["cross_route_handoffs"] == 2 and _chrono(old)["tasks_with_cross_route_handoff"] == 1
+    # Every chronological figure is derived without the link columns, so the populated database agrees.
+    assert _chrono(old) == _chrono(rer.build_report(_make(tmp_path / f"{Z}-new.db")))
+
+
+def _accepted_pair(con, first, second, *, start_first, start_second, producer="b", task="T1"):
+    _insert(con, "runs", id=R1, created_at="2026-09-01T09:00:00+00:00", phase="closed")
+    _dispatch(con, "a", task, first, start=start_first, end="2026-09-01T12:00:00+00:00")
+    _dispatch(con, "b", task, second, start=start_second, end="2026-09-01T12:00:00+00:00")
+    _task(con, task, "accepted", rev=producer, producer=producer)
+    _revision(con, producer, task, 1, producer, LEDGER)
+    con.commit()
+    con.close()
+
+
+def test_a_chronological_first_final_mismatch_and_intermediate_handoff(tmp_path):
+    _accepted_pair(_mini(tmp_path, v12=False), A, B, start_first="2026-09-01T10:00:00+00:00",
+                   start_second="2026-09-01T11:00:00+00:00")
+    chrono = _chrono(rer.build_report(tmp_path / "mini.db"))
+    assert (chrono["first_final_mismatch"], chrono["accepted_from_first_dispatch"], chrono["comparable"]) == (1, 0, 1)
+    # The only handoff lands on the accepted producer, so it is not intermediate.
+    assert (chrono["cross_route_handoffs"], chrono["intermediate_cross_route_handoffs"]) == (1, 0)
+
+
+def test_a_producer_that_ran_first_leaves_the_later_dispatch_as_an_intermediate_handoff(tmp_path):
+    _accepted_pair(_mini(tmp_path, v12=False), A, B, start_first="2026-09-01T10:00:00+00:00",
+                   start_second="2026-09-01T11:00:00+00:00", producer="a")
+    chrono = _chrono(rer.build_report(tmp_path / "mini.db"))
+    assert (chrono["accepted_from_first_dispatch"], chrono["intermediate_cross_route_handoffs"]) == (1, 1)
+    assert chrono["tasks_with_intermediate_cross_route_handoff"] == 1
+
+
+@pytest.mark.parametrize("second_start", [None, "2026-09-01T10:00:00+00:00", "not a time"])
+def test_an_order_that_start_times_do_not_settle_is_unknown_not_guessed(tmp_path, second_start):
+    """A missing, tied or unparseable started_at: no first executor and no handoff is inferred."""
+    _accepted_pair(_mini(tmp_path, v12=False), A, B, start_first="2026-09-01T10:00:00+00:00", start_second=second_start)
+    chrono = _chrono(rer.build_report(tmp_path / "mini.db"))
+    assert (chrono["order_unknown"], chrono["comparable"]) == (1, 0)
+    assert chrono["cross_route_handoffs"] == 0 and chrono["accepted_from_first_dispatch"] == 0
+    assert chrono["first_final_mismatch"] == 0 and chrono["later_dispatch_same_route"] == 0
+
+
+def test_a_chronological_route_with_an_unknown_part_is_unknown_not_a_mismatch(tmp_path):
+    _accepted_pair(_mini(tmp_path), ("claude", "m", None), ("claude", "m", "high"),
+                   start_first="2026-09-01T10:00:00+00:00", start_second="2026-09-01T11:00:00+00:00")
+    chrono = _chrono(rer.build_report(tmp_path / "mini.db"))
+    assert (chrono["first_final_mismatch"], chrono["route_unknown"], chrono["route_unknown_handoffs"]) == (0, 1, 1)
+    assert chrono["cross_route_handoffs"] == 0
+
+
+def test_chronological_orders_do_not_cross_runs_that_share_a_task_id(tmp_path):
+    con = _mini(tmp_path, v12=False)
+    _accepted_pair(con, A, A, start_first="2026-09-01T10:00:00+00:00", start_second="2026-09-01T11:00:00+00:00")
+    con = _mini(tmp_path, name="other.db", v12=False)
+    _insert(con, "runs", id=R1, created_at="2026-09-01T09:00:00+00:00", phase="closed")
+    _insert(con, "runs", id=R2, created_at="2026-09-01T09:00:00+00:00", phase="closed")
+    _dispatch(con, "a", "T1", A, start="2026-09-01T10:00:00+00:00", end="2026-09-01T10:30:00+00:00")
+    _dispatch(con, "b", "T1", B, run=R2, start="2026-09-01T10:10:00+00:00", end="2026-09-01T10:30:00+00:00")
+    _task(con, "T1", "accepted", rev="a", producer="a")
+    _revision(con, "a", "T1", 1, "a", LEDGER)
+    con.commit()
+    con.close()
+    chrono = _chrono(rer.build_report(tmp_path / "other.db"))
+    assert (chrono["accepted_from_first_dispatch"], chrono["cross_route_handoffs"]) == (1, 0)
+
+
+def test_persisted_route_attributions_are_reported_per_exact_route_and_apart_from_strict_success(report):
+    section = sec(report, "route_attributions")
+    assert section["available"] and "not the revision-derived strict success" in section["label"]
+    rows = {(r["role"], r["harness"], r["model"], r["effort"]): r for r in section["routes"]}
+    executor_a = rows[("executor", *A)]
+    assert (executor_a["attributions"], executor_a["successes"]) == (5, 3)
+    assert executor_a["by_attribution"] == {"route": 3, "mixed": 1, "unknown": 1, "plan": 0, "environment": 0, "reviewer": 0}
+    executor_b = rows[("executor", *B)]
+    assert (executor_b["attributions"], executor_b["successes"]) == (2, 1)
+    assert executor_b["by_attribution"]["route"] == 2
+    # The dispatch row of this attribution is gone, so its role is unknown; it is not folded into the executor route.
+    gone = rows[("unknown", *A)]
+    assert (gone["attributions"], gone["successes"], gone["by_attribution"]["environment"]) == (1, 0, 1)
+    assert section["totals"] == {"attributions": 8, "successes": 4}
+    # The two measures are different: persisted success is 3 for executor route A, revision-derived strict success is 4.
+    strict = by_route(sec(report, "dispatches")["routes"], "executor", A)["strict_successes"]
+    assert strict == 4 != executor_a["successes"]
+
+
+def test_route_attributions_merge_clamped_routes_and_never_echo_free_text(tmp_path):
+    con = _mini(tmp_path)
+    for name, route, attribution in (("x", f"/Users/{Z}/key", f"sk-ant-{Z}"), ("w", f"/Users/{Z}/other", "route"),
+                                     ("y", f"tok-{Z}\n/m@high", "mixed"), ("z", "", "plan")):
+        _insert(con, "route_attributions", dispatch_id=did(name), run_id=R1, route=route, success=1, attribution=attribution,
+                confidence=1.0, learn_weight=1.0, learner_version="1", derived_at="2026-10-01T00:00:00+00:00")
+    con.commit()
+    con.close()
+    text, as_json = _printed(tmp_path / "mini.db")
+    assert Z not in text and Z not in as_json
+    section = sec(rer.build_report(tmp_path / "mini.db"), "route_attributions")
+    rows = {(r["harness"], r["model"], r["effort"]): r for r in section["routes"]}
+    # Two different free-text routes clamp to the same key and are one row; an unrecognised class is `other`.
+    merged = rows[("other", "other", "other")]
+    assert (merged["attributions"], merged["successes"]) == (2, 2)
+    assert merged["by_attribution"]["other"] == 1 and merged["by_attribution"]["route"] == 1
+    assert rows[("other", "m", "high")]["by_attribution"]["mixed"] == 1
+    assert rows[("other", "other", "unknown")]["by_attribution"]["plan"] == 1
+
+
+def test_an_absent_route_attributions_table_makes_only_that_section_unavailable(tmp_path):
+    con = _mini(tmp_path)
+    con.execute("DROP TABLE route_attributions")
+    con.commit()
+    con.close()
+    report = rer.build_report(tmp_path / "mini.db")
+    assert sec(report, "route_attributions") == {"available": False, "missing_tables": ["route_attributions"]}
+    assert sec(report, "dispatches")["available"] and "route_attributions" in report["schema_gaps_read_as_unknown"]
 
 
 # ------------------------------------------------------------------ command line
@@ -759,13 +926,15 @@ def test_a_route_with_an_unknown_effort_is_unknown_not_a_mismatch(tmp_path):
 def test_a_dispatch_is_never_its_own_predecessor(tmp_path):
     con = _mini(tmp_path)
     _insert(con, "runs", id=R1, created_at="2026-09-01T09:00:00+00:00", phase="closed")
-    _dispatch(con, "a", "T1", A, start="2026-09-01T10:00:00+00:00", end="2026-09-01T10:01:00+00:00", pred="a")
-    _task(con, "T1", "submitted")
+    _dispatch(con, "a", "T1", A, start="2026-09-01T10:00:00+00:00", end="2026-09-01T10:01:00+00:00")
+    _dispatch(con, "b", "T1", A, start="2026-09-01T11:00:00+00:00", end="2026-09-01T11:01:00+00:00", pred="b")
+    _task(con, "T1", "submitted", first="a")
     con.commit()
     con.close()
     paths = sec(rer.build_report(tmp_path / "mini.db"), "task_paths")
-    assert paths["executor_dispatch_links"] == {"executor_dispatches": 1, "first": 0, "linked": 0, "unknown": 1}
-    assert {r["task_state"]: r for r in paths["handoffs_by_task_state"]}["unresolved"]["same_route_retries"] == 0
+    assert paths["executor_dispatch_links"] == {"executor_dispatches": 2, "first": 1, "linked": 0, "unknown": 1}
+    unresolved = {r["task_state"]: r for r in paths["handoffs_by_task_state"]}["unresolved"]
+    assert (unresolved["tasks_links_recorded"], unresolved["same_route_retries"]) == (1, 0)
 
 
 def test_an_accepted_revision_that_belongs_to_another_task_is_not_credited(tmp_path):

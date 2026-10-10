@@ -13,7 +13,7 @@ Exit codes: `0` report printed, `1` printed but `PRAGMA integrity_check` failed,
 
 - **Read only.** The file is opened with a SQLite URI `mode=ro`, then `PRAGMA query_only=ON`, through `sqlite3.connect` directly. It never calls `office.db.connect`, which migrates and enters WAL mode. A read-only open of a WAL database can create empty `-wal` and `-shm` files beside it; the main file's bytes are not changed. The test suite proves the source hash and modification time are unchanged.
 - **Aggregate only.** Only counts, dates (day precision) and categorical values are printed. No goal, title, prompt, path, summary, commit, token, run id, task id or dispatch id is selected, and the source path is not printed. Categorical values (tags, sizes, receipt kinds, attribution bases) are clamped to their documented sets, and role, harness, model, effort, run phase and task status must look like an identifier (`LABELS` in the script: lowercase words, a model may have one `/`); anything else prints as `other`, so free text, paths or control characters in those columns cannot reach the report. A malformed row degrades the section that reads it to `available: false` with the exception type, never the report.
-- **Unknown stays unknown.** A column the database lacks reads as NULL, a NULL is reported as `unknown` (or `not-recorded`), and nothing is backfilled or inferred from timestamps. A table the database lacks makes the sections that need it `available: false` with the table names, and `schema_gaps_read_as_unknown` lists every `table.column` read as NULL.
+- **Unknown stays unknown.** A column the database lacks reads as NULL, a NULL is reported as `unknown` (or `not-recorded`), and nothing is backfilled. The one timestamp derivation, `task.chronological`, is reported under its own label and never fills a recorded figure. A table the database lacks makes the sections that need it `available: false` with the table names, and `schema_gaps_read_as_unknown` lists every `table.column` read as NULL.
 - **Missing cost is unknown.** A route with no recorded cost prints `total: unknown`, never `0`.
 
 ## Provenance
@@ -37,37 +37,40 @@ Every metric is one statement appended to the same prelude of normalized views. 
 A metric whose SQL starts with a comma adds CTEs of its own after the prelude. `tests/v31/test_routing_evidence_report.py` fails if this page and the script differ.
 
 ```sql
-WITH dr AS (SELECT p.*, CASE WHEN p.harness IS NOT NULL AND p.model IS NOT NULL AND p.effort IS NOT NULL
-    THEN p.harness || '/' || p.model || '@' || p.effort END AS route FROM (SELECT d.id, d.run_id,
-    d.role, d.task_id, d.started_at, d.ended_at, d.wall_clock_seconds, d.money_actual, d.size_class,
-    d.predecessor_dispatch_id, d.descriptor_json, COALESCE(NULLIF(d.harness, ''), CASE WHEN
-    instr(d.triple, '/') > 0 THEN CASE WHEN instr(substr(d.triple, 1, instr(d.triple, '/') - 1), '@') >
-    0 THEN substr(d.triple, 1, instr(d.triple, '@') - 1) ELSE substr(d.triple, 1, instr(d.triple, '/') -
-    1) END END) AS harness, COALESCE(NULLIF(d.model, ''), CASE WHEN instr(d.triple, '/') > 0 AND
-    length(rtrim(d.triple, replace(d.triple, '@', ''))) > instr(d.triple, '/') THEN substr(d.triple,
-    instr(d.triple, '/') + 1, length(rtrim(d.triple, replace(d.triple, '@', ''))) - instr(d.triple, '/')
-    - 1) END) AS model, COALESCE(NULLIF(d.effort, ''), CASE WHEN instr(d.triple, '/') > 0 AND
-    length(rtrim(d.triple, replace(d.triple, '@', ''))) > instr(d.triple, '/') THEN
-    NULLIF(substr(d.triple, length(rtrim(d.triple, replace(d.triple, '@', ''))) + 1), '') END) AS effort
-    FROM dispatches d) p),
-tk AS (SELECT t.run_id, t.id AS task_id, t.status, t.accepted_revision_id, t.descriptor_json,
-    t.first_executor_dispatch_id, CASE WHEN t.status = 'accepted' AND t.accepted_revision_id IS NOT NULL
-    THEN 1 ELSE 0 END AS is_accepted FROM tasks t),
-rv AS (SELECT r.id, r.run_id, r.task_id, r.seq, r.dispatch_id, r.self_review_json FROM revisions r),
-gt AS (SELECT g.id, g.run_id, g.subject, g.scope, CASE WHEN json_valid(g.members_json) THEN CASE WHEN
-    json_type(g.members_json) = 'array' THEN g.members_json END END AS members_json FROM gates g),
-fd AS (SELECT f.id, f.run_id, f.gate_id, f.code, f.contract, f.attribution_basis, f.attributed_task,
-    f.clone_of FROM findings f),
-rn AS (SELECT r.id, r.created_at, r.phase, r.risk_json, r.pruned_at FROM runs r),
-tr AS (SELECT t.run_id, t.task_id, t.is_accepted, fe.id AS first_id, fe.route AS first_route, pd.id AS
-    producer_id, pd.route AS producer_route FROM tk t LEFT JOIN dr fe ON fe.id =
-    t.first_executor_dispatch_id AND fe.run_id = t.run_id AND fe.task_id = t.task_id AND fe.role =
-    'executor' LEFT JOIN rv ar ON ar.id = t.accepted_revision_id AND ar.run_id = t.run_id AND ar.task_id
-    = t.task_id LEFT JOIN dr pd ON pd.id = ar.dispatch_id AND pd.run_id = t.run_id AND pd.task_id =
-    t.task_id),
-ed AS (SELECT d.run_id, d.task_id, d.id AS to_id, p.route AS from_route, d.route AS to_route FROM dr d
-    JOIN dr p ON p.id = d.predecessor_dispatch_id AND p.run_id = d.run_id AND p.task_id = d.task_id AND
-    p.role = 'executor' AND p.id <> d.id WHERE d.role = 'executor')
+WITH dr AS (SELECT p.*, CASE WHEN p.harness IS NOT NULL AND p.model IS NOT NULL AND p.effort IS NOT
+    NULL THEN p.harness || '/' || p.model || '@' || p.effort END AS route FROM (SELECT d.id,
+    d.run_id, d.role, d.task_id, d.started_at, d.ended_at, d.wall_clock_seconds, d.money_actual,
+    d.size_class, d.predecessor_dispatch_id, d.descriptor_json, COALESCE(NULLIF(d.harness, ''), CASE
+    WHEN instr(d.triple, '/') > 0 THEN CASE WHEN instr(substr(d.triple, 1, instr(d.triple, '/') -
+    1), '@') > 0 THEN substr(d.triple, 1, instr(d.triple, '@') - 1) ELSE substr(d.triple, 1,
+    instr(d.triple, '/') - 1) END END) AS harness, COALESCE(NULLIF(d.model, ''), CASE WHEN
+    instr(d.triple, '/') > 0 AND length(rtrim(d.triple, replace(d.triple, '@', ''))) >
+    instr(d.triple, '/') THEN substr(d.triple, instr(d.triple, '/') + 1, length(rtrim(d.triple,
+    replace(d.triple, '@', ''))) - instr(d.triple, '/') - 1) END) AS model,
+    COALESCE(NULLIF(d.effort, ''), CASE WHEN instr(d.triple, '/') > 0 AND length(rtrim(d.triple,
+    replace(d.triple, '@', ''))) > instr(d.triple, '/') THEN NULLIF(substr(d.triple,
+    length(rtrim(d.triple, replace(d.triple, '@', ''))) + 1), '') END) AS effort FROM dispatches d)
+    p), tk AS (SELECT t.run_id, t.id AS task_id, t.status, t.accepted_revision_id,
+    t.descriptor_json, t.first_executor_dispatch_id, CASE WHEN t.status = 'accepted' AND
+    t.accepted_revision_id IS NOT NULL THEN 1 ELSE 0 END AS is_accepted, CASE WHEN
+    t.first_executor_dispatch_id IS NOT NULL OR NOT EXISTS (SELECT 1 FROM dr x WHERE x.run_id =
+    t.run_id AND x.task_id = t.id AND x.role = 'executor') THEN 1 ELSE 0 END AS links_recorded FROM
+    tasks t), rv AS (SELECT r.id, r.run_id, r.task_id, r.seq, r.dispatch_id, r.self_review_json FROM
+    revisions r), gt AS (SELECT g.id, g.run_id, g.subject, g.scope, CASE WHEN
+    json_valid(g.members_json) THEN CASE WHEN json_type(g.members_json) = 'array' THEN
+    g.members_json END END AS members_json FROM gates g), fd AS (SELECT f.id, f.run_id, f.gate_id,
+    f.code, f.contract, f.attribution_basis, f.attributed_task, f.clone_of FROM findings f), rn AS
+    (SELECT r.id, r.created_at, r.phase, r.risk_json, r.pruned_at FROM runs r), ra AS (SELECT
+    a.dispatch_id, a.run_id, a.route, a.success, a.attribution FROM route_attributions a), tr AS
+    (SELECT t.run_id, t.task_id, t.is_accepted, t.links_recorded, fe.id AS first_id, fe.route AS
+    first_route, pd.id AS producer_id, pd.route AS producer_route FROM tk t LEFT JOIN dr fe ON fe.id
+    = t.first_executor_dispatch_id AND fe.run_id = t.run_id AND fe.task_id = t.task_id AND fe.role =
+    'executor' LEFT JOIN rv ar ON ar.id = t.accepted_revision_id AND ar.run_id = t.run_id AND
+    ar.task_id = t.task_id LEFT JOIN dr pd ON pd.id = ar.dispatch_id AND pd.run_id = t.run_id AND
+    pd.task_id = t.task_id), ed AS (SELECT d.run_id, d.task_id, d.id AS to_id, p.route AS
+    from_route, d.route AS to_route FROM dr d JOIN dr p ON p.id = d.predecessor_dispatch_id AND
+    p.run_id = d.run_id AND p.task_id = d.task_id AND p.role = 'executor' AND p.id <> d.id WHERE
+    d.role = 'executor')
 ```
 
 ## Metrics
@@ -237,33 +240,79 @@ SELECT COUNT(*) AS accepted_tasks, COALESCE(SUM(first_id IS NULL), 0) AS first_e
     producer_route IS NULL)), 0) AS route_unknown FROM tr WHERE is_accepted = 1
 ```
 
-First executor is read only from `tasks.first_executor_dispatch_id`: a NULL there is unknown, never inferred from timestamps. The accepted producer is the dispatch of the task's accepted revision, which is also provable on older databases. `first_final_mismatch` compares route keys (harness, model, effort), so a different dispatch on the same route is `later_dispatch_same_route`.
+First executor is read only from `tasks.first_executor_dispatch_id`: a NULL there is unknown, never inferred from timestamps (see `task.chronological` for the timestamp derivation, reported apart). Where that column does not exist, `first_executor_is_producer`, `later_dispatch_same_route`, `first_final_mismatch` and `route_unknown` print `unknown`, and `first_executor_unknown` equals `accepted_tasks`. The accepted producer is the dispatch of the task's accepted revision, which is also provable on older databases. `first_final_mismatch` compares route keys (harness, model, effort), so a different dispatch on the same route is `later_dispatch_same_route`.
 
 ### `task.handoffs`
 
-**Denominator:** tasks, split into accepted and unresolved; an edge is an executor dispatch whose recorded predecessor is an executor dispatch of the same run and task.
+**Denominator:** tasks, split into accepted and unresolved; an edge is an executor dispatch whose recorded predecessor is an executor dispatch of the same run and task; a task whose links are not recorded (no predecessor column, or executor dispatches but no recorded first executor) is unknown and counts toward no handoff figure.
 
 **Reported as:** `sections.task_paths.handoffs_by_task_state`.
 
 ```sql
-, tc AS (SELECT tr.run_id, tr.task_id, tr.is_accepted, tr.first_route, tr.producer_route,
-    COALESCE(SUM(ed.from_route IS NOT NULL AND ed.to_route IS NOT NULL AND ed.from_route = ed.to_route),
-    0) AS same_route_retries, COALESCE(SUM(ed.from_route IS NOT NULL AND ed.to_route IS NOT NULL AND
-    ed.from_route <> ed.to_route), 0) AS cross_route_handoffs, COALESCE(SUM(ed.from_route IS NOT NULL
-    AND ed.to_route IS NOT NULL AND ed.from_route <> ed.to_route AND ed.to_id IS NOT tr.producer_id), 0)
-    AS intermediate_cross_route_handoffs, COALESCE(SUM(ed.to_id IS NOT NULL AND (ed.from_route IS NULL
-    OR ed.to_route IS NULL)), 0) AS route_unknown_edges FROM tr LEFT JOIN ed ON ed.run_id = tr.run_id
-    AND ed.task_id = tr.task_id GROUP BY tr.run_id, tr.task_id) SELECT CASE WHEN is_accepted = 1 THEN
-    'accepted' ELSE 'unresolved' END AS task_state, COUNT(*) AS tasks, SUM(same_route_retries) AS
-    same_route_retries, SUM(same_route_retries > 0) AS tasks_with_same_route_retry,
-    SUM(cross_route_handoffs) AS cross_route_handoffs, SUM(cross_route_handoffs > 0) AS
-    tasks_with_cross_route_handoff, SUM(intermediate_cross_route_handoffs) AS
-    intermediate_cross_route_handoffs, SUM(cross_route_handoffs > 0 AND first_route IS NOT NULL AND
-    first_route = producer_route) AS swap_away_and_back_tasks, SUM(route_unknown_edges) AS
-    route_unknown_handoffs FROM tc GROUP BY 1 ORDER BY 1
+, tc AS (SELECT tr.run_id, tr.task_id, tr.is_accepted, tr.links_recorded, tr.first_route,
+    tr.producer_route, COALESCE(SUM(ed.from_route IS NOT NULL AND ed.to_route IS NOT NULL AND
+    ed.from_route = ed.to_route), 0) AS same_route_retries, COALESCE(SUM(ed.from_route IS NOT NULL
+    AND ed.to_route IS NOT NULL AND ed.from_route <> ed.to_route), 0) AS cross_route_handoffs,
+    COALESCE(SUM(ed.from_route IS NOT NULL AND ed.to_route IS NOT NULL AND ed.from_route <>
+    ed.to_route AND ed.to_id IS NOT tr.producer_id), 0) AS intermediate_cross_route_handoffs,
+    COALESCE(SUM(ed.to_id IS NOT NULL AND (ed.from_route IS NULL OR ed.to_route IS NULL)), 0) AS
+    route_unknown_edges FROM tr LEFT JOIN ed ON ed.run_id = tr.run_id AND ed.task_id = tr.task_id
+    GROUP BY tr.run_id, tr.task_id) SELECT CASE WHEN is_accepted = 1 THEN 'accepted' ELSE
+    'unresolved' END AS task_state, COUNT(*) AS tasks, SUM(links_recorded) AS tasks_links_recorded,
+    SUM(1 - links_recorded) AS tasks_links_unknown, SUM(CASE WHEN links_recorded = 1 THEN
+    same_route_retries END) AS same_route_retries, SUM(CASE WHEN links_recorded = 1 THEN
+    same_route_retries > 0 END) AS tasks_with_same_route_retry, SUM(CASE WHEN links_recorded = 1
+    THEN cross_route_handoffs END) AS cross_route_handoffs, SUM(CASE WHEN links_recorded = 1 THEN
+    cross_route_handoffs > 0 END) AS tasks_with_cross_route_handoff, SUM(CASE WHEN links_recorded =
+    1 THEN intermediate_cross_route_handoffs END) AS intermediate_cross_route_handoffs, SUM(CASE
+    WHEN links_recorded = 1 THEN cross_route_handoffs > 0 AND first_route IS NOT NULL AND
+    first_route = producer_route END) AS swap_away_and_back_tasks, SUM(CASE WHEN links_recorded = 1
+    THEN route_unknown_edges END) AS route_unknown_handoffs FROM tc GROUP BY 1 ORDER BY 1
 ```
 
 An edge is one executor dispatch and its recorded predecessor, both executor dispatches of the same run and task. `same_route_retries` are edges whose routes match, `cross_route_handoffs` edges whose routes differ, and `intermediate_cross_route_handoffs` the cross-route edges that do not land on the accepted producer. `swap_away_and_back_tasks` have a first route equal to the producer's route and at least one cross-route handoff: the first/final comparison alone hides them. An edge with an unrecorded route is `route_unknown_handoffs`.
+
+A task's links are **recorded** (`links_recorded` in the prelude) when `dispatches.predecessor_dispatch_id` exists and the task has a recorded `first_executor_dispatch_id`, or has no executor dispatch to link. Any other task has links that were never written (a database last opened before the link columns existed, or a run from before them), so its handoffs are unknown: they enter no figure, `tasks_links_unknown` counts them and `tasks_links_recorded` the rest. A group with no task whose links were recorded prints every handoff figure as `unknown`, never `0`: the retries and handoffs may well have happened, they were not recorded. Read `task.chronological` for those tasks.
+
+### `task.chronological`
+
+**Denominator:** accepted tasks; the executor dispatches of a task are ordered by julianday(started_at), and the order is known only when every one has a parseable, distinct started_at; the accepted producer is the dispatch of the accepted revision; no recorded link is read.
+
+**Reported as:** `sections.task_paths.chronological_derived`, labelled `chronological (derived from dispatches.started_at, not a recorded link)`.
+
+```sql
+, ex AS (SELECT run_id, task_id, id, route, julianday(started_at) AS ts FROM dr WHERE role =
+    'executor'), cs AS (SELECT run_id, task_id, COUNT(*) AS n, COUNT(ts) AS timed, COUNT(DISTINCT
+    ts) AS distinct_ts FROM ex GROUP BY run_id, task_id), cx AS (SELECT run_id, task_id, id, route,
+    ROW_NUMBER() OVER (PARTITION BY run_id, task_id ORDER BY ts) AS pos, LAG(id) OVER (PARTITION BY
+    run_id, task_id ORDER BY ts) AS prev_id, LAG(route) OVER (PARTITION BY run_id, task_id ORDER BY
+    ts) AS prev_route FROM ex), ct AS (SELECT t.run_id, t.task_id, t.producer_id, t.producer_route,
+    COALESCE(s.n > 0 AND s.n = s.timed AND s.timed = s.distinct_ts, 0) AS ordered, MIN(f.id) AS
+    first_id, MIN(f.route) AS first_route, COALESCE(SUM(x.prev_route IS NOT NULL AND x.route IS NOT
+    NULL AND x.prev_route <> x.route), 0) AS cross_edges, COALESCE(SUM(x.prev_route IS NOT NULL AND
+    x.route IS NOT NULL AND x.prev_route <> x.route AND x.id IS NOT t.producer_id), 0) AS
+    intermediate_edges, COALESCE(SUM(x.prev_id IS NOT NULL AND (x.prev_route IS NULL OR x.route IS
+    NULL)), 0) AS unknown_edges FROM tr t LEFT JOIN cs s ON s.run_id = t.run_id AND s.task_id =
+    t.task_id LEFT JOIN cx f ON f.run_id = t.run_id AND f.task_id = t.task_id AND f.pos = 1 LEFT
+    JOIN cx x ON x.run_id = t.run_id AND x.task_id = t.task_id WHERE t.is_accepted = 1 GROUP BY
+    t.run_id, t.task_id), cc AS (SELECT *, ordered = 1 AND producer_id IS NOT NULL AS comparable
+    FROM ct) SELECT COUNT(*) AS accepted_tasks, COALESCE(SUM(ordered = 0), 0) AS order_unknown,
+    COALESCE(SUM(ordered = 1 AND producer_id IS NULL), 0) AS producer_unknown,
+    COALESCE(SUM(comparable), 0) AS comparable, COALESCE(SUM(comparable AND first_id = producer_id),
+    0) AS accepted_from_first_dispatch, COALESCE(SUM(comparable AND first_id <> producer_id AND
+    first_route IS NOT NULL AND first_route = producer_route), 0) AS later_dispatch_same_route,
+    COALESCE(SUM(comparable AND first_id <> producer_id AND first_route IS NOT NULL AND
+    producer_route IS NOT NULL AND first_route <> producer_route), 0) AS first_final_mismatch,
+    COALESCE(SUM(comparable AND first_id <> producer_id AND (first_route IS NULL OR producer_route
+    IS NULL)), 0) AS route_unknown, COALESCE(SUM(CASE WHEN ordered = 1 THEN cross_edges END), 0) AS
+    cross_route_handoffs, COALESCE(SUM(CASE WHEN ordered = 1 THEN cross_edges > 0 END), 0) AS
+    tasks_with_cross_route_handoff, COALESCE(SUM(CASE WHEN comparable THEN intermediate_edges END),
+    0) AS intermediate_cross_route_handoffs, COALESCE(SUM(CASE WHEN comparable THEN
+    intermediate_edges > 0 END), 0) AS tasks_with_intermediate_cross_route_handoff,
+    COALESCE(SUM(CASE WHEN ordered = 1 THEN unknown_edges END), 0) AS route_unknown_handoffs FROM cc
+```
+
+This section reads no recorded link, so it gives the same answer on a database with and without the link columns. It is a derivation, not a record: the executor dispatches of a task are ordered by `started_at`, the first in that order is the chronological first executor, and an edge is two consecutive dispatches. If any executor dispatch of the task has no parseable `started_at`, or two share one, the order is not known and the task counts in `order_unknown` and in no other figure. `accepted_from_first_dispatch`, `later_dispatch_same_route` and `first_final_mismatch` compare the chronological first executor with the accepted producer (the dispatch of `tasks.accepted_revision_id`), over `comparable` tasks (ordered, with a known producer). `cross_route_handoffs` and `tasks_with_cross_route_handoff` count consecutive executor dispatches on different routes over every ordered accepted task. `intermediate_cross_route_handoffs` are those that do not land on the accepted producer, over comparable tasks. A route with an unknown harness, model or effort is `route_unknown` or `route_unknown_handoffs`, never a mismatch.
 
 ### `task.links`
 
@@ -279,7 +328,7 @@ SELECT COUNT(*) AS executor_dispatches, COALESCE(SUM(t.first_executor_dispatch_i
     d.role = 'executor'
 ```
 
-Says how much of the handoff graph is knowable: `unknown` executor dispatches are neither a task's recorded first executor nor linked to a predecessor, so their handoffs are not in the counts above.
+Says how much of the handoff graph is knowable: `unknown` executor dispatches are neither a task's recorded first executor nor linked to a predecessor, so their handoffs are not in the counts above. Where the column that would record `first` (`tasks.first_executor_dispatch_id`) or `linked` (`dispatches.predecessor_dispatch_id`) does not exist, that count prints `unknown` instead of `0` and every executor dispatch is in `unknown`.
 
 ### `task.revisions_to_accept`
 
@@ -354,6 +403,20 @@ A lane gate is one review round of one lane or shared scope. Only a JSON array o
 
 A finding is one (run, gate, code): a finding recorded once per repair owner has several rows and counts once, with or without `clone_of`, so historical duplicates also count once. `duplicate_rows` is rows beyond the first, `clone_marked_rows` those carrying `clone_of`. `lane_exposure` is the number of member tasks the finding's gate put in front of it, so it is the count of tasks exposed, against `attributed_findings` which name one. `basis` is the first row's recorded `attribution_basis`; NULL is `unknown`.
 
+### `route_attributions`
+
+**Denominator:** every row of route_attributions (one per dispatch route_learning.refresh derived an outcome for, written at run close); successes = rows whose persisted success flag is 1; role comes from the dispatch row and is unknown when that row is gone.
+
+**Reported as:** `sections.route_attributions`.
+
+```sql
+SELECT COALESCE(d.role, 'unknown') AS role, a.route AS route, a.attribution AS attribution, COUNT(*)
+    AS attributions, COALESCE(SUM(a.success = 1), 0) AS successes FROM ra a LEFT JOIN dr d ON d.id =
+    a.dispatch_id AND d.run_id = a.run_id GROUP BY 1, 2, 3 ORDER BY 1, 2, 3
+```
+
+The learner's own persisted rows (`route_learning.refresh` writes them when a run closes), per exact route: `attributions` is the number of rows, `successes` the rows whose `success` is 1, and `by_attribution` counts rows per attribution class (`route`, `mixed`, `unknown`, `plan`, `environment`, `reviewer`; anything else is `other`). The persisted route key is split as `harness/model@effort` and clamped like every other label. These are not the report's revision-derived `strict_successes`: a run that has not closed has no rows, and the learner's success is its own derivation, so the two can differ for the same route and are never added or substituted. The section is unavailable when the database has no `route_attributions` table.
+
 ### `tags.tasks`
 
 **Denominator:** every row of tasks, once per tag; not-recorded = the descriptor has no such key.
@@ -399,6 +462,8 @@ See the Provenance section above.
 ## Reading it
 
 - **Strict successes vs episodes.** `dispatch.strict_successes` is the raw count of dispatches whose revision was accepted. `episodes` counts task-route pairs. Compare them per route: where a route has retries, episodes are fewer than settled dispatches, and a route that was handed a task and then lost it has a failed episode without a failed task.
+- **Recorded vs chronological paths.** `task.handoffs` and `task.accepted_paths` read links Office recorded and are `unknown` where none were. `task.chronological` reads only `started_at` and is the path for older data. They answer related questions with different evidence, so they are printed apart and never combined.
+- **Persisted attributions vs strict successes.** `route_attributions` is what the learner stored at run close, `dispatch.strict_successes` is derived from revisions when the report runs. Compare them per route; they are not interchangeable.
 - **Task size vs run size.** `size.task` is what the planner said about each task, `size.dispatch_snapshot` what was copied onto its executor dispatch at launch, and `size.run` the run's risk size. They are three different questions and are printed under three labels.
 - **Lane exposure vs findings.** A finding in a shared reviewed scope is in front of every member task (`lane_exposure`). Attribution (`reviewer-declared`, `unique-path`) names one task; `unassigned` could not. Attribution is evidence only: it did not decide which producer repaired the finding.
 - **NULL effort.** `task.*` metrics treat a route with an unknown harness, model or effort as unknown, so a NULL effort never counts as a mismatch or a handoff. `episodes` and `dispatch.routes` print a NULL effort as the `unknown` effort of an otherwise known route, so the three sections can disagree on whether a NULL-effort dispatch and a later one are the same route.

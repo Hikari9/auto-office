@@ -3,9 +3,9 @@
 
 Reads one runs.db (a copy, or the live file) and prints counts that say how executor routes behaved:
 dispatch counts per role x harness x model x effort, raw strict dispatch successes beside accepted task-route
-episodes, first executor vs accepted producer, same-route retries and cross-route handoffs, revisions to accept,
-self-review receipts, lane exposure vs unique and unassigned findings, latency and cost where recorded, task size
-vs run size, and planner tag coverage.
+episodes, persisted route_attributions per route, first executor vs accepted producer, same-route retries and
+cross-route handoffs, revisions to accept, self-review receipts, lane exposure vs unique and unassigned findings,
+latency and cost where recorded, task size vs run size, and planner tag coverage.
 
   * Opened only through a SQLite URI with mode=ro, then PRAGMA query_only=ON. `office.db.connect` is never used:
     it migrates and enters WAL mode. The file is hashed (SHA-256) before the first query and again after the last;
@@ -14,7 +14,9 @@ vs run size, and planner tag coverage.
   * Aggregate only: no goal, title, prompt, path, summary, commit, token, run id, task id or dispatch id is read
     into the report. Free-text columns are never selected; categorical values are clamped to their known sets.
   * An absent column reads as NULL (unknown), an absent table makes its section "unavailable". Nothing historical is
-    backfilled: a NULL stays unknown.
+    backfilled: a NULL stays unknown. Handoff, same-route retry and first-executor counts of tasks whose links were
+    never recorded print `unknown`, not 0; `task_paths.chronological_derived` reports first executor, handoffs and
+    accepted-from-first-dispatch from dispatches.started_at alone, under its own label.
   * Every metric is one SQL statement over the normalized views in `prelude()`; docs/routing-evidence-report.md
     lists each statement and its denominator, and a test keeps the two identical.
 
@@ -48,6 +50,9 @@ except ImportError:
         route_learning = None
 
 REPORT_VERSION = 1
+CHRONOLOGICAL_LABEL = "chronological (derived from dispatches.started_at, not a recorded link)"
+ROUTE_ATTRIBUTION_LABEL = ("persisted route_attributions rows per exact route (written by route_learning at run "
+                           "close); not the revision-derived strict success in `dispatches`")
 
 CAVEATS = (
     "sha256 and size_bytes cover the main database file only. Committed frames still in a -wal file are read by the "
@@ -94,6 +99,7 @@ VIEWS = {
     "gates": ("id", "run_id", "subject", "scope", "members_json"),
     "findings": ("id", "run_id", "gate_id", "code", "contract", "attribution_basis", "attributed_task", "clone_of"),
     "runs": ("id", "created_at", "phase", "risk_json", "pruned_at"),
+    "route_attributions": ("dispatch_id", "run_id", "route", "success", "attribution"),
 }
 # Columns read only through an expression (the dispatch route parts come from `triple` when the columns are empty).
 EXTRA_COLUMNS = {"dispatches": ("triple", "harness", "model", "effort")}
@@ -145,22 +151,30 @@ def prelude(schema: dict) -> str:
     dr = ("dr AS (SELECT p.*, CASE WHEN p.harness IS NOT NULL AND p.model IS NOT NULL "
           f"AND p.effort IS NOT NULL THEN p.harness || '/' || p.model || '@' || p.effort END AS route FROM ({inner}) p)")
 
-    def plain(table: str, alias: str, name: str, renames: dict | None = None, extra: str = "") -> str:
+    def plain(table: str, alias: str, name: str, renames: dict | None = None, extra: str = "",
+              extra_names: tuple[str, ...] = ()) -> str:
         renames = renames or {}
         if table not in schema:
             cols = tuple(renames.get(c, c) for c in VIEWS[table])
-            return f"{name} AS ({empty(cols + (('is_accepted',) if extra else ()))})"
+            return f"{name} AS ({empty(cols + extra_names)})"
         sel = ", ".join(_proj(schema, table, alias, c, renames.get(c)) for c in VIEWS[table])
         return f"{name} AS (SELECT {sel}{extra} FROM {table} {alias})"
 
+    # links_recorded: the task's handoff graph is knowable. Both link columns exist and the task has a recorded
+    # first executor (or no executor dispatch to link). Otherwise its handoffs are unknown, not zero.
+    first = _col(schema, "tasks", "t", "first_executor_dispatch_id")
+    links = (f"CASE WHEN {first} IS NOT NULL OR NOT EXISTS (SELECT 1 FROM dr x WHERE x.run_id = t.run_id "
+             "AND x.task_id = t.id AND x.role = 'executor') THEN 1 ELSE 0 END"
+             if _has(schema, "dispatches", "predecessor_dispatch_id") else "0")
     tk = plain("tasks", "t", "tk", {"id": "task_id"},
-               ", CASE WHEN t.status = 'accepted' AND t.accepted_revision_id IS NOT NULL THEN 1 ELSE 0 END AS is_accepted")
+               ", CASE WHEN t.status = 'accepted' AND t.accepted_revision_id IS NOT NULL THEN 1 ELSE 0 END AS is_accepted"
+               f", {links} AS links_recorded", ("is_accepted", "links_recorded"))
     gt = plain("gates", "g", "gt")
     if "gates" in schema and _has(schema, "gates", "members_json"):
         # Only a JSON array is a membership; anything else (NULL, an object, a scalar, malformed) is unknown.
         gt = gt.replace("g.members_json", "CASE WHEN json_valid(g.members_json) THEN CASE WHEN "
                         "json_type(g.members_json) = 'array' THEN g.members_json END END AS members_json")
-    tr = ("tr AS (SELECT t.run_id, t.task_id, t.is_accepted, fe.id AS first_id, fe.route AS first_route, "
+    tr = ("tr AS (SELECT t.run_id, t.task_id, t.is_accepted, t.links_recorded, fe.id AS first_id, fe.route AS first_route, "
           "pd.id AS producer_id, pd.route AS producer_route FROM tk t "
           "LEFT JOIN dr fe ON fe.id = t.first_executor_dispatch_id AND fe.run_id = t.run_id "
           "AND fe.task_id = t.task_id AND fe.role = 'executor' "
@@ -171,7 +185,7 @@ def prelude(schema: dict) -> str:
           "AND p.role = 'executor' AND p.id <> d.id WHERE d.role = 'executor')")
     return "WITH " + ",\n".join((
         dr, tk, plain("revisions", "r", "rv"), gt, plain("findings", "f", "fd"),
-        plain("runs", "r", "rn"), tr, ed))
+        plain("runs", "r", "rn"), plain("route_attributions", "a", "ra"), tr, ed))
 
 
 # A metric is one SQL statement appended to the prelude. A body that starts with "," adds CTEs of its own.
@@ -275,8 +289,10 @@ METRICS = {
     "task.handoffs": {
         "needs": ("tasks", "dispatches", "revisions"),
         "denominator": "tasks, split into accepted and unresolved; an edge is an executor dispatch whose recorded "
-                       "predecessor is an executor dispatch of the same run and task",
-        "sql": ", tc AS (SELECT tr.run_id, tr.task_id, tr.is_accepted, tr.first_route, tr.producer_route, "
+                       "predecessor is an executor dispatch of the same run and task; a task whose links are not "
+                       "recorded (no predecessor column, or executor dispatches but no recorded first executor) is "
+                       "unknown and counts toward no handoff figure",
+        "sql": ", tc AS (SELECT tr.run_id, tr.task_id, tr.is_accepted, tr.links_recorded, tr.first_route, tr.producer_route, "
                "COALESCE(SUM(ed.from_route IS NOT NULL AND ed.to_route IS NOT NULL AND ed.from_route = ed.to_route), 0) "
                "AS same_route_retries, "
                "COALESCE(SUM(ed.from_route IS NOT NULL AND ed.to_route IS NOT NULL AND ed.from_route <> ed.to_route), 0) "
@@ -287,13 +303,57 @@ METRICS = {
                "AS route_unknown_edges FROM tr LEFT JOIN ed ON ed.run_id = tr.run_id AND ed.task_id = tr.task_id "
                "GROUP BY tr.run_id, tr.task_id) "
                "SELECT CASE WHEN is_accepted = 1 THEN 'accepted' ELSE 'unresolved' END AS task_state, COUNT(*) AS tasks, "
-               "SUM(same_route_retries) AS same_route_retries, SUM(same_route_retries > 0) AS tasks_with_same_route_retry, "
-               "SUM(cross_route_handoffs) AS cross_route_handoffs, "
-               "SUM(cross_route_handoffs > 0) AS tasks_with_cross_route_handoff, "
-               "SUM(intermediate_cross_route_handoffs) AS intermediate_cross_route_handoffs, "
-               "SUM(cross_route_handoffs > 0 AND first_route IS NOT NULL AND first_route = producer_route) "
-               "AS swap_away_and_back_tasks, SUM(route_unknown_edges) AS route_unknown_handoffs "
+               "SUM(links_recorded) AS tasks_links_recorded, SUM(1 - links_recorded) AS tasks_links_unknown, "
+               "SUM(CASE WHEN links_recorded = 1 THEN same_route_retries END) AS same_route_retries, "
+               "SUM(CASE WHEN links_recorded = 1 THEN same_route_retries > 0 END) AS tasks_with_same_route_retry, "
+               "SUM(CASE WHEN links_recorded = 1 THEN cross_route_handoffs END) AS cross_route_handoffs, "
+               "SUM(CASE WHEN links_recorded = 1 THEN cross_route_handoffs > 0 END) AS tasks_with_cross_route_handoff, "
+               "SUM(CASE WHEN links_recorded = 1 THEN intermediate_cross_route_handoffs END) "
+               "AS intermediate_cross_route_handoffs, "
+               "SUM(CASE WHEN links_recorded = 1 THEN cross_route_handoffs > 0 AND first_route IS NOT NULL "
+               "AND first_route = producer_route END) AS swap_away_and_back_tasks, "
+               "SUM(CASE WHEN links_recorded = 1 THEN route_unknown_edges END) AS route_unknown_handoffs "
                "FROM tc GROUP BY 1 ORDER BY 1",
+    },
+    "task.chronological": {
+        "needs": ("tasks", "dispatches", "revisions"),
+        "denominator": "accepted tasks; the executor dispatches of a task are ordered by julianday(started_at), and the "
+                       "order is known only when every one has a parseable, distinct started_at; the accepted "
+                       "producer is the dispatch of the accepted revision; no recorded link is read",
+        "sql": ", ex AS (SELECT run_id, task_id, id, route, julianday(started_at) AS ts FROM dr WHERE role = 'executor'), "
+               "cs AS (SELECT run_id, task_id, COUNT(*) AS n, COUNT(ts) AS timed, COUNT(DISTINCT ts) AS distinct_ts "
+               "FROM ex GROUP BY run_id, task_id), "
+               "cx AS (SELECT run_id, task_id, id, route, ROW_NUMBER() OVER (PARTITION BY run_id, task_id ORDER BY ts) "
+               "AS pos, LAG(id) OVER (PARTITION BY run_id, task_id ORDER BY ts) AS prev_id, "
+               "LAG(route) OVER (PARTITION BY run_id, task_id ORDER BY ts) AS prev_route FROM ex), "
+               "ct AS (SELECT t.run_id, t.task_id, t.producer_id, t.producer_route, "
+               "COALESCE(s.n > 0 AND s.n = s.timed AND s.timed = s.distinct_ts, 0) AS ordered, "
+               "MIN(f.id) AS first_id, MIN(f.route) AS first_route, "
+               "COALESCE(SUM(x.prev_route IS NOT NULL AND x.route IS NOT NULL AND x.prev_route <> x.route), 0) AS cross_edges, "
+               "COALESCE(SUM(x.prev_route IS NOT NULL AND x.route IS NOT NULL AND x.prev_route <> x.route "
+               "AND x.id IS NOT t.producer_id), 0) AS intermediate_edges, "
+               "COALESCE(SUM(x.prev_id IS NOT NULL AND (x.prev_route IS NULL OR x.route IS NULL)), 0) AS unknown_edges "
+               "FROM tr t LEFT JOIN cs s ON s.run_id = t.run_id AND s.task_id = t.task_id "
+               "LEFT JOIN cx f ON f.run_id = t.run_id AND f.task_id = t.task_id AND f.pos = 1 "
+               "LEFT JOIN cx x ON x.run_id = t.run_id AND x.task_id = t.task_id "
+               "WHERE t.is_accepted = 1 GROUP BY t.run_id, t.task_id), "
+               "cc AS (SELECT *, ordered = 1 AND producer_id IS NOT NULL AS comparable FROM ct) "
+               "SELECT COUNT(*) AS accepted_tasks, COALESCE(SUM(ordered = 0), 0) AS order_unknown, "
+               "COALESCE(SUM(ordered = 1 AND producer_id IS NULL), 0) AS producer_unknown, "
+               "COALESCE(SUM(comparable), 0) AS comparable, "
+               "COALESCE(SUM(comparable AND first_id = producer_id), 0) AS accepted_from_first_dispatch, "
+               "COALESCE(SUM(comparable AND first_id <> producer_id AND first_route IS NOT NULL "
+               "AND first_route = producer_route), 0) AS later_dispatch_same_route, "
+               "COALESCE(SUM(comparable AND first_id <> producer_id AND first_route IS NOT NULL "
+               "AND producer_route IS NOT NULL AND first_route <> producer_route), 0) AS first_final_mismatch, "
+               "COALESCE(SUM(comparable AND first_id <> producer_id AND (first_route IS NULL OR producer_route IS NULL)), 0) "
+               "AS route_unknown, "
+               "COALESCE(SUM(CASE WHEN ordered = 1 THEN cross_edges END), 0) AS cross_route_handoffs, "
+               "COALESCE(SUM(CASE WHEN ordered = 1 THEN cross_edges > 0 END), 0) AS tasks_with_cross_route_handoff, "
+               "COALESCE(SUM(CASE WHEN comparable THEN intermediate_edges END), 0) AS intermediate_cross_route_handoffs, "
+               "COALESCE(SUM(CASE WHEN comparable THEN intermediate_edges > 0 END), 0) "
+               "AS tasks_with_intermediate_cross_route_handoff, "
+               "COALESCE(SUM(CASE WHEN ordered = 1 THEN unknown_edges END), 0) AS route_unknown_handoffs FROM cc",
     },
     "task.links": {
         "needs": ("dispatches",),
@@ -358,6 +418,15 @@ METRICS = {
                "SUM(clone_rows) AS clone_marked_rows, "
                "SUM(members) AS lane_exposure, SUM(members_json IS NULL) AS membership_unknown "
                "FROM um GROUP BY 1 ORDER BY 1",
+    },
+    "route_attributions": {
+        "needs": ("route_attributions",),
+        "denominator": "every row of route_attributions (one per dispatch route_learning.refresh derived an outcome for, "
+                       "written at run close); successes = rows whose persisted success flag is 1; role comes from the "
+                       "dispatch row and is unknown when that row is gone",
+        "sql": "SELECT COALESCE(d.role, 'unknown') AS role, a.route AS route, a.attribution AS attribution, "
+               "COUNT(*) AS attributions, COALESCE(SUM(a.success = 1), 0) AS successes "
+               "FROM ra a LEFT JOIN dr d ON d.id = a.dispatch_id AND d.run_id = a.run_id GROUP BY 1, 2, 3 ORDER BY 1, 2, 3",
     },
     "tags.tasks": {
         "needs": ("tasks",),
@@ -521,6 +590,21 @@ def _histogram(rows: list[dict], state: str) -> dict:
 
 # ------------------------------------------------------------------ sections
 
+def _route_parts(route) -> tuple[str, str, str]:
+    """(harness, model, effort) labels of a persisted `harness/model@effort` route key, as route_learning writes it."""
+    if not isinstance(route, str):
+        return ("other",) * 3
+    harness, _, rest = route.partition("/")
+    model, _, effort = rest.rpartition("@")
+    return (label("harness", harness), label("model", model), "unknown" if effort in ("None", "") else label("effort", effort))
+
+
+def _unknown_if(row: dict, keys: tuple[str, ...], force: bool = False) -> dict:
+    """`row` with `keys` printed as the string `unknown` when `force` (the source column does not exist) or when the
+    count has no value."""
+    return {k: "unknown" if k in keys and (force or v is None) else v for k, v in row.items()}
+
+
 def _dispatch_section(con, schema) -> dict:
     def build(routes, strict):
         by_key = None if strict is None else {(r["role"], r["harness"], r["model"], r["effort"]): r["strict_successes"]
@@ -553,10 +637,7 @@ def _episode_section(con, schema) -> dict:
     rows: dict[tuple, dict] = {}
 
     def row(role: str, route: str) -> dict:
-        harness, _, rest = route.partition("/")
-        model, _, effort = rest.rpartition("@")
-        key = (role, label("harness", harness), label("model", model),  # role is executor or worker here
-               "unknown" if effort in ("None", "") else label("effort", effort))
+        key = (role, *_route_parts(route))  # role is executor or worker here
         return rows.setdefault(key, {"role": key[0], "harness": key[1], "model": key[2], "effort": key[3],
                                      "settled_dispatches": 0, "settled_strict_successes": 0, "episodes": 0,
                                      "accepted_episodes": 0, "failed_episodes": 0, "multi_attempt_episodes": 0,
@@ -582,12 +663,51 @@ def _episode_section(con, schema) -> dict:
                        "failed_episodes": _sum(out, "failed_episodes")}}
 
 
+HANDOFF_COUNTS = ("same_route_retries", "tasks_with_same_route_retry", "cross_route_handoffs",
+                  "tasks_with_cross_route_handoff", "intermediate_cross_route_handoffs", "swap_away_and_back_tasks",
+                  "route_unknown_handoffs")
+FIRST_EXECUTOR_COUNTS = ("first_executor_is_producer", "later_dispatch_same_route", "first_final_mismatch", "route_unknown")
+
+
 def _task_path_section(con, schema) -> dict:
-    def build(paths, handoffs, links, revisions):
-        return {"accepted": paths[0] if paths else {}, "handoffs_by_task_state": handoffs, "executor_dispatch_links": links[0],
+    first_recorded = _has(schema, "tasks", "first_executor_dispatch_id")
+    linked_recorded = _has(schema, "dispatches", "predecessor_dispatch_id")
+
+    def build(paths, handoffs, chronological, links, revisions):
+        # A link column that does not exist leaves what depends on it `unknown`, never 0. A task group with no task
+        # whose links were recorded sums to NULL in SQL and prints the same way.
+        link_counts = dict(links[0])
+        for key, recorded in (("first", first_recorded), ("linked", linked_recorded)):
+            if not recorded:
+                link_counts[key] = "unknown"
+        return {"accepted": _unknown_if(paths[0] if paths else {}, FIRST_EXECUTOR_COUNTS, not first_recorded),
+                "handoffs_by_task_state": [_unknown_if(r, HANDOFF_COUNTS) for r in handoffs],
+                "executor_dispatch_links": link_counts,
+                "chronological_derived": {"label": CHRONOLOGICAL_LABEL, **(chronological[0] if chronological else {})},
                 "revisions_to_accept": _histogram(revisions, "accepted"),
                 "unresolved_revisions_so_far": _histogram(revisions, "unresolved")}
-    return _section(con, schema, ("task.accepted_paths", "task.handoffs", "task.links", "task.revisions_to_accept"), build)
+    return _section(con, schema, ("task.accepted_paths", "task.handoffs", "task.chronological", "task.links",
+                                  "task.revisions_to_accept"), build)
+
+
+def _route_attribution_section(con, schema) -> dict:
+    """Persisted route_attributions per exact route. These are the learner's own derived rows (written at run close),
+    not this report's revision-derived strict success: they are kept apart and labelled."""
+    def build(rows):
+        out: dict[tuple, dict] = {}
+        for r in rows:
+            key = (r["role"], *_route_parts(r["route"]))
+            cell = out.setdefault(key, {"role": key[0], "harness": key[1], "model": key[2], "effort": key[3],
+                                        "attributions": 0, "successes": 0,
+                                        "by_attribution": {a: 0 for a in ATTRIBUTIONS}})
+            cell["attributions"] += r["attributions"]
+            cell["successes"] += r["successes"]
+            cls = _clamp(r["attribution"], ATTRIBUTIONS)
+            cell["by_attribution"][cls] = cell["by_attribution"].get(cls, 0) + r["attributions"]
+        table = [out[k] for k in sorted(out)]
+        return {"label": ROUTE_ATTRIBUTION_LABEL, "routes": table,
+                "totals": {"attributions": _sum(table, "attributions"), "successes": _sum(table, "successes")}}
+    return _section(con, schema, ("route_attributions",), build)
 
 
 def _self_review_section(con, schema) -> dict:
@@ -733,6 +853,7 @@ def build_report(path: Path) -> dict:
             "population": population,
             "dispatches": _safely(_dispatch_section, con, schema),
             "episodes": _safely(_episode_section, con, schema),
+            "route_attributions": _safely(_route_attribution_section, con, schema),
             "task_paths": _safely(_task_path_section, con, schema),
             "self_review": _safely(_self_review_section, con, schema),
             "findings": _safely(_finding_section, con, schema),
