@@ -992,17 +992,52 @@ def revoke(con, run: dict, target: str, reason: str) -> Result:
     return _revoke_task(con, run, task_id, reason)
 
 
+def _revoke_standing(con, run_id: str, task: dict) -> tuple[str | None, str | None, list[str]]:
+    """How a revoke leaves a task: (status to set or None to keep it, pause_reason, unapplied delivery ids).
+
+    A task whose current revision is its accepted revision keeps that acceptance while the revision's applied
+    contract version still covers the task's contract: revoking a worker that only held the lease (an amendment
+    relaunch whose submit was refused, an ack-only session) does not undo the accepted work. Revision identity
+    decides, not status, because `amend._deliver` already demoted the task and a refused submit already blocked it.
+    A contract bump past the revision, with its amendment still unapplied, is changes_required naming it, never
+    paused. A cancelled task keeps its status."""
+    if task["status"] == "cancelled":
+        return None, None, []
+    open_ = con.execute("SELECT amendment_id FROM deliveries WHERE run_id=? AND task_id=? AND status IN ('queued','delivered') "
+                        "ORDER BY target_version", (run_id, task["id"])).fetchall()
+    unapplied = list(dict.fromkeys(r["amendment_id"] for r in open_))
+    rev_id = task.get("accepted_revision_id")
+    if rev_id and rev_id == task.get("current_revision_id"):
+        rev = con.execute("SELECT applied_version FROM revisions WHERE id=?", (rev_id,)).fetchone()
+        if rev is not None and (rev["applied_version"] or 0) >= task["contract_version"]:
+            return "accepted", None, unapplied
+        if unapplied:
+            return "changes_required", f"amended by {', '.join(unapplied)}", unapplied
+    return "paused", None, unapplied
+
+
 def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = None) -> Result:
     """Revoke the task's lease and stop its live dispatches; `only` (a revoked
-    dispatch id) stops that one and leaves any other live session alone."""
+    dispatch id) stops that one and leaves any other live session alone. An accepted task whose accepted
+    revision is still current stays accepted and its lease is released instead (`_revoke_standing`)."""
     with db.transaction(con):
         task = state.get_task(con, run["id"], task_id)
         if task is None:
             raise Usage("unknown-task", f"no task {task_id}")
-        con.execute("UPDATE leases SET revoked_at=?, revoke_reason=? WHERE run_id=? AND task_id=? AND released_at IS NULL "
-                    "AND revoked_at IS NULL", (now_iso(), reason, run["id"], task_id))
-        state.update_task(con, run["id"], task_id, status="paused", pause_reason=f"lease revoked: {reason}")
-        state.emit(con, run, "lease.revoked", f"{task_id} lease revoked", task_id=task_id)
+        status, pause_reason, unapplied = _revoke_standing(con, run["id"], task)
+        kept = status == "accepted"
+        now = now_iso()
+        if kept:
+            con.execute("UPDATE leases SET released_at=? WHERE run_id=? AND task_id=? AND released_at IS NULL "
+                        "AND revoked_at IS NULL", (now, run["id"], task_id))
+        else:
+            con.execute("UPDATE leases SET revoked_at=?, revoke_reason=? WHERE run_id=? AND task_id=? "
+                        "AND released_at IS NULL AND revoked_at IS NULL", (now, reason, run["id"], task_id))
+        if status:
+            state.update_task(con, run["id"], task_id, status=status,
+                              pause_reason=pause_reason or (f"lease revoked: {reason}" if status == "paused" else None))
+        state.emit(con, run, "lease.released" if kept else "lease.revoked",
+                   f"{task_id} lease {'released' if kept else 'revoked'}", task_id=task_id)
     live = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE run_id=? AND task_id=? AND ended_at IS NULL "
                                          "AND status IN ('launching', 'running')", (run["id"], task_id)).fetchall()]
     notes: list[str] = []
@@ -1013,7 +1048,13 @@ def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = N
     fresh = [state.get_dispatch(con, d["id"]) for d in targets if d["id"] not in cancelled]
     stopped = [d["id"] for d in fresh if stop_dispatch(run, d, notes=notes)]
     starting = [d["id"] for d in fresh if d["id"] not in stopped and d["status"] == "launching" and not d.get("launcher")]
-    lines = [f"{task_id} lease revoked | later submits from its holder are rejected"]
+    if kept:
+        lines = [f"{task_id} stays accepted on {task['accepted_revision_id']} | lease released; later submits from its "
+                 "holder are rejected"]
+        if unapplied:
+            lines.append(f"unapplied deliveries: {', '.join(unapplied)}")
+    else:
+        lines = [f"{task_id} lease revoked | later submits from its holder are rejected"]
     if stopped:
         lines.append(f"stopped {', '.join(stopped)} (SIGTERM)")
     if cancelled:
@@ -1025,7 +1066,15 @@ def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = N
         lines.append(f"left running: {', '.join(others)} (not the dispatch named; its lease is revoked too, so its "
                      f"submits are rejected; office revoke {task_id} ends it, and office rerun refuses until it ends)")
     lines += notes
-    return Result(lines=lines, next=f"office dispatch {task_id} to relaunch")
+    if kept:
+        nxt = f"no relaunch is needed: {task_id} is accepted; office status"
+    elif status == "changes_required":
+        nxt = f"office rerun {task_id} --resume to apply {', '.join(unapplied)}"
+    elif status is None:
+        nxt = "office status"
+    else:
+        nxt = f"office dispatch {task_id} to relaunch"
+    return Result(lines=lines, next=nxt)
 
 
 def _cancel_pending_launch(con, run: dict, d: dict, reason: str) -> bool:
