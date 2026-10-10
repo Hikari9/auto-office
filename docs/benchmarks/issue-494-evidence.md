@@ -15,9 +15,9 @@ Run branch `office/d9f6f6d3/T6`, stacked on T5 (#512) and T4. Reference tree for
 | S2 and S9 include the cold-start probe-fail path with no trial row | `test_s02_a_failed_probe_never_becomes_a_trial_...` (5 reason classes), `test_s09_a_cold_start_probe_failure_...` | pass |
 | S11 repeated same-key probes keep separate histories | `test_s11_repeated_probes_of_one_fingerprint_keep_separate_histories` | pass |
 | `scripts/route_replay.py` on a copy of the operator's runs.db | see "Routing replay" | run, counts below |
-| Live exact probe and one real reversible trial reaching an accepted revision | see "Live evidence" | probe pass, revision accepted, one defect found |
-| `scripts/validate.sh` and `pytest -n 2 --all` | see "Gates" | see "Default activation" |
-| Default flip | see "Default activation" | see below |
+| Live exact probe and one real reversible trial reaching an accepted revision | see "Live evidence" | probe pass; task accepted through Office's review; trial row ended `abandoned` (defect found, below) |
+| `scripts/validate.sh` and `pytest -n 2 --all` | see "Gates" | pass with the default `false`; fail on 3 default-pinning tests with `true` |
+| Default flip to `true` | see "Default activation" | **not applied**: waits on a scope decision (#3029) for three tests outside T6's scope |
 
 ## Scenario suite
 
@@ -172,13 +172,52 @@ What did not go cleanly, and why:
 
 ## Gates
 
-(filled in below)
+Run in this worktree with `.venv` (Python 3.12, `uv pip install -e '.[test,visual]'`), `PATH` led by `.venv/bin` and
+`OFFICE_PINNED_LEGACY=1`, as `scripts/validate.sh` sets them.
+
+| Gate | Tree | Result |
+|---|---|---|
+| `pytest -n 2 tests/v31/test_issue_494_scenarios.py` | shipped default `false` | 79 passed (unit tier) |
+| `pytest -n 2 --all tests/v31/test_issue_494_scenarios.py` | shipped default `false` | 84 passed |
+| `scripts/route_replay.py --self-test` | shipped default `false` | passed |
+| `scripts/validate.sh` (ecosystem check, unit tier, adapter validation) | shipped default `false` | passed |
+| `pytest -n 2 --all` | shipped default `false` | 3453 passed, 18 failed on the first run, which had no gate environment: 17 need the venv on `PATH` or the `visual` extra and fail the same way on the base commit `d066334`; 1 (`test_inprocess_launch ... [hup]`) is a load flake. All 17 pass with `validate.sh`'s environment and the `visual` extra; `[hup]` passes alone and in a 35-test re-run |
+| `scripts/validate.sh` | shipped default `true` (trial flip) | 1988 passed, **2 failed** |
+| `pytest -n 2 --all` | shipped default `true` (trial flip) | 3610 passed, **3 failed**, 1 flake (`[hup]` again, under load) |
+
+The three failures with the default `true` are the same three tests, each pinning the old shipped default `off`
+(listed under "Default activation"). Nothing else in the repository depends on the default.
 
 ## Default activation
 
-(filled in below)
+State at this commit: **`routing.discovery.enabled` is still `false` in `config/config.default.yaml`.**
+
+S1-S12, the pre-flip `scripts/validate.sh` and the pre-flip `pytest -n 2 --all` all passed, so the flip was tried. With
+`enabled: true`, `validate.sh` and `--all` fail only on three existing tests that assert the previous shipped
+default, and they are outside T6's scope (T1's and T3's files):
+
+1. `tests/v31/test_route_policy_config.py::test_new_defaults_have_no_hard_ceiling_or_user_policy` asserts the shipped
+   settings equal `DISCOVERY_DEFAULTS`, whose `enabled` is `False`.
+2. `tests/v31/test_route_policy_config.py::test_policy_digest_covers_settings_policy_and_ceiling_source_only` expects
+   `routing.discovery.enabled=true` to change the policy digest; with the shipped default `true` it does not.
+3. `tests/v31/test_route_discovery_routing.py::test_route_role_with_discovery_off_a_pinned_run_a_manual_route_or_a_reviewer_never_discovers`
+   starts with a "shipped: off" assertion.
+
+No invariant of S1-S12 failed. A scope request (#3029) asks to update those three tests. The edits were written and run
+on the flipped tree: all 135 tests in the two files pass (saved as `/tmp/t6-flip.patch`: the config flip plus the three
+test edits). Until that is answered the default stays `false`, as the acceptance line requires when a gate does not pass.
+
+What the flip changes, once applied: a run started after it pins `discovery.enabled: true` for executor and worker, and
+discovery then draws at most 15 percent of recent executor/worker decisions, 2 probes and 1 trial per run. A run
+started before it, a `v3.1` review-contract run and a 3.0 legacy run keep their pinned policy and never discover (S12).
+The replay above shows the effect on the operator's history: none of the 64 recorded dispatches would have drawn a probe.
 
 ## Findings outside T6's scope
 
-* Headless launches do not write `agent.env` (above). A fix belongs to the dispatch launch path or to preflight's
-  `next:` line; the brief text in `briefs.py` repeats the instruction.
+* A headless launch (no Herdr pane) never writes the dispatch's `agent.env`, which the brief and `office preflight`
+  tell the executor to source before `office submit` (`src/office/dispatch.py`, `launch()` outside the Herdr and
+  external paths; the brief text is in `briefs.py`). A headless executor cannot submit. Found in the live run.
+* When a trial's worker ends without submitting, the trial is recorded `abandoned`. If the revision is then submitted
+  by someone else (as in the live run), the task is accepted but the trial row stays `abandoned` and gets no
+  `trial-accepted` event. The learner still reads the dispatch as landed.
+

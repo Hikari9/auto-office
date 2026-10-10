@@ -21,7 +21,8 @@ What it reports (counts only; no goal, title, brief or task text is read into th
     last 20 dispatch decisions with the trials this replay itself granted.
 
 `route_audit` keeps the scored decision, not the raw request, so each request is rebuilt from the copy with HEAD's
-own builder. The copy is never written back, no quota is probed, no harness model is called and nothing is launched.
+own builder. The copy is never written back, no quota is probed, no model is called and nothing is launched. (Resolving a
+route reads each installed harness's `--version`, as every routing decision does.)
 The live runs.db is refused: pass a copy, or `--snapshot-live` to take one with SQLite's read-only backup API.
 
   scripts/route_replay.py --db /tmp/runs-copy.db [--json out.json] [--limit N]
@@ -51,7 +52,6 @@ except ImportError:  # run from a checkout without the package installed
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 ROLES = ("executor", "worker")
-POLICIES = ("pinned", "pinned-off", "head-off", "head-on")
 ALLOCATING_PHASES = ("dispatch", "reroute")  # a plan-phase row is a preview: it launches nothing, so it spends no cap
 WINDOW = 20
 
