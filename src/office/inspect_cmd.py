@@ -127,9 +127,9 @@ def _task(con, run, tid) -> Result:
                 return " ".join("".join(c if c.isprintable() else " " for c in str(value or "")).split())[:200]
             lines.append(f"  pane {safe(evidence.get('pane'))} owned by {safe(evidence.get('dispatch'))} "
                          f"task {safe(evidence.get('task'))} | expected {safe(evidence.get('expected_worktree'))} "
-                         f"reported cwd {safe(evidence.get('reported_cwd')) or 'unavailable'} "
-                         f"agent {safe(evidence.get('reported_agent')) or 'unavailable'} "
-                         f"session {safe(evidence.get('reported_session')) or 'unavailable'} "
+                         f"reported cwd {safe(evidence.get('reported_cwd')) or 'not reported'} "
+                         f"agent {safe(evidence.get('reported_agent')) or 'not reported'} "
+                         f"session {safe(evidence.get('reported_session')) or 'not reported'} "
                          f"| prompt_landed {bool(receipt.get('prompt_landed'))}"
                          + (f" | MISMATCH {safe(evidence['mismatch'])}" if evidence.get('mismatch') else ""))
         for form, info in (receipt.get("rendered_launches") or {}).items():

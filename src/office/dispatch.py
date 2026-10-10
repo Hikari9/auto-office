@@ -1603,11 +1603,15 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         else:
             inter = _interactive(dispatch, kind, cwd, include_dirs, output=output)
         label = pane_label(run, dispatch, kind)
-        pane = _herdr_pane(run, cwd, label=label, dispatch_id=dispatch["id"]) if inter else None
+        no_pane = "no herdr pane could be opened"
+        try:
+            pane = _herdr_pane(run, cwd, label=label, dispatch_id=dispatch["id"]) if inter else None
+        except ValueError as exc:
+            pane, no_pane = None, f"{no_pane}: {exc}"
         if inter and not pane:
-            spec["fallback_reason"] = "no herdr pane could be opened"
+            spec["fallback_reason"] = no_pane
             write_launch_spec(run, dispatch["id"], spec)
-            _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
+            _launch_notice(run, dispatch, f"{no_pane}; running headless instead")
             if resume:
                 _headless_resume(run, dispatch, kind, spec, resume)
         if pane:
@@ -1855,7 +1859,11 @@ def _close_abandoned_pane(run: dict, dispatch: dict, pane: str) -> bool:
                                                  (run["id"], dispatch["id"])).fetchall()}
     finally:
         con.close()
-    if held or pane in _reserved_panes(run, open_ids):
+    try:
+        reserved = _reserved_panes(run, open_ids)
+    except ValueError:
+        return False  # an unreadable ledger cannot show the pane is free to close
+    if held or pane in reserved:
         return False
     _herdr_quiet("pane", "close", pane)
     if _pane_exists(pane):
@@ -1878,15 +1886,16 @@ def _identity_line(value: object) -> str:
     return " ".join("".join(c if c.isprintable() else " " for c in str(value)).split())[:200]
 
 
-def _reserved_by(run: dict, pane: str) -> str | None:
-    """Read existing pane reservations; a damaged ledger fails closed.
+def _read_reservations(run: dict) -> dict[str, str]:
+    """Pane -> holding dispatch from the run's reservation ledger.
 
-    Runs created before reservation support may have no ledger. If one exists,
-    however, unreadable or malformed contents must never authorize delivery.
+    Runs created before reservation support have no ledger: that is empty. A
+    ledger that exists but cannot be read, or is malformed, never authorizes a
+    pane, so every reader and writer refuses on the ValueError.
     """
     path = paths.run_dir(run["id"]) / "herdr-reservations.json"
     if not path.exists():
-        return None  # compatibility with retained runs
+        return {}
     try:
         held = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
@@ -1894,7 +1903,20 @@ def _reserved_by(run: dict, pane: str) -> str | None:
     if not isinstance(held, dict) or any(not isinstance(k, str) or not k.strip() or not isinstance(v, str) or not v.strip()
                                           for k, v in held.items()):
         raise ValueError("pane reservation evidence is malformed")
-    return held.get(pane)
+    return held
+
+
+def _reserved_by(run: dict, pane: str) -> str | None:
+    return _read_reservations(run).get(pane)
+
+
+def reported_identity(info: dict) -> dict:
+    """The cwd, agent and session Herdr reports in a `pane get` record (None when it reports none)."""
+    running = info.get("agent")
+    nested = running if isinstance(running, dict) else {}
+    return {"cwd": info.get("foreground_cwd") or info.get("cwd"),
+            "agent": nested.get("name") if nested else running,
+            "session": (nested.get("session_id") or nested.get("agent_session_id")) or info.get("session_id")}
 
 
 def _pane_identity_mismatch(run: dict, dispatch: dict, pane: str, cwd: Path, *,
@@ -1936,6 +1958,26 @@ def _pane_identity_mismatch(run: dict, dispatch: dict, pane: str, cwd: Path, *,
     if agent and reported_session and recorded_session and reported_session != recorded_session:
         return f"pane {pane} session does not match dispatch {dispatch['id']}"
     return None
+
+
+class PaneMismatch(Exception):
+    """Herdr reports a pane identity that contradicts the dispatch about to be sent to."""
+
+
+@contextlib.contextmanager
+def fenced_pane(run: dict, dispatch: dict):
+    """Yield the dispatch's recorded pane with the run's pane lock held, once its
+    reported cwd, agent and session are shown to be this dispatch's own; else
+    raise PaneMismatch. Send a prompt into a live agent's pane only inside this
+    block, so the pane cannot be reassigned between the check and the send."""
+    pane = dispatch["pane_id"]
+    worktree = dispatch.get("worktree")
+    with _pane_lock(run):
+        mismatch = _pane_identity_mismatch(run, dispatch, pane, Path(worktree or ""), check_cwd=bool(worktree),
+                                           agent=herdr_agent_name(dispatch["id"]))
+        if mismatch:
+            raise PaneMismatch(mismatch)
+        yield pane
 
 
 def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
@@ -2006,7 +2048,10 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         if "agent_pane_busy" in why and not retried:
             # The pane still holds an agent (a finished session herdr keeps):
             # split a fresh one and try once more before going headless (#200 B7).
-            fresh = _herdr_fresh_pane(run, cwd, pane, dispatch_id=dispatch["id"])
+            try:
+                fresh = _herdr_fresh_pane(run, cwd, pane, dispatch_id=dispatch["id"])
+            except ValueError:
+                fresh = None  # the ledger cannot vouch for a new pane: fall back below
             if fresh:
                 return _herdr_agent_start(run, dispatch, spec, env, inter, fresh, cwd, ddir, retried=True, label=label)
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, "herdr agent start failed", why)
@@ -2061,15 +2106,11 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     # The reservation is still checked inside this critical section.
     with _pane_lock(run):
         mismatch = _pane_identity_mismatch(run, dispatch, pane, cwd, agent=name)
-        observed = _herdr_json(["pane", "get", pane]).get("pane") or {}
-        running = observed.get("agent")
+        reported = reported_identity(_herdr_json(["pane", "get", pane]).get("pane") or {})
         spec["pane_evidence"] = {"pane": pane, "dispatch": dispatch["id"],
                                 "task": dispatch.get("task_id"), "expected_worktree": str(cwd),
-                                "reported_cwd": observed.get("foreground_cwd") or observed.get("cwd"),
-                                "reported_agent": running.get("name") if isinstance(running, dict) else running,
-                                "reported_session": (running.get("session_id") if isinstance(running, dict)
-                                                     else observed.get("session_id")),
-                                "mismatch": mismatch}
+                                "reported_cwd": reported["cwd"], "reported_agent": reported["agent"],
+                                "reported_session": reported["session"], "mismatch": mismatch}
         if mismatch:
             # Once an agent starts, never launch a racing headless copy.
             landed = False
@@ -2848,8 +2889,12 @@ def _herdr_pane(run: dict, cwd: Path, label: str | None = None, dispatch_id: str
     `dispatch_id`. Launch jobs run in parallel, and a dispatch records its pane
     only once its agent has started: without the lock and the reservation two
     launches took the same idle pane, and one's setup line never ran because the
-    other's agent already held the pane (run f00446ac)."""
+    other's agent already held the pane (run f00446ac).
+
+    Raises ValueError when the reservation ledger is unreadable, before any pane
+    is picked or split."""
     with _pane_lock(run):
+        _read_reservations(run)
         pane = _herdr_pick_pane(run, cwd)
         if pane and dispatch_id:
             _reserve_pane(run, pane, dispatch_id)
@@ -2872,25 +2917,23 @@ def _pane_lock(run: dict):
 
 
 def _reserve_pane(run: dict, pane: str, dispatch_id: str) -> None:
-    f = paths.run_dir(run["id"]) / "herdr-reservations.json"
-    try:
-        held = json.loads(f.read_text()) if f.is_file() else {}
-    except (OSError, ValueError):
-        held = {}
+    """Reserve `pane` for `dispatch_id`. Caller holds the pane lock. An unreadable
+    ledger raises ValueError rather than being rewritten from empty, which would
+    drop other dispatches' reservations."""
+    held = _read_reservations(run)
     held[pane] = dispatch_id
-    atomic_write_json(f, held)
+    atomic_write_json(paths.run_dir(run["id"]) / "herdr-reservations.json", held)
 
 
 def _unreserve_pane(run: dict, pane: str) -> None:
     """Drop a closed pane's reservation. Caller holds the pane lock."""
-    f = paths.run_dir(run["id"]) / "herdr-reservations.json"
     try:
-        held = json.loads(f.read_text()) if f.is_file() else {}
-    except (OSError, ValueError):
-        return
+        held = _read_reservations(run)
+    except ValueError:
+        return  # nothing is released from a ledger that cannot be trusted
     if pane in held:
         held.pop(pane)
-        atomic_write_json(f, held)
+        atomic_write_json(paths.run_dir(run["id"]) / "herdr-reservations.json", held)
 
 
 def _tab_exists(tab_id: str) -> bool:
@@ -2908,13 +2951,9 @@ def _live_panes(panes: list) -> list:
 
 
 def _reserved_panes(run: dict, open_ids: set) -> set:
-    """Panes reserved for a dispatch that has not ended."""
-    f = paths.run_dir(run["id"]) / "herdr-reservations.json"
-    try:
-        held = json.loads(f.read_text()) if f.is_file() else {}
-    except (OSError, ValueError):
-        return set()
-    return {pane for pane, did in held.items() if did in open_ids}
+    """Panes reserved for a dispatch that has not ended. Raises ValueError on an
+    unreadable ledger: an empty answer would offer every pane as free."""
+    return {pane for pane, did in _read_reservations(run).items() if did in open_ids}
 
 
 def _herdr_pick_pane(run: dict, cwd: Path) -> str | None:
@@ -3436,8 +3475,11 @@ def _set_dispatch(dispatch_id: str, **cols) -> None:
 
 def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str, dispatch_id: str | None = None) -> str | None:
     """A new pane split from one herdr refused as busy, recorded in the run's layout
-    and reserved for the dispatch, under the pane lock (review F2)."""
+    and reserved for the dispatch, under the pane lock (review F2). Raises
+    ValueError, before splitting, when the reservation ledger is unreadable."""
     with _pane_lock(run):
+        if dispatch_id:
+            _read_reservations(run)
         res = _herdr_json(["pane", "split", "--pane", busy_pane, "--direction", "down", "--cwd", str(cwd), "--no-focus"])
         pane = (res.get("pane") or {}).get("pane_id")
         if not pane:
@@ -4524,10 +4566,20 @@ def job_notify_worker(con, run: dict, job: dict) -> dict:
             _amendment_undelivered(con, run, payload, d)
         return {"sent": False}
     text = payload.get("text", "office status has an update for you.")
-    landed = submit_prompt(d["pane_id"], text, pane=d["pane_id"])
+    try:
+        with fenced_pane(run, d) as pane:
+            landed = submit_prompt(pane, text, pane=pane)
+    except PaneMismatch as exc:
+        with db.transaction(con):
+            state.emit(con, run, "prompt", f"{d.get('task_id') or d['id']} {d['id']}: native nudge refused, pane "
+                       f"{d['pane_id']} is not this dispatch's: {exc}", audience="runtime",
+                       task_id=d.get("task_id"), dispatch_id=d["id"])
+        if unblock:
+            _amendment_undelivered(con, run, payload, d)
+        return {"sent": False, "refused": str(exc)}
     if unblock:
         if landed == "landed":
-            from office import db, submit
+            from office import submit
             with db.transaction(con):
                 task = state.get_task(con, run["id"], payload["task_id"])
                 # Still this dispatch's own block (a revoke or newer owner since keeps its blocker).
