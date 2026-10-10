@@ -57,6 +57,46 @@ _STARTUP_SCREEN_MARKERS = (
 )
 
 
+# A launch receipt must never turn adapter arguments or a prompt into a credential leak.
+_LAUNCH_SECRET = re.compile(r"(?i)(?:api[_-]?key|password|passwd|secret|token|credential|authorization|bearer)")
+
+
+def _redact_launch_argv(argv: list[str]) -> list[str]:
+    safe: list[str] = []
+    hide_next = False
+    for arg in argv:
+        if hide_next:
+            safe.append("[REDACTED]")
+            hide_next = False
+        elif _LAUNCH_SECRET.search(arg):
+            if arg.startswith("-") and "=" not in arg and ":" not in arg:
+                safe.append(arg)
+                hide_next = True
+            else:
+                safe.append("[REDACTED]")
+        elif arg.startswith(("sk-", "ghp_", "gho_", "github_pat_")):
+            safe.append("[REDACTED]")
+        else:
+            safe.append(arg)
+    return safe
+
+
+def _record_launch_form(run: dict, dispatch: dict, spec: dict, form: str, argv: list[str],
+                        *, transport: str, **fields) -> None:
+    """Persist the actual rendered launch form, never the prompt or secret arguments (#500)."""
+    adapter = adapters.load_all().get(dispatch.get("adapter_id") or dispatch.get("harness") or "")
+    route = dispatch.get("route") or {}
+    cand = route.get("candidate") or {}
+    spec.setdefault("rendered_launches", {})[form] = {
+        "argv": _redact_launch_argv(argv),
+        "prompt_transport": transport,
+        "adapter_hash": adapters.adapter_hash(adapter) if adapter else None,
+        "harness_version": cand.get("harness_version") or dispatch.get("harness_version"),
+        **fields,
+    }
+    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+
+
 # ------------------------------------------------------------------ planner task
 
 def create_planner_task(con, run: dict, *, contract_request: str | None = None, decision: dict | None = None) -> str:
@@ -1436,6 +1476,10 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, f"the shell in pane {pane} never ran Office's setup "
                                "line (env and cd)", f"within {_shell_timeout():g}s")
         return None
+    _record_launch_form(run, dispatch, spec, "herdr",
+                        ["herdr", "agent", "start", name, "--kind", herdr_kind, "--pane", pane, "--", *args],
+                        transport="herdr agent prompt pointer", herdr_kind=herdr_kind,
+                        brief_delivery="herdr agent prompt (brief pointer)")
     try:
         proc = subprocess.run(["herdr", "agent", "start", name, "--kind", herdr_kind, "--pane", pane, "--", *args],
                               capture_output=True, text=True, timeout=120)
@@ -3129,6 +3173,15 @@ def supervise(dispatch_id: str) -> int:
                 argv = argv + [prompt]
             elif prof.get("prompt") == "argv-bound":
                 argv = argv + [prof.get("prompt_flag", "--prompt=") + prompt]
+            # The prompt itself is never persisted: for argv-bound harnesses record a
+            # placeholder rather than the (possibly sensitive) appended prompt text.
+            evidence_argv = list(argv)
+            if prof.get("prompt") == "argv":
+                evidence_argv[-1] = "[PROMPT REDACTED]"
+            elif prof.get("prompt") == "argv-bound":
+                evidence_argv[-1] = prof.get("prompt_flag", "--prompt=") + "[PROMPT REDACTED]"
+            _record_launch_form(run, d, spec, "headless", evidence_argv,
+                                transport=prof.get("prompt") or "file", output=spec.get("output"))
             child = _spawn_agent(argv, spec["cwd"], env, stdin)
             _mark(dispatch_id, pid_child=child.pid)
             _agent_pgid_file(run, dispatch_id).write_text(str(child.pid))
