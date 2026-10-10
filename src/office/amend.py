@@ -24,18 +24,63 @@ from office.util import dumps, loads, now_iso, sha256_bytes
 # is one part of a hyphen/underscore compound identifier (`send-keys`, `send_keys`,
 # `release-notes`) names a thing, not the action, so it does not count; `--prod` and
 # `force-push` still do.
-# A `send` addressed to the orchestrator is a report, not an external action: `send <it | the
-# report/result/status/summary/reply/review> [back] to the orchestrator/Office`, or an all-caps
-# compound protocol word (`send READY-FOR-LIVE again`) with no other recipient in the clause.
-# Anything sent to anyone else (`send it to all members`, `send NEWSLETTER_2026 to members`) counts.
-_OFFICE_NAME = r"(?:the\s+)?(?:orchestrator|office)\b"
-_TO_OFFICE = r"to\s+" + _OFFICE_NAME
-_SEND = (r"send(?!\s+(?:(?:it|(?:the|a|an|your)\s+(?:report|result|status|summary|reply|review))(?:\s+back)?\s+"
-         + _TO_OFFICE + r"|(?-i:[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+)\b(?![^.;\n]*\bto\s+(?!" + _OFFICE_NAME + r"))))")
-AUTHORITY_TERMS = re.compile(
-    r"\b(?<!\w-)(?:deploy|production|prod|publish|release|" + _SEND + r"|email|notify users|delete|drop table|truncate|"
+# A `send` addressed only to the orchestrator is a report, not an external action:
+#   `send <it | the report/result/status/summary/reply/review> [back] to the orchestrator/Office`, or
+#   an all-caps compound protocol word (`send READY-FOR-LIVE`, optionally `to the orchestrator`).
+# Nothing after it is interpreted: the rest of the text, to the end of the string (across lines),
+# with whitespace normalized and surrounding punctuation trimmed, must be empty or exactly one of
+# _REPORT_ENDINGS. Anything else is an external send; a false refusal only routes the amendment
+# to review, which is safe.
+_REPORT_OBJECT = re.compile(r"(?:it|(?:the|a|an|your)\s+(?:report|result|status|summary|reply|review))(?:\s+back)?\s+",
+                            re.I)
+_TO_ORCHESTRATOR = re.compile(r"to\s+(?:the\s+)?(?:orchestrator|office)(?![\w@-]|\.\w)", re.I)
+_PROTOCOL_WORD = re.compile(r"(?-i:[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+)\b")
+_REPORT_ENDINGS = {"and stop", "then stop", "and wait", "then run tests", "and run tests", "when done", "(done)",
+                   "for review"}
+
+
+def _ending_ok(rest: str) -> bool:
+    text = " ".join(rest.split()).lower().rstrip(".!?;:,").lstrip(",;: ").strip()
+    return text == "" or text in _REPORT_ENDINGS
+
+
+def _send_is_report(after: str) -> bool:
+    """`after` is the text following `send `: whether this send only reports to the orchestrator."""
+    m = _REPORT_OBJECT.match(after)
+    if m:
+        r = _TO_ORCHESTRATOR.match(after, m.end())
+        return bool(r) and _ending_ok(after[r.end():])
+    m = _PROTOCOL_WORD.match(after)
+    if m:
+        rest = after[m.end():]
+        r = _TO_ORCHESTRATOR.match(rest.lstrip())
+        if r:
+            rest = rest.lstrip()[r.end():]
+        return _ending_ok(rest)
+    return False
+
+
+_OTHER_TERMS = re.compile(
+    r"\b(?<!\w-)(?:deploy|production|prod|publish|release|email|notify users|delete|drop table|truncate|"
     r"force.?push|merge (?:to|into) main|migrat(?:e|ion) (?:prod|production)|payment|charge|"
     r"rotate (?:key|secret)|credentials?)\b(?!-\w)", re.I)
+_SEND_WORD = re.compile(r"\b(?<!\w-)send\b(?!-\w)", re.I)
+
+
+class _AuthorityTerms:
+    """`AUTHORITY_TERMS.search(text)`: the first authority-envelope term, or None. A `send` that
+    only reports to the orchestrator (see above) does not count."""
+
+    def search(self, text: str):
+        found = _OTHER_TERMS.search(text)
+        for m in _SEND_WORD.finditer(text):
+            after = text[m.end():].lstrip(" \t")
+            if not _send_is_report(after) and (found is None or m.start() < found.start()):
+                return m
+        return found
+
+
+AUTHORITY_TERMS = _AuthorityTerms()
 
 
 def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, requirements: bool = False,
@@ -549,20 +594,22 @@ def _audit(con, run: dict, amendment_id: str, before: dict, version: int, delta:
 
 
 def _sync_leases(con, run: dict, task_ids: list[str]) -> None:
-    """A changed scope is the scope the task's live lease holds, so it must not overlap another live task's."""
+    """A changed scope is the scope the task's live lease holds, so it must not overlap another live task's.
+    A dormant lease (no live session of its task, dispatch.lease_dormant) holds no scope on either side: the
+    next session of that task acquires its lease against the new scopes then (#307)."""
+    from office import dispatch
     for tid in task_ids:
         task = state.get_task(con, run["id"], tid)
-        lease = con.execute("SELECT id FROM leases WHERE run_id=? AND task_id=? AND released_at IS NULL AND revoked_at IS NULL",
+        lease = con.execute("SELECT * FROM leases WHERE run_id=? AND task_id=? AND released_at IS NULL AND revoked_at IS NULL",
                             (run["id"], tid)).fetchone()
         if task is None or lease is None:
             continue
-        for row in con.execute("SELECT task_id FROM leases WHERE run_id=? AND task_id IS NOT ? AND released_at IS NULL "
-                               "AND revoked_at IS NULL", (run["id"], tid)).fetchall():
-            other = state.get_task(con, run["id"], row["task_id"])
-            if other and planfile.scopes_overlap(task["scope"], other["scope"]):
-                raise Refused("scope-held", f"{tid}'s new scope overlaps {other['id']}, which holds a live lease",
-                              scope=tid, preserved="plan unchanged",
-                              next_step=f"wait for {other['id']} to be accepted, or order {tid} after it with depends")
+        holder = None if dispatch.lease_dormant(con, run["id"], lease) else dispatch.scope_holder(con, run, task)
+        if holder:
+            raise Refused("scope-held", f"{tid}'s new scope overlaps {holder}, which holds a live lease",
+                          scope=tid, preserved="plan unchanged",
+                          next_step=f"wait for {holder}'s session to end (submit, accept, or office revoke {holder}), "
+                                    f"or order {tid} after it with depends")
         con.execute("UPDATE leases SET scope=? WHERE id=?", (dumps(task["scope"]), lease["id"]))
 
 

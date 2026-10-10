@@ -4,6 +4,8 @@ suites share a host-wide concurrency cap instead of all running at once."""
 from __future__ import annotations
 
 import threading
+
+import pytest
 import time
 
 from conftest import GOOD_ADD, GOOD_MUL, PLAN_TWO, approved_run
@@ -232,3 +234,73 @@ def test_a_parallel_shared_directory_the_accepted_plan_had_is_grandfathered():
     redo = planfile.parse(quoted)
     planfile.grandfather_entries(redo, old.tasks)
     assert not redo.errors, redo.errors
+
+
+@pytest.mark.parametrize("entry,is_dir", [
+    ("+src", True), ("+scripts", True), ("+.github", True), ("+docker/Dockerfile", False),
+    ("+Makefile", False), ("+locales/*.json", False), ("+src/reg/", True), ("+REG.md", False),
+])
+def test_shared_entries_are_classed_as_files_or_directories(entry, is_dir):
+    # R3-6: one classifier for the depends rule, the lease guard and matching.
+    assert planfile.shared_tree(entry) is is_dir
+    bare = entry.lstrip("+").rstrip("/")
+    assert planfile.path_in_scope(bare + "/a.ts", [entry]) is is_dir
+    assert planfile.scopes_overlap([entry], [entry]) is is_dir
+
+
+def test_two_parallel_tasks_sharing_src_are_a_plan_error():
+    plan = planfile.parse(PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: src\n").replace(
+        "scope: mul.py\n", "scope: mul.py\nshared: src\n"))
+    assert any("share the directory 'src'" in e for e in plan.errors), plan.errors
+
+
+def test_nextjs_optional_catch_all_and_stacked_intercepting_segments_are_paths():
+    # R3-7.
+    plan = planfile.parse(PLAN_TWO.replace(
+        "scope: calc.py\n", "scope: calc.py, src/app/[[...slug]]/page.tsx, src/app/(..)(..)photo/page.tsx\n"))
+    assert not plan.errors, plan.errors
+    assert planfile._entry_problem("x.csv(A3)")
+
+
+def test_a_new_shared_directory_on_a_grandfathered_pair_is_still_an_error():
+    # R3-8: grandfathering is per (pair, entry), and every shared directory is reported.
+    accepted = planfile.parse(SHARED_TREE)
+    revised = SHARED_TREE.replace("shared: src/reg/\n", "shared: src/reg/, src/other/\n")
+    plan = planfile.parse(revised)
+    planfile.grandfather_entries(plan, accepted.tasks)
+    assert any("'src/other/'" in e for e in plan.errors), (plan.errors, plan.warnings)
+
+
+def test_an_entry_error_cites_its_own_line():
+    # R3-10.
+    text = PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\nshared: vitest.config.ts (note)\n")
+    line = next(i for i, ln in enumerate(text.splitlines(), start=1) if ln.startswith("shared: vitest"))
+    plan = planfile.parse(text)
+    assert any(f"(line {line})" in e and "vitest.config.ts (note)" in e for e in plan.errors), plan.errors
+
+
+@pytest.mark.parametrize("entry", ["+src/profile", "+content/authors", "+docs/changelog", "+public/.well-known"])
+def test_suffixless_and_dot_directories_below_the_root_are_directories(entry):
+    # R4-4: these are real directories; classing them as files took their contents out of scope.
+    assert planfile.shared_tree(entry)
+    assert planfile.path_in_scope(entry.lstrip("+") + "/a.md", [entry])
+
+
+@pytest.mark.parametrize("entry,is_dir", [
+    # PR #492 review item 7
+    ("+README", False), ("+LICENSE", False), ("+src/Makefile", False), ("+docs/README", True),
+    # item 5: common files that were classed as directories
+    ("+.npmignore", False), ("+.gitkeep", False), ("+.coveragerc", False), ("+.flake8", False),
+    ("+.pylintrc", False), ("+.nojekyll", False), ("+docs/CODEOWNERS", False), ("+Readme", False),
+    ("+License", False),
+])
+def test_review_492_file_and_directory_probes(entry, is_dir):
+    assert planfile.shared_tree(entry) is is_dir
+
+
+@pytest.mark.parametrize("entry", ["+.vercel", "+.terraform", "+.astro", "+.netlify", "+.aws", "+.tox", "+.output",
+                                   "+.pytest_cache", "+src/.generated"])
+def test_unlisted_dot_directories_are_directories(entry):
+    # a071c74 re-verify item 3: an extensionless dot-name is a directory unless it is a known dotfile.
+    assert planfile.shared_tree(entry)
+    assert planfile.path_in_scope(entry.lstrip("+") + "/project.json", [entry])

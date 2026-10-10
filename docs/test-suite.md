@@ -86,7 +86,6 @@ No production code changed. Every change is under `tests/`, `docs/`, `pyproject.
 - The 40 malformed ledger lines now run through `parse_ledger` and `check_ledger` with no git repository, and assert the
   parser rejected the line (they ran through a repo and accepted any later fix line numbered the same, which let
   `fixed a b c` pass for a different reason). One case still goes through the whole verdict.
-- The 33 authority-term examples are two tests instead of four, all examples kept (review #446 F1, M7).
 
 ### Added
 

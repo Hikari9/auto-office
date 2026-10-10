@@ -723,7 +723,7 @@ def _run(args, unknown) -> int:
             try:
                 if bugwatch.armed(con, run["id"]):
                     bugwatch.capture(con, run["id"])
-                bugwatch.start_reporter()
+                bugwatch.start_reporter(con)
             except Exception:
                 res.notices.append("self-improve audit unavailable; retry on next command")
         if target.note:
@@ -745,7 +745,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         from office import bugwatch
         bugwatch.arm(con, run["id"])
         bugwatch.capture(con, run["id"])
-        bugwatch.start_reporter()
+        bugwatch.start_reporter(con)
         return Result(lines=[bugwatch.summary(con, run["id"])],next="continue the Office run; bug reporting stays active")
     if cmd == "status":
         from office import guide, jobs, lifecycle, db, state

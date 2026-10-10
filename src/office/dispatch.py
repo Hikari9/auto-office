@@ -96,7 +96,8 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
         raise Usage("invalid-override", "--review-cli/--review-external need --review-as <harness>/<model>[@effort]")
     launch_prefs = {k: v for k, v in (("cli", cli), ("external", external)) if v}
     if review_as:
-        candidates.declared_decision(review_as, flag="--review-as")  # validates the route's shape
+        candidates.declared_decision(review_as, flag="--review-as", role="code_reviewer",
+                                    config=state.pinned_config(run))  # validates shape and role fit
     if state.is_terminal(run):
         raise Refused("run-terminal", f"run is {run['phase']}")
     from office import guide, plan_view, plans, prs, queuecmd
@@ -120,7 +121,8 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             if block:
                 continue
         if as_model:
-            routes[tid] = candidates.declared_decision(as_model)
+            routes[tid] = candidates.declared_decision(as_model, role="executor",
+                                                       config=state.pinned_config(run))
         else:
             routes[tid] = planned_route(con, run, task, override=route, reroute=reroute)
         if launch_prefs and routes[tid].get("status") == "selected":
@@ -149,10 +151,10 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 previous = tid
                 continue
             after = task.get("stack_after")
-            if (task["status"] == "queued" and after
-                    and (state.get_task(con, run["id"], after) or {}).get("status") == "accepted"):
-                # Stacked after a task that was accepted before the stack was
-                # recorded: start_stacked already fired, so launch it now.
+            released = stack_released(con, run, after) if task["status"] == "queued" and after else None
+            if released:
+                # Stacked after a task that was accepted, or that submitted and whose session
+                # ended, before this dispatch: nothing else starts it, so launch it now.
                 state.update_task(con, run["id"], tid, stack_after=None, pause_reason=None)
                 decision = routes.get(tid) if (routes.get(tid) or {}).get("status") == "selected" else None
                 if decision:
@@ -160,7 +162,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                     note_route(con, run, task, decision)
                 did = request_launch(con, run, tid, role="executor", decision=decision,
                                      base=_base_for(con, run, task, graph, after))
-                res.add(f"{tid} was stacked after {after}, which is already accepted -> {did} launching")
+                res.add(f"{tid} was stacked after {after}, which {released} -> {did} launching")
                 previous = tid
                 continue
             if task["status"] in ("running", "launching", "submitted", "changes_required", "queued"):
@@ -237,9 +239,10 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     planned slate (`--route`, `--reroute`, a pre-#300 plan) the fresh decision stands."""
     tid = task["id"]
     kind = "fix" if task.get("current_dispatch_id") else "fresh"
-    fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
-                                  dispatch_kind=kind)
     planned = None if (override or reroute) else _effective_slate(con, run, task)
+    declared = planned["primary"] if planned and planned.get("chooser") == "declared" else None
+    fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
+                                  dispatch_kind=kind, declared=declared)
     if reroute and fresh.get("status") == "selected":
         fresh["route_source"], fresh["route_note"] = "reroute", "rerouted from current evidence"
     if not planned:
@@ -402,10 +405,24 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
         kind, args = Path(argv[0]).name, argv[1:]
     else:
         adapter = adapters.load_all().get(d.get("adapter_id") or "")
-        inter = adapters.interactive_argv(adapter, "worker" if output is None else "reviewer", model=d.get("model") or "",
+        kind_name = "worker" if output is None else "reviewer"
+        inter = adapters.interactive_argv(adapter, kind_name, model=d.get("model") or "",
                                           effort=d.get("effort") or "none", cwd=Path(wt),
                                           output=Path(output) if output else None,
                                           session_id=_assigned_session(d)) if adapter and d.get("model") else None
+        if inter is None and adapter and d.get("model") and adapters.profile(adapter, kind_name):
+            # No pane-hosted form: show the recorded headless invocation instead
+            # of a bare executable, which would run on the harness's default
+            # model with none of the pinned trust flags.
+            try:
+                headless, _ = adapters.build_argv(adapter, kind_name, model=d.get("model") or "",
+                                                  effort=d.get("effort") or "none", cwd=Path(wt),
+                                                  output=Path(output) if output else None,
+                                                  session_id=_assigned_session(d))
+            except adapters.AdapterError:
+                headless = None
+            if headless:
+                inter = (headless[1:], d.get("harness") or "<kind>")
         kind, args = (inter[1], inter[0]) if inter else (d.get("harness") or "<kind>", [])
     if output is None:
         pointer = (f"Read and carry out the brief at {ddir / 'brief.md'} exactly. "
@@ -515,23 +532,48 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
     return dispatch_id
 
 
-def acquire_lease(con, run: dict, task: dict, holder: str, role: str) -> dict:
-    """One fenced lease per task scope. Overlapping live scopes are refused."""
-    now = datetime.now(timezone.utc)
-    rows = con.execute("SELECT * FROM leases WHERE run_id=? AND released_at IS NULL AND revoked_at IS NULL",
-                       (run["id"],)).fetchall()
-    for row in rows:
-        if row["task_id"] == task["id"]:
-            # Handing the task's lease to a new holder (fix round, relaunch):
-            # revoke the old one so a late submit from it is fenced out.
-            con.execute("UPDATE leases SET revoked_at=?, revoke_reason='superseded' WHERE id=?", (now.isoformat(), row["id"]))
-            continue
+def lease_dormant(con, run_id: str, row) -> bool:
+    """A task lease that holds no scope: its task has no live or launching session (the
+    worker submitted and ended, an ack-only session ended, an accepted task was reopened
+    and its session is gone). Nothing edits the task's files, so an overlapping task may
+    run (#398, #307). The lease row stays: a relaunch of the task supersedes it, and that
+    relaunch is refused while the overlapping task's session is live. A planner lease, a
+    lease with no task, and a task Office still shows running or launching keep holding."""
+    if row["role"] == "planner" or not row["task_id"]:
+        return False
+    task = state.get_task(con, run_id, row["task_id"])
+    if task is None or task["role"] == "planner" or task["status"] in ("running", "launching"):
+        return False
+    from office import gates
+    return gates.live_task_session(con, run_id, row["task_id"]) is None
+
+
+def scope_holder(con, run: dict, task: dict) -> str | None:
+    """The task whose live session holds a scope overlapping `task`'s, or None. Read-only."""
+    for row in con.execute("SELECT * FROM leases WHERE run_id=? AND released_at IS NULL AND revoked_at IS NULL "
+                           "AND task_id IS NOT ?", (run["id"], task["id"])).fetchall():
         other = state.get_task(con, run["id"], row["task_id"]) if row["task_id"] else None
         other_scope = other["scope"] if other else json.loads(row["scope"] or "[]")
-        if planfile.scopes_overlap(task["scope"], other_scope):
-            raise Refused("scope-held", f"{task['id']} scope overlaps {row['task_id']}, which holds a live lease",
-                          scope=task["id"], preserved="both tasks' work",
-                          next_step=f"wait for {row['task_id']} to be accepted, or office dispatch {row['task_id']} {task['id']} (stacked)")
+        if planfile.scopes_overlap(task["scope"], other_scope) and not lease_dormant(con, run["id"], row):
+            return row["task_id"] or row["holder_id"]
+    return None
+
+
+def acquire_lease(con, run: dict, task: dict, holder: str, role: str) -> dict:
+    """One fenced lease per task scope. Overlapping live scopes are refused; a dormant
+    lease (no live session of its task) does not hold its scope."""
+    now = datetime.now(timezone.utc)
+    other = scope_holder(con, run, task)
+    if other:
+        raise Refused("scope-held", f"{task['id']} scope overlaps {other}, which holds a live lease",
+                      scope=task["id"], preserved="both tasks' work",
+                      next_step=f"wait for {other}'s session to end (submit, accept, or office revoke {other}), "
+                                f"or office dispatch {other} {task['id']} (stacked)")
+    for row in con.execute("SELECT id FROM leases WHERE run_id=? AND task_id=? AND released_at IS NULL "
+                           "AND revoked_at IS NULL", (run["id"], task["id"])).fetchall():
+        # Handing the task's lease to a new holder (fix round, relaunch):
+        # revoke the old one so a late submit from it is fenced out.
+        con.execute("UPDATE leases SET revoked_at=?, revoke_reason='superseded' WHERE id=?", (now.isoformat(), row["id"]))
     fencing = (con.execute("SELECT COALESCE(MAX(fencing),0) FROM leases WHERE run_id=?", (run["id"],)).fetchone()[0] or 0) + 1
     lease_id = "L" + uuid.uuid4().hex[:8]
     con.execute("INSERT INTO leases(id, run_id, role, scope, holder_id, acquired_at, expires_at, task_id, fencing, dispatch_id, renewed_at) "
@@ -1002,8 +1044,19 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
                     (packet["packet_hash"], str(ddir / "packet.json"), str(ddir / "output.log"), dispatch["id"]))
     current = state.get_dispatch(con, dispatch["id"])
     if current["status"] != "launching":
-        # Revoked while its worktree was being set up (review F2): start nothing.
         return {"skipped": current["status"]}
+    lease = con.execute("SELECT revoked_at FROM leases WHERE id=?", (current.get("lease_id"),)).fetchone() \
+        if current.get("lease_id") else None
+    if lease and lease["revoked_at"]:
+        # Revoked while its worktree was being set up: this job owns the claim, so it ends the
+        # dispatch itself instead of starting an agent whose submits are fenced (R3-4).
+        with db.transaction(con):
+            con.execute("UPDATE dispatches SET status='cancelled', terminal_classification='revoked', ended_at=? "
+                        "WHERE id=? AND ended_at IS NULL AND status='launching'", (now_iso(), dispatch["id"]))
+            state.emit(con, run, "dispatch.ended", f"{dispatch.get('task_id')} {role} ended: revoked before its agent "
+                       "started", audience="runtime", task_id=dispatch.get("task_id"), dispatch_id=dispatch["id"],
+                       payload={"exit_code": None, "signal": None, "classification": "revoked"})
+        return {"skipped": "revoked"}
     launcher = launch(run, dispatch, "worker", ddir, cwd=wt, cli=payload.get("cli"),
                       external=bool(payload.get("external")), resume=payload.get("resume"))
     return {"dispatch_id": dispatch["id"], **launcher}
@@ -1760,6 +1813,9 @@ def _confirm_trust(pane: str, read, herdr, text: str | None = None) -> bool:
     Current Claude Code preselects "No, exit", so a bare Enter would quit the
     agent; Enter is pressed only once the selected option is the trust one.
     `text` is a screen the caller already read."""
+    if text is None or _selected_option(text) is None or not _trust_dialog(text):
+        # The first frame may be blank, unreadable or half-drawn too (R3-11).
+        text = _settled(read, None)
     for key in ("down", "down", "up", "up", "up", None):
         text = read() if text is None else text
         if not _trust_dialog(text):
@@ -2261,6 +2317,15 @@ def _unreserve_pane(run: dict, pane: str) -> None:
         atomic_write_json(f, held)
 
 
+def _tab_exists(tab_id: str) -> bool:
+    """False only when herdr says the tab is gone; an unreachable herdr counts as present."""
+    try:
+        proc = subprocess.run(["herdr", "tab", "get", tab_id], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return proc.returncode == 0 or "not_found" not in (proc.stdout or "") + (proc.stderr or "")
+
+
 def _live_panes(panes: list) -> list:
     """The recorded panes herdr has not reported gone (an unreachable herdr keeps them)."""
     return [p for p in panes if _pane_exists(p)]
@@ -2414,16 +2479,16 @@ def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None,
 
 def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None) -> str | None:
     """No caller pane to split (or a run begun before split mode): a tab owned by the run."""
-    orphans: list = []
-    if tab and not _herdr_json(["tab", "get", tab["tab_id"]]):
-        tab = None  # the user closed it
+    orphans: list = list((tab or {}).get("orphan_tabs") or [])  # carried whenever the record is replaced
+    if tab and not _tab_exists(tab["tab_id"]):
+        tab = None  # the user closed it (an unreachable herdr keeps it)
     if tab is not None:
         # Panes closed since (by the user or as abandoned) are never split from (review F1).
         tab["panes"] = _live_panes(tab.get("panes") or [])
         if not tab["panes"]:
             # The tab outlived its recorded panes: open a new one, and keep the old id so
             # close_herdr_tab still closes it.
-            orphans = [*(tab.get("orphan_tabs") or []), tab["tab_id"]]
+            orphans.append(tab["tab_id"])
             tab = None
     if tab is None:
         workspace = (os.environ.get("HERDR_WORKSPACE_ID") or os.environ.get("HERDR_PANE_ID") or "").split(":")[0]
@@ -2528,7 +2593,7 @@ def _pane_ledger(run: dict, dispatch: dict, pane: str, *, agent: str | None = No
 # A harness's startup header block opens and closes with a rule line: dashes
 # (`codex exec`'s stream) or a box edge (codex's interactive banner, whose
 # lines sit between box sides). Session ids are read only inside one (#406).
-_ANSI_SEQ = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_ANSI_SEQ = _CSI  # one stripper (OSC included)
 _HEADER_RULE = re.compile(r"-{8,}|[╭┌][─━].*[─━][╮┐]|[╰└][─━].*[─━][╯┘]")
 
 
@@ -2720,7 +2785,7 @@ class _SessionSniffer:
     HEADER_BYTES = 16384
     BANNER_LINES = 3  # lines allowed before the opening rule
     ATTEMPTS = 2
-    _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+    _ANSI = _CSI
 
     def __init__(self, run: dict, dispatch: dict, adapter: dict | None, log_path=None):
         self.run, self.dispatch, self.log_path = run, dispatch, log_path
@@ -3030,6 +3095,16 @@ def supervise(dispatch_id: str) -> int:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         adapter = adapters.load_all()[d["adapter_id"]]
         output = Path(spec["output"]) if spec.get("output") else None
+        if os.environ.get("OFFICE_PREFLIGHT") != "off":
+            # The candidate's provider/model and credentials, validated on this
+            # host before anything launches: an unlisted slug or missing auth
+            # fails here with the reason recorded, never a silent wrong-model run.
+            ok, why = adapters.run_preflight(adapter, d.get("model") or "")
+            if not ok:
+                _note(log_path, f"launch stopped before the harness started: {why}")
+                _launch_notice(run, d, why)
+                classification, code = "preflight_failed", 127
+                return 1
         argv, prof = adapters.build_argv(adapter, spec["kind"], model=d["model"], effort=d["effort"] or "none",
                                          cwd=Path(spec["cwd"]), output=output,
                                          images=[Path(i) for i in spec.get("images") or []],
@@ -3078,7 +3153,9 @@ def supervise(dispatch_id: str) -> int:
                 except BrokenPipeError:
                     pass
             sniffer = None if d.get("resumed_from") and not spec.get("headless_fresh") else _SessionSniffer(run, d, adapter, log_path)
+            wrote = 0
             for chunk in iter(lambda: child.stdout.read1(65536), b""):
+                wrote += len(chunk)
                 log.write(chunk)
                 log.flush()
                 if sniffer:
@@ -3096,6 +3173,10 @@ def supervise(dispatch_id: str) -> int:
             sig, classification = state_box["signal"], "signal"
         else:
             classification = "success" if code == 0 else "nonzero"
+        if classification == "success" and not wrote and not output:
+            # A worker with no reply file ended cleanly but said nothing: the
+            # prompt may never have been consumed (adapter failure_signatures).
+            _note(log_path, "the harness exited 0 with no output; the prompt may not have been consumed")
     except _Stopped as stop:
         sig, classification = stop.signum, "signal"
     except FileNotFoundError as exc:
@@ -3160,6 +3241,9 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> No
                        payload={"exit_code": code, "signal": sig, "classification": classification})
             if d["kind"] in ("planner", "executor"):
                 after_worker_exit(con, run, dispatch_id)
+            if d["kind"] == "executor" and d.get("task_id") and _submitted(con, d):
+                # The session that submitted is gone: tasks stacked after it may start (#398).
+                start_stacked(con, run, d["task_id"])
             accepted = (d["kind"] in ("planner", "executor") and classification == "success"
                         and _submitted(con, d))
     finally:
@@ -3227,6 +3311,20 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
             state.emit(con, run, "task.blocked", f"{task['id']} worker ended on a question; answer it: "
                        f"{questions.answer_command(d, asked)}; work is preserved in its worktree", task_id=task["id"])
             return
+        acked = [r[0] for r in con.execute("SELECT amendment_id FROM deliveries WHERE run_id=? AND dispatch_id=? "
+                                           "AND status='applied' ORDER BY applied_at", (run["id"], dispatch_id))]
+        if acked and task.get("current_revision_id"):
+            # An amendment relaunch whose session acknowledged it and ended without
+            # submitting (D24): a blind relaunch repeats the same brief with nothing left
+            # to ack. The task keeps its revision and waits for the orchestrator, whose
+            # next: line names the rerun; it is not shown live.
+            which = ", ".join(dict.fromkeys(acked))
+            state.update_task(con, run["id"], task["id"], status="changes_required",
+                              pause_reason=f"{which} applied; the session ended without submitting")
+            state.emit(con, run, "task.findings_queued", f"{task['id']} applied {which} and its session ended without "
+                       f"submitting: office rerun {task['id']} --resume (resubmits on the amended contract) | --fresh",
+                       task_id=task["id"])
+            return
         # A dispatch that raised stopped on purpose (an answer, not a retry, resolves it): it is no failed attempt.
         retries = con.execute("SELECT COUNT(*) FROM dispatches d WHERE d.run_id=? AND d.task_id=? AND d.terminal_classification "
                               "IS NOT NULL AND NOT EXISTS (SELECT 1 FROM revisions r WHERE r.dispatch_id=d.id) "
@@ -3236,7 +3334,7 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
         if retries <= limit:
             state.emit(con, run, "task.relaunch", f"{task['id']} worker ended ({d['terminal_classification']}) "
                        f"without submitting; relaunching {retries}/{limit}", audience="runtime", task_id=task["id"])
-            request_launch(con, run, task["id"], role=d["role"])
+            _launch_or_block(con, run, task["id"], role=d["role"])
             return
         state.update_task(con, run["id"], task["id"], status="blocked",
                           pause_reason=f"worker ended ({d['terminal_classification']}) without submitting")
@@ -3340,13 +3438,49 @@ def _amendment_undelivered(con, run: dict, payload: dict, d: dict) -> None:
                    f"to {d['id']}; its blocker stays: office revoke {tid}, then office rerun {tid} --resume|--fresh", task_id=tid, dispatch_id=d["id"])
 
 
-def start_stacked(con, run: dict, accepted_task: str) -> list[str]:
-    """Launch tasks the orchestrator stacked after `accepted_task`. Caller holds tx."""
+def _launch_or_block(con, run: dict, task_id: str, **kw) -> str | None:
+    """An internal relaunch (auto-relaunch, stacked start): a refusal blocks the task with
+    its reason instead of rolling back the transition that asked for it."""
+    try:
+        return request_launch(con, run, task_id, **kw)
+    except Refused as err:
+        state.update_task(con, run["id"], task_id, status="blocked", pause_reason=f"relaunch refused: {err.message}")
+        state.emit(con, run, "task.blocked", f"{task_id} not relaunched: {err.message}; {err.next_step or ''}".strip(),
+                   task_id=task_id)
+        return None
+
+
+def stack_released(con, run: dict, holder_id: str) -> str | None:
+    """Why a task stacked after `holder_id` may start now (a phrase), or None. The holder was
+    accepted, or it submitted and no session of it is live: in a convergence RECHECK a submitted
+    task can wait on its lane for a long time, and its ended session edits nothing (#398)."""
+    holder = state.get_task(con, run["id"], holder_id) or {}
+    if holder.get("status") == "accepted":
+        return "is already accepted"
+    if (holder.get("current_revision_id") and holder.get("status") not in ("running", "launching")
+            and _live_session(con, run["id"], holder_id) is None):
+        return f"submitted {holder['current_revision_id']} and has no live session"
+    return None
+
+
+def _live_session(con, run_id: str, task_id: str) -> str | None:
+    from office import gates
+    return gates.live_task_session(con, run_id, task_id)
+
+
+def start_stacked(con, run: dict, holder_task: str) -> list[str]:
+    """Launch tasks the orchestrator stacked after `holder_task` once it is accepted, or has
+    submitted with no live session (stack_released). A stacked task whose scope another live
+    session holds stays queued. Caller holds tx."""
     started = []
+    if not stack_released(con, run, holder_task):
+        return started
     for t in state.tasks(con, run["id"]):
-        if t["status"] == "queued" and t.get("stack_after") == accepted_task:
+        if t["status"] == "queued" and t.get("stack_after") == holder_task:
+            if scope_holder(con, run, t):
+                continue
             graph = {x["id"]: x["depends"] for x in state.tasks(con, run["id"])}
-            base = _base_for(con, run, t, graph, accepted_task)
-            request_launch(con, run, t["id"], role="executor", base=base)
-            started.append(t["id"])
+            base = _base_for(con, run, t, graph, holder_task)
+            if _launch_or_block(con, run, t["id"], role="executor", base=base):
+                started.append(t["id"])
     return started

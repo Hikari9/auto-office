@@ -786,3 +786,23 @@ def test_closing_an_abandoned_pane_drops_its_reservation(env, monkeypatch):
     f = paths.run_dir(run["id"]) / "herdr-reservations.json"
     held = json.loads(f.read_text()) if f.is_file() else {}
     assert pane not in held, held
+
+
+def test_a_blank_first_frame_does_not_end_confirmation(monkeypatch):
+    # R3-11: _answer_startup_trust passes no frame; the first read may be blank or half-drawn.
+    from office import dispatch
+    monkeypatch.setenv("OFFICE_HERDR_KEY_SETTLE", "1")
+    dialog = "Quick safety check: Is this a project you created or one you trust?\n{}\n Enter to confirm"
+    no = dialog.format("❯ No, exit\n  Yes, I trust this folder")
+    yes = dialog.format("  No, exit\n❯ Yes, I trust this folder")
+    frames = iter(["", "Quick safety check: Is this a project you created or one you trust?", no, yes, yes])
+    sent = []
+    assert dispatch._confirm_trust("w1:p1", lambda: next(frames, yes), lambda *a: sent.append(a[-1]))
+    assert sent == ["down", "Enter"], sent
+
+
+def test_an_osc_link_before_the_cursor_glyph_is_stripped():
+    # R3-14: fails with a CSI-only stripper (the cursor line no longer matches).
+    from office import dispatch
+    assert dispatch._selected_option("Trust this folder?\n\x1b]8;;u\x07❯ Yes, I trust this folder") == \
+        "Yes, I trust this folder"

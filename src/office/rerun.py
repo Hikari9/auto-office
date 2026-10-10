@@ -300,7 +300,7 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         launch = {**launch, "launch": launch_prefs}
     restack = _restack(con, run, task, parent.get("worktree"))
     if restack:
-        extra = {**(extra or {}), "restack": {k: restack[k] for k in ("merged", "conflict")}}
+        extra = {**(extra or {}), "restack": {k: restack.get(k) for k in ("merged", "conflict", "unmerged")}}
         if resume:
             # A resumed session reads only its prompt pointer first: name the restack there.
             extra["resume"]["findings"] = "; ".join(x for x in (restack["line"], extra["resume"]["findings"]) if x)

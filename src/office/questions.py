@@ -40,7 +40,7 @@ TAIL_LINES = 60
 PROTOCOL = ("answer it yourself (planning, scope, ordering, test detail); ask the user only if it is a "
             "user decision (requirements, authority, irreversible or external action)")
 
-_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[@-_]")
+_ANSI = dispatch._CSI  # the one ANSI stripper (CSI, OSC, two-byte escapes)
 # Footer lines a selection widget shows while it waits for a choice. Claude:
 # "Enter to select · Tab/Arrow keys to navigate · Esc to cancel"; codex: "Press enter
 # to confirm or esc to cancel"; agy: "Waiting for user confirmation".
@@ -188,10 +188,34 @@ _NEXT = re.compile(r"\bNEXT=(.+)$")
 # decide...) or names a question id together with an answer/approval/decision ("await
 # orchestrator answer to Q1", "need approval on Q1"). A bare id ("Q1 was resolved") does not.
 _ASK_WORD = r"(?:answer|approv(?:e|al)|authori[sz](?:e|ation)|confirm(?:ation)?|decid(?:e|ing)|decision|choose|choice|tell me|reply)"
-_ASKS = re.compile(r"^\W*" + _ASK_WORD + r"\b|\b" + _ASK_WORD + r"\b[^;]*\bQ\d+\b|\bQ\d+\b[^;]*\b" + _ASK_WORD + r"\b",
-                   re.I)
+# Waiting on a question id asks too; applying an answer or decision already given does not.
+_WAITING = r"(?:await(?:ing|s)?|wait(?:ing|s)?\s+(?:on|for)|needs?|blocked\s+(?:on|until|by)|pending)"
+_QID = r"\bQ\d+\b"
+_NEEDED = r"(?:(?:an?|your|the|a\s+final)\s+)?(?:answer|approval|decision|confirmation|reply|choice)"
+_ASKS = re.compile("|".join([
+    r"^\W*" + _ASK_WORD + r"\b",                                                   # "Answer Q1 ..."
+    r"\bplease\s+" + _ASK_WORD + r"\b[^;]*" + _QID,                                # "please answer Q1"
+    _QID + r"[^;]*\bplease\s+" + _ASK_WORD + r"\b",                                # "Q1: please answer"
+    # second person or the orchestrator as subject; a worker's own plan ("will confirm Q1 fix") is not an ask
+    r"\b(?:can|could|would|will)\s+you\s+" + _ASK_WORD + r"\b[^;]*" + _QID,  # "can you answer Q1"
+    r"\b(?:you|orchestrator|office|user)\s+(?:should|can|could|must|will|would)\s+" + _ASK_WORD + r"\b[^;]*" + _QID,
+    r"\b(?:to|get|need|needs|request(?:ing|s|ed)?|requires?)\s+" + _NEEDED + r"\b[^;]*" + _QID,  # "get approval for Q3"
+    r"\b(?:orchestrator|office|you|user)\s+to\s+" + _ASK_WORD + r"\b[^;]*" + _QID,  # "orchestrator to answer Q1"
+    _QID + r"[^;]*\b(?:needs?|requires?|" + _WAITING + r"|awaiting)\s+" + _NEEDED + r"\b",  # "Q1 is awaiting a decision"
+    r"\b" + _WAITING + r"\b[^;]*" + _QID,                                           # "waiting on Q1"
+]), re.I)
+# A negated need or wait reports progress ("no longer waiting on Q1", "Q1 doesn't need an answer",
+# "nothing pending on Q1", "need nothing on Q1"); it is removed before matching.
+_NEGATED = re.compile(r"\b(?:no\s+longer|not(?!\s+only\b)|no|nothing|doesn'?t|does\s+not|don'?t|do\s+not|isn'?t"
+                      r"|is\s+not)\s+(?:\w+\s+)?(?:" + _WAITING + r"|need|needs|requires?)\b|\b(?:needs?|" + _WAITING + r")\s+nothing\b",
+                      re.I)
 _QUESTION_LINE = re.compile(r"\bQ\d+\b|\bquestion\b", re.I)
 ENDED_PREFIX = "worker ended on a question: "
+
+
+def _asks(nxt: str | None) -> bool:
+    """Whether a closing NEXT asks the orchestrator something; a negated wait is removed first."""
+    return bool(nxt) and bool(_ASKS.search(_NEGATED.sub(" ", nxt)))
 
 
 def final_question(text: str | None) -> dict | None:
@@ -202,7 +226,7 @@ def final_question(text: str | None) -> dict | None:
     if not lines:
         return None
     nxt = next((m.group(1).strip() for ln in reversed(lines[-6:]) if (m := _NEXT.search(ln))), None)
-    if not ((nxt and _ASKS.search(nxt)) or lines[-1].endswith("?")):
+    if not (_asks(nxt) or lines[-1].endswith("?")):
         return None
     # The latest question wins: a log can echo the prompt or an earlier, answered turn.
     asked = next((ln for ln in reversed(lines) if "?" in ln and _QUESTION_LINE.search(ln)), None) \
