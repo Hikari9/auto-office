@@ -27,7 +27,9 @@ def test_new_defaults_have_no_hard_ceiling_or_user_policy():
     assert policy.user_policy(cfg) == {"denied": [], "overkill": [],
                                        "sources": {"denied_models": "shipped", "overkill_rules": "shipped"}}
     settings = policy.discovery_settings(cfg)
-    assert settings == policy.DISCOVERY_DEFAULTS
+    # shipped config turns discovery on (#494 T6); the code constant stays off, the safe default for a pre-#494 pin
+    assert settings == {**policy.DISCOVERY_DEFAULTS, "enabled": True}
+    assert policy.DISCOVERY_DEFAULTS["enabled"] is False
     assert cfg["routing"]["adaptive"]["cost_scale_usd"] == 25
     assert cfg[policy.DIGEST_KEY] == policy.policy_digest(cfg)
 
@@ -101,7 +103,7 @@ def test_policy_digest_covers_settings_policy_and_ceiling_source_only():
     same["routing"]["adaptive"]["cost_scale_usd"] = 99
     same["irrelevant"] = "changed"
     assert policy.policy_digest(same) == digest
-    for edited in (resolve(sets=["routing.discovery.enabled=true"]),
+    for edited in (resolve(sets=["routing.discovery.enabled=false"]),
                    resolve(sets=["routing.user_policy.denied_models=[new-model]"]),
                    resolve(layer(30)), resolve(sets=["routing.adaptive.budget_ceiling_usd=null"])):
         assert policy.policy_digest(edited) != digest

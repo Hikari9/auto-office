@@ -41,8 +41,10 @@ cost_policy:
 # keep its default. Preference is weighted evidence, capped at 0.25.
 routing:
   discovery:
-    # Enable only after the integrated discovery acceptance evidence passes.
-    enabled: false
+    # On for executor and worker only (#494). A route the catalog marks `discovery: eligible` is proven by one
+    # exact conformance probe and then tried once, bounded, with a known-working fallback. A run pins this at
+    # start, so a run started earlier keeps its own setting. Evidence: docs/benchmarks/issue-494-evidence.md.
+    enabled: true
     roles: [executor, worker]
     max_probes_per_run: 2
     max_trials_per_run: 1
