@@ -308,17 +308,29 @@ def _disabled(cold, _decision):
         cold.con.execute("UPDATE runs SET policy_json=? WHERE id='run-A'", (dumps(cold.policy(enabled=False)),))
 
 
-@pytest.mark.parametrize("change,blocked", [
-    (_take_the_trial, "trial-cap"), (_large_task, "risk"), (_irreversible, "risk"), (_spent_quota, "quota-reserve"),
-    (_quarantined_fallback, "no-fallback"), (_quarantined_trial_route, "quarantined"), (_stale_probe, "probe-stale"),
-    (_disabled, "discovery-disabled")])
-def test_any_recheck_that_fails_in_the_transaction_dispatches_the_fallback_and_writes_no_trial(cold, monkeypatch, change, blocked):
+def _blast_radius(cold, _decision):
+    with db.transaction(cold.con):
+        cold.con.execute("UPDATE runs SET risk_json=? WHERE id='run-A'",
+                         (dumps({"size_class": "S", "blast_radius": "production", "irreversible": False}),))
+
+
+def _changed_fingerprint(cold, _decision):
+    with db.transaction(cold.con):  # the probe on record now speaks for another harness version
+        cold.con.execute("UPDATE route_probes SET key=key || '-old'")
+
+
+@pytest.mark.parametrize("change,blocked,others", [
+    (_take_the_trial, "trial-cap", ["other"]), (_large_task, "risk", []), (_irreversible, "risk", []),
+    (_blast_radius, "risk", []), (_spent_quota, "quota-reserve", []), (_quarantined_fallback, "no-fallback", []),
+    (_quarantined_trial_route, "quarantined", []), (_stale_probe, "probe-stale", []),
+    (_changed_fingerprint, "probe-stale", []), (_disabled, "discovery-disabled", [])])
+def test_any_recheck_that_fails_in_the_transaction_dispatches_the_fallback_and_writes_no_trial(cold, monkeypatch, change, blocked, others):
     _between(cold, monkeypatch, change)
     cold.dispatch("T1")
     (d,) = cold.dispatches()
     (attempt,) = cold.attempts()
     assert d["triple"].startswith("codex@0/gpt-6-astra@"), d["triple"]
-    assert [t["id"] for t in cold.trials()] in ([], ["other"]) and len(_live_leases(cold)) == 1
+    assert [t["id"] for t in cold.trials()] == others and len(_live_leases(cold)) == 1
     assert not [t for t in cold.trials() if t["dispatch_id"] == d["id"]]
     assert cold.kinds(attempt) == ["probe-reserved", "probe-result", "dispatch-linked"]
     assert cold.events(attempt)[-1]["dispatch_id"] == d["id"]
@@ -396,13 +408,13 @@ def test_concurrent_dispatch_commands_race_for_one_trial_and_exactly_one_gets_it
     gate = threading.Barrier(2, timeout=45)
     real = dispatch.preflight_discovery
 
+    arrived = []
+
     def together(con, run, task, decision, **kw):
         out = real(con, run, task, decision, **kw)
         if out.get("trial"):
-            try:
-                gate.wait()  # both have a trial decision in hand before either opens its transaction
-            except threading.BrokenBarrierError:
-                pass
+            arrived.append(task["id"])
+            gate.wait()  # both have a trial decision in hand before either opens its transaction
         return out
 
     monkeypatch.setattr(dispatch, "preflight_discovery", together)
@@ -423,11 +435,15 @@ def test_concurrent_dispatch_commands_race_for_one_trial_and_exactly_one_gets_it
     for t in threads:
         t.join(120)
     assert not errors, errors
+    assert sorted(arrived) == ["T1", "T2"] and not gate.broken  # the race was real: both held a trial decision
     (trial,) = cold.trials()
     ds = cold.dispatches()
     assert len(ds) == 2 and sum(d["triple"] == trial["route"] for d in ds) == 1
     assert sum(len(_live_leases(cold, t)) for t in ("T1", "T2")) == 2
     assert [e["kind"] for e in cold.events()].count("trial-reserved") == 1
+    (loser,) = [d for d in ds if d["id"] != trial["dispatch_id"]]
+    assert _route_json(loser)["discovery"]["blocked"] == "trial-cap" and loser["triple"].startswith("codex@0/gpt-6-astra@")
+    assert [e["outcome"] for e in cold.events() if e["kind"] == "dispatch-linked" and e["dispatch_id"] == loser["id"]] == ["fallback"]
 
 
 # ------------------------------------------------------------------ events only append
@@ -502,8 +518,20 @@ def test_an_external_or_stacked_dispatch_is_never_probed(cold):
 
 def test_a_task_stacked_behind_another_is_not_probed_for_a_launch_it_will_not_make_now(cold):
     cold.dispatch("T1", "T2")
-    assert len(cold.attempts()) == 1 and len(cold.dispatches()) == 1 and not cold.trials() or len(cold.trials()) <= 1
+    assert len(cold.attempts()) == 1 and len(cold.dispatches()) == 1 and len(cold.trials()) == 1
+    assert cold.trials()[0]["task_id"] == "T1" and {e["task_id"] for e in cold.events()} == {"T1"}
     assert state.get_task(cold.con, "run-A", "T2")["status"] == "queued"
+
+
+def test_a_trial_decision_that_will_not_launch_now_is_never_reserved(cold):
+    run = state.get_run(cold.con, "run-A")
+    task = state.get_task(cold.con, "run-A", "T1")
+    decision = dispatch.preflight_discovery(cold.con, run, task, dispatch.planned_route(cold.con, run, task))
+    assert decision.get("trial")
+    with db.transaction(cold.con):
+        stacked = dispatch.settle_discovery(cold.con, run, task, decision, launching=False)
+    assert "trial_record" not in stacked and stacked["discovery_link"]["blocked"] == "not-launching"
+    assert stacked["selected"] == decision["trial"]["fallback"]["selected"] and not cold.trials()
 
 
 
@@ -517,6 +545,8 @@ import time
 
 from office import jobs
 from office.util import atomic_write_json, pid_alive, process_start
+
+_REAL_PROCESS_TABLE = dispatch._process_table  # tests patch dispatch._process_table; the fake workers' own checks do not
 
 LEADER = r"""
 import os, subprocess, sys, time
@@ -543,11 +573,14 @@ class Tree:
     def record(self, run_id, did):
         ddir = paths.run_dir(run_id) / "dispatches" / did
         ddir.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(ddir / "agent.identity", {"pid": self.leader.pid, "start": process_start(self.leader.pid)})
+        atomic_write_json(ddir / "agent.identity", {"pid": self.leader.pid, "start": process_start(self.leader.pid),
+                                                    "c_start": dispatch._c_start(self.leader.pid)})
         (ddir / "agent.pgid").write_text(str(self.leader.pid))
 
     def alive(self):
-        return pid_alive(self.child) or self.leader.poll() is None
+        """Whether either process can still run: a zombie, killed and waiting for its parent, cannot write."""
+        states = {pid: st for pid, _, st, *_ in _REAL_PROCESS_TABLE()}
+        return any(pid in states and not states[pid].startswith("Z") for pid in (self.child, self.leader.pid))
 
     def close(self):
         for pid in (self.child, self.leader.pid):
@@ -555,6 +588,14 @@ class Tree:
                 os.kill(pid, 9)
             except OSError:
                 pass
+
+
+def _until(check, seconds=15):
+    """Wait for a fake worker's child to do what the test relies on, however loaded the machine is."""
+    end = time.time() + seconds
+    while not check():
+        assert time.time() < end, "the fake worker never got going"
+        time.sleep(0.05)
 
 
 @pytest.fixture
@@ -567,6 +608,8 @@ def trees():
 
 def in_flight(cold):
     """T1 dispatched as a trial, its worktree created and its launch baseline taken: an agent about to run."""
+    if _REAL_PROCESS_TABLE() is None or dispatch._c_start(os.getpid()) is None:
+        pytest.skip("recovery reads the process table: it needs a readable `ps`")
     cold.dispatch("T1")
     d = cold.dispatches()[0]
     assert cold.trials()[0]["dispatch_id"] == d["id"]
@@ -629,8 +672,8 @@ def test_a_child_still_able_to_write_is_terminated_before_the_fallback_starts(co
     tree = Tree(d["id"], log)
     trees.append(tree)
     tree.record("run-A", d["id"])
-    time.sleep(0.3)
-    assert tree.alive() and log.stat().st_size > 0
+    _until(lambda: log.exists() and log.stat().st_size > 0)
+    assert tree.alive()
     seen = {}
     real = dispatch.request_launch
 
@@ -654,7 +697,7 @@ def test_untracked_meaningful_work_is_preserved_and_blocks_the_fallback(cold, tr
     tree = Tree(d["id"], work)  # the worker's child is writing a new, untracked file in the worktree
     trees.append(tree)
     tree.record("run-A", d["id"])
-    time.sleep(0.3)
+    _until(lambda: work.exists() and work.stat().st_size > 0)
     recover(cold, d["id"])
     assert not tree.alive() and work.exists() and work.stat().st_size > 0
     assert len(cold.dispatches()) == 1 and cold.trials()[0]["status"] == "abandoned"
@@ -668,13 +711,16 @@ def test_untracked_meaningful_work_is_preserved_and_blocks_the_fallback(cold, tr
     assert cold.kinds(attempt)[-1] == "trial-abandoned" and "trial-fell-back" not in cold.kinds(attempt)
 
 
-def test_a_worker_that_survives_the_termination_blocks_the_fallback_without_moving_the_lease(cold, trees, monkeypatch):
+@pytest.mark.parametrize("claimed_gone", [False, True])
+def test_a_worker_that_survives_the_termination_blocks_the_fallback_without_moving_the_lease(cold, trees, monkeypatch, claimed_gone):
+    # False: the termination itself reports failure. True: it claims success while the worker is still running,
+    # so only the final scan stands between the fallback and a second writer.
     d, wt, ddir = in_flight(cold)
     launched(cold, d)
     tree = Tree(d["id"], cold.tmp / "child.log")
     trees.append(tree)
     tree.record("run-A", d["id"])
-    monkeypatch.setattr(route_probe, "_terminate_tree", lambda *a, **kw: False)  # it ignored every signal
+    monkeypatch.setattr(dispatch, "_terminate_worker", lambda *a, **kw: claimed_gone)  # it ignored every signal
     lease = _live_leases(cold)[0]["id"]
     recover(cold, d["id"])
     assert tree.alive()
@@ -695,9 +741,9 @@ def test_an_unconfirmable_identity_or_process_table_blocks_the_fallback(cold, tr
     trees.append(tree)
     tree.record("run-A", d["id"])
     if what == "identity":
-        monkeypatch.setattr(dispatch, "process_start", lambda pid: None)  # ps cannot say which process this is
+        monkeypatch.setattr(dispatch, "_c_start", lambda pid: None)  # ps cannot say which process this is
     else:
-        monkeypatch.setattr(route_probe, "_process_table", lambda: None)
+        monkeypatch.setattr(dispatch, "_process_table", lambda: None)
     recover(cold, d["id"])
     assert len(cold.dispatches()) == 1 and len(_live_leases(cold)) == 1 and task_row(cold)["status"] == "blocked"
     assert tree.alive() or what == "process-table"  # an unreadable identity is never signalled
@@ -987,7 +1033,7 @@ def test_a_supervisor_that_is_this_process_is_never_the_worker_and_its_other_chi
     try:
         ident = paths.run_dir("run-A") / "dispatches" / d["id"] / "supervisor.identity"
         ident.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(ident, {"pid": os.getpid(), "start": process_start(os.getpid())})
+        atomic_write_json(ident, {"pid": os.getpid(), "start": process_start(os.getpid()), "c_start": dispatch._c_start(os.getpid())})
         recover(cold, d["id"])
         assert bystander.poll() is None
         assert cold.trials()[0]["status"] == "fell-back" and len(_live_leases(cold)) == 1
@@ -1001,7 +1047,7 @@ def test_a_symlink_in_the_worktree_is_compared_by_its_link_text_and_never_follow
     outside.write_text("one")
     (wt / "alias").symlink_to(outside)
     before = dispatch._worktree_snapshot(wt)
-    assert before["files"]["alias"].endswith(f"link:{outside}")
+    assert before["files"]["alias"] == f"link:{outside}"
     outside.write_text("two")  # the target changes; the worktree did not
     assert dispatch._worktree_snapshot(wt) == before
     (wt / "alias").unlink()
@@ -1025,3 +1071,306 @@ def test_a_dispatch_with_no_worktree_is_pre_work_and_never_reads_the_current_dir
     monkeypatch.setattr(dispatch, "_worktree_snapshot", lambda path: pytest.fail(f"snapshotted {path}"))
     for missing in (None, "", str(cold.tmp / "no-such-worktree")):
         assert dispatch.work_started(cold.con, {**d, "worktree": missing}, ddir) == (False, "the dispatch never got a worktree")
+
+
+def test_a_fallback_that_is_the_trial_route_or_is_not_selected_is_no_fallback(cold):
+    run = state.get_run(cold.con, "run-A")
+    task = state.get_task(cold.con, "run-A", "T1")
+    decision = dispatch.preflight_discovery(cold.con, run, task, dispatch.planned_route(cold.con, run, task))
+    trial = decision["trial"]
+    own = {k: v for k, v in decision.items() if k != "trial"}
+    with db.transaction(cold.con):
+        assert dispatch._trial_blocked(cold.con, run, decision, trial["fallback"]) is None
+        assert dispatch._trial_blocked(cold.con, run, decision, own) == "no-fallback"
+        assert dispatch._trial_blocked(cold.con, run, decision, {"status": "slate_exhausted"}) == "no-fallback"
+
+
+def test_when_the_trial_route_is_the_only_one_that_qualifies_no_trial_is_taken(cold, monkeypatch):
+    real = dispatch.planned_route
+
+    def nothing_else(con, run, task, **kw):
+        if kw.get("exclude"):  # the preflight asks for the known-working route without the trial route
+            return {"status": "no_qualifying_candidate", "selected": None, "rejected": []}
+        return real(con, run, task, **kw)
+
+    monkeypatch.setattr(dispatch, "planned_route", nothing_else)
+    run = state.get_run(cold.con, "run-A")
+    task = state.get_task(cold.con, "run-A", "T1")
+    out = dispatch.preflight_discovery(cold.con, run, task, real(cold.con, run, task))
+    assert "trial" not in out and out["status"] == "no_qualifying_candidate"
+    assert out["discovery_link"]["blocked"] == "no-fallback" and not cold.trials()
+
+
+def test_the_probe_runs_before_any_dispatch_lease_session_or_worktree_exists_and_outside_a_transaction(cold, monkeypatch):
+    seen = {}
+    real = route_probe.ensure
+
+    def watching(con, run, cand, **kw):
+        seen.update({t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                     for t in ("dispatches", "leases", "route_trials", "session_bindings", "outbox")})
+        seen["in_transaction"] = con.in_transaction
+        seen["worktrees"] = list(paths.worktrees_dir().glob("*/*")) if paths.worktrees_dir().exists() else []
+        seen["attempt"] = kw["attempt_id"]
+        return real(con, run, cand, **kw)
+
+    monkeypatch.setattr(route_probe, "ensure", watching)
+    cold.dispatch("T1")
+    assert seen.pop("in_transaction") is False and seen.pop("worktrees") == []
+    assert {k: v for k, v in seen.items() if k != "attempt"} == {t: 0 for t in
+                                                                   ("dispatches", "leases", "route_trials", "session_bindings", "outbox")}
+    assert cold.attempts() == [seen["attempt"]]  # the attempt id was minted before the call and is the one linked later
+
+
+def test_only_the_recomputed_decision_is_dispatched(cold, monkeypatch):
+    # After the probe, the original primary and the trial route are both denied. The recompute names another route,
+    # and that route (not the decision made before the probe) is what runs.
+    first = {}
+    real = route_probe.ensure
+
+    def then_denied(con, run, cand, **kw):
+        first["primary"] = kw["context"]["primary_route"]
+        out = real(con, run, cand, **kw)
+        cold.write_policy("user", denied=[SOL, "codex/gpt-6-astra@low"])
+        return out
+
+    monkeypatch.setattr(route_probe, "ensure", then_denied)
+    cold.dispatch("T1")
+    (d,) = cold.dispatches()
+    assert first["primary"] == "codex@0/gpt-6-astra@low" and d["triple"] != first["primary"]
+    assert "gpt-6.1-sol" not in d["triple"] and not cold.trials()
+    assert _route_json(d)["candidate"]["effort"] == d["effort"] and d["route_json"]
+
+
+def test_a_probe_that_raises_costs_the_dispatch_nothing(cold, monkeypatch):
+    def broken(con, run, cand, **kw):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(route_probe, "ensure", broken)
+    cold.dispatch("T1")
+    (d,) = cold.dispatches()
+    assert d["triple"].startswith("codex@0/gpt-6-astra@") and not cold.trials()
+    assert _route_json(d)["discovery"]["blocked"] == "probe-error: OperationalError"
+
+
+# ------------------------------------------------------------------ one transaction
+
+def test_the_trial_row_and_its_events_commit_with_the_dispatch_row_or_not_at_all(cold, monkeypatch):
+    real = dispatch.record_discovery
+
+    def then_fails(*a, **kw):
+        real(*a, **kw)  # the trial row and both events are written ...
+        raise RuntimeError("the transaction dies after them")
+
+    monkeypatch.setattr(dispatch, "record_discovery", then_fails)
+    with pytest.raises(RuntimeError):
+        cold.dispatch("T1")
+    # ... and none of it, nor the dispatch row or its lease, survives. Only the probe's own events (committed earlier) do.
+    assert not cold.trials() and not cold.dispatches() and not cold.leases()
+    assert {e["kind"] for e in cold.events()} <= {"probe-reserved", "probe-result"}
+
+
+def test_a_trial_status_and_its_event_commit_together_or_not_at_all(cold):
+    cold.dispatch("T1")
+    d = cold.dispatches()[0]
+    before = _frozen(cold)
+    with pytest.raises(RuntimeError):
+        with db.transaction(cold.con):
+            assert dispatch.set_trial_status(cold.con, cold.trials()[0], "launched", detail="x")
+            raise RuntimeError("rolled back")
+    assert cold.trials()[0]["status"] == "reserved" and _frozen(cold) == before
+
+
+# ------------------------------------------------------------------ what counts as work
+
+def test_a_launch_with_no_baseline_cannot_rule_work_out(cold):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    (ddir / "worktree-baseline.json").unlink()
+    recover(cold, d["id"])
+    assert len(cold.dispatches()) == 1 and "no launch baseline" in task_row(cold)["pause_reason"]
+
+
+def test_a_worktree_that_never_settles_cannot_rule_work_out(cold, monkeypatch):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    real = dispatch._worktree_snapshot
+    baseline = (ddir / "worktree-baseline.json").read_text()
+    monkeypatch.setattr(dispatch, "_worktree_snapshot", lambda path: None)  # a writer keeps changing it
+    recover(cold, d["id"])
+    assert len(cold.dispatches()) == 1 and "could not be snapshotted" in task_row(cold)["pause_reason"]
+    assert (ddir / "worktree-baseline.json").read_text() == baseline and real is not None
+
+
+def _git(wt, *args):
+    subprocess.run(["git", "-C", str(wt), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True, capture_output=True)
+
+
+def test_an_edit_to_a_tracked_file_is_work(cold):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    (wt / "tracked.txt").write_text("one\n")
+    _git(wt, "add", "tracked.txt")
+    _git(wt, "commit", "-qm", "tracked")  # part of the launch state, not the worker's work:
+    atomic_write_json(ddir / "worktree-baseline.json", dispatch._worktree_snapshot(wt))
+    (wt / "tracked.txt").write_text("two\n")  # the worker's uncommitted edit
+    recover(cold, d["id"])
+    assert len(cold.dispatches()) == 1 and "tracked.txt" in task_row(cold)["pause_reason"]
+
+
+def test_a_new_untracked_directory_or_a_staged_file_is_work(cold):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    (wt / "pkg" / "sub").mkdir(parents=True)
+    (wt / "pkg" / "sub" / "mod.py").write_text("x = 1\n")
+    recover(cold, d["id"])
+    assert len(cold.dispatches()) == 1 and "pkg/sub/mod.py" in task_row(cold)["pause_reason"]
+
+
+def test_a_staged_file_alone_is_work(cold):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    (wt / "a.txt").write_text("x\n")
+    _git(wt, "add", "a.txt")
+    (wt / "a.txt").unlink()  # staged, then gone from the tree: only the index remembers it
+    recover(cold, d["id"])
+    assert len(cold.dispatches()) == 1 and "the index" in task_row(cold)["pause_reason"]
+
+
+def test_the_failed_dispatchs_session_binding_ends_with_a_fallback_and_only_then(cold):
+    def bound(cold):
+        d, wt, ddir = in_flight(cold)
+        with db.transaction(cold.con):
+            cold.con.execute("UPDATE dispatches SET session_id='sess-1', harness='codex' WHERE id=?", (d["id"],))
+            cold.con.execute("INSERT INTO session_bindings(harness, session_id, run_id, bound_at, bound_by) "
+                             "VALUES('codex','sess-1','run-A',?,'x'), ('codex','sess-other','run-A',?,'x')",
+                             (now_iso(), now_iso()))
+        return d
+
+    d = bound(cold)
+    recover(cold, d["id"])
+    ended = {r["session_id"]: r["ended_at"] for r in cold.con.execute("SELECT * FROM session_bindings")}
+    assert ended["sess-1"] and ended["sess-other"] is None
+
+
+def test_a_blocked_recovery_leaves_the_session_binding_alone(cold):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    (wt / "new.py").write_text("x\n")
+    with db.transaction(cold.con):
+        cold.con.execute("UPDATE dispatches SET session_id='sess-1', harness='codex' WHERE id=?", (d["id"],))
+        cold.con.execute("INSERT INTO session_bindings(harness, session_id, run_id, bound_at, bound_by) "
+                         "VALUES('codex','sess-1','run-A',?,'x')", (now_iso(),))
+    recover(cold, d["id"])
+    assert cold.con.execute("SELECT ended_at FROM session_bindings").fetchone()[0] is None
+
+
+# ------------------------------------------------------------------ a recovery that cannot finish
+
+def test_a_recovery_job_that_fails_for_good_blocks_the_task_and_settles_the_trial(cold):
+    d, wt, ddir = in_flight(cold)
+    with db.transaction(cold.con):
+        assert dispatch._queue_trial_recovery(cold.con, state.get_run(cold.con, "run-A"), d, "worker died")
+    job = state.get_job(cold.con, cold.con.execute("SELECT id FROM outbox WHERE kind='trial_recovery'").fetchone()[0])
+    with db.transaction(cold.con):
+        jobs.on_permanent_failure(cold.con, state.get_run(cold.con, "run-A"), job, "worker process died twice")
+    assert task_row(cold)["status"] == "blocked" and "the recovery itself failed" in task_row(cold)["pause_reason"]
+    assert cold.trials()[0]["status"] == "abandoned" and len(_live_leases(cold)) == 1
+    (attempt,) = cold.attempts()
+    assert cold.kinds(attempt)[-1] == "trial-abandoned"
+
+
+def test_a_recovery_that_crashes_after_the_worker_is_gone_ends_the_dispatch(cold, monkeypatch):
+    d, wt, ddir = in_flight(cold)
+    monkeypatch.setattr(dispatch, "request_launch", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("scope-held")))
+    recover(cold, d["id"])
+    assert cold.dispatches()[0]["ended_at"] and len(cold.dispatches()) == 1 and task_row(cold)["status"] == "blocked"
+    assert [bool(l["released_at"]) for l in cold.leases()] == [False]  # the rolled-back transaction moved nothing
+
+
+def test_the_task_is_not_announced_blocked_when_the_recovery_did_not_block_it(cold):
+    d, wt, ddir = in_flight(cold)
+    with db.transaction(cold.con):
+        state.update_task(cold.con, "run-A", "T1", status="paused", pause_reason="lease revoked: x")
+    before = cold.con.execute("SELECT COUNT(*) FROM events WHERE kind='task.blocked'").fetchone()[0]
+    dispatch._recovery_blocked(cold.con, state.get_run(cold.con, "run-A"), d, cold.trials()[0], "abandoned", "x", "y")
+    assert cold.con.execute("SELECT COUNT(*) FROM events WHERE kind='task.blocked'").fetchone()[0] == before
+    assert task_row(cold)["status"] == "paused"
+
+
+# ------------------------------------------------------------------ gates and a quota wall
+
+def test_a_quota_wall_before_any_work_falls_back_and_after_work_blocks(cold, monkeypatch):
+    monkeypatch.setattr(dispatch, "_quota_wall", lambda run, dd: "you have hit your usage limit")
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    dispatch._finish(d["id"], 1, None, "nonzero", 0.1)
+    job = cold.con.execute("SELECT id FROM outbox WHERE kind='trial_recovery'").fetchone()
+    assert jobs.execute(cold.con, job["id"]) == 0
+    assert cold.trials()[0]["status"] == "fell-back" and len(cold.dispatches()) == 2
+
+
+def test_a_quota_wall_after_work_started_blocks(cold, monkeypatch):
+    monkeypatch.setattr(dispatch, "_quota_wall", lambda run, dd: "you have hit your usage limit")
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    (wt / "half_done.py").write_text("x = 1\n")
+    dispatch._finish(d["id"], 1, None, "nonzero", 0.1)
+    job = cold.con.execute("SELECT id FROM outbox WHERE kind='trial_recovery'").fetchone()
+    assert jobs.execute(cold.con, job["id"]) == 0
+    assert len(cold.dispatches()) == 1 and "half_done.py" in task_row(cold)["pause_reason"]
+
+
+@pytest.mark.parametrize("what", ["scope", "terminal", "lease"])
+def test_each_gate_is_rechecked_before_the_fallback_lease(cold, monkeypatch, what):
+    from office.state import Refused
+    d, wt, ddir = in_flight(cold)
+    if what == "scope":
+        monkeypatch.setattr(plans, "require_scope_clear", lambda con, run, tid: (_ for _ in ()).throw(Refused("plan-defect", "open defect")))
+    elif what == "terminal":
+        with db.transaction(cold.con):
+            cold.con.execute("UPDATE runs SET phase='closed' WHERE id='run-A'")
+    else:
+        with db.transaction(cold.con):
+            cold.con.execute("UPDATE leases SET revoked_at=?, revoke_reason='x' WHERE id=?", (now_iso(), d["lease_id"]))
+    recover(cold, d["id"])
+    assert len(cold.dispatches()) == 1 and cold.trials()[0]["status"] == "launch-failed"
+    assert [l["released_at"] for l in cold.leases()] == [None]  # no lease was released or handed on
+    assert task_row(cold)["status"] == "blocked" and "a gate no longer allows the fallback" in task_row(cold)["pause_reason"]
+    assert cold.dispatches()[0]["ended_at"]  # the worker is gone: no phantom live session
+
+
+def test_a_helper_with_no_dispatch_tag_still_working_in_the_worktree_blocks_the_fallback(cold):
+    # A worker that cleared its environment and left its group carries nothing that names the dispatch. It is
+    # still in the worktree, so it may be writing there: the exit is not confirmed, and it is not signalled.
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(25)"], cwd=wt, start_new_session=True,
+                              env={k: v for k, v in os.environ.items() if not k.startswith("OFFICE_")})
+    threading.Thread(target=helper.wait, daemon=True).start()
+    try:
+        recover(cold, d["id"])
+        assert helper.poll() is None
+        assert len(cold.dispatches()) == 1 and [l["id"] for l in _live_leases(cold)] == [d["lease_id"]]
+        assert "unattributed working directory" in task_row(cold)["pause_reason"] and str(helper.pid) in task_row(cold)["pause_reason"]
+        assert not cold.dispatches()[0]["ended_at"] and cold.trials()[0]["status"] == "abandoned"
+    finally:
+        helper.kill()
+
+
+def test_a_killed_worker_that_is_waiting_to_be_reaped_does_not_count_as_running(cold):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    zombie = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(25)"], start_new_session=True,
+                              env={**os.environ, "OFFICE_DISPATCH_ID": d["id"]})
+    ident = paths.run_dir("run-A") / "dispatches" / d["id"]
+    ident.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(ident / "agent.identity", {"pid": zombie.pid, "start": process_start(zombie.pid), "c_start": dispatch._c_start(zombie.pid)})
+    (ident / "agent.pgid").write_text(str(zombie.pid))
+    try:
+        recover(cold, d["id"])  # this test never waits for the process, so once killed it stays a zombie
+        states = {pid: st for pid, _, st, *_ in _REAL_PROCESS_TABLE()}
+        assert states[zombie.pid].startswith("Z")
+        assert cold.trials()[0]["status"] == "fell-back" and len(cold.dispatches()) == 2
+    finally:
+        zombie.kill()
+        zombie.wait()

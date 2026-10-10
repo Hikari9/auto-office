@@ -270,6 +270,10 @@ def on_permanent_failure(con, run: dict, job: dict, err: str) -> None:
     elif gate_id:
         gates.mark_unavailable(con, run, gate_id, f"{job['kind']} could not run: {err[:200]}")
     task_id = job["payload"].get("task_id")
+    if job["kind"] == "trial_recovery":
+        from office import dispatch
+        dispatch.trial_recovery_failed(con, run, job, err)
+        return
     if job["kind"] == "launch_agent" and task_id:
         from office import dispatch
         if dispatch.trial_launch_failed(con, run, job["payload"].get("dispatch_id"), f"launch failed: {err}"):

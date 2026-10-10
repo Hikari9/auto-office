@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import hashlib
 import json
 import os
 import re
@@ -479,16 +478,19 @@ def preflight_discovery(con, run: dict, task: dict, decision: dict, *, reroute: 
                "reason": f"discovery: untried route {link['candidate']} drawn for an exact probe; "
                          f"{decision['selected']} stays the known-working fallback",
                "primary_route": decision["selected"], "fallback_route": decision["selected"]}
-    outcome = route_probe.ensure(con, run, candidate, attempt_id=link["attempt_id"], context=context)
-    if isinstance(outcome, route_probe.Refused):
-        return _annotated(decision, link, blocked=outcome.reason)
-    handle = {"candidate": link["candidate"], "probe_key": link["probe_key"], "reservation_id": link["attempt_id"],
-              "attempt_id": link["attempt_id"]}
-    fresh = planned_route(con, run, task, reroute=reroute, discovery_input=handle)
-    block = fresh.get("discovery") or {}
-    if fresh.get("status") != "selected" or block.get("intent") != "trial":
-        return _annotated(fresh, link, blocked=block.get("blocked") or "no-trial")
-    fallback = planned_route(con, run, task, reroute=reroute, exclude={link["candidate"]})
+    try:
+        outcome = route_probe.ensure(con, run, candidate, attempt_id=link["attempt_id"], context=context)
+        if isinstance(outcome, route_probe.Refused):
+            return _annotated(decision, link, blocked=outcome.reason)
+        handle = {"candidate": link["candidate"], "probe_key": link["probe_key"], "reservation_id": link["attempt_id"],
+                  "attempt_id": link["attempt_id"]}
+        fresh = planned_route(con, run, task, reroute=reroute, discovery_input=handle)
+        block = fresh.get("discovery") or {}
+        if fresh.get("status") != "selected" or block.get("intent") != "trial":
+            return _annotated(fresh, link, blocked=block.get("blocked") or "no-trial")
+        fallback = planned_route(con, run, task, reroute=reroute, exclude={link["candidate"]})
+    except Exception as exc:  # discovery never costs the dispatch: the known-working decision stands
+        return _annotated(decision, link, blocked=f"probe-error: {type(exc).__name__}")
     if fallback.get("status") != "selected":
         return _annotated(fallback, link, blocked="no-fallback")
     reason = (f"discovery trial: a fresh exact conformance probe passed for {link['candidate']} (attempt "
@@ -1067,12 +1069,26 @@ def _identity_file(run_id: str, dispatch_id: str, which: str) -> Path:
     return paths.run_dir(run_id) / "dispatches" / dispatch_id / f"{which}.identity"
 
 
+def _c_start(pid: int | None) -> str | None:
+    """The process's start time as `ps` prints it in the C locale, whitespace-normalized, or None. Unlike
+    `process_start` it reads the same in any locale, so an identity recorded under one locale still matches
+    when it is checked under another."""
+    if not pid or pid <= 0:
+        return None
+    try:
+        out = subprocess.run([_system_tool("ps", "/bin/ps", "/usr/bin/ps"), "-o", "lstart=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=10, env={**os.environ, "LC_ALL": "C", "LANG": "C"}).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return " ".join(out.split()) or None
+
+
 def _record_identity(run_id: str, dispatch_id: str, which: str, pid: int) -> None:
     """Record which process instance `pid` is (`supervisor` or `agent`), so a
     later stop never signals another process that reused the pid."""
     path = _identity_file(run_id, dispatch_id, which)
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(path, {"pid": pid, "start": process_start(pid)})
+    atomic_write_json(path, {"pid": pid, "start": process_start(pid), "c_start": _c_start(pid)})
 
 
 def _verified(run: dict, dispatch_id: str, which: str, pid: int | None) -> bool:
@@ -3567,6 +3583,57 @@ def _close_trial(con, run: dict, dispatch_id: str) -> None:
         abandon_trial(con, dispatch_id, "the worker ended without a submission and without a recovery")
 
 
+def _system_tool(name: str, *system: str) -> str:
+    """A system tool by absolute path, so a restricted PATH (a sandbox, a test) cannot hide it."""
+    return next((p for p in system if os.access(p, os.X_OK)), shutil.which(name) or name)
+
+
+_PS_ROW = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d+\s+[\d:]{8}\s+\d{4})\s+(.*)$")
+
+
+def _process_table() -> list[tuple[int, int, str, str, str]] | None:
+    """(pid, ppid, state, start, command-and-environment) for every process, or None when the table cannot be
+    trusted. `ps` runs in the C locale, so the start time parses (and matches a recorded identity) whatever the
+    user's locale is; a table that does not contain this very process was misread, and says nothing."""
+    try:
+        listing = subprocess.run([_system_tool("ps", "/bin/ps", "/usr/bin/ps"), "-axeww", "-o", "pid=,ppid=,stat=,lstart=,command="],
+                                 capture_output=True,
+                                 text=True, timeout=10, check=True, env={**os.environ, "LC_ALL": "C", "LANG": "C"}).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    rows = [(int(m.group(1)), int(m.group(2)), m.group(3), " ".join(m.group(4).split()), m.group(5))
+            for m in map(_PS_ROW.match, listing.splitlines()) if m]
+    return rows if any(r[0] == os.getpid() for r in rows) else None
+
+
+def _terminate_worker(pgid: int, tree: "_WorkerTree", *, term_wait: float = 3.0, kill_wait: float = 3.0) -> bool:
+    """SIGTERM, then SIGKILL, the verified agent group (`pgid`, 0 for none) and every process the tree
+    attributes to the worker; True once a scan finds none. A zombie is not a process that can write, and the
+    scan does not count it."""
+    for sig, wait in ((signal.SIGTERM, term_wait), (signal.SIGKILL, kill_wait)):
+        pids = tree.scan()
+        if pids is None:
+            return False
+        if not pids:
+            return True
+        if pgid > 1:
+            with contextlib.suppress(OSError):
+                os.killpg(pgid, sig)
+        for pid in pids:
+            with contextlib.suppress(OSError):
+                os.kill(pid, sig)
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            time.sleep(0.1)
+            pids = tree.scan()
+            if pids is None:
+                return False
+            if not pids:
+                return True
+    pids = tree.scan()
+    return pids is not None and not pids
+
+
 class _WorkerTree:
     """The processes of one dispatch's worker: a recorded root that is still the process it was recorded as
     (pid and start time), anything that carries the dispatch's id in its environment, and everything
@@ -3578,15 +3645,26 @@ class _WorkerTree:
         self.roots = roots
         self.seen: dict[int, str] = {}
 
+    def mine(self) -> set[int]:
+        """This process and its ancestors."""
+        table = _process_table() or []
+        parent = {pid: ppid for pid, ppid, *_ in table}
+        out, pid = set(), os.getpid()
+        while pid in parent and pid not in out:
+            out.add(pid)
+            pid = parent[pid]
+        return out or {os.getpid()}
+
     def scan(self, _root=None) -> set[int] | None:
-        table = route_probe._process_table()
+        table = _process_table()
         if table is None:
             return None
         children: dict[int, list[int]] = {}
         started, parent = {}, {}
         found: set[int] = set()
-        for pid, ppid, start, command in table:
-            start = " ".join(start.split())
+        for pid, ppid, state_, start, command in table:
+            if state_.startswith("Z"):
+                continue  # exited and waiting to be reaped: it cannot write
             children.setdefault(ppid, []).append(pid)
             started[pid], parent[pid] = start, ppid
             if self.tag.search(command):
@@ -3635,64 +3713,67 @@ def stop_worker_tree(run: dict, d: dict) -> tuple[bool, str]:
         rec = _recorded_identity(run, d["id"], which)
         if rec is None:
             continue
-        pid, start = rec["pid"], rec.get("start")
+        pid = rec["pid"]
         if pid_state(pid) == DEAD:
             continue
-        now = process_start(pid)
-        if not start or now is None:
+        # A record made by this version carries the C-locale start; an older one only the user-locale start.
+        recorded, now = ((rec["c_start"], _c_start(pid)) if rec.get("c_start") else (rec.get("start"), process_start(pid)))
+        if not recorded or now is None:
             return False, f"recorded {which} pid {pid} is alive and its identity cannot be proven (start time unreadable)"
-        if now == start:
-            roots[pid] = " ".join(start.split())
+        if now == recorded:
+            roots[pid] = _c_start(pid) or now
             agent_pgid = pid if which == "agent" else agent_pgid
     pid = d.get("pid")
     if pid and pid != os.getpid() and not _recorded_identity(run, d["id"], "supervisor") and pid_alive(pid):
         return False, f"supervisor pid {pid} is alive and has no recorded identity to prove which process it is"
     tree = _WorkerTree(d["id"], roots)
-    gone = route_probe._terminate_tree(agent_pgid, tree, seed=bool(agent_pgid))
+    gone = _terminate_worker(agent_pgid, tree)
     left = tree.scan()
     if not gone or left is None or left:
         return False, ("worker processes remain: " + (", ".join(map(str, sorted(left))) if left else
                                                       "the process table cannot be read, so exit is unconfirmed"))
+    # A helper that cleared its environment and left the group carries nothing that names the dispatch. If
+    # one still has the worktree as its working directory it may be writing there: not confirmed.
+    if d.get("worktree") and Path(d["worktree"]).is_dir():
+        holders = _cwd_holders(Path(d["worktree"]))
+        if holders is None:
+            return False, "the processes working in the worktree cannot be listed, so exit is unconfirmed"
+        holders -= tree.mine()
+        if holders:
+            return False, ("processes with an unattributed working directory in the worktree remain: "
+                           + ", ".join(map(str, sorted(holders))))
     return True, "; ".join([*notes, f"confirmed no process of {d['id']} remains"
                             + (f" (terminated {len(roots)} recorded)" if roots else "")])
 
 
-def _file_digest(path: Path) -> str:
-    """A content digest for a regular file, the link text for a symlink (never followed), else size and mtime."""
+def _file_stamp(path: Path) -> str:
+    """What changes when a file does: link text for a symlink (never followed), else size and mtime."""
     try:
         st = path.lstat()
-        if stat.S_ISLNK(st.st_mode):
-            return "link:" + os.readlink(path)
-        if stat.S_ISREG(st.st_mode) and st.st_size <= 8 << 20:
-            return hashlib.sha256(path.read_bytes()).hexdigest()
-        return f"{st.st_size}:{st.st_mtime_ns}"
     except OSError:
         return "gone"
+    return "link:" + os.readlink(path) if stat.S_ISLNK(st.st_mode) else f"{st.st_size}:{st.st_mtime_ns}"
 
 
 def _worktree_snapshot(wt: Path) -> dict | None:
-    """HEAD and every changed or untracked, non-ignored path with a digest of its content. Taken until two
-    consecutive reads agree, so it describes a worktree nothing is writing. None when it never settles or
-    git cannot say."""
+    """HEAD, the index, and a stamp for every tracked and every non-ignored untracked path. Taken until two
+    consecutive reads agree, so it describes a worktree nothing is writing. None when it never settles or git
+    cannot say. The worktree is the failed agent's, so this reads names and stamps only: `git status` would
+    hash content through whatever filter drivers the agent configured, and run them here."""
+    def git_z(*args: str) -> list[str]:
+        raw = subprocess.run(["git", "-C", str(wt), "-c", "core.fsmonitor=false", *args], capture_output=True, timeout=120)
+        if raw.returncode != 0:
+            raise OSError(raw.stderr.decode("utf-8", "replace"))
+        return [x for x in raw.stdout.decode("utf-8", "surrogateescape").split("\0") if x]
+
     def once() -> dict | None:
         try:
             head = paths.git(wt, "rev-parse", "HEAD")
-            # The worktree is the failed agent's: no fsmonitor hook it may have configured runs for this read.
-            raw = subprocess.run(["git", "-C", str(wt), "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z",
-                                  "--untracked-files=all"], capture_output=True, timeout=120)
+            index = sha256_obj(git_z("ls-files", "-s", "-z"))
+            names = sorted({*git_z("ls-files", "-z"), *git_z("ls-files", "-o", "-z", "--exclude-standard")})
         except (OSError, subprocess.SubprocessError, paths.GitError):
             return None
-        if raw.returncode != 0:
-            return None
-        files = {}
-        entries = raw.stdout.decode("utf-8", "surrogateescape").split("\0")
-        i = 0
-        while i < len(entries) and entries[i]:
-            code, name = entries[i][:2], entries[i][3:]
-            i += 2 if code[0] in "RC" else 1  # a rename carries its source as another field
-            path = wt / name
-            files[name] = f"{code}:{_file_digest(path)}"
-        return {"head": head, "files": files}
+        return {"head": head, "index": index, "files": {name: _file_stamp(wt / name) for name in names}}
 
     previous = once()
     for _ in range(4):
@@ -3702,6 +3783,22 @@ def _worktree_snapshot(wt: Path) -> dict | None:
             return current
         previous = current
     return None
+
+
+def _cwd_holders(wt: Path) -> set[int] | None:
+    """Processes whose working directory is inside `wt`, or None when they cannot be listed."""
+    try:
+        out = subprocess.run([_system_tool("lsof", "/usr/sbin/lsof", "/usr/bin/lsof"), "-nP", "-a", "-d", "cwd", "-F", "pn"],
+                             capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    holders, pid, root = set(), None, str(wt.resolve())
+    for line in out.splitlines():
+        if line[:1] == "p" and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line[:1] == "n" and pid and (line[1:] == root or line[1:].startswith(root + os.sep)):
+            holders.add(pid)
+    return holders
 
 
 def work_started(con, d: dict, ddir: Path) -> tuple[bool, str]:
@@ -3726,6 +3823,8 @@ def work_started(con, d: dict, ddir: Path) -> tuple[bool, str]:
     if after["head"] != before["head"]:
         return True, f"the branch moved from {str(before['head'])[:8]} to {after['head'][:8]}"
     changed = sorted(p for p in {*after["files"], *before["files"]} if after["files"].get(p) != before["files"].get(p))
+    if after["index"] != before.get("index", after["index"]):
+        changed.insert(0, "the index")
     if changed:
         return True, "the worktree changed after launch: " + ", ".join(changed[:5]) + (" ..." if len(changed) > 5 else "")
     return False, "no revision, no commit and no worktree change since the launch"
@@ -3744,8 +3843,8 @@ def _recovery_blocked(con, run: dict, d: dict, trial: dict, status: str, reason:
         set_trial_status(con, trial, status, origin="recovery", detail=reason, outcome={"recovery": "blocked", "why": reason})
         if task and task["current_dispatch_id"] == d["id"] and task["status"] in ("running", "launching"):
             state.update_task(con, run["id"], task["id"], status="blocked", pause_reason=f"trial {trial['route']}: {reason}"[:300])
-        state.emit(con, run, "task.blocked", f"{d['task_id']} trial route {trial['route']} failed: {reason}; no fallback "
-                   f"was started. {next_step}", task_id=d["task_id"], dispatch_id=d["id"])
+            state.emit(con, run, "task.blocked", f"{d['task_id']} trial route {trial['route']} failed: {reason}; no fallback "
+                       f"was started. {next_step}", task_id=d["task_id"], dispatch_id=d["id"])
     return {"recovery": "blocked", "reason": reason}
 
 
@@ -3779,21 +3878,39 @@ def _recovery_fallback(con, run: dict, task: dict, d: dict, trial: dict) -> tupl
 def job_trial_recovery(con, run: dict, job: dict) -> dict:
     """A failure inside the recovery blocks the task with its reason: a dead worker and a trial left open
     would otherwise wait for nobody."""
+    progress = {"exited": False}
     try:
-        return _trial_recovery(con, run, job)
+        return _trial_recovery(con, run, job, progress)
     except db.StaleAttempt:
         raise
     except Exception as exc:
-        d = state.get_dispatch(con, job["payload"]["dispatch_id"])
-        trial = open_trial(con, d["id"]) if d else None
-        if not trial:
-            raise
-        return _recovery_blocked(con, run, d, trial, "abandoned", f"the recovery itself failed ({type(exc).__name__}: {exc})",
-                                 f"The worktree is preserved; office rerun {d['task_id']} --fresh, or office dispatch "
-                                 f"{d['task_id']} --reroute")
+        return _recovery_crashed(con, run, job["payload"]["dispatch_id"], f"{type(exc).__name__}: {exc}",
+                                 exited=progress["exited"]) or _reraise(exc)
 
 
-def _trial_recovery(con, run: dict, job: dict) -> dict:
+def _reraise(exc: BaseException):
+    raise exc
+
+
+def _recovery_crashed(con, run: dict, dispatch_id: str, err: str, *, exited: bool = False) -> dict | None:
+    """The recovery failed (an exception in it, or its job failed for good): block the task and settle the
+    trial, so neither waits for a recovery that is not coming. None when there is no open trial."""
+    d = state.get_dispatch(con, dispatch_id)
+    trial = open_trial(con, dispatch_id) if d else None
+    if not trial:
+        return None
+    return _recovery_blocked(con, run, d, trial, "abandoned", f"the recovery itself failed ({err[:200]})",
+                             f"The worktree is preserved; office rerun {d['task_id']} --fresh, or office dispatch "
+                             f"{d['task_id']} --reroute", exited=exited)
+
+
+def trial_recovery_failed(con, run: dict, job: dict, err: str) -> None:
+    """A trial_recovery job that failed for good (killed twice, a version mismatch): the same block. Caller holds
+    the transaction."""
+    _recovery_crashed(con, run, job["payload"].get("dispatch_id"), err)
+
+
+def _trial_recovery(con, run: dict, job: dict, progress: dict) -> dict:
     """The outbox job behind a trial's launch failure (#494). In order: end the failed worker's process
     tree and confirm it is gone; decide from the revisions, commits and a stable worktree snapshot whether
     work started; and only for a confirmed pre-work failure release the trial's lease, end its binding, mark
@@ -3815,6 +3932,7 @@ def _trial_recovery(con, run: dict, job: dict) -> dict:
         return _recovery_blocked(con, run, d, trial, "abandoned", f"its worker process could not be confirmed gone ({detail})",
                                  f"Stop the process by hand and confirm it with ps, then {rerun_hint}. The worktree and "
                                  f"lease {d.get('lease_id')} are preserved")
+    progress["exited"] = True
     ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
     meaningful, evidence = work_started(con, state.get_dispatch(con, d["id"]), ddir)
     if meaningful:
@@ -3875,7 +3993,8 @@ def _trial_recovery(con, run: dict, job: dict) -> dict:
                                  f"The worker is gone and no work started; resolve that, then office dispatch {tid} --reroute",
                                  exited=True)
     if cur.get("launcher") == "herdr" and cur.get("pane_id"):
-        _unreserve_pane(run, cur["pane_id"])
+        with _pane_lock(run):
+            _unreserve_pane(run, cur["pane_id"])
     return {"recovery": "fell-back", "fallback_dispatch": new}
 
 
