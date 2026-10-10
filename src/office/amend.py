@@ -398,11 +398,11 @@ def _contract(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
             if t["id"] in targets and t["status"] not in ("accepted", "cancelled", "planned", "paused"):
                 state.update_task(con, run["id"], t["id"], status="paused", pause_reason=f"contract amendment {amendment_id}")
                 paused.append(t["id"])
-        dispatch.create_planner_task(con, run, contract_request=request)
-        state.emit(con, run, "plan.contract_requested", f"contract amendment {amendment_id} requested; planner queued",
-                   audience="runtime")
+        planner = dispatch.create_planner_task(con, run, contract_request=request)
+        state.emit(con, run, "plan.contract_requested", f"contract amendment {amendment_id} requested; planner {planner} "
+                   f"retained or queued", audience="runtime")
     jobs.kick(con, run["id"])
-    return Result(lines=[f"contract amendment {amendment_id} | planner P1 queued"
+    return Result(lines=[f"contract amendment {amendment_id} | planner {planner} retained or queued"
                          + (f" | paused {','.join(paused)}" if paused else "")] + (redirect_lines if redirect else []),
                   next="no action; the revised plan returns here (unaffected work continues)")
 
