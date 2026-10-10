@@ -929,7 +929,12 @@ def _agent_pgid_file(run: dict, dispatch_id: str) -> Path:
     return paths.run_dir(run["id"]) / "dispatches" / dispatch_id / "agent.pgid"
 
 
-_PANE_GROUP_WAIT = 3.0
+def _pane_group_wait() -> float:
+    """How long a pane launch polls for the agent's foreground group (#507)."""
+    try:
+        return max(0.0, float(os.environ.get("OFFICE_PANE_GROUP_WAIT", "3.0")))
+    except ValueError:
+        return 3.0
 
 
 def _record_pane_agent_group(run: dict, dispatch_id: str, pane: str) -> int | None:
@@ -938,7 +943,7 @@ def _record_pane_agent_group(run: dict, dispatch_id: str, pane: str) -> int | No
     behind can later be proven Office's (#507). The agent is the pane's
     foreground job, so it leads that group. Nothing is recorded when the group
     is unknown, is the shell's own, or its leader's start cannot be read."""
-    deadline = time.time() + _PANE_GROUP_WAIT
+    deadline = time.time() + _pane_group_wait()
     while True:
         # Right after start the shell may still own the terminal, or a short-lived
         # wrapper may: poll briefly until another group holds the foreground.

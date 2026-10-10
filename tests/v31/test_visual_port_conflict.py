@@ -332,6 +332,7 @@ def test_pane_group_is_read_again_until_the_shell_hands_over(env, live_agent, mo
         calls.append(args)
         return {"process_info": seq[min(len(calls) - 1, len(seq) - 1)]}
     monkeypatch.setattr(dispatch, "_herdr_json", fake)
+    monkeypatch.setenv("OFFICE_PANE_GROUP_WAIT", "3")
     monkeypatch.setattr(dispatch.time, "sleep", lambda s: None)
     assert dispatch._record_pane_agent_group(run, "DP4", "p1") == agent["pid"]
     assert len(calls) == 3
@@ -341,7 +342,7 @@ def test_pane_group_is_read_again_until_the_shell_hands_over(env, live_agent, mo
 def test_pane_group_wait_is_bounded(env, monkeypatch):
     from office import dispatch
     _, run = _run(env)
-    monkeypatch.setattr(dispatch, "_PANE_GROUP_WAIT", 0.3)
+    monkeypatch.setenv("OFFICE_PANE_GROUP_WAIT", "0.3")
     monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {"process_info": {"shell_pid": 7, "foreground_process_group_id": 7}})
     t = time.time()
     assert dispatch._record_pane_agent_group(run, "DP5", "p1") is None
