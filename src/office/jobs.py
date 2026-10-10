@@ -65,6 +65,7 @@ def _handlers():
         "lane_visual": convergence.job_lane_visual,
         "pr_sync": prs.job_pr_sync,
         "launch_agent": dispatch.job_launch_agent,
+        "trial_recovery": dispatch.job_trial_recovery,
         "notify_worker": dispatch.job_notify_worker,
         "run_checks": gates.job_run_checks,
         "review": gates.job_review,
@@ -270,6 +271,9 @@ def on_permanent_failure(con, run: dict, job: dict, err: str) -> None:
         gates.mark_unavailable(con, run, gate_id, f"{job['kind']} could not run: {err[:200]}")
     task_id = job["payload"].get("task_id")
     if job["kind"] == "launch_agent" and task_id:
+        from office import dispatch
+        if dispatch.trial_launch_failed(con, run, job["payload"].get("dispatch_id"), f"launch failed: {err}"):
+            return  # a trial's failed launch is recovered (fallback, or a blocker with a next step), not just blocked
         state.update_task(con, run["id"], task_id, status="blocked", pause_reason=f"launch failed: {err[:200]}")
         state.emit(con, run, "task.blocked", f"{task_id} could not launch: {err[:120]}", task_id=task_id)
 
@@ -410,6 +414,9 @@ def _run_attempt(con, job_id: str, token: str) -> int:
         except db.StaleAttempt as stale:
             _stale(con, run, job, token, f"{stale} (its own failure was {err[:200]})")
         sys.stderr.write(tb)
+        if mode() != "inline":
+            with db.unfenced():
+                kick(con, run["id"])  # a failure may have queued its own recovery
         return 1
     state.write_projection(con, run["id"])
     if mode() != "inline":
