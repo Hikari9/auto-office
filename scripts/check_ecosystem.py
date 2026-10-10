@@ -70,7 +70,7 @@ def frontmatter(path):
 def discovered_skills(root):
     return sorted(
         path for path in root.rglob('SKILL.md')
-        if not any(part.startswith('.') for part in path.relative_to(root).parts)
+        if not any(part.startswith('.') or part == 'mutants' for part in path.relative_to(root).parts)  # mutants/: mutmut's copy
     )
 
 def check_skill_budgets(root=ROOT):

@@ -25,6 +25,8 @@ git config core.hooksPath .githooks                # enable the pre-push gate
 - There is no remote CI. `scripts/validate.sh` is the only gate and stamps the validated tree under `$(git rev-parse --git-common-dir)/office-validated` so pre-push can skip a rerun.
 - Markers (`pyproject.toml`): `integration`, `legacy`, `slow` are deselected by default. `approved` starts from an approved-plan snapshot. `review_contract(name)` pins the run's review contract (v3.1 suites test pinned pre-#337 runs).
 - Tests use isolated homes and scripted fake harness binaries. Never call a real model from a test.
+- Property tests use Hypothesis (`from hypothesis import given`). Use one where an invariant over generated inputs says more than a table of examples, not to convert ordinary example tests. `tests/conftest.py` loads a deterministic profile (`derandomize`, no example database); `HYPOTHESIS_PROFILE=explore` randomises and widens a one-off hunt. Keep a shrunk counterexample as an `@example(...)`. Keep a named example where the example itself is the contract or the historical regression.
+- Mutation testing (mutmut) audits the core-logic tests by hand and is not part of the gate: `docs/mutation-testing.md`. Install with `.[mutation]`.
 - To dogfood a change: `uv tool install --force --reinstall --no-cache "auto-office[visual] @ <checkout>"` then `office install`.
 
 ## Architecture

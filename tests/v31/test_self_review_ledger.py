@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from hypothesis import given, strategies as st
 
 from conftest import GOOD_ADD, approved_run, task_row
 
@@ -184,21 +185,24 @@ def test_commit_in_upper_case_is_the_same_sha(repo):
     assert verdict(repo) == ([], [])
 
 
-@pytest.mark.parametrize("length", [7, 12, 39])
-def test_a_commit_prefix_of_head_is_malformed_not_current(repo, length):
+def test_a_commit_prefix_of_head_is_malformed_not_current(repo):
+    """A 39-hex prefix of HEAD is the closest miss: it must not count as naming HEAD."""
     head = _git(repo, "rev-parse", "HEAD")
-    write_ledger(repo, ledger_text(head[:length]))
+    write_ledger(repo, ledger_text(head[:39]))
     stop, fix = verdict(repo)
     assert stop == [], stop
     assert any(f.startswith("ledger line 1:") and "COMMIT needs the full sha of HEAD" in f for f in fix), fix
     assert any("no COMMIT line" in f for f in fix), "a prefix must not count as naming HEAD"
 
 
-@pytest.mark.parametrize("length", [41, 63, 65])
-def test_a_commit_that_is_no_sha_length_is_malformed(repo, length):
-    write_ledger(repo, ledger_text("a" * length))
-    stop, fix = verdict(repo)
-    assert any(f.startswith("ledger line 1:") and "COMMIT needs the full sha of HEAD" in f for f in fix), fix
+@given(sha=st.text(alphabet="0123456789abcdefABCDEF", min_size=1, max_size=80))
+def test_a_commit_line_is_read_only_when_it_is_a_whole_sha(sha):
+    from office import preflight
+    led, errors = preflight.parse_ledger(f"COMMIT {sha}\n")
+    if len(sha) in (40, 64):
+        assert errors == [] and led["commit"] == sha.lower()
+    else:
+        assert len(errors) == 1 and errors[0].startswith("line 1:") and led["commit"] is None, (len(sha), errors)
 
 
 def test_a_sha256_commit_is_read_and_compared_in_full(repo):
@@ -369,16 +373,43 @@ def test_a_low_fix_needs_neither_test_nor_mutation_but_a_given_mutation_must_be_
     ("src/calc.test.ts", True), ("web/calc.spec.js", True), ("__tests__/calc.js", True), ("spec/calc_spec.rb", True),
     ("tests/helpers/util.py", True), ("test.py", True), ("src/calc-test.js", True), ("src/test-calc.js", True),
     ("lib/calc_spec.rb", True), ("web/calc-spec.ts", True), ("Calc.Tests/CalcTests.cs", True), ("Calc.Tests/Helpers.cs", True), ("calc-tests/util.go", True), ("src/CalcTest.java", True),
-    ("cypress/e2e/calc.cy.ts", True), ("e2e/calc.ts", True), ("src/calc.rs::tests::adds", True), ("src/calc.tests.ts", True),
-    ("README.md", False), ("calc.py", False), ("tests/NOTES.md", False), ("tests/data.json", False), ("docs/test_plan.md", False),
-    ("tests/__init__.py", False), ("tests/conftest.py", False), ("tests/a.svg", False), ("tests/a.jpeg", False),
-    ("tests/report.html", False), ("src/calc.rs", False), ("src/calc.rs::adds", False), ("src/Contest.java", False),
-    ("tests/data.csv", False), ("tests/data.jsonl", False), ("tests/q.sql", False), ("tests/fixtures/x.bin", False), ("tests/__snapshots__/a.snap", False), ("src/spec.py", False),
+    ("cypress/e2e/calc.cy.ts", True), ("e2e/calc.ts", True), ("src/calc.rs::tests::adds", True), ("src/calc.rs::test::adds", True), ("tests\\calc.py", True), ("src\\calc.py", False), ("src/calc.tests.ts", True),
+    ("README.md", False), ("calc.py", False), ("docs/test_plan.md", False),
+    ("src/calc.rs", False), ("src/calc.rs::adds", False), ("src/Contest.java", False),
+    ("src/spec.py", False),
     ("src/contest.py", False), ("latest/calc.py", False), ("tests", False), ("", False),
 ])
 def test_which_paths_count_as_a_test_file(name, ok):
     from office import preflight
     assert preflight._is_test_path(name) is ok
+
+
+_NON_CODE = [".md", ".json", ".svg", ".jpeg", ".html", ".csv", ".jsonl", ".sql", ".bin", ".snap", ".yaml", ".txt"]
+_TEST_DIRS = ["tests", "test", "spec", "__tests__", "e2e"]
+_stem = st.text(alphabet="abcdefgh", min_size=1, max_size=6)
+_any_dir = st.one_of(st.just(""), st.sampled_from(_TEST_DIRS + ["src", "docs", "pkg/lib"]))
+
+
+@given(directory=_any_dir, stem=_stem, suffix=st.sampled_from(_NON_CODE), test_named=st.booleans())
+def test_a_doc_or_data_file_is_never_a_test_whatever_its_name_or_directory(directory, stem, suffix, test_named):
+    from office import preflight
+    name = (f"test_{stem}" if test_named else stem) + suffix
+    assert preflight._is_test_path(f"{directory}/{name}" if directory else name) is False
+
+
+@given(directory=st.sampled_from(_TEST_DIRS), stem=_stem, suffix=st.sampled_from([".py", ".js", ".go", ".rb"]))
+def test_any_code_file_under_a_test_directory_is_a_test_except_package_markers(directory, stem, suffix):
+    from office import preflight
+    assert preflight._is_test_path(f"{directory}/{stem}{suffix}") is True
+    assert preflight._is_test_path(f"{directory}/__init__.py") is False
+    assert preflight._is_test_path(f"{directory}/conftest.py") is False
+
+
+@given(directory=st.sampled_from(["", "src/", "pkg/lib/"]), stem=_stem)
+def test_a_test_prefixed_file_is_a_test_in_any_directory(directory, stem):
+    from office import preflight
+    assert preflight._is_test_path(f"{directory}test_{stem}.py") is True
+    assert preflight._is_test_path(f"{directory}{stem}_test.go") is True
 
 
 @pytest.mark.parametrize("lens", LENSES)
@@ -553,15 +584,38 @@ MALFORMED = [
 
 
 @pytest.mark.parametrize("bad", MALFORMED)
-def test_a_malformed_line_is_a_fix_with_its_line_number_and_never_ready(repo, bad):
-    head = _git(repo, "rev-parse", "HEAD")
+def test_a_malformed_line_is_an_error_naming_its_line_and_never_ready(tmp_path, bad):
+    from office import preflight
+    head = "a" * 40
     text = ledger_text(head) + bad + "\n"
     n = text.splitlines().index(bad) + 1
-    fix = fixes(repo, text)
-    assert any(f.startswith(f"ledger line {n}:") for f in fix), (bad, fix)
+    _, errors = preflight.parse_ledger(text)
+    assert [e for e in errors if e.startswith(f"line {n}:")], (bad, errors)  # the parser rejects it, not a later check
+    stop, fix = preflight.check_ledger(text, head, [], ["calc.py"], tmp_path)
+    assert stop == [] and any(f.startswith(f"ledger line {n}:") for f in fix), (bad, fix)
+
+
+def test_a_summary_may_contain_a_pipe():
+    from office import preflight
+    led, errors = preflight.parse_ledger(ledger_text("c" * 40, findings=["FINDING high security calc.py:3 | a | b | c | open"]))
+    assert errors == [] and led["findings"][0]["summary"] == "a | b | c" and led["findings"][0]["kind"] == "open"
+
+
+def test_a_byte_order_mark_before_the_first_line_is_not_part_of_it():
+    from office import preflight
+    led, errors = preflight.parse_ledger("\ufeff" + ledger_text("b" * 40))
+    assert errors == [] and led["commit"] == "b" * 40
+
+
+def test_a_malformed_line_reaches_the_verdict_the_same_way(repo):
+    head = _git(repo, "rev-parse", "HEAD")
+    fix = fixes(repo, ledger_text(head) + "NOTE all fine\n")
+    assert len(fix) == 1 and fix[0].startswith("ledger line 7:") and "unknown line" in fix[0], fix
 
 
 @pytest.mark.parametrize("line, why", [
+    ("FINDING low security calc.py:9", "FINDING needs"),
+    ("FINDING low security calc.py:9 | nit", "FINDING needs"),
     ("FINDING low calc.py:9 | nit | fixed", "lens must be one of"),
     ("FINDING low crypto calc.py:9 | nit | fixed", "lens must be one of"),
     ("FINDING low Security calc.py:9 | nit | fixed", "lens must be one of"),
@@ -576,6 +630,34 @@ def test_a_finding_line_is_rejected_for_its_own_reason_not_just_flagged_as_somet
     head = _git(repo, "rev-parse", "HEAD")
     fix = fixes(repo, ledger_text(head) + line + "\n")
     assert len(fix) == 1 and fix[0].startswith("ledger line 7:") and why in fix[0], fix
+
+
+_SEVERITIES = ["high", "medium", "low"]
+_DISPOSITIONS = st.sampled_from(["open", "out-of-scope", "dismissed the call never happens", "fixed", "fixed tests/test_a.py",
+                                 "fixed tests/test_a.py mutation=failed", "contract-conflict accept=3"])
+_finding = st.tuples(st.sampled_from(_SEVERITIES), st.sampled_from(LENSES),
+                     st.from_regex(r"[a-z]{1,6}\.py:[0-9]{1,3}(-[0-9]{1,3})?", fullmatch=True),
+                     st.text(alphabet="abcdef 0123()", min_size=1, max_size=20).filter(lambda t: t.strip() and " | " not in t),
+                     _DISPOSITIONS)
+_lens_status = st.one_of(st.just(None), st.text(alphabet="abc xyz", min_size=1, max_size=10).filter(lambda t: t.strip()))
+
+
+@given(sha=st.one_of(st.text(alphabet="0123456789abcdef", min_size=40, max_size=40),
+                     st.text(alphabet="0123456789abcdef", min_size=64, max_size=64)),
+       rnd=st.integers(min_value=1, max_value=3), statuses=st.lists(_lens_status, min_size=4, max_size=4),
+       findings=st.lists(_finding, max_size=5))
+def test_a_well_formed_ledger_parses_without_error_and_keeps_every_field(sha, rnd, statuses, findings):
+    from office import preflight
+    lines = [f"COMMIT {sha}", f"ROUND {rnd}"]
+    lines += [f"LENS {lens} reviewed" if why is None else f"LENS {lens} skipped {why}" for lens, why in zip(LENSES, statuses)]
+    lines += [f"FINDING {sev} {lens} {loc} | {summary} | {disp}" for sev, lens, loc, summary, disp in findings]
+    led, errors = preflight.parse_ledger("\n".join(lines) + "\n")
+    assert errors == []
+    assert (led["commit"], led["round"]) == (sha, rnd)
+    assert led["lenses"] == {lens: (why.strip() if why else None) for lens, why in zip(LENSES, statuses)}
+    got = [(f["severity"], f["lens"], f["location"], f["summary"], f["kind"] + (" " + f["arg"] if f["arg"] else ""), f["line"])
+           for f in led["findings"]]
+    assert got == [(sev, lens, loc, summary.strip(), disp, 7 + i) for i, (sev, lens, loc, summary, disp) in enumerate(findings)]
 
 
 @pytest.mark.parametrize("dup", ["COMMIT {head}", "ROUND 2", "LENS security reviewed", "LENS security skipped why"])

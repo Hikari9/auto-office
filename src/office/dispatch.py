@@ -31,7 +31,7 @@ except ImportError:  # not POSIX: a pane's terminal mode cannot be read
 from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, scoring, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
-from office.util import (atomic_write_json, claim_signalable, dumps, now_iso, parse_iso, pid_alive,
+from office.util import (atomic_write_json, atomic_write_text, claim_signalable, dumps, now_iso, parse_iso, pid_alive,
                          process_is, process_start, sha256_obj, short, loads)
 
 LEASE_TTL_SECONDS = 4 * 3600
@@ -57,12 +57,102 @@ _STARTUP_SCREEN_MARKERS = (
 )
 
 
+# A launch receipt must never turn adapter arguments or a prompt into a credential leak.
+_LAUNCH_SECRET = re.compile(r"(?i)(?:api[_-]?key|access[_-]?key|private[_-]?key|password|passwd|secret|token(?!s)"
+                            r"|credential|authorization|bearer|cookie|session[_-]?key|\bauth\b|\bpat\b|\bpass\b)")
+# Flags whose value is a secret or a prompt even though the flag name does not say so.
+_HIDE_VALUE_FLAGS = {"--auth", "--key", "--pat", "--pass", "-p", "--prompt"}
+_ENV_FLAGS = {"-e", "--env", "--set-env"}
+# Credential shapes caught wherever they appear, whatever the flag or key name says.
+_SECRET_VALUE = re.compile(r"(?:sk-[A-Za-z0-9_-]{8,}|gh[opsur]_[A-Za-z0-9]{8,}|github_pat_\w{8,}|xox[abpr]-[\w-]{8,}"
+                           r"|glpat-[\w-]{8,}|AKIA[0-9A-Z]{16}|eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]+|AIza[\w-]{30,})")
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@")
+_REDACTED = "[REDACTED]"
+
+
+def _redact_arg(arg: str) -> str:
+    named = _LAUNCH_SECRET.search(arg)
+    if named:
+        # Keep everything before the secret's own separator; whatever follows it is the value.
+        sep = re.search(r"[=:]", arg[named.end():])
+        if sep is None:
+            return _REDACTED
+        cut = named.end() + sep.end()
+        return arg[:cut] + (" " if arg[cut - 1] == ":" else "") + _REDACTED
+    arg = _URL_USERINFO.sub(lambda m: m.group(1) + _REDACTED + "@", arg)
+    return _SECRET_VALUE.sub(_REDACTED, arg)
+
+
+def _redact_launch_argv(argv: list[str]) -> list[str]:
+    """Redact an argv for evidence. A secret-named flag hides its next argument;
+    `name=value` and `Header: value` keep the name and hide the value; an env
+    flag's `NAME=value` keeps only the name."""
+    safe: list[str] = []
+    hide = None
+    for arg in argv:
+        if hide == "value":
+            safe.append(_REDACTED)
+        elif hide == "env":
+            safe.append(arg.split("=", 1)[0] + "=" + _REDACTED if "=" in arg else _REDACTED)
+        elif arg.startswith("-") and not re.search(r"[=:]", arg) and (arg in _HIDE_VALUE_FLAGS or _LAUNCH_SECRET.search(arg)):
+            safe.append(arg)
+            hide = "value"
+            continue
+        elif arg in _ENV_FLAGS:
+            safe.append(arg)
+            hide = "env"
+            continue
+        else:
+            safe.append(_redact_arg(arg))
+        hide = None
+    return safe
+
+
+def write_launch_spec(run: dict, dispatch_id: str, spec: dict) -> None:
+    """launch.json is private to the user: it carries argv evidence and paths (#500)."""
+    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch_id / "launch.json", spec, mode=0o600)
+
+
+def _record_launch_form(run: dict, dispatch: dict, spec: dict, form: str, argv: list[str],
+                        *, transport: str, **fields) -> None:
+    """Persist the actual rendered launch form, never the prompt or secret arguments (#500)."""
+    adapter = adapters.load_all().get(dispatch.get("adapter_id") or dispatch.get("harness") or "")
+    route = dispatch.get("route") or {}
+    cand = route.get("candidate") or {}
+    spec.setdefault("rendered_launches", {})[form] = {
+        "argv": _redact_launch_argv(argv),
+        "prompt_transport": transport,
+        "adapter_hash": adapters.adapter_hash(adapter) if adapter else None,
+        "harness_version": cand.get("harness_version") or dispatch.get("harness_version"),
+        **fields,
+    }
+    write_launch_spec(run, dispatch["id"], spec)
+
+
 # ------------------------------------------------------------------ planner task
 
 def create_planner_task(con, run: dict, *, contract_request: str | None = None, decision: dict | None = None) -> str:
     """Queue the dedicated planner. Caller holds the transaction."""
     now = now_iso()
     existing = state.get_task(con, run["id"], PLANNER_TASK)
+    from office import gates
+    live = gates.live_task_session(con, run["id"], PLANNER_TASK)
+    if live:
+        # A planner cannot be superseded while it is writing PLAN.md. The new
+        # amendment is already durable in amendments. A queued planner picks it
+        # up when its packet is built; a running one acknowledges only what its
+        # packet carried, so the request waits for the next revision (#506).
+        if contract_request:
+            d = state.get_dispatch(con, live)
+            if d and d.get("status") == "running":
+                state.enqueue(con, run, "notify_worker",
+                              {"dispatch_id": live, "task_id": PLANNER_TASK,
+                               "text": f"CONTRACT AMENDMENT QUEUED: {contract_request}. "
+                                       "It is not part of your brief; Office plans it in a follow-up "
+                                       "revision after you submit. Finish the current revision as briefed."},
+                              dedup_key=f"planner-amend:{live}:{contract_request.split(':', 1)[0]}",
+                              max_attempts=1)
+        return live
     if existing is None:
         con.execute(
             "INSERT INTO tasks(run_id, id, title, role, scope_json, depends_json, interfaces_json, accept_json, "
@@ -470,12 +560,13 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
     rounds route here from pinned state because they have no orchestrator turn.
     """
     task = state.get_task(con, run["id"], task_id)
-    if role == "executor":
+    if role in ("executor", "planner"):
         from office import gates
         live = gates.live_task_session(con, run["id"], task_id, exclude=replaces)
         if live:
             # One session per worktree: amend, rerun and relaunch all come through here.
-            raise Refused("worker-live", f"{task_id} still has a live worker ({live})", scope=task_id,
+            raise Refused("planner-live" if role == "planner" else "worker-live",
+                          f"{task_id} still has a live {role} ({live})", scope=task_id,
                           next_step=f'office prompt {task_id} -- "<message>" to reach it, or office revoke {task_id} '
                                     "to end it first")
     prior = None
@@ -951,6 +1042,14 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
     task = state.get_task(con, run["id"], dispatch["task_id"])
     plan = state.current_plan(con, run["id"])
     req = state.current_requirements(con, run["id"])
+    # Gather contract requests when the launch job constructs the packet, not
+    # when the first amendment queued it: later requests may arrive before the
+    # planner starts and must be included in its first brief (#506).
+    requests = con.execute("SELECT seq, delta FROM amendments WHERE run_id=? AND class='contract' "
+                           "AND to_plan_version IS NULL ORDER BY seq", (run["id"],)).fetchall() if role == "planner" else []
+    contract_request = ("\n".join(f"A{r['seq']}: {r['delta']}" for r in requests)
+                        if requests else extra.get("contract_request"))
+    contract_request_max_seq = max((r["seq"] for r in requests), default=None)
     body = {
         "role": role,
         "dispatch_id": dispatch["id"],
@@ -972,7 +1071,8 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
         "pr": _pr_packet(con, run, task, dispatch) if role == "executor" else None,
         "requirements": req["frozen"],
         "fix_of": extra.get("fix_of"),
-        "contract_request": extra.get("contract_request"),
+        "contract_request": contract_request,
+        "contract_request_max_seq": contract_request_max_seq,
         "restack": extra.get("restack"),
     }
     return state.packet_envelope(run, f"{role}-dispatch", body)
@@ -984,7 +1084,7 @@ def _pr_packet(con, run: dict, task: dict, dispatch: dict) -> dict | None:
     if not prs.enabled(run) or not prs.has_pr(task):
         return None
     ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch["id"]
-    ddir.mkdir(parents=True, exist_ok=True)
+    ddir.mkdir(parents=True, exist_ok=True, mode=0o700)
     body_path = ddir / "pr-body.md"
     body_path.write_text(prs.body(con, run, task, dispatch), encoding="utf-8")
     return {"push": f"git push -u origin HEAD:refs/heads/{dispatch['branch']}",
@@ -1020,7 +1120,7 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     wt = ensure_worktree(run, dispatch)
     role = payload["role"]
     ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch["id"]
-    ddir.mkdir(parents=True, exist_ok=True)
+    ddir.mkdir(parents=True, exist_ok=True, mode=0o700)
     setup = None
     if role == "executor":
         _set_aside_evidence(con, run, dispatch, wt, ddir)
@@ -1099,7 +1199,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
             "images": [str(i) for i in images or []], "include_dirs": [str(d) for d in include_dirs or []],
             "prompt_file": str(prompt_file or ddir / "brief.md"), "log_path": str(ddir / "output.log")}
     # The supervisor always finds its spec here, whatever directory holds the brief.
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     con = db.connect()
     try:
         with db.transaction(con):
@@ -1153,7 +1253,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         pane = _herdr_pane(run, cwd, label=label, dispatch_id=dispatch["id"]) if inter else None
         if inter and not pane:
             spec["fallback_reason"] = "no herdr pane could be opened"
-            atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+            write_launch_spec(run, dispatch["id"], spec)
             _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
             if resume:
                 _headless_resume(run, dispatch, kind, spec, resume)
@@ -1205,7 +1305,7 @@ def _headless_resume(run: dict, dispatch: dict, kind: str, spec: dict, resume: d
         why = "no session id was recorded" if not session else "its adapter declares no headless resume form"
         _launch_notice(run, dispatch, f"the resume could not run in a pane and {why}: started a FRESH session, not "
                                       "a continuation of the parent's; the brief and the preserved worktree carry the task")
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
 
 
 def _supervise_in_process(dispatch_id: str, cwd: Path, extra: dict) -> None:
@@ -1236,7 +1336,7 @@ def _launch_external(run: dict, dispatch: dict, kind: str, spec: dict, ddir: Pat
         return {"launcher": "external"}
     # A reviewer: a detached watcher ends the dispatch once the output file is written.
     spec["external"] = True
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     log = open(ddir / "supervisor.log", "ab")
     try:
         watcher = subprocess.Popen(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
@@ -1359,13 +1459,13 @@ def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pa
     tail = ddir / "pane-tail.txt"
     screen = _startup_screen(view)
     if view:
-        tail.write_text(view + "\n", encoding="utf-8")
+        atomic_write_text(tail, view + "\n", mode=0o600)  # an unredacted screen: private (#500)
     spec["failed_herdr_pane"] = pane
     spec["failed_herdr_snapshot"] = str(tail) if view else None
     spec["failed_herdr_screen"] = screen
     closed = bool(view) and _close_abandoned_pane(run, dispatch, pane)
     spec["failed_herdr_pane_closed"] = closed
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     observed = (f"; pane {pane} was waiting on {screen}" if screen
                 else f"; pane {pane} snapshot saved to {tail}" if view
                 else f"; pane {pane} could not be read")
@@ -1376,7 +1476,7 @@ def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pa
                 "credentials, or user-authority prompts; resolve a safe runtime blocker or choose another route, "
                 "then follow `office status` / `office resume` instead of abandoning the run")
     spec["fallback_reason"] = f"{failure} ({why}){observed}"
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     _launch_notice(run, dispatch, f"{failure} ({why}){observed}; running headless instead. {recovery}")
 
 
@@ -1436,6 +1536,10 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, f"the shell in pane {pane} never ran Office's setup "
                                "line (env and cd)", f"within {_shell_timeout():g}s")
         return None
+    _record_launch_form(run, dispatch, spec, "herdr",
+                        ["herdr", "agent", "start", name, "--kind", herdr_kind, "--pane", pane, "--", *args],
+                        transport="herdr agent prompt pointer", herdr_kind=herdr_kind,
+                        brief_delivery="herdr agent prompt (brief pointer)")
     try:
         proc = subprocess.run(["herdr", "agent", "start", name, "--kind", herdr_kind, "--pane", pane, "--", *args],
                               capture_output=True, text=True, timeout=120)
@@ -1458,7 +1562,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, "herdr agent start failed", why)
         return None
     spec.update({"herdr_agent": name, "pane": pane})
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     _record_launch(run, dispatch["id"], launcher="herdr", pane_id=pane)
     # A PR recorded between the first label and the pane id landing is missed by relabel_task_panes.
     fresh_label = pane_label(run, dispatch, dispatch.get("kind") or "")
@@ -1519,7 +1623,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
             _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
                                           f"re-prompt it: office prompt {dispatch['id']} -- {shlex.quote(pointer)}")
     spec["prompt_landed"] = landed
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     if not session and landed and not dispatch.get("resumed_from"):
         # The session's own transcript now records the prompt naming this brief.
         session = _transcript_session(run, dispatch, spec, herdr_kind, cwd, since=sent_at)
@@ -2958,7 +3062,7 @@ def reclaim_pane(run: dict, dispatch_id: str, *, explicit: bool = False) -> str:
         _ledger_event(run, d, closed_at=now_iso(), note="pane already gone")
         return "closed"
     ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch_id
-    ddir.mkdir(parents=True, exist_ok=True)
+    ddir.mkdir(parents=True, exist_ok=True, mode=0o700)
     snap = ddir / "pane-final.txt"
     text = _pane_snapshot(herdr_agent_name(dispatch_id), pane)
     if text:
@@ -3125,10 +3229,16 @@ def supervise(dispatch_id: str) -> int:
         with log_path.open("ab") as log:
             os.chmod(log_path, 0o600)
             stdin = subprocess.PIPE if prof.get("prompt") == "stdin" else subprocess.DEVNULL
+            # The prompt itself is never persisted: evidence carries a placeholder in
+            # the prompt's slot, built before the prompt is appended (#500).
+            evidence_argv = list(argv)
             if prof.get("prompt") == "argv":
-                argv = argv + [prompt]
+                argv, evidence_argv = argv + [prompt], evidence_argv + ["[PROMPT REDACTED]"]
             elif prof.get("prompt") == "argv-bound":
-                argv = argv + [prof.get("prompt_flag", "--prompt=") + prompt]
+                flag = prof.get("prompt_flag", "--prompt=")
+                argv, evidence_argv = argv + [flag + prompt], evidence_argv + [flag + "[PROMPT REDACTED]"]
+            _record_launch_form(run, d, spec, "headless", evidence_argv,
+                                transport=prof.get("prompt") or "file", output=spec.get("output"))
             child = _spawn_agent(argv, spec["cwd"], env, stdin)
             _mark(dispatch_id, pid_child=child.pid)
             _agent_pgid_file(run, dispatch_id).write_text(str(child.pid))
@@ -3241,6 +3351,20 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> No
                        payload={"exit_code": code, "signal": sig, "classification": classification})
             if d["kind"] in ("planner", "executor"):
                 after_worker_exit(con, run, dispatch_id)
+            if d["kind"] == "planner" and _submitted(con, d):
+                # If a request arrived after this planner already submitted,
+                # let its session end before starting the next revision.
+                pending = con.execute("SELECT 1 FROM amendments WHERE run_id=? AND class='contract' "
+                                      "AND to_plan_version IS NULL LIMIT 1", (run["id"],)).fetchone()
+                if pending and not state.is_terminal(state.get_run(con, run["id"])):
+                    try:
+                        create_planner_task(con, run)
+                    except Refused as err:
+                        # Never roll back the recorded end: block the planner with the reason.
+                        state.update_task(con, run["id"], PLANNER_TASK, status="blocked",
+                                          pause_reason=f"follow-up planner refused: {err.message}")
+                        state.emit(con, run, "task.blocked", f"{PLANNER_TASK} follow-up revision not launched: "
+                                   f"{err.message}; {err.next_step or ''}".strip(), task_id=PLANNER_TASK)
             if d["kind"] == "executor" and d.get("task_id") and _submitted(con, d):
                 # The session that submitted is gone: tasks stacked after it may start (#398).
                 start_stacked(con, run, d["task_id"])
