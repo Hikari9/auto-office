@@ -190,6 +190,8 @@ class Env:
         monkeypatch.setenv("OFFICE_QUOTA_PROBE", "off")
         # A held startup prompt waits for an answer no test gives unless it asks to (#510).
         monkeypatch.setenv("OFFICE_STARTUP_PROMPT_WAIT", "0")
+        # A pane launch polls for the agent's process group; fake herdr reports none (#507).
+        monkeypatch.setenv("OFFICE_PANE_GROUP_WAIT", "0")
         monkeypatch.setenv("FAKE_SCENARIO", str(self.scenario))
         # Harness session transcripts (the reviewer-reply fallback) are read from
         # these homes; never from the real ones.
