@@ -111,6 +111,12 @@ def _resolve_adapter(ident: str | None, file: str | None = None) -> tuple[dict, 
         return sources[ident]
     draft = adapters.user_adapter_dir() / f"{ident}.yaml"
     if draft.is_file():
+        try:
+            data = yaml.safe_load(draft.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            data = None
+        if isinstance(data, dict):
+            return data, "draft (not loaded until it validates)", draft
         raise OfficeError("adapter-unreadable", f"{draft} is not a readable YAML mapping", exit_code=1,
                           next_step=f"fix {draft}, then office harness validate {ident}")
     raise _usage(f"no adapter named {ident!r}", next_step="office harness list, or office harness scaffold "
@@ -689,6 +695,14 @@ def harness_list(con) -> Result:
 
 # ------------------------------------------------------------------ model
 
+def _overlay_for_write() -> dict:
+    try:
+        return user_catalog.load(strict=True)
+    except user_catalog.OverlayUnreadable as e:
+        raise OfficeError("overlay-unreadable", f"{e}; refusing to write so its rows are not lost", exit_code=1,
+                          next_step=f"fix or move {user_catalog.path()}, then rerun")
+
+
 def _parse_model_ident(ident: str | None) -> tuple[str, str]:
     if not ident or "/" not in ident:
         raise _usage("name the route as <harness>/<model-slug>", next_step="office model add pi/provider/model --effort medium")
@@ -729,7 +743,7 @@ def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | N
     if dupes:
         raise OfficeError("row-exists", f"{harness}/{mid}@{','.join(dupes)} is already a catalog row", exit_code=1,
                           next_step=f"office model list {harness}")
-    overlay = user_catalog.load()
+    overlay = _overlay_for_write()
     added = []
     for e in want:
         row = {"model_id": mid, "invocation_model_id": slug, "invocation_harness": harness,
@@ -786,7 +800,7 @@ def model_disable(ident: str | None, *, reason: str | None = None) -> Result:
     live = [r for r in hits if r.get("dispatchable") is not False]
     if not live:
         return Result(lines=[f"{ident} is already disabled"], next=None, data={"disabled": ident, "changed": False})
-    overlay = user_catalog.load()
+    overlay = _overlay_for_write()
     overlay["disabled"].append({**entry, "reason": reason or "", "at": now_iso()})
     target = user_catalog.save(overlay)
     rows = ", ".join(f"{r.get('invocation_harness')}/{r.get('model_id')}@{r.get('effort')}" for r in live)

@@ -301,7 +301,8 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
     """Return (candidates, skipped). `skipped` explains unavailable harnesses
     and rows under a model_family_floors entry."""
     kind = KIND_FOR_ROLE.get(role, "worker")
-    all_adapters = adapters.load_all()
+    sources = adapters.load_sources()
+    all_adapters = {aid: entry[0] for aid, entry in sources.items()}
     candidates, skipped = [], []
     for row in catalog_rows():
         harness = row.get("invocation_harness")
@@ -319,7 +320,7 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
         if not adapters.installed(adapter):
             skipped.append({"candidate": label, "reason": f"{harness} not installed"})
             continue
-        version = adapters.route_version(harness, adapter)
+        version = adapters.route_version(harness, adapter, sources)
         cand = {
             "harness": harness,
             "harness_version": version,

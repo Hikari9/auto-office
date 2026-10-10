@@ -354,3 +354,38 @@ def test_status_warns_and_model_commands_name_runs_whose_routing_inputs_drifted(
 def test_seed_justifications_live_outside_the_seed_adapters(unit):
     assert "trust_justifications" not in adapters.load_all()["codex"]
     assert "--yolo" in harnesscmd.packaged_justifications("codex")
+
+
+def test_snapshot_hashes_never_raise_on_a_malformed_user_adapter(unit):
+    base = config.snapshot_hashes()
+    d = adapters.user_adapter_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "broken.yaml").write_text("id: [unclosed\n")
+    assert config.snapshot_hashes() == base
+    user_catalog.path().write_text("models: [unclosed\n")
+    assert config.snapshot_hashes()["catalog_hash"] != base["catalog_hash"]  # hashed by bytes, no raise
+
+
+def test_a_corrupt_overlay_is_never_overwritten(unit):
+    _write_adapter(GOOD)
+    user_catalog.path().parent.mkdir(parents=True, exist_ok=True)
+    user_catalog.path().write_text("models: [unclosed\n")
+    import pytest as _pytest
+    from office.state import OfficeError
+    for call in (lambda: harnesscmd.model_add("kilo/acme/fast-1", ["medium"]),
+                 lambda: harnesscmd.model_disable("codex/luna")):
+        with _pytest.raises(OfficeError) as err:
+            call()
+        assert str(user_catalog.path()) in err.value.message
+    assert user_catalog.path().read_text() == "models: [unclosed\n"
+
+
+def test_drafts_and_shadowed_files_do_not_change_the_adapter_hash(unit):
+    base = config.snapshot_hashes()["adapter_hash"]
+    _write_adapter(_with(source_notes="TODO fill"), "kilo")
+    _write_adapter(dict(GOOD, id="codex"), "codex")  # a seed id without override_seed: ignored
+    assert config.snapshot_hashes()["adapter_hash"] == base
+    assert "kilo" not in adapters.load_all()
+    assert harnesscmd.validate("kilo").exit_code == 1  # the draft is still validated directly
+    _write_adapter(GOOD, "kilo")
+    assert config.snapshot_hashes()["adapter_hash"] != base

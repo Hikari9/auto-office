@@ -22,13 +22,32 @@ def path() -> Path:
     return Path(raw).expanduser() if raw else paths.user_config_path().parent / "catalog.yaml"
 
 
-def load() -> dict:
-    """The overlay as `{models: [...], disabled: [...]}`; absent or unreadable is empty."""
+class OverlayUnreadable(Exception):
+    pass
+
+
+def load(*, strict: bool = False) -> dict:
+    """The overlay as `{models: [...], disabled: [...]}`. Absent is empty.
+    Unparseable reads as empty for routing, but with `strict` (every writer)
+    raises OverlayUnreadable so a save never overwrites the user's rows."""
+    target = path()
     try:
-        data = yaml.safe_load(path().read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
+        text = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"models": [], "disabled": []}
+    except OSError as e:
+        if strict:
+            raise OverlayUnreadable(f"{target}: {e}")
+        return {"models": [], "disabled": []}
+    try:
+        data = yaml.safe_load(text) or {}
+    except yaml.YAMLError as e:
+        if strict:
+            raise OverlayUnreadable(f"{target} is not valid YAML: {str(e).splitlines()[0]}")
         return {"models": [], "disabled": []}
     if not isinstance(data, dict):
+        if strict:
+            raise OverlayUnreadable(f"{target} is not a YAML mapping")
         return {"models": [], "disabled": []}
     models = [r for r in data.get("models") or [] if isinstance(r, dict)]
     disabled = [d for d in data.get("disabled") or [] if isinstance(d, dict)]
@@ -89,6 +108,11 @@ def merge(rows: list[dict], overlay: dict | None = None) -> tuple[list[dict], li
 def raw() -> dict | None:
     """The overlay file's parsed content for run pinning, or None when absent."""
     try:
-        return yaml.safe_load(path().read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
+        text = path().read_bytes()
+    except OSError:
         return None
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError:
+        import hashlib
+        return {"unparseable_sha256": hashlib.sha256(text).hexdigest()}

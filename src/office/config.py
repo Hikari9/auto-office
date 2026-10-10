@@ -230,21 +230,36 @@ def routing_inputs_drift(run: dict, hashes: dict | None = None) -> str | None:
             "(office model/harness edits or an upgrade); later dispatches route from the current files")
 
 
+_HASHES_CACHE: dict[tuple, dict] = {}
+
+
 def snapshot_hashes() -> dict:
+    """policy/catalog/adapter hashes a run pins. Never raises on a user file:
+    only user adapters that load (adapters.load_sources) are hashed, and an
+    unparseable catalog overlay is hashed by its bytes. With no user files the
+    hashes are the seed-only values earlier runs recorded. Cached per process,
+    keyed on the input files' mtimes and sizes."""
     root = paths.resources_root()
     from office import adapters as adapter_mod, user_catalog
+    key = (adapter_mod.files_stamp(),
+           adapter_mod._file_stamp([root / "catalog" / "seed.yaml", user_catalog.path(), default_config_path()]))
+    cached = _HASHES_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
     adapters = {p.name: load_yaml(p) for p in sorted((root / "adapters" / "seed").glob("*.yaml"))}
-    # User-level adapters and catalog rows pin with the run; with none the hashes
-    # stay the seed-only values earlier runs recorded.
-    for p in adapter_mod.user_adapter_files():
-        adapters["user/" + p.name] = load_yaml(p)
+    for aid, (data, origin, p) in sorted(adapter_mod.load_sources().items()):
+        if origin != "seed" and data.get("office_profiles"):
+            adapters["user/" + p.name] = data
     catalog = load_yaml(root / "catalog" / "seed.yaml")
     overlay = user_catalog.raw()
-    return {
+    out = {
         "policy_hash": sha256_file(default_config_path()),
         "catalog_hash": sha256_obj(catalog if overlay is None else {"seed": catalog, "user": overlay}),
         "adapter_hash": sha256_obj(adapters),
     }
+    _HASHES_CACHE.clear()
+    _HASHES_CACHE[key] = out
+    return dict(out)
 
 
 def resolve_risk(config: dict, blast_radius: str | None, size_class: str | None,
