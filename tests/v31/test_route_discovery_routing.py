@@ -102,6 +102,33 @@ def test_discovery_off_ignores_pool_candidates_and_hashes_exactly_as_before():
     assert off["decision_hash"] == plain["decision_hash"]
 
 
+# decision_hash and a digest of the whole result, computed by routing.route at 341b48b (before #494)
+# for requests that carry no discovery input.
+GOLDEN_BEFORE_494 = {
+    "two": ("sha256:ff3c41ae5690c965d11f4599ccca6a22714035e6751374c4a90a4ee9398acf2a", "049814e09be95432"),
+    "three": ("sha256:811e29d6fbaf68a6337c594860b7db95093e57d126214cdb8dcb03ad9bdca5a9", "275109a3750be881"),
+    "worker": ("sha256:40ab10639a2b4e71fa048b2d5a8ff496a24e9d1c78fc8c8573484c51e31ad894", "47afc75e129d1149"),
+    "explore": ("sha256:ea98364617d5102b827b2a025a28bd56120372c536c6202dd9f82367bdf7b700", "8ae898fdd5006f56"),
+}
+
+
+def golden_requests():
+    yield "two", trusted(req(base()))
+    yield "three", trusted(req(base() + [cand("codex", "terra", idx=48, out=1.0)], seed="seed-7"))
+    yield "worker", trusted(req(base(), role="worker", seed="seed-3"))
+    explore = trusted(req(base() + [cand("agy", "flash", idx=30, out=0.2)], seed="seed-9"))
+    explore["adaptive_config"] = {"exploration": {"rate": 0.5, "margin": 1.0, "max_cost_vs_primary_percent": 100000}}
+    yield "explore", explore
+
+
+def test_routing_output_is_byte_identical_to_the_pre_change_commit_when_discovery_is_not_in_play():
+    import hashlib
+    for name, request in golden_requests():
+        result = routing.route(json.loads(json.dumps(request)))
+        digest = hashlib.sha256(json.dumps(result, sort_keys=True, default=str).encode()).hexdigest()[:16]
+        assert (result["decision_hash"], digest) == GOLDEN_BEFORE_494[name], name
+
+
 def test_routing_output_is_unchanged_for_a_request_with_no_discovery_inputs():
     """The decision hash only gains a discovery block when discovery is active."""
     d = go(base())
@@ -141,7 +168,7 @@ def test_a_stale_or_other_fingerprint_pass_is_not_on_the_candidate_so_it_yields_
 def test_the_draw_is_seeded_and_bounded_by_the_percentage():
     hits = [go(base() + [untried()], disc=discovery(percent=15), seed=f"s{i}")["discovery"]["intent"] == "probe"
             for i in range(200)]
-    assert 0 < sum(hits) < 60  # about 15 percent, reproducible per seed
+    assert 15 <= sum(hits) <= 45  # about 15 percent of 200, reproducible per seed
     assert go(base() + [untried()], disc=discovery(percent=15), seed="s7")["discovery"] == \
         go(base() + [untried()], disc=discovery(percent=15), seed="s7")["discovery"]
     never = [go(base() + [untried()], disc=discovery(percent=0), seed=f"s{i}")["discovery"]["intent"] for i in range(30)]
@@ -535,6 +562,28 @@ def test_a_fresh_exact_pass_attaches_to_exactly_that_candidate(installed, tmp_pa
         assert by[sibling]["probe"] is None and by[sibling]["route_status"] == "discovered-unconfirmed"
 
 
+def test_a_stale_or_other_fingerprint_pass_never_attaches_to_a_candidate(installed, tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from office import adapters, db
+    con = db.connect(tmp_path / "runs.db")
+    settings = {**route_policy.DISCOVERY_DEFAULTS, "enabled": True}
+    built, _ = candidates.build_candidates(con, "executor", probe=False, discovery=settings, user_policies=[])
+    target = next(c for c in built if label(c) == "codex/gpt-6.1-sol@high")
+    fp = route_probe.fingerprint(target, adapters.load_all()["codex"])
+    insert = ("INSERT INTO route_probes(key, harness, harness_version, adapter_hash, profile, invocation_model_id, "
+              "effort, result, probed_at, attempt_id) VALUES(?,?,?,?,?,?,?,?,?,?)")
+    columns = ("harness", "harness_version", "adapter_hash", "profile", "invocation_model_id", "effort")
+    long_ago = (datetime.now(timezone.utc) - timedelta(days=settings["probe_ttl_days"] + 5)).isoformat()
+    con.execute(insert, (target["probe_key"], *(fp[k] for k in columns), "pass", long_ago, "A-old"))
+    other = target["probe_key"].replace("|2.0.0|", "|9.9.9|")  # a pass for another harness version
+    assert other != target["probe_key"]
+    con.execute(insert, (other, fp["harness"], "9.9.9", *(fp[k] for k in columns[2:]), "pass",
+                         datetime.now(timezone.utc).isoformat(), "A-other"))
+    built, _ = candidates.build_candidates(con, "executor", probe=False, discovery=settings, user_policies=[])
+    chosen = next(c for c in built if label(c) == "codex/gpt-6.1-sol@high")
+    assert chosen["probe"] is None and chosen["route_status"] == "discovered-unconfirmed"
+
+
 def test_denied_routes_leave_every_other_caller_with_a_category(installed):
     built, skipped = candidates.build_candidates(None, "executor", probe=False,
                                                  user_policies=[policy(denied=["codex/gpt-5.6-sol@high", "harness:agy"])])
@@ -719,6 +768,60 @@ def test_route_role_drives_cold_start_probe_then_trial_without_minting_trust(env
     assert acts() == before
     from office import scoring
     assert scoring.evaluate_trust_state(con, pooled)[1] == "valid-unverified"
+
+
+def test_a_mistyped_value_outside_the_denial_subtree_does_not_hide_or_refuse_a_policy(monkeypatch, tmp_path):
+    user = tmp_path / "user.yaml"
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(user))
+    user.write_text("routing:\n  adaptive:\n    competitive_band: high\n")
+    assert candidates.live_user_policies() == []
+    user.write_text("routing:\n  adaptive:\n    competitive_band: high\n  user_policy:\n"
+                    "    denied_models: [harness:codex]\n")
+    assert candidates.live_user_policies()[0]["denied"] == ["harness:codex"]
+    user.write_text("routing:\n  user_policy:\n    overkill_rules: bad\n")
+    with pytest.raises(ValueError, match="routing.user_policy.overkill_rules"):
+        candidates.live_user_policies()
+
+
+def test_a_malformed_repo_tier_policy_fails_closed_like_the_user_tier(monkeypatch, tmp_path):
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "none.yaml"))
+    repo = tmp_path / "repo"
+    (repo / ".auto-office").mkdir(parents=True)
+    (repo / ".auto-office" / "config.yaml").write_text("routing: [unclosed\n  - : :\n")
+    with pytest.raises(Exception):
+        candidates.live_user_policies(repo)
+    with pytest.raises(Refused) as err:
+        candidates.required_user_policies(repo)
+    assert err.value.category == "policy-unreadable"
+
+
+def test_route_role_honors_a_live_denial_and_fails_closed_on_an_unreadable_policy(env, monkeypatch, tmp_path):
+    from conftest import start_inline
+    from office import state
+    env.trust()
+    start_inline(env)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()[0])
+    config = discovering_config(run)
+    user = tmp_path / "live-user.yaml"
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(user))
+    first = candidates.route_role(con, config, run, "executor", task_id="T1", probe=False)
+    harness = first["selected"].split("@")[0]
+    # a denial written after the run was pinned takes effect on the next decision
+    user.write_text(f"routing:\n  user_policy:\n    denied_models: [harness:{harness}]\n")
+    after = candidates.route_role(con, config, run, "executor", task_id="T1", probe=False)
+    assert not str(after.get("selected") or "").startswith(harness + "@")
+    assert any(e.get("category") == "denied" for e in after["rejected"])
+    # an unreadable or malformed live policy offers nothing: no route, probe or trial, rather than no denials
+    for text in ("routing: [unclosed\n  - : :\n", "routing:\n  user_policy:\n    denied_models: \"codex/x@high\"\n",
+                 "routing: 5\n"):
+        user.write_text(text)
+        with pytest.raises(Refused) as err:
+            candidates.route_role(con, config, run, "executor", task_id="T1", probe=False)
+        assert err.value.category == "policy-unreadable"
+        with pytest.raises(Refused) as declared:
+            candidates.declared_candidate("codex", "gpt-5.6-sol", "high")
+        assert declared.value.category == "policy-unreadable"
 
 
 def test_route_role_with_discovery_off_a_pinned_run_a_manual_route_or_a_reviewer_never_discovers(env):
