@@ -1,8 +1,15 @@
 """Issue-only bug observer: persistence, non-blocking audits, privacy and publishing."""
 from __future__ import annotations
 
+import fcntl
 import json
+import os
+import shutil
 import sqlite3
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from office import bugwatch, db, version
@@ -52,7 +59,7 @@ def test_nonblocking_attempt_and_persistent_failure(env, monkeypatch):
     con=env.con()
     try:
         _event(con,"run-2",1,"job.failed","runtime internal scheduler failed")
-        monkeypatch.setattr(bugwatch,"start_reporter",lambda:None)
+        monkeypatch.setattr(bugwatch,"start_reporter",lambda *a,**k:None)
         # A refused gate is not a bug, but the attempt and pre-existing event are recorded.
         note=bugwatch.lifecycle_attempt("run-2","close","refused","close-blocked")
         assert "pending" in note
@@ -91,7 +98,7 @@ def test_issue_only_publisher_deduplicates_and_redacts(env,monkeypatch):
     incident={"fingerprint":"a"*64,"summary":"adapter crashed","kind":"dispatch.failed","occurrences":2}
     report={"confidence":"strong","title":"model adapter refused valid route","expected":"launch succeeds",
             "actual":"launch fails","evidence":"dispatch error captured","reproduction":"intermittent"}
-    def fake(*args):
+    def fake(*args, **kw):
         calls.append(args)
         if args[0]=="api":
             assert "--paginate" in args and "--slurp" in args
@@ -107,7 +114,7 @@ def test_issue_only_publisher_deduplicates_and_redacts(env,monkeypatch):
     assert bugwatch.publish(incident,report).endswith("/999")
     assert len(calls)==2 and not any("pr" in c or "push" in c for call in calls for c in call)
     calls.clear()
-    monkeypatch.setattr(bugwatch,"_gh",lambda *a:json.dumps([[{"title":"different",
+    monkeypatch.setattr(bugwatch,"_gh",lambda *a,**k:json.dumps([[{"title":"different",
                     "body":"<!-- auto-self-improve:"+"a"*64+" -->", "html_url":"https://github.com/Hikari9/auto-office/issues/999"}]]))
     assert bugwatch.publish(incident,report).endswith("/999")
 
@@ -115,7 +122,7 @@ def test_issue_only_publisher_deduplicates_and_redacts(env,monkeypatch):
 def test_dedup_searches_later_pages_and_ignores_pull_requests(monkeypatch):
     fingerprint = "b" * 64
     marker = f"<!-- auto-self-improve:{fingerprint} -->"
-    def gh(*args):
+    def gh(*args, **kw):
         assert args[0] == "api"  # a match on a later page must prevent creation
         return json.dumps([
             [{"pull_request": {}, "body": marker, "html_url": "pr-url"}],
@@ -220,9 +227,262 @@ def test_worker_drains_more_than_ten_ready_incidents(env, monkeypatch):
             bugwatch._record(con,'run-batch','job.failed',f'failure case {i}',f'event:{i}')
         monkeypatch.setattr(bugwatch,'investigate',lambda *args:{'confidence':'strong','title':'test defect',
                             'expected':'success','actual':'failed','evidence':'recorded failure','reproduction':''})
-        monkeypatch.setattr(bugwatch,'publish',lambda incident, report:
+        monkeypatch.setattr(bugwatch,'publish',lambda incident, report, *a:
                             'https://github.com/Hikari9/auto-office/issues/999')
         assert bugwatch.worker()==0
         assert con.execute("SELECT COUNT(*) FROM self_improve_incidents WHERE status='filed'").fetchone()[0]==12
+    finally:
+        con.close()
+
+
+# ------------------------------------------- bounded reporter lifetime (#501)
+
+def _queue_retry(con, summary: str) -> None:
+    """A queued incident whose next retry is an hour out: a real reporter
+    sleeps on it without reaching any model or GitHub."""
+    bugwatch._record(con, "run-501", "job.failed", summary, "event:1")
+    con.execute("UPDATE self_improve_incidents SET status='retry',attempts=1,next_retry_at=?",
+                ((datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),))
+
+
+def test_reporter_spawn_requires_free_ownership_and_pending_work(env, monkeypatch):
+    """A wake-up spawns nothing when a reporter owns the home's lock or when
+    no incident awaits work; an idle lock with work spawns exactly one."""
+    from office import frontdoor
+    con = env.con()
+    try:
+        launched = []
+        monkeypatch.setattr(frontdoor, "current_argv", lambda: (["office"], {}))
+        monkeypatch.setattr(bugwatch.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
+        bugwatch.start_reporter(con)  # no incident is waiting
+        assert launched == []
+        _queue_retry(con, "relay route unavailable")
+        held = open(env.state / "self-improve.lock", "a+")
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            bugwatch.start_reporter(con)  # work exists, but the home is owned
+            assert launched == []
+        finally:
+            held.close()  # releases the ownership lock
+        bugwatch.start_reporter(con)
+        assert len(launched) == 1 and launched[0][-1] == "_self_improve"
+        bugwatch.start_reporter()  # a wake-up without a connection cannot gate on work
+        assert len(launched) == 2
+        assert os.environ.get(bugwatch.SELF_ENV) != "1"  # the guard stays for the spawned process only
+    finally:
+        con.close()
+
+
+def test_detached_reporters_stay_bounded_and_leave_with_their_home(env):
+    """#501: racing wakeups leave at most one live reporter per home, and a
+    disposable state home that its owner deletes takes its reporter with it.
+    The pending retry receipt survives for a later Office invocation."""
+    con = env.con()
+    _queue_retry(con, "relay route unavailable")
+    con.close()
+    env_probe = {**os.environ, "OFFICE_SELF_IMPROVE_MAX_SECONDS": "120"}
+    workers = [subprocess.Popen([sys.executable, "-m", "office", "_self_improve"], cwd=str(env.repo),
+                                env=env_probe, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+               for _ in range(4)]
+    try:
+        deadline = time.monotonic() + 30
+        alive = workers
+        while time.monotonic() < deadline:
+            alive = [w for w in workers if w.poll() is None]
+            if len(alive) <= 1:
+                break
+            time.sleep(0.2)
+        assert len(alive) == 1, "the per-home lock bounds racing wakeups to one live reporter"
+        # The owner releases the disposable home (the test's teardown, in real life).
+        shutil.rmtree(env.state)
+        assert alive[0].wait(timeout=20) == 0, "the reporter leaves when its home is released"
+    finally:
+        for w in workers:
+            if w.poll() is None:
+                w.kill()
+        for w in workers:
+            w.wait()
+    check = env.con()
+    try:
+        row = check.execute("SELECT status,next_retry_at FROM self_improve_incidents").fetchone()
+        assert row["status"] == "retry" and row["next_retry_at"]  # receipts durable across reclamation
+    finally:
+        check.close()
+
+
+def test_reporter_lifetime_is_bounded_even_while_its_home_lives(env):
+    """A reporter with endless queued retries still exits on its per-process
+    lifetime bound; the queue is handed to a successor, never lost."""
+    con = env.con()
+    _queue_retry(con, "reporter route unavailable")
+    con.close()
+    worker = subprocess.Popen([sys.executable, "-m", "office", "_self_improve"], cwd=str(env.repo),
+                              env={**os.environ, "OFFICE_SELF_IMPROVE_MAX_SECONDS": "2"},
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        assert worker.wait(timeout=25) == 0
+        assert env.state.exists()  # it exited on the bound, not on home deletion
+    finally:
+        if worker.poll() is None:
+            worker.kill()
+            worker.wait()
+    check = env.con()
+    try:
+        row = check.execute("SELECT status,next_retry_at FROM self_improve_incidents").fetchone()
+        assert row["status"] == "retry" and row["next_retry_at"]
+    finally:
+        check.close()
+
+
+def test_reporter_leaves_with_its_owner_even_while_the_home_lives(env):
+    """#501: a disposable home is reclaimed when its owner ends — the test
+    process finished or was interrupted, leaving the directory behind and no
+    teardown to delete it. Owner liveness alone takes the reporter with it;
+    the pending retry receipt stays durable."""
+    from office.util import claim_identity
+    con = env.con()
+    _queue_retry(con, "relay route unavailable")
+    con.close()
+    owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3)"])
+    try:
+        identity = claim_identity(owner.pid)  # the owner is live when it arms the home
+        worker = subprocess.Popen([sys.executable, "-m", "office", "_self_improve"], cwd=str(env.repo),
+                                  env={**os.environ, "OFFICE_STATE_HOME_OWNER": identity,
+                                       "OFFICE_SELF_IMPROVE_MAX_SECONDS": "120"},
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            owner.wait(timeout=15)  # the owner ends while the worker would sleep for minutes
+            assert worker.wait(timeout=20) == 0, "the reporter leaves with its owner"
+        finally:
+            if worker.poll() is None:
+                worker.kill()
+                worker.wait()
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+            owner.wait()
+    assert env.state.exists()  # no deletion: the owner's end alone reclaims the home's reporter
+    check = env.con()
+    try:
+        row = check.execute("SELECT status,next_retry_at FROM self_improve_incidents").fetchone()
+        assert row["status"] == "retry" and row["next_retry_at"]  # receipts durable across reclamation
+    finally:
+        check.close()
+
+
+def test_retry_due_after_the_worker_expires_is_woken_by_a_successor(env):
+    """#501: a retry due after the process cap is still delivered. The bound
+    hands ownership to a successor instead of stalling the queue; the preset
+    report needs no model or GitHub, and the successor leaves when the queue
+    drains."""
+    con = env.con()
+    try:
+        bugwatch._record(con, "run-501", "job.failed", "relay route unavailable", "event:1")
+        preset = json.dumps({"confidence": "none", "title": "", "expected": "", "actual": "",
+                             "evidence": "", "reproduction": ""})
+        con.execute("UPDATE self_improve_incidents SET status='retry',attempts=1,report_json=?,next_retry_at=?",
+                    (preset, (datetime.now(timezone.utc) + timedelta(seconds=4)).isoformat()))
+    finally:
+        con.close()
+    worker = subprocess.Popen([sys.executable, "-m", "office", "_self_improve"], cwd=str(env.repo),
+                              env={**os.environ, "OFFICE_SELF_IMPROVE_MAX_SECONDS": "2"},
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        assert worker.wait(timeout=25) == 0  # the capped worker leaves; the successor is spawned
+    finally:
+        if worker.poll() is None:
+            worker.kill()
+            worker.wait()
+    check = env.con()
+    try:
+        deadline = time.monotonic() + 30
+        status = "retry"
+        while time.monotonic() < deadline:
+            status = check.execute("SELECT status FROM self_improve_incidents").fetchone()[0]
+            if status != "retry":
+                break
+            time.sleep(0.5)
+        assert status == "dismissed", "the successor delivered the retry due after the cap"
+    finally:
+        check.close()
+        shutil.rmtree(env.state, ignore_errors=True)  # belt and braces; the successor exits when idle
+
+
+CALLER = """
+import os, sys
+import office.bugwatch as bw
+import office.frontdoor as fd
+fd.current_argv = lambda: ([sys.executable, "-m", "office"], {})
+real = bw.subprocess.Popen
+def wrapped(*a, **k):
+    with open(os.environ["SPAWN_LOG"], "a") as fh:
+        fh.write("spawn\\n")
+    return real(*a, **k)
+bw.subprocess.Popen = wrapped
+bw.start_reporter()
+"""
+
+
+def test_concurrent_wakeups_spawn_at_most_one_worker(env):
+    """#501: concurrent start_reporter calls cannot race the spawn into
+    duplicate reporters: the ownership lock is held through the spawn and
+    inherited by the child, so only one wake-up spawns at all."""
+    con = env.con()
+    _queue_retry(con, "relay route unavailable")
+    con.close()
+    log = env.tmp / "spawns.log"
+    log.write_text("")
+    callers = [subprocess.Popen([sys.executable, "-c", CALLER], cwd=str(env.repo),
+                                env={**os.environ, "SPAWN_LOG": str(log)},
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+               for _ in range(4)]
+    try:
+        for caller in callers:
+            assert caller.wait(timeout=30) == 0
+        assert log.read_text().count("spawn") == 1, "exactly one wake-up spawns"
+        # The spawned worker owns the lock: its inherited flock blocks a fresh claim.
+        probe = open(env.state / "self-improve.lock", "a+")
+        try:
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                raise AssertionError("the spawned worker does not own the home's lock")
+        finally:
+            probe.close()
+    finally:
+        for caller in callers:
+            if caller.poll() is None:
+                caller.kill()
+        for caller in callers:
+            caller.wait()
+        shutil.rmtree(env.state, ignore_errors=True)  # the worker leaves with its home
+
+
+def test_active_processing_stops_at_the_lifetime_bound(env, monkeypatch):
+    """#501: the cap binds during active work, not only while sleeping: a
+    batch stops between incidents at the bound, the unprocessed rows stay
+    queued, and a successor keeps delivery eventual."""
+    con = env.con()
+    launched = []
+    try:
+        for i in range(5):
+            bugwatch._record(con, "run-501", "job.failed", f"failure {i}", f"event:{i}")
+        processed = []
+        def slow(_con, incident, budget=None):
+            time.sleep(1.2)
+            processed.append(incident["fingerprint"])
+            con.execute("UPDATE self_improve_incidents SET status='dismissed' WHERE fingerprint=?",
+                        (incident["fingerprint"],))  # record the work like the real _process
+        monkeypatch.setattr(bugwatch, "_process", slow)
+        monkeypatch.setenv("OFFICE_SELF_IMPROVE_MAX_SECONDS", "2")
+        monkeypatch.setattr(bugwatch, "_spawn_locked",
+                            lambda lock_file: launched.append("_self_improve"))
+        assert bugwatch.worker() == 0
+        assert 0 < len(processed) < 5, "the batch stops at the lifetime bound"
+        assert (con.execute("SELECT COUNT(*) FROM self_improve_incidents WHERE status='pending'")
+                .fetchone()[0] == 5 - len(processed)), "the unprocessed incidents stay queued"
+        assert launched == ["_self_improve"], "a successor keeps delivery eventual"
     finally:
         con.close()

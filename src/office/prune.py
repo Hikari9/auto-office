@@ -220,7 +220,7 @@ def _prune_one(con, run_id: str) -> str | None:
     try:
         from office import bugwatch
         bugwatch.capture(con, run_id, force=True)
-        bugwatch.start_reporter()
+        bugwatch.start_reporter(con)
     except Exception:
         pass  # reporting never prevents legitimate cleanup
     with db.transaction(con):
