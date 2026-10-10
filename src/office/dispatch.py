@@ -1379,6 +1379,8 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         # user or a test drives). A worker is live until it submits; a reviewer
         # ends when its output file is written.
         return _launch_external(run, dispatch, kind, spec, ddir, sup, env, cwd, wait=wait, announce=external)
+    # The brief tells the agent to source agent.env whichever way it starts (the Herdr path rewrites it identically).
+    write_agent_env(run, dispatch, ddir, worker=kind == "worker")
     if launcher == "sync":
         # Deterministic mode for tests and fixtures: supervise in the foreground.
         _record_launch(run, dispatch["id"], launcher="sync", pid=os.getpid())
