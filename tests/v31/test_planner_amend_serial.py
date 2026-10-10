@@ -106,3 +106,25 @@ def test_running_planner_nudge_does_not_claim_late_request_is_in_this_revision(e
     row = con.execute("SELECT payload_json FROM outbox WHERE kind='notify_worker' ORDER BY rowid DESC LIMIT 1").fetchone()
     text = json.loads(row[0])["text"]
     assert "follow-up revision" in text and "same PLAN.md revision" not in text
+
+
+def test_no_follow_up_planner_on_a_terminal_run(env, tmp_path, monkeypatch):
+    con, run = _dedicated_existing_plan(env)
+    env.office("amend", "T1", "--contract", "--", "early request", env=MANUAL, check=0)
+    did = state.get_task(con, run["id"], "P1")["current_dispatch_id"]
+    packet = dispatch.build_packet(con, run, state.get_dispatch(con, did), "planner", {})
+    packet_path = tmp_path / "packet.json"
+    packet_path.write_text(json.dumps(packet))
+    con.execute("UPDATE dispatches SET packet_path=? WHERE id=?", (str(packet_path), did))
+    con.commit()
+    env.office("amend", "T2", "--contract", "--", "late request", env=MANUAL, check=0)
+    monkeypatch.setenv("OFFICE_JOBS", "manual")
+    draft = tmp_path / "PLAN.md"
+    draft.write_text(PLAN_TWO.replace("scope: calc.py", "scope: calc.py, calc_helpers.py"))
+    plans.submit_plan(con, state.get_run(con, run["id"]), draft, submitter=did, dispatch_id=did)
+    con.execute("UPDATE runs SET phase='abandoned' WHERE id=?", (run["id"],))
+    con.commit()
+    dispatch._finish(did, 0, None, "success", 0)
+    con2 = env.con()
+    assert con2.execute("SELECT COUNT(*) FROM dispatches WHERE role='planner'").fetchone()[0] == 2
+    assert con2.execute("SELECT ended_at FROM dispatches WHERE id=?", (did,)).fetchone()[0]

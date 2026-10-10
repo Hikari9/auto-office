@@ -3274,8 +3274,15 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> No
                 # let its session end before starting the next revision.
                 pending = con.execute("SELECT 1 FROM amendments WHERE run_id=? AND class='contract' "
                                       "AND to_plan_version IS NULL LIMIT 1", (run["id"],)).fetchone()
-                if pending:
-                    create_planner_task(con, run)
+                if pending and not state.is_terminal(state.get_run(con, run["id"])):
+                    try:
+                        create_planner_task(con, run)
+                    except Refused as err:
+                        # Never roll back the recorded end: block the planner with the reason.
+                        state.update_task(con, run["id"], PLANNER_TASK, status="blocked",
+                                          pause_reason=f"follow-up planner refused: {err.message}")
+                        state.emit(con, run, "task.blocked", f"{PLANNER_TASK} follow-up revision not launched: "
+                                   f"{err.message}; {err.next_step or ''}".strip(), task_id=PLANNER_TASK)
             if d["kind"] == "executor" and d.get("task_id") and _submitted(con, d):
                 # The session that submitted is gone: tasks stacked after it may start (#398).
                 start_stacked(con, run, d["task_id"])
