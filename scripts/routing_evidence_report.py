@@ -36,8 +36,13 @@ from urllib.parse import quote
 
 try:
     from office import route_learning
-except ImportError:  # the episodes section then reports itself unavailable
-    route_learning = None
+except ImportError:
+    # Run straight from a checkout, the package is under src/ and not on the path.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    try:
+        from office import route_learning
+    except ImportError:  # the episodes section then reports itself unavailable
+        route_learning = None
 
 REPORT_VERSION = 1
 
@@ -61,6 +66,17 @@ SIZES = ("S", "M", "L", "XL")
 ATTRIBUTED_BASES = ("reviewer-declared", "unique-path")
 FINDING_BASES = (*ATTRIBUTED_BASES, "unassigned")
 UNRECORDED = ("descriptor-null", "descriptor-unreadable", "not-recorded")
+# What a route, phase or status label may look like. A value outside it (a path, a token, control characters, a
+# non-text value) is printed as `other`, so free text that lands in these columns cannot reach the report.
+LABELS = {
+    "role": r"[a-z][a-z0-9_-]{0,23}",
+    "phase": r"[a-z][a-z0-9_-]{0,23}",
+    "status": r"[a-z][a-z0-9_-]{0,23}",
+    "harness": r"[a-z][a-z0-9_-]{0,31}",
+    "model": r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,63}(?:/[A-Za-z0-9][A-Za-z0-9._:+-]{0,63})?",
+    "effort": r"[a-z0-9][a-z0-9_-]{0,15}",
+}
+LABEL_RES = {k: re.compile(v) for k, v in LABELS.items()}
 SELF_REVIEW_KINDS = ("ledger", "exempt", "missing", "unreadable")
 EXEMPT_TYPES = ("read-only", "empty", "trivial", "mechanical")
 ATTRIBUTIONS = ("route", "mixed", "unknown", "plan", "environment", "reviewer")
@@ -123,8 +139,8 @@ def prelude(schema: dict) -> str:
                  + f", {route_cols} FROM dispatches d")
     else:
         inner = empty((*VIEWS["dispatches"], "harness", "model", "effort"))
-    dr = ("dr AS (SELECT p.*, CASE WHEN p.harness IS NOT NULL AND p.model IS NOT NULL THEN "
-          f"p.harness || '/' || p.model || '@' || COALESCE(p.effort, '-') END AS route FROM ({inner}) p)")
+    dr = ("dr AS (SELECT p.*, CASE WHEN p.harness IS NOT NULL AND p.model IS NOT NULL "
+          f"AND p.effort IS NOT NULL THEN p.harness || '/' || p.model || '@' || p.effort END AS route FROM ({inner}) p)")
 
     def plain(table: str, alias: str, name: str, renames: dict | None = None, extra: str = "") -> str:
         renames = renames or {}
@@ -136,17 +152,22 @@ def prelude(schema: dict) -> str:
 
     tk = plain("tasks", "t", "tk", {"id": "task_id"},
                ", CASE WHEN t.status = 'accepted' AND t.accepted_revision_id IS NOT NULL THEN 1 ELSE 0 END AS is_accepted")
+    gt = plain("gates", "g", "gt")
+    if "gates" in schema and _has(schema, "gates", "members_json"):
+        # Only a JSON array is a membership; anything else (NULL, an object, a scalar, malformed) is unknown.
+        gt = gt.replace("g.members_json", "CASE WHEN json_valid(g.members_json) THEN CASE WHEN "
+                        "json_type(g.members_json) = 'array' THEN g.members_json END END AS members_json")
     tr = ("tr AS (SELECT t.run_id, t.task_id, t.is_accepted, fe.id AS first_id, fe.route AS first_route, "
           "pd.id AS producer_id, pd.route AS producer_route FROM tk t "
           "LEFT JOIN dr fe ON fe.id = t.first_executor_dispatch_id AND fe.run_id = t.run_id "
           "AND fe.task_id = t.task_id AND fe.role = 'executor' "
-          "LEFT JOIN rv ar ON ar.id = t.accepted_revision_id AND ar.run_id = t.run_id "
+          "LEFT JOIN rv ar ON ar.id = t.accepted_revision_id AND ar.run_id = t.run_id AND ar.task_id = t.task_id "
           "LEFT JOIN dr pd ON pd.id = ar.dispatch_id AND pd.run_id = t.run_id AND pd.task_id = t.task_id)")
     ed = ("ed AS (SELECT d.run_id, d.task_id, d.id AS to_id, p.route AS from_route, d.route AS to_route FROM dr d "
           "JOIN dr p ON p.id = d.predecessor_dispatch_id AND p.run_id = d.run_id AND p.task_id = d.task_id "
-          "AND p.role = 'executor' WHERE d.role = 'executor')")
+          "AND p.role = 'executor' AND p.id <> d.id WHERE d.role = 'executor')")
     return "WITH " + ",\n".join((
-        dr, tk, plain("revisions", "r", "rv"), plain("gates", "g", "gt"), plain("findings", "f", "fd"),
+        dr, tk, plain("revisions", "r", "rv"), gt, plain("findings", "f", "fd"),
         plain("runs", "r", "rn"), tr, ed))
 
 
@@ -202,8 +223,8 @@ METRICS = {
                        "accepted_revision_id (route_learning's success definition, ended or not)",
         "sql": "SELECT d.role AS role, COALESCE(d.harness, 'unknown') AS harness, COALESCE(d.model, 'unknown') AS model, "
                "COALESCE(d.effort, 'unknown') AS effort, COUNT(DISTINCT d.id) AS strict_successes "
-               "FROM tk t JOIN rv r ON r.id = t.accepted_revision_id AND r.run_id = t.run_id "
-               "JOIN dr d ON d.id = r.dispatch_id AND d.run_id = t.run_id "
+               "FROM tk t JOIN rv r ON r.id = t.accepted_revision_id AND r.run_id = t.run_id AND r.task_id = t.task_id "
+               "JOIN dr d ON d.id = r.dispatch_id AND d.run_id = t.run_id AND d.task_id = t.task_id "
                "WHERE d.role IN ('executor', 'worker') GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4",
     },
     "dispatch.latency": {
@@ -285,7 +306,7 @@ METRICS = {
                        "revision row is missing); unresolved tasks: revisions submitted so far, shown apart",
         "sql": "SELECT 'accepted' AS task_state, n AS revisions, COUNT(*) AS tasks FROM ("
                "SELECT t.run_id, t.task_id, CASE WHEN ar.id IS NULL THEN NULL ELSE COUNT(r.id) END AS n FROM tk t "
-               "LEFT JOIN rv ar ON ar.id = t.accepted_revision_id AND ar.run_id = t.run_id "
+               "LEFT JOIN rv ar ON ar.id = t.accepted_revision_id AND ar.run_id = t.run_id AND ar.task_id = t.task_id "
                "LEFT JOIN rv r ON r.run_id = t.run_id AND r.task_id = t.task_id AND r.seq <= ar.seq "
                "WHERE t.is_accepted = 1 GROUP BY t.run_id, t.task_id) GROUP BY n "
                "UNION ALL SELECT 'unresolved', n, COUNT(*) FROM ("
@@ -306,13 +327,12 @@ METRICS = {
     "lanes.exposure": {
         "needs": ("gates",),
         "denominator": "gates with subject lane; a pair is one distinct (run, lane scope, member task) from the "
-                       "frozen members_json; NULL members_json is unknown membership",
-        "sql": ", lm AS (SELECT DISTINCT g.run_id, g.scope, j.value AS task_id FROM gt g, "
-               "json_each(CASE WHEN json_valid(g.members_json) THEN g.members_json ELSE '[]' END) j "
-               "WHERE g.subject = 'lane') "
+                       "frozen members_json (distinct text entries of a JSON array); any other members_json is unknown membership",
+        "sql": ", lm AS (SELECT DISTINCT g.run_id, COALESCE(g.scope, '') AS scope, j.value AS task_id FROM gt g, "
+               "json_each(COALESCE(g.members_json, '[]')) j WHERE g.subject = 'lane' AND j.type = 'text') "
                "SELECT (SELECT COUNT(*) FROM gt WHERE subject = 'lane') AS lane_gates, "
                "(SELECT COUNT(*) FROM gt WHERE subject = 'lane' AND members_json IS NULL) AS membership_unknown_gates, "
-               "(SELECT COUNT(DISTINCT run_id || char(31) || scope) FROM gt WHERE subject = 'lane') AS lanes, "
+               "(SELECT COUNT(DISTINCT run_id || char(31) || COALESCE(scope, '')) FROM gt WHERE subject = 'lane') AS lanes, "
                "(SELECT COUNT(*) FROM lm) AS lane_task_pairs, "
                "(SELECT COUNT(DISTINCT run_id || char(31) || task_id) FROM lm) AS exposed_tasks, "
                "(SELECT COUNT(*) FROM (SELECT 1 FROM lm GROUP BY run_id, task_id HAVING COUNT(*) > 1)) "
@@ -325,13 +345,14 @@ METRICS = {
         "sql": ", uf AS (SELECT f.run_id, f.gate_id, f.code, COUNT(*) AS recorded_rows, "
                "COALESCE(SUM(f.clone_of IS NOT NULL), 0) AS clone_rows, MIN(f.attribution_basis) AS basis, "
                "MIN(g.members_json) AS members_json FROM fd f LEFT JOIN gt g ON g.id = f.gate_id "
-               "WHERE f.contract = 'convergence-v1' AND f.gate_id IS NOT NULL GROUP BY f.run_id, f.gate_id, f.code) "
+               "WHERE f.contract = 'convergence-v1' AND f.gate_id IS NOT NULL GROUP BY f.run_id, f.gate_id, f.code), "
+               "um AS (SELECT uf.*, (SELECT COUNT(DISTINCT j.value) FROM json_each(COALESCE(uf.members_json, '[]')) j "
+               "WHERE j.type = 'text') AS members FROM uf) "
                "SELECT COALESCE(basis, 'unknown') AS basis, COUNT(*) AS unique_findings, "
                "SUM(recorded_rows) AS recorded_rows, SUM(recorded_rows) - COUNT(*) AS duplicate_rows, "
                "SUM(clone_rows) AS clone_marked_rows, "
-               "COALESCE(SUM(CASE WHEN json_valid(members_json) THEN json_array_length(members_json) END), 0) "
-               "AS lane_exposure, SUM(NOT json_valid(members_json) OR members_json IS NULL) AS membership_unknown "
-               "FROM uf GROUP BY 1 ORDER BY 1",
+               "SUM(members) AS lane_exposure, SUM(members_json IS NULL) AS membership_unknown "
+               "FROM um GROUP BY 1 ORDER BY 1",
     },
     "tags.tasks": {
         "needs": ("tasks",),
@@ -369,9 +390,20 @@ def sha256_file(path: Path) -> str:
 
 def open_readonly(path: Path) -> sqlite3.Connection:
     """The only way this report opens a database: URI mode=ro, then query_only. It never creates the file."""
-    con = sqlite3.connect(f"file:{quote(os.path.abspath(path))}?mode=ro", uri=True, timeout=30)
+    con = sqlite3.connect(f"file://{quote(os.path.abspath(path))}?mode=ro", uri=True, timeout=30)
     con.execute("PRAGMA query_only=ON")
     return con
+
+
+def require_features(con: sqlite3.Connection) -> None:
+    """The metrics use JSON1 and window functions (SQLite 3.25 or later): say so rather than fail mid-report."""
+    try:
+        con.execute("SELECT json_valid('[]'), json_type('[]'), (SELECT COUNT(*) OVER () FROM (SELECT 1))").fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such function" not in str(exc) and "syntax error" not in str(exc):
+            raise  # not a missing feature: a read-only WAL database in a read-only directory fails here, say
+        raise RuntimeError(f"this SQLite ({sqlite3.sqlite_version}) lacks JSON1 or window functions; "
+                           "the report needs SQLite 3.25 or later") from None
 
 
 def read_schema(con: sqlite3.Connection) -> dict[str, set[str]]:
@@ -402,10 +434,14 @@ def missing_schema(schema: dict) -> list[str]:
     return sorted(out)
 
 
+def label(kind: str, value) -> str:
+    return value if isinstance(value, str) and LABEL_RES[kind].fullmatch(value) else "other"
+
+
 def _rows(con: sqlite3.Connection, schema: dict, metric: str) -> list[dict]:
     cursor = con.execute(prelude(schema) + " " + METRICS[metric]["sql"])
     names = [d[0] for d in cursor.description]
-    return [dict(zip(names, row)) for row in cursor.fetchall()]
+    return [{n: label(n, v) if n in LABEL_RES else v for n, v in zip(names, row)} for row in cursor.fetchall()]
 
 
 def _section(con, schema, metrics: tuple[str, ...], build, optional: tuple[str, ...] = ()) -> dict:
@@ -454,8 +490,12 @@ def _histogram(rows: list[dict], state: str) -> dict:
 
 def _dispatch_section(con, schema) -> dict:
     def build(routes, strict):
-        by_key = None if strict is None else {(r["role"], r["harness"], r["model"], r["effort"]): r["strict_successes"]
-                                              for r in strict}
+        by_key = None
+        if strict is not None:
+            by_key = {}
+            for r in strict:  # a clamped label can make two rows share a key
+                key = (r["role"], r["harness"], r["model"], r["effort"])
+                by_key[key] = by_key.get(key, 0) + r["strict_successes"]
 
         def successes(r):
             if by_key is None or r["role"] not in ("executor", "worker"):
@@ -479,14 +519,15 @@ def _episode_section(con, schema) -> dict:
     try:
         outcomes = route_learning.derive_outcomes(con)
         episodes = route_learning.episodes(outcomes)
-    except sqlite3.Error as exc:
+    except Exception as exc:  # route_learning reads untrusted rows: a malformed one must not end the report
         return {"available": False, "reason": f"{type(exc).__name__} while deriving outcomes"}
     rows: dict[tuple, dict] = {}
 
     def row(role: str, route: str) -> dict:
         harness, _, rest = route.partition("/")
         model, _, effort = rest.rpartition("@")
-        key = (role, harness, model, "unknown" if effort in ("None", "") else effort)
+        key = (label("role", role), label("harness", harness), label("model", model),
+               "unknown" if effort in ("None", "") else label("effort", effort))
         return rows.setdefault(key, {"role": key[0], "harness": key[1], "model": key[2], "effort": key[3],
                                      "settled_dispatches": 0, "settled_strict_successes": 0, "episodes": 0,
                                      "accepted_episodes": 0, "failed_episodes": 0, "multi_attempt_episodes": 0,
@@ -523,8 +564,9 @@ def _task_path_section(con, schema) -> dict:
 def _self_review_section(con, schema) -> dict:
     def build(rows):
         out: dict[tuple, dict] = {}
+        predates = not _has(schema, "revisions", "self_review_json")  # no column: unknown, not a missing receipt
         for r in rows:
-            kind = _clamp(r["kind"], SELF_REVIEW_KINDS, "unreadable")
+            kind = "unknown" if predates else _clamp(r["kind"], SELF_REVIEW_KINDS, "unreadable")
             etype = _clamp(r["exempt_type"], EXEMPT_TYPES) if kind == "exempt" else None
             cell = out.setdefault((kind, etype), {"kind": kind, "exempt_type": etype, "revisions": 0, "accepted_revisions": 0})
             cell["revisions"] += r["revisions"]
@@ -569,22 +611,28 @@ def _size_section(con, schema) -> dict:
     def build(task, snapshot, run):
         def dist(rows, key):
             out: dict[str, int] = {}
-            for r in rows:
+            for r in rows or ():
                 size = _known(r["size"], SIZES)
                 out[size] = out.get(size, 0) + r[key]
             return dict(sorted(out.items()))
         by_route: dict[tuple, dict] = {}
-        for r in snapshot:
+        for r in snapshot or ():
             size = _known(r["size"], SIZES)
             cell = by_route.setdefault((r["harness"], r["model"], r["effort"]),
                                        {"harness": r["harness"], "model": r["model"], "effort": r["effort"], "sizes": {}})
             cell["sizes"][size] = cell["sizes"].get(size, 0) + r["dispatches"]
-        return {"task_size": {"label": "planner task_size per task (tasks.descriptor_json)", "tasks": dist(task, "tasks")},
-                "dispatch_task_size_snapshot": {"label": "task size snapshotted on executor dispatches (dispatches.size_class)",
-                                                "dispatches": dist(snapshot, "dispatches"),
-                                                "by_route": [by_route[k] for k in sorted(by_route)]},
-                "run_size": {"label": "run size_class from the run's risk record (runs.risk_json)", "runs": dist(run, "runs")}}
-    return _section(con, schema, ("size.task", "size.dispatch_snapshot", "size.run"), build)
+        def part(rows, label_, **fields):
+            return {"label": label_, **fields} if rows is not None else {"label": label_, "available": False}
+        return {"task_size": part(task, "planner task_size per task (tasks.descriptor_json)",
+                                  **({"tasks": dist(task, "tasks")} if task is not None else {})),
+                "dispatch_task_size_snapshot": part(
+                    snapshot, "task size snapshotted on executor dispatches (dispatches.size_class)",
+                    **({"dispatches": dist(snapshot, "dispatches"), "by_route": [by_route[k] for k in sorted(by_route)]}
+                       if snapshot is not None else {})),
+                "run_size": part(run, "run size_class from the run's risk record (runs.risk_json)",
+                                 **({"runs": dist(run, "runs")} if run is not None else {}))}
+    metrics = ("size.task", "size.dispatch_snapshot", "size.run")
+    return _section(con, schema, metrics, build, optional=metrics)
 
 
 def _tag_section(con, schema) -> dict:
@@ -603,15 +651,33 @@ def _tag_section(con, schema) -> dict:
             unknown = sum(values.get(k, 0) for k in UNRECORDED)
             out[tag] = {"declared": total - unknown, "unknown_not_recorded": unknown, "values": dict(sorted(values.items()))}
         return out
-    return _section(con, schema, ("tags.tasks", "tags.dispatches"),
-                    lambda tasks, dispatches: {"tasks": coverage(tasks, "tasks"), "executor_dispatches": coverage(dispatches, "dispatches")})
+    metrics = ("tags.tasks", "tags.dispatches")
+    return _section(con, schema, metrics, lambda tasks, dispatches: {
+        "tasks": coverage(tasks, "tasks") if tasks is not None else {"available": False},
+        "executor_dispatches": coverage(dispatches, "dispatches") if dispatches is not None else {"available": False}},
+        optional=metrics)
 
 
 def _population_section(con, schema) -> dict:
+    def tally(rows, key, value):  # a clamped label can make two rows share a key
+        out: dict[str, int] = {}
+        for r in rows:
+            out[r[key]] = out.get(r[key], 0) + r[value]
+        return out
+
     def build(span, phases, statuses):
-        return {"runs": span[0], "runs_by_phase": {r["phase"]: r["runs"] for r in phases},
-                "tasks_by_status": {r["status"]: r["tasks"] for r in statuses}}
-    return _section(con, schema, ("runs.span", "runs.by_phase", "tasks.by_status"), build)
+        return {"runs": span[0], "runs_by_phase": tally(phases, "phase", "runs"),
+                "tasks_by_status": tally(statuses, "status", "tasks") if statuses is not None else None}
+    return _section(con, schema, ("runs.span", "runs.by_phase", "tasks.by_status"), build, optional=("tasks.by_status",))
+
+
+def _safely(section, con, schema) -> dict:
+    """One section that cannot be read (a malformed row, say) must not take the others down with it. Only the
+    exception's type is reported: its text could quote a database value."""
+    try:
+        return section(con, schema)
+    except Exception as exc:
+        return {"available": False, "reason": f"{type(exc).__name__} while reading this section"}
 
 
 def build_report(path: Path) -> dict:
@@ -619,8 +685,10 @@ def build_report(path: Path) -> dict:
     path = Path(path)
     before = sha256_file(path)
     size = path.stat().st_size
+    side_before = {suffix: Path(f"{path}{suffix}").exists() for suffix in ("-wal", "-shm")}
     con = open_readonly(path)
     try:
+        require_features(con)
         schema = read_schema(con)
         integrity = [r[0] for r in con.execute("PRAGMA integrity_check").fetchmany(5)]
         report = {
@@ -628,24 +696,26 @@ def build_report(path: Path) -> dict:
             "source": {
                 "sha256": before, "size_bytes": size, "integrity_check": integrity[0] if integrity == ["ok"] else integrity,
                 "schema_version": schema_version(con, schema), "journal_mode": con.execute("PRAGMA journal_mode").fetchone()[0],
-                "wal_file_present": Path(f"{path}-wal").exists(), "shm_file_present": Path(f"{path}-shm").exists(),
+                "wal_file_present": side_before["-wal"], "shm_file_present": side_before["-shm"],
+                "side_files_created_by_report": any(not side_before[x] and Path(f"{path}{x}").exists() for x in side_before),
                 "caveats": list(CAVEATS),
             },
             "schema_gaps_read_as_unknown": missing_schema(schema),
         }
-        population = _population_section(con, schema)
-        report["source"]["run_date_range"] = ({"runs": population["runs"]["runs"], "first": population["runs"]["first_day"],
-                                               "last": population["runs"]["last_day"]} if population["available"] else "unavailable")
+        population = _safely(_population_section, con, schema)
+        runs = population.get("runs")
+        report["source"]["run_date_range"] = ({"runs": runs["runs"], "first": runs["first_day"], "last": runs["last_day"]}
+                                              if runs else "unavailable")
         report["sections"] = {
             "population": population,
-            "dispatches": _dispatch_section(con, schema),
-            "episodes": _episode_section(con, schema),
-            "task_paths": _task_path_section(con, schema),
-            "self_review": _self_review_section(con, schema),
-            "findings": _finding_section(con, schema),
-            "latency_and_cost": _latency_cost_section(con, schema),
-            "size": _size_section(con, schema),
-            "tags": _tag_section(con, schema),
+            "dispatches": _safely(_dispatch_section, con, schema),
+            "episodes": _safely(_episode_section, con, schema),
+            "task_paths": _safely(_task_path_section, con, schema),
+            "self_review": _safely(_self_review_section, con, schema),
+            "findings": _safely(_finding_section, con, schema),
+            "latency_and_cost": _safely(_latency_cost_section, con, schema),
+            "size": _safely(_size_section, con, schema),
+            "tags": _safely(_tag_section, con, schema),
         }
     finally:
         con.close()
@@ -697,7 +767,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         report = build_report(args.db)
     except sqlite3.Error as exc:
-        print(f"routing_evidence_report: cannot read the file as a database ({type(exc).__name__}: {exc})", file=sys.stderr)
+        hint = ("; a WAL-mode database needs a writable directory or existing -wal and -shm files: copy the .db, "
+                "-wal and -shm files to a writable directory" if "readonly" in str(exc) or "unable to open" in str(exc) else "")
+        print(f"routing_evidence_report: cannot read the file as a database ({type(exc).__name__}: {exc}){hint}",
+              file=sys.stderr)
+        return 2
+    except RuntimeError as exc:
+        print(f"routing_evidence_report: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # the traceback could quote a database value
+        print(f"routing_evidence_report: internal error ({type(exc).__name__})", file=sys.stderr)
         return 2
     print(json.dumps(report, indent=2) if args.format == "json" else render_text(report))
     return 0 if report["source"]["integrity_check"] == "ok" else 1

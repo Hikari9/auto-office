@@ -172,19 +172,25 @@ def populate(con) -> None:
     _finding(con, "o1", "k1", "O1", None, None, "T1", contract=None)
 
 
+def _migrated(path: Path, *, v12: bool = True):
+    """An empty current-schema database, with the v12 evidence columns unless `v12` is False."""
+    con = db.connect(path)
+    if v12:
+        for table, columns in V12_COLUMNS.items():
+            have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+            for column in columns:
+                if column.split()[0] not in have:
+                    con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+    con.execute("PRAGMA foreign_keys=OFF")
+    return con
+
+
 def _make(path: Path, *, v12: bool = True, legacy_only: bool = False, wal: bool = False) -> Path:
     if legacy_only:
         con = sqlite3.connect(path)
         con.executescript(db.LEGACY_DDL)
     else:
-        con = db.connect(path)
-        if v12:
-            for table, columns in V12_COLUMNS.items():
-                have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
-                for column in columns:
-                    if column.split()[0] not in have:
-                        con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
-        con.execute("PRAGMA foreign_keys=OFF")
+        con = _migrated(path, v12=v12)
     if legacy_only:
         for name, triple, role in (("1", "claude@2/claude-sonnet-5-5@high", "executor"),
                                    ("2", "codex@1/gpt-5-codex@medium", "reviewer")):
@@ -353,6 +359,8 @@ def test_raw_strict_dispatch_successes_are_counted_apart_from_episodes(report):
     assert by_route(rows, "executor", A)["strict_successes"] == 4
     assert by_route(rows, "executor", B)["strict_successes"] == 1
     assert by_route(rows, "reviewer", ("agy", "gemini-3.8-flash", "medium"))["strict_successes"] is None
+    # Executor dispatches that never landed are 0 strict successes, not unknown.
+    assert by_route(rows, "executor", ("unknown", "unknown", "unknown"))["strict_successes"] == 0
 
     episodes = sec(report, "episodes")
     assert episodes["available"]
@@ -571,8 +579,15 @@ def test_a_3_0_recorder_database_reports_what_it_has_and_marks_the_rest_unavaila
     assert dispatches["totals"] == {"dispatches": 2, "terminal": 2, "pending": 0, "strict_successes": None}
     assert by_route(dispatches["routes"], "executor", A)["strict_successes"] is None
     assert by_route(dispatches["routes"], "reviewer", B)["dispatches"] == 1
-    for name in ("task_paths", "self_review", "findings", "tags", "size"):
+    for name in ("task_paths", "self_review", "findings"):
         assert sec(report, name)["available"] is False, name
+    # A missing tasks table hides only what needs it: the run range, run size and dispatch tags stay readable.
+    assert report["source"]["run_date_range"] == {"runs": 1, "first": "2026-08-01", "last": "2026-08-01"}
+    assert sec(report, "population")["tasks_by_status"] is None
+    assert sec(report, "size")["task_size"] == {"label": sec(report, "size")["task_size"]["label"], "available": False}
+    assert sec(report, "size")["run_size"]["runs"] == {"unknown": 1}
+    assert sec(report, "tags")["tasks"] == {"available": False}
+    assert sec(report, "tags")["executor_dispatches"]["intent"]["declared"] == 0
     assert sec(report, "episodes")["available"] is False
     assert {"tasks", "revisions", "gates"} <= set(report["schema_gaps_read_as_unknown"])
 
@@ -635,3 +650,355 @@ def test_every_metric_runs_on_a_full_schema_and_each_section_uses_only_documente
             assert isinstance(rer._rows(con, schema, metric_id), list), metric_id
     finally:
         con.close()
+
+
+# ------------------------------------------------------------------ findings from the self-review round
+
+def _mini(tmp_path, name="mini.db", **kw) -> sqlite3.Connection:
+    return _migrated(tmp_path / name, **kw)
+
+
+def _printed(path) -> tuple[str, str]:
+    """The report as text and as JSON, for one database."""
+    report = rer.build_report(path)
+    return rer.render_text(report), json.dumps(report)
+
+
+def test_free_text_in_route_phase_and_status_columns_never_reaches_the_output(tmp_path):
+    con = _mini(tmp_path)
+    _insert(con, "runs", id=R1, created_at="2026-09-01T09:00:00+00:00", phase=f"Tok {Z}\n\x1b[31m")
+    _insert(con, "dispatches", id=did("x"), run_id=R1, role=f"/etc/{Z}", harness=f"/Users/{Z}/.ssh/id_rsa",
+            model=f"sk-ant-{Z}/Users/rico/x", effort=f"\x1b]0;{Z}\x07", task_id="T1",
+            started_at="2026-09-01T10:00:00+00:00", ended_at="2026-09-01T10:01:00+00:00")
+    _insert(con, "dispatches", id=did("y"), run_id=R1, role="executor", harness="claude", model="claude-sonnet-5-5",
+            effort="high", ended_at="2026-09-01T10:01:00+00:00")
+    _insert(con, "tasks", run_id=R1, id="T1", title="t", role="executor", scope_json="[]", depends_json="[]",
+            accept_json="[]", checks_json="[]", status=f"{Z} done", introduced_plan_version=1, contract_version=1,
+            acceptance_version=1, created_at="x", updated_at="x")
+    con.execute("UPDATE runs SET risk_json=?", (b"\xff\x00",))  # a BLOB where text belongs
+    con.commit()
+    con.close()
+    text, as_json = _printed(tmp_path / "mini.db")
+    for out in (text, as_json):
+        assert Z not in out and "\x1b" not in out and "/Users/" not in out
+    rows = sec(rer.build_report(tmp_path / "mini.db"), "dispatches")["routes"]
+    assert by_route(rows, "other", ("other", "other", "other"))["dispatches"] == 1
+    assert by_route(rows, "executor", ("claude", "claude-sonnet-5-5", "high"))["dispatches"] == 1
+    assert sec(rer.build_report(tmp_path / "mini.db"), "population")["runs_by_phase"] == {"other": 1}
+    assert sec(rer.build_report(tmp_path / "mini.db"), "population")["tasks_by_status"] == {"other": 1}
+
+
+def test_a_malformed_row_degrades_one_section_and_never_the_exit_code(tmp_path, capsys):
+    con = _mini(tmp_path)
+    # Valid JSON that is not an object: route_learning's size lookup raises AttributeError on it.
+    _insert(con, "runs", id=R1, created_at="2026-09-01T09:00:00+00:00", phase="closed", risk_json="[1]")
+    _dispatch(con, "a", "T1", A, start="2026-09-01T10:00:00+00:00", end="2026-09-01T10:01:00+00:00")
+    # A start time that is an integer next to text ones: comparing them raises TypeError in the learner.
+    _dispatch(con, "b", "T1", A, start=5, end="2026-09-01T10:02:00+00:00")
+    con.commit()
+    con.close()
+    report = rer.build_report(tmp_path / "mini.db")
+    episodes = sec(report, "episodes")
+    assert episodes["available"] is False and episodes["reason"].endswith("while deriving outcomes")
+    assert Z not in json.dumps(episodes)
+    assert sec(report, "dispatches")["totals"]["dispatches"] == 2  # the other sections are untouched
+    assert rer.main(["--db", str(tmp_path / "mini.db"), "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["sections"]["episodes"]["available"] is False
+
+
+def test_an_unexpected_failure_exits_2_without_a_traceback(tmp_path, monkeypatch, capsys):
+    path = _make(tmp_path / f"{Z}-boom.db")
+
+    def boom(*a, **kw):
+        raise ZeroDivisionError(f"quotes a value {Z}")
+    monkeypatch.setattr(rer, "read_schema", boom)
+    assert rer.main(["--db", str(path)]) == 2
+    err = capsys.readouterr().err
+    assert err.strip() == "routing_evidence_report: internal error (ZeroDivisionError)"
+
+
+def test_lane_membership_counts_only_arrays_of_text_ids_and_the_two_lane_metrics_agree(tmp_path):
+    con = _mini(tmp_path)
+    for name, scope, members in (("g1", "s1", '{"a": "T1", "b": "T2"}'), ("g2", "s2", '"T9"'),
+                                 ("g3", "s3", '["T1", "T1", "T3"]'), ("g4", "s4", '["T4", 5, null, ["x"]]'),
+                                 ("g5", None, '["T1"]'), ("g6", "s6", "{not json")):
+        _insert(con, "gates", id=f"gate-{Z}-{name}", run_id=R1, subject="lane", scope=scope, kind="code_review",
+                input_key=Z, status="done", created_at="x", members_json=members)
+        _finding(con, name, name, "C1", "unassigned", None, "T1")
+    con.commit()
+    con.close()
+    findings = sec(rer.build_report(tmp_path / "mini.db"), "findings")
+    # Objects, scalars and malformed JSON are unknown membership; duplicates and non-text entries do not count.
+    assert findings["lanes"] == {"lane_gates": 6, "membership_unknown_gates": 3, "lanes": 6, "lane_task_pairs": 4,
+                                 "exposed_tasks": 3, "tasks_in_several_lanes": 1}
+    only = findings["by_attribution"][0]
+    assert (only["unique_findings"], only["lane_exposure"], only["membership_unknown"]) == (6, 4, 3)
+
+
+def test_a_route_with_an_unknown_effort_is_unknown_not_a_mismatch(tmp_path):
+    con = _mini(tmp_path)
+    _insert(con, "runs", id=R1, created_at="2026-09-01T09:00:00+00:00", phase="closed")
+    _dispatch(con, "a", "T1", ("claude", "m", None), start="2026-09-01T10:00:00+00:00", end="2026-09-01T10:01:00+00:00")
+    _dispatch(con, "b", "T1", ("claude", "m", "high"), start="2026-09-01T11:00:00+00:00",
+              end="2026-09-01T11:01:00+00:00", pred="a")
+    _task(con, "T1", "accepted", first="a", rev="b", producer="b")
+    _revision(con, "b", "T1", 1, "b", LEDGER)
+    con.commit()
+    con.close()
+    paths = sec(rer.build_report(tmp_path / "mini.db"), "task_paths")
+    assert paths["accepted"]["first_final_mismatch"] == 0 and paths["accepted"]["route_unknown"] == 1
+    accepted = {r["task_state"]: r for r in paths["handoffs_by_task_state"]}["accepted"]
+    assert (accepted["cross_route_handoffs"], accepted["same_route_retries"], accepted["route_unknown_handoffs"]) == (0, 0, 1)
+
+
+def test_a_dispatch_is_never_its_own_predecessor(tmp_path):
+    con = _mini(tmp_path)
+    _insert(con, "runs", id=R1, created_at="2026-09-01T09:00:00+00:00", phase="closed")
+    _dispatch(con, "a", "T1", A, start="2026-09-01T10:00:00+00:00", end="2026-09-01T10:01:00+00:00", pred="a")
+    _task(con, "T1", "submitted")
+    con.commit()
+    con.close()
+    paths = sec(rer.build_report(tmp_path / "mini.db"), "task_paths")
+    assert paths["executor_dispatch_links"] == {"executor_dispatches": 1, "first": 0, "linked": 0, "unknown": 1}
+    assert {r["task_state"]: r for r in paths["handoffs_by_task_state"]}["unresolved"]["same_route_retries"] == 0
+
+
+def test_an_accepted_revision_that_belongs_to_another_task_is_not_credited(tmp_path):
+    con = _mini(tmp_path)
+    _insert(con, "runs", id=R1, created_at="2026-09-01T09:00:00+00:00", phase="closed")
+    _dispatch(con, "a", "T2", A, start="2026-09-01T10:00:00+00:00", end="2026-09-01T10:01:00+00:00")
+    _task(con, "T1", "accepted", rev="x")       # points at T2's revision
+    _task(con, "T2", "submitted", first="a")
+    _revision(con, "x", "T2", 1, "a", LEDGER)
+    con.commit()
+    con.close()
+    report = rer.build_report(tmp_path / "mini.db")
+    paths = sec(report, "task_paths")
+    assert paths["accepted"]["accepted_tasks"] == 1 and paths["accepted"]["producer_unknown"] == 1
+    assert paths["revisions_to_accept"]["revision_row_missing"] == 1
+    assert sec(report, "dispatches")["totals"]["strict_successes"] == 0
+
+
+def test_a_revision_and_its_dispatch_must_both_belong_to_the_accepted_task(tmp_path):
+    con = _mini(tmp_path)
+    _insert(con, "runs", id=R1, created_at="2026-09-01T09:00:00+00:00", phase="closed")
+    for name in ("a", "b"):
+        _dispatch(con, name, name.upper(), A, start="2026-09-01T10:00:00+00:00", end="2026-09-01T10:01:00+00:00")
+    # T-A is accepted on a revision filed under T-B (its dispatch is T-A's); T-B on a revision filed under T-B
+    # whose dispatch belongs to T-A.
+    _task(con, "A", "accepted", first="a", rev="ra")
+    _task(con, "B", "accepted", first="b", rev="rb")
+    _revision(con, "ra", "B", 1, "a", LEDGER)
+    _revision(con, "rb", "B", 1, "a", LEDGER)
+    con.commit()
+    con.close()
+    report = rer.build_report(tmp_path / "mini.db")
+    assert sec(report, "dispatches")["totals"]["strict_successes"] == 0
+    assert sec(report, "task_paths")["accepted"]["producer_unknown"] == 2
+
+
+def test_a_section_that_fails_is_unavailable_and_the_rest_of_the_report_stands(new_db, monkeypatch):
+    def boom(con, schema):
+        raise ValueError(f"quotes a database value {Z}")
+    monkeypatch.setattr(rer, "_latency_cost_section", boom)
+    report = rer.build_report(new_db)
+    assert sec(report, "latency_and_cost") == {"available": False, "reason": "ValueError while reading this section"}
+    assert Z not in json.dumps(report)
+    assert sec(report, "dispatches")["totals"]["dispatches"] == 15
+
+
+def test_a_database_without_the_receipt_column_reports_unknown_not_missing(tmp_path):
+    con = _mini(tmp_path)
+    _insert(con, "runs", id=R1, created_at="2026-09-01T09:00:00+00:00", phase="closed")
+    _dispatch(con, "a", "T1", A)
+    _task(con, "T1", "accepted", rev="a", first="a", producer="a")
+    _revision(con, "a", "T1", 1, "a", None)
+    con.execute("ALTER TABLE revisions DROP COLUMN self_review_json")
+    con.commit()
+    con.close()
+    receipts = sec(rer.build_report(tmp_path / "mini.db"), "self_review")["by_receipt"]
+    assert receipts == [{"kind": "unknown", "exempt_type": None, "revisions": 1, "accepted_revisions": 1}]
+
+
+def test_a_path_with_a_leading_double_slash_opens(new_db):
+    report = rer.build_report(Path("/" + str(new_db)))
+    assert report["source"]["hash_unchanged"] is True and report["source"]["integrity_check"] == "ok"
+
+
+def test_side_files_are_reported_as_found_not_as_the_report_left_them(tmp_path):
+    path = _make(tmp_path / f"{Z}-wal.db", wal=True)
+    assert not Path(f"{path}-wal").exists() and not Path(f"{path}-shm").exists()
+    report = rer.build_report(path)
+    assert report["source"]["wal_file_present"] is False and report["source"]["shm_file_present"] is False
+    left = Path(f"{path}-wal").exists() or Path(f"{path}-shm").exists()
+    assert report["source"]["side_files_created_by_report"] is left
+
+
+def test_a_sqlite_without_json1_or_window_functions_is_named(tmp_path, monkeypatch, capsys):
+    class Old:
+        def execute(self, sql, *a):
+            raise sqlite3.OperationalError("no such function: json_valid")
+    with pytest.raises(RuntimeError, match=r"3\.25"):
+        rer.require_features(Old())
+    path = _make(tmp_path / f"{Z}-old-sqlite.db")
+    real = rer.require_features
+    monkeypatch.setattr(rer, "require_features", lambda con: real(Old()))
+    assert rer.main(["--db", str(path)]) == 2
+    assert "needs SQLite 3.25 or later" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "geteuid") or __import__("os").geteuid() == 0,
+                    reason="root can write to a read-only directory")
+def test_a_wal_database_in_a_read_only_directory_gets_an_actionable_message(tmp_path, capsys):
+    import os
+    sub = tmp_path / "ro"
+    sub.mkdir()
+    path = _make(sub / "wal.db", wal=True)
+    os.chmod(sub, 0o555)
+    try:
+        assert rer.main(["--db", str(path)]) == 2
+    finally:
+        os.chmod(sub, 0o755)
+    assert "writable directory" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------ test-strength round
+
+def _accepted(con, tid, route, revisions, *, run=R1, descriptor=None, role="executor", missing_revision=False):
+    """An accepted task with `revisions` revisions, the last of which is accepted and produced by one dispatch."""
+    _dispatch(con, tid, tid, route, run=run, role=role, start="2026-09-01T10:00:00+00:00",
+              end="2026-09-01T10:01:00+00:00")
+    for n in range(1, revisions + 1):
+        _revision(con, f"{tid}-{n}", tid, n, tid, LEDGER, run=run)
+    _task(con, tid, "accepted", run=run, first=tid, rev="missing" if missing_revision else f"{tid}-{revisions}",
+          descriptor=descriptor)
+
+
+def test_a_file_that_changes_during_the_report_is_flagged(new_db, monkeypatch):
+    real, calls = rer.sha256_file, []
+
+    def spy(path):
+        if calls:
+            Path(path).write_bytes(Path(path).read_bytes() + b"x")
+        calls.append(path)
+        return real(path)
+    monkeypatch.setattr(rer, "sha256_file", spy)
+    src = rer.build_report(new_db)["source"]
+    assert src["hash_unchanged"] is False and src["sha256"] != src["sha256_after"]
+    assert src["sha256_after"] == hashlib.sha256(new_db.read_bytes()).hexdigest()
+
+
+def test_a_live_wal_is_read_and_reported(tmp_path):
+    path = _make(tmp_path / f"{Z}-live.db", wal=True)
+    writer = db.connect(path)
+    try:
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        _insert(writer, "runs", id=f"run-{Z}-live", created_at="2026-10-09T09:00:00+00:00", phase="active")
+        writer.commit()
+        report = rer.build_report(path)
+    finally:
+        writer.close()
+    src = report["source"]
+    assert (src["wal_file_present"], src["shm_file_present"], src["journal_mode"]) == (True, True, "wal")
+    assert src["side_files_created_by_report"] is False
+    assert src["run_date_range"]["last"] == "2026-10-09"  # the committed frame in the -wal was read
+
+
+def test_self_review_values_outside_the_known_sets_are_clamped(tmp_path):
+    con = _mini(tmp_path)
+    for name, receipt in (("a", json.dumps({"kind": f"{Z}-kind"})), ("b", json.dumps({"kind": "exempt", "type": f"{Z}-type"})),
+                          ("c", "{}"), ("d", "5"), ("e", json.dumps({"kind": "exempt", "type": "empty"}))):
+        _revision(con, name, "T1", 1, "a", receipt)
+    con.commit()
+    con.close()
+    text, as_json = _printed(tmp_path / "mini.db")
+    assert Z not in text and Z not in as_json
+    rows = {(r["kind"], r["exempt_type"]): r["revisions"] for r in sec(rer.build_report(tmp_path / "mini.db"), "self_review")["by_receipt"]}
+    assert rows == {("exempt", "empty"): 1, ("exempt", "other"): 1, ("unreadable", None): 3}
+
+
+def test_an_unexpected_attribution_basis_is_clamped(tmp_path):
+    con = _mini(tmp_path)
+    _gate(con, "a", "lane", "s", ["T1"])
+    _finding(con, "a", "a", "C1", f"{Z}-basis", "T1", "T1")
+    con.commit()
+    con.close()
+    report = rer.build_report(tmp_path / "mini.db")
+    assert [r["basis"] for r in sec(report, "findings")["by_attribution"]] == ["other"]
+    assert Z not in json.dumps(report)
+
+
+def test_worker_dispatches_count_and_a_reviewer_that_shares_a_revision_does_not(tmp_path):
+    con = _mini(tmp_path)
+    _insert(con, "runs", id=R1, created_at="2026-09-01T09:00:00+00:00", phase="closed")
+    _accepted(con, "T1", A, 1, role="worker")
+    _dispatch(con, "rv", None, B, role="reviewer", end="2026-09-01T10:02:00+00:00")
+    _accepted(con, "T2", A, 1)
+    con.execute("UPDATE revisions SET dispatch_id=? WHERE id=?", (did("rv"), f"rev-{Z}-T2-1"))
+    con.commit()
+    con.close()
+    rows = sec(rer.build_report(tmp_path / "mini.db"), "dispatches")["routes"]
+    assert by_route(rows, "worker", A)["strict_successes"] == 1
+    assert by_route(rows, "reviewer", B)["strict_successes"] is None
+    assert by_route(rows, "executor", A)["strict_successes"] == 0
+
+
+def test_revisions_to_accept_uses_the_even_median_and_sets_a_missing_revision_apart(tmp_path):
+    con = _mini(tmp_path)
+    _insert(con, "runs", id=R1, created_at="2026-09-01T09:00:00+00:00", phase="closed")
+    for tid, n in (("T1", 1), ("T2", 1), ("T3", 2), ("T4", 6)):
+        _accepted(con, tid, A, n)
+    _accepted(con, "T5", A, 1, missing_revision=True)
+    con.commit()
+    con.close()
+    accepted = sec(rer.build_report(tmp_path / "mini.db"), "task_paths")["revisions_to_accept"]
+    assert accepted == {"tasks": 5, "revision_row_missing": 1, "mean": 2.5, "median": 1.5,
+                        "histogram": {"1": 2, "2": 1, "6": 1}}
+
+
+def test_a_route_with_no_recorded_effort_is_one_unknown_route_everywhere(tmp_path):
+    con = _mini(tmp_path)
+    _insert(con, "runs", id=R1, created_at="2026-09-01T09:00:00+00:00", phase="closed")
+    _accepted(con, "T1", ("claude", "m", None), 1)
+    con.commit()
+    con.close()
+    report = rer.build_report(tmp_path / "mini.db")
+    assert by_route(sec(report, "dispatches")["routes"], "executor", ("claude", "m", "unknown"))["dispatches"] == 1
+    assert by_route(sec(report, "episodes")["routes"], "executor", ("claude", "m", "unknown"))["accepted_episodes"] == 1
+
+
+def test_a_path_with_spaces_hashes_and_percent_signs_opens(new_db, tmp_path):
+    odd = tmp_path / "a b#c%d.db"
+    odd.write_bytes(new_db.read_bytes())
+    report = rer.build_report(odd)
+    assert report["source"]["sha256"] == hashlib.sha256(odd.read_bytes()).hexdigest()
+    assert report["source"]["integrity_check"] == "ok" and report["source"]["run_date_range"]["runs"] == 2
+
+
+def test_an_explicit_unknown_is_a_declared_value_for_every_tag(tmp_path):
+    con = _mini(tmp_path)
+    _insert(con, "runs", id=R1, created_at="2026-09-01T09:00:00+00:00", phase="closed")
+    _accepted(con, "T1", A, 1, descriptor=json.dumps({"brief_shape": "unknown"}))
+    _accepted(con, "T2", A, 1, descriptor=json.dumps({"brief_shape": "checks-only"}))
+    con.commit()
+    con.close()
+    shape = sec(rer.build_report(tmp_path / "mini.db"), "tags")["tasks"]["brief_shape"]
+    assert shape == {"declared": 2, "unknown_not_recorded": 0, "values": {"checks-only": 1, "unknown": 1}}
+
+
+def test_missing_values_print_as_unknown_in_text_and_costs_are_never_zero(new_db, tmp_path):
+    text = rer.render_text(rer.build_report(new_db))
+    assert "total=0" not in text and "total=unknown" in text
+    legacy = rer.render_text(rer.build_report(_make(tmp_path / "legacy.db", legacy_only=True)))
+    assert "strict_successes: unknown" in legacy
+
+
+def test_latency_and_cost_keep_their_precision(tmp_path):
+    con = _mini(tmp_path)
+    _dispatch(con, "a", None, A, start="2026-09-01T10:00:00+00:00", end="2026-09-01T10:01:00+00:00", wall=12.3456,
+              money=0.0123456)
+    con.commit()
+    con.close()
+    report = sec(rer.build_report(tmp_path / "mini.db"), "latency_and_cost")
+    assert by_route(report["latency"], "executor", A)["mean_seconds"] == 12.346
+    assert by_route(report["cost"], "executor", A)["total"] == 0.012346
