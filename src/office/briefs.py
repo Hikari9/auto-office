@@ -265,10 +265,9 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
     if vis and not vis.get("none"):
         out.append(f"VISUAL the runtime will capture {vis.get('url')} at {vis.get('viewports') or 'desktop, mobile'}"
                    + (f" against reference {vis['reference']}" if vis.get("reference") else " (no reference: fidelity unmeasured)"))
-        if vis.get("start"):
-            out.append("DEV SERVER if you start a preview server to verify this task, stop it before office submit. "
-                       "A detached server can survive your session and block the later visual gate's port. "
-                       "Never kill a port owner without verifying it belongs to your task.")
+    out.append("SERVERS stop any server or background process you started before office submit. A detached server "
+               "survives your session and blocks ports" + (" such as the visual gate's" if vis and vis.get("start") else "")
+               + ". Never kill a port owner without verifying it belongs to your task.")
     out.append(f"VERSIONS plan p{packet['plan_version']} / requirements r{packet['requirements_version']}")
     if setup and setup.get("exit") != 0:
         out.append(f"SETUP FAILED the repo's worktree setup (`{setup['command']}`) did not finish in this worktree; "

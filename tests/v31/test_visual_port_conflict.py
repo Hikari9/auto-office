@@ -2,6 +2,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import json
 import os
 import signal
 import socket
@@ -13,7 +14,7 @@ import pytest
 
 from conftest import approved_run
 from office import db, paths, state, visual
-from office.util import now_iso
+from office.util import now_iso, process_start
 
 
 def test_port_conflict_names_pid_command_and_possible_finished_dispatch(monkeypatch, tmp_path):
@@ -124,19 +125,21 @@ def _alive(pid) -> bool:
         return True
 
 
-def _executor(env, run, worktree, *, pgid, started, ended, did="DX1"):
+def _executor(env, run, worktree, *, pgid, started, ended, did="DX1", launcher=None, identity=None):
     con = env.con()
     try:
         with db.transaction(con):
-            con.execute("INSERT INTO dispatches(id, run_id, role, started_at, ended_at, worktree, status) "
-                        "VALUES(?,?,?,?,?,?,?)", (did, run["id"], "executor", started, ended, str(worktree),
-                                                  "ended" if ended else "running"))
+            con.execute("INSERT INTO dispatches(id, run_id, role, started_at, ended_at, worktree, status, launcher) "
+                        "VALUES(?,?,?,?,?,?,?,?)", (did, run["id"], "executor", started, ended, str(worktree),
+                                                    "ended" if ended else "running", launcher))
     finally:
         con.close()
     ddir = paths.run_dir(run["id"]) / "dispatches" / did
     ddir.mkdir(parents=True, exist_ok=True)
     if pgid:
         (ddir / "agent.pgid").write_text(str(pgid))
+    if identity:
+        (ddir / "agent.identity").write_text(json.dumps(identity))
 
 
 def _run(env):
@@ -228,3 +231,89 @@ def test_missing_lsof_reports_a_generic_blocker(env, leftover, tmp_path, monkeyp
 
 def test_free_port_is_no_conflict(tmp_path):
     assert visual._capture_port_conflict(f"http://127.0.0.1:{_free_port()}/", None, {"id": "R1"}, tmp_path) is None
+
+
+PANE_AGENT = """
+import socket, sys, time
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(); print("up", flush=True); time.sleep(60)
+"""
+
+
+@pytest.fixture
+def live_agent():
+    """A pane "agent" that leads its own group and still holds the port itself."""
+    procs = []
+
+    def make():
+        port = _free_port()
+        proc = subprocess.Popen([sys.executable, "-c", PANE_AGENT, str(port)], stdout=subprocess.PIPE, text=True,
+                                start_new_session=True)
+        procs.append(proc)
+        assert proc.stdout.readline().strip() == "up"
+        return {"port": port, "pid": proc.pid, "proc": proc}
+    yield make
+    for proc in procs:
+        proc.kill()
+        proc.wait()
+
+
+@pytest.mark.approved
+def test_leftover_of_an_ended_pane_executor_is_stopped(env, leftover, tmp_path):
+    con, run = _run(env)
+    lo, hi = _window()
+    srv = leftover()
+    _executor(env, run, tmp_path, pgid=srv["leader"], started=lo, ended=hi, launcher="herdr",
+              identity={"pid": srv["leader"], "start": "Mon Jan  1 00:00:00 2026"})  # leader already exited
+    assert visual._capture_port_conflict(f"http://127.0.0.1:{srv['port']}/", con, run, tmp_path) is None
+    assert not _bound(srv["port"])
+
+
+@pytest.mark.approved
+def test_pane_executor_without_a_recorded_start_is_only_reported(env, leftover, tmp_path):
+    con, run = _run(env)
+    lo, hi = _window()
+    srv = leftover()
+    _executor(env, run, tmp_path, pgid=srv["leader"], started=lo, ended=hi, launcher="herdr")
+    cause = visual._capture_port_conflict(f"http://127.0.0.1:{srv['port']}/", con, run, tmp_path)
+    assert cause and _bound(srv["port"]) and _alive(srv["server"])
+
+
+@pytest.mark.approved
+def test_live_pane_leader_must_match_its_recorded_start(env, live_agent, tmp_path):
+    con, run = _run(env)
+    lo, hi = _window()
+    agent = live_agent()
+    _executor(env, run, tmp_path, pgid=agent["pid"], started=lo, ended=hi, launcher="herdr",
+              identity={"pid": agent["pid"], "start": "Mon Jan  1 00:00:00 2001"})
+    cause = visual._capture_port_conflict(f"http://127.0.0.1:{agent['port']}/", con, run, tmp_path)
+    assert cause and _bound(agent["port"]) and agent["proc"].poll() is None
+
+
+@pytest.mark.approved
+def test_live_pane_leader_with_its_recorded_start_is_stopped(env, live_agent, tmp_path):
+    con, run = _run(env)
+    lo, hi = _window()
+    agent = live_agent()
+    _executor(env, run, tmp_path, pgid=agent["pid"], started=lo, ended=hi, launcher="herdr",
+              identity={"pid": agent["pid"], "start": process_start(agent["pid"])})
+    assert visual._capture_port_conflict(f"http://127.0.0.1:{agent['port']}/", con, run, tmp_path) is None
+    assert agent["proc"].wait(timeout=10) is not None
+
+
+@pytest.mark.approved
+def test_pane_launch_records_the_agent_group_and_start(env, live_agent, monkeypatch):
+    from office import dispatch
+    _, run = _run(env)
+    agent = live_agent()
+    info = {"process_info": {"shell_pid": os.getpid(), "foreground_process_group_id": agent["pid"]}}
+    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: info if args[:2] == ["pane", "process-info"] else {})
+    assert dispatch._record_pane_agent_group(run, "DP1", "p1") == agent["pid"]
+    ddir = paths.run_dir(run["id"]) / "dispatches" / "DP1"
+    assert (ddir / "agent.pgid").read_text() == str(agent["pid"])
+    assert json.loads((ddir / "agent.identity").read_text()) == {"pid": agent["pid"], "start": process_start(agent["pid"])}
+    # The shell's own group, or an unknown one, is never recorded.
+    info["process_info"]["foreground_process_group_id"] = os.getpid()
+    assert dispatch._record_pane_agent_group(run, "DP2", "p1") is None
+    info["process_info"] = {}
+    assert dispatch._record_pane_agent_group(run, "DP3", "p1") is None
