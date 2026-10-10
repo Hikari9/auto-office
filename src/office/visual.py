@@ -20,6 +20,7 @@ import os
 import re
 import shlex
 import signal
+import socket
 import subprocess
 import time
 import urllib.error
@@ -274,6 +275,160 @@ def _wait_url(url: str, timeout: float) -> str | None:
     return f"not reachable: {last}"
 
 
+def _capture_port_conflict(url: str, con, run: dict, worktree: Path) -> str | None:
+    """Diagnose a bound local capture port before launching a second server (#507).
+
+    Never kill based solely on a matching cwd or port: unrelated local services
+    may share a worktree. A human can verify and stop the named process.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+        return None
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        with socket.create_connection((parsed.hostname, port), timeout=0.3):
+            pass
+    except (OSError, ValueError):
+        return None
+    pids: list[int] = []
+    try:
+        probe = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"],
+                               capture_output=True, text=True, timeout=3)
+        if probe.returncode == 0:
+            pids = sorted({int(line[1:]) for line in probe.stdout.splitlines()
+                           if line.startswith("p") and line[1:].isdigit()})
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if len(pids) != 1:
+        return (f"port {port} is already bound before visual capture; "
+                f"inspect its owner: lsof -nP -iTCP:{port} -sTCP:LISTEN; "
+                "stop the prior dev server before re-running capture")
+    pid = pids[0]
+    command = "unknown"
+    cwd = None
+    try:
+        ps = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                            capture_output=True, text=True, timeout=3)
+        if ps.returncode == 0:
+            command = Path((ps.stdout or "unknown").strip().splitlines()[0]).name[:100]
+        info = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                              capture_output=True, text=True, timeout=3)
+        if info.returncode == 0:
+            cwd = next((line[1:] for line in info.stdout.splitlines() if line.startswith("n")), None)
+    except (OSError, subprocess.SubprocessError, IndexError):
+        pass
+    owner = _office_leftover(con, run, pid)
+    if owner and owner.get("dispatch_id") and not owner.get("blocked"):
+        freed = _reclaim_leftover(owner, parsed.hostname, port)
+        _record_reclaim(con, run, owner, pid, command, port, freed)
+        if freed:
+            return None
+        return (f"port {port} is bound by PID {pid} ({command}), a leftover of ended executor dispatch "
+                f"{owner['dispatch_id']} (its agent process group {owner['pgid']}); Office signalled that group but "
+                f"the port is still bound; stop it by hand: kill -TERM -{owner['pgid']}; then retry visual capture")
+    if owner and owner.get("blocked"):
+        return (f"port {port} is bound by PID {pid} ({command}), a leftover of ended executor dispatch "
+                f"{owner['dispatch_id']}; not stopped because {owner['blocked']}; stop it when safe: "
+                f"kill -TERM -{owner['pgid']}; then retry visual capture")
+    possible = False
+    if cwd and Path(cwd).resolve() == worktree.resolve():
+        prior = con.execute("SELECT 1 FROM dispatches WHERE run_id=? AND worktree=? "
+                            "AND role='executor' AND ended_at IS NOT NULL LIMIT 1",
+                            (run["id"], str(worktree))).fetchone()
+        possible = bool(prior)
+    origin = ("possibly from an ended Office executor dispatch in this worktree"
+              if possible else "ownership by an Office dispatch is not proven")
+    return (f"port {port} is already bound by PID {pid} ({command}); {origin}; "
+            f"after confirming the process is safe to stop, run: kill {pid}; then retry visual capture")
+
+
+def _epoch(stamp: str | None) -> float | None:
+    """A `ps -o lstart` or ISO timestamp as epoch seconds, or None."""
+    if not stamp:
+        return None
+    for fmt in ("%a %b %d %H:%M:%S %Y", "%a %d %b %H:%M:%S %Y"):  # ps orders day and month by locale
+        try:
+            return time.mktime(time.strptime(stamp, fmt))
+        except ValueError:
+            pass
+    try:
+        from office.util import parse_iso
+        return parse_iso(stamp).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _office_leftover(con, run: dict, pid: int) -> dict | None:
+    """The ended executor dispatch whose headless agent left `pid` behind, or None (#507).
+
+    Proof, not a guess: the listener's process group is the agent group Office
+    recorded for that dispatch (`agent.pgid`), and the listener started while
+    that dispatch ran. A process group id is not reused while any member lives,
+    so a listener in group G that started while the agent led G is that agent's
+    descendant. Pane-hosted agents record no group and are never matched. A
+    leftover is not stopped while a live executor works in the same worktree.
+    """
+    from office.util import process_start
+    try:
+        pgid = os.getpgid(pid)
+    except OSError:
+        return None
+    started = _epoch(process_start(pid))
+    if started is None or pgid <= 1 or pgid in (os.getpgrp(), os.getpid()):
+        return None
+    for d in con.execute("SELECT id, worktree, started_at, ended_at FROM dispatches WHERE run_id=? AND role='executor' "
+                         "AND ended_at IS NOT NULL ORDER BY started_at DESC", (run["id"],)).fetchall():
+        try:
+            recorded = int((paths.run_dir(run["id"]) / "dispatches" / d["id"] / "agent.pgid").read_text().strip())
+        except (OSError, ValueError):
+            continue
+        lo, hi = _epoch(d["started_at"]), _epoch(d["ended_at"])
+        if recorded != pgid or lo is None or hi is None or not (lo - 1 <= started <= hi + 1):
+            continue
+        owner = {"dispatch_id": d["id"], "pgid": pgid, "worktree": d["worktree"]}
+        live = con.execute("SELECT id FROM dispatches WHERE run_id=? AND role='executor' AND worktree=? "
+                           "AND ended_at IS NULL AND status IN ('launching','running') LIMIT 1",
+                           (run["id"], d["worktree"])).fetchone()
+        if live:
+            owner["blocked"] = f"executor dispatch {live['id']} is live in the same worktree"
+        return owner
+    return None
+
+
+def _port_bound(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
+def _reclaim_leftover(owner: dict, host: str, port: int, wait: float = 5.0) -> bool:
+    """Stop a proven leftover agent process group; True once the port is free."""
+    pgid = owner["pgid"]
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except OSError:
+            break  # the group is gone
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            if not _port_bound(host, port):
+                return True
+            time.sleep(0.1)
+    return not _port_bound(host, port)
+
+
+def _record_reclaim(con, run: dict, owner: dict, pid: int, command: str, port: int, freed: bool) -> None:
+    from office import db, state
+    with db.transaction(con):
+        state.emit(con, run, "visual.reclaimed", f"stopped leftover {command} (PID {pid}, process group {owner['pgid']}) "
+                   f"holding port {port}: started by ended executor dispatch {owner['dispatch_id']}"
+                   + ("" if freed else "; the port is still bound"), audience="runtime",
+                   dispatch_id=owner["dispatch_id"],
+                   payload={"pid": pid, "pgid": owner["pgid"], "port": port, "command": command, "freed": freed})
+
+
 def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Path) -> dict:
     from office.submit import matches_revision, restore_tracked_paths
     spec = task["visual"]
@@ -288,6 +443,10 @@ def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Pat
         return {"evidence_status": "CAPTURE_BLOCKED",
                 "cause": f"{url} is not a local/test origin; capture is limited to authorized local and preview environments",
                 "product_failures": []}
+    if spec.get("start"):
+        conflict = _capture_port_conflict(url, con, run, worktree)
+        if conflict:
+            return {"evidence_status": "CAPTURE_BLOCKED", "cause": conflict, "product_failures": []}
     server = None
     server_log = None
     server_started = False
