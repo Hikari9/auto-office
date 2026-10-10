@@ -630,3 +630,22 @@ def test_v31_code_review_brief_lists_the_codes_the_task_already_used(env, monkey
     env.office("dispatch", "T1", check=0)
     env.office("rerun", "T1", "--fresh", check=0)
     assert seen and seen[0] == [] and seen[-1] == ["F1"], seen
+
+
+def test_plan_review_brief_lists_the_codes_the_plan_review_already_used(env, monkeypatch):
+    from office import briefs
+    seen = []
+    real = briefs.plan_review_brief
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("used_codes"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(briefs, "plan_review_brief", spy)
+    env.trust()
+    env.script(plan_reviewer=[{"reply": recheck("FINDING P1 | medium | blocking | T1 | the contract is unclear | fix it")},
+                              {"reply": APPROVED}])
+    start_inline(env, plan=PLAN_ONE, gear="express")
+    env.write_plan(PLAN_ONE.replace("- calc.add(2, 3) == 5", "- calc.add(2, 3) == 5\n- calc.add(0, 0) == 0"))
+    env.office("amend", "T1", "--contract", "--", "revision", check=0)
+    assert seen and seen[0] == [] and seen[-1] == ["P1"], seen
