@@ -1129,7 +1129,8 @@ def test_s11_inspect_route_names_recovered_launches_and_a_trial_with_its_fallbac
 # ====================================================================== S12 migration and replay
 
 ROOT = Path(__file__).resolve().parents[2]
-BASE_COMMIT = "eaf155a"  # the tree the S12 reference hashes and the old schema come from
+BASE_COMMIT = "eaf155a"  # the tree the S12 reference hashes come from
+SCHEMA_BASE = "5ad1594"  # main as #494 lands on it: the previous runtime whose schema S12 extends
 
 
 def test_s12_recorded_requests_replay_to_the_same_decision_hash_with_discovery_off():
@@ -1209,9 +1210,9 @@ def test_s12_archived_rows_and_confirmed_unsupported_rows_never_return(world, mo
 def test_s12_db_changes_are_additive_and_the_previous_runtime_keeps_working_on_the_same_file(tmp_path):
     import subprocess
     import types
-    shown = subprocess.run(["git", "-C", str(ROOT), "show", f"{BASE_COMMIT}:src/office/db.py"], capture_output=True, text=True)
+    shown = subprocess.run(["git", "-C", str(ROOT), "show", f"{SCHEMA_BASE}:src/office/db.py"], capture_output=True, text=True)
     if shown.returncode:
-        pytest.skip(f"{BASE_COMMIT} is not in this clone")
+        pytest.skip(f"{SCHEMA_BASE} is not in this clone")
     old = types.ModuleType("office_db_before_494")
     old.__package__ = "office"
     exec(compile(shown.stdout, "db_before_494.py", "exec"), old.__dict__)
