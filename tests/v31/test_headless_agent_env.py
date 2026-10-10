@@ -22,7 +22,7 @@ from pathlib import Path
 if os.environ.get("OFFICE_ROLE") == "executor" and os.environ.get("OFFICE_DISPATCH_ID"):
     from office import paths
     _env = paths.run_dir(os.environ["OFFICE_RUN_ID"]) / "dispatches" / os.environ["OFFICE_DISPATCH_ID"] / "agent.env"
-    _seen = {"exists": _env.is_file(), "text": _env.read_text() if _env.is_file() else None,
+    _seen = {"dispatch_id": os.environ["OFFICE_DISPATCH_ID"], "exists": _env.is_file(), "text": _env.read_text() if _env.is_file() else None,
              "mode": _env.stat().st_mode & 0o777 if _env.is_file() else None}
     Path(os.environ["FAKE_ENV_RECORD"]).write_text(json.dumps(_seen))
 """
@@ -53,13 +53,15 @@ def _approved_executor(env, monkeypatch):
     return record
 
 
-def _expected(env, overrides):
-    """What the Herdr path writes for this run and dispatch: `write_agent_env` under the launching environment."""
+def _expected(env, overrides, dispatch_id=None):
+    """What the Herdr path writes for this run and dispatch: `write_agent_env` under the launching environment.
+    A started agent names the dispatch it saw: the task may have moved on by the time this reads it."""
     from office import dispatch, paths, state
     con = env.con()
     try:
         run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
-        d = state.get_dispatch(con, con.execute("SELECT current_dispatch_id FROM tasks WHERE id='T1'").fetchone()[0])
+        d = state.get_dispatch(con, dispatch_id or con.execute(
+            "SELECT current_dispatch_id FROM tasks WHERE id='T1'").fetchone()[0])
     finally:
         con.close()
     out = env.tmp / "expected"
@@ -94,7 +96,7 @@ def test_a_headless_executor_finds_agent_env_when_it_starts(world, monkeypatch, 
     code, out = env.office("dispatch", "T1", env=overrides)
     assert code == 0, out
     seen = _wait_for(record)
-    ddir, expected = _expected(env, overrides)
+    ddir, expected = _expected(env, overrides, seen["dispatch_id"])
     assert seen["exists"], f"{launcher}: the agent started with no {ddir / 'agent.env'}"
     assert seen["text"] == expected
     assert seen["mode"] == 0o600
