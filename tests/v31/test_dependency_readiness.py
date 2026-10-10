@@ -11,7 +11,10 @@ from __future__ import annotations
 import json
 import re
 
+from unittest import mock
+
 import pytest
+from hypothesis import given, strategies as st
 
 from conftest import GOOD_ADD, approved_run
 
@@ -64,23 +67,81 @@ def _run(con):
     return state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
 
 
-@pytest.mark.parametrize("status", ["planned", "launching", "running", "submitted", "changes_required", "blocked",
-                                    "paused", "accepted"])
+@pytest.mark.parametrize("status", ["submitted", "accepted"])
 def test_only_an_accepted_dependency_makes_its_dependent_ready(env, status):
     approved_run(env, plan=PLAN_STACK)
     con = env.con()
     run = _run(con)
     assert _ready(con, run) == ["T1"]
-    # A submitted (or checking, or changes-required) T1 has a current revision: that was
-    # enough for the old rule. It is not enough now.
-    con.execute("UPDATE tasks SET status=?, current_revision_id='R1-x', pause_reason=? WHERE id='T1'",
-                (status, "held" if status in ("blocked", "paused") else None))
+    # A submitted T1 has a current revision: that was enough for the old rule. It is not enough now.
+    con.execute("UPDATE tasks SET status=?, current_revision_id='R1-x' WHERE id='T1'", (status,))
     ready = _ready(con, run)
     if status == "accepted":
         assert ready == ["T2"], ready  # T3 still waits for T2
     else:
         assert "T2" not in ready and "T3" not in ready, (status, ready)
         assert "office dispatch T2" not in _next(con, run), _next(con, run)
+
+
+# Accepted and planned are over-represented: a ready task needs both a planned task and accepted dependencies.
+STATUSES = ["planned", "planned", "accepted", "accepted", "accepted", "launching", "running", "submitted", "changes_required",
+            "blocked", "paused", "cancelled"]
+
+
+@st.composite
+def _stacks(draw):
+    """Tasks T1..Tn whose `depends` name earlier tasks (so the graph is acyclic) or, now and then, a task the plan lacks."""
+    n = draw(st.integers(min_value=1, max_value=7))
+    tasks = []
+    for i in range(1, n + 1):
+        earlier = [f"T{j}" for j in range(1, i)] + ["T99"]
+        deps = draw(st.lists(st.sampled_from(earlier), unique=True, max_size=3))
+        tasks.append({"id": f"T{i}", "depends": deps, "status": draw(st.sampled_from(STATUSES)), "role": "executor"})
+    return tasks
+
+
+@given(tasks=_stacks())
+def test_a_task_is_ready_exactly_when_it_is_planned_and_every_dependency_is_accepted(tasks):
+    """Safety: nothing ready has an unaccepted or unknown dependency. Liveness: nothing is held back once its
+    dependencies are accepted. And status and resume never disagree: each planned task is ready xor waiting."""
+    from office import guide, state
+    status = {t["id"]: t["status"] for t in tasks}
+    with mock.patch.object(state, "tasks", lambda con, run_id: tasks):
+        ready = set(guide.ready_tasks(None, {"id": "r"}))
+        waiting = {w.split()[0] for w in guide.held_by_dependencies(None, {"id": "r"})}
+    for t in tasks:
+        deps_accepted = all(status.get(d) == "accepted" for d in t["depends"])
+        if t["id"] in ready:
+            assert t["status"] == "planned" and deps_accepted, t
+        if t["status"] == "planned" and deps_accepted:
+            assert t["id"] in ready, t
+        assert (t["id"] in ready) != (t["id"] in waiting) if t["status"] == "planned" else t["id"] not in ready | waiting, t
+
+
+def _task(id_, status, *depends):
+    return {"id": id_, "status": status, "depends": list(depends), "role": "executor"}
+
+
+def test_a_waiting_task_says_which_dependency_holds_it_and_in_what_state():
+    from office import guide, state
+    tasks = [_task("T1", "submitted"), _task("T2", "accepted"), _task("T3", "planned", "T1", "T2", "T99")]
+    with mock.patch.object(state, "tasks", lambda con, run_id: tasks):
+        assert guide.held_by_dependencies(None, {"id": "r"}) == [
+            "T3 waits for T1, T99 to be accepted (T1 submitted; T99 unknown)"]
+    assert guide.unaccepted_dependencies(tasks[2], {t["id"]: t for t in tasks}) == ["T1 submitted", "T99 unknown"]
+
+
+@given(tasks=_stacks(), data=st.data())
+def test_accepting_a_task_never_makes_another_task_wait(tasks, data):
+    from office import guide, state
+    before = {}
+    with mock.patch.object(state, "tasks", lambda con, run_id: tasks):
+        before = set(guide.ready_tasks(None, {"id": "r"}))
+    target = data.draw(st.sampled_from(tasks))
+    after_tasks = [{**t, "status": "accepted"} if t["id"] == target["id"] else t for t in tasks]
+    with mock.patch.object(state, "tasks", lambda con, run_id: after_tasks):
+        after = set(guide.ready_tasks(None, {"id": "r"}))
+    assert before - {target["id"]} <= after
 
 
 def test_a_stack_opens_one_acceptance_at_a_time(env):

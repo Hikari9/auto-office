@@ -9,6 +9,18 @@ from pathlib import Path
 
 import pytest
 import yaml
+from hypothesis import HealthCheck, settings
+
+# Property tests must be reproducible: `derandomize` fixes the example sequence per test, and no
+# example database means a laptop run and a hook run see the same inputs. A failure still prints
+# `@reproduce_failure` (print_blob), and a shrunk counterexample worth keeping belongs in an
+# `@example(...)` next to the property. `HYPOTHESIS_PROFILE=explore` randomises and widens the
+# search for a one-off hunt; the gate never uses it.
+_PROPERTY_SETTINGS = dict(deadline=None, print_blob=True, database=None,
+                          suppress_health_check=[HealthCheck.function_scoped_fixture])
+settings.register_profile("office", max_examples=100, derandomize=True, **_PROPERTY_SETTINGS)
+settings.register_profile("explore", max_examples=1000, derandomize=False, **_PROPERTY_SETTINGS)
+settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "office"))
 
 _SCRUBBED_PREFIXES = ("OFFICE_", "HERDR_", "AUTO_OFFICE_")
 

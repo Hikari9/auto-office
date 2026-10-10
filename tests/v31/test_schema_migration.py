@@ -11,7 +11,7 @@ import sqlite3
 import subprocess
 import sys
 
-import pytest
+from hypothesis import example, given, settings, strategies as st
 
 from conftest import SRC
 
@@ -71,36 +71,30 @@ def _every_shared_column():
     return [(t, c.split()[0]) for t, cols in db.SHARED_COLUMNS.items() for c in cols]
 
 
-@pytest.mark.parametrize("table,column", _every_shared_column())
-def test_any_shared_column_missing_at_current_version_is_added(env, table, column):
-    """Guard: a SHARED_COLUMNS addition reaches existing DBs even without a version bump."""
+@settings(max_examples=40)  # each example builds and heals a database
+@example(dropped=set(_every_shared_column()), version=_db()[0].SCHEMA_VERSION)  # every column at once, not left to chance
+@given(dropped=st.sets(st.sampled_from(_every_shared_column()), min_size=1),
+       version=st.integers(min_value=2, max_value=_db()[0].SCHEMA_VERSION + 5))
+def test_any_shared_columns_missing_at_any_recorded_version_are_added_without_lowering_it(env, dropped, version):
+    """Guard: a SHARED_COLUMNS addition reaches existing DBs even without a version bump, whatever
+    version the file records and however many columns it lacks. A newer recorded version is kept."""
     db, paths = _db()
     path = paths.runs_db()
     path.parent.mkdir(parents=True, exist_ok=True)
-    _build_old_db(path, db.SCHEMA_VERSION, {table: {column}})
+    for leftover in path.parent.glob(path.name + "*"):  # each example starts from its own file
+        leftover.unlink()
+    drop: dict[str, set[str]] = {}
+    for table, column in dropped:
+        drop.setdefault(table, set()).add(column)
+    _build_old_db(path, version, drop)
     raw = sqlite3.connect(str(path))
-    inline = column in db._columns(raw, table)  # declared in the base DDL, cannot be absent
+    absent = {f"{t}.{c}" for t, c in dropped if c not in db._columns(raw, t)}  # a base-DDL column cannot be absent
+    assert set(db.missing_columns(raw)) == absent
     raw.close()
-    if not inline:
-        con = sqlite3.connect(str(path))
-        assert f"{table}.{column}" in db.missing_columns(con)
-        con.close()
     con = db.connect()
     try:
         assert db.missing_columns(con) == []
-    finally:
-        con.close()
-
-
-def test_newer_recorded_version_is_not_lowered(env):
-    db, paths = _db()
-    path = paths.runs_db()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _build_old_db(path, db.SCHEMA_VERSION + 5, {"dispatches": {"pane_closed_at"}})
-    con = db.connect()
-    try:
-        assert db.missing_columns(con) == []
-        assert db._schema_version(con) == db.SCHEMA_VERSION + 5
+        assert db._schema_version(con) == max(version, db.SCHEMA_VERSION)
     finally:
         con.close()
 

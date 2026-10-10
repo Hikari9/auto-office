@@ -4,6 +4,7 @@ a changed acceptance still reaches the task it changes."""
 from __future__ import annotations
 
 import pytest
+from hypothesis import given, strategies as st
 
 from conftest import PLAN_ONE, PLAN_TWO, approved_run, task_row
 
@@ -85,6 +86,23 @@ def test_authority_terms_ignore_compound_identifiers(text):
 def test_authority_terms_still_match_standalone_actions(text):
     from office.amend import AUTHORITY_TERMS
     assert AUTHORITY_TERMS.search(text) is not None, text
+
+
+_ACTIONS = ["deploy", "publish", "release", "email", "delete", "charge", "payment", "credentials"]
+_names = st.text(alphabet="abcdefghijklmnop", min_size=1, max_size=8)
+
+
+@given(action=st.sampled_from(_ACTIONS), name=_names, joiner=st.sampled_from(["-", "_"]), front=st.booleans())
+def test_an_action_word_inside_a_compound_identifier_names_a_thing_not_an_action(action, name, joiner, front):
+    from office.amend import AUTHORITY_TERMS
+    token = f"{action}{joiner}{name}" if front else f"{name}{joiner}{action}"
+    assert AUTHORITY_TERMS.search(f"use the {token} helper") is None, token
+
+
+@given(action=st.sampled_from(_ACTIONS), before=_names, after=_names)
+def test_the_same_action_word_standing_alone_is_an_authority_term(action, before, after):
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(f"{before} {action} {after}") is not None
 
 
 def test_a_delta_naming_a_compound_identifier_is_an_ordinary_amendment(env):
