@@ -261,7 +261,7 @@ Run in this worktree with `.venv` (Python 3.12, `uv pip install -e '.[test,visua
 | `scripts/validate.sh` | shipped default `true`, A10 applied (`25d0280`) | 1990 passed, 1 skipped, 0 failed |
 | `pytest -n 2 --all` | shipped default `true`, A10 applied (`25d0280`) | 3614 passed, 2 skipped, 0 failed (`[hup]` passed) |
 | `pytest -n 2 tests/v31/test_issue_494_scenarios.py`, `scripts/route_replay.py --self-test` | shipped default `true` | 79 passed; self-test passed |
-| T8 checks: `pytest -n 2` on `test_headless_agent_env`, `test_discovery_dispatch`, `test_issue_399_dispatch_recovery`, `test_adaptive_dispatch`, `test_job_ownership`, `test_declared_route_426` | shipped default `true`, T8 fix | 106 passed (unit tier); with `--all` and `test_herdr_agent_launch`, `test_headless_fallback` added: 192 passed |
+| T8 checks: `pytest -n 2` on `test_headless_agent_env`, `test_discovery_dispatch`, `test_issue_399_dispatch_recovery`, `test_adaptive_dispatch`, `test_job_ownership`, `test_declared_route_426` | shipped default `true`, T8 fix, rerun after the T6 R16 restack and A14 (plan p11) | 108 passed (unit tier); earlier, before the restack, 106 passed; with `--all` and `test_herdr_agent_launch`, `test_headless_fallback` added: 192 passed |
 | `scripts/validate.sh` | shipped default `true`, T8 fix | passed |
 | new test without the fix (`write_agent_env` call removed from `launch()`) | mutation | `test_a_headless_executor_finds_agent_env_when_it_starts[sync]` and `[process]` fail |
 | `scripts/validate.sh` | after restack onto T4 R15 / T5 R14 and A14 (`cc4956e`) | passed |
