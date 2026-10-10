@@ -58,7 +58,9 @@ TAGS = {
     "brief_shape": ("deliverables-enumerated", "checks-only", "unknown"),
 }
 SIZES = ("S", "M", "L", "XL")
-FINDING_BASES = ("reviewer-declared", "unique-path", "unassigned")
+ATTRIBUTED_BASES = ("reviewer-declared", "unique-path")
+FINDING_BASES = (*ATTRIBUTED_BASES, "unassigned")
+UNRECORDED = ("descriptor-null", "descriptor-unreadable", "not-recorded")
 SELF_REVIEW_KINDS = ("ledger", "exempt", "missing", "unreadable")
 EXEMPT_TYPES = ("read-only", "empty", "trivial", "mechanical")
 ATTRIBUTIONS = ("route", "mixed", "unknown", "plan", "environment", "reviewer")
@@ -425,6 +427,11 @@ def _sum(rows: list[dict], key: str) -> int:
     return sum(r.get(key) or 0 for r in rows)
 
 
+def _known(value, allowed: tuple[str, ...]) -> str:
+    """A categorical value, with `unknown` kept and anything outside `allowed` printed as `other`."""
+    return value if value == "unknown" else _clamp(value, allowed)
+
+
 def _median(values: list[int]) -> float | None:
     if not values:
         return None
@@ -532,7 +539,7 @@ def _finding_section(con, schema) -> dict:
     def build(lanes, findings):
         out: dict[str, dict] = {}
         for r in findings:
-            basis = r["basis"] if r["basis"] == "unknown" else _clamp(r["basis"], FINDING_BASES)
+            basis = _known(r["basis"], FINDING_BASES)
             cell = out.setdefault(basis, {k: 0 for k in ("unique_findings", "recorded_rows", "duplicate_rows",
                                                          "clone_marked_rows", "lane_exposure", "membership_unknown")})
             for k in cell:
@@ -540,7 +547,7 @@ def _finding_section(con, schema) -> dict:
         table = [{"basis": b, **out[b]} for b in sorted(out)]
         return {"lanes": lanes[0], "by_attribution": table,
                 "totals": {k: _sum(table, k) for k in ("unique_findings", "recorded_rows", "duplicate_rows", "lane_exposure")},
-                "attributed_findings": sum(c["unique_findings"] for b, c in out.items() if b in FINDING_BASES[:2]),
+                "attributed_findings": sum(c["unique_findings"] for b, c in out.items() if b in ATTRIBUTED_BASES),
                 "unassigned_findings": out.get("unassigned", {}).get("unique_findings", 0),
                 "attribution_unknown_findings": out.get("unknown", {}).get("unique_findings", 0)}
     return _section(con, schema, ("lanes.exposure", "findings.attribution"), build)
@@ -563,12 +570,12 @@ def _size_section(con, schema) -> dict:
         def dist(rows, key):
             out: dict[str, int] = {}
             for r in rows:
-                size = r["size"] if r["size"] == "unknown" else _clamp(r["size"], SIZES)
+                size = _known(r["size"], SIZES)
                 out[size] = out.get(size, 0) + r[key]
             return dict(sorted(out.items()))
         by_route: dict[tuple, dict] = {}
         for r in snapshot:
-            size = r["size"] if r["size"] == "unknown" else _clamp(r["size"], SIZES)
+            size = _known(r["size"], SIZES)
             cell = by_route.setdefault((r["harness"], r["model"], r["effort"]),
                                        {"harness": r["harness"], "model": r["model"], "effort": r["effort"], "sizes": {}})
             cell["sizes"][size] = cell["sizes"].get(size, 0) + r["dispatches"]
@@ -589,11 +596,11 @@ def _tag_section(con, schema) -> dict:
                 if r["tag"] != tag:
                     continue
                 v = r["value"]
-                if v not in ("descriptor-null", "descriptor-unreadable", "not-recorded"):
+                if v not in UNRECORDED:
                     v = _clamp(v, allowed)
                 values[v] = values.get(v, 0) + r[key]
             total = sum(values.values())
-            unknown = sum(values.get(k, 0) for k in ("descriptor-null", "descriptor-unreadable", "not-recorded"))
+            unknown = sum(values.get(k, 0) for k in UNRECORDED)
             out[tag] = {"declared": total - unknown, "unknown_not_recorded": unknown, "values": dict(sorted(values.items()))}
         return out
     return _section(con, schema, ("tags.tasks", "tags.dispatches"),
