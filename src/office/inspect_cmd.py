@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from office import adaptive, candidates, contract, plans, routing, state
+from office import adaptive, candidates, contract, paths, plans, routing, state
 from office import risk as risk_mod
 from office.result import Result
 from office.state import Usage
@@ -107,6 +107,17 @@ def _task(con, run, tid) -> Result:
                         if (d["resumed_from"] or ov.get("resumed_from")) else "")
                      + (f" | session {d['session_id']}" if d["session_id"]
                         else f" | session unavailable: {d['harness'] or 'harness'} exposes none"))
+    for d in con.execute("SELECT id FROM dispatches WHERE run_id=? AND task_id=? ORDER BY started_at",
+                         (run["id"], tid)).fetchall():
+        launch_file = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "launch.json"
+        try:
+            receipt = json.loads(launch_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for form, info in (receipt.get("rendered_launches") or {}).items():
+            lines.append(f"  launch {d['id']} {form} argv={json.dumps(info.get('argv') or [])} "
+                         f"transport={info.get('prompt_transport')} adapter={info.get('adapter_hash')} "
+                         f"version={info.get('harness_version') or 'unknown'}")
     for r in con.execute("SELECT id, commit_sha, status, applied_version, created_at FROM revisions WHERE run_id=? AND task_id=? "
                          "ORDER BY seq", (run["id"], tid)).fetchall():
         lines.append(f"revision {r['id']} {r['commit_sha'][:12]} {r['status']} applied p{r['applied_version']}")
