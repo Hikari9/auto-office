@@ -205,3 +205,49 @@ def test_preflight_gates_only_this_sessions_unacknowledged_amendments(env, state
         assert code == 1 and "office ack A1" in out, out
     else:
         assert code == 0 and ("amendment: A1 applied" in out) == (state_ == "applied"), out
+
+
+def _end_session(env, did):
+    con = env.con()
+    con.execute("UPDATE dispatches SET ended_at='2026-01-01T00:00:00+00:00', status='exited', "
+                "terminal_classification='success' WHERE id=?", (did,))
+    con.commit()
+
+
+def test_a_rerun_after_an_ack_only_session_counts_that_sessions_applied_amendment(env):
+    """The amendment was applied by an earlier session of the task that ended before resubmitting: the
+    amendment-only rerun has work (build what the amendment asked), so preflight is not the no-findings stop."""
+    first, second = _accepted_then_amended(env)
+    wenv, wt, d = _worker(env, second)
+    env.office("ack", "A1", cwd=wt, env=wenv, check=0)
+    _end_session(env, second)
+    code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
+    assert code == 0, out
+    third = task_row(env)["current_dispatch_id"]
+    assert third not in (first, second)
+    row = [r for r in _deliveries(env) if r["amendment_id"] == "A1"][0]
+    assert row["status"] == "applied" and row["dispatch_id"] == second, row
+    wenv3, wt3, d3 = _worker(env, third)
+    (wt3 / "calc.py").write_text(GOOD_ADD)
+    _commit_work(env, wt3)
+    code, out = env.office("preflight", cwd=wt3, env=wenv3)
+    assert code == 0 and "PREFLIGHT ready" in out and "amendment: A1 applied" in out, out
+    assert "no open findings" not in out, out
+
+
+def test_an_amendment_applied_at_or_below_the_fix_of_revisions_version_is_not_new_work(env):
+    first, second = _accepted_then_amended(env)
+    wenv, wt, d = _worker(env, second)
+    env.office("ack", "A1", cwd=wt, env=wenv, check=0)
+    _end_session(env, second)
+    env.office("rerun", "T1", "--fresh", env=EXTERNAL, check=0)
+    third = task_row(env)["current_dispatch_id"]
+    con = env.con()
+    # The accepted revision already applied that version: the earlier session's ack is not work for this round.
+    con.execute("UPDATE revisions SET applied_version=(SELECT target_version FROM deliveries WHERE amendment_id='A1') "
+                "WHERE id=?", (task_row(env)["accepted_revision_id"],))
+    con.commit()
+    wenv3, wt3, d3 = _worker(env, third)
+    _commit_work(env, wt3)
+    code, out = env.office("preflight", cwd=wt3, env=wenv3)
+    assert code == 4 and "no open findings or amendments" in out, out

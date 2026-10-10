@@ -233,6 +233,25 @@ def planner_brief(con, run: dict, packet: dict) -> str:
     return "\n".join(out) + "\n"
 
 
+def _builds_on(con, run: dict, packet: dict) -> list[str]:
+    """The parents the dispatch base contains, so the brief never claims one that is not there. A parent
+    without an accepted revision (a stacked holder that submitted, #398) says so."""
+    from office import integration
+    base = packet.get("base_commit")
+    parents = packet.get("base_parents")
+    if parents is None:  # a rerun or an older packet: the declared dependencies' newest revisions
+        parents = []
+        for dep in packet.get("depends") or []:
+            t = state.get_task(con, run["id"], dep) or {}
+            rev = t.get("accepted_revision_id") or t.get("current_revision_id")
+            row = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (rev,)).fetchone() if rev else None
+            if row:
+                parents.append({"task": dep, "revision": rev, "commit": row["commit_sha"],
+                                "accepted": bool(t.get("accepted_revision_id"))})
+    return [p["task"] if p["accepted"] else f"{p['task']} (unaccepted: submitted {p['revision']}, not yet reviewed)"
+            for p in parents if base and integration.contains(run, base, p["commit"])]
+
+
 def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carried: list | None = None) -> str:
     out = [
         "ROLE executor",
@@ -256,8 +275,9 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
                 "and moves any file left from an earlier dispatch out of this worktree before you start, so write it "
                 "fresh for every submission, including a retry or fix round; submit refuses a file whose content "
                 "matches evidence already submitted for this task."]
-    if packet.get("depends"):
-        out.append(f"BUILDS ON {', '.join(packet['depends'])} (already in this worktree's base)")
+    built_on = _builds_on(con, run, packet)
+    if built_on:
+        out.append(f"BUILDS ON {', '.join(built_on)} (already in this worktree's base)")
     out += _lines("ACCEPT", packet.get("accept"))
     checks = packet.get("checks") or []
     out.append("CHECKS the runtime will run: " + ("; ".join(checks) if checks else "none declared"))
@@ -280,6 +300,9 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
     if restack.get("merged"):
         out.append("RESTACKED Office merged " + ", ".join(f"{m['task']} {m['revision']}" for m in restack["merged"])
                    + " into this worktree; build on it")
+    if restack.get("reopened"):
+        out.append("RESTACK SKIPPED " + ", ".join(f"{r['task']} is {r['status']}" for r in restack["reopened"])
+                   + " again, so Office did not merge it; it needs a restack once it is accepted")
     if restack.get("conflict"):
         c = restack["conflict"]
         out += ["", f"RESTACK FIRST: {c['task']} was accepted on {c['revision']}, which this worktree lacks. Run "
