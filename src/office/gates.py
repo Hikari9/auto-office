@@ -1593,6 +1593,7 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
                payload={"basis": basis, "waived": sorted(waived)})
     from office import prs
     prs.queue(con, run, task_id, "accepted", rev_id)
+    reopen_stale_dependents(con, run, task_id, rev)
     dispatch_mod.start_stacked(con, run, task_id)
     for other in state.tasks(con, run["id"]):
         if task_id in other["depends"] and other["status"] == "submitted":
@@ -1604,6 +1605,37 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
     from office import integration
     integration.maybe_queue(con, run)
     return True
+
+
+def reopen_stale_dependents(con, run: dict, task_id: str, rev) -> list[str]:
+    """`task_id` was just accepted on `rev`. Every transitive dependent that is
+    accepted on a revision without it was built on the superseded one and can
+    no longer land: reopen it to changes_required, naming the restack. Its
+    accepted revision stays recorded (#294), and `office rerun <T> --resume`
+    merges the new revision into its worktree. Returns the tasks reopened.
+    Caller holds the tx."""
+    tasks = state.tasks(con, run["id"])
+    downstream = {task_id}
+    grew = True
+    while grew:
+        grew = False
+        for t in tasks:
+            if t["id"] not in downstream and downstream.intersection(t["depends"]):
+                downstream.add(t["id"])
+                grew = True
+    reason = f"restack: {task_id} re-accepted on {rev['id']}"
+    reopened = []
+    for t in tasks:
+        if t["id"] == task_id or t["id"] not in downstream or t["status"] != "accepted" or not t.get("accepted_revision_id"):
+            continue
+        built = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (t["accepted_revision_id"],)).fetchone()
+        if built is None or _is_ancestor(run, rev["commit_sha"], built["commit_sha"]):
+            continue
+        state.update_task(con, run["id"], t["id"], status="changes_required", pause_reason=reason)
+        state.emit(con, run, "task.restack_needed", f"{t['id']} {t['accepted_revision_id']} {reason}; reopened: "
+                   f"office rerun {t['id']} --resume merges it into the worktree first", task_id=t["id"])
+        reopened.append(t["id"])
+    return reopened
 
 
 def reevaluate_submitted(con, run: dict) -> list[str]:
