@@ -318,9 +318,12 @@ METRICS = {
     "task.chronological": {
         "needs": ("tasks", "dispatches", "revisions"),
         "denominator": "accepted tasks; the executor dispatches of a task are ordered by julianday(started_at), and the "
-                       "order is known only when every one has a parseable, distinct started_at; the accepted "
+                       "order is known only when every one has a distinct started_at that is text starting YYYY-MM-DD and "
+                       "parses; the accepted "
                        "producer is the dispatch of the accepted revision; no recorded link is read",
-        "sql": ", ex AS (SELECT run_id, task_id, id, route, julianday(started_at) AS ts FROM dr WHERE role = 'executor'), "
+        "sql": ", ex AS (SELECT run_id, task_id, id, route, CASE WHEN typeof(started_at) = 'text' AND started_at GLOB "
+               "'[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' THEN julianday(started_at) END AS ts "
+               "FROM dr WHERE role = 'executor'), "
                "cs AS (SELECT run_id, task_id, COUNT(*) AS n, COUNT(ts) AS timed, COUNT(DISTINCT ts) AS distinct_ts "
                "FROM ex GROUP BY run_id, task_id), "
                "cx AS (SELECT run_id, task_id, id, route, ROW_NUMBER() OVER (PARTITION BY run_id, task_id ORDER BY ts) "

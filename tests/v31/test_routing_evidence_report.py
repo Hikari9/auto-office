@@ -692,7 +692,7 @@ def test_a_producer_that_ran_first_leaves_the_later_dispatch_as_an_intermediate_
     assert chrono["tasks_with_intermediate_cross_route_handoff"] == 1
 
 
-@pytest.mark.parametrize("second_start", [None, "2026-09-01T10:00:00+00:00", "not a time"])
+@pytest.mark.parametrize("second_start", [None, "2026-09-01T10:00:00+00:00", "not a time", "11:00:00", 5])
 def test_an_order_that_start_times_do_not_settle_is_unknown_not_guessed(tmp_path, second_start):
     """A missing, tied or unparseable started_at: no first executor and no handoff is inferred."""
     _accepted_pair(_mini(tmp_path, v12=False), A, B, start_first="2026-09-01T10:00:00+00:00", start_second=second_start)
@@ -724,6 +724,16 @@ def test_chronological_orders_do_not_cross_runs_that_share_a_task_id(tmp_path):
     con.close()
     chrono = _chrono(rer.build_report(tmp_path / "other.db"))
     assert (chrono["accepted_from_first_dispatch"], chrono["cross_route_handoffs"]) == (1, 0)
+
+
+def test_a_task_with_no_executor_dispatch_has_recorded_links_and_no_handoffs(tmp_path):
+    con = _mini(tmp_path)
+    _insert(con, "runs", id=R1, created_at="2026-09-01T09:00:00+00:00", phase="active")
+    _task(con, "T1", "pending")
+    con.commit()
+    con.close()
+    row = {r["task_state"]: r for r in sec(rer.build_report(tmp_path / "mini.db"), "task_paths")["handoffs_by_task_state"]}
+    assert (row["unresolved"]["tasks_links_recorded"], row["unresolved"]["cross_route_handoffs"]) == (1, 0)
 
 
 def test_persisted_route_attributions_are_reported_per_exact_route_and_apart_from_strict_success(report):

@@ -276,43 +276,45 @@ A task's links are **recorded** (`links_recorded` in the prelude) when `dispatch
 
 ### `task.chronological`
 
-**Denominator:** accepted tasks; the executor dispatches of a task are ordered by julianday(started_at), and the order is known only when every one has a parseable, distinct started_at; the accepted producer is the dispatch of the accepted revision; no recorded link is read.
+**Denominator:** accepted tasks; the executor dispatches of a task are ordered by julianday(started_at), and the order is known only when every one has a distinct started_at that is text starting YYYY-MM-DD and parses; the accepted producer is the dispatch of the accepted revision; no recorded link is read.
 
 **Reported as:** `sections.task_paths.chronological_derived`, labelled `chronological (derived from dispatches.started_at, not a recorded link)`.
 
 ```sql
-, ex AS (SELECT run_id, task_id, id, route, julianday(started_at) AS ts FROM dr WHERE role =
-    'executor'), cs AS (SELECT run_id, task_id, COUNT(*) AS n, COUNT(ts) AS timed, COUNT(DISTINCT
-    ts) AS distinct_ts FROM ex GROUP BY run_id, task_id), cx AS (SELECT run_id, task_id, id, route,
-    ROW_NUMBER() OVER (PARTITION BY run_id, task_id ORDER BY ts) AS pos, LAG(id) OVER (PARTITION BY
-    run_id, task_id ORDER BY ts) AS prev_id, LAG(route) OVER (PARTITION BY run_id, task_id ORDER BY
-    ts) AS prev_route FROM ex), ct AS (SELECT t.run_id, t.task_id, t.producer_id, t.producer_route,
-    COALESCE(s.n > 0 AND s.n = s.timed AND s.timed = s.distinct_ts, 0) AS ordered, MIN(f.id) AS
-    first_id, MIN(f.route) AS first_route, COALESCE(SUM(x.prev_route IS NOT NULL AND x.route IS NOT
-    NULL AND x.prev_route <> x.route), 0) AS cross_edges, COALESCE(SUM(x.prev_route IS NOT NULL AND
-    x.route IS NOT NULL AND x.prev_route <> x.route AND x.id IS NOT t.producer_id), 0) AS
-    intermediate_edges, COALESCE(SUM(x.prev_id IS NOT NULL AND (x.prev_route IS NULL OR x.route IS
-    NULL)), 0) AS unknown_edges FROM tr t LEFT JOIN cs s ON s.run_id = t.run_id AND s.task_id =
-    t.task_id LEFT JOIN cx f ON f.run_id = t.run_id AND f.task_id = t.task_id AND f.pos = 1 LEFT
-    JOIN cx x ON x.run_id = t.run_id AND x.task_id = t.task_id WHERE t.is_accepted = 1 GROUP BY
-    t.run_id, t.task_id), cc AS (SELECT *, ordered = 1 AND producer_id IS NOT NULL AS comparable
-    FROM ct) SELECT COUNT(*) AS accepted_tasks, COALESCE(SUM(ordered = 0), 0) AS order_unknown,
-    COALESCE(SUM(ordered = 1 AND producer_id IS NULL), 0) AS producer_unknown,
-    COALESCE(SUM(comparable), 0) AS comparable, COALESCE(SUM(comparable AND first_id = producer_id),
-    0) AS accepted_from_first_dispatch, COALESCE(SUM(comparable AND first_id <> producer_id AND
-    first_route IS NOT NULL AND first_route = producer_route), 0) AS later_dispatch_same_route,
-    COALESCE(SUM(comparable AND first_id <> producer_id AND first_route IS NOT NULL AND
-    producer_route IS NOT NULL AND first_route <> producer_route), 0) AS first_final_mismatch,
-    COALESCE(SUM(comparable AND first_id <> producer_id AND (first_route IS NULL OR producer_route
-    IS NULL)), 0) AS route_unknown, COALESCE(SUM(CASE WHEN ordered = 1 THEN cross_edges END), 0) AS
-    cross_route_handoffs, COALESCE(SUM(CASE WHEN ordered = 1 THEN cross_edges > 0 END), 0) AS
-    tasks_with_cross_route_handoff, COALESCE(SUM(CASE WHEN comparable THEN intermediate_edges END),
-    0) AS intermediate_cross_route_handoffs, COALESCE(SUM(CASE WHEN comparable THEN
-    intermediate_edges > 0 END), 0) AS tasks_with_intermediate_cross_route_handoff,
-    COALESCE(SUM(CASE WHEN ordered = 1 THEN unknown_edges END), 0) AS route_unknown_handoffs FROM cc
+, ex AS (SELECT run_id, task_id, id, route, CASE WHEN typeof(started_at) = 'text' AND started_at
+    GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' THEN julianday(started_at) END AS ts FROM dr
+    WHERE role = 'executor'), cs AS (SELECT run_id, task_id, COUNT(*) AS n, COUNT(ts) AS timed,
+    COUNT(DISTINCT ts) AS distinct_ts FROM ex GROUP BY run_id, task_id), cx AS (SELECT run_id,
+    task_id, id, route, ROW_NUMBER() OVER (PARTITION BY run_id, task_id ORDER BY ts) AS pos, LAG(id)
+    OVER (PARTITION BY run_id, task_id ORDER BY ts) AS prev_id, LAG(route) OVER (PARTITION BY
+    run_id, task_id ORDER BY ts) AS prev_route FROM ex), ct AS (SELECT t.run_id, t.task_id,
+    t.producer_id, t.producer_route, COALESCE(s.n > 0 AND s.n = s.timed AND s.timed = s.distinct_ts,
+    0) AS ordered, MIN(f.id) AS first_id, MIN(f.route) AS first_route, COALESCE(SUM(x.prev_route IS
+    NOT NULL AND x.route IS NOT NULL AND x.prev_route <> x.route), 0) AS cross_edges,
+    COALESCE(SUM(x.prev_route IS NOT NULL AND x.route IS NOT NULL AND x.prev_route <> x.route AND
+    x.id IS NOT t.producer_id), 0) AS intermediate_edges, COALESCE(SUM(x.prev_id IS NOT NULL AND
+    (x.prev_route IS NULL OR x.route IS NULL)), 0) AS unknown_edges FROM tr t LEFT JOIN cs s ON
+    s.run_id = t.run_id AND s.task_id = t.task_id LEFT JOIN cx f ON f.run_id = t.run_id AND
+    f.task_id = t.task_id AND f.pos = 1 LEFT JOIN cx x ON x.run_id = t.run_id AND x.task_id =
+    t.task_id WHERE t.is_accepted = 1 GROUP BY t.run_id, t.task_id), cc AS (SELECT *, ordered = 1
+    AND producer_id IS NOT NULL AS comparable FROM ct) SELECT COUNT(*) AS accepted_tasks,
+    COALESCE(SUM(ordered = 0), 0) AS order_unknown, COALESCE(SUM(ordered = 1 AND producer_id IS
+    NULL), 0) AS producer_unknown, COALESCE(SUM(comparable), 0) AS comparable,
+    COALESCE(SUM(comparable AND first_id = producer_id), 0) AS accepted_from_first_dispatch,
+    COALESCE(SUM(comparable AND first_id <> producer_id AND first_route IS NOT NULL AND first_route
+    = producer_route), 0) AS later_dispatch_same_route, COALESCE(SUM(comparable AND first_id <>
+    producer_id AND first_route IS NOT NULL AND producer_route IS NOT NULL AND first_route <>
+    producer_route), 0) AS first_final_mismatch, COALESCE(SUM(comparable AND first_id <> producer_id
+    AND (first_route IS NULL OR producer_route IS NULL)), 0) AS route_unknown, COALESCE(SUM(CASE
+    WHEN ordered = 1 THEN cross_edges END), 0) AS cross_route_handoffs, COALESCE(SUM(CASE WHEN
+    ordered = 1 THEN cross_edges > 0 END), 0) AS tasks_with_cross_route_handoff, COALESCE(SUM(CASE
+    WHEN comparable THEN intermediate_edges END), 0) AS intermediate_cross_route_handoffs,
+    COALESCE(SUM(CASE WHEN comparable THEN intermediate_edges > 0 END), 0) AS
+    tasks_with_intermediate_cross_route_handoff, COALESCE(SUM(CASE WHEN ordered = 1 THEN
+    unknown_edges END), 0) AS route_unknown_handoffs FROM cc
 ```
 
-This section reads no recorded link, so it gives the same answer on a database with and without the link columns. It is a derivation, not a record: the executor dispatches of a task are ordered by `started_at`, the first in that order is the chronological first executor, and an edge is two consecutive dispatches. If any executor dispatch of the task has no parseable `started_at`, or two share one, the order is not known and the task counts in `order_unknown` and in no other figure. `accepted_from_first_dispatch`, `later_dispatch_same_route` and `first_final_mismatch` compare the chronological first executor with the accepted producer (the dispatch of `tasks.accepted_revision_id`), over `comparable` tasks (ordered, with a known producer). `cross_route_handoffs` and `tasks_with_cross_route_handoff` count consecutive executor dispatches on different routes over every ordered accepted task. `intermediate_cross_route_handoffs` are those that do not land on the accepted producer, over comparable tasks. A route with an unknown harness, model or effort is `route_unknown` or `route_unknown_handoffs`, never a mismatch.
+This section reads no recorded link, so it gives the same answer on a database with and without the link columns. It is a derivation, not a record: the executor dispatches of a task are ordered by `started_at`, the first in that order is the chronological first executor, and an edge is two consecutive dispatches. If any executor dispatch of the task has no usable `started_at` (not text starting `YYYY-MM-DD`, or unparseable), or two share one, the order is not known and the task counts in `order_unknown` and in no other figure. `accepted_from_first_dispatch`, `later_dispatch_same_route` and `first_final_mismatch` compare the chronological first executor with the accepted producer (the dispatch of `tasks.accepted_revision_id`), over `comparable` tasks (ordered, with a known producer). `cross_route_handoffs` and `tasks_with_cross_route_handoff` count consecutive executor dispatches on different routes over every ordered accepted task. `intermediate_cross_route_handoffs` are those that do not land on the accepted producer, over comparable tasks. A route with an unknown harness, model or effort is `route_unknown` or `route_unknown_handoffs`, never a mismatch.
 
 ### `task.links`
 
