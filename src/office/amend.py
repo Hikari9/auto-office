@@ -594,20 +594,22 @@ def _audit(con, run: dict, amendment_id: str, before: dict, version: int, delta:
 
 
 def _sync_leases(con, run: dict, task_ids: list[str]) -> None:
-    """A changed scope is the scope the task's live lease holds, so it must not overlap another live task's."""
+    """A changed scope is the scope the task's live lease holds, so it must not overlap another live task's.
+    A dormant lease (no live session of its task, dispatch.lease_dormant) holds no scope on either side: the
+    next session of that task acquires its lease against the new scopes then (#307)."""
+    from office import dispatch
     for tid in task_ids:
         task = state.get_task(con, run["id"], tid)
-        lease = con.execute("SELECT id FROM leases WHERE run_id=? AND task_id=? AND released_at IS NULL AND revoked_at IS NULL",
+        lease = con.execute("SELECT * FROM leases WHERE run_id=? AND task_id=? AND released_at IS NULL AND revoked_at IS NULL",
                             (run["id"], tid)).fetchone()
         if task is None or lease is None:
             continue
-        for row in con.execute("SELECT task_id FROM leases WHERE run_id=? AND task_id IS NOT ? AND released_at IS NULL "
-                               "AND revoked_at IS NULL", (run["id"], tid)).fetchall():
-            other = state.get_task(con, run["id"], row["task_id"])
-            if other and planfile.scopes_overlap(task["scope"], other["scope"]):
-                raise Refused("scope-held", f"{tid}'s new scope overlaps {other['id']}, which holds a live lease",
-                              scope=tid, preserved="plan unchanged",
-                              next_step=f"wait for {other['id']} to be accepted, or order {tid} after it with depends")
+        holder = None if dispatch.lease_dormant(con, run["id"], lease) else dispatch.scope_holder(con, run, task)
+        if holder:
+            raise Refused("scope-held", f"{tid}'s new scope overlaps {holder}, which holds a live lease",
+                          scope=tid, preserved="plan unchanged",
+                          next_step=f"wait for {holder}'s session to end (submit, accept, or office revoke {holder}), "
+                                    f"or order {tid} after it with depends")
         con.execute("UPDATE leases SET scope=? WHERE id=?", (dumps(task["scope"]), lease["id"]))
 
 

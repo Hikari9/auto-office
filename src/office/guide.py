@@ -134,6 +134,9 @@ def next_action(con, run: dict) -> str:
     for t in tasks:
         if t["status"] == "changes_required" and not gates_mod.worker_live(con, t.get("current_dispatch_id")):
             # Findings wait for the orchestrator's choice (R8); nothing relaunches on its own.
+            if (t.get("pause_reason") or "").endswith("the session ended without submitting"):
+                return (f"{t['id']} {t['pause_reason']}: office rerun {t['id']} --resume (resubmit on the amended "
+                        "contract) | --fresh")
             return f"findings on {t['id']} wait for you: office rerun {t['id']} --resume | --fresh"
     for t in tasks:
         if t["status"] == "changes_required":
@@ -242,9 +245,17 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
             res.add(drift)
     if tasks:
         parts = [f"accepted {len(c.get('accepted', []))}/{len([t for t in tasks if t['status'] != 'cancelled'])}"]
-        for label, keys in (("live", ("running", "launching", "submitted", "changes_required")), ("queued", ("queued",)),
-                            ("paused", ("paused",)), ("blocked", ("blocked",))):
-            ids = [i for k in keys for i in c.get(k, [])]
+        # `live` is a task with a live or launching session. A task whose session ended is
+        # `submitted` (its revision waits on gates, its lane or its dependencies) or `idle`
+        # (it waits for the orchestrator: next: names the rerun), never live (#398).
+        from office import gates as gates_mod
+        open_ids = [t["id"] for t in tasks if t["status"] in ("running", "launching", "submitted", "changes_required")]
+        live_ids = {i for i in open_ids if gates_mod.live_task_session(con, run["id"], i)}
+        groups = {"live": [i for i in open_ids if i in live_ids],
+                  "submitted": [i for i in c.get("submitted", []) if i not in live_ids],
+                  "idle": [i for i in open_ids if i not in live_ids and i not in c.get("submitted", [])]}
+        for label in ("live", "submitted", "idle", "queued", "paused", "blocked"):
+            ids = groups.get(label, c.get(label, []))
             if ids:
                 parts.append(f"{label} {','.join(ids)}")
         res.add(" | ".join(parts))
