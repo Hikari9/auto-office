@@ -279,10 +279,11 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 continue
             plans.require_scope_clear(con, run, tid)
             stack_after = None if parallel or previous is None else previous
-            released = bool(stack_after) and (state.get_task(con, run["id"], stack_after) or {}).get("status") == "accepted"
+            holder_accepted = bool(stack_after) and (state.get_task(con, run["id"], stack_after) or {}).get("status") == "accepted"
             parts = []
-            base = _base_for(con, run, task, graph, stack_after, queued=bool(stack_after) and not released, parents=parts)
-            if released:
+            base = _base_for(con, run, task, graph, stack_after, queued=bool(stack_after) and not holder_accepted,
+                             parents=parts)
+            if holder_accepted:
                 # Nothing would release a stack on an accepted task: launch now,
                 # based on its accepted revision (base above).
                 stack_after = None
@@ -1458,7 +1459,7 @@ def ensure_worktree(run: dict, dispatch: dict) -> Path:
     branches = paths.git(repo, "branch", "--list", dispatch["branch"])
     if branches.strip():
         from office import integration
-        head = paths.git(repo, "rev-parse", dispatch["branch"])
+        head = paths.git(repo, "rev-parse", f"refs/heads/{dispatch['branch']}")
         if not integration.contains(run, head, dispatch["base_commit"]):
             # An existing branch is reused as it is: it must hold the base this dispatch recorded.
             raise Refused("base-mismatch", f"branch {dispatch['branch']} ({head[:12]}) does not contain the base "

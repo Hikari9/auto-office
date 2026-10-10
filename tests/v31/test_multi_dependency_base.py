@@ -296,3 +296,42 @@ def test_ensure_worktree_reports_a_base_the_existing_branch_lacks(env):
     assert not (env.tmp / "wt-mismatch").exists()
     ok = dispatch.ensure_worktree(run, {**spec, "base_commit": base_sha(env), "worktree": str(env.tmp / "wt-ok")})
     assert (ok / ".git").exists()
+
+
+def test_a_task_queued_behind_its_holder_is_not_refused_for_an_unaccepted_parent(env):
+    # The base of a queued task is worked out when it starts; only a parent with no revision at all refuses now.
+    fan_in_run(env)
+    c1 = commit_on(env, base_sha(env), {"calc.py": GOOD_ADD}, "t1 submitted")
+    record_revision(env, "T1", c1, accepted=False)
+    code, out = env.office("dispatch", "T2", "T3", env=EXTERNAL)
+    assert code == 0 and "T3 stacked after T2" in out, out
+    assert task_row(env, "T3")["status"] == "queued" and task_row(env, "T3")["stack_after"] == "T2"
+
+
+@pytest.fixture
+def old_git(monkeypatch):
+    """git without `merge-tree --write-tree` (before 2.38): it exits 129 on the option."""
+    from office import integration
+    real = subprocess.run
+
+    def run(cmd, *a, **kw):
+        if "merge-tree" in cmd:
+            return subprocess.CompletedProcess(cmd, 129, "", "usage: git merge-tree")
+        return real(cmd, *a, **kw)
+
+    monkeypatch.setattr(integration.subprocess, "run", run)
+
+
+def test_combine_merges_in_a_scratch_worktree_when_git_lacks_merge_tree_write_tree(env, old_git):
+    from office import integration, state
+    fan_in_run(env)
+    c1 = commit_on(env, base_sha(env), {"calc.py": GOOD_ADD, "registry.txt": edit_line(2, "t1")})
+    c2 = commit_on(env, base_sha(env), {"mul.py": GOOD_MUL, "registry.txt": edit_line(25, "t2")})
+    c3 = commit_on(env, base_sha(env), {"registry.txt": edit_line(2, "t3")})
+    run = state.get_run(env.con(), run_id(env))
+    merged = integration.combine(run, [("T1", c1), ("T2", c2)])
+    assert is_ancestor(env, c1, merged) and is_ancestor(env, c2, merged)
+    with pytest.raises(integration.CombineConflict) as err:
+        integration.combine(run, [("T1", c1), ("T2", c2), ("T3", c3)])
+    assert (err.value.left, err.value.right, err.value.paths) == ("T1", "T3", ["registry.txt"])
+    assert env.git("worktree", "list").count("office-combine") == 0, "the scratch worktree is removed"

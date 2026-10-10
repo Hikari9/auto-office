@@ -19,6 +19,7 @@ import contextlib
 import json
 import os
 import subprocess
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -460,13 +461,29 @@ class CombineConflict(Exception):
 
 
 def _merge_tree(repo: str, a: str, b: str) -> tuple[str, list[str]]:
-    """(tree, conflicting paths) of merging commits `a` and `b` without a worktree."""
+    """(tree, conflicting paths) of merging commits `a` and `b` without touching a checkout."""
     proc = subprocess.run(["git", "-C", repo, "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", a, b],
                           capture_output=True, text=True)
+    if proc.returncode == 129:  # git before 2.38 has no --write-tree: merge in a throwaway worktree
+        return _merge_in_scratch(repo, a, b)
     if proc.returncode not in (0, 1):
         raise paths.GitError(("merge-tree", a, b), proc.returncode, proc.stderr.strip())
     tree, *files = [f for f in proc.stdout.split("\0") if f]
     return tree, files if proc.returncode == 1 else []
+
+
+def _merge_in_scratch(repo: str, a: str, b: str) -> tuple[str, list[str]]:
+    with tempfile.TemporaryDirectory(prefix="office-combine-") as tmp:
+        scratch = str(Path(tmp) / "wt")
+        paths.git(repo, "worktree", "add", "-q", "--detach", scratch, a)
+        try:
+            proc = subprocess.run(["git", "-C", scratch, "merge", "--no-edit", "-q", "-m", "office: combine", b],
+                                  capture_output=True, text=True, env={**os.environ, **paths.commit_identity_env(repo)})
+            if proc.returncode == 0:
+                return paths.git(scratch, "rev-parse", "HEAD^{tree}"), []
+            return "", paths.git(scratch, "diff", "--name-only", "--diff-filter=U", check=False).splitlines() or ["(unknown)"]
+        finally:
+            subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", scratch], capture_output=True)
 
 
 def combine(run: dict, parents: list[tuple[str, str]]) -> str:

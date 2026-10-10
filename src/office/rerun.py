@@ -127,10 +127,9 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
                     pending.append((dep, rev_id, row["commit_sha"]))
         elif dt and (rev_id or dt["status"] == "changes_required"):
             reopened.append({"task": dep, "status": dt["status"], "revision": rev_id})
-    note = ("; " + ", ".join(f"{r['task']} is {r['status']} and was not restacked" for r in reopened)) if reopened else ""
+    note = ", ".join(f"{r['task']} is {r['status']} and was not restacked" for r in reopened)
     if not pending:
-        return {"base": None, "merged": [], "conflict": None, "reopened": reopened,
-                "line": note[2:]} if reopened else None
+        return {"base": None, "merged": [], "conflict": None, "reopened": reopened, "line": note} if reopened else None
     env = {**os.environ, **paths.commit_identity_env(wt)}
     merged = []
     for i, (dep, rev_id, sha) in enumerate(pending):
@@ -143,7 +142,8 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
             unmerged = [{"task": t, "revision": r, "commit": c} for t, r, c in pending[i:]]
             return {"base": None, "merged": merged, "conflict": {"task": dep, "revision": rev_id, "commit": sha},
                     "unmerged": unmerged, "reopened": reopened,
-                    "line": f"restack onto {dep} {rev_id} conflicts; the executor merges {sha[:7]} first" + note}
+                    "line": "; ".join(x for x in (f"restack onto {dep} {rev_id} conflicts; the executor merges {sha[:7]} first",
+                                           note) if x)}
         merged.append({"task": dep, "revision": rev_id, "commit": sha})
     from office import integration
     try:
@@ -151,7 +151,8 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
     except (integration.CombineConflict, paths.GitError):
         base = None  # the dispatch keeps the base it had
     return {"base": base, "merged": merged, "conflict": None, "reopened": reopened,
-            "line": "restacked onto " + ", ".join(f"{m['task']} {m['revision']}" for m in merged) + note}
+            "line": "; ".join(x for x in ("restacked onto " + ", ".join(f"{m['task']} {m['revision']}" for m in merged),
+                                       note) if x)}
 
 
 def _sticky_check(con, run: dict, task: dict, parent: dict) -> str | None:
