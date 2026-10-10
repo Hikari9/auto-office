@@ -67,13 +67,14 @@ def test_a_revoke_after_a_refused_amendment_submit_keeps_the_task_accepted(env):
     assert code == 0, out
     assert "lease revoked" not in out and "relaunch" not in out.replace("no relaunch is needed", ""), out
     assert "stays accepted" in out and "no relaunch is needed" in out.splitlines()[-1], out
+    assert "office rerun T1 --resume to apply A1" in out.splitlines()[-1], out
     t1 = task_row(env, "T1")
     assert t1["status"] == "accepted" and t1["accepted_revision_id"] == accepted["accepted_revision_id"], t1
     assert not t1["pause_reason"], t1
     current = _leases(env)[-1]
     assert current["released_at"] and not current["revoked_at"], current
     # The unapplied amendment is listed, not lost.
-    assert "unapplied deliveries: A1" in out, out
+    assert "unapplied amendments: A1" in out, out
     # The dependent starts, and a late submit from the revoked worker is rejected.
     code, out = env.office("dispatch", "T2", env=EXTERNAL)
     assert code == 0 and "T2 ->" in out, out
@@ -84,31 +85,49 @@ def test_a_revoke_after_a_refused_amendment_submit_keeps_the_task_accepted(env):
     assert task_row(env, "T1")["status"] == "accepted"
 
 
-def test_a_revoke_ends_the_amendment_relaunch_without_pausing_the_accepted_task(env):
+def test_a_revoke_of_an_ordinary_amendment_relaunch_keeps_the_task_accepted(env):
+    """An ordinary amendment bumps the task's contract_version past its accepted revision; that alone does not demote."""
     accepted = _accepted(env)
     env.office("amend", "T1", "--", DELTA, env=EXTERNAL, check=0)
+    rev = env.con().execute("SELECT applied_version FROM revisions WHERE id=?", (accepted["accepted_revision_id"],)).fetchone()[0]
+    assert task_row(env, "T1")["contract_version"] > rev and task_row(env, "T1")["status"] == "running"
     code, out = env.office("revoke", "T1", "--reason", "ack-only session is not needed")
     t1 = task_row(env, "T1")
-    # The amendment bumped T1's contract past its accepted revision: not accepted, but a pending amendment, not paused.
+    assert code == 0 and t1["status"] == "accepted" and not t1["pause_reason"], (t1, out)
+    assert "unapplied amendments: A1" in out and "lease revoked" not in out, out
+    last = _leases(env)[-1]
+    assert last["released_at"] and not last["revoked_at"], last
+
+
+def test_a_revoke_with_an_unapplied_contract_amendment_is_changes_required_naming_it(env):
+    accepted = _accepted(env)
+    env.write_plan(PLAN_DEPENDENT.replace("scope: calc.py\ndepends: none", "scope: calc.py, util.py\ndepends: none"))
+    code, out = env.office("amend", "T1", "--contract", "--", "T1 also owns util.py", env=EXTERNAL)
+    assert code == 0, out
+    con = env.con()
+    assert con.execute("SELECT class FROM amendments WHERE id LIKE '%:A1'").fetchone()[0] == "contract"
+    code, out = env.office("revoke", "T1", "--reason", "contract moved")
+    t1 = task_row(env, "T1")
     assert code == 0 and t1["status"] == "changes_required" and "A1" in (t1["pause_reason"] or ""), (t1, out)
-    assert "lease revoked" in out and "office rerun T1 --resume" in out.splitlines()[-1], out
+    assert t1["accepted_revision_id"] == accepted["accepted_revision_id"]
+    assert "stays accepted" not in out and "office rerun T1 --resume to apply A1" in out.splitlines()[-1], out
     last = _leases(env)[-1]
     assert last["revoked_at"] and not last["released_at"], last
 
 
-def test_after_a_contract_version_bump_a_revoke_does_not_restore_accepted(env):
-    accepted = _accepted(env)
-    env.office("amend", "T1", "--", DELTA, env=EXTERNAL, check=0)
+def test_an_ordinary_and_a_contract_amendment_together_name_only_the_contract_one(env):
+    _accepted(env)
     con = env.con()
-    rev = con.execute("SELECT applied_version FROM revisions WHERE id=?", (accepted["accepted_revision_id"],)).fetchone()[0]
-    assert task_row(env, "T1")["contract_version"] > rev
-    # The delivery is gone too (superseded): nothing pending, yet the contract moved past what was accepted.
-    con.execute("UPDATE deliveries SET status='superseded'")
+    run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    for i, (aid, cls) in enumerate((("A8", "ordinary"), ("A9", "contract"))):
+        con.execute("INSERT INTO amendments(id, run_id, seq, class, scope_json, delta, requested_by, status, created_at) "
+                    "VALUES(?,?,?,?,'[]','d','test','applied','2026-01-01')", (f"{run_id[:8]}:{aid}", run_id, 90 + i, cls))
+        con.execute("INSERT INTO deliveries(id, run_id, amendment_id, task_id, dispatch_id, target_version, status, content, "
+                    "created_at) VALUES(?,?,?,'T1','Dx',?,'applied','c','2026-01-01')", (f"d{i}", run_id, aid, 5 + i))
     con.commit()
-    code, out = env.office("revoke", "T1", "--reason", "contract moved")
+    code, out = env.office("revoke", "T1", "--reason", "x")
     t1 = task_row(env, "T1")
-    assert code == 0 and t1["status"] != "accepted", (t1, out)
-    assert t1["status"] == "paused" and "lease revoked" in out and "stays accepted" not in out, (t1, out)
+    assert code == 0 and t1["status"] == "changes_required" and t1["pause_reason"] == "amended by A9", (t1, out)
 
 
 def test_a_revoke_never_turns_a_cancelled_task_into_paused(env):
@@ -125,16 +144,18 @@ def test_a_revoke_never_turns_a_cancelled_task_into_paused(env):
     assert "relaunch" not in out, out
 
 
-def test_a_revoke_of_a_plain_accepted_task_lists_unapplied_deliveries_and_keeps_it_accepted(env):
+def test_a_revoke_of_a_plain_accepted_task_lists_unapplied_ordinary_amendments_and_keeps_it_accepted(env):
     accepted = _accepted(env)
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    con.execute("INSERT INTO amendments(id, run_id, seq, class, scope_json, delta, requested_by, status, created_at) "
+                "VALUES(?, ?, 90, 'ordinary', '[]', 'd', 'test', 'applied', '2026-01-01')", (f"{run_id[:8]}:A9", run_id))
     con.execute("INSERT INTO deliveries(id, run_id, amendment_id, task_id, dispatch_id, target_version, status, content, "
-                "created_at) VALUES('x', ?, 'A9', 'T1', ?, 1, 'queued', 'c', '2026-01-01')",
+                "created_at) VALUES('x', ?, 'A9', 'T1', ?, 5, 'queued', 'c', '2026-01-01')",
                 (run_id, accepted["current_dispatch_id"]))
     con.commit()
     code, out = env.office("revoke", "T1", "--reason", "tidy")
-    assert code == 0 and "unapplied deliveries: A9" in out and "stays accepted" in out, out
+    assert code == 0 and "unapplied amendments: A9" in out and "stays accepted" in out, out
     assert task_row(env, "T1")["status"] == "accepted"
 
 
