@@ -539,10 +539,15 @@ def test_the_live_policy_cache_survives_a_concurrent_clear(world, monkeypatch):
     assert policy["denied"] == ["harness:codex"]
 
 
-def test_an_unreadable_live_policy_refuses_the_probe(world):
+@pytest.mark.parametrize("text", [
+    "routing: [unclosed\n  - : :\n",
+    "routing:\n  user_policy:\n    denied_models: \"codex/x@high\"\n",
+    "routing: 5\n",
+])
+def test_an_unreadable_live_policy_refuses_the_probe(world, text):
     con = world.con()
     run = world.run()
-    Path(os.environ["OFFICE_USER_CONFIG"]).write_text("routing: [unclosed\n  - : :\n", encoding="utf-8")
+    Path(os.environ["OFFICE_USER_CONFIG"]).write_text(text, encoding="utf-8")
     refused = ensure(world, con, run, attempt="A-live-bad")
     assert refused == Refused("policy-unreadable") and "cannot be read" in refused.detail
     _assert_nothing_allocated(world, con, run, "A-live-bad", "policy-unreadable")

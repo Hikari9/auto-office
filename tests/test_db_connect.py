@@ -53,7 +53,7 @@ def test_concurrent_first_opens_of_one_database_all_succeed_in_wal_mode(tmp_path
         con = db.connect(path)  # migration ran to one correct schema, triggers included
         assert db._schema_version(con) == db.SCHEMA_VERSION and not db._drifted(con)
         assert con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
-                           "AND tbl_name='route_discovery_events'").fetchone()[0] >= 1
+                           "AND tbl_name='route_discovery_events'").fetchone()[0] == 3
         con.close()
 
 

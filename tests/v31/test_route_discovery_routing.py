@@ -783,6 +783,18 @@ def test_a_mistyped_value_outside_the_denial_subtree_does_not_hide_or_refuse_a_p
         candidates.live_user_policies()
 
 
+def test_a_malformed_repo_tier_policy_fails_closed_like_the_user_tier(monkeypatch, tmp_path):
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "none.yaml"))
+    repo = tmp_path / "repo"
+    (repo / ".auto-office").mkdir(parents=True)
+    (repo / ".auto-office" / "config.yaml").write_text("routing: [unclosed\n  - : :\n")
+    with pytest.raises(Exception):
+        candidates.live_user_policies(repo)
+    with pytest.raises(Refused) as err:
+        candidates.required_user_policies(repo)
+    assert err.value.category == "policy-unreadable"
+
+
 def test_route_role_honors_a_live_denial_and_fails_closed_on_an_unreadable_policy(env, monkeypatch, tmp_path):
     from conftest import start_inline
     from office import state
