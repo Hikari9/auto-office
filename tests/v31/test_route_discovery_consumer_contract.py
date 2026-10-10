@@ -52,9 +52,9 @@ class World:
             monkeypatch.setenv(key, str(value))
         system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
         monkeypatch.setenv("PATH", os.pathsep.join([str(tmp / "bin")] + system))
-        script = tmp / "bin" / "codex"
-        script.write_text(f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
-        script.chmod(0o755)
+        self.codex = tmp / "bin" / "codex"
+        self.codex.write_text(f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
+        self.codex.chmod(0o755)
         if route_probe.write_boundary_reason() is not None:
             # No OS write boundary here: the launch path still runs, only the sandbox wrapper is dropped.
             monkeypatch.setattr(route_probe, "write_boundary_reason", lambda: None)
@@ -77,6 +77,14 @@ class World:
 
     def script(self, **fields):
         self.monkeypatch.setenv("FAKE_PROBE", json.dumps(fields))
+
+    def upgrade_harness(self, version):
+        """The installed `codex` now reports another version. The version is memoized per binary mtime, so the
+        wrapper is rewritten, as an upgrade replaces the binary."""
+        self.script(version=f"codex-cli {version}")
+        stat = self.codex.stat()
+        self.codex.write_text(self.codex.read_text() + f"# {version}\n")
+        os.utime(self.codex, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))
 
     def policy(self, **discovery):
         config = copy.deepcopy(cfg.resolve(None)[0])
@@ -198,6 +206,21 @@ def test_d5_ends_in_a_trial_after_a_fresh_exact_pass(world):
     # the recorded request replays to the same decision
     replay = routing.route(json.loads(json.dumps(second["request"])))
     assert replay["decision_hash"] == second["decision_hash"] and replay["selected"] == disc["candidate"]
+    # the recompute tries the candidate the handle names and never draws another untried route
+    wide = world.decide(None, discovery_input=second["request"]["discovery_input"])
+    assert wide["discovery"]["intent"] == "trial" and wide["selected"] == disc["candidate"]
+    assert {categories(wide)[world.sol[e]] for e in EFFORTS if e != "high"} == {"untried"}
+
+
+def test_a_changed_harness_version_makes_the_cached_pass_unusable(world):
+    first, _, outcome, _ = world.preflight("high")
+    assert outcome["result"] == "pass"
+    world.upgrade_harness("0.163.0")
+    after = world.decide("high")
+    disc = after["discovery"]
+    assert disc["intent"] == "probe" and disc["probe"] is None  # the 0.162.0 pass is not this route's record
+    assert "|0.163.0|" in disc["probe_key"] and disc["probe_key"] != first["discovery"]["probe_key"]
+    assert [c["harness_version"] for c in world.cache()] == ["0.162.0"]
 
 
 @pytest.mark.parametrize("mode,reason_class", [
@@ -252,7 +275,7 @@ def test_a_cached_pass_is_reused_by_a_later_attempt_without_a_second_probe(world
 
 
 def test_the_event_rows_t5_attributes_by_attempt_id_carry_the_audit_fields(world):
-    first, attempt, _, _ = world.preflight("high", attempt_id=None)
+    first, attempt, _, _ = world.preflight("high")
     reserved, result = world.events(attempt)
     assert (reserved["kind"], result["kind"]) == ("probe-reserved", "probe-result")
     digest = world.config[route_policy.DIGEST_KEY]
@@ -563,7 +586,7 @@ def test_a_denied_route_is_refused_for_as_and_review_as(world, flag, spec, tier,
     assert "office config routing.user_policy.denied_models" in err.value.next_step
 
 
-def test_amend_route_and_dispatch_declare_through_the_same_denial_seam(world, monkeypatch):
+def test_amend_route_and_dispatch_declare_through_the_same_denial_seam(world):
     """`amend route --as` and `dispatch --as` both call `declared_candidate`, which names only the exact route."""
     deny(world)
     with pytest.raises(state.Refused) as err:
@@ -644,15 +667,14 @@ def cli_authority(env):
     return {t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in AUTHORITY_TABLES}
 
 
-def cli_deny(env, spec=CLI_DENIED, overkill=""):
-    body = f"routing:\n  user_policy:\n    denied_models: [{spec}]\n"
-    env.tmp.joinpath("user-config.yaml").write_text(body + overkill)
+def cli_deny(env, spec=CLI_DENIED):
+    env.tmp.joinpath("user-config.yaml").write_text(f"routing:\n  user_policy:\n    denied_models: [{spec}]\n")
 
 
 def test_cli_manual_routes_refuse_a_denied_route_and_change_nothing(env):
     from conftest import approved_run
     approved_run(env)
-    before, trust = cli_authority(env), None
+    before = cli_authority(env)
     cli_deny(env)
     con = env.con()
     dispatches = con.execute("SELECT COUNT(*) FROM dispatches").fetchone()[0]
@@ -663,7 +685,7 @@ def test_cli_manual_routes_refuse_a_denied_route_and_change_nothing(env):
                  ("amend", "route", "T1", "--as", CLI_DENIED, "--quote", "use it")):
         code, out = env.office(*args, env=EXTERNAL)
         assert code != 0 and "denied by user routing.user_policy.denied_models" in out, (args, out)
-        if args[2] != "--route":  # `--route` is routed, not declared: it fails as "no qualifying route"
+        if "--route" not in args:  # `--route` is routed, not declared: it fails as "no qualifying route"
             assert "office config routing.user_policy.denied_models" in out, (args, out)
     con = env.con()
     assert con.execute("SELECT COUNT(*) FROM dispatches").fetchone()[0] == dispatches
@@ -674,9 +696,9 @@ def test_cli_manual_routes_refuse_a_denied_route_and_change_nothing(env):
     assert code == 0, out
 
 
-def cli_overkill(env, route=CLI_DENIED):
+def cli_overkill(env):
     env.tmp.joinpath("user-config.yaml").write_text(
-        f"routing:\n  user_policy:\n    overkill_rules:\n      - {{route: {route}}}\n")
+        f"routing:\n  user_policy:\n    overkill_rules:\n      - {{route: {CLI_DENIED}}}\n")
 
 
 def test_cli_an_overkill_route_stays_selectable_by_as_and_amend_route(env):
