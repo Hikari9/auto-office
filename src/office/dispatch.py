@@ -63,6 +63,24 @@ def create_planner_task(con, run: dict, *, contract_request: str | None = None, 
     """Queue the dedicated planner. Caller holds the transaction."""
     now = now_iso()
     existing = state.get_task(con, run["id"], PLANNER_TASK)
+    from office import gates
+    live = gates.live_task_session(con, run["id"], PLANNER_TASK)
+    if live:
+        # A planner cannot be superseded while it is writing PLAN.md. The new
+        # amendment is already durable in amendments. A queued planner picks it
+        # up when its packet is built; a running one acknowledges only what its
+        # packet carried, so the request waits for the next revision (#506).
+        if contract_request:
+            d = state.get_dispatch(con, live)
+            if d and d.get("status") == "running":
+                state.enqueue(con, run, "notify_worker",
+                              {"dispatch_id": live, "task_id": PLANNER_TASK,
+                               "text": f"CONTRACT AMENDMENT QUEUED: {contract_request}. "
+                                       "It is not part of your brief; Office plans it in a follow-up "
+                                       "revision after you submit. Finish the current revision as briefed."},
+                              dedup_key=f"planner-amend:{live}:{contract_request.split(':', 1)[0]}",
+                              max_attempts=1)
+        return live
     if existing is None:
         con.execute(
             "INSERT INTO tasks(run_id, id, title, role, scope_json, depends_json, interfaces_json, accept_json, "
@@ -470,12 +488,13 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
     rounds route here from pinned state because they have no orchestrator turn.
     """
     task = state.get_task(con, run["id"], task_id)
-    if role == "executor":
+    if role in ("executor", "planner"):
         from office import gates
         live = gates.live_task_session(con, run["id"], task_id, exclude=replaces)
         if live:
             # One session per worktree: amend, rerun and relaunch all come through here.
-            raise Refused("worker-live", f"{task_id} still has a live worker ({live})", scope=task_id,
+            raise Refused("planner-live" if role == "planner" else "worker-live",
+                          f"{task_id} still has a live {role} ({live})", scope=task_id,
                           next_step=f'office prompt {task_id} -- "<message>" to reach it, or office revoke {task_id} '
                                     "to end it first")
     prior = None
@@ -951,6 +970,14 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
     task = state.get_task(con, run["id"], dispatch["task_id"])
     plan = state.current_plan(con, run["id"])
     req = state.current_requirements(con, run["id"])
+    # Gather contract requests when the launch job constructs the packet, not
+    # when the first amendment queued it: later requests may arrive before the
+    # planner starts and must be included in its first brief (#506).
+    requests = con.execute("SELECT seq, delta FROM amendments WHERE run_id=? AND class='contract' "
+                           "AND to_plan_version IS NULL ORDER BY seq", (run["id"],)).fetchall() if role == "planner" else []
+    contract_request = ("\n".join(f"A{r['seq']}: {r['delta']}" for r in requests)
+                        if requests else extra.get("contract_request"))
+    contract_request_max_seq = max((r["seq"] for r in requests), default=None)
     body = {
         "role": role,
         "dispatch_id": dispatch["id"],
@@ -972,7 +999,8 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
         "pr": _pr_packet(con, run, task, dispatch) if role == "executor" else None,
         "requirements": req["frozen"],
         "fix_of": extra.get("fix_of"),
-        "contract_request": extra.get("contract_request"),
+        "contract_request": contract_request,
+        "contract_request_max_seq": contract_request_max_seq,
         "restack": extra.get("restack"),
     }
     return state.packet_envelope(run, f"{role}-dispatch", body)
@@ -3241,6 +3269,20 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> No
                        payload={"exit_code": code, "signal": sig, "classification": classification})
             if d["kind"] in ("planner", "executor"):
                 after_worker_exit(con, run, dispatch_id)
+            if d["kind"] == "planner" and _submitted(con, d):
+                # If a request arrived after this planner already submitted,
+                # let its session end before starting the next revision.
+                pending = con.execute("SELECT 1 FROM amendments WHERE run_id=? AND class='contract' "
+                                      "AND to_plan_version IS NULL LIMIT 1", (run["id"],)).fetchone()
+                if pending and not state.is_terminal(state.get_run(con, run["id"])):
+                    try:
+                        create_planner_task(con, run)
+                    except Refused as err:
+                        # Never roll back the recorded end: block the planner with the reason.
+                        state.update_task(con, run["id"], PLANNER_TASK, status="blocked",
+                                          pause_reason=f"follow-up planner refused: {err.message}")
+                        state.emit(con, run, "task.blocked", f"{PLANNER_TASK} follow-up revision not launched: "
+                                   f"{err.message}; {err.next_step or ''}".strip(), task_id=PLANNER_TASK)
             if d["kind"] == "executor" and d.get("task_id") and _submitted(con, d):
                 # The session that submitted is gone: tasks stacked after it may start (#398).
                 start_stacked(con, run, d["task_id"])

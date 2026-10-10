@@ -132,13 +132,29 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
                             (now_iso(), run["id"]))
         if new_version > 1:
             from office import amend
-            pending = con.execute("SELECT seq FROM amendments WHERE run_id=? AND class='contract' AND to_plan_version IS NULL "
-                                  "ORDER BY seq DESC LIMIT 1", (run["id"],)).fetchone()
-            amend.contract_from_planner(con, run, f"A{pending['seq']}" if pending else None, changes, new_version,
+            # Resolve only amendments that were in this planner's launch packet.
+            # A second contract request can arrive after the prompt was sent;
+            # it cannot be assumed incorporated into this revision (#506).
+            max_seq = None
+            if dispatch_id:
+                row = con.execute("SELECT packet_path FROM dispatches WHERE id=?", (dispatch_id,)).fetchone()
+                if row and row["packet_path"]:
+                    try:
+                        import json
+                        packet = json.loads(Path(row["packet_path"]).read_text(encoding="utf-8"))
+                        if packet.get("dispatch_id") == dispatch_id:
+                            max_seq = packet.get("contract_request_max_seq")
+                    except (OSError, ValueError):
+                        pass
+            pending = (con.execute("SELECT seq FROM amendments WHERE run_id=? AND class='contract' "
+                                   "AND to_plan_version IS NULL AND seq<=? ORDER BY seq",
+                                   (run["id"], max_seq)).fetchall() if max_seq is not None
+                       else [])
+            amend.contract_from_planner(con, run, f"A{pending[-1]['seq']}" if pending else None, changes, new_version,
                                          prior_graph)
             if pending:
-                con.execute("UPDATE amendments SET to_plan_version=? WHERE run_id=? AND seq=?",
-                            (new_version, run["id"], pending["seq"]))
+                con.execute("UPDATE amendments SET to_plan_version=? WHERE run_id=? AND class='contract' "
+                            "AND to_plan_version IS NULL AND seq<=?", (new_version, run["id"], max_seq))
         if parsed.questions:
             state.emit(con, run, "plan.questions", f"PLAN QUESTIONS p{new_version}: " + " | ".join(parsed.questions[:4]),
                        payload={"questions": parsed.questions})
