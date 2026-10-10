@@ -82,8 +82,26 @@ function titleFor(run) {
   const issue = run.issue?.ref && store.state?.entities?.issues?.[run.issue.ref];
   return issue?.title || run.goal || `Run ${shortRun(run.run_id)}`;
 }
+// The Office snapshot keeps tasks in entities.tasks, not inside each run object.
+// Rebuild once per Office snapshot revision; sorting hundreds of runs must not
+// rescan the entire tasks collection for each status comparison or sidebar row.
+let taskCache = {revision: null, collection: null, byRun: new Map()};
+function tasksFor(run) {
+  const snapshot = store?.state;
+  const collection = snapshot?.entities?.tasks;
+  if (taskCache.collection !== collection || taskCache.revision !== snapshot?.rev) {
+    const byRun = new Map();
+    for (const task of Object.values(collection || {})) {
+      if (!task?.run) continue;
+      if (!byRun.has(task.run)) byRun.set(task.run, []);
+      byRun.get(task.run).push(task);
+    }
+    taskCache = {revision: snapshot?.rev, collection, byRun};
+  }
+  return taskCache.byRun.get(run.id) || [];
+}
 function statusFor(run) {
-  const tasks = run.tasks || [];
+  const tasks = tasksFor(run);
   if (run.liveness === 'terminal') return [run.phase === 'abandoned' ? 'Abandoned' : 'Closed', run.phase === 'abandoned' ? 'warn' : 'quiet'];
   if (run.awaiting_plan_authorization || tasks.some(t => ['blocked','failed','needs_attention','paused'].includes(t.status))) return ['Needs input', 'warn'];
   if (run.liveness === 'resumable') return ['Resumable', 'quiet'];
@@ -375,11 +393,11 @@ function renderInspector() {
     const [status,tone]=statusFor(r),p=r.progress;
     scroll.append(card('Run details',el('dl',{class:'ww-kvs'},kv('Repository',repoLabel(r)),kv('Issue',external(issueLabel(r),r.issue?.url)),kv('Run ID',r.run_id),kv('Status',badge(status,tone)),kv('Phase',r.phase||'Unavailable'),kv('Updated',when(r.updated_at||r.created_at)),kv('Office version',r.office_version||'Unknown'))));
     scroll.append(card('Verified progress',el('div',{class:'ww-progress'},el('div',{class:'ww-progress-track'},el('span',{style:`width:${p?.value!=null?Math.max(0,Math.min(100,p.value*100)):0}%`})),el('p',{text:p?`${p.accepted_weight} / ${p.total_weight} accepted tasks`:'No task progress recorded'}))));
-    const taskCount=(r.tasks||[]).length;scroll.append(card('Tasks',el('div',{class:'ww-summary'},text(`${taskCount} recorded tasks`),button('Inspect',()=>{state.inspector='tasks';renderInspector();},'ww-small'))));
+    const taskCount=tasksFor(r).length;scroll.append(card('Tasks',el('div',{class:'ww-summary'},text(`${taskCount} recorded tasks`),button('Inspect',()=>{state.inspector='tasks';renderInspector();},'ww-small'))));
     scroll.append(card('Active agents',el('div',{class:'ww-summary'},text(`${agentsFor(r).length} projected agents`),button('Inspect',()=>{state.inspector='agents';renderInspector();},'ww-small'))));
     scroll.append(card('Linked PRs',el('div',{class:'ww-summary'},text(`${(r.prs||[]).length} Office PR references`),button('Inspect',()=>{state.inspector='changes';renderInspector();},'ww-small'))));
   }else if(state.inspector==='tasks'){
-    const tasks=r.tasks||[];scroll.append(el('h3',{class:'ww-list-heading',text:`TASKS · ${tasks.length}`}));
+    const tasks=tasksFor(r).sort((a,b)=>String(a.task_id).localeCompare(String(b.task_id),undefined,{numeric:true}));scroll.append(el('h3',{class:'ww-list-heading',text:`TASKS · ${tasks.length}`}));
     if(!tasks.length)scroll.append(el('p',{class:'ww-empty-note',text:'No recorded tasks for this run.'}));
     for(const task of tasks){scroll.append(card(`${task.task_id} · ${task.title||'Untitled task'}`,el('div',{class:'ww-task-body'},badge(task.status||'Unknown',task.status==='accepted'?'done':task.status==='blocked'?'warn':'quiet'),el('p',{text:(task.depends||[]).length?`Depends on ${(task.depends||[]).join(', ')}`:'No dependencies recorded'}),el('p',{text:`Route: ${task.route?.dispatched||task.route?.primary||'unavailable'}`}))));}
   }else if(state.inspector==='agents'){

@@ -199,3 +199,47 @@ def test_issue_with_several_runs_requires_an_explicit_choice(page, web_url):
     choice = page.locator('[data-testid="wb-run-choice"]').first
     choice.wait_for()
     assert choice.locator('[data-testid="wb-open-run"]').count() >= 2
+
+
+
+def test_task_inspector_reads_flat_office_task_collection(page, web_url):
+    """The service strips run.tasks and supplies the same tasks under entities.tasks."""
+    open_workbench(page, web_url)
+    info = page.evaluate("""() => {
+        const entities = window.officeStore.state.entities;
+        const tasks = Object.values(entities.tasks);
+        const selected = Object.values(entities.runs).map(r => ({
+            id: r.id, run_id: r.run_id,
+            count: tasks.filter(t => t.run === r.id).length
+        })).find(r => r.count > 0);
+        return selected || null;
+    }""")
+    if not info:
+        pytest.skip("The fixture has no recorded run tasks")
+    page.locator('#ww-search').fill(info["run_id"])
+    page.locator(f'[data-testid="wb-run"][data-run-id="{info["id"]}"]').click()
+    page.locator('[data-testid="wb-tab-overview"]').click()
+    assert f'{info["count"]} recorded tasks' in page.locator('.ww-inspector-scroll').inner_text()
+    page.locator('[data-testid="wb-tab-tasks"]').click()
+    assert page.locator('.ww-list-heading').inner_text() == f'TASKS · {info["count"]}'
+    assert page.locator('.ww-task-body').count() == info["count"]
+
+
+def test_blocked_flat_task_marks_run_as_needing_input(page, web_url):
+    """A blocked task from entities.tasks must affect its run's sidebar status."""
+    open_workbench(page, web_url)
+    info = page.evaluate("""() => {
+        const e = window.officeStore.state.entities;
+        const tasks = Object.values(e.tasks);
+        const match = Object.values(e.runs).find(r => r.liveness !== 'terminal'
+            && !r.awaiting_plan_authorization && tasks.some(t => t.run === r.id));
+        return match ? {id: match.id, task: tasks.find(t => t.run === match.id).id} : null;
+    }""")
+    if not info:
+        pytest.skip("The fixture has no eligible non-terminal run with tasks")
+    page.evaluate("""(i) => {
+        window.officeStore.state.entities.tasks[i.task].status = 'blocked';
+        window.officeStore.emit('delta');
+    }""", info)
+    page.wait_for_function("""(id) => [...document.querySelectorAll('[data-testid="wb-run"]')]
+        .some(el => el.dataset.runId === id && el.textContent.includes('Needs input'))""", info["id"])
