@@ -39,11 +39,72 @@ def adapter_dir() -> Path:
     return paths.resources_root() / "adapters" / "seed"
 
 
-def load_all() -> dict[str, dict]:
-    out = {}
+def user_adapter_dir() -> Path:
+    """User-level adapters (`office harness scaffold` writes here): a harness
+    registered without a release. OFFICE_USER_ADAPTERS overrides the location."""
+    raw = os.environ.get("OFFICE_USER_ADAPTERS")
+    return Path(raw).expanduser() if raw else paths.user_config_path().parent / "adapters"
+
+
+def user_adapter_files() -> list[Path]:
+    d = user_adapter_dir()
+    return sorted(d.glob("*.yaml")) if d.is_dir() else []
+
+
+def _read(p: Path) -> dict | None:
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def load_sources() -> dict[str, tuple[dict, str, Path]]:
+    """id -> (adapter, origin, path). Origin is `seed`, `user`, or
+    `user-override`. A user adapter whose id names a seed adapter is ignored
+    unless it sets `override_seed: true`; an unreadable user file is skipped so
+    one bad draft never stops every dispatch (`office harness validate` reports it)."""
+    out: dict[str, tuple[dict, str, Path]] = {}
     for p in sorted(adapter_dir().glob("*.yaml")):
         data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-        out[data.get("id", p.stem)] = data
+        out[data.get("id", p.stem)] = (data, "seed", p)
+    for p in user_adapter_files():
+        data = _read(p)
+        if data is None:
+            continue
+        aid = str(data.get("id") or p.stem)
+        if aid in out and out[aid][1] == "seed":
+            if data.get("override_seed") is not True:
+                continue
+            out[aid] = (data, "user-override", p)
+        else:
+            out[aid] = (data, "user", p)
+    return out
+
+
+def load_all() -> dict[str, dict]:
+    return {aid: entry[0] for aid, entry in load_sources().items()}
+
+
+def harness_ids(*, routed: bool = False) -> list[str]:
+    """Adapters that can launch an Office role (they declare `office_profiles`),
+    sorted. With `routed`, only those the catalog has a row for."""
+    ids = sorted(aid for aid, a in load_all().items() if a.get("office_profiles"))
+    if not routed:
+        return ids
+    from office import candidates
+    used = {r.get("invocation_harness") for r in candidates.catalog_rows()}
+    return [aid for aid in ids if aid in used]
+
+
+def executables() -> set[str]:
+    """Every adapter id and executable name, for recognising a harness process."""
+    out = set()
+    for aid, a in load_all().items():
+        out.add(aid)
+        exe = executable(a)
+        if exe:
+            out.add(os.path.basename(exe))
     return out
 
 

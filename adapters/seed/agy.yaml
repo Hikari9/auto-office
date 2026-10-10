@@ -56,6 +56,12 @@ source_notes: Current office-skills Agy mechanics seeded for migration; exact mo
 # launch, sends no hook payload and declares no resume form: `office inspect` says so.
 session:
   id: none
+# Every permission or trust flag in a launch form, with what it grants (#499).
+trust_justifications:
+  --dangerously-skip-permissions: >-
+    agy has no non-interactive approval mode short of skipping permission
+    prompts. Grants unprompted tool use, including edits and commands, in the
+    Office worktree or the include dirs a form is given.
 capabilities: [builder, review]
 office_profiles:
   worker:

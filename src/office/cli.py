@@ -53,6 +53,9 @@ Auto Office {ver}
   office close                      finish the run after acceptance and landing
                                     (--landed-externally <pr>: its work merged through another PR)
   office benchmarks brief|submit <f> opted-in runs: one background refresh of missing benchmark scores
+  office harness scaffold|validate|smoke|list
+                                    register a harness: draft a user adapter, check it, one throwaway-repo launch
+  office model add|list|disable     catalog rows in the user overlay (add <harness>/<slug> --effort E)
 
   office list                       runs in this repository (--all for every run)
   office inspect [run|task|gate|evidence|events|route|learner|trust|convergence] [id]
@@ -317,6 +320,22 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("benchmarks", parents=[common])
     s.add_argument("action", choices=["brief", "submit"])
     s.add_argument("file", nargs="?")
+    s = sp.add_parser("harness", parents=[common])
+    s.add_argument("action", choices=["scaffold", "validate", "smoke", "list"])
+    s.add_argument("ident", nargs="?", help="harness (adapter) id")
+    s.add_argument("--binary", help="scaffold: the harness executable to probe")
+    s.add_argument("--force", action="store_true", help="scaffold: redraft an existing user adapter")
+    s.add_argument("--override-seed", action="store_true", help="scaffold: a user adapter replacing a seed id")
+    s.add_argument("--file", help="validate: an adapter file instead of an installed id")
+    s.add_argument("--model", help="smoke: the model (catalog id or harness slug) to launch")
+    s.add_argument("--effort", help="smoke: the effort (default: the catalog row's, else medium)")
+    s.add_argument("--timeout", type=int, help="smoke: seconds before the launch is stopped (default 300)")
+    s = sp.add_parser("model", parents=[common])
+    s.add_argument("action", choices=["add", "list", "disable"])
+    s.add_argument("ident", nargs="?", help="add: <harness>/<slug>; list: <harness>; disable: <harness>/<model>[@effort]")
+    s.add_argument("--effort", action="append", help="add: an effort (repeat or comma-separate)")
+    s.add_argument("--model-id", help="add: the catalog model id (default: the slug's last segment)")
+    s.add_argument("--reason", help="disable: why the row is off")
     s = sp.add_parser("inspect", parents=[common])
     s.add_argument("what", nargs="?")
     s.add_argument("ident", nargs="?")
@@ -658,6 +677,27 @@ def _run(args, unknown) -> int:
         return emit(configcmd.config(key=args.key, value=args.value, tier=args.tier, unset=args.unset, list_=args.list_,
                                      all_=args.all_, edit=args.edit, path=args.path, origin=args.origin,
                                      force=args.force, cwd=cwd), args)
+    if cmd == "harness":
+        from office import harnesscmd
+        if args.action == "scaffold":
+            return emit(harnesscmd.scaffold(args.ident, args.binary, force=args.force,
+                                            override_seed=args.override_seed), args)
+        if args.action == "validate":
+            return emit(harnesscmd.validate(args.ident, file=args.file), args)
+        if args.action == "smoke":
+            return emit(harnesscmd.smoke(args.ident, args.model, effort=args.effort, timeout=args.timeout), args)
+        con = _con()
+        try:
+            return emit(harnesscmd.harness_list(con), args)
+        finally:
+            con.close()
+    if cmd == "model":
+        from office import harnesscmd
+        if args.action == "add":
+            return emit(harnesscmd.model_add(args.ident, args.effort, model_id=args.model_id), args)
+        if args.action == "disable":
+            return emit(harnesscmd.model_disable(args.ident, reason=args.reason), args)
+        return emit(harnesscmd.model_list(args.ident or getattr(args, "harness", None)), args)
     if cmd == "queue":
         from office import queuecmd
         con = _con()

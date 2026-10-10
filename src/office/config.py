@@ -214,10 +214,17 @@ def config_drift(run: dict) -> str | None:
 
 def snapshot_hashes() -> dict:
     root = paths.resources_root()
+    from office import adapters as adapter_mod, user_catalog
     adapters = {p.name: load_yaml(p) for p in sorted((root / "adapters" / "seed").glob("*.yaml"))}
+    # User-level adapters and catalog rows pin with the run; with none the hashes
+    # stay the seed-only values earlier runs recorded.
+    for p in adapter_mod.user_adapter_files():
+        adapters["user/" + p.name] = load_yaml(p)
+    catalog = load_yaml(root / "catalog" / "seed.yaml")
+    overlay = user_catalog.raw()
     return {
         "policy_hash": sha256_file(default_config_path()),
-        "catalog_hash": sha256_obj(load_yaml(root / "catalog" / "seed.yaml")),
+        "catalog_hash": sha256_obj(catalog if overlay is None else {"seed": catalog, "user": overlay}),
         "adapter_hash": sha256_obj(adapters),
     }
 

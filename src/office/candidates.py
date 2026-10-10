@@ -38,7 +38,8 @@ _QUOTA_TTL = 60.0
 
 def catalog_rows() -> list[dict]:
     data = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8")) or {}
-    return resolve_aliases(list(data.get("models") or []))
+    from office import user_catalog
+    return resolve_aliases(user_catalog.apply(list(data.get("models") or [])))
 
 
 _ALIAS_FIELDS = ("benchmark_indexes", "task_benchmarks", "price_fields", "speed_fields", "release_date")

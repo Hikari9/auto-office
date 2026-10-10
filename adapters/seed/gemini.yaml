@@ -42,6 +42,12 @@ conformance:
   deterministic: pending
   live: pending
 source_notes: Added in 3.1 as a Gemini route. The shipped catalog has no Gemini CLI row (the 3.1 visual preference routes Gemini Flash through agy); a Gemini CLI row added by the user stays valid-unverified until the office conformance probe passes on the installed version.
+# Every permission or trust flag in a launch form, with what it grants (#499).
+trust_justifications:
+  yolo: >-
+    --approval-mode yolo on the worker form only: headless gemini cannot answer
+    approval prompts. Grants unprompted edits and commands in the Office
+    worktree. Reviewer and vision forms use --approval-mode plan (read-only).
 capabilities: [planning, builder, review]
 office_profiles:
   worker:

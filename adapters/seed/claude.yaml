@@ -57,6 +57,13 @@ source_notes: Current office-skills Claude mechanics seeded for migration; tool 
 session:
   id: assigned
   assign_arg: [--session-id, "{session_id}"]
+# Every permission or trust flag in a launch form, with what it grants (#499).
+trust_justifications:
+  bypassPermissions: >-
+    Worker form only: it edits and runs commands unattended in its own Office
+    worktree, and headless -p has no one to answer permission prompts. Grants
+    unprompted tool use. Reviewer and vision forms use dontAsk with a read-only
+    tool allowlist instead.
 capabilities: [planning, builder, review]
 office_profiles:
   worker:

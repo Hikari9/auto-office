@@ -17,7 +17,11 @@ from office import legacy, paths
 from office.state import NoRun, Refused, Usage, find_run, get_dispatch, get_run, get_task, TERMINAL_PHASES
 from office.util import now_iso, short
 
-HARNESS_NAMES = ("claude", "codex", "gemini", "agy", "hermes")
+
+def harness_names() -> set[str]:
+    """Process names that mark a harness session: every adapter id and executable (#499)."""
+    from office import adapters
+    return adapters.executables()
 
 
 @dataclass
@@ -54,6 +58,7 @@ def process_key() -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     table = {}
+    names = harness_names()
     for line in out.splitlines():
         parts = line.split()
         if len(parts) < 8:
@@ -67,7 +72,7 @@ def process_key() -> str | None:
         if pid <= 1 or pid not in table:
             return None
         ppid, start, comm = table[pid]
-        if comm in HARNESS_NAMES:
+        if comm in names:
             return f"{comm}:{pid}:{start}"
         pid = ppid
     return None

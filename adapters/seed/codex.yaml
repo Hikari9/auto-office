@@ -60,6 +60,16 @@ session:
   id: detected
   sources: [hook, herdr, output, transcript]
   output_pattern: '^session id:\s*([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})$'
+# Every permission or trust flag in a launch form, with what it grants (#499).
+trust_justifications:
+  --yolo: >-
+    Worker form only: codex exec cannot answer approval prompts headlessly.
+    Grants unsandboxed edits and commands in the Office worktree. Reviewer and
+    vision forms use --sandbox workspace-write instead.
+  trust_level=trusted: >-
+    Marks only the dispatch's own worktree or sandbox dir as a trusted codex
+    project so a pane does not stop on codex's project-trust dialog. It trusts
+    no other path.
 capabilities: [planning, builder, review]
 office_profiles:
   worker:

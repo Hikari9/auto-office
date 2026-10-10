@@ -26,7 +26,8 @@ HUB_LINE_BUDGET = 210
 SKILL_LINE_BUDGETS = {
     'skills/auto-office-lean/SKILL.md': 60,
     'skills/agy-cli/SKILL.md': 46,
-    'skills/auto-adapter/SKILL.md': 21,
+    # #499: the 3.1+ office harness/model checklist, trust posture and Herdr form requirement.
+    'skills/auto-adapter/SKILL.md': 52,
     'skills/auto-closeout/SKILL.md': 67,
     'skills/auto-execution/SKILL.md': 23,
     'skills/auto-intake/SKILL.md': 51,
