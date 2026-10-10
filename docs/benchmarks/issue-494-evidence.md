@@ -78,7 +78,9 @@ table keeps the scored decision, not the raw request, so each request is rebuilt
 builder (`candidates.route_role`, no quota probe, no model call). It never opens the live file: it refuses it, or takes
 a copy through SQLite's read-only backup API (`--snapshot-live`). Its self-test (`--self-test`) builds a database,
 checks the source is untouched, that discovery-off and pinned pre-change decisions are identical, that the simulated
-caps bind, and that no goal or title text reaches the report.
+caps bind, that an unreadable user or repo policy (T3 refuses every route with `policy-unreadable`, A14) is counted as
+`refused:policy-unreadable` rather than compared, and that no goal or title text reaches the report. A replay that skips
+every recorded decision exits 3.
 
 Policies compared: `pinned` (the run's own), `pinned-off` (the same with discovery forced off), `head-off`, `head-on`
 (HEAD's resolved policy; shipped caps; allocation simulated in recorded order). A trial counts as "would have been"

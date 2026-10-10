@@ -209,6 +209,9 @@ def replay(db_path: Path, *, limit: int | None = None) -> dict:
             run = {**run, "plan_version": row["plan_version"] or run.get("plan_version")}
             try:
                 results = replay_one(con, run, row, allocation, trial_runs)
+            except state.Refused as exc:  # e.g. policy-unreadable: HEAD's router offers nothing, so there is no decision to compare
+                report["skipped"][f"refused:{exc.category}"] += 1
+                continue
             except Exception as exc:  # noqa: BLE001 - a decision that cannot be rebuilt is counted, not hidden
                 report["skipped"][f"error:{type(exc).__name__}"] += 1
                 continue
@@ -399,9 +402,9 @@ def self_test() -> int:
         os.environ.pop("AUTO_OFFICE_RUNS_DB", None)
         # A 100 percent rolling cap makes every dispatch decision draw, and no cost or exploration limit gets in the
         # way, so the per-run caps are what bind.
-        (tmp / "user-config.yaml").write_text(
-            "routing:\n  discovery:\n    max_trial_percent_rolling_20: 100\n  adaptive:\n    exploration:\n"
-            "      {rate: 0.0, margin: 1.0, max_cost_vs_primary_percent: 100000}\n")
+        user_config = ("routing:\n  discovery:\n    max_trial_percent_rolling_20: 100\n  adaptive:\n    exploration:\n"
+                       "      {rate: 0.0, margin: 1.0, max_cost_vs_primary_percent: 100000}\n")
+        (tmp / "user-config.yaml").write_text(user_config)
         os.chdir(tmp / "repo")
         live = build_fixture(tmp / "repo")
         before = (sha(live), live.stat().st_mtime_ns)
@@ -432,6 +435,12 @@ def self_test() -> int:
               f"the per-run trial cap bound for the other three dispatches {on['caps_bound']}")
         check(on["plan_previews_with_a_probe_candidate"] >= 1, "plan previews are counted apart and spend no cap")
         check(report["head_off"]["no_discovery_block"] == report["head_off"]["decisions"], "HEAD with discovery off carries no discovery block")
+        # an unreadable policy refuses every decision (T3), and the replay counts that cause rather than comparing nothing
+        (tmp / "user-config.yaml").write_text("routing: 5\n")
+        refused = replay(copy_path)
+        check(refused["skipped"] == {"refused:policy-unreadable": 10} and refused["pinned"]["identical_to_discovery_off"] == 0,
+              f"an unreadable policy skips every decision with its cause {refused['skipped']}")
+        (tmp / "user-config.yaml").write_text(user_config)
         text = "\n".join(render(report)) + json.dumps(report)
         check(SENTINEL not in text, "the report carries no goal, title or task text")
         # the cap simulation binds: a run's second would-be trial is stopped by the per-run cap
@@ -484,6 +493,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         args.json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print("\n".join(render(report)))
+    if report["source"]["decisions"] and sum(report["skipped"].values()) == report["source"]["decisions"]:
+        print("every recorded decision was skipped, so nothing was replayed", file=sys.stderr)
+        return 3
     return 1 if report["pinned"]["different_from_discovery_off"] else 0
 
 
