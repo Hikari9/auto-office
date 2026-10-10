@@ -184,6 +184,24 @@ def test_every_probe_failure_class_blocks_a_trial_with_its_own_reason(reason_cla
     assert d["discovery"]["blocked"] == f"probe-failed:{reason_class}"
 
 
+@pytest.mark.parametrize("reason_class", ["conformance-failed", "isolation-missing", "unsupported-model-effort"])
+def test_a_failed_probe_keeps_its_exact_class_in_the_rejection_never_a_model_verdict(reason_class):
+    c = untried(probe=failed(reason_class))
+    d = go(base() + [c], disc=discovery())
+    row = next(r for r in d["rejected"] if r["candidate"] == "codex@2/newmodel@high")
+    assert row["category"] == "probe-failed" and reason_class in row["reason"]
+    assert "unsupported by the model" not in row["reason"] and "intelligence" not in row["reason"]
+
+
+def test_an_unconfirmed_row_without_discovery_metadata_is_excluded_and_never_called_unsupported():
+    state = route_policy.row_status({"dispatchable": False, "model_id": "x"})
+    assert state["status"] == "discovered-unconfirmed" and state["discovery_eligible"] is False
+    built, skipped = candidates.build_candidates(None, "executor", probe=False, discovery=discovery(), user_policies=[])
+    plain = [s for s in skipped if s["category"] == "not-eligible"]
+    assert plain and all("unsupported" not in s["category"] for s in plain)
+    assert not [c for c in built if c.get("discovery") and c["model_id"] in ("gpt-6-luna",)]
+
+
 def test_recompute_without_a_probe_record_is_dropped():
     c = untried(probe=None)
     d = go(base() + [c], disc=discovery(), discovery_input=handle(c))
@@ -434,7 +452,8 @@ def test_an_alias_over_a_disabled_target_is_never_available_and_names_the_target
     out = candidates.resolve_aliases(rows)
     alias = next(r for r in out if r["model_id"] == "niner")
     assert alias["dispatchable"] is False and "target gpt-9-x" in alias["status_reason"]
-    assert route_policy.row_status(alias)["status"] == "confirmed-unsupported"
+    state = route_policy.row_status(alias)
+    assert state["status"] == "discovered-unconfirmed" and state["discovery_eligible"] is False
 
 
 def test_an_alias_over_a_discovery_eligible_target_inherits_eligibility_not_availability():
@@ -492,7 +511,7 @@ def test_discovery_on_returns_eligible_rows_as_candidates_with_status_and_a_prob
         assert c["probe_key"].split("|")[:4] == [c["harness"], "2.0.0", c["invocation_model_id"], c["effort"]]
     # benchmark-only and ineligible rows are never offered for discovery
     cat = {s["candidate"]: s["category"] for s in skipped}
-    assert cat["codex/gpt-6-luna@none"] == "unsupported"
+    assert cat["codex/gpt-6-luna@none"] == "not-eligible"
     assert not [c for c in pool if c["model_id"] in ("claude-sonnet-5-5", "gpt-6-luna")]
 
 

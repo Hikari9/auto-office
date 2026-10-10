@@ -310,7 +310,7 @@ def _static_refusal(cand: dict, adapter: dict | None, fp: dict, ctx: dict, confi
             return "archived", "archived catalog rows never return as routes"
         return "unknown-route", "no active catalog row names this harness, model and effort"
     state = row_state(row)
-    if state["status"] == "confirmed-unsupported":
+    if state["status"] != "available" and not state["discovery_eligible"]:
         # Fail closed, but say only what is known: no discovery eligibility (or no invocation id) was
         # declared. That is not evidence the model or effort is unsupported; only a probe can show that.
         return "not-eligible", f"not explicitly discovery-eligible in the catalog ({state['reason']})"

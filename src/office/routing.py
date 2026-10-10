@@ -519,11 +519,8 @@ def route(request: dict, discovery_input: dict | None = None) -> dict:
 def _pool_category(c: dict) -> tuple[str, str]:
     """(category, reason) for a discovery candidate that is not being tried now."""
     probe = c.get("probe") or {}
-    status = c.get("route_status")
     if probe.get("result") == "fail":
         return "probe-failed", f"exact probe failed: {probe.get('reason_class')}: {probe.get('detail') or ''}".rstrip(": ")
-    if status == "confirmed-unsupported":
-        return "unsupported", c.get("status_reason") or "no discovery eligibility is declared"
     if probe.get("result") == "pending":
         return "untried", "an exact probe is in flight"
     return "untried", c.get("status_reason") or "no fresh exact probe pass yet"
