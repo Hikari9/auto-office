@@ -19,7 +19,9 @@ refuses something this page allows, the runtime is right; fix this page.
 ## Dispatch recovery
 
 A dispatch failure is a recovery checkpoint, not permission to abandon the run. Inspect the launch notice and
-`office inspect task <T> --verbose`. When Office names a failed Herdr pane, read it yourself with `herdr pane read <pane>`
+`office inspect task <T> --verbose`. Each dispatch's `launch` lines show the argv Office actually rendered for the Herdr
+attempt and any headless fallback, with prompt transport, adapter hash and harness version. Prompts and credential values are
+redacted there and in the private `launch.json`. When Office names a failed Herdr pane, read it yourself with `herdr pane read <pane>`
 (or the saved `pane-tail.txt` once Office closed it) to find the startup dialog, dead harness, quota wall, or other blocker.
 Office answers a folder-trust dialog only for worktrees and dispatch directories it created. Never approve hook trust, other
 directories, credentials, irreversible actions, or user authority on the user's behalf. Close a pane only by the id Office

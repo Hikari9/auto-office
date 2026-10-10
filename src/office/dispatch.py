@@ -58,27 +58,42 @@ _STARTUP_SCREEN_MARKERS = (
 
 
 # A launch receipt must never turn adapter arguments or a prompt into a credential leak.
-_LAUNCH_SECRET = re.compile(r"(?i)(?:api[_-]?key|password|passwd|secret|token|credential|authorization|bearer)")
+_LAUNCH_SECRET = re.compile(r"(?i)(?:api[_-]?key|access[_-]?key|private[_-]?key|password|passwd|secret|token(?!s)"
+                            r"|credential|authorization|bearer|cookie|session[_-]?key)")
+# Credential shapes caught wherever they appear, whatever the flag or key name says.
+_SECRET_VALUE = re.compile(r"(?:sk-[A-Za-z0-9_-]{8,}|gh[opsur]_[A-Za-z0-9]{8,}|github_pat_\w{8,}|xox[abpr]-[\w-]{8,}"
+                           r"|glpat-[\w-]{8,}|AKIA[0-9A-Z]{16}|eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]+|AIza[\w-]{30,})")
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@")
+_REDACTED = "[REDACTED]"
 
 
 def _redact_launch_argv(argv: list[str]) -> list[str]:
+    """Redact an argv for evidence. A secret-named flag hides its next argument;
+    `name=value` and `Header: value` keep the name and hide the value."""
     safe: list[str] = []
     hide_next = False
     for arg in argv:
         if hide_next:
-            safe.append("[REDACTED]")
+            safe.append(_REDACTED)
             hide_next = False
-        elif _LAUNCH_SECRET.search(arg):
-            if arg.startswith("-") and "=" not in arg and ":" not in arg:
-                safe.append(arg)
-                hide_next = True
-            else:
-                safe.append("[REDACTED]")
-        elif arg.startswith(("sk-", "ghp_", "gho_", "github_pat_")):
-            safe.append("[REDACTED]")
+            continue
+        named = _LAUNCH_SECRET.search(arg)
+        sep = min((i for i in (arg.find("="), arg.find(":")) if i > 0), default=-1)
+        if named and sep < 0:
+            # A bare secret-named flag (`--api-key`) hides its value; a bare word is the value.
+            safe.append(arg if arg.startswith("-") else _REDACTED)
+            hide_next = arg.startswith("-")
+        elif named and named.start() < sep:
+            safe.append(arg[:sep + 1] + (" " if arg[sep] == ":" else "") + _REDACTED)
         else:
-            safe.append(arg)
+            arg = _URL_USERINFO.sub(lambda m: m.group(1) + _REDACTED + "@", arg)
+            safe.append(_SECRET_VALUE.sub(_REDACTED, arg))
     return safe
+
+
+def write_launch_spec(run: dict, dispatch_id: str, spec: dict) -> None:
+    """launch.json is private to the user: it carries argv evidence and paths (#500)."""
+    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch_id / "launch.json", spec, mode=0o600)
 
 
 def _record_launch_form(run: dict, dispatch: dict, spec: dict, form: str, argv: list[str],
@@ -94,7 +109,7 @@ def _record_launch_form(run: dict, dispatch: dict, spec: dict, form: str, argv: 
         "harness_version": cand.get("harness_version") or dispatch.get("harness_version"),
         **fields,
     }
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
 
 
 # ------------------------------------------------------------------ planner task
@@ -1139,7 +1154,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
             "images": [str(i) for i in images or []], "include_dirs": [str(d) for d in include_dirs or []],
             "prompt_file": str(prompt_file or ddir / "brief.md"), "log_path": str(ddir / "output.log")}
     # The supervisor always finds its spec here, whatever directory holds the brief.
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     con = db.connect()
     try:
         with db.transaction(con):
@@ -1193,7 +1208,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         pane = _herdr_pane(run, cwd, label=label, dispatch_id=dispatch["id"]) if inter else None
         if inter and not pane:
             spec["fallback_reason"] = "no herdr pane could be opened"
-            atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+            write_launch_spec(run, dispatch["id"], spec)
             _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
             if resume:
                 _headless_resume(run, dispatch, kind, spec, resume)
@@ -1245,7 +1260,7 @@ def _headless_resume(run: dict, dispatch: dict, kind: str, spec: dict, resume: d
         why = "no session id was recorded" if not session else "its adapter declares no headless resume form"
         _launch_notice(run, dispatch, f"the resume could not run in a pane and {why}: started a FRESH session, not "
                                       "a continuation of the parent's; the brief and the preserved worktree carry the task")
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
 
 
 def _supervise_in_process(dispatch_id: str, cwd: Path, extra: dict) -> None:
@@ -1276,7 +1291,7 @@ def _launch_external(run: dict, dispatch: dict, kind: str, spec: dict, ddir: Pat
         return {"launcher": "external"}
     # A reviewer: a detached watcher ends the dispatch once the output file is written.
     spec["external"] = True
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     log = open(ddir / "supervisor.log", "ab")
     try:
         watcher = subprocess.Popen(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
@@ -1405,7 +1420,7 @@ def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pa
     spec["failed_herdr_screen"] = screen
     closed = bool(view) and _close_abandoned_pane(run, dispatch, pane)
     spec["failed_herdr_pane_closed"] = closed
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     observed = (f"; pane {pane} was waiting on {screen}" if screen
                 else f"; pane {pane} snapshot saved to {tail}" if view
                 else f"; pane {pane} could not be read")
@@ -1416,7 +1431,7 @@ def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pa
                 "credentials, or user-authority prompts; resolve a safe runtime blocker or choose another route, "
                 "then follow `office status` / `office resume` instead of abandoning the run")
     spec["fallback_reason"] = f"{failure} ({why}){observed}"
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     _launch_notice(run, dispatch, f"{failure} ({why}){observed}; running headless instead. {recovery}")
 
 
@@ -1502,7 +1517,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, "herdr agent start failed", why)
         return None
     spec.update({"herdr_agent": name, "pane": pane})
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     _record_launch(run, dispatch["id"], launcher="herdr", pane_id=pane)
     # A PR recorded between the first label and the pane id landing is missed by relabel_task_panes.
     fresh_label = pane_label(run, dispatch, dispatch.get("kind") or "")
@@ -1563,7 +1578,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
             _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
                                           f"re-prompt it: office prompt {dispatch['id']} -- {shlex.quote(pointer)}")
     spec["prompt_landed"] = landed
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     if not session and landed and not dispatch.get("resumed_from"):
         # The session's own transcript now records the prompt naming this brief.
         session = _transcript_session(run, dispatch, spec, herdr_kind, cwd, since=sent_at)

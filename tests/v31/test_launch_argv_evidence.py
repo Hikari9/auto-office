@@ -6,18 +6,41 @@ def test_redact_argument_secrets_without_losing_launch_shape():
     assert dispatch._redact_launch_argv([
         "codex", "exec", "--model", "gpt", "--api-key=private",
         "--token", "secret-value", "-c", "projects={trusted=true}",
-        "ghp_12345",
+        "ghp_" + "a" * 36,
     ]) == [
-        "codex", "exec", "--model", "gpt", "[REDACTED]",
+        "codex", "exec", "--model", "gpt", "--api-key=[REDACTED]",
         "--token", "[REDACTED]", "-c", "projects={trusted=true}",
         "[REDACTED]",
     ]
 
 
+def test_redaction_adversarial_combinations():
+    sk, gh = "sk-ant-" + "x" * 30, "ghs_" + "b" * 36
+    out = dispatch._redact_launch_argv([
+        "env", f"OPENAI_API_KEY={sk}", "ANTHROPIC_AUTH_TOKEN=abc123", "AWS_SECRET_ACCESS_KEY=zz",
+        "-c", 'mcp_servers.x.env.API_KEY="v1"', "--header", "Authorization: Bearer v2",
+        "--remote", f"https://user:{gh}@github.com/o/r.git", f"--extra={gh}", "--password",
+        "hunter2", "--cookie=c1", "AKIAABCDEFGHIJKLMNOP", "--max-tokens", "4096",
+        "eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.sig_part",
+    ])
+    flat = " ".join(out)
+    for leaked in (sk, gh, "abc123", "zz", "v1", "v2", "hunter2", "c1", "AKIAABCDEFGHIJKLMNOP", "eyJhbGci", "user:"):
+        assert leaked not in flat, leaked
+    # The launch shape survives: names, flags, hosts and harmless values stay readable.
+    for kept in ("OPENAI_API_KEY=", "Authorization:", "--password", "github.com/o/r.git", "--max-tokens", "4096"):
+        assert kept in flat, kept
+
+
+def test_launch_spec_is_private(tmp_path, monkeypatch):
+    monkeypatch.setattr(dispatch.paths, "run_dir", lambda _: tmp_path)
+    dispatch.write_launch_spec({"id": "R1"}, "D1", {"argv": []})
+    assert (tmp_path / "dispatches" / "D1" / "launch.json").stat().st_mode & 0o077 == 0
+
+
 def test_record_both_forms_preserves_persisted_launch_evidence(tmp_path, monkeypatch):
     written = []
     monkeypatch.setattr(dispatch.paths, "run_dir", lambda _: tmp_path)
-    monkeypatch.setattr(dispatch, "atomic_write_json", lambda path, value: written.append((path, dict(value))))
+    monkeypatch.setattr(dispatch, "atomic_write_json", lambda path, value, mode=None: written.append((path, dict(value))))
     monkeypatch.setattr(dispatch.adapters, "load_all", lambda: {"mock": {"id": "mock"}})
     run = {"id": "R1"}
     d = {"id": "D1", "adapter_id": "mock", "route": {"candidate": {"harness_version": "1.2.3"}}}
