@@ -278,6 +278,13 @@ def _integrate(con, run: dict, job: dict) -> dict:
     wt = paths.worktrees_dir() / run["id"][:8] / "_integration"
     revs = {t["id"]: dict(con.execute("SELECT * FROM revisions WHERE id=?", (t["accepted_revision_id"],)).fetchone())
             for t in tasks}
+    stale = stale_composition(run, tasks, revs)
+    if stale:
+        # A merge would only report this as a conflict (or compose a tree no one reviewed): name the task to restack.
+        with db.transaction(con):
+            _set_integration(con, run, key=key, status="stale", detail=stale)
+            state.emit(con, run, "integration.stale", f"INTEGRATION stale: {stale}")
+        return {"status": "stale"}
     if (wt / ".git").exists():
         subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)], capture_output=True)
     wt.parent.mkdir(parents=True, exist_ok=True)
@@ -419,6 +426,17 @@ def _gate(con, run, rev, kind, commit) -> str:
                     "VALUES(?,?,?,?,?,?,?,?,?,?)", (gid, run["id"], "integration", rev["id"], run["plan_version"], kind,
                                                    f"integration:{commit}", "running", now_iso(), now_iso()))
     return gid
+
+
+def stale_composition(run: dict, tasks: list[dict], revs: dict) -> str | None:
+    """Why the accepted set cannot compose: a task's accepted revision does not contain the accepted
+    revision of a dependency (it was built on one that was re-accepted since), else None."""
+    for t in tasks:
+        for dep in t["depends"]:
+            if dep in revs and not gates._is_ancestor(run, revs[dep]["commit_sha"], revs[t["id"]]["commit_sha"]):
+                return (f"{t['id']} accepted on {revs[t['id']]['id']} does not contain {dep} accepted on "
+                        f"{revs[dep]['id']}; restack {t['id']} onto {dep}")
+    return None
 
 
 def review_boundary(con, run: dict, tasks: list[dict], revs: dict) -> tuple[bool, str]:
