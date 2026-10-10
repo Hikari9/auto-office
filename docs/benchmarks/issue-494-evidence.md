@@ -308,4 +308,3 @@ evidence"). Nothing in this section is a trust grant.
 * When a trial's worker ends without submitting, the trial is recorded `abandoned`. If the revision is then submitted
   by someone else (as in the live run), the task is accepted but the trial row stays `abandoned` and gets no
   `trial-accepted` event. The learner still reads the dispatch as landed. Still open; no change in T8.
-
