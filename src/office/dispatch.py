@@ -1543,6 +1543,8 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     try:
         proc = subprocess.run(["herdr", "agent", "start", name, "--kind", herdr_kind, "--pane", pane, "--", *args],
                               capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        proc = subprocess.CompletedProcess(exc.cmd, 1, "", f"timeout: {exc}")
     except (OSError, subprocess.SubprocessError) as exc:
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, "herdr agent start failed", str(exc))
         return None
@@ -1551,6 +1553,22 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         # The harness opened Office's own worktree on its folder-trust dialog and Herdr
         # stopped waiting; the dialog is answered and the agent is up (330605a8).
         proc = subprocess.CompletedProcess(proc.args, 0, "", "")
+    if proc.returncode != 0 and re.search(r"agent_not_ready|\btimeout\b", (proc.stdout or "") + (proc.stderr or "")):
+        # Held on an interactive startup screen: keep the pane and let the
+        # orchestrator answer it before falling back to headless (#510).
+        from office import startup
+        held = startup.hold(run, dispatch, spec, pane, name, herdr_kind, ddir)
+        write_launch_spec(run, dispatch["id"], spec)
+        if held == "ready":
+            proc = subprocess.CompletedProcess(proc.args, 0, "", "")
+        elif held == "cancelled":
+            _close_abandoned_pane(run, dispatch, pane)
+            return {"launcher": "herdr", "agent": name, "pane": pane, "cancelled": True}
+        elif held == "fallback":
+            sp = spec["startup_prompt"]
+            _herdr_fallback_notice(run, dispatch, spec, ddir, pane, f"startup prompt {sp['id']} ({sp['screen']}) "
+                                   f"held herdr agent {name}", sp.get("resolution") or "not answered")
+            return None
     if proc.returncode != 0:
         why = (proc.stdout or proc.stderr or "").strip()[:200]
         if "agent_pane_busy" in why and not retried:

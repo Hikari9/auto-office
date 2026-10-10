@@ -23,7 +23,17 @@ A dispatch failure is a recovery checkpoint, not permission to abandon the run. 
 attempt and any headless fallback, with prompt transport, adapter hash and harness version. Prompts and credential values are
 redacted there and in the private `launch.json`. When Office names a failed Herdr pane, read it yourself with `herdr pane read <pane>`
 (or the saved `pane-tail.txt` once Office closed it) to find the startup dialog, dead harness, quota wall, or other blocker.
-Office answers a folder-trust dialog only for worktrees and dispatch directories it created. Never approve hook trust, other
+When a harness opens on an interactive startup screen (an update notice, a trust, login or what's-new screen),
+Office keeps its Herdr pane and records a startup prompt instead of falling back to headless at once (#510). `office status`
+and `office wait` (exit 5) print it as a `question:` line with the screen, its options, a snapshot path and the answer
+command: `office answer <dispatch> --choice <n> --expect <fp>` or `--keys esc --expect <fp>` (`--keys` takes up to six of
+esc, enter, up, down, left, right, tab, space, 1-9). Office checks that the pane still shows that exact prompt and that the
+launch holding it is alive. It refuses a stale or concurrent answer. Once the harness is ready, Office delivers the brief once.
+An answer that opens another screen is recorded as a new round with a new fingerprint. An unanswered prompt
+(`OFFICE_STARTUP_PROMPT_WAIT`, default 900s), a closed pane or a dead launcher ends in an attributed headless fallback, or in
+no relaunch when the dispatch was revoked meanwhile. `office inspect startup [dispatch]` lists every prompt and how it ended.
+Office never answers one on its own: choosing Update now, trusting a folder, logging in or granting permissions is the
+user's decision. Office answers a folder-trust dialog only for worktrees and dispatch directories it created. Never approve hook trust, other
 directories, credentials, irreversible actions, or user authority on the user's behalf. Close a pane only by the id Office
 names, never by matching screen text, and never your own (`$HERDR_PANE_ID`). Then follow the printed `next:`: re-prompt a live
 pane, `office resume`, `office rerun <task> --resume|--fresh`, `office dispatch <task> --reroute`, or the documented

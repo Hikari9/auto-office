@@ -96,9 +96,9 @@ never wait or `--skip`; continue on the current preferences and tell the user to
   `office dispatch <task> --reroute`). Never approve hook trust, other directories, credentials, irreversible actions or user authority for
   the user. Close a pane only by the id Office names, never your own (`$HERDR_PANE_ID`). Detail: `docs/orchestrator-reference.md`.
 - `office wait`: exit 0 means act, 3 a stall, 5 an agent asked a question, 124 nothing new. Key on the exit code, never on status text.
-  Exit 5 prints a `question:` line. Decide planning, scope, ordering and test detail yourself (amend the contract first if the answer
-  changes it), then `office answer <task|dispatch> <n>` or `-- "<text>"`. Take it to the user (native question tool) only when it hints at
-  requirements, authority, or an irreversible or external action; never answer those on your own.
+  Exit 5 prints a `question:` line. Decide planning, scope, ordering and test detail yourself (amend the contract first if the answer changes
+  it), then `office answer <task|dispatch> <n>` or `-- "<text>"` (a `[startup]` held screen, #510: the printed `--choice|--keys --expect`).
+  Take it to the user (native question tool) on requirements, authority (trust, login, update), irreversible or external actions; never answer those.
 - `office status` makes one `herdr agent list` call and prints a `blocker:` line for a live pane dispatch herdr reports `blocked` with no
   recorded question. Run `office wait` to record it; status itself records nothing.
 - Executors push their task branch as they work and submit; the runtime pushes the accepted revision to the task's draft PR (stacked on its
@@ -204,7 +204,7 @@ work from runs.db; never start a new run to continue an old one. Only on the use
 
 ## Diagnostics
 
-`office inspect run|plan|task|gate|evidence|events|route|learner|convergence [id]` and `--verbose`/`--json` show the detail default output hides.
+`office inspect run|plan|task|gate|evidence|events|route|learner|convergence|startup [id]` and `--verbose`/`--json` show the detail default output hides.
 `office doctor` checks the install, hooks, pinned runtimes, and known harness defects. `office list` and `office prune` (dry run; `-f` to delete) maintain runs.
 
 Review semantics live in `docs/review-convergence.md` and the runtime design in `docs/v31-implementation.md`; you need neither to run the lifecycle.

@@ -347,9 +347,10 @@ def scan(con, run: dict) -> tuple[list[str], list[str], dict]:
         every.append(text)
         if _record(con, run, d, q, {"text": None}):
             new.append(text)
-    from office import raising
+    from office import raising, startup
     fresh, open_ = raising.report(con, run)
-    return new + fresh, every + open_, acts
+    s_fresh, s_open = startup.report(con, run)
+    return new + fresh + s_fresh, every + open_ + s_open, acts
 
 
 def recorded(con, run: dict) -> list[str]:
@@ -362,8 +363,8 @@ def recorded(con, run: dict) -> list[str]:
         if last and last["kind"] == EVENT:
             out.append(line(d, json.loads(last["payload_json"] or "{}")))
     out += [line(d, q) for d, q in _ended_question_dispatches(con, run)]
-    from office import raising
-    return out + [raising.line(r) for r in raising.open_raises(con, run)]
+    from office import raising, startup
+    return out + [raising.line(r) for r in raising.open_raises(con, run)] + startup.recorded(con, run)
 
 
 def _herdr_agents() -> list[dict] | None:
@@ -450,18 +451,30 @@ def _answer_ended(con, run: dict, d: dict, who: str, text: str) -> Result | None
                        f'a scope or acceptance change needs office amend {tid} --contract -- "<delta>"')
 
 
-def answer(con, run: dict, target: str | None, text: str) -> Result:
+def answer(con, run: dict, target: str | None, text: str, *, keys: str | None = None, choice: int | None = None,
+           expect: str | None = None) -> Result:
     """Answer the question a live pane agent is waiting on. A number answers a selection widget
     with that keypress (`office prompt` types text, which a widget ignores or misreads). Any other
     answer to a widget dismisses it with Esc, then is sent as a prompt. A plain-text question is
     answered with `office prompt`."""
     from office import prompting, raising
     raising.refuse_worker()
-    if not target or not text.strip():
+    startup_answer = keys is not None or choice is not None or expect is not None
+    if not target or not (text.strip() or startup_answer):
         raise Usage("answer-usage", "name the task or dispatch and the answer",
                     next_step='office answer <task|dispatch> <option> | office answer <task|dispatch> -- "<text>"')
     d = prompting._resolve(con, run, target)
     who = d.get("task_id") or d["id"]
+    from office import startup
+    if choice is None and keys is None and text.strip().isdigit():
+        choice = int(text.strip())
+    if startup.open_prompt(con, d["id"]) is not None or startup_answer:
+        res = startup.answer(con, run, d, keys=keys, choice=choice, expect=expect)
+        if res is not None:
+            return res
+        raise Refused("no-startup-prompt", f"{d['id']} ({who}) has no open startup prompt; --keys, --choice and "
+                      "--expect answer startup prompts only", scope=who,
+                      next_step='office status; office answer <task|dispatch> <option> | -- "<text>"')
     from office import raising
     res = raising.answer(con, run, d, text.strip())
     if res is None:

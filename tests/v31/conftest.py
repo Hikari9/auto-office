@@ -188,6 +188,8 @@ class Env:
         monkeypatch.setenv("OFFICE_JOBS", "inline")
         monkeypatch.setenv("OFFICE_LAUNCHER", "sync")
         monkeypatch.setenv("OFFICE_QUOTA_PROBE", "off")
+        # A held startup prompt waits for an answer no test gives unless it asks to (#510).
+        monkeypatch.setenv("OFFICE_STARTUP_PROMPT_WAIT", "0")
         monkeypatch.setenv("FAKE_SCENARIO", str(self.scenario))
         # Harness session transcripts (the reviewer-reply fallback) are read from
         # these homes; never from the real ones.

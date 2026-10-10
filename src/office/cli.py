@@ -44,7 +44,7 @@ Auto Office {ver}
                                     after a worker ends: continue its session, or start a new one with the findings
   office prompt <task|dispatch> -- "<message>"
                                     message a live pane agent and confirm it was submitted (never herdr pane run)
-  office answer <task|dispatch> <n> | -- "<text>"
+  office answer <task|dispatch> <n> | -- "<text>" | --choice <n>|--keys <keys> [--expect <fp>]
                                     answer the question a pane agent is waiting on (a number presses that option)
                                     or a worker's `office raise`; a headless worker is queued the answer
   office dismiss <task|dispatch|--all>
@@ -440,6 +440,9 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("answer", parents=[common])
     s.add_argument("target", nargs="?")
     s.add_argument("message", nargs="*")
+    s.add_argument("--keys", help="startup prompt: keys to press, e.g. esc or 'down enter' (#510)")
+    s.add_argument("--choice", type=int, help="startup prompt: the option number to press (#510)")
+    s.add_argument("--expect", help="startup prompt: the fingerprint `office status` printed; a stale one is refused")
     s = sp.add_parser("dismiss", parents=[common])
     s.add_argument("target", nargs="?")
     s.add_argument("--all", dest="dismiss_all", action="store_true")
@@ -866,7 +869,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "answer":
         from office import questions
         text = " ".join([*(args.message or []), *[u for u in unknown if u != "--"]]).strip()
-        return questions.answer(con, run, args.target, text)
+        return questions.answer(con, run, args.target, text, keys=args.keys, choice=args.choice, expect=args.expect)
     from office.state import OfficeError
     raise OfficeError("usage", f"unknown command {cmd}", exit_code=2)
 

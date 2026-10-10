@@ -137,6 +137,8 @@ CREATE TABLE IF NOT EXISTS deviations(id TEXT PRIMARY KEY, run_id TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS commands(id TEXT PRIMARY KEY, kind TEXT NOT NULL, target TEXT, payload_json TEXT NOT NULL, payload_hash TEXT NOT NULL, origin TEXT, status TEXT NOT NULL, pid INTEGER, result_json TEXT, error TEXT, accepted_at TEXT NOT NULL, started_at TEXT, finished_at TEXT);
 CREATE TABLE IF NOT EXISTS sched_items(id TEXT PRIMARY KEY, kind TEXT NOT NULL, run_id TEXT, task_id TEXT, ref TEXT, title TEXT, priority TEXT NOT NULL DEFAULT 'normal', paused INTEGER NOT NULL DEFAULT 0, pause_reason TEXT, paused_at TEXT, demoted_seq INTEGER, enqueued_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sched_state(scope TEXT PRIMARY KEY, auto_mode TEXT NOT NULL, reason TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS startup_prompts(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, dispatch_id TEXT NOT NULL, pane_id TEXT NOT NULL, agent TEXT NOT NULL, harness TEXT, screen TEXT NOT NULL, fingerprint TEXT NOT NULL, options_json TEXT, snapshot_path TEXT, state TEXT NOT NULL, round INTEGER NOT NULL DEFAULT 1, launcher_pid INTEGER, launcher_identity TEXT, answer TEXT, reported INTEGER NOT NULL DEFAULT 0, resolution TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expires_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS startup_prompts_dispatch ON startup_prompts(dispatch_id, state);
 """
 
 # #131 F6: a 3.1 finding must name a recorded dispatch. Scoped to 3.1 rows

@@ -66,6 +66,9 @@ def test_failed_codex_start_names_the_screen(tmp_path, monkeypatch, screen, time
     monkeypatch.setattr(dispatch, "_shell_run", lambda *a: True)
     monkeypatch.setattr(dispatch, "_launch_notice", lambda run, d, text: notices.append(text))
     monkeypatch.setattr(dispatch, "atomic_write_json", lambda *a, **kw: None)
+    # The unanswered path: the #510 hold (test_startup_prompts.py) finds nothing to hold.
+    from office import startup
+    monkeypatch.setattr(startup, "hold", lambda *a, **kw: "not-a-prompt")
 
     def run(argv, **kwargs):
         calls.append(argv)
