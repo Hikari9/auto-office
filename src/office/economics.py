@@ -141,7 +141,8 @@ def parse_codex(path: Path, session_id: str | None = None) -> list[dict]:
             if last is None or ident is None:
                 continue
             raw_in, cached = _int(last.get("input_tokens")), _int(last.get("cached_input_tokens"))
-            fresh = raw_in - cached if raw_in is not None and cached is not None and raw_in >= cached else None
+            # Without cached_input_tokens the raw input is all that is known: keep it, cache read stays unknown.
+            fresh = raw_in if cached is None else (raw_in - cached if raw_in is not None and raw_in >= cached else None)
             out.append({
                 "harness": "codex", "session_id": sid or path.stem, "turn_id": "", "event_id": f"total:{ident}",
                 "model": model, "occurred_at": entry.get("timestamp"),

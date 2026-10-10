@@ -167,3 +167,26 @@ def test_many_tasks_and_json_payload_stay_bounded(env):
     snap = data["data"]
     assert len(json.dumps(snap)) <= 24000 and snap["tasks"]["total"] == 201
     assert len(snap["tasks"]["open"]) <= 40 and snap["truncated"].get("tasks")
+    assert snap["tasks"]["accepted_or_cancelled_count"] == 100, "the count is not the capped list's length"
+    code, out = env.office("context")
+    assert "tasks: 100/201 accepted or cancelled" in out, out
+
+
+def test_rewritten_evidence_path_flags_only_its_latest_row(env):
+    from office import state
+    con, run = _con_run(env)
+    try:
+        log = env.tmp / "check-0.log"
+        log.write_text("first attempt")
+        state.record_evidence(con, run["id"], "check", log)
+        log.write_text("retry")
+        state.record_evidence(con, run["id"], "check", log)
+    finally:
+        con.close()
+    code, data = env.ojson("context")
+    rows = [a["status"] for a in data["data"]["artifacts"] if a["path"] == str(log)]
+    assert rows == ["ok", "superseded"], rows
+    assert not any("check-0.log" in s for s in data["data"]["stale"])
+    log.write_text("changed after the retry")
+    code, data = env.ojson("context")
+    assert any(f"stale: {log}" in s for s in data["data"]["stale"]), "a latest-row mismatch is still flagged"

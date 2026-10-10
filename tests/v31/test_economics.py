@@ -265,6 +265,22 @@ def test_resume_sharing_a_session_owns_only_its_window(env):
     assert data["data"]["cold_resumes"] == ["D-b"]
 
 
+def test_codex_without_cached_input_keeps_raw_input(env):
+    run_id = _run_id(env)
+    _dispatch(env, run_id, harness="codex", sid=CODEX_SID)
+    _enable(env)
+    path = env.home / ".codex" / "sessions" / "2030" / "01" / "01" / f"rollout-2030-01-01T00-00-00-{CODEX_SID}.jsonl"
+    path.parent.mkdir(parents=True)
+    tc = {"type": "event_msg", "timestamp": "2030-01-01T00:00:05Z",
+          "payload": {"type": "token_count", "info": {
+              "last_token_usage": {"input_tokens": 1000, "output_tokens": 50},
+              "total_token_usage": {"total_tokens": 1050}}}}
+    path.write_text(json.dumps({"type": "session_meta", "payload": {"id": CODEX_SID}}) + "\n" + json.dumps(tc) + "\n")
+    env.office("economics", "ingest", check=0)
+    (row,) = _rows(env)
+    assert (row["input_tokens"], row["cache_read_tokens"], row["output_tokens"]) == (1000, None, 50)
+
+
 def test_cost_merge_is_order_independent(env, tmp_path):
     _enable(env)
     rows = [{"cost_kind": "estimated-nominal", "cost_usd": 0.5}, {"cost_kind": "actual", "cost_usd": 0.2},

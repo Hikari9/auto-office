@@ -93,7 +93,9 @@ def _read(con, run_id: str, since: int | None) -> dict:
         f"SELECT id FROM tasks WHERE run_id=? AND status IN ({terminal}) ORDER BY id LIMIT ?",
         (rid, *state.TASK_TERMINAL, MAX_TASKS + 1))]
     total = con.execute("SELECT COUNT(*) FROM tasks WHERE run_id=?", (rid,)).fetchone()[0]
-    tasks = {"open": open_tasks, "done": done_tasks, "total": total}
+    done_count = con.execute(f"SELECT COUNT(*) FROM tasks WHERE run_id=? AND status IN ({terminal})",
+                             (rid, *state.TASK_TERMINAL)).fetchone()[0]
+    tasks = {"open": open_tasks, "done": done_tasks, "done_count": done_count, "total": total}
     gates = [dict(r) for r in con.execute(
         "SELECT id, kind, subject, task_id, status, verdict, round FROM gates WHERE run_id=? "
         "AND status NOT IN ('done','stale') ORDER BY created_at DESC LIMIT ?", (rid, MAX_ITEMS + 1))]
@@ -153,9 +155,15 @@ def snapshot(con, run: dict, *, since: int | None = None) -> dict:
     if raw["req"] and r.get("requirements_version") and raw["req"]["version"] != r["requirements_version"]:
         stale.append(f"run names requirements r{r['requirements_version']}, latest stored r{raw['req']['version']}")
     artifacts, budget = [], [HASH_BUDGET_BYTES]
+    seen: set[str] = set()  # rows are newest first: only a path's latest row is checked
     for kind, rows in (("evidence", raw["evidence"]), ("visual", raw["visuals"])):
         for row in rows[:MAX_ITEMS]:
-            status = _artifact(row["path"], row["sha256"], budget)
+            # Office rewrites some evidence in place (check-<i>.log on a gate retry); an older row of a path
+            # with a newer row is superseded, never stale.
+            key = f"{kind}:{row['path']}"
+            status = "superseded" if row["path"] and key in seen else _artifact(row["path"], row["sha256"], budget)
+            if row["path"]:
+                seen.add(key)
             artifacts.append({"kind": kind, "id": row["id"], "path": row["path"], "sha256": row["sha256"],
                               "status": status})
             if status in ("missing", "stale"):
@@ -172,7 +180,8 @@ def snapshot(con, run: dict, *, since: int | None = None) -> dict:
         "plan_draft": draft,
         "tasks": {"open": [{k: (_clip(v) if k == "title" else v) for k, v in t.items() if v is not None}
                            for t in open_tasks[:MAX_TASKS]],
-                  "accepted_or_cancelled": done_tasks[:MAX_TASKS], "total": raw["tasks"]["total"]},
+                  "accepted_or_cancelled": done_tasks[:MAX_TASKS], "accepted_or_cancelled_count": raw["tasks"]["done_count"],
+                  "total": raw["tasks"]["total"]},
         "pending_gates": raw["gates"][:MAX_ITEMS],
         "blocking_findings": [{**f, "summary": _clip(f["summary"])} for f in raw["findings"][:MAX_ITEMS]],
         "amendments": raw["amendments"],
@@ -237,7 +246,7 @@ def render(snap: dict) -> list[str]:
     for d in (req or {}).get("done", []):
         lines.append(f"  done: {d}")
     t = snap["tasks"]
-    lines.append(f"tasks: {len(t['accepted_or_cancelled'])}/{t['total']} accepted or cancelled")
+    lines.append(f"tasks: {t['accepted_or_cancelled_count']}/{t['total']} accepted or cancelled")
     for task in t["open"]:
         lines.append(f"  {task['id']} {task['status']}: {task.get('title', '')}"
                      + (f" (paused: {_clip(task['pause_reason'], 80)})" if task.get("pause_reason") else ""))
