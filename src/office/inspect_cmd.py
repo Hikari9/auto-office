@@ -489,38 +489,39 @@ def _learner(con, run) -> Result:
             pending.append({"role": role, **tr})
             lines.append(f"pending at next close: {role} {tr['route']} {tr['previous_state']} -> {tr['state']} "
                          f"(n={tr['evidence']['samples']}, replay: {tr['replay']['reason']})")
-    trial = _learner_trials(con, eps)
+    trial = _learner_trials(con, outcomes)
     lines += trial["lines"]
     return Result(lines=lines, data={"routes": by_route, "eligibility": current, "pending": pending,
                                      "trial_evidence": trial["routes"], "unsupported": trial["unsupported"]})
 
 
-def _learner_trials(con, eps: list[dict]) -> dict:
-    """What discovery trials taught the learner, apart from trust. A trial route's evidence is quality
-    evidence only: its adapter trust is read here beside it and is never changed by it."""
+def _learner_trials(con, outcomes: list[dict]) -> dict:
+    """What discovery trial dispatches taught the learner, apart from trust. A trial route's evidence is
+    quality evidence only: its adapter trust is read here beside it and is never changed by it. Counted per
+    trial dispatch, so a later retry that landed on the same route is not credited to the trial."""
     from office import scoring
     routes: dict[str, dict] = {}
     triples = {a["learner_route"]: a["route"] for a in route_learning.trial_attempts(con).values()}
-    for e in eps:
-        if not e.get("trial"):
+    for o in outcomes:
+        if not o.get("trial"):
             continue
-        b = routes.setdefault(e["route"], {"episodes": 0, "landed": 0, "not_the_model": 0, "failed_on_route": 0})
-        b["episodes"] += 1
-        if e["success"]:
+        b = routes.setdefault(o["route"], {"dispatches": 0, "landed": 0, "not_the_model": 0, "failed_on_route": 0})
+        b["dispatches"] += 1
+        if o["success"]:
             b["landed"] += 1
-        elif e["attribution"] in ("environment", "plan", "reviewer"):
+        elif o["attribution"] in ("environment", "plan", "reviewer"):
             b["not_the_model"] += 1
         else:
             b["failed_on_route"] += 1
     unsupported = route_learning.unsupported_routes(con)
+    trust_ready = route_learning._table(con, "adapter_trust_acts")
     lines = []
     if routes or unsupported:
-        scoring.ensure_trust_schema(con)
         lines.append("trial evidence (quality only; trials never change adapter trust):")
     for route, b in sorted(routes.items()):
-        trust = scoring.evaluate_trust_state(con, triples[route])[1] if route in triples else "unknown"
+        trust = scoring.evaluate_trust_state(con, triples[route])[1] if route in triples and trust_ready else "unknown"
         b["trust"] = trust
-        lines.append(f"  {route:<44} {b['landed']}/{b['episodes']} trial episodes landed"
+        lines.append(f"  {route:<44} {b['landed']}/{b['dispatches']} trial dispatches landed"
                      + (f" | {b['not_the_model']} not the model's (launch, environment, quota or brief)" if b["not_the_model"] else "")
                      + (f" | {b['failed_on_route']} failed on the route" if b["failed_on_route"] else "")
                      + f" | trust {trust}")

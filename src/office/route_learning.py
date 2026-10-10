@@ -158,18 +158,19 @@ def trial_attempts(con: sqlite3.Connection, run_id: str | None = None) -> dict[s
     attempts: dict[str, dict] = {}
     for e in events:
         attempts.setdefault(e["attempt_id"], {"attempt_id": e["attempt_id"], "events": []})["events"].append(e)
-    rows = {}
+    by_dispatch, by_id = {}, {}
     if _table(con, "route_trials"):
         for r in _dicts(con.execute("SELECT id, dispatch_id, status, outcome, fallback_route FROM route_trials")):
-            rows[r["dispatch_id"]] = r
-            rows.setdefault(r["id"], r)
+            if r["dispatch_id"]:
+                by_dispatch[r["dispatch_id"]] = r
+            by_id[r["id"]] = r
     for a in attempts.values():
         evs = a["events"]
         trial = [e for e in evs if e["kind"].startswith("trial-")]
         probes = [e for e in evs if e["kind"] in ("probe-result", "probe-cache-hit")]
         first, last = trial[0], trial[-1]
         dispatch_id = next((e["dispatch_id"] for e in trial if e["dispatch_id"]), None)
-        row = rows.get(dispatch_id) or rows.get(a["attempt_id"])
+        row = by_dispatch.get(dispatch_id) or by_id.get(a["attempt_id"])
         failed = next((e for e in reversed(trial) if e["kind"] == "trial-launch-failed"), None)
         probe = probes[-1] if probes else None
         reason_class = (failed or {}).get("reason_class") or (
@@ -205,17 +206,24 @@ def unsupported_routes(con: sqlite3.Connection) -> dict[str, dict]:
     """Exact routes a recorded attempt confirmed unsupported, route key -> evidence.
 
     Read from the events, one key per harness x model x effort: an unsupported
-    `high` says nothing about `medium`, and the key carries the effort."""
+    `high` says nothing about `medium`, and the key carries the effort. A later
+    pass or accepted trial of the same route (a harness upgrade, say) lifts the mark."""
     if not _table(con, "route_discovery_events"):
         return {}
     out: dict[str, dict] = {}
     for e in _dicts(con.execute(
-            "SELECT * FROM route_discovery_events WHERE reason_class=? AND (kind='trial-launch-failed' OR "
-            "(kind='probe-result' AND outcome='fail')) ORDER BY seq", (UNSUPPORTED_EFFORT,))):
+            "SELECT * FROM route_discovery_events WHERE (reason_class=? AND (kind='trial-launch-failed' OR "
+            "(kind='probe-result' AND outcome='fail'))) OR kind='trial-accepted' OR "
+            "(kind IN ('probe-result','probe-cache-hit') AND outcome IN ('pass','cache-hit:pass')) ORDER BY seq",
+            (UNSUPPORTED_EFFORT,))):
         route = fingerprint_route(e)
-        if route:
+        if not route:
+            continue
+        if e["reason_class"] == UNSUPPORTED_EFFORT:
             out[route] = {"attempt_id": e["attempt_id"], "event_id": e["id"], "kind": e["kind"], "at": e["created_at"],
                           "probe_key": e["probe_key"]}
+        else:
+            out.pop(route, None)
     return out
 
 
@@ -261,10 +269,15 @@ def record_trial_outcomes(con: sqlite3.Connection, outcomes: list[dict] | None =
                 con.execute("UPDATE route_trials SET status=?, outcome=?, updated_at=? WHERE id=?",
                             ("accepted" if outcome["success"] else "rejected", kind[len("trial-"):],
                              datetime.now(timezone.utc).isoformat(), row["id"]))
-        except sqlite3.IntegrityError:
-            con.execute("ROLLBACK TO trial_terminal")  # observed already: a second observation is a no-op
+        except (sqlite3.IntegrityError, ValueError) as exc:
+            con.execute("ROLLBACK TO trial_terminal")
             con.execute("RELEASE trial_terminal")
-            continue
+            if isinstance(exc, ValueError):
+                continue  # a malformed recorded event: this trial cannot be recorded, the others still are
+            if con.execute("SELECT 1 FROM route_discovery_events WHERE attempt_id=? AND kind IN "
+                           "('trial-accepted','trial-rejected')", (trial["attempt_id"],)).fetchone():
+                continue  # observed already: a second observation is a no-op
+            raise
         con.execute("RELEASE trial_terminal")
         written.append({"event_id": event_id, "kind": kind, "attempt_id": trial["attempt_id"], "dispatch_id": dispatch_id})
     return written
@@ -287,11 +300,12 @@ def attempt_history(con: sqlite3.Connection, *, run_id: str | None = None, task_
             clauses.append(f"({column}=?" + (f" OR {column} IS NULL" if include_unbound else "") + ")")
             args.append(value)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    ids = [r[0] for r in con.execute(
-        f"SELECT attempt_id FROM route_discovery_events{where} GROUP BY attempt_id ORDER BY MIN(seq) DESC LIMIT ?",
-        (*args, limit)).fetchall()]
+    # This run's own attempts come before unbound ones, so a pile of manual probes cannot push them out.
+    ids = [r[0] for r in sorted(con.execute(
+        f"SELECT attempt_id, MIN(seq) FROM route_discovery_events{where} GROUP BY attempt_id "
+        "ORDER BY MAX(run_id IS NULL), MIN(seq) DESC LIMIT ?", (*args, limit)).fetchall(), key=lambda r: r[1])]
     attempts = []
-    for attempt_id in reversed(ids):
+    for attempt_id in ids:
         events = _dicts(con.execute("SELECT * FROM route_discovery_events WHERE attempt_id=? ORDER BY seq", (attempt_id,)))
         first = events[0]
         attempts.append({
@@ -300,7 +314,7 @@ def attempt_history(con: sqlite3.Connection, *, run_id: str | None = None, task_
             "probe_key": first["probe_key"], "route": first["candidate_route"], "reason": first["reason"],
             "dispatches": sorted({e["dispatch_id"] for e in events if e["dispatch_id"]}),
             "events": [{k: e[k] for k in ("id", "kind", "origin", "dispatch_id", "probe_freshness", "outcome",
-                                          "reason_class", "detail", "source_attempt_id", "created_at")}
+                                          "reason_class", "source_attempt_id", "created_at")}
                        for e in events]})
     return attempts
 
@@ -412,7 +426,7 @@ def derive_outcomes(con: sqlite3.Connection) -> list[dict]:
         trial = trials.get(did)
         if success:
             attr, conf, prov = "route", 1.0, "accepted revision"
-        elif trial and not my_revs and trial["state"] in TRIAL_LAUNCH_STATES:
+        elif trial and not my_revs and (trial["state"] in (*TRIAL_LAUNCH_STATES, "abandoned") or trial["reason_class"]):
             attr, conf, prov = launch_failure_attribution(trial)
         else:
             attr, conf, prov = attribute_failure(
@@ -517,7 +531,6 @@ def episodes(outcomes: list[dict]) -> list[dict]:
             "descriptor": last.get("descriptor") if all(o.get("descriptor") == last.get("descriptor") for o in rows) else {},
             "success": success, "attribution": attr, "attribution_confidence": conf,
             "attribution_provenance": prov, "learn_weight": round(weight, 4),
-            "trial": next((o["trial"] for o in rows if o.get("trial")), None),
             "attempts": len(rows), "review_rounds": sum(o["review_rounds"] for o in rows),
             "wall_seconds": sum(walls) if walls else None, "money_actual": sum(money) if money else None,
             "dispatch_ids": [o["dispatch_id"] for o in rows], "ended_at": last.get("ended_at"),

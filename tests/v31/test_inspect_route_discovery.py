@@ -284,13 +284,14 @@ def test_the_learner_view_shows_trial_evidence_apart_from_trust(world):
     res = inspect_cmd._learner(world.con, world.run)
     lines = res.lines
     assert "trial evidence (quality only; trials never change adapter trust):" in lines
-    row = next(line for line in lines if "trial episodes landed" in line)
-    assert row.startswith("  codex/gpt-6.1-sol@high") and "2/3 trial episodes landed" in row and "1 not the model's" in row and "failed on the route" not in row
+    row = next(line for line in lines if "trial dispatches landed" in line)
+    assert row.startswith("  codex/gpt-6.1-sol@high") and "2/3 trial dispatches landed" in row and "1 not the model's" in row and "failed on the route" not in row
     assert row.endswith("| trust valid-unverified")
+    assert not any("trial episodes" in line for line in lines)
     assert any(line.startswith("  unsupported codex/gpt-6.1-sol@high (this exact effort only; attempt A3)") for line in lines)
     assert not any("gpt-6.1-sol@medium" in line for line in lines if "unsupported" in line)
     assert res.data["trial_evidence"]["codex/gpt-6.1-sol@high"] == {
-        "episodes": 3, "landed": 2, "not_the_model": 1, "failed_on_route": 0, "trust": "valid-unverified"}
+        "dispatches": 3, "landed": 2, "not_the_model": 1, "failed_on_route": 0, "trust": "valid-unverified"}
     assert scoring.evaluate_trust_state(world.con, TRIPLE) == trust_before  # reading it changed nothing
 
 
@@ -394,3 +395,17 @@ def test_the_next_line_and_routes_line_name_a_trial_through_the_cli(env):
     con.execute("UPDATE route_trials SET status='accepted'")
     data = env.ojson("status")[1]["data"]
     assert "trial" not in data["next"] and "trial" not in data["routes"]["T1"]
+
+
+def test_a_later_retry_that_landed_is_not_credited_to_the_trial(world):
+    """The trial's launch failed before work; a plain retry on the same route landed the task."""
+    seed = Seed(world.con)
+    seed.run("R7")
+    seed.task("R7", "T1", accepted="V2")
+    seed.dispatch("R7", "D1", "T1", term="nonzero", exit_code=2)
+    seed.trial("A7", "R7", "T1", "D1", ending="launch-failed", reason_class="transient")
+    seed.dispatch("R7", "D2", "T1", day=2)  # same route, not a trial
+    seed.revision("R7", "V2", "D2", "T1")
+    res = inspect_cmd._learner(world.con, world.run)
+    assert res.data["trial_evidence"]["codex/gpt-6.1-sol@high"]["landed"] == 0
+    assert res.data["trial_evidence"]["codex/gpt-6.1-sol@high"]["not_the_model"] == 1

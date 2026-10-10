@@ -155,7 +155,7 @@ def test_an_accepted_trial_is_route_attributed_evidence(con, seed):
     assert o["trial"] == {"attempt_id": "A1", "state": "launched", "reason_class": None, "fallback_route": FALLBACK,
                           "probe_key": probe_key()}
     (episode,) = route_learning.episodes([o])
-    assert episode["trial"]["attempt_id"] == "A1" and episode["success"] and episode["learn_weight"] == 1.0
+    assert episode["success"] and episode["learn_weight"] == 1.0
     stats = evidence(con, [o])
     assert stats["successes"] > 0.9 and stats["failures"] == 0
 
@@ -172,7 +172,7 @@ def test_accepted_trials_clear_the_maturity_bar_through_the_existing_replay_rule
     for i in range(1, 13):
         seed.landed_trial(i)
     eps = [e for e in route_learning.episodes(route_learning.derive_outcomes(con)) if e["role"] == "executor"]
-    assert len(eps) == 12 and all(e["trial"] for e in eps)
+    assert len(eps) == 12
     (move,) = route_learning.eligibility_transitions(eps, {ROUTE: {"prior_p": 0.5}}, {})
     assert move["state"] == "learned-eligible" and move["replay"]["validated"] is True
     assert move["evidence"]["samples"] == 12 and move["evidence"]["runs"] == 12
@@ -379,7 +379,8 @@ def test_the_terminal_event_and_the_trial_row_change_together_or_not_at_all(con,
     con.execute("CREATE TRIGGER no_trial_update BEFORE UPDATE ON route_trials "
                 "BEGIN SELECT RAISE(ABORT, 'row locked'); END")
     snapshot, row = all_events(con), trial_row(con, "A1")
-    assert observe(con) == []
+    with pytest.raises(sqlite3.IntegrityError, match="row locked"):  # a failure that is not "already observed" surfaces
+        observe(con)
     assert all_events(con) == snapshot and trial_row(con, "A1") == row  # no event without the status change
     con.execute("DROP TRIGGER no_trial_update")
     assert [w["kind"] for w in observe(con)] == ["trial-accepted"]  # and the next observation still lands
@@ -453,3 +454,76 @@ def test_pre_change_databases_without_discovery_tables_still_derive_outcomes(tmp
     assert route_learning.derive_outcomes(con) == []
     assert route_learning.trial_attempts(con) == {} and route_learning.unsupported_routes(con) == {}
     assert route_learning.attempt_history(con) == [] and route_learning.live_trial(con, "D1") is None
+
+
+# ------------------------------------------------------------------ review fixes
+
+@pytest.mark.parametrize("last", ["trial-abandoned", "trial-launched"])
+def test_a_trial_with_a_recorded_reason_or_abandoned_before_work_is_not_the_models(con, seed, last):
+    """No launch-failed event was written, but the events carry the block (or the trial was abandoned)."""
+    seed.run("R1", phase="abandoned")
+    seed.task("R1", "T1", status="cancelled")
+    seed.dispatch("R1", "D1", "T1", term="nonzero", exit_code=2)
+    seed.event("probe-reserved", "A1", "R1", "T1", None, outcome="reserved", origin="preflight", freshness="none")
+    seed.event("probe-result", "A1", "R1", "T1", None, outcome="fail" if last == "trial-launched" else "pass",
+               reason_class="auth-quota-blocked" if last == "trial-launched" else None, origin="preflight")
+    seed.event("trial-reserved", "A1", "R1", "T1", "D1", outcome="reserved")
+    seed.event(last, "A1", "R1", "T1", "D1", outcome=last[len("trial-"):])
+    o = outcome(con, "D1")
+    assert o["attribution"] == "environment" and o["learn_weight"] == 0
+
+
+def test_a_trial_launched_with_nothing_recorded_against_it_is_read_as_any_dispatch_is(con, seed):
+    seed.run("R1")
+    seed.task("R1", "T1", accepted="VX")
+    seed.dispatch("R1", "D1", "T1", term="nonzero", exit_code=2)
+    seed.trial("A1", "R1", "T1", "D1")  # probe passed, launched, no revision, nothing else recorded
+    assert outcome(con, "D1")["attribution"] == "mixed"
+
+
+def test_a_later_pass_of_the_same_route_lifts_the_unsupported_mark(con, seed):
+    seed.event("probe-result", "P1", None, None, None, effort="high", outcome="fail",
+               reason_class="unsupported-model-effort", origin="manual")
+    seed.event("probe-result", "P2", None, None, None, effort="medium", outcome="fail",
+               reason_class="unsupported-model-effort", origin="manual")
+    assert set(route_learning.unsupported_routes(con)) == {"codex/gpt-6.1-sol@high", "codex/gpt-6.1-sol@medium"}
+    seed.event("probe-result", "P3", None, None, None, effort="high", outcome="pass", origin="manual")  # after an upgrade
+    assert set(route_learning.unsupported_routes(con)) == {"codex/gpt-6.1-sol@medium"}
+    seed.event("probe-result", "P4", None, None, None, effort="high", outcome="fail",
+               reason_class="unsupported-model-effort", origin="manual")  # and unsupported again, later
+    assert "codex/gpt-6.1-sol@high" in route_learning.unsupported_routes(con)
+
+
+def test_a_trial_without_a_dispatch_never_borrows_another_trials_row(con, seed):
+    seed.run("R1", phase="executing")
+    seed.task("R1", "T1", status="running")
+    seed.dispatch("R1", "D1", "T1")
+    seed.trial("A9", "R1", "T1", "D1")
+    con.execute("UPDATE route_trials SET dispatch_id=NULL")  # a reserved row with no dispatch yet
+    seed.event("trial-reserved", "A1", "R1", "T1", None, outcome="reserved")
+    assert route_learning.trial_attempts(con)["A1"]["trial_row"] is None
+    assert route_learning.trial_attempts(con)["A9"]["trial_row"]["id"] == "A9"
+
+
+def test_a_malformed_recorded_event_skips_that_trial_and_records_the_rest(con, seed):
+    seed.landed_trial(1)
+    seed.landed_trial(2)
+    for trigger in ("route_discovery_no_update",):
+        con.execute(f"DROP TRIGGER {trigger}")
+    con.execute("UPDATE route_discovery_events SET fingerprint_json='{not json' WHERE attempt_id='A1' AND kind='trial-launched'")
+    assert [w["attempt_id"] for w in observe(con)] == ["A2"]
+
+
+def test_attempt_history_keeps_this_runs_attempts_among_many_manual_probes(con, seed):
+    seed.landed_trial(1)
+    for i in range(30):
+        seed.event("probe-result", f"M{i}", None, None, None, outcome="pass", origin="manual")
+    history = route_learning.attempt_history(con, run_id="R1", include_unbound=True, limit=5)
+    assert len(history) == 5 and "A1" in [a["attempt_id"] for a in history]
+    # this run's attempt first in time, then the newest unbound ones that fill the rest, oldest first
+    assert [a["attempt_id"] for a in history] == ["A1", "M26", "M27", "M28", "M29"]
+
+
+def test_attempt_history_does_not_carry_probe_detail_text(con, seed):
+    seed.landed_trial(1)
+    assert all("detail" not in e for a in route_learning.attempt_history(con) for e in a["events"])
