@@ -19,12 +19,12 @@ from test_herdr_agent_launch import launch_in_herdr
 PRELUDE = """\
 import json, os
 from pathlib import Path
-from office import paths
-_ddir = paths.run_dir(os.environ["OFFICE_RUN_ID"]) / "dispatches" / os.environ["OFFICE_DISPATCH_ID"]
-_env = _ddir / "agent.env"
-_seen = {"exists": _env.is_file(), "text": _env.read_text() if _env.is_file() else None,
-         "mode": _env.stat().st_mode & 0o777 if _env.is_file() else None}
-Path(os.environ["FAKE_ENV_RECORD"]).write_text(json.dumps(_seen))
+if os.environ.get("OFFICE_ROLE") == "executor" and os.environ.get("OFFICE_DISPATCH_ID"):
+    from office import paths
+    _env = paths.run_dir(os.environ["OFFICE_RUN_ID"]) / "dispatches" / os.environ["OFFICE_DISPATCH_ID"] / "agent.env"
+    _seen = {"exists": _env.is_file(), "text": _env.read_text() if _env.is_file() else None,
+             "mode": _env.stat().st_mode & 0o777 if _env.is_file() else None}
+    Path(os.environ["FAKE_ENV_RECORD"]).write_text(json.dumps(_seen))
 """
 
 
@@ -40,6 +40,7 @@ def _recording_harnesses(env, monkeypatch):
     monkeypatch.setenv("FAKE_ENV_RECORD", str(record))
     for path in list(env.fakes):
         body = path.read_text().replace("import os, runpy\n", "import os, runpy\n" + PRELUDE, 1)
+        assert PRELUDE in body, "the fake harness wrapper changed shape"
         path.write_text(body)
         env.fakes[path] = body
     return record
@@ -77,7 +78,7 @@ def _wait_for(path, timeout=60):
     raise AssertionError(f"the fake harness never started: no {path}")
 
 
-def _check_env_text(text, env):
+def _check_env_text(text):
     lines = text.splitlines()
     assert lines == sorted(lines) and all(ln.startswith("export ") for ln in lines), lines
     for key in ("OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE_ROLE"):
@@ -97,7 +98,7 @@ def test_a_headless_executor_finds_agent_env_when_it_starts(world, monkeypatch, 
     assert seen["exists"], f"{launcher}: the agent started with no {ddir / 'agent.env'}"
     assert seen["text"] == expected
     assert seen["mode"] == 0o600
-    _check_env_text(seen["text"], env)
+    _check_env_text(seen["text"])
 
 
 def test_an_external_executor_finds_agent_env_before_anyone_starts_it(world, monkeypatch):
@@ -108,7 +109,7 @@ def test_an_external_executor_finds_agent_env_before_anyone_starts_it(world, mon
     assert code == 0, out
     ddir, expected = _expected(env, overrides)
     assert (ddir / "agent.env").read_text() == expected
-    _check_env_text(expected, env)
+    _check_env_text(expected)
 
 
 @pytest.mark.approved
@@ -118,4 +119,4 @@ def test_the_herdr_path_writes_the_same_file(env, monkeypatch):
     out = env.tmp / "expected"
     out.mkdir()
     assert (ddir / "agent.env").read_text() == dispatch.write_agent_env(run, d, out, worker=True).read_text()
-    _check_env_text((ddir / "agent.env").read_text(), env)
+    _check_env_text((ddir / "agent.env").read_text())
