@@ -55,7 +55,9 @@ Auto Office {ver}
   office benchmarks brief|submit <f> opted-in runs: one background refresh of missing benchmark scores
 
   office list                       runs in this repository (--all for every run)
-  office inspect [run|task|gate|evidence|events|route|learner|trust|convergence] [id]
+  office inspect [run|task|gate|evidence|events|route|learner|trust|convergence|economics] [id]
+  office economics ingest [--file F [--from-harness H] [--from-session S] [--role R]]
+                                    opt-in (economics.collect): record measured token/cache usage
   office decide <lane> escalate|continue|waive|stop --quote "<user's words>"
                                     the user's choice once a lane review spent its 3 RECHECK rounds
   office waive <lane> --reason "<why the open findings are acceptable>"
@@ -317,6 +319,13 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("benchmarks", parents=[common])
     s.add_argument("action", choices=["brief", "submit"])
     s.add_argument("file", nargs="?")
+    s = sp.add_parser("economics", parents=[common])
+    s.add_argument("action", choices=["ingest"])
+    s.add_argument("--file", help="a transcript or normalized usage JSONL to ingest instead of the run's sessions")
+    s.add_argument("--from-harness", dest="usage_harness", choices=["claude", "codex"],
+                   help="parse --file as this harness's transcript (default: normalized usage JSONL)")
+    s.add_argument("--from-session", dest="usage_session", help="session id for --file")
+    s.add_argument("--role", dest="usage_role", help="role for --file rows (root, executor, reviewer, planner)")
     s = sp.add_parser("inspect", parents=[common])
     s.add_argument("what", nargs="?")
     s.add_argument("ident", nargs="?")
@@ -820,6 +829,10 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         if not args.file:
             raise OfficeError("usage", "name the delta file", next_step=benchmarks.SUBMIT_FORM, exit_code=2)
         return benchmarks.submit(con, run, args.file)
+    if cmd == "economics":
+        from office import economics
+        return economics.ingest(con, run, file=args.file, harness=args.usage_harness,
+                                session=args.usage_session, role=args.usage_role)
     if cmd == "inspect":
         from office import inspect_cmd
         return inspect_cmd.inspect(con, run, args.what, args.ident)

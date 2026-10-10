@@ -116,6 +116,18 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
   or `myaccount/.env` passed to a sourced script). Fix it by listing the path under `deploy.env_files` in the config: Office copies each
   listed file into the deploy checkout with its mode preserved, never stages or commits it, and refuses an entry outside the repo.
 
+## Orchestrator economics (opt-in)
+
+Usage collection is off by default (`economics.collect: false`); while off nothing reads session logs or writes usage rows,
+and `office inspect economics` says collection is disabled. `office config economics.collect true` opts in, then
+`office economics ingest` (on demand, never from a hook) reads the token/cache usage each harness recorded in its own transcripts
+for this run's dispatches and the bound root session into runs.db `usage_events`. Root-session turns outside the run's binding
+window are stored as `outside` and excluded. Input, output, cache-read and cache-write tokens are separate; a field the harness did
+not report is unknown, never 0. Codex input includes its cached input, which is subtracted once. Transcript cost is `unknown`
+(no price table); `--file <jsonl>` imports normalized rows with `cost_kind` actual, estimated-nominal, quota or unknown.
+`office inspect economics` shows usage by role and phase, cache share, cold resumes (only a resumed dispatch whose first measured
+turn wrote cache and read none; a long gap alone is not evidence), and coverage. `office config economics.collect false` stops it.
+
 ## Historical material
 
 Everything under `references/OFFICE-SKILLS-V3-*.md`, `docs/v3-*.md` and the 3.0 spokes (`skills/auto-planning`,
