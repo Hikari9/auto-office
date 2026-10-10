@@ -35,12 +35,11 @@ LEARNER_VERSION = "route-learner-2-task"
 
 ADAPTIVE_ROLES = ("executor", "worker")
 
-# A trial that ended before any work is the invocation's or the environment's,
-# never the model's. Every probe reason class (`route_probe.REASON_CLASSES`)
-# lands here, and so does a class this table does not know.
+# A trial that ended before any work belongs to the invocation or the environment,
+# never to the model, whatever reason class its events record.
 TRIAL_LAUNCH_STATES = ("launch-failed", "fell-back")
 # Trial states that need no gate result: the trial already ended.
-_TRIAL_ENDED = {"accepted", "rejected", "launch-failed", "fell-back", "abandoned"}
+_TRIAL_ENDED = {"accepted", "rejected", *TRIAL_LAUNCH_STATES, "abandoned"}
 UNSUPPORTED_EFFORT = "unsupported-model-effort"
 
 # Learning authority per attribution class. A plan, environment, or reviewer
@@ -168,7 +167,7 @@ def trial_attempts(con: sqlite3.Connection, run_id: str | None = None) -> dict[s
         evs = a["events"]
         trial = [e for e in evs if e["kind"].startswith("trial-")]
         probes = [e for e in evs if e["kind"] in ("probe-result", "probe-cache-hit")]
-        last, first = trial[-1], trial[0]
+        first, last = trial[0], trial[-1]
         dispatch_id = next((e["dispatch_id"] for e in trial if e["dispatch_id"]), None)
         row = rows.get(dispatch_id) or rows.get(a["attempt_id"])
         failed = next((e for e in reversed(trial) if e["kind"] == "trial-launch-failed"), None)
@@ -176,7 +175,7 @@ def trial_attempts(con: sqlite3.Connection, run_id: str | None = None) -> dict[s
         reason_class = (failed or {}).get("reason_class") or (
             probe.get("reason_class") if probe and probe.get("outcome") == "fail" else None)
         a.update(
-            run_id=first["run_id"], task_id=first["task_id"], role=first["role"], dispatch_id=dispatch_id,
+            last=last, run_id=first["run_id"], task_id=first["task_id"], role=first["role"], dispatch_id=dispatch_id,
             route=first["candidate_route"], learner_route=fingerprint_route(first), probe_key=first["probe_key"],
             primary_route=first["primary_route"], fallback_route=first["fallback_route"] or (row or {}).get("fallback_route"),
             policy_digest=first["policy_digest"], state=last["kind"][len("trial-"):],
@@ -246,7 +245,7 @@ def record_trial_outcomes(con: sqlite3.Connection, outcomes: list[dict] | None =
         if not con.in_transaction:
             raise ValueError("record_trial_outcomes requires the caller's db.transaction")
         kind = "trial-accepted" if outcome["success"] else "trial-rejected"
-        last = trial["events"][-1]
+        last = trial["last"]
         con.execute("SAVEPOINT trial_terminal")
         try:
             event_id = route_policy.record_event(
