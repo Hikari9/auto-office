@@ -330,6 +330,8 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--model", help="smoke: the model (catalog id or harness slug) to launch")
     s.add_argument("--effort", help="smoke: the effort (default: the catalog row's, else medium)")
     s.add_argument("--timeout", type=int, help="smoke: seconds before the launch is stopped (default 300)")
+    s.add_argument("--allow-unsafe-flags", action="store_true",
+                   help="smoke: launch a form carrying a permission/trust flag when no safer form exists")
     s = sp.add_parser("model", parents=[common])
     s.add_argument("action", choices=["add", "list", "disable"])
     s.add_argument("ident", nargs="?", help="add: <harness>/<slug>; list: <harness>; disable: <harness>/<model>[@effort]")
@@ -680,12 +682,13 @@ def _run(args, unknown) -> int:
     if cmd == "harness":
         from office import harnesscmd
         if args.action == "scaffold":
-            return emit(harnesscmd.scaffold(args.ident, args.binary, force=args.force,
-                                            override_seed=args.override_seed), args)
+            return emit(harnesscmd._with_affected(harnesscmd.scaffold(args.ident, args.binary, force=args.force,
+                                            override_seed=args.override_seed)), args)
         if args.action == "validate":
             return emit(harnesscmd.validate(args.ident, file=args.file), args)
         if args.action == "smoke":
-            return emit(harnesscmd.smoke(args.ident, args.model, effort=args.effort, timeout=args.timeout), args)
+            return emit(harnesscmd.smoke(args.ident, args.model, effort=args.effort, timeout=args.timeout,
+                                         allow_unsafe_flags=args.allow_unsafe_flags), args)
         con = _con()
         try:
             return emit(harnesscmd.harness_list(con), args)
@@ -694,9 +697,9 @@ def _run(args, unknown) -> int:
     if cmd == "model":
         from office import harnesscmd
         if args.action == "add":
-            return emit(harnesscmd.model_add(args.ident, args.effort, model_id=args.model_id), args)
+            return emit(harnesscmd._with_affected(harnesscmd.model_add(args.ident, args.effort, model_id=args.model_id)), args)
         if args.action == "disable":
-            return emit(harnesscmd.model_disable(args.ident, reason=args.reason), args)
+            return emit(harnesscmd._with_affected(harnesscmd.model_disable(args.ident, reason=args.reason)), args)
         return emit(harnesscmd.model_list(args.ident or getattr(args, "harness", None)), args)
     if cmd == "queue":
         from office import queuecmd

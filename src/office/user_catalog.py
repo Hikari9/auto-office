@@ -53,15 +53,37 @@ def matches(entry: dict, row: dict) -> bool:
 def apply(rows: list[dict], overlay: dict | None = None) -> list[dict]:
     """Seed rows followed by the overlay's rows, with disabled rows marked
     `dispatchable: false`. With no overlay the seed rows come back unchanged."""
+    return merge(rows, overlay)[0]
+
+
+def _key(row: dict) -> tuple:
+    return (row.get("invocation_harness"), row.get("model_id"), row.get("effort"))
+
+
+def merge(rows: list[dict], overlay: dict | None = None) -> tuple[list[dict], list[str]]:
+    """(rows, warnings). An overlay row whose harness/model/effort is already a
+    row never adds a second one: `dispatchable: false` on it disables the
+    existing row, anything else is skipped with a warning."""
     overlay = load() if overlay is None else overlay
     if not overlay["models"] and not overlay["disabled"]:
-        return rows
-    out = []
-    for row in list(rows) + [dict(r) for r in overlay["models"]]:
-        if any(matches(d, row) for d in overlay["disabled"]):
-            row = {**row, "dispatchable": False}
-        out.append(row)
-    return out
+        return rows, []
+    out = list(rows)
+    index = {_key(r): i for i, r in enumerate(out)}
+    warnings = []
+    for raw_row in overlay["models"]:
+        key = _key(raw_row)
+        if key in index:
+            label = f"{key[0]}/{key[1]}@{key[2]}"
+            if raw_row.get("dispatchable") is False:
+                out[index[key]] = {**out[index[key]], "dispatchable": False}
+            else:
+                warnings.append(f"user catalog row {label} duplicates an existing row; skipped "
+                                "(only dispatchable: false may override one)")
+            continue
+        index[key] = len(out)
+        out.append(dict(raw_row))
+    out = [{**r, "dispatchable": False} if any(matches(d, r) for d in overlay["disabled"]) else r for r in out]
+    return out, warnings
 
 
 def raw() -> dict | None:

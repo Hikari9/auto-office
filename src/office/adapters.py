@@ -86,6 +86,18 @@ def load_all() -> dict[str, dict]:
     return {aid: entry[0] for aid, entry in load_sources().items()}
 
 
+def route_version(harness: str, adapter: dict) -> str:
+    """The harness version a route's identity and trust key on. A user adapter
+    that overrides a seed id is labelled `user-override-<hash>`: a non-numeric
+    label never inherits trust earned by the seed under the real major, so its
+    routes stay valid-unverified until a trust act names this label, and the
+    label shows the override in every route explanation."""
+    entry = load_sources().get(harness)
+    if entry and entry[1] == "user-override":
+        return "user-override-" + adapter_hash(entry[0]).split(":")[-1][:12]
+    return harness_version(adapter) or "unknown"
+
+
 def harness_ids(*, routed: bool = False) -> list[str]:
     """Adapters that can launch an Office role (they declare `office_profiles`),
     sorted. With `routed`, only those the catalog has a row for."""

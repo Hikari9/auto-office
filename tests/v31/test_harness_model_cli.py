@@ -287,6 +287,70 @@ def test_a_missing_harness_binary_warns_but_a_malformed_command_fails(unit):
     assert any("not resolvable" in p for p in harnesscmd.check(_with(preflight={"auth_check": ["other-tool"]}), rows=[]))
 
 
+def test_an_overridden_seed_never_inherits_the_seeds_trust(env):
+    proven = next(t for t, s in scoring.trust_baseline().items() if s == "proven" and t.startswith("codex@"))
+    rest = proven.split("/", 1)[1]
+    con = env.con()
+    try:
+        assert scoring.evaluate_trust_state(con, proven)[1] == "proven"
+        _write_adapter({**adapters.load_all()["codex"], "override_seed": True}, "codex")
+        label = adapters.route_version("codex", adapters.load_all()["codex"])
+        assert label.startswith("user-override-")
+        assert scoring.evaluate_trust_state(con, f"codex@{label}/{rest}")[1] == "valid-unverified"
+    finally:
+        con.close()
+    built, _ = candidates.build_candidates(env.con(), "executor", probe=False)
+    assert all(c["harness_version"].startswith("user-override-") for c in built if c["harness"] == "codex")
+
+
+def test_smoke_refuses_a_permission_flag_form_unless_allowed(env, tmp_path):
+    _kilo(env)
+    _write_adapter(_with(office_profiles__worker__argv=["--yolo", "--model", "{model}"],
+                         trust_justifications={"--yolo": "headless kilo cannot answer prompts"}))
+    code, out = env.office("harness", "smoke", "kilo", "--model", "acme/fast-1")
+    assert code == 1 and "--allow-unsafe-flags" in out
+    code, out = env.office("harness", "smoke", "kilo", "--model", "acme/fast-1", "--allow-unsafe-flags")
+    assert code == 0, out
+    assert json.loads(harnesscmd.smoke_log().read_text().splitlines()[-1])["unsafe_flags"] == ["--yolo"]
+
+
+def test_smoke_timeout_kills_a_grandchild_holding_the_pipes(unit):
+    import time
+    hang = unit / "bin" / "kilo"
+    hang.write_text(f"#!{sys.executable}\nimport subprocess, sys, time\n"
+                    "if sys.argv[1:2] == ['--version']: print('kilo 2.4.1'); sys.exit(0)\n"
+                    "if sys.argv[1:2] == ['models']: print('acme/fast-1'); sys.exit(0)\n"
+                    "subprocess.Popen(['sleep', '60'])\ntime.sleep(60)\n")
+    _write_adapter(GOOD)
+    started = time.time()
+    res = harnesscmd.smoke("kilo", "acme/fast-1", timeout=1)
+    assert res.exit_code == 1 and res.data["result"] == "timed_out"
+    assert time.time() - started < 30
+
+
+def test_overlay_rows_never_duplicate_an_existing_row(unit):
+    seed = [r for r in candidates.catalog_rows() if not r.get("alias_family")][0]
+    key = {k: seed[k] for k in ("invocation_harness", "model_id", "effort")}
+    user_catalog.save({"models": [{**key, "invocation_model_id": "evil"}], "disabled": []})
+    same = [r for r in candidates.catalog_rows() if all(r.get(k) == v for k, v in key.items())]
+    assert len(same) == 1 and same[0].get("invocation_model_id") != "evil"
+    assert any("duplicates" in line for line in harnesscmd.model_list().lines)
+    user_catalog.save({"models": [{**key, "dispatchable": False}], "disabled": []})
+    same = [r for r in candidates.catalog_rows() if all(r.get(k) == v for k, v in key.items())]
+    assert len(same) == 1 and same[0]["dispatchable"] is False
+
+
+def test_status_warns_and_model_commands_name_runs_whose_routing_inputs_drifted(env):
+    from conftest import approved_run
+    run_id = approved_run(env)
+    code, out = env.office("status")
+    assert "routing catalog" not in out, out
+    code, out = env.office("model", "disable", "codex/luna")
+    assert code == 0 and "active runs whose pinned routing inputs now differ" in out, out
+    code, out = env.office("status")
+    assert "routing catalog changed since run" in out, out
+
+
 def test_seed_justifications_live_outside_the_seed_adapters(unit):
     assert "trust_justifications" not in adapters.load_all()["codex"]
     assert "--yolo" in harnesscmd.packaged_justifications("codex")

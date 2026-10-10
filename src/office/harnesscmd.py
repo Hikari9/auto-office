@@ -61,6 +61,34 @@ def _usage(message: str, next_step: str | None = None) -> OfficeError:
     return OfficeError("usage", message, next_step=next_step, exit_code=2)
 
 
+def affected_runs_line() -> str | None:
+    """Which active runs now differ from their pinned catalog/adapter hashes."""
+    from office import config, db, state
+    try:
+        con = db.connect()
+    except Exception:  # noqa: BLE001 - a missing store means no runs to warn about
+        return None
+    try:
+        now = config.snapshot_hashes()
+        rows = con.execute("SELECT id FROM runs WHERE phase NOT IN ('closed','abandoned')").fetchall()
+        ids = [r["id"][:8] for r in rows if config.routing_inputs_drift(state.get_run(con, r["id"]), now)]
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        con.close()
+    if not ids:
+        return None
+    return (f"active runs whose pinned routing inputs now differ: {', '.join(ids)} "
+            "(their later dispatches route from the current files; office status shows the drift)")
+
+
+def _with_affected(res: Result) -> Result:
+    line = affected_runs_line()
+    if line:
+        res.lines.append(line)
+    return res
+
+
 def _catalog_rows() -> list[dict]:
     from office import candidates
     return candidates.catalog_rows()
@@ -496,7 +524,48 @@ def _throwaway_repo(root: Path) -> Path:
     return repo
 
 
-def smoke(ident: str | None, model: str | None, *, effort: str | None = None, timeout: int | None = None) -> Result:
+def _unsafe_flags(adapter: dict, prof: dict) -> list[str]:
+    """Permission/trust flags in a profile's headless argv: the unsafe-flag set
+    plus any flag the adapter itself lists under trust_justifications."""
+    listed = adapter.get("trust_justifications")
+    listed = set(listed) if isinstance(listed, dict) else set()
+    found: list[str] = []
+    for token in prof.get("argv") or []:
+        token = str(token)
+        for key, matcher in UNSAFE_TRUST_FLAGS.items():
+            if matcher.search(token) and key not in found:
+                found.append(key)
+        if token in listed and token not in found:
+            found.append(token)
+    return found
+
+
+def _run_capped(argv: list[str], *, cwd: Path, stdin_text: str | None, cap: int) -> tuple[int | None, str, str, bool]:
+    """Run in its own session so a timeout kills the whole process group: a
+    grandchild holding the pipes open cannot hang the smoke."""
+    import signal
+    proc = subprocess.Popen(argv, cwd=cwd, env=_smoke_env(), text=True, start_new_session=True,
+                            stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        out, err = proc.communicate(input=stdin_text, timeout=cap)
+        return proc.returncode, out or "", err or "", False
+    except subprocess.TimeoutExpired:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(proc.pid, sig)
+            except OSError:
+                pass
+            try:
+                out, err = proc.communicate(timeout=5)
+                return None, out or "", err or "", True
+            except subprocess.TimeoutExpired:
+                continue
+        return None, "", "", True
+
+
+def smoke(ident: str | None, model: str | None, *, effort: str | None = None, timeout: int | None = None,
+          allow_unsafe_flags: bool = False) -> Result:
     adapter, origin, _ = _resolve_adapter(ident)
     aid = adapter.get("id") or ident
     if not model:
@@ -512,7 +581,16 @@ def smoke(ident: str | None, model: str | None, *, effort: str | None = None, ti
     slug = (rows[0].get("invocation_model_id") or rows[0].get("model_id")) if rows else model
     effort = effort or (rows[0].get("effort") if rows else None) or "medium"
     profiles = adapter.get("office_profiles") or {}
-    kind = next(k for k in adapters.PROFILE_KINDS if k in profiles)
+    kinds = [k for k in adapters.PROFILE_KINDS if isinstance(profiles.get(k), dict)]
+    # Prefer a form that carries no permission/trust flag; one that does runs only when asked.
+    kind = next((k for k in kinds if not _unsafe_flags(adapter, profiles[k])), None)
+    if kind is None:
+        flags = sorted({f for k in kinds for f in _unsafe_flags(adapter, profiles[k])})
+        if not allow_unsafe_flags:
+            raise OfficeError("unsafe-flags", f"every {aid} launch form carries a permission/trust flag "
+                              f"({', '.join(flags)}); smoke will not run one unasked", exit_code=1,
+                              next_step=f"office harness smoke {aid} --model {model} --allow-unsafe-flags")
+        kind = kinds[0]
     prof = profiles[kind]
     started = time.time()
     rec = {"at": now_iso(), "harness": aid, "origin": origin, "version": adapters.harness_version(adapter),
@@ -542,16 +620,12 @@ def smoke(ident: str | None, model: str | None, *, effort: str | None = None, ti
             stdin_text = SMOKE_PROMPT
         rec["argv"] = evidence_argv
         cap = timeout or SMOKE_TIMEOUT_S
+        rec["unsafe_flags"] = _unsafe_flags(adapter, prof)
         try:
-            # No pty and no answers: a login, trust or permission prompt is never approved; it times out or fails.
-            proc = subprocess.run(argv, cwd=repo, env=_smoke_env(), input=stdin_text if stdin_text is not None else None,
-                                  stdin=None if stdin_text is not None else subprocess.DEVNULL,
-                                  capture_output=True, text=True, timeout=cap)
-            code, out, err, timed_out = proc.returncode, proc.stdout or "", proc.stderr or "", False
-        except subprocess.TimeoutExpired as e:
-            code, timed_out = None, True
-            out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-            err = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+            # No pty and no one answering: a login, trust or permission prompt the
+            # harness shows is never approved, so the launch fails or times out.
+            # A form's own permission flags are a separate matter, gated above.
+            code, out, err, timed_out = _run_capped(argv, cwd=repo, stdin_text=stdin_text, cap=cap)
         except OSError as e:
             code, out, err, timed_out = None, "", str(e), False
         reply = output.read_text(encoding="utf-8", errors="replace") if output and output.is_file() else ""
@@ -601,7 +675,7 @@ def harness_list(con) -> Result:
         auth, auth_detail = onboarding.credentials(aid) if installed else ("-", "")
         if auth == "unknown" and (a.get("preflight") or {}).get("auth_check"):
             auth_detail = "checked by preflight auth_check at each launch"
-        trust = _trust_summary(con, aid, version, mine)
+        trust = _trust_summary(con, aid, adapters.route_version(aid, a) if origin == "user-override" else version, mine)
         last = (_smoke_records(aid) or [None])[-1]
         smoke_txt = f"{last['result']} {last['at'][:10]}" if last else "never"
         lines.append(f"{aid:<8} {origin:<13} {'installed ' + (version or 'unknown') if installed else 'not installed':<22}"
@@ -692,6 +766,8 @@ def model_list(harness: str | None = None) -> Result:
                      f"score {score if score is not None else '-'}  {origin}{'' if enabled else '  disabled'}")
         data.append({"harness": h, "model_id": r.get("model_id"), "effort": r.get("effort"),
                      "slug": r.get("invocation_model_id"), "score": score, "origin": origin, "dispatchable": enabled})
+    seed = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8")) or {}
+    lines += [f"warning: {w}" for w in user_catalog.merge(list(seed.get("models") or []))[1]]
     return Result(lines=lines or [f"no catalog rows{' for ' + harness if harness else ''}"],
                   next="office model add <harness>/<slug> --effort <e>, or office model disable <harness>/<model>[@effort]",
                   data={"rows": data})

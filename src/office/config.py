@@ -212,6 +212,24 @@ def config_drift(run: dict) -> str | None:
             f"not applied to this run ({_describe(diffs)})")
 
 
+def routing_inputs_drift(run: dict, hashes: dict | None = None) -> str | None:
+    """A warning when the catalog (seed plus user overlay) or the adapter set
+    (seed plus user adapters) no longer hashes to what `run` pinned at start.
+    Warn-only, like config_drift: candidate building reads the live files."""
+    if not run.get("catalog_hash") and not run.get("adapter_hash"):
+        return None
+    try:
+        now = hashes or snapshot_hashes()
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+    changed = [name for name, key in (("catalog", "catalog_hash"), ("adapters", "adapter_hash"))
+               if run.get(key) and run.get(key) != now.get(key)]
+    if not changed:
+        return None
+    return (f"routing {' and '.join(changed)} changed since run {str(run.get('id', ''))[:8]} started "
+            "(office model/harness edits or an upgrade); later dispatches route from the current files")
+
+
 def snapshot_hashes() -> dict:
     root = paths.resources_root()
     from office import adapters as adapter_mod, user_catalog

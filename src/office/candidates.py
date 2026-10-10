@@ -319,7 +319,7 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
         if not adapters.installed(adapter):
             skipped.append({"candidate": label, "reason": f"{harness} not installed"})
             continue
-        version = adapters.harness_version(adapter) or "unknown"
+        version = adapters.route_version(harness, adapter)
         cand = {
             "harness": harness,
             "harness_version": version,
@@ -414,7 +414,7 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
     row = rows[0] if len(rows) == 1 or (rows and effort) else None
     return {
         "harness": harness,
-        "harness_version": adapters.harness_version(adapter) or "unknown",
+        "harness_version": adapters.route_version(harness, adapter),
         "model_id": (row or {}).get("model_id") or model,
         "invocation_model_id": (row or {}).get("invocation_model_id") or model,
         "invocation_source": "user-override",
