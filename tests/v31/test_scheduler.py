@@ -86,29 +86,42 @@ def test_paused_work_goes_to_the_end_and_is_held():
 
 # --- admission properties ---------------------------------------------------
 
-_PRIORITIES = st.sampled_from(["urgent", "high", "normal", "low", None])
+_PRIORITIES = st.sampled_from(["urgent", "high", "normal", "low", None, "unlisted"])
+# Most items are plain, so a slate often holds several that are free to run: the capacity rules need that to show.
 _items = st.lists(
     st.fixed_dictionaries({
         "priority": _PRIORITIES, "hours": st.integers(min_value=0, max_value=200), "blocks": st.integers(min_value=0, max_value=3),
-        "protected": st.booleans(), "paused": st.booleans(), "demoted_seq": st.one_of(st.none(), st.integers(min_value=1, max_value=5)),
-        "auto_mode": st.sampled_from(["on", "paused", "off"]), "provider": st.sampled_from([None, "codex", "claude"]),
-    }), max_size=7).map(lambda rows: [item(f"i{n}", **{**row}) for n, row in enumerate(rows)])
-_sample = st.one_of(st.just({"status": "unavailable", "value": None}),
+        "protected": st.sampled_from([False] * 6 + [True]), "paused": st.sampled_from([False] * 5 + [True]),
+        "demoted_seq": st.sampled_from([None] * 4 + [1, 2, 3]),
+        "auto_mode": st.sampled_from(["on"] * 4 + ["paused", "off"]), "provider": st.sampled_from([None, "codex", "claude"]),
+    }), max_size=7).map(lambda rows: [item(f"i{n}", **row) for n, row in enumerate(rows)])
+# A sample only counts when it was taken (`ok`) and carries a value: an unavailable probe that still reports a number is no pressure.
+_sample = st.one_of(st.just({"status": "unavailable", "value": None}), st.just({"status": "unavailable", "value": 0.99}),
+                    st.just({"status": "ok", "value": None}), st.just(None), st.just({"status": "ok", "value": 0.9}),
                     st.builds(lambda v: {"status": "ok", "value": v}, st.floats(min_value=0, max_value=1)))
+_calm = st.builds(lambda v: {"status": "ok", "value": v}, st.floats(min_value=0, max_value=0.89))
 _hosts = st.fixed_dictionaries({"cpu": _sample, "ram": _sample})
 _quotas = st.dictionaries(st.sampled_from(["codex", "claude"]),
-                          st.builds(lambda r: {"remaining_percent": r}, st.integers(min_value=0, max_value=100)))
+                          st.builds(lambda r: {"remaining_percent": r}, st.one_of(st.just(5), st.integers(min_value=0, max_value=100))))
 _caps = st.one_of(st.none(), st.integers(min_value=0, max_value=4))
 _active = st.lists(st.sampled_from(["running", "idle", "paused"]), max_size=4).map(
     lambda states: [{"id": f"a{n}", "state": state} for n, state in enumerate(states)])
 
 
-def _conf(cap):
-    return {"scheduler": {**CONFIG["scheduler"], "max_active_runs": cap}, "quota": {"reserve_percent": 5}}
+def _conf(cap, reserve=5):
+    return {"scheduler": {**CONFIG["scheduler"], "max_active_runs": cap}, "quota": {"reserve_percent": reserve}}
 
 
 def _admitted(res):
     return [e for e in res["entries"] if e["decision"] == "admit"]
+
+
+def _exhausted(entry, quota, reserve=5):
+    return (quota.get(entry.get("provider")) or {}).get("remaining_percent", 100) <= reserve
+
+
+def _pressured(host):
+    return any(h and h["status"] == "ok" and h["value"] is not None and h["value"] >= 0.9 for h in host.values())
 
 
 @given(items=_items, active=_active, host=_hosts, quota=_quotas, cap=_caps)
@@ -119,11 +132,17 @@ def test_every_item_gets_one_decision_and_a_reason_and_none_is_lost(items, activ
 
 
 @given(items=_items, active=_active, host=_hosts, quota=_quotas, cap=st.integers(min_value=0, max_value=4))
-def test_admission_never_exceeds_max_active_runs_except_for_the_protected_orchestrator(items, active, host, quota, cap):
+def test_admission_fills_max_active_runs_exactly_and_never_past_it(items, active, host, quota, cap):
+    """Of the ordinary work free to run, as much is admitted as the cap leaves room for: no more (safety), no less (liveness).
+    Only running agents hold capacity, and the protected orchestrator is outside the cap."""
     res = plan(items, active=active, host=host, quota=quota, config=_conf(cap))
     running = sum(1 for a in active if a["state"] == "running")
+    pressure = _pressured(host)
+    free = [e for e in res["entries"] if not e.get("paused") and not e.get("protected") and e.get("auto_mode", "on") == "on"
+            and not pressure and not _exhausted(e, quota)]
     ordinary = [e for e in _admitted(res) if not e.get("protected")]
-    assert len(ordinary) <= max(0, cap - running)
+    assert ordinary == [e for e in ordinary if e in free]
+    assert len(ordinary) == min(len(free), max(0, cap - running))
 
 
 @given(items=_items, active=_active, host=_hosts, quota=_quotas, cap=_caps)
@@ -135,15 +154,15 @@ def test_a_paused_item_is_never_admitted_and_a_protected_one_always_is(items, ac
             assert e["decision"] == "admit"
 
 
-@given(items=_items, active=_active, host=_hosts, quota=_quotas, cap=_caps)
-def test_measured_pressure_auto_mode_and_exhausted_quota_each_hold_ordinary_work(items, active, host, quota, cap):
-    res = plan(items, active=active, host=host, quota=quota, config=_conf(cap))
-    pressure = any(h["status"] == "ok" and h["value"] >= 0.9 for h in host.values())
+@given(items=_items, active=_active, host=_hosts, quota=_quotas, cap=_caps, reserve=st.sampled_from([5, 5, 10, 20]))
+def test_measured_pressure_auto_mode_and_exhausted_quota_each_hold_ordinary_work(items, active, host, quota, cap, reserve):
+    """The reserve is the configured one: a provider at or below it is held."""
+    res = plan(items, active=active, host=host, quota=quota, config=_conf(cap, reserve))
+    pressure = _pressured(host)
     for e in res["entries"]:
         if e.get("paused") or e.get("protected"):
             continue
-        exhausted = (quota.get(e.get("provider")) or {}).get("remaining_percent", 100) <= 5
-        if pressure or exhausted or e.get("auto_mode", "on") != "on":
+        if pressure or _exhausted(e, quota, reserve) or e.get("auto_mode", "on") != "on":
             assert e["decision"] == "hold", e
 
 
@@ -157,6 +176,46 @@ def test_unmeasured_host_and_unknown_quota_never_gate_ordinary_work(items):
         assert e["quota"] == "unknown"
 
 
+@pytest.mark.parametrize("host, quota, held_because", [
+    ({"cpu": {"status": "ok", "value": 0.95}, "ram": OK}, {}, "cpu pressure"),
+    ({"cpu": OK, "ram": {"status": "ok", "value": 0.95}}, {}, "ram pressure"),
+    ({"cpu": {"status": "ok", "value": 0.9}, "ram": OK}, {}, "cpu pressure"),                   # at the limit gates
+    (HOST_OK, {"codex": {"remaining_percent": 5}}, "provider quota at or below the 5% reserve"),  # at the reserve gates
+])
+def test_a_gated_item_names_what_gates_it(host, quota, held_because):
+    e = by_id(plan([item("a", provider="codex")], host=host, quota=quota))["a"]
+    assert e["decision"] == "hold" and held_because in e["reason"]
+
+
+def test_just_inside_the_limits_admits():
+    res = plan([item("a", provider="codex")], host={"cpu": {"status": "ok", "value": 0.89}, "ram": OK},
+               quota={"codex": {"remaining_percent": 6}})
+    assert by_id(res)["a"]["decision"] == "admit"
+
+
+def test_a_configured_reserve_replaces_the_default():
+    for remaining, decision in ((20, "hold"), (21, "admit")):
+        e = by_id(plan([item("a", provider="codex")], quota={"codex": {"remaining_percent": remaining}}, config=_conf(None, 20)))["a"]
+        assert e["decision"] == decision, remaining
+
+
+def test_a_quota_reserve_left_unconfigured_is_five_percent():
+    for remaining, decision in ((5, "hold"), (6, "admit")):
+        e = by_id(plan([item("a", provider="codex")], quota={"codex": {"remaining_percent": remaining}}, config={}))["a"]
+        assert e["decision"] == decision, remaining
+
+
+def test_a_paused_auto_mode_holds_and_says_so():
+    for mode in ("paused", "off"):
+        e = by_id(plan([item("a", auto_mode=mode)]))["a"]
+        assert e["decision"] == "hold" and e["reason"] == f"auto mode {mode}"
+
+
+def test_an_item_with_no_or_an_unlisted_priority_scores_as_normal():
+    for priority in (None, "unlisted"):
+        assert by_id(plan([item("a", priority=priority)]))["a"]["score"]["components"]["priority"] == 20.0
+
+
 @given(items=_items)
 def test_ready_order_puts_paused_last_then_demoted_and_otherwise_the_highest_score_first(items):
     entries = plan(items)["entries"]
@@ -164,6 +223,18 @@ def test_ready_order_puts_paused_last_then_demoted_and_otherwise_the_highest_sco
     assert klass == sorted(klass)
     plain = [e["score"]["total"] for e in entries if not e.get("paused") and e.get("demoted_seq") is None]
     assert plain == sorted(plain, reverse=True)
+
+
+@given(items=_items)
+def test_within_a_class_the_demoted_run_in_demotion_order_and_equal_scores_run_oldest_first(items):
+    """Same score, same class: the one enqueued first goes first. Demoted work keeps the order it was demoted in."""
+    flat = {**CONFIG, "scheduler": {**CONFIG["scheduler"], "aging_per_hour": 0.0}}
+    entries = plan([{**i, "priority": "normal", "blocks": 0, "protected": False} for i in items], config=flat)["entries"]
+    demoted = [e["demoted_seq"] for e in entries if not e.get("paused") and e.get("demoted_seq") is not None]
+    assert demoted == sorted(demoted)
+    for klass in (lambda e: e.get("paused"), lambda e: not e.get("paused") and e.get("demoted_seq") is None):
+        same = [e["enqueued_at"] for e in entries if klass(e) and e.get("demoted_seq") is None]
+        assert same == sorted(same)
 
 
 @given(priority=_PRIORITIES, hours=st.integers(min_value=0, max_value=100), older_by=st.integers(min_value=1, max_value=100))

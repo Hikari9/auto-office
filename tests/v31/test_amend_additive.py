@@ -4,6 +4,7 @@ a changed acceptance still reaches the task it changes."""
 from __future__ import annotations
 
 import pytest
+from hypothesis import given, strategies as st
 
 from conftest import PLAN_ONE, PLAN_TWO, approved_run, task_row
 
@@ -67,24 +68,49 @@ def test_an_added_task_alongside_a_changed_acceptance_still_delivers_to_the_chan
     assert [r["task_id"] for r in _deliveries(env)] == ["T1"]
 
 
-# M7: AUTHORITY_TERMS must not fire on a term that is part of a hyphen/underscore compound identifier.
+# Texts AUTHORITY_TERMS must not fire on: a term that is one part of a hyphen/underscore compound identifier (M7),
+# and a send addressed to the orchestrator (a no-review amendment telling a worker to report back was refused as an
+# authority change).
 @pytest.mark.parametrize("text", [
     "drive herdr with send-text", "drive herdr with send-keys", "call send_keys on the pane", "add release-notes to the docs",
     "write the release_notes file", "a pre-release check", "the email-validator helper", "see deploy_log.txt",
+    "re-run root test and build, then send READY-FOR-LIVE again", "send the report to the orchestrator",
+    "send it back to the orchestrator for review", "send READY_FOR_REVIEW when done",
+    "send READY_FOR_REVIEW to the orchestrator",
 ])
-def test_authority_terms_ignore_compound_identifiers(text):
+def test_authority_terms_ignore_what_is_not_an_external_action(text):
     from office.amend import AUTHORITY_TERMS
     assert AUTHORITY_TERMS.search(text) is None, text
 
 
+# Texts it must still fire on. Review #446 F1: an exempt object sent to anyone but the orchestrator counts.
 @pytest.mark.parametrize("text", [
     "send email to the team", "deploy", "vercel deploy --prod", "vercel --prod", "force-push the branch",
     "force push the branch", "merge into main", "merge to main", "publish the package", "then send-keys and deploy",
     "release.", "(send)", "rotate key",
+    "send SMS to members", "send the invitations", "send a newsletter", "send it to all members",
+    "send the summary to every parent", "send NEWSLETTER_2026 to members", "send it back",
 ])
-def test_authority_terms_still_match_standalone_actions(text):
+def test_authority_terms_still_match_external_actions(text):
     from office.amend import AUTHORITY_TERMS
     assert AUTHORITY_TERMS.search(text) is not None, text
+
+
+_ACTIONS = ["deploy", "publish", "release", "email", "delete", "charge", "payment", "credentials"]
+_names = st.text(alphabet="abcdefghijklmnop", min_size=1, max_size=8)
+
+
+@given(action=st.sampled_from(_ACTIONS), name=_names, joiner=st.sampled_from(["-", "_"]), front=st.booleans())
+def test_an_action_word_inside_a_compound_identifier_names_a_thing_not_an_action(action, name, joiner, front):
+    from office.amend import AUTHORITY_TERMS
+    token = f"{action}{joiner}{name}" if front else f"{name}{joiner}{action}"
+    assert AUTHORITY_TERMS.search(f"use the {token} helper") is None, token
+
+
+@given(action=st.sampled_from(_ACTIONS), before=_names, after=_names)
+def test_the_same_action_word_standing_alone_is_an_authority_term(action, before, after):
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(f"{before} {action} {after}") is not None
 
 
 def test_a_delta_naming_a_compound_identifier_is_an_ordinary_amendment(env):
@@ -97,23 +123,3 @@ def test_a_delta_naming_a_standalone_action_is_refused_as_contract_level(env):
     _running(env)
     code, out = env.office("amend", "plan", "--", "then send email to the team", env=EXTERNAL)
     assert code == 4 and "contract-level-change" in out, out
-
-
-@pytest.mark.parametrize("text", [
-    "re-run root test and build, then send READY-FOR-LIVE again", "send the report to the orchestrator",
-    "send it back to the orchestrator for review", "send READY_FOR_REVIEW when done",
-    "send READY_FOR_REVIEW to the orchestrator",
-])
-def test_authority_terms_ignore_a_send_to_the_orchestrator(text):
-    # A no-review amendment telling a worker to report back was refused as an authority change.
-    from office.amend import AUTHORITY_TERMS
-    assert AUTHORITY_TERMS.search(text) is None, text
-
-
-@pytest.mark.parametrize("text", ["send SMS to members", "send the invitations", "send a newsletter",
-                                  # review #446 F1: an exempt object sent to anyone but the orchestrator counts
-                                  "send it to all members", "send the summary to every parent",
-                                  "send NEWSLETTER_2026 to members", "send it back"])
-def test_authority_terms_still_match_external_sends(text):
-    from office.amend import AUTHORITY_TERMS
-    assert AUTHORITY_TERMS.search(text) is not None, text

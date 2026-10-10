@@ -2,7 +2,7 @@
 import json
 
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import example, given, strategies as st
 
 from office import db
 from office.web import server, synthetic
@@ -59,24 +59,36 @@ POLICY = {"scheduler": {"orchestrator_route": "claude", "orchestrator_fallbacks"
 
 
 _HARNESSES = ["claude", "codex", "agy", "hermes"]
-_remaining = st.one_of(st.none(), st.integers(min_value=0, max_value=100))
+_remaining = st.one_of(st.none(), st.just(5), st.integers(min_value=0, max_value=100))
 
 
-@given(remaining=st.dictionaries(st.sampled_from(_HARNESSES), _remaining),
-       fallbacks=st.lists(st.sampled_from(_HARNESSES), max_size=4), installed=st.sets(st.sampled_from(_HARNESSES)))
-def test_orchestrator_route_falls_back_only_on_known_quota(remaining, fallbacks, installed):
+@example(primary="claude", remaining={"claude": 3, "codex": 60}, fallbacks=["codex"], installed={"codex"}, reserve=5)
+@example(primary="claude", remaining={"claude": 12, "codex": 15}, fallbacks=["codex"], installed={"codex"}, reserve=20)
+@given(primary=st.one_of(st.none(), st.sampled_from(_HARNESSES)),
+       remaining=st.dictionaries(st.sampled_from(_HARNESSES), _remaining),
+       fallbacks=st.lists(st.sampled_from(_HARNESSES), max_size=4), installed=st.sets(st.sampled_from(_HARNESSES)),
+       reserve=st.sampled_from([5, 20]))
+def test_orchestrator_route_falls_back_only_on_known_quota(primary, remaining, fallbacks, installed, reserve):
     """Unknown quota never moves the orchestrator. Exhausted primary quota moves it to the first allowed,
     installed fallback whose quota is known to be above the reserve, or else the launch waits."""
     quota = {h: {"remaining_percent": r} for h, r in remaining.items()}
-    conf = {**POLICY, "scheduler": {**POLICY["scheduler"], "orchestrator_fallbacks": fallbacks}}
-    route = orchestrator_route(conf, quota, available=installed.__contains__)
+    sched = {"orchestrator_fallbacks": fallbacks, **({} if primary is None else {"orchestrator_route": primary})}
+    route = orchestrator_route({"scheduler": sched, "quota": {"reserve_percent": reserve}}, quota, available=installed.__contains__)
+    primary = primary or "claude"  # the configured default
     known = lambda h: remaining.get(h) is not None  # noqa: E731
-    if not known("claude") or remaining["claude"] > 5:
-        assert (route["harness"], route["fallback_from"]) == ("claude", None)
+    if not known(primary) or remaining[primary] > reserve:
+        assert (route["harness"], route["fallback_from"]) == (primary, None)
+        assert route["quota"] == ("unknown" if not known(primary) else "ok")
         return
-    assert route["fallback_from"] == "claude"
-    usable = [h for h in fallbacks if h != "claude" and known(h) and remaining[h] > 5 and h in installed]
+    assert route["fallback_from"] == primary
+    usable = [h for h in fallbacks if h != primary and known(h) and remaining[h] > reserve and h in installed]
     assert route["harness"] == (usable[0] if usable else None)
+    assert route["quota"] == ("ok" if usable else "exhausted")
+
+
+def test_an_unconfigured_reserve_is_five_percent():
+    assert orchestrator_route({}, {"claude": {"remaining_percent": 5}})["harness"] is None
+    assert orchestrator_route({}, {"claude": {"remaining_percent": 6}})["harness"] == "claude"
 
 
 def test_default_config_allows_no_fallback():

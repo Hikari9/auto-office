@@ -373,7 +373,7 @@ def test_a_low_fix_needs_neither_test_nor_mutation_but_a_given_mutation_must_be_
     ("src/calc.test.ts", True), ("web/calc.spec.js", True), ("__tests__/calc.js", True), ("spec/calc_spec.rb", True),
     ("tests/helpers/util.py", True), ("test.py", True), ("src/calc-test.js", True), ("src/test-calc.js", True),
     ("lib/calc_spec.rb", True), ("web/calc-spec.ts", True), ("Calc.Tests/CalcTests.cs", True), ("Calc.Tests/Helpers.cs", True), ("calc-tests/util.go", True), ("src/CalcTest.java", True),
-    ("cypress/e2e/calc.cy.ts", True), ("e2e/calc.ts", True), ("src/calc.rs::tests::adds", True), ("src/calc.tests.ts", True),
+    ("cypress/e2e/calc.cy.ts", True), ("e2e/calc.ts", True), ("src/calc.rs::tests::adds", True), ("src/calc.rs::test::adds", True), ("tests\\calc.py", True), ("src\\calc.py", False), ("src/calc.tests.ts", True),
     ("README.md", False), ("calc.py", False), ("docs/test_plan.md", False),
     ("src/calc.rs", False), ("src/calc.rs::adds", False), ("src/Contest.java", False),
     ("src/spec.py", False),
@@ -584,13 +584,27 @@ MALFORMED = [
 
 
 @pytest.mark.parametrize("bad", MALFORMED)
-def test_a_malformed_line_is_a_fix_with_its_line_number_and_never_ready(tmp_path, bad):
+def test_a_malformed_line_is_an_error_naming_its_line_and_never_ready(tmp_path, bad):
     from office import preflight
     head = "a" * 40
     text = ledger_text(head) + bad + "\n"
     n = text.splitlines().index(bad) + 1
+    _, errors = preflight.parse_ledger(text)
+    assert [e for e in errors if e.startswith(f"line {n}:")], (bad, errors)  # the parser rejects it, not a later check
     stop, fix = preflight.check_ledger(text, head, [], ["calc.py"], tmp_path)
     assert stop == [] and any(f.startswith(f"ledger line {n}:") for f in fix), (bad, fix)
+
+
+def test_a_summary_may_contain_a_pipe():
+    from office import preflight
+    led, errors = preflight.parse_ledger(ledger_text("c" * 40, findings=["FINDING high security calc.py:3 | a | b | c | open"]))
+    assert errors == [] and led["findings"][0]["summary"] == "a | b | c" and led["findings"][0]["kind"] == "open"
+
+
+def test_a_byte_order_mark_before_the_first_line_is_not_part_of_it():
+    from office import preflight
+    led, errors = preflight.parse_ledger("\ufeff" + ledger_text("b" * 40))
+    assert errors == [] and led["commit"] == "b" * 40
 
 
 def test_a_malformed_line_reaches_the_verdict_the_same_way(repo):
@@ -600,6 +614,8 @@ def test_a_malformed_line_reaches_the_verdict_the_same_way(repo):
 
 
 @pytest.mark.parametrize("line, why", [
+    ("FINDING low security calc.py:9", "FINDING needs"),
+    ("FINDING low security calc.py:9 | nit", "FINDING needs"),
     ("FINDING low calc.py:9 | nit | fixed", "lens must be one of"),
     ("FINDING low crypto calc.py:9 | nit | fixed", "lens must be one of"),
     ("FINDING low Security calc.py:9 | nit | fixed", "lens must be one of"),

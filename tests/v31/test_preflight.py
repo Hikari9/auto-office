@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import example, given, strategies as st
 
 from conftest import GOOD_ADD, approved_run, task_row
 from test_self_review_ledger import write_ledger
@@ -379,6 +379,12 @@ def test_a_low_gear_with_a_contained_clean_risk_is_inline(gear, blast, size):
     assert briefs.self_review_tier(gear, _risk(blast, size=size)) == "inline"
 
 
+@example(gear="direct", blast="production", size=None, irreversible=False, high=False)  # each signal alone is enough
+@example(gear="direct", blast="production-data", size=None, irreversible=False, high=False)
+@example(gear="direct", blast="local", size="L", irreversible=False, high=False)
+@example(gear="light", blast="repo", size="XL", irreversible=False, high=False)
+@example(gear="direct", blast="local", size=None, irreversible=True, high=False)
+@example(gear="direct", blast="local", size=None, irreversible=False, high=True)
 @given(gear=_GEARS, blast=_BLASTS, size=_SIZES, irreversible=st.booleans(), high=st.booleans())
 def test_any_high_risk_signal_is_deep_review_in_every_gear(gear, blast, size, irreversible, high):
     from office import briefs

@@ -129,3 +129,92 @@ def test_money_saver_picks_a_cheapest_route_and_quota_saver_a_lightest_one(cands
     assert by_id[cheapest]["cost"]["money_estimate"] == min(c["cost"]["money_estimate"] for c in eligible)
     lightest = routing.route(_reviewer(cands, {"cost_policy": "quota_saver"}))["selected"]
     assert by_id[lightest]["cost"]["quota_burn"] == min(c["cost"]["quota_burn"] for c in eligible)
+
+
+# ------------------------------------------------------------------ why a candidate was turned away
+
+def _first_failed_gate(c, capability):
+    if c["hard_excluded"]:
+        return 1
+    if capability not in c["capabilities"]:
+        return 3
+    if c["effort"] not in ("medium", "high"):
+        return 4
+    if c["supported_playbooks"] and "Change" not in c["supported_playbooks"]:
+        return 5
+    return None
+
+
+@given(cands=_slates, role=st.sampled_from(["worker", "plan_reviewer"]))
+def test_a_turned_away_candidate_is_named_with_the_first_gate_it_failed(cands, role):
+    capability = "builder" if role == "worker" else "review"
+    decision = routing.route(_worker(cands) if role == "worker" else _reviewer(cands))
+    stage_of = {r["candidate"]: r["stage"] for r in decision["rejected"]}
+    for c in cands:
+        failed = _first_failed_gate(c, capability)
+        if failed is not None:
+            assert stage_of[routing.candidate_id(c)] == failed, (routing.candidate_id(c), stage_of)
+
+
+# ------------------------------------------------------------------ quota, advisory anchor, money band
+
+@st.composite
+def _qualifying_with_quota(draw):
+    """Candidates that pass every gate, so only quota, anchor and cost decide between them."""
+    out = []
+    for c in draw(_slates):
+        if draw(st.booleans()):
+            quota = {"status": "ok", "tightest_remaining_percent": draw(st.integers(min_value=0, max_value=100)),
+                     "projected_burn_percent": draw(st.integers(min_value=0, max_value=30))}
+        else:
+            quota = {"status": "unknown", "tightest_remaining_percent": None}
+        out.append({**c, "quota": quota, "hard_excluded": False, "capabilities": ["builder", "review"], "effort": "high",
+                    "supported_playbooks": None})
+    return out
+
+
+def _quota_class(c, reserve=5):
+    q = c["quota"]
+    if q["status"] != "ok":
+        return "unknown"
+    return "safe" if q["tightest_remaining_percent"] - q["projected_burn_percent"] >= reserve else "unsafe"
+
+
+@given(cands=_qualifying_with_quota(), role=st.sampled_from(["worker", "plan_reviewer"]))
+def test_the_quota_reserve_is_never_spent_while_a_safe_or_unknown_route_exists(cands, role):
+    decision = routing.route(_worker(cands) if role == "worker" else _reviewer(cands))
+    ids = {k: [routing.candidate_id(c) for c in cands if _quota_class(c) == k] for k in ("safe", "unknown", "unsafe")}
+    if not ids["safe"] and not ids["unknown"]:
+        assert decision["status"] == "protected_quota_would_be_consumed" and decision["selected"] is None
+        return
+    chosen = {e["route"] for e in decision["slate"]} if role == "worker" else {decision["selected"]}
+    assert decision["status"] == "selected" and chosen <= set(ids["safe"] + ids["unknown"])
+    assert {r["candidate"] for r in decision["rejected"] if r["stage"] == 6} == set(ids["unsafe"])
+
+
+_SEEDS = st.lists(st.fixed_dictionaries({"model_id": st.sampled_from(["m1", "m2", "m3", "m4"])}), min_size=1, max_size=3)
+
+
+@given(cands=_slates, seed=_SEEDS)
+def test_a_seed_the_policy_will_not_undercut_keeps_the_choice_inside_it(cands, seed):
+    eligible = _eligible(cands)
+    assume(eligible)
+    wanted = {e["model_id"] for e in seed}
+    inside = {routing.candidate_id(c) for c in eligible if c["model_id"] in wanted}
+    decision = routing.route(_reviewer(cands, preferred_seed=seed, allow_advisory_undercut=False))
+    if inside:
+        assert decision["selected"] in inside
+        outside = {routing.candidate_id(c) for c in eligible} - inside
+        assert {r["candidate"] for r in decision["rejected"] if r["stage"] == 7} == outside
+
+
+@given(cands=_slates)
+def test_balanced_cost_keeps_only_routes_within_a_fifth_of_the_cheapest(cands):
+    eligible = _eligible(cands)
+    assume(eligible)
+    decision = routing.route(_reviewer(cands, {"cost_policy": "balanced"}))
+    cheapest = min(c["cost"]["money_estimate"] for c in eligible)
+    by_id = {routing.candidate_id(c): c for c in eligible}
+    assert by_id[decision["selected"]]["cost"]["money_estimate"] * 5 <= cheapest * 6
+    turned_away = {r["candidate"] for r in decision["rejected"] if r["stage"] == 8}
+    assert all(i in turned_away for i, c in by_id.items() if c["cost"]["money_estimate"] * 5 > cheapest * 6)

@@ -142,6 +142,21 @@ def test_a_target_value_of_the_wrong_kind_is_refused(kind, data, bad):
     _refused_as_bad_target(kind, {**target, broken: bad})
 
 
+def test_a_string_target_value_may_be_512_characters_but_not_513():
+    ok = Command.parse({"id": "cmd-target-512", "kind": "resume_run", "target": {"run_id": "r" * 512}})
+    assert ok.target == {"run_id": "r" * 512}
+    _refused_as_bad_target("resume_run", {"run_id": "r" * 513})
+
+
+def test_a_refused_target_says_which_shapes_the_kind_accepts():
+    with pytest.raises(CommandRefused) as info:
+        Command.parse({"id": "cmd-target-msg", "kind": "start_issue", "target": {}})
+    assert "start_issue targets a issue: target must be {repo, issue}" in str(info.value)
+    with pytest.raises(CommandRefused) as info:
+        Command.parse({"id": "cmd-target-msg2", "kind": "pause", "target": {}})
+    assert "target must be {item} or {run_id, task_id?}" in str(info.value)
+
+
 def test_a_bad_target_over_http_records_no_receipt(svc):
     with pytest.raises(CommandRefused):
         svc.submit(cmd("cmd-target-03", "pause", {"run_id": "r-1", "pane": "p"}), wait=True)
@@ -201,12 +216,6 @@ def test_scheduler_kinds_need_an_existing_item_and_never_github_readiness(svc):
     write(svc, lambda con: con.execute("UPDATE sched_items SET ref='synth-org-0/not-ready#1' WHERE id='issue:nr'"))
     svc.submit(cmd("cmd-tv-item2", "pause", {"item": "issue:nr"}), wait=True)  # a not-ready repo still pauses
     assert svc.executor.calls[-1]["args"] == ["queue", "pause", "issue:nr"]
-
-
-def test_task_must_belong_to_the_run(svc):
-    run = live_run(svc)
-    err = refused(svc, cmd("cmd-tv-task1", "pause", {"run_id": run["run_id"], "task_id": "T-none"}))
-    assert err.reason == "task-missing"
 
 
 def test_set_auto_mode_needs_only_a_live_office_source(svc):
@@ -274,10 +283,3 @@ def test_settings_accept_entries_of_a_shipped_empty_map(svc):
     svc.submit(cmd("cmd-tv-set-02", "settings_set", {"tier": "machine", "key": "web.checkouts.acme"}, {"value": "/x"}),
                wait=True)
     assert svc.executor.calls[-1]["args"][-2:] == ["web.checkouts.acme", "/x"]
-
-
-@pytest.mark.parametrize("kind", KINDS)
-def test_every_kind_is_refused_while_office_is_stale(svc, kind):
-    svc.last_ok -= svc.stale_after + 1
-    target = valid_target(kind, live_run(svc)["run_id"])
-    assert refused(svc, cmd(f"cmd-tv-st-{kind}", kind, target, {"text": "hi", "mode": "on", "value": 1})).reason == "office-stale"

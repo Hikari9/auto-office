@@ -8,7 +8,7 @@ retained 3.0 helper (`scripts/office_scoring.py`); both run the same properties.
 from __future__ import annotations
 
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import example, given, strategies as st
 
 import office_scoring
 from office import routing, scoring
@@ -179,7 +179,8 @@ def test_candidate_identity_keys_on_harness_major_not_the_full_version(harness, 
 
 # --------------------------------------------------------------- preferred seed
 
-_CHOICES = dict(model_id=["m1", "m2", "m3"], effort=["low", "high"], harness=["claude", "codex"])
+# Few values per field, so entries often agree with the candidate on one field and differ on another.
+_CHOICES = dict(model_id=["m1", "m2"], effort=["low", "high"], harness=["claude", "codex"])
 _candidate = st.fixed_dictionaries({k: st.sampled_from(v) for k, v in _CHOICES.items()})
 _seed_entry = st.fixed_dictionaries(
     {"model_id": st.sampled_from(_CHOICES["model_id"])},
@@ -192,6 +193,12 @@ def _matches(entry, candidate):
     return all(candidate[k] == v for k, v in entry.items() if v)
 
 
+_C = {"model_id": "m1", "effort": "low", "harness": "claude"}
+
+
+@example(candidate=_C, seed=[{"model_id": "m1", "effort": "high"}, {"model_id": "m1"}])    # a narrower entry that misses
+@example(candidate=_C, seed=[{"model_id": "m1", "harness": "codex"}, {"model_id": "m1"}])  # does not end the search
+@example(candidate=_C, seed=[{"model_id": "m2"}, {"model_id": "m1", "effort": "", "harness": None}])
 @given(candidate=_candidate, seed=st.one_of(st.none(), st.lists(_seed_entry, max_size=6)))
 def test_preferred_rank_is_the_position_of_the_first_matching_entry(candidate, seed):
     expected = next((i for i, e in enumerate(seed or []) if _matches(e, candidate)), None)

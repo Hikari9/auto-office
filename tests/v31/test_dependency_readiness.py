@@ -83,7 +83,9 @@ def test_only_an_accepted_dependency_makes_its_dependent_ready(env, status):
         assert "office dispatch T2" not in _next(con, run), _next(con, run)
 
 
-STATUSES = ["planned", "launching", "running", "submitted", "changes_required", "blocked", "paused", "accepted", "cancelled"]
+# Accepted and planned are over-represented: a ready task needs both a planned task and accepted dependencies.
+STATUSES = ["planned", "planned", "accepted", "accepted", "accepted", "launching", "running", "submitted", "changes_required",
+            "blocked", "paused", "cancelled"]
 
 
 @st.composite
@@ -114,6 +116,19 @@ def test_a_task_is_ready_exactly_when_it_is_planned_and_every_dependency_is_acce
         if t["status"] == "planned" and deps_accepted:
             assert t["id"] in ready, t
         assert (t["id"] in ready) != (t["id"] in waiting) if t["status"] == "planned" else t["id"] not in ready | waiting, t
+
+
+def _task(id_, status, *depends):
+    return {"id": id_, "status": status, "depends": list(depends), "role": "executor"}
+
+
+def test_a_waiting_task_says_which_dependency_holds_it_and_in_what_state():
+    from office import guide, state
+    tasks = [_task("T1", "submitted"), _task("T2", "accepted"), _task("T3", "planned", "T1", "T2", "T99")]
+    with mock.patch.object(state, "tasks", lambda con, run_id: tasks):
+        assert guide.held_by_dependencies(None, {"id": "r"}) == [
+            "T3 waits for T1, T99 to be accepted (T1 submitted; T99 unknown)"]
+    assert guide.unaccepted_dependencies(tasks[2], {t["id"]: t for t in tasks}) == ["T1 submitted", "T99 unknown"]
 
 
 @given(tasks=_stacks(), data=st.data())
