@@ -174,11 +174,11 @@ A cached result of the image-capability probe for one exact harness/model/effort
 
 **Probe**:
 A bounded invocation/conformance check for one exact harness, full harness version, adapter hash, launch profile, invocation model ID and effort. A pass proves only that invocation and required behavior; it expires and carries no learned quality or adapter trust grant. Distinct from the quota probe and vision proof.
-_Avoid_: verified model, trusted route, quality test
+_Avoid_: verified (for a probe pass), proven, trusted route, quality test, health check
 
 **Trial**:
 A bounded automatic real-task assignment to a previously unverified executor/worker route after exact probe preflight and all current policy/safety checks, with a recorded known-working fallback. Keeps normal tests, independent review and verification; grants no planner, reviewer or final gate authority.
-_Avoid_: trust promotion, unrestricted exploration, reviewer trial
+_Avoid_: trust promotion, verification, unrestricted exploration, reviewer trial
 
 **trial_eligible**:
 Policy-derived permission for a bounded builder trial (routing eligibility source `trial`), separate from `learned-eligible`, `proven` and recorded user overrides. It neither mints trust nor clears quarantine.
@@ -186,11 +186,11 @@ _Avoid_: proven, user-approved route, learned eligibility
 
 **User-denied**:
 A route prohibited by explicit user routing policy, including automatic selection, probing and convenience manual selection. Re-enabling requires an explicit user policy change.
-_Avoid_: unsupported, unverified, overkill
+_Avoid_: unsupported, unverified, overkill, blacklist (for a cost or age rule)
 
 **Overkill**:
 An explicit user preference that excludes a route from matching automatic role/task-size selection only. Manual selection and automatic selection outside its scope remain subject to the normal factual gates. Never inferred from price, age or missing evidence.
-_Avoid_: denial, cost blacklist, system preference
+_Avoid_: denial, cost blacklist, cost cutoff, system preference
 
 **Model family floor**:
 The minimum model version per family for default routing (`model_family_floors`, Gemini 3.7 by default). An explicit `--route` is exempt.
