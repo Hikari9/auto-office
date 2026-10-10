@@ -148,14 +148,14 @@ Through the bounded wrapper, one suite at a time:
 ```
 pytest -n 2 tests/test_db_connect.py tests/test_route_policy.py tests/test_catalog_archival.py tests/test_route_probe.py \
   tests/test_adapters.py tests/test_alias_resolution.py tests/test_derived_routing.py tests/test_scoring.py \
-  tests/test_trust_conformance.py                                                   184 passed
+  tests/test_trust_conformance.py                                                   186 passed
 pytest -n 2 tests/v31/test_route_probe_live_shape.py tests/v31/test_adaptive_routing.py \
   tests/v31/test_intelligence_floor.py tests/v31/test_model_floor.py tests/v31/test_dispatch_override.py \
-  tests/v31/test_declared_route_426.py tests/v31/test_route_discovery_routing.py     129 passed
+  tests/v31/test_declared_route_426.py tests/v31/test_route_discovery_routing.py     131 passed
 pytest -n 2 --all tests/v31/test_declared_route_426.py                              12 passed
-pytest -n 2 --all tests/v31/test_route_discovery_routing.py tests/v31/test_route_probe_live_shape.py \
-  tests/v31/test_adaptive_routing.py tests/v31/test_dispatch_override.py           151 passed
-pytest -n 2 (default unit tier, whole repo)                                         1629 passed, 1 skipped
+pytest -n 2 --all tests/v31/test_route_discovery_routing.py tests/v31/test_route_probe_live_shape.py  104 passed
+pytest -n 2 (default unit tier, whole repo)                                         1633 passed, 1 skipped
+  (the skip is tests/v31/test_self_review_ledger.py:438, "case-insensitive filesystem", outside T2 scope)
 validate-adapter over adapters/seed/*.yaml                                           5 of 5 exit 0
 ```
 
