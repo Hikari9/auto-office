@@ -1541,3 +1541,16 @@ def test_a_job_spawned_from_inside_a_worktree_starts_elsewhere_and_without_the_d
 def test_the_supervisor_launch_env_does_not_tag_the_supervisor_with_a_dispatch(cold, monkeypatch):
     import inspect
     assert "env.pop(_WORKER_TAG, None)" in inspect.getsource(dispatch.launch)
+
+
+def test_the_scan_follows_the_descendants_of_everything_it_already_named(cold, trees):
+    # A leader named by its group (or its tag) still has children: they are the worker's too.
+    d, wt, ddir = in_flight(cold)
+    tree = Tree(d["id"], cold.tmp / "child.log")
+    trees.append(tree)
+    start = dispatch._c_start(tree.leader.pid)
+    by_group = dispatch._WorkerTree("Dnone", {}, tree.leader.pid).scan()
+    by_root = dispatch._WorkerTree("Dnone", {tree.leader.pid: start}).scan()
+    by_tag = dispatch._WorkerTree(d["id"], {}).scan()
+    assert {tree.leader.pid, tree.child} <= by_group and {tree.leader.pid, tree.child} <= by_root
+    assert by_tag is not None  # the tag only shows where the OS shows environments; the group and root paths above do not need it

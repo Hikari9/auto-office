@@ -3678,9 +3678,12 @@ class _WorkerTree:
             mine.add(pid)
             pid = parent[pid]
         queue = [p for p, st in {**self.seen, **self.roots}.items() if started.get(p) == st and p not in mine]
+        queue.extend(found)  # whatever the tag or the group named has descendants too
+        walked: set[int] = set()
         while queue:
             pid = queue.pop()
-            if pid not in found:
+            if pid not in walked:
+                walked.add(pid)
                 found.add(pid)
                 queue.extend(children.get(pid, []))
         found = {p for p in found if p in started and p > 1 and p not in mine}
