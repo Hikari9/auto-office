@@ -502,10 +502,14 @@ def _git(cwd, *args: str, env: dict | None = None) -> subprocess.CompletedProces
 
 
 def _accepted_commit(con, task: dict) -> str:
-    return con.execute("SELECT commit_sha FROM revisions WHERE id=?", (task["accepted_revision_id"],)).fetchone()[0]
+    row = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (task["accepted_revision_id"],)).fetchone()
+    if row is None:
+        raise Refused("no-accepted-revision", f"{task['id']} has no accepted revision to land", next_step="office status")
+    return row[0]
 
 
-NOT_MERGEABLE = re.compile(r"not mergeable|cannot be cleanly created", re.I)
+# A branch-policy refusal also says "not mergeable", but no conflict is behind it: rewriting the branch cannot help.
+NOT_MERGEABLE = re.compile(r"cannot be cleanly created|not mergeable(?!: the base branch policy)", re.I)
 
 
 def _merge_all(con, run: dict, res: Result) -> str:
@@ -533,8 +537,8 @@ def _merge_all(con, run: dict, res: Result) -> str:
             continue
         up = prs.parent(con, run, t)
         if up is not None and pr.get("base") != base:
-            if method != "merge":
-                _restack(con, run, t, up, base)
+            if method != "merge" and (pr.get("restacked") or {}).get("base") != base:
+                pr = _restack(con, run, t, up, base)
             if _gh(run, "pr", "edit", str(pr["number"]), "--base", base).returncode != 0:
                 raise Refused("retarget-failed", f"could not retarget #{pr['number']} to {base}")
             # Recorded at once: a retry after a failed merge must not restack the restacked branch again.
@@ -547,10 +551,15 @@ def _merge_all(con, run: dict, res: Result) -> str:
             _gh(run, "pr", "update-branch", str(pr["number"]))
             _wait_checks(run, pr["number"])
             proc = _gh(run, "pr", "merge", str(pr["number"]), prs.MERGE_FLAGS[method])
-        if proc.returncode != 0 and NOT_MERGEABLE.search(proc.stderr + proc.stdout):
-            pr = _recover_conflicting(con, run, t, pr, base, res)
+        if proc.returncode != 0 and method != "rebase" and NOT_MERGEABLE.search(proc.stderr + proc.stdout):
+            # GitHub's rebase merge replays the branch's own commits, so a merge commit pushed to it would change nothing.
+            pr = _recover_conflicting(con, run, t, pr, base, res,
+                                      f"merged so far: {', '.join(merged) or 'none'}; {base} was {before[:12]}")
+            new_head = pr["recovered"]["commit"]
+            _await_head(run, pr["number"], new_head)
             _wait_checks(run, pr["number"])
-            proc = _gh(run, "pr", "merge", str(pr["number"]), prs.MERGE_FLAGS[method])
+            # Pinned: a push to the branch after the proof must not be merged on its strength.
+            proc = _gh(run, "pr", "merge", str(pr["number"]), prs.MERGE_FLAGS[method], "--match-head-commit", new_head)
         if proc.returncode != 0:
             raise Refused("merge-failed", f"#{pr['number']} ({t['id']}) did not merge: "
                           f"{(proc.stderr or proc.stdout).strip()[:200]}", preserved=f"merged so far: "
@@ -565,9 +574,12 @@ def _merge_all(con, run: dict, res: Result) -> str:
     return before
 
 
-def _restack(con, run: dict, task: dict, up: dict, base: str) -> None:
+def _restack(con, run: dict, task: dict, up: dict, base: str) -> dict:
     """Squash/rebase merges rewrite the parent, so rebase the child's own
-    commits onto the new base and force-push with lease."""
+    commits onto the new base and force-push with lease. Returns the task's PR
+    record, which now names the pushed head and the base it was restacked onto:
+    a retry must not rebase the rebased branch again, and a recovery must
+    recognise the head this push left on the remote."""
     d = state.get_dispatch(con, task["current_dispatch_id"])
     wt = Path(d["worktree"])
     old_parent = _accepted_commit(con, up)
@@ -580,6 +592,10 @@ def _restack(con, run: dict, task: dict, up: dict, base: str) -> None:
     ok, err = prs.push(run, d, force=True, expected=_accepted_commit(con, task))
     if not ok:
         raise Refused("restack-push-failed", f"force-push of {d['branch']} failed: {err[:160]}")
+    pr = {**(task.get("pr") or {}), "restacked": {"commit": paths.git(wt, "rev-parse", "HEAD"), "base": base}}
+    with db.transaction(con):
+        state.update_task(con, run["id"], task["id"], pr=pr)
+    return pr
 
 
 def _merge_tree(repo: Path, ours: str, theirs: str) -> tuple[str, list[str] | None]:
@@ -590,11 +606,11 @@ def _merge_tree(repo: Path, ours: str, theirs: str) -> tuple[str, list[str] | No
         return lines[0], None
     if proc.returncode == 1 and lines:
         return lines[0], lines[1:lines.index("")] if "" in lines else lines[1:]
-    raise Refused("recovery-failed", f"git merge-tree {ours[:12]} {theirs[:12]} failed: "
-                  f"{(proc.stderr or proc.stdout).strip()[:160]}", next_step="office land again once git is fixed")
+    raise Refused("recovery-failed", f"git merge-tree {ours[:12]} {theirs[:12]} failed (it needs git >= 2.38): "
+                  f"{(proc.stderr or proc.stdout).strip()[:160]}", next_step=COMPOSE_BY_HAND.format(base="the default branch"))
 
 
-def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: Result) -> dict:
+def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: Result, merged_so_far: str) -> dict:
     """GitHub says the PR cannot be merged, though the reviewed work may still
     compose cleanly (a squash or rebase of the parent leaves the child's
     ancestry conflicting). Prove it before touching the branch: the remote head
@@ -605,17 +621,26 @@ def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: R
     repo, tid, number = Path(run["repo_root"]), task["id"], pr["number"]
     branch = pr.get("branch") or state.get_dispatch(con, task["current_dispatch_id"])["branch"]
     by_hand = COMPOSE_BY_HAND.format(base=base)
-    untouched = f"{tid} #{number}, its branch and {base}; nothing was pushed"
+    untouched = f"recovery pushed nothing; {merged_so_far}"
     ns = f"refs/office/land/{short(run['id'])}"
-    if _git(repo, "fetch", "-q", "origin", f"+refs/heads/{base}:{ns}/base",
+    base_ref = f"{ns}/_base"  # a task id is never "_base"
+    if _git(repo, "fetch", "-q", "origin", f"+refs/heads/{base}:{base_ref}",
             f"+refs/heads/{branch}:{ns}/{tid}").returncode != 0:
         raise Refused("fetch-failed", f"could not fetch origin/{base} and {branch}", preserved=untouched,
                       next_step="office land again")
-    default, head = paths.git(repo, "rev-parse", f"{ns}/base"), paths.git(repo, "rev-parse", f"{ns}/{tid}")
+    default, head = paths.git(repo, "rev-parse", base_ref), paths.git(repo, "rev-parse", f"{ns}/{tid}")
     accepted = _accepted_commit(con, task)
-    if head not in (accepted, (pr.get("recovered") or {}).get("commit")):
-        raise Refused("branch-moved", f"{branch} on origin is {head[:12]}, not the reviewed {accepted[:12]}",
-                      preserved=untouched, next_step=f"find out who pushed to {branch}; then office land again, or " + by_hand)
+    ours = {accepted} | {(pr.get(k) or {}).get("commit") for k in ("restacked", "recovering", "recovered")}
+    if head not in ours:
+        raise Refused("branch-moved", f"{branch} on origin is {head[:12]}, not a head Office reviewed or pushed "
+                      f"({accepted[:12]})", preserved=untouched,
+                      next_step=f"find out who pushed to {branch}; then office land again, or " + by_hand)
+    pushed = {(pr.get(k) or {}).get("commit") for k in ("recovering", "recovered")}
+    if head in pushed and _git(repo, "merge-base", "--is-ancestor", default, head).returncode == 0:
+        # A second recovery would only stack another empty merge on the first.
+        raise Refused("not-mergeable", f"#{number} ({tid}) already contains {base} {default[:12]} from an earlier "
+                      "recovery, yet GitHub reports it unmergeable", preserved=untouched,
+                      next_step="wait for GitHub to recompute the PR, then office land again; if it stays, " + by_hand)
     open_ids = [u["id"] for u in integration._topo(integration.accepted_set(con, run) or [])
                 if u["id"] != tid and prs.has_pr(u)
                 and not (state.get_task(con, run["id"], u["id"]).get("pr") or {}).get("merged")]
@@ -623,7 +648,7 @@ def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: R
     genv = dict(os.environ, **paths.commit_identity_env(repo))
 
     def commit_tree(tree: str, parents: tuple[str, str], message: str) -> str:
-        proc = _git(repo, "commit-tree", tree, "-p", parents[0], "-p", parents[1], "-m", message, env=genv)
+        proc = _git(repo, "-c", "commit.gpgsign=false", "commit-tree", tree, "-p", parents[0], "-p", parents[1], "-m", message, env=genv)
         if proc.returncode != 0:
             raise Refused("recovery-failed", f"git commit-tree failed: {proc.stderr.strip()[:160]}", preserved=untouched)
         return proc.stdout.strip()
@@ -636,23 +661,45 @@ def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: R
                           preserved=untouched, next_step=by_hand)
         cur = commit_tree(tree, (cur, commit), f"office land: fold {uid} onto {base}")  # scratch: never pushed
         trees.append(tree)
-    reviewed = _tree(repo, integration.final_commit(con, run))
+    integrated = integration.final_commit(con, run)
+    if not integrated:
+        raise Refused("recovery-failed", "there is no accepted integration to compare the merge against",
+                      preserved=untouched, next_step="office status")
+    reviewed = _tree(repo, integrated)
     if trees[-1] != reviewed:
         raise Refused("recovery-tree-mismatch", f"merging the open PRs onto {base} {default[:12]} gives tree {trees[-1][:12]}, "
                       f"not the reviewed integration tree {reviewed[:12]}", preserved=untouched, next_step=by_hand)
     new = commit_tree(trees[0], (head, default), f"Merge {base} into {branch}\n\nOffice land recovery: GitHub reported "
                       f"#{number} not mergeable.\n\n{paths.office_trailer(run['id'])}")
-    ok, err = prs.push(run, {"worktree": str(repo), "branch": branch}, commit=new, force=True, expected=head)
+    with db.transaction(con):  # before the push: a land killed after it still knows the head is Office's
+        state.update_task(con, run["id"], tid, pr={**pr, "recovering": {"from": head, "commit": new}})
+    wt = Path((state.get_dispatch(con, task["current_dispatch_id"]) or {}).get("worktree") or repo)
+    ok, err = prs.push(run, {"worktree": str(wt if wt.is_dir() else repo), "branch": branch}, commit=new, force=True,
+                       expected=head)
     if not ok:
         raise Refused("recovery-push-failed", f"push of {branch} failed: {err[:160]}", preserved=untouched,
                       next_step="office land again, or " + by_hand)
-    pr = {**pr, "recovered": {"from": head, "commit": new, "tree": trees[0], "at": now_iso()}}
+    pr = {**{k: v for k, v in pr.items() if k != "recovering"},
+          "recovered": {"from": head, "commit": new, "tree": trees[0], "at": now_iso()}}
     with db.transaction(con):
         state.update_task(con, run["id"], tid, pr=pr)
         state.emit(con, run, "pr.recovered", f"{tid} #{number} recovered: {base} {default[:12]} merged into {branch} "
                    f"({head[:12]} -> {new[:12]})", task_id=tid, payload={**pr["recovered"], "base": default})
     res.add(f"{tid} #{number} was not mergeable; merged {base} {default[:12]} into {branch} ({new[:12]}), tree matches the reviewed integration")
     return pr
+
+
+def _await_head(run: dict, number: int, sha: str, tries: int = 30) -> None:
+    """Wait for GitHub to show the pushed head: checks read before that belong to the old head."""
+    import time
+    for attempt in range(tries):
+        proc = _gh(run, "pr", "view", str(number), "--json", "headRefOid")
+        if proc.returncode == 0 and (json.loads(proc.stdout or "{}").get("headRefOid") == sha):
+            return
+        if attempt + 1 < tries:
+            time.sleep(2.0)
+    raise Refused("head-not-synced", f"GitHub still shows another head on #{number}, not the recovered {sha[:12]}",
+                  next_step="office land again once the PR shows the new head")
 
 
 def _wait_checks(run: dict, number: int) -> None:

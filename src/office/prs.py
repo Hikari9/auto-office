@@ -219,7 +219,10 @@ def push(run: dict, dispatch: dict, *, commit: str = "HEAD", force: bool = False
     args = ["git", "-C", dispatch["worktree"], "push", "origin", f"{commit}:refs/heads/{branch}"]
     if force:
         args.insert(4, f"--force-with-lease=refs/heads/{branch}:{expected}")
-    proc = subprocess.run(args, capture_output=True, text=True, timeout=120)
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return False, "push timed out after 120s"
     return proc.returncode == 0, (proc.stderr or proc.stdout).strip()
 
 

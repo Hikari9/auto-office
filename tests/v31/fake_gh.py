@@ -89,6 +89,10 @@ def main(argv: list[str]) -> int:
         elif argv[1] == "merge":
             if s.get("fail_merge"):
                 code, out = 1, "merge blocked"
+            elif (s.get("merge_error") or {}).get(str(pr["number"])):
+                code, out = 1, s["merge_error"][str(pr["number"])]  # `merge_error: {"<n>": "<gh message>"}`
+            elif "--match-head-commit" in argv and opt(argv, "--match-head-commit") != remote_head(pr):
+                code, out = 1, "Head branch was modified. Review and try the merge again."
             elif conflicting(s, pr):
                 code, out = 1, f"X Pull request #{pr['number']} is not mergeable: the merge commit cannot be cleanly created."
             else:
@@ -97,7 +101,7 @@ def main(argv: list[str]) -> int:
                 pr["state"], pr["merged_with"] = "merged", method
         elif argv[1] == "view":
             out = json.dumps({"number": pr["number"], "body": pr["body"], "state": pr["state"].upper(), "isDraft": pr["draft"],
-                              "baseRefName": pr["base"], "mergeStateStatus": s.get("merge_state", "CLEAN"),
+                              "baseRefName": pr["base"], "headRefOid": remote_head(pr), "mergeStateStatus": s.get("merge_state", "CLEAN"),
                               "statusCheckRollup": s.get("checks", [])})
         elif argv[1] == "checks":
             code = s.get("checks_exit", 0)
