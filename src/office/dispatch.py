@@ -1873,6 +1873,71 @@ def _close_abandoned_pane(run: dict, dispatch: dict, pane: str) -> bool:
     return True
 
 
+def _identity_line(value: object) -> str:
+    """Printable and bounded evidence from a pane or a reservation."""
+    return " ".join("".join(c if c.isprintable() else " " for c in str(value)).split())[:200]
+
+
+def _reserved_by(run: dict, pane: str) -> str | None:
+    """Read existing pane reservations; a damaged ledger fails closed.
+
+    Runs created before reservation support may have no ledger. If one exists,
+    however, unreadable or malformed contents must never authorize delivery.
+    """
+    path = paths.run_dir(run["id"]) / "herdr-reservations.json"
+    if not path.exists():
+        return None  # compatibility with retained runs
+    try:
+        held = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise ValueError("pane reservation evidence is unreadable") from exc
+    if not isinstance(held, dict) or any(not isinstance(k, str) or not k.strip() or not isinstance(v, str) or not v.strip()
+                                          for k, v in held.items()):
+        raise ValueError("pane reservation evidence is malformed")
+    return held.get(pane)
+
+
+def _pane_identity_mismatch(run: dict, dispatch: dict, pane: str, cwd: Path, *,
+                            check_cwd: bool = True, agent: str | None = None) -> str | None:
+    """Refuse a *reported* contradictory Herdr identity before crossing into a pane.
+
+    Herdr versions do not all report cwd/session fields; the dispatch-specific
+    `_shell_run` marker separately confirms its setup ran. We never treat a
+    reported contradictory value as missing evidence or a successful prompt.
+    """
+    try:
+        holder = _reserved_by(run, pane)
+    except ValueError as exc:
+        return f"pane {pane} cannot be trusted: {exc}"
+    if holder and holder != dispatch["id"]:
+        return f"pane {_identity_line(pane)} belongs to dispatch {_identity_line(holder)}, not {dispatch['id']} ({dispatch.get('task_id')})"
+    info = _herdr_json(["pane", "get", pane]).get("pane") or {}
+    actual = info.get("foreground_cwd") or info.get("cwd")
+    if check_cwd and actual:
+        expected = os.path.realpath(str(cwd))
+        observed = os.path.realpath(str(actual))
+        if observed != expected and not observed.startswith(expected.rstrip(os.sep) + os.sep):
+            # A pane can report another task's path, never echo terminal control
+            # sequences from an untrusted shell path into the operator output.
+            return (f"pane {_identity_line(pane)} cwd {_identity_line(actual)} does not belong to {dispatch['id']} "
+                    f"({dispatch.get('task_id')}); expected {_identity_line(cwd)}")
+    running = info.get("agent")
+    reported_name = running.get("name") if isinstance(running, dict) else running
+    if isinstance(running, dict) and not reported_name:
+        return f"pane {_identity_line(pane)} has an agent without a verifiable identity"
+    if agent is None and reported_name:
+        return f"pane {pane} already runs an agent; shell setup is unsafe for {dispatch['id']}"
+    if agent and reported_name and reported_name != agent:
+        return (f"pane {_identity_line(pane)} runs {_identity_line(reported_name)}, "
+                f"not {_identity_line(agent)} for dispatch {dispatch['id']}")
+    reported_session = ((running.get("session_id") or running.get("agent_session_id"))
+                        if isinstance(running, dict) else None) or info.get("session_id")
+    recorded_session = dispatch.get("session_id")
+    if agent and reported_session and recorded_session and reported_session != recorded_session:
+        return f"pane {pane} session does not match dispatch {dispatch['id']}"
+    return None
+
+
 def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
                        cwd: Path, ddir: Path, *, retried: bool = False, label: str | None = None) -> dict | None:
     """Start the real harness in the pane with `herdr agent start`, hand it a
@@ -1881,6 +1946,13 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     args, herdr_kind = inter
     name = herdr_agent_name(dispatch["id"])
     worker = spec["kind"] == "worker"
+    mismatch = _pane_identity_mismatch(run, dispatch, pane, cwd, check_cwd=False)
+    if mismatch:
+        spec["fallback_reason"] = f"pane-mismatch: {mismatch}"
+        spec["prompt_landed"] = False
+        write_launch_spec(run, dispatch["id"], spec)
+        _launch_notice(run, dispatch, f"pane-mismatch: {mismatch}; no shell command or brief sent")
+        return None
     # The pane's shell does not inherit this process's environment: source the
     # dispatch identity into it first, so the agent's own `office submit` works.
     env_file = write_agent_env(run, dispatch, ddir, worker=worker)
@@ -1888,6 +1960,13 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     if not _shell_run(pane, setup, ddir / "shell-ready"):
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, f"the shell in pane {pane} never ran Office's setup "
                                "line (env and cd)", f"within {_shell_timeout():g}s")
+        return None
+    mismatch = _pane_identity_mismatch(run, dispatch, pane, cwd)
+    if mismatch:
+        spec["fallback_reason"] = f"pane-mismatch: {mismatch}"
+        spec["prompt_landed"] = False
+        write_launch_spec(run, dispatch["id"], spec)
+        _launch_notice(run, dispatch, f"pane-mismatch: {mismatch}; agent and brief were not started")
         return None
     _record_launch_form(run, dispatch, spec, "herdr",
                         ["herdr", "agent", "start", name, "--kind", herdr_kind, "--pane", pane, "--", *args],
@@ -1977,8 +2056,29 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         except Exception:  # a landing probe must never abort the launch
             return False
 
-    landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen)
-    if not landed:
+    # The same lock guards both pane assignment and delivery. Without it an
+    # ended dispatch's pane could be reassigned between inspection and send.
+    # The reservation is still checked inside this critical section.
+    with _pane_lock(run):
+        mismatch = _pane_identity_mismatch(run, dispatch, pane, cwd, agent=name)
+        observed = _herdr_json(["pane", "get", pane]).get("pane") or {}
+        running = observed.get("agent")
+        spec["pane_evidence"] = {"pane": pane, "dispatch": dispatch["id"],
+                                "task": dispatch.get("task_id"), "expected_worktree": str(cwd),
+                                "reported_cwd": observed.get("foreground_cwd") or observed.get("cwd"),
+                                "reported_agent": running.get("name") if isinstance(running, dict) else running,
+                                "reported_session": (running.get("session_id") if isinstance(running, dict)
+                                                     else observed.get("session_id")),
+                                "mismatch": mismatch}
+        if mismatch:
+            # Once an agent starts, never launch a racing headless copy.
+            landed = False
+            spec["identity_failure"] = mismatch
+            _launch_notice(run, dispatch, f"pane-mismatch: {mismatch}; brief NOT sent; "
+                           f"inspect pane {pane} and use office revoke {dispatch.get('task_id') or dispatch['id']}")
+        else:
+            landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen)
+    if not landed and not mismatch:
         # The agent is up in a pane the user can see; a second headless copy
         # would race it. Say so and leave the pane for a manual re-prompt.
         view = _pane_view(name)

@@ -9,6 +9,8 @@ composer, never sending the text twice.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from office import amend, db, dispatch, gates, state
 from office.result import Result
 from office.state import Refused, Usage
@@ -64,7 +66,15 @@ def prompt(con, run: dict, target: str | None, text: str) -> Result:
         raise Refused("dispatch-ended", f"{d['id']} ({who}) has no live agent; nothing is listening in its pane",
                       scope=who, next_step=nxt)
     pane = d["pane_id"]
-    got = dispatch.submit_prompt(pane, text, pane=pane)
+    cwd = Path(d.get("worktree") or "")
+    with dispatch._pane_lock(run):
+        mismatch = dispatch._pane_identity_mismatch(run, d, pane, cwd,
+                                                    check_cwd=bool(d.get("worktree")),
+                                                    agent=dispatch.herdr_agent_name(d["id"]))
+        if mismatch:
+            raise Refused("pane-mismatch", f"{mismatch}; refusing to send the prompt", scope=who,
+                          next_step=f"office inspect task {who}, then office revoke {who} if the pane is misassigned")
+        got = dispatch.submit_prompt(pane, text, pane=pane)
     outcome = {"landed": "landed", "held": "typed but unsubmitted"}.get(got, "sent, not confirmed")
     with db.transaction(con):
         state.emit(con, run, "prompt", f"{who} {d['id']}: orchestrator prompt {outcome}", audience="runtime",
@@ -73,7 +83,7 @@ def prompt(con, run: dict, target: str | None, text: str) -> Result:
         raise Refused("prompt-held", f"the prompt is typed but unsubmitted in pane {pane} after Office's Enters",
                       scope=who, next_step=f"herdr pane send-keys {pane} Enter (never send the text again)")
     if got == "landed":
-        return Result(lines=[f"{who} {d['id']}: prompt landed in pane {pane}"], next="office status")
+        return Result(lines=[f"{who} {d['id']}: prompt landed in pane {pane} (cwd {cwd})"], next="office status")
     return Result(lines=[f"{who} {d['id']}: prompt sent to pane {pane}; no landed signal and nothing left in the "
                          "composer (a busy agent may have queued it)"],
                   next=f"herdr pane read {pane}, then office status")
