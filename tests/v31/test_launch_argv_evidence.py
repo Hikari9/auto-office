@@ -56,3 +56,15 @@ def test_record_both_forms_preserves_persisted_launch_evidence(tmp_path, monkeyp
     assert forms["headless"]["prompt_transport"] == "argv"
     assert forms["headless"]["argv"][-1] == "[PROMPT REDACTED]"
     assert "sensitive-prompt" not in str(forms)
+
+
+def test_redaction_secret_after_first_separator_and_generic_flags():
+    out = dispatch._redact_launch_argv([
+        "--header=Cookie=abc1", "-c", '{"model":"x","token":"abc2"}', "--opt", "a=b,api_key=abc3",
+        "--auth", "abc4", "--password:abc9", "--key", "abc5", "--pat", "abc6", "-p", "the raw prompt", "--env", "FOO=abc7",
+        "-e", "BAR=abc8", "--model", "gpt-5",
+    ])
+    flat = " ".join(out)
+    for leaked in ("abc1", "abc2", "abc3", "abc4", "abc5", "abc6", "raw prompt", "abc7", "abc8", "abc9"):
+        assert leaked not in flat, leaked
+    assert "FOO=[REDACTED]" in out and '"model":"x"' in flat and out[-2:] == ["--model", "gpt-5"]
