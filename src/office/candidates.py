@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, paths, routing, state
+from office import adapters, paths, route_policy, routing, state
 
 KIND_FOR_ROLE = {
     "planner": "worker",
@@ -91,6 +91,11 @@ def resolve_aliases(rows: list[dict]) -> list[dict]:
             resolved = dict(base)
             if target.get("dispatchable") is False:
                 resolved["dispatchable"] = False
+                # An alias is never more available than its exact target, and says why (#494).
+                for field in ("discovery", "discovery_reason"):
+                    if target.get(field):
+                        resolved[field] = target[field]
+                resolved["status_reason"] = route_policy.alias_status(resolved, target)["reason"]
             resolved["invocation_model_id"] = target.get("invocation_model_id") or target["model_id"]
             source = str(target.get("invocation_source") or "")
             if source.startswith(("local-evidence:", "documented:")):
@@ -102,6 +107,74 @@ def resolve_aliases(rows: list[dict]) -> list[dict]:
             resolved["alias_resolved_to"] = target["model_id"]
             out.append(resolved)
     return out
+
+
+_POLICY_CACHE: dict = {}
+
+
+_REPO_ROOTS: dict[str, Path] = {}
+
+
+def _repo_root_here() -> Path | None:
+    """The repository holding the cwd, remembered per directory so routing does not fork git each call."""
+    try:
+        here = os.getcwd()
+    except OSError:
+        return None
+    if here not in _REPO_ROOTS:
+        ident = paths.repo_identity(here)
+        if ident is None:
+            return None  # not remembered: a repository may be created here later
+        _REPO_ROOTS[here] = ident[0]
+    return _REPO_ROOTS[here]
+
+
+def live_user_policies(repo_root=None) -> list[dict]:
+    """The user's denied/overkill policy as the user and repo config files say now.
+
+    A denial applies the moment the user writes it, even to a run pinned earlier, so
+    it can never be bypassed by a stale pin. `repo_root` defaults to the cwd's
+    repository. Returns [] when nothing is set (the shipped default). Raises
+    OSError, ValueError or yaml.YAMLError when the config cannot be read, so a
+    caller that must fail closed (the probe) can tell that from "no denials"."""
+    from office import config as cfg
+    repo_root = repo_root if repo_root is not None else _repo_root_here()
+    # Read here, not through `cfg.read_files`: this feeds only the denial lookup and must not
+    # add a second read to the snapshot `office start` pins and baselines its drift check on.
+    files = {tier: (path.read_text(encoding="utf-8") if path.is_file() else None)
+             for tier, path in cfg.config_paths(repo_root).items()}
+    cache_key = (str(repo_root), tuple(sorted(files.items(), key=lambda kv: kv[0])))
+    policy = _POLICY_CACHE.get(cache_key)
+    if policy is None:  # held in a local: concurrent probes share this cache and may clear it
+        effective, warnings = cfg.resolve(repo_root, files=files)
+        ignored = [w for w in warnings if w["reason"] == "type-mismatch-ignored"
+                   and (w["key"] in ("routing", "routing.user_policy") or w["key"].startswith("routing.user_policy."))]
+        if ignored:  # a malformed routing value is dropped by the merge: it may have been a denial
+            raise ValueError(f"{ignored[0]['tier']} config {ignored[0]['key']} has the wrong type "
+                             f"(expected {ignored[0]['expected']}, got {ignored[0]['got']})")
+        policy = route_policy.user_policy(effective)
+        _POLICY_CACHE.clear()
+        _POLICY_CACHE[cache_key] = policy
+    return [policy] if policy["denied"] or policy["overkill"] else []
+
+
+def required_user_policies(repo_root=None) -> list[dict]:
+    """`live_user_policies`, refusing when the config cannot be read: a route the
+    unreadable policy might deny is never offered, declared or discovered."""
+    try:
+        return live_user_policies(repo_root)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise state.Refused("policy-unreadable", f"the user or repo routing policy cannot be read ({exc})",
+                            next_step="fix the config (office config --user / --repo) and retry") from exc
+
+
+def current_user_policies(repo_root=None) -> list[dict]:
+    """`live_user_policies`, or [] when the config cannot be read: an unreadable
+    config already stops `office` elsewhere."""
+    try:
+        return live_user_policies(repo_root)
+    except (OSError, ValueError, yaml.YAMLError):
+        return []
 
 
 def role_policy(config: dict, role: str) -> dict:
@@ -295,30 +368,61 @@ def below_family_floor(model_id: str | None, floors: dict | None) -> str | None:
     return None
 
 
+def _probe_view(rec: dict | None) -> dict | None:
+    if not rec:
+        return None
+    return {"result": rec.get("result"), "reason_class": rec.get("reason_class"), "detail": rec.get("detail"),
+            "probed_at": rec.get("probed_at"), "fresh": True, "attempt_id": rec.get("attempt_id")}
+
+
 def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
                      family_floors: dict | None = None,
-                     quota_snapshot: dict[str, dict] | None = None) -> tuple[list[dict], list[dict]]:
-    """Return (candidates, skipped). `skipped` explains unavailable harnesses
-    and rows under a model_family_floors entry."""
+                     quota_snapshot: dict[str, dict] | None = None,
+                     discovery: dict | None = None,
+                     user_policies: list[dict] | None = None) -> tuple[list[dict], list[dict]]:
+    """Return (candidates, skipped). Every active catalog row lands in exactly one of
+    them: `skipped` names each row that is not a candidate, with a `category`
+    (denied, not-eligible, untried, floor, not-installed, no-profile) and a reason.
+
+    `discovery` is the run's pinned `routing.discovery` settings when discovery
+    applies to this call (#494). Rows that are not dispatchable but are explicitly
+    discovery-eligible then become candidates carrying `route_status` and, when
+    `con` has one, the fresh exact probe record. They are never available routes;
+    routing keeps them out of the eligible slate. `user_policies` (default: the
+    user's current policy) removes denied routes; routing passes [] and rejects
+    denied routes itself, with the policy source, at stage 1.
+    """
+    from office import route_probe
     kind = KIND_FOR_ROLE.get(role, "worker")
     sources = adapters.load_sources()
     all_adapters = {aid: entry[0] for aid, entry in sources.items()}
-    candidates, skipped = [], []
+    policies = current_user_policies() if user_policies is None else user_policies
+    candidates, skipped, not_routable = [], [], []
     for row in catalog_rows():
         harness = row.get("invocation_harness")
         adapter = all_adapters.get(harness)
         label = f"{harness}/{row.get('model_id')}@{row.get('effort')}"
-        if row.get("dispatchable") is False:
+        state = route_policy.row_status(row)
+        if row.get("status_reason"):
+            state = {**state, "reason": row["status_reason"]}
+        if row.get("dispatchable") is False and not (discovery and state["discovery_eligible"]):
+            if state["discovery_eligible"]:
+                not_routable.append({"candidate": label, "category": "untried",
+                                     "reason": "discovery-eligible but discovery is off for this role or run: "
+                                               + state["reason"]})
+            else:
+                not_routable.append({"candidate": label, "category": "not-eligible",
+                                     "reason": f"not a candidate: {state['reason']}"})
             continue
         floor = below_family_floor(row.get("model_id"), family_floors)
         if floor:
-            skipped.append({"candidate": label, "reason": f"below model family floor {floor}"})
+            skipped.append({"candidate": label, "category": "floor", "reason": f"below model family floor {floor}"})
             continue
         if not adapter or not adapters.profile(adapter, kind):
-            skipped.append({"candidate": label, "reason": f"no {kind} launch profile"})
+            skipped.append({"candidate": label, "category": "no-profile", "reason": f"no {kind} launch profile"})
             continue
         if not adapters.installed(adapter):
-            skipped.append({"candidate": label, "reason": f"{harness} not installed"})
+            skipped.append({"candidate": label, "category": "not-installed", "reason": f"{harness} not installed"})
             continue
         version = adapters.route_version(harness, adapter, sources)
         cand = {
@@ -336,11 +440,27 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
             "cost": _cost(row),
             "price_fields": row.get("price_fields") or {},
             "speed_fields": row.get("speed_fields") or {},
+            "route_status": state["status"], "status_reason": state["reason"],
+            "discovery": state["discovery_eligible"], "probe_key": None,
         }
+        if row.get("alias_resolved_to"):
+            cand["alias_resolved_to"] = row["alias_resolved_to"]
+        denied = next((why for pol in policies if (why := route_policy.is_denied(cand, pol))), None)
+        if denied:
+            skipped.append({"candidate": label, "category": "denied", "reason": denied})
+            continue
+        if state["discovery_eligible"]:
+            cand["probe_key"] = route_probe.key(cand, adapter)
+            fresh = route_probe.status(con, cand, adapter=adapter, ttl_days=discovery["probe_ttl_days"],
+                                       timeout_s=discovery["probe_timeout_s"]) if con is not None else None
+            cand["probe"] = _probe_view(fresh)
+            refined = route_policy.row_status(row, fresh)
+            cand["route_status"], cand["status_reason"] = refined["status"], refined["reason"]
         if kind == "vision" and vision_proven(con, cand, adapter):
             cand["capabilities"] = sorted(set(cand["capabilities"]) | {"vision"})
         cand["quota"] = {"status": "unknown", "tightest_remaining_percent": None}
         candidates.append(cand)
+    skipped.extend(not_routable)
     if quota_snapshot is not None:
         for c in candidates:
             c["quota"] = quota_snapshot.get(c["adapter_id"], c["quota"])
@@ -413,6 +533,18 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
     # A row named exactly what the user typed beats an alias that invokes it.
     rows.sort(key=lambda r: r.get("model_id") != model)
     row = rows[0] if len(rows) == 1 or (rows and effort) else None
+    # A user-denied route is not selectable by any manual route either (--as, --review-as,
+    # amend route). Overkill is automatic-only and never blocks a declared route (#494).
+    named = {"harness": harness, "model_id": (row or {}).get("model_id") or model,
+             "invocation_model_id": (row or {}).get("invocation_model_id") or model,
+             "alias_resolved_to": (row or {}).get("alias_resolved_to"),
+             "effort": effort or (row or {}).get("effort") or "none"}
+    for policy in required_user_policies():
+        denied = route_policy.is_denied(named, policy)
+        if denied:
+            raise state.Refused("route-denied", denied, next_step=(
+                f"it stays denied until you change the policy: office config routing.user_policy.denied_models "
+                f"--user (or --repo) to remove {harness}/{model}"))
     return {
         "harness": harness,
         "harness_version": adapters.route_version(harness, adapter),
@@ -505,6 +637,12 @@ def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str,
     from office.util import sha256_obj
     s = config.get("routing") or {}
     adaptive_cfg = s.get("adaptive") or {}
+    ceiling = None
+    if route_policy.PROVENANCE_KEY in config:
+        # A #494-era run: only a user-set ceiling is hard, and its source is disclosed. A run
+        # pinned before provenance existed keeps its own ceiling (or the old default) untouched.
+        ceiling = route_policy.budget_ceiling(config)
+        adaptive_cfg = {**adaptive_cfg, "budget_ceiling_usd": ceiling["usd"]}
     context = {"role": role, "playbook": run.get("playbook"), "size_class": (run.get("risk") or {}).get("size_class"),
                "gear": run.get("gear"), "dispatch_kind": dispatch_kind}
     task = state.get_task(con, run["id"], task_id) if task_id and run.get("id") else None
@@ -519,6 +657,7 @@ def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str,
     explored = con.execute("SELECT COUNT(*) FROM route_audit WHERE run_id=? AND role=? AND explored=1",
                            (run.get("id"), role)).fetchone()[0]
     return {
+        **({"budget_ceiling": ceiling} if ceiling else {}),
         "context": context, "evidence": evidence, "adaptive_config": adaptive_cfg,
         "learned_eligibility": route_learning.current_eligibility(con, role),
         "exploration_history": route_learning.recent_exploration(con, role),
@@ -528,22 +667,55 @@ def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str,
     }
 
 
+def discovery_inputs(con: sqlite3.Connection, run: dict, role: str, candidates: list[dict], settings: dict) -> dict:
+    """The recorded, replayable inputs the discovery allocation reads (#494): caps by
+    read-only count, task risk, and which routes are known-working (proven or
+    learned-eligible) or quarantined. `routing.route` stays offline."""
+    from office import route_learning, route_probe, scoring
+    scoring.ensure_trust_schema(con)
+    learned = route_learning.current_eligibility(con, role)
+    known, quarantined = [], []
+    for c in candidates:
+        cid = routing.candidate_id(c)
+        _, trust = scoring.evaluate_trust_state(con, cid)
+        if trust == "quarantined":
+            quarantined.append(cid)
+        elif c.get("route_status", "available") == "available" and (
+                trust == "proven" or (learned.get(route_learning.candidate_key(c)) or {}).get("state") == "learned-eligible"):
+            known.append(cid)
+    risk = run.get("risk") or {}
+    return {"settings": settings, "allocation": route_probe.allocation(con, run.get("id"), settings),
+            "known_working": sorted(known), "quarantined": sorted(quarantined),
+            "risk": {"size_class": risk.get("size_class"), "blast_radius": risk.get("blast_radius"),
+                     "irreversible": bool(risk.get("irreversible"))}}
+
+
 def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                task_id: str | None = None, override: str | None = None,
                exclude: set[str] | None = None, probe: bool = True, exact: str | None = None,
                dispatch_kind: str = "fresh", wave_load: dict | None = None, pending_explorations: int = 0,
                quota_snapshot: dict[str, dict] | None = None,
-               quota_event_seen: set[str] | None = None, declared: str | None = None) -> dict:
+               quota_event_seen: set[str] | None = None, discovery_input: dict | None = None,
+               manual: bool = False, declared: str | None = None) -> dict:
     """Build the request and route. Returns the routing result plus request.
     `declared` is a user-declared route identity that passes unverified adapter trust.
+    `discovery_input` is the dispatch preflight's recompute handle (#494); a manual
+    `override` or a non-builder role never discovers. `manual` marks a recorded
+    declared route being re-qualified: like `override` it is exempt from overkill
+    rules, but it keeps the ordinary candidate set, floors and discovery inputs.
     `exact` keeps only the candidate with that route identity (harness@major/model@effort).
     Executor and worker requests carry the adaptive inputs (#300); `wave_load`
     counts routes already planned for other tasks of the same wave."""
+    live = required_user_policies(run.get("repo_root"))
     policy_cfg = role_policy(config, role)
     # An explicit --route names its model, so it is not held to the family floor.
     floors = None if override else config.get("model_family_floors")
+    settings = route_policy.discovery_settings(config)
+    discovering = bool(settings["enabled"] and role in settings["roles"] and role in routing.ADAPTIVE_ROLES
+                       and not override)
     candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors,
-                                           quota_snapshot=quota_snapshot)
+                                           quota_snapshot=quota_snapshot,
+                                           discovery=settings if discovering else None, user_policies=[])
     seed = None if override else _preferred_seed(policy_cfg, run)
     for entry in seed or []:
         if not any(routing.preferred_rank(c, [entry]) is not None for c in candidates):
@@ -614,6 +786,17 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         request.update(adaptive_inputs(con, config, run, role, candidates, task_id=task_id,
                                        dispatch_kind=dispatch_kind, plan_version=run.get("plan_version"),
                                        wave_load=wave_load, pending_explorations=pending_explorations))
+    if discovering:
+        request["discovery"] = discovery_inputs(con, run, role, candidates, settings)
+        if discovery_input:
+            request["discovery_input"] = discovery_input
+    policies = [pol for pol in (route_policy.user_policy(config), *live)
+                if pol["denied"] or pol["overkill"]]
+    if policies:
+        request["user_policies"] = policies
+        request["size_class"] = (run.get("risk") or {}).get("size_class")
+        if override or manual:
+            request["manual_route"] = True
     result = routing.route(request)
     result["benchmark_snapshot"] = snapshot
     result["skipped"] = skipped

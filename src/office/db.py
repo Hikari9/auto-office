@@ -11,6 +11,7 @@ the same file without schema errors.
 """
 from __future__ import annotations
 
+import random
 import re
 import sqlite3
 import time
@@ -23,7 +24,7 @@ from office import paths
 # Bump when SHARED_COLUMNS or the DDL changes. The version is a record, not the
 # gate: every open also runs the additive column pass (see `migrate`), so a
 # column added without a bump still reaches existing databases.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -139,6 +140,17 @@ CREATE TABLE IF NOT EXISTS sched_items(id TEXT PRIMARY KEY, kind TEXT NOT NULL, 
 CREATE TABLE IF NOT EXISTS sched_state(scope TEXT PRIMARY KEY, auto_mode TEXT NOT NULL, reason TEXT, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS startup_prompts(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, dispatch_id TEXT NOT NULL, pane_id TEXT NOT NULL, agent TEXT NOT NULL, harness TEXT, screen TEXT NOT NULL, fingerprint TEXT NOT NULL, options_json TEXT, snapshot_path TEXT, state TEXT NOT NULL, round INTEGER NOT NULL DEFAULT 1, launcher_pid INTEGER, launcher_identity TEXT, answer TEXT, reported INTEGER NOT NULL DEFAULT 0, resolution TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expires_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS startup_prompts_dispatch ON startup_prompts(dispatch_id, state);
+CREATE TABLE IF NOT EXISTS route_probes(key TEXT PRIMARY KEY, harness TEXT, harness_version TEXT, adapter_hash TEXT, profile TEXT, invocation_model_id TEXT, effort TEXT, result TEXT CHECK(result IN ('pass','fail','pending')), reason_class TEXT CHECK(reason_class IN ('unsupported-model-effort','auth-quota-blocked','transient','isolation-missing','conformance-failed')), detail TEXT, probed_at TEXT, run_id TEXT, dispatch_id TEXT, attempt_id TEXT);
+CREATE TABLE IF NOT EXISTS route_probe_reservations(id TEXT PRIMARY KEY, run_id TEXT, probe_key TEXT, dispatch_id TEXT, task_id TEXT, status TEXT CHECK(status IN ('reserved','completed','failed','abandoned','expired')), claim_token TEXT, reserved_at TEXT, finished_at TEXT);
+CREATE UNIQUE INDEX IF NOT EXISTS route_probe_inflight ON route_probe_reservations(probe_key) WHERE status='reserved';
+CREATE INDEX IF NOT EXISTS route_probe_run ON route_probe_reservations(run_id);
+CREATE TABLE IF NOT EXISTS route_trials(id TEXT PRIMARY KEY, run_id TEXT, task_id TEXT, dispatch_id TEXT, role TEXT, route TEXT, probe_key TEXT, fallback_route TEXT, policy_digest TEXT, reason TEXT, status TEXT CHECK(status IN ('reserved','launched','launch-failed','fell-back','submitted','accepted','rejected','abandoned')), outcome TEXT, created_at TEXT, updated_at TEXT);
+CREATE INDEX IF NOT EXISTS route_trial_run ON route_trials(run_id, role);
+CREATE TABLE IF NOT EXISTS route_discovery_events(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, attempt_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('probe-reserved','probe-result','probe-cache-hit','probe-refused','probe-expired','probe-abandoned','dispatch-linked','trial-reserved','trial-launched','trial-launch-failed','trial-fell-back','trial-submitted','trial-accepted','trial-rejected','trial-abandoned')), origin TEXT NOT NULL CHECK(origin IN ('preflight','manual','dispatch','recovery','job')), run_id TEXT, plan_version INTEGER, task_id TEXT, dispatch_id TEXT, role TEXT, policy_digest TEXT NOT NULL, policy_version TEXT NOT NULL, probe_key TEXT NOT NULL, fingerprint_json TEXT NOT NULL, candidate_route TEXT NOT NULL, primary_route TEXT, fallback_route TEXT, reason TEXT NOT NULL, probe_freshness TEXT NOT NULL CHECK(probe_freshness IN ('fresh-run','cached-fresh','stale','none')), source_attempt_id TEXT, allocation_json TEXT NOT NULL, outcome TEXT, reason_class TEXT, detail TEXT, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS route_discovery_attempt ON route_discovery_events(attempt_id,seq);
+CREATE INDEX IF NOT EXISTS route_discovery_run ON route_discovery_events(run_id,seq);
+CREATE INDEX IF NOT EXISTS route_discovery_probe ON route_discovery_events(probe_key,seq);
+CREATE UNIQUE INDEX IF NOT EXISTS route_discovery_trial_terminal ON route_discovery_events(attempt_id) WHERE kind IN ('trial-accepted','trial-rejected');
 """
 
 # #131 F6: a 3.1 finding must name a recorded dispatch. Scoped to 3.1 rows
@@ -150,6 +162,45 @@ WHEN NEW.run_id IS NOT NULL AND NEW.dispatch_id IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'finding references an unrecorded dispatch'); END;
 """
 
+DISCOVERY_TRIGGERS = ("""
+CREATE TRIGGER IF NOT EXISTS route_discovery_no_update BEFORE UPDATE ON route_discovery_events
+BEGIN SELECT RAISE(ABORT, 'route discovery events are append-only'); END;
+""", """CREATE TRIGGER IF NOT EXISTS route_discovery_no_delete BEFORE DELETE ON route_discovery_events
+BEGIN SELECT RAISE(ABORT, 'route discovery events are append-only'); END;
+""", """CREATE TRIGGER IF NOT EXISTS route_discovery_no_replace BEFORE INSERT ON route_discovery_events
+WHEN EXISTS (SELECT 1 FROM route_discovery_events WHERE id=NEW.id OR seq=NEW.seq
+ OR (attempt_id=NEW.attempt_id AND kind IN ('trial-accepted','trial-rejected')
+     AND NEW.kind IN ('trial-accepted','trial-rejected')))
+BEGIN SELECT RAISE(ABORT, 'route discovery events are append-only'); END;
+""")
+
+
+def _enter_wal(con: sqlite3.Connection, attempts: int = 40) -> None:
+    """Put the database in WAL mode, once.
+
+    Switching the journal mode needs a lock SQLite can refuse with `database is
+    locked` without consulting the busy timeout while another connection is
+    creating the file or converting it, so concurrent first opens could crash here.
+    A file already in WAL mode needs no switch, so that is read first. Otherwise
+    the switch is retried with jittered backoff, bounded; any other error raises."""
+    delay = 0.02
+    for attempt in range(attempts):
+        try:
+            mode = con.execute("PRAGMA journal_mode").fetchone()[0]
+            if str(mode).lower() != "wal":
+                mode = con.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) and "busy" not in str(exc):
+                raise
+            if attempt == attempts - 1:
+                raise RuntimeError(f"runs.db could not enter WAL mode (still locked after {attempts} tries)") from exc
+            time.sleep(delay * (0.5 + random.random()))
+            delay = min(delay * 2, 0.5)
+            continue
+        if str(mode).lower() != "wal":  # pragma: no cover - platform specific
+            raise RuntimeError(f"runs.db could not enter WAL mode ({mode})")
+        return
+
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
     db_path = Path(path) if path else paths.runs_db()
@@ -157,9 +208,7 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     con = sqlite3.connect(str(db_path), timeout=30, isolation_level=None)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA busy_timeout=30000")
-    mode = con.execute("PRAGMA journal_mode=WAL").fetchone()[0]
-    if str(mode).lower() != "wal":  # pragma: no cover - platform specific
-        raise RuntimeError(f"runs.db could not enter WAL mode ({mode})")
+    _enter_wal(con)
     con.execute("PRAGMA foreign_keys=ON")
     migrate(con)
     return con
@@ -183,6 +232,8 @@ def migrate(con: sqlite3.Connection) -> None:
                 if col.split()[0] not in have:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
         con.execute(TRIGGERS)
+        for trigger in DISCOVERY_TRIGGERS:
+            con.execute(trigger)
         con.execute("CREATE INDEX IF NOT EXISTS runs_repo ON runs(git_common_dir, phase)")
         con.execute("CREATE INDEX IF NOT EXISTS findings_task ON findings(run_id, task_id, state)")
         con.execute("CREATE INDEX IF NOT EXISTS dispatches_run ON dispatches(run_id, task_id)")
@@ -213,12 +264,21 @@ def _schema_version(con: sqlite3.Connection) -> int:
 
 
 _TABLES = re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", LEGACY_DDL + OFFICE_DDL)
+_ROUTE_INDEXES = {"route_probe_inflight", "route_probe_run", "route_trial_run", "route_discovery_attempt",
+                  "route_discovery_run", "route_discovery_probe", "route_discovery_trial_terminal"}
+_ROUTE_TRIGGERS = {"route_discovery_no_update", "route_discovery_no_delete", "route_discovery_no_replace"}
 
 
 def _drifted(con: sqlite3.Connection) -> bool:
     """True when a table or shared column this version expects is absent."""
     have = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if not have.issuperset(_TABLES):
+        return True
+    indexes = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    if not indexes.issuperset(_ROUTE_INDEXES):
+        return True
+    triggers = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+    if not triggers.issuperset(_ROUTE_TRIGGERS):
         return True
     for table, columns in SHARED_COLUMNS.items():
         cols = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}

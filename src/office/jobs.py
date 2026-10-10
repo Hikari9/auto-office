@@ -65,6 +65,7 @@ def _handlers():
         "lane_visual": convergence.job_lane_visual,
         "pr_sync": prs.job_pr_sync,
         "launch_agent": dispatch.job_launch_agent,
+        "trial_recovery": dispatch.job_trial_recovery,
         "notify_worker": dispatch.job_notify_worker,
         "run_checks": gates.job_run_checks,
         "review": gates.job_review,
@@ -269,7 +270,14 @@ def on_permanent_failure(con, run: dict, job: dict, err: str) -> None:
     elif gate_id:
         gates.mark_unavailable(con, run, gate_id, f"{job['kind']} could not run: {err[:200]}")
     task_id = job["payload"].get("task_id")
+    if job["kind"] == "trial_recovery":
+        from office import dispatch
+        dispatch.trial_recovery_failed(con, run, job, err)
+        return
     if job["kind"] == "launch_agent" and task_id:
+        from office import dispatch
+        if dispatch.trial_launch_failed(con, run, job["payload"].get("dispatch_id"), f"launch failed: {err}"):
+            return  # a trial's failed launch is recovered (fallback, or a blocker with a next step), not just blocked
         state.update_task(con, run["id"], task_id, status="blocked", pause_reason=f"launch failed: {err[:200]}")
         state.emit(con, run, "task.blocked", f"{task_id} could not launch: {err[:120]}", task_id=task_id)
 
@@ -300,18 +308,30 @@ def kick(con, run_id: str | None = None) -> int:
     return len(rows)
 
 
+def _child_cwd(run_id: str) -> str | None:
+    """Where a job process starts. A command a worker ran in its worktree must not hand that directory to the
+    job it spawns: `python -m office` puts the working directory first on sys.path, so a file the agent left
+    there would run as Office. Inside the worktrees, the job starts in the run's own directory instead."""
+    try:
+        Path.cwd().resolve().relative_to(paths.worktrees_dir().resolve())
+    except (ValueError, OSError):
+        return None
+    return str(paths.run_dir(run_id))
+
+
 def spawn(job_id: str, run_id: str) -> None:
     argv, extra_env = frontdoor.current_argv()
     env = dict(os.environ)
     env.update(extra_env)
     env.pop(frontdoor.HOP_ENV, None)
     env.pop(LOCK_FD_ENV, None)
+    env.pop("OFFICE_WORKER_TAG", None)  # a job is not the worker that kicked it: the tag would name the job's processes
     path = log_path(run_id, job_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     log = open(path, "ab")
     try:
         subprocess.Popen(argv + ["_job", job_id], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                         env=env, start_new_session=True, close_fds=True)
+                         env=env, start_new_session=True, close_fds=True, cwd=_child_cwd(run_id))
     finally:
         log.close()
 
@@ -410,6 +430,9 @@ def _run_attempt(con, job_id: str, token: str) -> int:
         except db.StaleAttempt as stale:
             _stale(con, run, job, token, f"{stale} (its own failure was {err[:200]})")
         sys.stderr.write(tb)
+        if mode() != "inline":
+            with db.unfenced():
+                kick(con, run["id"])  # a failure may have queued its own recovery
         return 1
     state.write_projection(con, run["id"])
     if mode() != "inline":
@@ -487,6 +510,7 @@ def _supervise_locked(con, run_id: str, job_id: str, lock_fd: int) -> int:
     env = dict(os.environ)
     env.update(extra_env)
     env.pop(frontdoor.HOP_ENV, None)
+    env.pop("OFFICE_WORKER_TAG", None)
     env[LOCK_FD_ENV] = str(lock_fd)
     os.set_inheritable(lock_fd, True)
     log = log_path(run_id, job_id)
@@ -495,7 +519,7 @@ def _supervise_locked(con, run_id: str, job_id: str, lock_fd: int) -> int:
     _note(run_id, job_id, f"attempt {token}: supervisor pid {os.getpid()} starts a worker")
     try:
         proc = subprocess.Popen(argv + ["_job", job_id, "--attempt", token], stdin=subprocess.DEVNULL, env=env,
-                                pass_fds=(lock_fd,))
+                                pass_fds=(lock_fd,), cwd=_child_cwd(run_id))
     except OSError as exc:
         _note(run_id, job_id, f"attempt {token}: the worker could not start: {exc}")
         return 1

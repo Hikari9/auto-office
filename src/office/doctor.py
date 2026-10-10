@@ -12,7 +12,10 @@ from office import adapters, config_repairs, db, frontdoor, install, legacy, pat
 from office.result import Result
 
 
-def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
+def doctor(fix: bool = False, probe_vision: bool = False, probe_route: str | None = None,
+           run: dict | None = None) -> Result:
+    if probe_route:
+        return probe_route_record(probe_route, run=run)
     res = Result()
     problems = 0
     ver = version.current()
@@ -173,6 +176,52 @@ def doctor(fix: bool = False, probe_vision: bool = False) -> Result:
     res.data = {"problems": problems}
     res.next = "office doctor --fix" if problems and not fix else None
     res.exit_code = 1 if problems else 0
+    return res
+
+
+def probe_route_record(spec: str, *, run: dict | None = None) -> Result:
+    """`office doctor --probe-route harness/model@effort`: one manual exact-route probe.
+
+    Bound to `run` when one is given (the probe counts against its cap and records its
+    plan version); otherwise an unbound manual probe with explicit NULL run fields.
+    Uses quota like any harness launch and never grants trust or edits any route."""
+    from office import candidates, route_policy, route_probe
+    from office.config import resolve
+    cand = route_probe.candidate_from_spec(spec)
+    adapter = adapters.load_all()[cand["adapter_id"]]
+    repo = paths.repo_identity()
+    try:
+        config = run.get("policy") if run else resolve(repo[0] if repo else None)[0]
+    except ValueError as exc:
+        return Result(lines=[f"probe {spec}: not run; config is invalid: {exc}"], exit_code=1)
+    if adapters.installed(adapter):
+        cand["quota"] = candidates.probe_quota(adapter)
+    attempt_id = route_policy.new_attempt_id()
+    con = db.connect()
+    try:
+        result = route_probe.ensure(con, run, cand, attempt_id=attempt_id,
+                                    context={"origin": "manual", "reason": route_probe.MANUAL_REASON,
+                                             "config": config})
+    finally:
+        con.close()
+    res = Result()
+    label = f"{cand['harness']}/{cand['model_id']}@{cand['effort']}"
+    scope = f"run {run['id'][:8]}" if run else "no bound run"
+    if isinstance(result, route_probe.Refused):
+        res.add(f"probe {label}: refused ({result}); nothing was launched ({scope}, attempt {attempt_id})")
+        res.data = {"probe": None, "refused": result.reason, "detail": result.detail, "attempt_id": attempt_id,
+                    "allocation": result.allocation}
+        res.exit_code = 1
+        return res
+    how = "cached record, no new launch" if result.get("cached") else "fresh probe"
+    outcome = result["result"] + (f" ({result['reason_class']})" if result.get("reason_class") else "")
+    res.add(f"probe {label}: {outcome} [{how}; {scope}; attempt {attempt_id}]")
+    res.add(f"  fingerprint: {result['key'] if 'key' in result else route_probe.key(cand, adapter)}")
+    if result.get("detail"):
+        res.add(f"  {result['detail']}")
+    res.add("  invocation conformance only: this is not adapter trust and says nothing about other efforts or models")
+    res.data = {"probe": {k: v for k, v in result.items() if k != "settings"}, "attempt_id": attempt_id}
+    res.exit_code = 0 if result["result"] == "pass" else 1
     return res
 
 

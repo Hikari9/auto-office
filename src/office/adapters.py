@@ -12,6 +12,7 @@ path passes (office.conformance).
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -95,14 +96,15 @@ def load_sources() -> dict[str, tuple[dict, str, Path]]:
     unless it sets `override_seed: true`. An unreadable user file, or a draft
     still holding a TODO, is skipped so it never reaches routing or stops a
     dispatch (`office harness validate <id>` reads it directly). Cached per
-    process, keyed on the adapter files' mtimes and sizes."""
+    process, keyed on the adapter files' mtimes and sizes; each caller gets its
+    own copy, so editing a returned adapter never changes what the next caller reads."""
     key = files_stamp()
     cached = _SOURCES_CACHE.get(key)
     if cached is None:
         cached = _load_sources_uncached()
         _SOURCES_CACHE.clear()
         _SOURCES_CACHE[key] = cached
-    return dict(cached)
+    return copy.deepcopy(cached)
 
 
 def _load_sources_uncached() -> dict[str, tuple[dict, str, Path]]:

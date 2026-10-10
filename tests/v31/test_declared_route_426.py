@@ -195,3 +195,42 @@ def test_a_task_between_rounds_can_be_rerouted_and_rerun_follows_it(env):
     code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
     assert code == 0, out
     assert _triple(env) == CODEX and len(_events(env)) == 1
+
+
+# ------------------------------------------------------------------ B2 (D11): overkill is automatic-only
+
+def _overkill_codex(env):
+    from pathlib import Path
+    import os
+    Path(os.environ["OFFICE_USER_CONFIG"]).write_text(
+        "routing:\n  user_policy:\n    overkill_rules:\n      - {route: codex/gpt-6-astra@low, roles: [executor]}\n")
+
+
+def test_a_declared_route_under_an_overkill_rule_is_dispatched(env):
+    _approve(env)
+    _overkill_codex(env)
+    code, out = env.office("amend", "route", "T1", "--as", "codex/gpt-6-astra@low", "--quote", "use astra here")
+    assert code == 0 and "declared" in out, out
+    code, out = env.office("dispatch", "T1", env=_quota(env))
+    assert code == 0 and f"executor/{CODEX}" in out, out
+    assert _triple(env) == CODEX and _task_route(env)["declared"] is True
+
+
+def test_the_same_overkill_route_stays_skipped_for_an_undeclared_task(env):
+    _approve(env)
+    _overkill_codex(env)
+    code, out = env.office("dispatch", "T1", env=_quota(env, claude=1))
+    assert code != 0 and "every planned route is unavailable" in out and "overkill" in out, out
+    assert env.con().execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == 0
+
+
+def test_a_declared_route_denied_later_is_refused_not_dispatched(env):
+    _approve(env)
+    env.office("amend", "route", "T1", "--as", "codex/gpt-6-astra@low", "--quote", "use astra here", check=0)
+    from pathlib import Path
+    import os
+    Path(os.environ["OFFICE_USER_CONFIG"]).write_text(
+        "routing:\n  user_policy:\n    denied_models: [codex/gpt-6-astra@low]\n")
+    code, out = env.office("dispatch", "T1", env=_quota(env))
+    assert code != 0 and "denied by user routing.user_policy.denied_models" in out, out
+    assert env.con().execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == 0

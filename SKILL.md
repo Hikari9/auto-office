@@ -86,11 +86,11 @@ never wait or `--skip`; continue on the current preferences and tell the user to
   planned route is out, it stops: `office dispatch <task> --reroute`. The effective route (harness, model, effort) is recorded at
   dispatch; `office status` lists it and `office inspect route <task>` adds every change (old/new, reason, actor, time). To change a
   pending or running task's route: `office amend route <task> --as <harness>/<model>[@effort] --quote "<words>"`. Office follows the
-  recorded route on redispatch and rerun, never swaps it silently, and waives only unverified trust for a declared one; every later routing stage applies.
+  recorded route on redispatch and rerun, never swaps it silently, and waives only unverified trust for a declared one; every later routing stage applies. Builder discovery and failed-trial recovery: `docs/route-discovery.md`; explicit pins skip discovery.
 - When the user names a model, dispatch with `--as <harness>/<model>[@effort]` (`--cli "<argv>"` for an exact command, `--external` to
   only print how to start it). `--review-as` pins the reviewer of the task (v3.1) or lane (convergence-v1). A reviewer is always a
   fresh session, never the executor's, though it may share the executor's model. `office rerun <task> --resume|--fresh [--as <route>] [--review-as <route>]` relaunches on a named route; `--resume` needs the route it ran on (another route needs `--fresh`).
-- Route and config changes reach a live run only on opt-in: `office config --run <id> --apply-routing --quote "<words>"` re-pins that run from the current config files.
+- Route and config changes reach a live run only on opt-in: `office config --run <id> --apply-routing --quote "<words>"` re-pins that run from the current config files. User denial blocks automatic and convenience manual routes; scoped user overkill affects matching automatic choices only. Probe passes, learned quality and adapter trust stay separate; only bounded builders trial, never reviewers or final gate roles. Policy, caps, inspect and rollback: `docs/route-discovery.md`.
 - A dispatch failure is a recovery checkpoint, not permission to abandon the run: read the launch notice, `office inspect task <T> --verbose`
   and any pane Office names, then follow the printed `next:` (re-prompt, `office resume`, `office rerun <task> --resume|--fresh`,
   `office dispatch <task> --reroute`). Never approve hook trust, other directories, credentials, irreversible actions or user authority for

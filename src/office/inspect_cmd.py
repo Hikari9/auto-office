@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from office import adaptive, candidates, contract, paths, plans, routing, state
+from office import adaptive, candidates, contract, paths, plans, route_learning, route_policy, routing, state
 from office import risk as risk_mod
 from office.result import Result
 from office.state import Usage
@@ -206,7 +206,17 @@ def _route(con, run, role_or_task) -> Result:
     elif decision.get("selection_disclosure"):
         lines.append(f"reason: {decision['selection_disclosure'].get('reason')}")
     lines += _rejections(decision)
+    categories = _categories(decision)
+    config = state.pinned_config(run)
+    policies = [*candidates.current_user_policies(run.get("repo_root")), route_policy.user_policy(config)]
+    lines += _discovery_lines(decision, categories, config, policies)
+    trials = _trial_rows(con, run, role=role)
+    lines += _trial_lines(trials) + _attempt_lines(route_learning.attempt_history(con, run_id=run["id"], role=role, include_unbound=True))
     data = {k: v for k, v in decision.items() if k not in ("request", "qualifying_candidates")}
+    if categories:
+        data["categories"] = categories
+    if trials:
+        data["trials"] = trials
     return Result(lines=lines, data=data)
 
 
@@ -275,6 +285,12 @@ def _route_task(con, run, tid) -> Result:
         taken = "; ".join(f"{t['route']}: {t['reason']}" for t in d.get("fallbacks_taken") or [])
         lines.append(f"{a['phase']} {a['created_at'][:16]} -> {a['dispatched_route']} ({d.get('source')})"
                      + (f" after fallback: {taken}" if taken else ""))
+        disc = a["disclosure"].get("discovery")
+        if disc:
+            lines.append("  " + _discovery_head(disc))
+    trials = _trial_rows(con, run, task_id=tid)
+    attempts = route_learning.attempt_history(con, run_id=run["id"], task_id=tid)
+    lines += _trial_lines(trials) + _attempt_lines(attempts)
     legacy = []
     for d in con.execute("SELECT id, triple, route_json FROM dispatches WHERE run_id=? AND task_id=? ORDER BY started_at",
                          (run["id"], tid)).fetchall():
@@ -286,9 +302,12 @@ def _route_task(con, run, tid) -> Result:
     changes = state.route_changes(con, run["id"], tid)
     if not lines:
         lines = [f"no routing recorded for {tid}; office inspect route shows a live decision"]
-    return Result(lines=lines, data={"task": tid, "audits": audits, "legacy": legacy,
-                                     "effective_route": state.recorded_route(state.get_task(con, run["id"], tid)) or None,
-                                     "route_changes": changes})
+    data = {"task": tid, "audits": audits, "legacy": legacy,
+            "effective_route": state.recorded_route(state.get_task(con, run["id"], tid)) or None,
+            "route_changes": changes}
+    if trials or attempts:
+        data.update(trials=trials, attempts=attempts)
+    return Result(lines=lines, data=data)
 
 
 def _effective_route_lines(con, run, tid) -> list[str]:
@@ -302,6 +321,157 @@ def _effective_route_lines(con, run, tid) -> list[str]:
     for c in state.route_changes(con, run["id"], tid):
         lines.append(f"route change {c['recorded_at'][:16]} {c.get('before') or 'unrecorded'} -> {c['after']} "
                      f"[{c.get('kind')}] by {c.get('actor')}: {c.get('reason')}")
+    return lines
+
+
+# The categories an operator reads one by one. A row that is out for a reason that has nothing to do
+# with discovery or policy (not installed, no launch profile, below a floor) is only counted.
+_LISTED_CATEGORIES = ("denied", "overkill", "unsupported", "untried", "probe-candidate", "probe-pending",
+                      "probe-passed", "probe-failed", "trial-eligible")
+
+
+def _probe_text(probe: dict | None) -> str:
+    if not probe:
+        return "no fresh exact probe on record"
+    result = probe.get("result") or "unknown"
+    reason = f" ({probe['reason_class']})" if probe.get("reason_class") else ""
+    fresh = "fresh" if probe.get("fresh", True) else "stale"
+    return f"{result}{reason}, {fresh}" + (f", probed {probe['probed_at'][:16]}" if probe.get("probed_at") else "")
+
+
+def _cap_text(name: str, cap: dict) -> str:
+    used, limit = cap.get("used", 0), cap.get("max", 0)
+    if name == "rolling":
+        return (f"rolling {used}/{limit} of the last {cap.get('window', '?')} decisions"
+                + (" (warming up: too few recorded decisions to allow one)" if cap.get("warmup") else ""))
+    return f"{name} {used}/{limit} used, {max(limit - used, 0)} left"
+
+
+def _discovery_head(disc: dict) -> str:
+    return (f"discovery intent {disc.get('intent')}" + (f" | blocked: {disc['blocked']}" if disc.get("blocked") else "")
+            + f" | candidate {disc.get('candidate') or '-'} | fallback {disc.get('fallback') or 'none'}")
+
+
+def _display_category(entry: dict, probe: dict | None) -> str:
+    """The category an operator reads: the router's category, refined by the exact probe record.
+    A fresh failed probe naming an unsupported model/effort is `unsupported` (that exact effort only);
+    an in-flight probe is `probe-pending` and a fresh pass that is not being tried now is `probe-passed`."""
+    category = entry.get("category") or "rejected"
+    result = (probe or {}).get("result")
+    if category == "probe-failed" and (probe or {}).get("reason_class") == route_learning.UNSUPPORTED_EFFORT:
+        return "unsupported"
+    if category == "untried" and result in ("pending", "pass"):
+        return "probe-pending" if result == "pending" else "probe-passed"
+    return category
+
+
+def _categories(decision: dict) -> list[dict]:
+    """Every categorized candidate of a decision: rejected at routing, or left out of the request."""
+    by_id = {routing.candidate_id(c): c for c in (decision.get("request") or {}).get("candidates") or []}
+    disc = decision.get("discovery") or {}
+    out, seen = [], set()
+    for entry in [*(decision.get("rejected") or []), *(decision.get("skipped") or [])]:
+        if not entry.get("category") or entry["candidate"] in seen:
+            continue
+        seen.add(entry["candidate"])
+        probe = (by_id.get(entry["candidate"]) or {}).get("probe")
+        out.append({"candidate": entry["candidate"], "category": _display_category(entry, probe),
+                    "reason": entry.get("reason"), "probe": probe})
+    if disc.get("intent") == "trial" and disc.get("candidate"):
+        out.append({"candidate": disc["candidate"], "category": "trial-eligible", "probe": disc.get("probe"),
+                    "reason": "a fresh exact probe passed and every gate still holds; falls back to "
+                              f"{disc.get('fallback')}"})
+    return out
+
+
+def _tier_text(policies: list[dict], key: str, field: str) -> str:
+    """The config tiers that set `field` of the user policy (user, repo, run), or none."""
+    tiers = sorted({(p.get("sources") or {}).get(key) or "run" for p in policies if p.get(field)})
+    return ", ".join(tiers) or "none"
+
+
+def _discovery_lines(decision: dict, categories: list[dict], config: dict, policies: list[dict]) -> list[str]:
+    disc = decision.get("discovery")
+    if not disc and not categories:
+        return []
+    lines = [""]
+    if disc:
+        slate = decision.get("slate") or []
+        fallback = disc.get("fallback") or (slate[1]["route"] if len(slate) > 1 else None)
+        lines += [_discovery_head({**disc, "fallback": fallback}),
+                  f"  primary {decision.get('selected')} | probe: {_probe_text(disc.get('probe'))}",
+                  "  caps: " + " | ".join(_cap_text(name, disc["caps"][name])
+                                          for name in ("probes", "trials", "rolling") if name in (disc.get("caps") or {}))]
+    lines.append(f"preference source tiers: denied_models {_tier_text(policies, 'denied_models', 'denied')} | "
+                 f"overkill_rules {_tier_text(policies, 'overkill_rules', 'overkill')} | "
+                 f"budget ceiling {route_policy.budget_ceiling(config)['source'] or 'none'}")
+    listed = [c for c in categories if c["category"] in _LISTED_CATEGORIES]
+    if listed:
+        lines.append("candidates by category:")
+        lines += [f"  {c['category']:<{max(len(x['category']) for x in listed)}}  {c['candidate']}  "
+                  f"{(c.get('reason') or '')[:140]}" for c in sorted(listed, key=lambda c: (c["category"], c["candidate"]))]
+    counts: dict[str, int] = {}
+    for c in categories:
+        if c["category"] not in _LISTED_CATEGORIES:
+            counts[c["category"]] = counts.get(c["category"], 0) + 1
+    if counts:
+        lines.append("also out of the pool: " + ", ".join(f"{n} {name}" for name, n in sorted(counts.items())))
+    return lines
+
+
+def _trial_rows(con, run: dict, *, task_id: str | None = None, role: str | None = None) -> list[dict]:
+    """This run's discovery trials with where each stands: the recorded terminal outcome, else what
+    the recorded gate result says now (not yet recorded), else why it never reached one."""
+    outcomes = {o["dispatch_id"]: o for o in route_learning.derive_outcomes(con)}
+    rows = []
+    for trial in route_learning.trial_attempts(con, run["id"]).values():
+        if (task_id and trial["task_id"] != task_id) or (role and trial["role"] != role):
+            continue
+        state_, outcome = trial["state"], outcomes.get(trial["dispatch_id"])
+        if trial["terminal"]:
+            result = f"{state_} (recorded)"
+        elif state_ in route_learning.TRIAL_LAUNCH_STATES:
+            result = "none: ended before any work" + (f" ({trial['reason_class']})" if trial["reason_class"] else "")
+        elif state_ == "abandoned":
+            result = "none: abandoned"
+        elif outcome and outcome["work"]:
+            result = ("accepted" if outcome["success"] else "not accepted") + ", not yet recorded"
+        else:
+            result = "in flight"
+        recovered = state_ in route_learning.TRIAL_LAUNCH_STATES
+        rows.append({"attempt_id": trial["attempt_id"], "task_id": trial["task_id"], "dispatch_id": trial["dispatch_id"],
+                     "route": trial["route"], "fallback": trial["fallback_route"], "status": state_,
+                     "recovered_launch": recovered, "outcome": result, "policy_digest": trial["policy_digest"],
+                     "probe_key": trial["probe_key"], "probe": trial["probe"]})
+    return rows
+
+
+def _trial_lines(trials: list[dict]) -> list[str]:
+    if not trials:
+        return []
+    lines = ["", "trials:"]
+    for t in trials:
+        lines.append(f"  {t['attempt_id']} {t['task_id']} dispatch {t['dispatch_id'] or 'none'} {t['route']} | "
+                     f"fallback {t['fallback'] or 'none'} | status {t['status']} | outcome {t['outcome']}"
+                     + (" | recovered launch: the fallback ran" if t["recovered_launch"] else ""))
+    return lines
+
+
+def _attempt_lines(attempts: list[dict]) -> list[str]:
+    """Per-attempt history from `route_discovery_events`, one block per attempt, events in order."""
+    if not attempts:
+        return []
+    lines = ["", "attempts (route_discovery_events):"]
+    for a in attempts:
+        lines.append(f"  attempt {a['attempt_id']} run {a['run_id'] or 'none'} plan "
+                     f"{'p' + str(a['plan_version']) if a['plan_version'] else 'none'} dispatch "
+                     f"{', '.join(a['dispatches']) or 'none'} origin {a['origin']} digest {(a['policy_digest'] or '')[:19]}")
+        lines.append(f"    fingerprint {a['probe_key']}")
+        lines.append(f"    route {a['route']} | reason: {a['reason']}")
+        for e in a["events"]:
+            lines.append(f"    {e['created_at'][11:19]} {e['kind']:<18} freshness {e['probe_freshness']:<12} "
+                         f"{e['outcome'] or '-'}" + (f" ({e['reason_class']})" if e["reason_class"] else "")
+                         + (f" from {e['source_attempt_id']}" if e["source_attempt_id"] else ""))
     return lines
 
 
@@ -336,4 +506,42 @@ def _learner(con, run) -> Result:
             pending.append({"role": role, **tr})
             lines.append(f"pending at next close: {role} {tr['route']} {tr['previous_state']} -> {tr['state']} "
                          f"(n={tr['evidence']['samples']}, replay: {tr['replay']['reason']})")
-    return Result(lines=lines, data={"routes": by_route, "eligibility": current, "pending": pending})
+    trial = _learner_trials(con, outcomes)
+    lines += trial["lines"]
+    return Result(lines=lines, data={"routes": by_route, "eligibility": current, "pending": pending,
+                                     "trial_evidence": trial["routes"], "unsupported": trial["unsupported"]})
+
+
+def _learner_trials(con, outcomes: list[dict]) -> dict:
+    """What discovery trial dispatches taught the learner, apart from trust. A trial route's evidence is
+    quality evidence only: its adapter trust is read here beside it and is never changed by it. Counted per
+    trial dispatch, so a later retry that landed on the same route is not credited to the trial."""
+    from office import scoring
+    routes: dict[str, dict] = {}
+    triples = {a["learner_route"]: a["route"] for a in route_learning.trial_attempts(con).values()}
+    for o in outcomes:
+        if not o.get("trial"):
+            continue
+        b = routes.setdefault(o["route"], {"dispatches": 0, "landed": 0, "not_the_model": 0, "failed_on_route": 0})
+        b["dispatches"] += 1
+        if o["success"]:
+            b["landed"] += 1
+        elif o["attribution"] in ("environment", "plan", "reviewer"):
+            b["not_the_model"] += 1
+        else:
+            b["failed_on_route"] += 1
+    unsupported = route_learning.unsupported_routes(con)
+    trust_ready = route_learning._table(con, "adapter_trust_acts")
+    lines = []
+    if routes or unsupported:
+        lines.append("trial evidence (quality only; trials never change adapter trust):")
+    for route, b in sorted(routes.items()):
+        trust = scoring.evaluate_trust_state(con, triples[route])[1] if route in triples and trust_ready else "unknown"
+        b["trust"] = trust
+        lines.append(f"  {route:<44} {b['landed']}/{b['dispatches']} trial dispatches landed"
+                     + (f" | {b['not_the_model']} not the model's (launch, environment, quota or brief)" if b["not_the_model"] else "")
+                     + (f" | {b['failed_on_route']} failed on the route" if b["failed_on_route"] else "")
+                     + f" | trust {trust}")
+    for route, ev in sorted(unsupported.items()):
+        lines.append(f"  unsupported {route} (this exact effort only; attempt {ev['attempt_id']})")
+    return {"lines": lines, "routes": routes, "unsupported": unsupported}
