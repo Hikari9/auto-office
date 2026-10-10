@@ -272,20 +272,21 @@ def record_trial_outcomes(con: sqlite3.Connection, outcomes: list[dict] | None =
 
 
 def attempt_history(con: sqlite3.Connection, *, run_id: str | None = None, task_id: str | None = None,
-                    include_unbound: bool = False, limit: int = 20) -> list[dict]:
+                    role: str | None = None, include_unbound: bool = False, limit: int = 20) -> list[dict]:
     """Per-attempt audit history, newest attempt last: every event under each attempt id.
 
-    `run_id`/`task_id` scope it to one run's attempts. `include_unbound` adds attempts
-    with no run (a manual probe). Read-only."""
+    `run_id`/`task_id`/`role` scope it to one run's attempts. `include_unbound` adds attempts
+    that name no run, task or role (a manual probe). Read-only."""
     if not _table(con, "route_discovery_events"):
         return []
     clauses, args = [], []
     if run_id is not None:
         clauses.append("(run_id=?" + (" OR run_id IS NULL" if include_unbound else "") + ")")
         args.append(run_id)
-    if task_id is not None:
-        clauses.append("(task_id=?" + (" OR task_id IS NULL" if include_unbound else "") + ")")
-        args.append(task_id)
+    for column, value in (("task_id", task_id), ("role", role)):
+        if value is not None:
+            clauses.append(f"({column}=?" + (f" OR {column} IS NULL" if include_unbound else "") + ")")
+            args.append(value)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     ids = [r[0] for r in con.execute(
         f"SELECT attempt_id FROM route_discovery_events{where} GROUP BY attempt_id ORDER BY MIN(seq) DESC LIMIT ?",
