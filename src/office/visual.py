@@ -20,6 +20,7 @@ import os
 import re
 import shlex
 import signal
+import socket
 import subprocess
 import time
 import urllib.error
@@ -274,6 +275,60 @@ def _wait_url(url: str, timeout: float) -> str | None:
     return f"not reachable: {last}"
 
 
+def _capture_port_conflict(url: str, con, run: dict, worktree: Path) -> str | None:
+    """Diagnose a bound local capture port before launching a second server (#507).
+
+    Never kill based solely on a matching cwd or port: unrelated local services
+    may share a worktree. A human can verify and stop the named process.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+        return None
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        with socket.create_connection((parsed.hostname, port), timeout=0.3):
+            pass
+    except (OSError, ValueError):
+        return None
+    pids: list[int] = []
+    try:
+        probe = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"],
+                               capture_output=True, text=True, timeout=3)
+        if probe.returncode == 0:
+            pids = sorted({int(line[1:]) for line in probe.stdout.splitlines()
+                           if line.startswith("p") and line[1:].isdigit()})
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if len(pids) != 1:
+        return (f"port {port} is already bound before visual capture; "
+                f"inspect its owner: lsof -nP -iTCP:{port} -sTCP:LISTEN; "
+                "stop the prior dev server before re-running capture")
+    pid = pids[0]
+    command = "unknown"
+    cwd = None
+    try:
+        ps = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                            capture_output=True, text=True, timeout=3)
+        if ps.returncode == 0:
+            command = Path((ps.stdout or "unknown").strip().splitlines()[0]).name[:100]
+        info = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                              capture_output=True, text=True, timeout=3)
+        if info.returncode == 0:
+            cwd = next((line[1:] for line in info.stdout.splitlines() if line.startswith("n")), None)
+    except (OSError, subprocess.SubprocessError, IndexError):
+        pass
+    possible = False
+    if cwd and Path(cwd).resolve() == worktree.resolve():
+        prior = con.execute("SELECT 1 FROM dispatches WHERE run_id=? AND worktree=? "
+                            "AND role='executor' AND ended_at IS NOT NULL LIMIT 1",
+                            (run["id"], str(worktree))).fetchone()
+        possible = bool(prior)
+    origin = ("possibly from an ended Office executor dispatch in this worktree"
+              if possible else "ownership by an Office dispatch is not proven")
+    return (f"port {port} is already bound by PID {pid} ({command}); {origin}; "
+            f"after confirming the process is safe to stop, run: kill {pid}; then retry visual capture")
+
+
 def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Path) -> dict:
     from office.submit import matches_revision, restore_tracked_paths
     spec = task["visual"]
@@ -288,6 +343,10 @@ def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Pat
         return {"evidence_status": "CAPTURE_BLOCKED",
                 "cause": f"{url} is not a local/test origin; capture is limited to authorized local and preview environments",
                 "product_failures": []}
+    if spec.get("start"):
+        conflict = _capture_port_conflict(url, con, run, worktree)
+        if conflict:
+            return {"evidence_status": "CAPTURE_BLOCKED", "cause": conflict, "product_failures": []}
     server = None
     server_log = None
     server_started = False
