@@ -19,6 +19,7 @@ import contextlib
 import json
 import os
 import subprocess
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -447,3 +448,75 @@ def review_boundary(con, run: dict, tasks: list[dict], revs: dict) -> tuple[bool
         if t["depends"]:
             return True, f"{t['id']} built on {', '.join(t['depends'])}"
     return False, "independent scopes with no shared files or interfaces"
+
+
+# ------------------------------------------------------------------ combining revisions
+
+class CombineConflict(Exception):
+    """Two heads cannot be merged. `left` and `right` label them, `paths` are the conflicting files."""
+
+    def __init__(self, left: str, right: str, paths: list[str]):
+        self.left, self.right, self.paths = left, right, paths
+        super().__init__(f"{left} and {right} conflict on {', '.join(paths[:6]) or 'files'}")
+
+
+def _merge_tree(repo: str, a: str, b: str) -> tuple[str, list[str]]:
+    """(tree, conflicting paths) of merging commits `a` and `b` without touching a checkout."""
+    proc = subprocess.run(["git", "-C", repo, "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", a, b],
+                          capture_output=True, text=True)
+    if proc.returncode == 129:  # git before 2.38 has no --write-tree: merge in a throwaway worktree
+        return _merge_in_scratch(repo, a, b)
+    if proc.returncode not in (0, 1):
+        raise paths.GitError(("merge-tree", a, b), proc.returncode, proc.stderr.strip())
+    tree, *files = [f for f in proc.stdout.split("\0") if f]
+    return tree, files if proc.returncode == 1 else []
+
+
+def _merge_in_scratch(repo: str, a: str, b: str) -> tuple[str, list[str]]:
+    with tempfile.TemporaryDirectory(prefix="office-combine-") as tmp:
+        scratch = str(Path(tmp) / "wt")
+        paths.git(repo, "worktree", "add", "-q", "--detach", scratch, a)
+        try:
+            proc = subprocess.run(["git", "-C", scratch, "merge", "--no-edit", "-q", "-m", "office: combine", b],
+                                  capture_output=True, text=True, env={**os.environ, **paths.commit_identity_env(repo)})
+            if proc.returncode == 0:
+                return paths.git(scratch, "rev-parse", "HEAD^{tree}"), []
+            return "", paths.git(scratch, "diff", "--name-only", "--diff-filter=U", check=False).splitlines() or ["(unknown)"]
+        finally:
+            subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", scratch], capture_output=True)
+
+
+def combine(run: dict, parents: list[tuple[str, str]]) -> str:
+    """One commit containing every `(label, commit)` head. A head that is an ancestor of another adds
+    nothing; the rest are merged without touching any worktree. Raises CombineConflict naming the
+    conflicting pair and paths, or GitError when git cannot merge (merge-tree needs git 2.38)."""
+    repo = run["repo_root"]
+    acc = None
+    seen: list[tuple[str, str]] = []
+    for label, commit in parents:
+        if acc is None:
+            acc = commit
+        elif commit == acc or gates._is_ancestor(run, commit, acc):
+            pass
+        elif gates._is_ancestor(run, acc, commit):
+            acc = commit
+        else:
+            tree, conflicts = _merge_tree(repo, acc, commit)
+            if conflicts:
+                # Name the earlier head that collides, not the whole accumulated result.
+                culprit = next((l for l, c in seen if _merge_tree(repo, c, commit)[1]), None)
+                raise CombineConflict(culprit or " + ".join(l for l, _ in seen), label, conflicts)
+            acc = paths.git(repo, "commit-tree", tree, "-p", acc, "-p", commit, "-m",
+                            f"office: combine {', '.join(l for l, _ in [*seen, (label, commit)])}\n\n"
+                            f"{paths.office_trailer(run['id'])}", env={**os.environ, **paths.commit_identity_env(repo)})
+        seen.append((label, commit))
+    return acc
+
+
+def contains(run: dict, head: str, commit: str) -> bool:
+    """`head` has `commit` in its history. A merge commit Office combined (never on the branch itself)
+    counts when every parent of it is."""
+    if gates._is_ancestor(run, commit, head):
+        return True
+    parents = paths.git(run["repo_root"], "rev-list", "--parents", "-n", "1", commit, check=False).split()[1:]
+    return len(parents) > 1 and all(contains(run, head, p) for p in parents)

@@ -540,10 +540,9 @@ def preflight(con, run: dict, cwd: Path) -> Result:
                              "as it is, or with your changes")
 
     # 5. Scope: tracked edits outside the contract are refused at submit.
-    base = d["base_commit"]
     head = _git(wt, "rev-parse", "HEAD")
     # The committed diff: the self-review ledger vouches for HEAD.
-    dep_bases = [b for b in submit._dependency_bases(con, run, task, head) if b != base]
+    base, dep_bases = submit.attribution(con, run, task, d, head)
     # Submit captures uncommitted edits too, so scope is judged on the worktree as it is now.
     touched = [f for f in _git(wt, "diff", "--no-renames", "--name-only", "-z", base).split("\0") if f]
     for b in dep_bases:
