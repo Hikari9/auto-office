@@ -262,6 +262,45 @@ def test_consolidated_recheck_routes_to_every_owner_then_same_reviewer(env):
     assert not _q(env, "SELECT 1 FROM findings WHERE scope='L-core' AND state='open'")
 
 
+def test_recheck_guidance_obeys_the_same_scope_lease_as_rerun(env, monkeypatch):
+    """#561: an idle dependent must not be advertised while its parent owns the scope."""
+    from office import convergence, dispatch, gates, guide, state
+
+    _start(env, plan=PLAN_LANE,
+           executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": GOOD_MUL}},
+                      "submit": True}],
+           convergence_reviewer=[{"reply": recheck(finding("F1", "T1"),
+                                                   finding("F2", "T2", where="mul.py:1"))}])
+    env.office("dispatch", "T1", "T2", "--parallel", check=0)
+    con = env.con()
+    try:
+        run = state.get_run(con, _run_row(env)["id"])
+        # T2's *real* launch gate is the common lease checker. Simulate an
+        # overlapping scope while the parent repair session is running.
+        owner = {"T1": None, "T2": "T1"}
+        monkeypatch.setattr(dispatch, "scope_holder", lambda c, r, t: owner[t["id"]])
+        initial = convergence.next_action(con, run)
+        assert "office rerun T1" in initial and "office rerun T2" not in initial, initial
+        assert "T2 waits for T1" in initial, initial
+
+        t1 = state.get_task(con, run["id"], "T1")
+        real_live = gates.worker_live
+        monkeypatch.setattr(gates, "worker_live", lambda c, did: bool(did == t1["current_dispatch_id"])
+                            or real_live(c, did))
+        waiting = guide.next_action(con, run)
+        assert waiting.startswith("no action;"), waiting
+        assert "T2 waits for T1" in waiting and "office rerun T2" not in waiting, waiting
+        assert not guide._needs_orchestrator(con, run), waiting
+
+        # When T1's lease really releases, T2 becomes the one legal repair.
+        owner["T2"] = None
+        released = guide.next_action(con, run)
+        assert "office rerun T2" in released and "office rerun T1" not in released, released
+        assert guide._needs_orchestrator(con, run)
+    finally:
+        con.close()
+
+
 def test_convergence_round_cap_escalates_to_the_operator(env):
     """5, 15, 40-43: three RECHECK rounds stop; the operator gets the remaining findings,
     attempts, risk, the recommendation and the choices. No fourth review, no INTAKE_GAP."""

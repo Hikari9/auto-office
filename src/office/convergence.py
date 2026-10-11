@@ -1066,7 +1066,7 @@ def settle(con, run: dict, scope: dict) -> None:
                                                           "vision" if g["kind"] == "visual" else "reviewer")
                                   for g in rechecks))
     state.emit(con, run, "convergence.recheck", f"{scope['id']} RECHECK (round {round_no}/{cap}): "
-               f"{len(blocking)} blocking finding(s) routed to {', '.join(owners)}; repair them in parallel "
+               f"{len(blocking)} blocking finding(s) routed to {', '.join(owners)}; repair each when its scope is free "
                f"(office rerun <task> --resume|--fresh), then the scope recomposes; next round: {who}",
                payload={"scope": scope["id"], "owners": owners, "findings": [f["code"] for f in blocking]})
 
@@ -1198,6 +1198,7 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
     """The orchestrator's next move for convergence, or None when nothing waits
     on it. `dispositions` adds the reminder for APPROVED findings, which never
     outranks dispatching ready work."""
+    held_rechecks = []
     for s in summary(con, run):
         sid = s["id"]
         if s["status"] == "escalated":
@@ -1218,11 +1219,30 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
             return (f"{sid} INTAKE_GAP: ask the user (native question tool): {gap.get('decision')}; record the answer "
                     f"(office amend requirements|plan ...), then office decide {sid} continue --quote \"<user's words>\"")
         if s["status"] == "recheck":
-            waiting = [t for t in s["tasks"] if (state.get_task(con, run["id"], t) or {}).get("status") == "changes_required"
-                       and not gates.worker_live(con, (state.get_task(con, run["id"], t) or {}).get("current_dispatch_id"))]
-            if waiting:
-                return (f"{sid} RECHECK repairs wait for you, run them in parallel: "
-                        + " ; ".join(f"office rerun {t} --resume|--fresh" for t in waiting))
+            # A rerun can be refused by the same live scope lease that dispatch enforces.
+            # Never offer a stacked dependent while its parent is still repairing (#561).
+            from office import dispatch
+            waiting = [state.get_task(con, run["id"], tid) for tid in s["tasks"]]
+            waiting = [t for t in waiting if t and t["status"] == "changes_required"
+                       and not gates.worker_live(con, t.get("current_dispatch_id"))]
+            ready, held = [], []
+            for t in waiting:
+                owner = dispatch.scope_holder(con, run, t)
+                if not owner:
+                    # Two overlapping fixes are individually legal now, but become
+                    # mutually exclusive once either starts. Name only the first.
+                    owner = next((a["id"] for a in ready if planfile.scopes_overlap(a["scope"], t["scope"])), None)
+                if owner:
+                    held.append(f"{t['id']} waits for {owner}'s repair session to end")
+                else:
+                    ready.append(t)
+            if ready:
+                what = " in parallel" if len(ready) > 1 else ""
+                note = f"; {'; '.join(held)}" if held else ""
+                return (f"{sid} RECHECK repairs ready{what}: "
+                        + " ; ".join(f"office rerun {t['id']} --resume|--fresh" for t in ready) + note)
+            if held:
+                held_rechecks.append(f"{sid} RECHECK: {'; '.join(held)}")
         spec_gate = spec_defect_gate(con, run, sid)
         if spec_gate:
             return (f"{sid}: amend the plan visual: block (office amend <task> -- \"<fix the visual: block>\"), then office "
@@ -1243,6 +1263,8 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
         if s["status"] in ("evidence_blocked", "attention", "conflict", "blocked"):
             return (f"{sid} {s['status']}: {s['detail']}; fix the cause, then office resume (a waiver needs landing "
                     f"authority: office approve waive {sid}:<convergence|visual> ...)")
+    if held_rechecks:
+        return "no action; " + "; ".join(held_rechecks) + "; office wait until the holding session ends"
     nb = undispositioned(con, run) if dispositions else []
     if nb:
         r = nb[0]

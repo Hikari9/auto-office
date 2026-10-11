@@ -574,7 +574,7 @@ def worker_signals(con, run: dict) -> tuple[list[str], int]:
 
 
 def _needs_orchestrator(con, run: dict) -> bool:
-    if any(t["status"] in ("paused", "blocked", "changes_required") for t in state.tasks(con, run["id"])):
+    if any(t["status"] in ("paused", "blocked") for t in state.tasks(con, run["id"])):
         return True
     return not next_action(con, state.get_run(con, run["id"])).startswith(("exceptions only", "no action"))
 
