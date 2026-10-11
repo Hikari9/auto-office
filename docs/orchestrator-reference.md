@@ -93,6 +93,13 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
 - A `launch` notice in `office status` means the pane agent never started (the dispatch ran headless) or the prompt never landed
   (re-prompt it). When startup fails before Herdr registers an agent, Office keeps the pane, snapshots its last screen, names
   recognized startup interstitials and prints the pane id.
+- Before it types into a pane (the brief, `office prompt`, a review re-prompt) Office reads Herdr's own record of that pane: its cwd must be the
+  dispatch's worktree, the agent kind must be the one the dispatch started, `herdr agent list` must name the dispatch's agent there, the
+  reported session must match the recorded one, and no other dispatch may hold the pane's reservation. Each send re-checks the reservation
+  under the pane lock, which is held for that one send only. Any mismatch sends nothing, starts no headless copy and prints
+  `pane-mismatch: <why>; brief NOT sent`: read the pane, then `office revoke <task>`.
+- `office revoke` restores a task to its accepted revision only when an amendment delivery alone demoted it. A task reopened for work still
+  owed (open RECHECK or APPROVED-cleanup findings, a `restack:` pause, a hold for an amended dependency) stays reopened.
 - Office presses Enter for a prompt left typed but unsubmitted. A notice saying it is still unsubmitted means
   `herdr pane send-keys <pane> Enter`, not a re-prompt, which would send it twice.
 - To message a live worker or reviewer, run `office prompt <T2|dispatch> -- "<message>"`: it sends with `herdr agent prompt`,
@@ -108,11 +115,37 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
   `herdr pane run`, `herdr agent start` and `herdr agent prompt` commands. A prompt has landed when the agent reports `working`
   or its pane shows a running turn. agy reads `idle` mid-turn: judge an agy pane by its footer and `git status`.
 
+## Review recovery, checks and stale dependents
+
+- A review that returned no verdict (UNAVAILABLE, ATTENTION, INVALID_RESULT) blocks its gate with a runtime status, not a verdict. Re-run only
+  that review of the same revision: `office review <T1|L-T1[:convergence|visual]> [--as <harness>/<model>[@effort] [--cli ARGV | --external]]`,
+  `office rerun <task> --review-as <route>` or `office resume`. No executor starts and no round is spent. A pinned reviewer is kept unless `--as`
+  re-pins it (checked against the reviewer role before any pin is written); without `--as` the next fallback route runs, and a re-run never
+  resumes the earlier reviewer over a named or pinned route. A terminal run is refused.
+- `office review L-T1:convergence|visual --report <file>` is the orchestrator reviewing a lane itself (visual: `--inspected <every screenshot>`);
+  a v3.1 run takes `office review T1 --report <file>` for a task whose code review no reviewer answered (#326). Specialists come first. A v3.1
+  task review is recorded degraded and non-independent and is never a waiver. Any of them is refused for the session that produced the work and
+  inside a worker or reviewer dispatch.
+- A failing task check is re-run on the revision's base commit. It is pre-existing only when it fails the same way there (same exit status and
+  failures); never when its output names a changed file, when the revision changes no file, or on timeout. Under `convergence-v1` a pre-existing-only
+  failure is a nonblocking note and the lane review still runs; on a v3.1 run the checks gate passes without cancelling code review, and a waiver of
+  checks re-queues the reviews checks had cancelled.
+- Re-accepting a task reopens its accepted dependents whose revision does not contain the new one: each is paused `restack: ...` and `office status`
+  prints `office rerun <T> --resume | --fresh`. Integration refuses a stale composition with `INTEGRATION stale: <T> accepted on ... does not
+  contain <dep> accepted on ...; restack <T> onto <dep>` instead of reporting a merge conflict.
+
 ## Landing detail
 
 - If the default branch moved after `office start`, run `office land --rebase` first: it re-composes the accepted work onto the new
   head and re-runs the run checks and one review of the rebase. A conflict refuses and prints the steps to compose by hand. When
   run checks fail and the default branch moved past the compose base, Office does this rebase itself once per new head.
+- A task PR GitHub reports `CONFLICTING`/`DIRTY` (a branch-policy refusal is not a conflict and is not recovered) gets one recovery attempt per
+  land. Office fetches the default branch and the task branch, then proves all of: the remote head is one Office accepted, restacked or recovered; the
+  PR merges with the default branch without conflicts; and folding every open task onto it gives the reviewed integration tree. Only then does it
+  push a merge commit to the task branch (a force-with-lease on the head it read), wait for GitHub to see it and merge pinned to that commit. A
+  moved branch, a conflict, a tree mismatch, a failed fetch or push, or git older than 2.38 (`merge-tree --write-tree`) refuses with the reason and
+  the by-hand steps; a refusal pushes nothing, and a timed-out push is reported as unknown, not as nothing pushed. The `pr.recovered` event records the
+  heads and base.
 - Office rewrites only the block above the PR body's `<!-- office:pr ... -->` line; put criteria that report data below it.
 - With task PRs off (local, no GitHub, `--no-prs`), push the integration branch it names, open a PR with `Closes #<issue>`, and
   `office close --handoff <pr-url>`. `office close --abandon "<reason>"` stops early; nothing is deleted until `office prune -f`.
