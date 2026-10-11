@@ -85,11 +85,20 @@ elif args[:2] == ["pane", "read"] and ("FAKE_HERDR_PANE_READ" in os.environ or "
     sys.exit(0)
 elif args[:2] == ["agent", "get"]:
     seq = data["get"]
-    status = seq.pop(0) if len(seq) > 1 else (seq[0] if seq else "gone")
+    # An agent the fake started is up (idle) unless the test scripted its statuses.
+    status = seq.pop(0) if len(seq) > 1 else (seq[0] if seq else ("idle" if args[2] in data.get("pane_agents", {{}}).values() else "gone"))
     if status == "gone":
         code = 1
     else:
         result = {{"agent": {{"name": args[2], "status": status}}}}
+        # Real `herdr agent get <name>`: the same entry `agent list` gives, with its pane, kind and session.
+        for pane, name in data.get("pane_agents", {{}}).items():
+            kind = data.get("pane_kinds", {{}}).get(pane)
+            if name == args[2]:
+                result["agent"].update({{"pane_id": pane, "agent": kind}})
+                if kind and data.get("session"):
+                    result["agent"]["agent_session"] = {{"agent": kind, "kind": "id", "source": "herdr:" + kind,
+                                                        "value": data["session"]}}
 elif args[:2] == ["pane", "read"]:
     # The pane's screen: what was there before (FAKE_HERDR_PRELUDE), the shell lines
     # Office ran, then what the agent drew at startup (FAKE_HERDR_BANNER).
@@ -115,8 +124,8 @@ def real_herdr_json(pane, *, name=None, kind="claude", cwd=None, foreground_cwd=
     """A stand-in for `dispatch._herdr_json` that answers in the shape herdr 0.9.3 really prints.
 
     `pane get` carries the agent KIND ("claude"), `agent_session.value`, the cwds and pane_id, and no agent name;
-    `agent list` entries carry the Office agent name as top-level "name" beside their "pane_id". A pane with no
-    `kind` is a plain shell. Every other command answers nothing."""
+    `agent list` / `agent get <name>` entries carry the Office agent name as top-level "name" beside their "pane_id".
+    A pane with no `kind` is a plain shell. Every other command answers nothing."""
     info = {"pane_id": pane, "agent_status": "idle" if kind else None, "focused": False, "tab_id": "w1:t1"}
     if cwd or foreground_cwd:
         info["cwd"], info["foreground_cwd"] = cwd or foreground_cwd, foreground_cwd or cwd
@@ -134,6 +143,8 @@ def real_herdr_json(pane, *, name=None, kind="claude", cwd=None, foreground_cwd=
             return {"pane": dict(info)}
         if args[:2] == ["agent", "list"]:
             return {"agents": [dict(entry)] if kind else []}
+        if args[:2] == ["agent", "get"] and kind and name and args[2] in (name, pane):
+            return {"agent": dict(entry)}
         return {}
     return answer
 
