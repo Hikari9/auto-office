@@ -636,6 +636,10 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     profile_kind = kind or ("vision" if visual else "reviewer")
     resume, same_route = (_reviewer_resume(con, run, resume_from, profile_kind, cwd, gate_id=gate["id"]) if resume_from
                           else (None, None))
+    if pinned and same_route and routing.candidate_id(
+            candidates.declared_decision(pinned["as"], flag="--review-as", role=role,
+                                         config=state.pinned_config(run))["candidate"]) != same_route:
+        resume, same_route = None, None  # the pin names another reviewer than the one that would be resumed
     for attempt in range(limit + 1):
         if attempt == 0 and same_route:
             decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),

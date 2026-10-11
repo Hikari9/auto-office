@@ -636,6 +636,31 @@ def test_a_pinned_reviewer_that_is_unchanged_keeps_resuming_its_session_across_r
     assert seen and seen[-1] is not None, seen  # a normal pinned round resumes; only a review-only re-run does not
 
 
+def test_a_re_pin_to_another_route_is_honored_over_resuming_the_earlier_reviewer(env):
+    adds = [GOOD_ADD + f"# r{i}\n" for i in range(3)]
+    _start(env, executor=[{"write": {"calc.py": a}, "submit": True} for a in adds],
+           convergence_reviewer=[{"reply": recheck(finding("F1"))}, {"reply": APPROVED}])
+    env.office("dispatch", "T1", check=0)
+    first = _triples(env)[0]
+    other = "claude/claude-opus-5-5@high" if first.startswith("codex") else "codex/gpt-6-luna@xhigh"
+    env.office("rerun", "T1", "--fresh", "--review-as", other, check=0)
+    assert _triples(env)[-1] == other, _triples(env)
+
+
+def test_a_pinned_lane_review_only_rerun_never_resumes_the_earlier_reviewer(env, monkeypatch):
+    _round_two_unavailable(env)
+    first = _triples(env)[0]
+    con = env.con()
+    con.execute("UPDATE tasks SET review_override_json=? WHERE id='T1'",
+                (json.dumps({"as": first, "cli": None, "external": False, "by": "user"}),))
+    con.commit()
+    seen = _spy_resume(monkeypatch)
+    env.script(convergence_reviewer=[{"reply": APPROVED}])
+    env.office("review", "L-T1", check=0)
+    assert seen == [None], seen
+    assert _pin(env)["as"] == first
+
+
 @V31
 @pytest.mark.parametrize("stale", [True, False])
 def test_every_review_only_path_refuses_a_terminal_run(env, tmp_path, stale):
