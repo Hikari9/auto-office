@@ -43,9 +43,9 @@ export OFFICE_PINNED_LEGACY=1
 echo "== Ecosystem check"
 python3 scripts/check_ecosystem.py
 
-echo "== Unit tests (3.0 helpers + 3.1 runtime; visual tests skip without Playwright)"
+echo "== Full test suite (unit, integration, legacy, slow; visual tests skip without Playwright)"
 # Two workers: the local resource budget caps test parallelism at 2 on this class of machine.
-python3 -m pytest tests/ -q -n "${VALIDATE_WORKERS:-2}"
+python3 -m pytest tests/ -q -n "${VALIDATE_WORKERS:-2}" --all
 
 echo "== Adapter validation"
 for f in adapters/seed/*.yaml; do

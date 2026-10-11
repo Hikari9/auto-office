@@ -227,6 +227,10 @@ def planner_brief(con, run: dict, packet: dict) -> str:
             "Keep its ranking unless the task's nature or the run's context says otherwise: a precise plan lets a "
             "cheaper builder succeed, and parallel tasks may spread across close routes. Name a different route "
             "with `route:` and say why with `route_why:`.",
+            "Run-level `checks:` in ## Requirements are what integration and landing actually verify, not an "
+            "implicit full-suite guarantee. Inspect how this repo selects test tiers and declare its complete "
+            "gate for runtime changes. Auto-Office itself needs `scripts/validate.sh` (pytest `--all` covers "
+            "integration, legacy and slow); bare `pytest` defaults to a partial tier and will not authorize landing.",
             "Write each check for the tool versions the repo pins. Vitest 1.x rejects `--maxWorkers=N` on its "
             "own (\"minThreads and maxThreads must not conflict\"): cap workers with `--maxWorkers=N --minWorkers=1`.",
             "WHEN DONE run: office submit", "Then stop. Review findings, if any, come back through the orchestrator."]
