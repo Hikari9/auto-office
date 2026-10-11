@@ -70,6 +70,13 @@ Auto Office {ver}
   office disposition <scope>:<F-id> fix|fixed|dismissed|follow-up -- "<note>"
                                     close a non-blocking (APPROVED) finding, or a plan finding the orchestrator
                                     owns after plan review's round cap; fix routes it, no re-review
+  office review <T1|L-T1[:convergence|visual]> [--as <harness>/<model>[@effort] [--cli ARGV | --external]]
+                                    re-run only the review of the same revision when no reviewer answered it
+                                    (UNAVAILABLE, ATTENTION, INVALID_RESULT): on --as, else the next fallback route;
+                                    never an executor, no round spent, a pinned reviewer kept unless --as re-pins it
+  office review <T1|L-T1:convergence|visual> --report <file>
+                                    the orchestrator reviews it itself: recorded degraded, non-independent, never a
+                                    waiver; refused for the session that produced the work
   office review plan --quote "<user's words>" [--rounds N]
                                     the user's explicit request for another plan review (a new bounded cycle)
   office config [<key> [<value>]]   read or set preferences like git config (--list, --unset, --edit, --repo)
@@ -445,11 +452,17 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("note", nargs="*")
     s.add_argument("--quote", help="dismissed: the user's own words, which dismiss an open blocking lane finding")
     s = sp.add_parser("review", parents=[common])
-    s.add_argument("target", help="<scope>:convergence|visual, or plan (the user's request for another plan review)")
+    s.add_argument("target", help="a task (T1) or lane (L-T1[:convergence|visual]) to re-review, or plan (the user's request "
+                                  "for another plan review)")
     s.add_argument("--report", help="<scope>:<kind>: your review, in the reviewer reply format")
     s.add_argument("--quote", help="plan: the user's own words asking for another plan review")
     s.add_argument("--rounds", type=int, help="plan: at most this many substantive rounds (default 3)")
     s.add_argument("--inspected", nargs="*", default=[], help="visual: every screenshot you inspected")
+    s.add_argument("--as", dest="review_as", metavar="HARNESS/MODEL[@EFFORT]",
+                   help="<task|lane>: re-run only its review on this reviewer route (re-pins the reviewer)")
+    s.add_argument("--cli", dest="review_cli", metavar="ARGV", help="with --as: start exactly this reviewer argv in herdr")
+    s.add_argument("--external", dest="review_external", action="store_true",
+                   help="with --as: you start the reviewer; Office reads its review file")
     s = sp.add_parser("revoke", parents=[common])
     s.add_argument("task", help="a task id, a dispatch id, `integration` (its reviews), or <scope>:convergence|visual (a lane review)")
     s.add_argument("--reason", default="orchestrator revoke")
@@ -925,11 +938,16 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         from office import plans
         return plans.request_review(con, run, args.quote, args.rounds)
     if cmd == "review":
-        from office import convergence
-        if not args.report:
-            from office.state import Usage
-            raise Usage("missing-report", "a fallback review needs --report",
-                        next_step="office review <scope>:convergence|visual --report <file>")
+        from office import convergence, gates
+        from office.state import Usage
+        if not args.report:  # no report: re-run only the review on another reviewer route
+            return gates.review_only(con, run, args.target, review_as=args.review_as, review_cli=args.review_cli,
+                                     review_external=args.review_external)
+        if args.review_as or args.review_cli or args.review_external:
+            raise Usage("invalid-override", "--as/--cli/--external name a reviewer route; --report is your own review",
+                        next_step="office review <task|lane> --as <route>   or   office review <task|lane> --report <file>")
+        if not re.match(r"[LS]-", args.target, re.I):
+            return gates.orchestrator_task_review(con, run, args.target.upper(), Path(args.report).expanduser())
         return convergence.fallback_review(con, run, args.target, Path(args.report).expanduser(),
                                            inspected=args.inspected)
     if cmd == "revoke":

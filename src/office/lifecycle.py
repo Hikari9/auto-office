@@ -261,6 +261,8 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
             from office import gates
             for t in state.tasks(con, run["id"]):
                 gates.rerun_unavailable_checks(con, state.get_run(con, run["id"]), t)
+                # An UNAVAILABLE or ATTENTION task review retries on the same revision: no round, no executor, pin kept.
+                gates.rerun_unavailable_review(con, state.get_run(con, run["id"]), state.get_task(con, run["id"], t["id"]))
             from office import contract
             if contract.is_convergence(run):
                 # Runtime/evidence failures retry on the same revision; no round is spent.
