@@ -164,12 +164,12 @@ uv venv && uv pip install -e '.[visual,test]'
 To put a checkout on your PATH as the installed runtime:
 
 ```bash
-uv tool install --force --reinstall --no-cache "auto-office[visual] @ <checkout>"
+uv tool install --force --reinstall-package auto-office "auto-office[visual] @ <checkout>"
 office install
 office doctor
 ```
 
-Why `--reinstall --no-cache`? `uv` can otherwise reuse a cached wheel from an older commit with the same release number. `office doctor` should report that the install matches its source checkout and commit.
+Why `--reinstall-package auto-office`? `uv` can otherwise reuse a cached wheel from an older commit with the same release number. This rebuilds only the Auto Office package and keeps dependencies such as playwright cached. `--reinstall` or `--no-cache` would re-download every dependency. `office doctor` should report that the install matches its source checkout and commit.
 
 > **Cross-release note:** runs are pinned to their Auto Office MAJOR.MINOR line. A PATCH upgrade is served by the newest registered patch on that line. Crossing a MAJOR/MINOR is explicit with `office upgrade`; do not overwrite the runtime environment for active runs on an older line without pinning that runtime first.
 
@@ -706,7 +706,7 @@ Tests use isolated homes and scripted fake harness binaries; they do not touch a
 When changing Auto Office itself, reinstall the checkout before dogfooding it:
 
 ```bash
-uv tool install --force --reinstall --no-cache "auto-office[visual] @ <checkout>"
+uv tool install --force --reinstall-package auto-office "auto-office[visual] @ <checkout>"
 office install
 office doctor
 ```
