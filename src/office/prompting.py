@@ -64,9 +64,8 @@ def prompt(con, run: dict, target: str | None, text: str) -> Result:
         raise Refused("dispatch-ended", f"{d['id']} ({who}) has no live agent; nothing is listening in its pane",
                       scope=who, next_step=nxt)
     try:
-        fence = dispatch.fenced_pane(run, d)
-        pane = fence.pane
-        got = dispatch.submit_prompt(pane, text, pane=pane, guard=fence.guard)
+        with dispatch.fenced_pane(run, d) as pane:
+            got = dispatch.submit_prompt(pane, text, pane=pane)
         seen = dispatch._pane_identity(pane, named=True)
     except dispatch.PaneMismatch as exc:
         raise Refused("pane-mismatch", f"{exc}; refusing to send the prompt", scope=who,

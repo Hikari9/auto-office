@@ -286,7 +286,7 @@ def test_manual_prompt_delivers_to_a_pane_that_is_this_dispatchs_in_real_herdr_j
     sent = []
 
     def submit(name, text, *, pane=None, guard=None):
-        with guard():
+        with pane.guard():  # the pane the fence yields carries its send guard
             sent.append((name, text, pane))
         return "landed"
     monkeypatch.setattr(dispatch, "submit_prompt", submit)
@@ -348,7 +348,6 @@ def test_manual_prompt_refuses_a_pane_reassigned_after_the_identity_check_and_se
 def test_a_send_waits_for_the_pane_lock_so_a_pane_assignment_never_interleaves_with_it(monkeypatch, tmp_path):
     from threading import Event
     run, d = _live_pane(monkeypatch, tmp_path)
-    fence = dispatch.fenced_pane(run, d)
     held, release, sent = Event(), Event(), Event()
 
     def assignment():
@@ -356,18 +355,19 @@ def test_a_send_waits_for_the_pane_lock_so_a_pane_assignment_never_interleaves_w
             held.set()
             assert release.wait(timeout=3)
 
-    def send():
-        with fence.guard():
-            sent.set()
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        a = pool.submit(assignment)
-        assert held.wait(timeout=3)
-        b = pool.submit(send)
-        assert not sent.wait(timeout=0.2), "the send went ahead while a pane assignment held the lock"
-        release.set()
-        a.result(timeout=3)
-        b.result(timeout=3)
-    assert sent.is_set()
+    with dispatch.fenced_pane(run, d) as pane:  # the identity check is done; the lock is free again
+        def send():
+            with pane.guard():
+                sent.set()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            a = pool.submit(assignment)
+            assert held.wait(timeout=3)
+            b = pool.submit(send)
+            assert not sent.wait(timeout=0.2), "the send went ahead while a pane assignment held the lock"
+            release.set()
+            a.result(timeout=3)
+            b.result(timeout=3)
+        assert sent.is_set()
 
 
 def test_inspect_optional_pane_column_in_old_schema():

@@ -24,7 +24,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, NamedTuple
+from typing import Callable
 
 try:
     import termios
@@ -2121,9 +2121,9 @@ class PaneMismatch(Exception):
     """Herdr reports a pane identity that contradicts the dispatch about to be sent to."""
 
 
-class Fence(NamedTuple):
-    """A pane shown to be the dispatch's own, and the guard every send into it passes through."""
-    pane: str
+class FencedPane(str):
+    """A pane id shown to be the dispatch's own. `guard` is the context manager every send into it passes through
+    (`_send_guard`); `submit_prompt(..., pane=<FencedPane>)` uses it."""
     guard: Callable[[], contextlib.AbstractContextManager]
 
 
@@ -2158,11 +2158,12 @@ def _guarded_herdr(guard):
     return send
 
 
-def fenced_pane(run: dict, dispatch: dict) -> Fence:
-    """The dispatch's recorded pane, once its reported cwd, agent and session are shown to be
-    this dispatch's own; else raise PaneMismatch. The pane lock is held for the check only.
-    Send a prompt into a live agent's pane through `Fence.guard` (`submit_prompt(..., guard=)`):
-    it re-checks the reservation immediately before each send."""
+@contextlib.contextmanager
+def fenced_pane(run: dict, dispatch: dict):
+    """Yield the dispatch's recorded pane (a `FencedPane`) once its reported cwd, agent kind and name, and session are
+    shown to be this dispatch's own; else raise PaneMismatch. The pane lock is held for the check only: send a
+    prompt into the pane with `submit_prompt(..., pane=pane)`, which passes each send through `pane.guard` to
+    re-check the reservation inside the lock immediately before it."""
     pane = dispatch["pane_id"]
     worktree = dispatch.get("worktree")
     with _pane_lock(run):
@@ -2170,7 +2171,9 @@ def fenced_pane(run: dict, dispatch: dict) -> Fence:
                                            agent=herdr_agent_name(dispatch["id"]), kind=_herdr_kind(run, dispatch))
     if mismatch:
         raise PaneMismatch(mismatch)
-    return Fence(pane, _send_guard(run, dispatch, pane))
+    fenced = FencedPane(pane)
+    fenced.guard = _send_guard(run, dispatch, pane)
+    yield fenced
 
 
 def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
@@ -2870,9 +2873,9 @@ def submit_prompt(name: str, text: str, *, pane: str | None = None, guard=None) 
     submitted, pressing Enter for it when it is left in the composer. Returns
     'landed', 'held' (still unsubmitted after the bounded Enters) or '' (no
     landed signal, nothing left in the composer). Never sends the text twice.
-    `guard` (`Fence.guard`) wraps each send; it may raise PaneMismatch."""
+    `guard` (a fenced pane's `.guard`, taken from `pane` when it is one) wraps each send; it may raise PaneMismatch."""
     timeout = _land_timeout()
-    herdr = _guarded_herdr(guard)
+    herdr = _guarded_herdr(guard or getattr(pane, "guard", None))
     baseline = _ctx_k(_pane_view(name))
     herdr("agent", "prompt", name, text)
     if _prompt_landed(name, timeout, baseline_ctx=baseline) == "landed":
@@ -4767,8 +4770,8 @@ def job_notify_worker(con, run: dict, job: dict) -> dict:
         return {"sent": False}
     text = payload.get("text", "office status has an update for you.")
     try:
-        fence = fenced_pane(run, d)
-        landed = submit_prompt(fence.pane, text, pane=fence.pane, guard=fence.guard)
+        with fenced_pane(run, d) as pane:
+            landed = submit_prompt(pane, text, pane=pane)
     except PaneMismatch as exc:
         with db.transaction(con):
             state.emit(con, run, "prompt", f"{d.get('task_id') or d['id']} {d['id']}: native nudge refused, pane "
