@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from hypothesis import example, given, strategies as st
 
-from conftest import GOOD_ADD, approved_run
+from conftest import GOOD_ADD, Env, _activate, approved_run, start_inline
 from office import bughint, cli, guide, state
 
 pytestmark = pytest.mark.approved
@@ -229,15 +229,23 @@ def test_unavailable_checks_for_a_missing_user_command_print_no_hint(run):
     assert code == 0 and not _hints(out), out
 
 
-def test_a_real_missing_check_command_leaves_no_hint(env):
+@pytest.fixture
+def fresh_env(request, tmp_path, monkeypatch):
+    """An Env with no run yet: the module is `approved`, and a second run would make `start` ambiguous."""
+    e = Env(tmp_path, monkeypatch)
+    e.trust_snapshots = request.getfixturevalue("_trust_snapshots")
+    return _activate(e, monkeypatch)
+
+
+def test_a_real_missing_check_command_leaves_no_hint(fresh_env):
     """End to end: a plan check naming a command that does not exist ends UNAVAILABLE and is not a defect."""
+    env = fresh_env
     plan = ("# Plan\n\n## Requirements\ndone:\n- add() returns the sum\nblast_radius: repo\n\n## Tasks\n"
             "### T1: Implement add\nscope: calc.py\ndepends: none\nchecks: office-no-such-command-xyz --run\n"
             "accept:\n- calc.add(2, 3) == 5\nvisual: none\n")
     env.trust()
     env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
                convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
-    from conftest import start_inline
     start_inline(env, plan=plan)
     env.office("approve", "plan", "--quote", "approved", check=0)
     env.office("dispatch", "T1", check=0)
