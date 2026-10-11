@@ -125,6 +125,12 @@ def dispatch_base(env, tid: str) -> str:
                              (task_row(env, tid)["current_dispatch_id"],)).fetchone()[0]
 
 
+def anchors(env, commit: str) -> list[str]:
+    """The refs/office/<run> refs that point at `commit`: what keeps a synthetic commit out of gc's reach."""
+    out = env.git("for-each-ref", "--points-at", commit, "--format=%(refname)", "refs/office/")
+    return [ref for ref in out.split() if ref.startswith(f"refs/office/{run_id(env)[:8]}/")]
+
+
 def test_a_clean_multi_parent_base_contains_every_parent(env):
     fan_in_run(env)
     c1 = accept_on_base(env, "T1", {"calc.py": GOOD_ADD, "registry.txt": edit_line(2, "t1 was here")})
@@ -133,6 +139,9 @@ def test_a_clean_multi_parent_base_contains_every_parent(env):
     assert code == 0, out
     base = dispatch_base(env, "T3")
     assert is_ancestor(env, c1, base) and is_ancestor(env, c2, base), "both parents are in the base"
+    assert base not in (c1, c2) and anchors(env, base), "the synthetic combined base is anchored by a refs/office ref"
+    env.git("gc", "-q", "--prune=now")
+    assert env.git("cat-file", "-t", base).strip() == "commit"
     wt = Path(env.con().execute("SELECT worktree FROM dispatches WHERE id=?",
                                 (task_row(env, "T3")["current_dispatch_id"],)).fetchone()[0])
     merged = (wt / "registry.txt").read_text()
@@ -252,6 +261,7 @@ def test_a_rerun_records_the_combined_base_of_all_accepted_dependencies(env):
     assert second != first
     base = dispatch_base(env, "T3")
     assert is_ancestor(env, new1, base) and is_ancestor(env, new2, base), "the recorded base holds both new parents"
+    assert anchors(env, base), "the restack's combined base is anchored by a refs/office ref"
     wt = Path(env.con().execute("SELECT worktree FROM dispatches WHERE id=?", (second,)).fetchone()[0])
     assert is_ancestor(env, new1, "HEAD", wt) and is_ancestor(env, new2, "HEAD", wt)
 

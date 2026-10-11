@@ -507,7 +507,8 @@ def _merge_in_scratch(repo: str, a: str, b: str) -> tuple[str, list[str]]:
 def combine(run: dict, parents: list[tuple[str, str]]) -> str:
     """One commit containing every `(label, commit)` head. A head that is an ancestor of another adds
     nothing; the rest are merged without touching any worktree. Raises CombineConflict naming the
-    conflicting pair and paths, or GitError when git cannot merge (merge-tree needs git 2.38)."""
+    conflicting pair and paths, or GitError when git cannot merge (merge-tree needs git 2.38). Each commit it
+    creates is anchored by a `refs/office/<run>/combine/<sha>` ref."""
     repo = run["repo_root"]
     acc = None
     seen: list[tuple[str, str]] = []
@@ -527,6 +528,9 @@ def combine(run: dict, parents: list[tuple[str, str]]) -> str:
             acc = paths.git(repo, "commit-tree", tree, "-p", acc, "-p", commit, "-m",
                             f"office: combine {', '.join(l for l, _ in [*seen, (label, commit)])}\n\n"
                             f"{paths.office_trailer(run['id'])}", env={**os.environ, **paths.commit_identity_env(repo)})
+            # No branch holds this commit: a ref under the run's namespace keeps gc from pruning the base a
+            # dispatch records, and `prune` deletes it with the run's other refs/office/<run>/ refs.
+            paths.git(repo, "update-ref", f"refs/office/{run['id'][:8]}/combine/{acc}", acc)
         seen.append((label, commit))
     return acc
 
