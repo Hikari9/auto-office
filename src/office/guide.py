@@ -18,6 +18,7 @@ from office.util import atomic_write_text, short
 ORCH_EVENT_KINDS = None  # every orchestrator-audience event
 
 IDLE_STALL_DEFAULT_S = 60.0
+BUG_HINT_LIMIT = 5
 
 
 def idle_stall_s() -> float:
@@ -340,6 +341,20 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     return res
 
 
+def add_bug_hints(con, run: dict, res: Result) -> Result:
+    """Attach the run's current `bug?:` lines to a status-shaped result as `data["bug_hints"]`; the CLI prints
+    them and `--json` carries them as a `bug_hints` list. Read-only and best effort. A worker is not told:
+    it never files an Office defect. The session-start hook calls `status` directly and never gets hints."""
+    if os.environ.get("OFFICE_DISPATCH_ID"):
+        return res
+    from office import bughint
+    try:
+        res.data["bug_hints"] = bughint.lines(bughint.collect(con, run["id"]), limit=BUG_HINT_LIMIT)
+    except Exception:  # a hint must never fail the command it rides on
+        pass
+    return res
+
+
 def _quota_unknown_note(con, task: dict) -> str | None:
     """A live task whose current dispatch was routed while its harness quota was
     unknown: unknown is scored conservatively, never as unlimited (#450)."""
@@ -611,7 +626,7 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
             elif not (stuck or changed or news or pending):
                 res.lines.insert(1, f"wait: nothing new in {int(timeout)}s")
                 res.exit_code = 124
-            return res
+            return add_bug_hints(con, run, res)
         time.sleep(poll)
 
 
