@@ -513,7 +513,10 @@ def test_reviewer_resume_argv_comes_from_the_recorded_id_after_the_pane_closed(l
 
 @pytest.mark.approved
 def test_pane_launch_starts_claude_with_the_assigned_id_and_never_polls_herdr_for_one(env, monkeypatch):
+    from office import dispatch
     from test_herdr_agent_launch import _calls, launch_in_herdr
+    polled = []
+    monkeypatch.setattr(dispatch, "_capture_session", lambda name: polled.append(name))
     state_file, run, d, ddir, res = launch_in_herdr(env, monkeypatch, reads=["Working (1s • esc to interrupt)"],
                                                     adapter="claude", model="fake-model", effort="high")
     assert res["launcher"] == "herdr"
@@ -522,6 +525,9 @@ def test_pane_launch_starts_claude_with_the_assigned_id_and_never_polls_herdr_fo
     calls = _calls(state_file)
     start = next(c for c in calls if c[:2] == ["agent", "start"])
     assert start[-2:] == ["--session-id", session]
-    assert not any(c[:2] == ["agent", "get"] for c in calls), "herdr was polled for an id Office assigned"
+    assert not polled, "herdr was polled for an id Office assigned"
+    # The one `agent get` is the fail-closed identity fence (right after its `pane get`), not a session poll.
+    gets = [i for i, c in enumerate(calls) if c[:2] == ["agent", "get"]]
+    assert len(gets) == 1 and calls[gets[0] - 1][:2] == ["pane", "get"], calls
     ledger_rows = [json.loads(line) for line in (Path(ddir).parents[1] / "panes.jsonl").read_text().splitlines()]
     assert ledger_rows[-1]["session_id"] == session

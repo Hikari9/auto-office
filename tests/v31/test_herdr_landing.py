@@ -221,9 +221,14 @@ def _reviewer_reprompt(env, monkeypatch, reads):
     monkeypatch.setenv("OFFICE_HERDR_KEY_DELAY", "0")
     monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_WAIT", "0")
     monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_POLL", "0")
-    from office import gates, review_parse
+    from office import dispatch, gates, review_parse
     d = {**d, "launcher": "herdr", "pane_id": "w1:p7", "role": "code_reviewer"}
     run = {**run, "gates": {"review_reprompt_max": 1}}
+    # Herdr holds this reviewer in its pane: the fail-closed fence types only into a pane it shows to be the dispatch's own.
+    data = json.loads(state_file.read_text())
+    data["pane_agents"] = {d["pane_id"]: dispatch.herdr_agent_name(d["id"])}
+    data["pane_kinds"] = {d["pane_id"]: dispatch._herdr_kind(run, d)}
+    state_file.write_text(json.dumps(data))
     con = env.con()
     try:
         got = gates._reprompt_until_valid(con, run, d, env.tmp, env.tmp / "reply.txt", review_parse.parse(""),

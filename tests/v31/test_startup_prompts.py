@@ -20,6 +20,7 @@ BRANCH = r'''elif os.environ.get("FAKE_HERDR_UPDATE") and args[:2] == ["agent", 
     result = {{"error": {{"code": os.environ.get("FAKE_HERDR_UPDATE_CODE", "agent_not_ready"),
                           "message": "agent is blocked during startup"}}}}
     data.setdefault("pane_agents", {{}})[args[args.index("--pane") + 1]] = args[2]
+    data.setdefault("pane_kinds", {{}})[args[args.index("--pane") + 1]] = args[args.index("--kind") + 1]
     data["update"] = True
 elif args[:2] == ["pane", "get"] and os.environ.get("FAKE_HERDR_PANE_GONE") and data.get("update_reads", 0) >= 2:
     json.dump(data, open(state, "w"))
@@ -44,6 +45,9 @@ elif args[:2] == ["pane", "send-keys"] and data.get("update"):
             data["update"] = False
 elif args[:2] == ["agent", "get"] and data.get("update"):
     result = {{"agent": {{"name": args[2], "agent_status": "blocked", "launch_pending": True}}}}
+    for pane, name in data.get("pane_agents", {{}}).items():
+        if name == args[2]:
+            result["agent"].update({{"pane_id": pane, "agent": data.get("pane_kinds", {{}}).get(pane)}})
 '''
 
 
