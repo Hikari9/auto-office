@@ -261,7 +261,8 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
     if review_cli and review_external:
         raise Usage("invalid-override", "a CLI review and an external review are mutually exclusive")
     if review_as is not None:
-        candidates.declared_decision(review_as, flag="--review-as")  # validates the route's shape
+        # the route's shape and capability, before any pin is written
+        candidates.declared_decision(review_as, flag="--review-as", role="code_reviewer", config=state.pinned_config(run))
     task = state.get_task(con, run["id"], tid)
     if task is None:
         raise Usage("unknown-task", f"no task {tid}")

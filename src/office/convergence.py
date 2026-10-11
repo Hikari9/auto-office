@@ -694,9 +694,11 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
         resume = _same_reviewer(con, run, scope["id"], "convergence_review", int(gate.get("cycle") or 1))
         # A user-pinned reviewer (office dispatch --review-as) on any lane task reviews the lane.
         pinned = next((t["review_override"] for t in tasks if t.get("review_override")), None)
-        away = job["payload"].get("exclude_routes")  # a review-only re-run: another reviewer, never the earlier session
+        away = job["payload"].get("exclude_routes")
+        # A review-only re-run starts a new reviewer, never the earlier session.
         outcome = gates.run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
-                                     exclude=exclude or None, resume_from=resume if not (exclude or away or pinned) else None,
+                                     exclude=exclude or None,
+                                     resume_from=resume if not (exclude or job["payload"].get("review_only")) else None,
                                      review_override=pinned, prefer_not=away)
     finally:
         gates.remove_checkout(run, checkout)
@@ -829,7 +831,8 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
     away = job["payload"].get("exclude_routes")
     outcome = gates.run_reviewer(con, run, gate, "visual_reviewer", brief, cwd=evdir, visual=True, images=images,
                                  include_dirs=[evdir] + sorted({i.parent for i in images}), kind="vision",
-                                 exclude=exclude or None, resume_from=resume if not (exclude or away) else None,
+                                 exclude=exclude or None,
+                                 resume_from=resume if not (exclude or job["payload"].get("review_only")) else None,
                                  prefer_not=away)
     parsed = outcome.get("parsed")
     if parsed is not None:
@@ -1696,6 +1699,8 @@ def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[s
     if not m or (m.group(2) and kind is None):
         raise Usage("bad-review-target", f"cannot review {spec!r}", next_step="office review L-T1[:convergence|visual] --as <route>")
     run = state.get_run(con, run["id"])
+    if state.is_terminal(run):
+        raise Refused("run-terminal", f"{run['id'][:8]} is {run['phase']}; nothing to review")
     scope = find_scope(con, run, m.group(1))
     if scope is None:
         raise Usage("unknown-scope", f"no lane or shared scope {m.group(1)}", next_step="office inspect convergence")
@@ -1713,13 +1718,12 @@ def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[s
         for tid in scope["tasks"]:  # a visual gate of the same call takes the next fallback route
             state.update_task(con, run["id"], tid, review_override=pin)
     st = scope_state(run, scope["id"])
-    st = scope_state(run, scope["id"])
     pinned = pin or next((t["review_override"] for t in (state.get_task(con, run["id"], tid) for tid in scope["tasks"])
                           if t and t.get("review_override")), None)
     lines = []
     for g in blocked:
         visual = g["kind"] == "visual"
-        payload: dict = {"scope": scope["id"]}
+        payload: dict = {"scope": scope["id"], "review_only": True}
         if visual or not pinned:
             tried = gates.tried_reviewer_routes(con, "g.run_id=? AND g.scope=? AND g.kind=? AND g.input_key=?",
                                                 (run["id"], scope["id"], g["kind"], g["input_key"]))
@@ -1759,6 +1763,8 @@ def fallback_review(con, run: dict, spec: str, report: Path, *, inspected: list[
                       next_step="rewrite it in the review format, then retry")
     with db.transaction(con):
         run = state.get_run(con, run["id"])
+        if state.is_terminal(run):
+            raise Refused("run-terminal", f"{run['id'][:8]} is {run['phase']}; nothing to review")
         scope = find_scope(con, run, scope_id)
         if scope is None:
             raise Usage("unknown-scope", f"no lane or shared scope {scope_id}")

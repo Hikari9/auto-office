@@ -233,6 +233,8 @@ def orchestrator_task_review(con, run: dict, tid: str, report: Path) -> Result:
                             next_step="rewrite it in the review format, then retry")
     with db.transaction(con):
         run = state.get_run(con, run["id"])
+        if state.is_terminal(run):
+            raise Refused("run-terminal", f"{run['id'][:8]} is {run['phase']}; nothing to review")
         task = state.get_task(con, run["id"], tid)
         code = unavailable_review_block(con, run, task) if task else None
         if code is None:
@@ -294,6 +296,8 @@ def review_only(con, run: dict, target: str, *, review_as: str | None = None, re
                         next_step="office review L-<task>[:convergence|visual] --as <route> (office inspect convergence lists the scopes)")
         with db.transaction(con):
             run = state.get_run(con, run["id"])
+            if state.is_terminal(run):
+                raise Refused("run-terminal", f"{run['id'][:8]} is {run['phase']}; nothing to review")
             task = state.get_task(con, run["id"], tid)
             if task is None:
                 raise Usage("bad-review-target", f"{target!r} is not a task, lane or shared scope",

@@ -499,8 +499,7 @@ def test_a_lane_review_only_on_the_named_route_never_resumes_the_earlier_reviewe
     assert [g["review_status"] for g in _gates(env, "convergence_review")][:1] == ["COMPLETED"]
     first = _triples(env)[0]
     other = "claude/claude-opus-5-5@high" if first.startswith("codex") else "codex/gpt-6-luna@xhigh"
-    if _gates(env, "convergence_review")[-1]["review_status"] != "UNAVAILABLE":
-        pytest.skip("the scripted fakes did not leave round 2 unavailable")
+    assert _gates(env, "convergence_review")[-1]["review_status"] == "UNAVAILABLE"
     env.script(convergence_reviewer=[{"reply": APPROVED}])
     env.office("review", "L-T1", "--as", other, check=0)
     assert _triples(env)[-1] == other, _triples(env)
@@ -524,6 +523,8 @@ def test_a_visual_review_only_takes_the_next_fallback_route_and_never_a_user_pin
     assert [g["kind"] for g in _gates(env, "visual")] == ["visual", "visual"] and len(_gates(env, "convergence_review")) == 1
     env.office("resume", check=0)  # the queued re-run starts as the visual reviewer
     assert _scope(env, "L-T1")["status"] == "approved", _triples(env, "visual_reviewer")
+    # only one vision route exists here: the preference to start away from it gives way instead of blocking the review
+    assert {_last_triple(env, "visual_reviewer")} == tried, _triples(env, "visual_reviewer")
 
 
 @V31
@@ -593,14 +594,114 @@ def test_the_reprompt_failure_hint_names_the_lane_gate_to_re_review(env):
     assert _hint(env, gid).startswith("office review L-T1:convergence --as <harness>/<model>")
 
 
+def _round_two_unavailable(env):
+    """Round 1 completed (RECHECK) on route A; the round-2 review of the repaired lane returned no verdict."""
+    adds = [GOOD_ADD + f"# r{i}\n" for i in range(3)]
+    _start(env, executor=[{"write": {"calc.py": a}, "submit": True} for a in adds],
+           convergence_reviewer=[{"reply": recheck(finding("F1"))}, {"exit": 1}])
+    env.office("dispatch", "T1", check=0)
+    env.office("rerun", "T1", "--fresh", check=0)
+    assert [g["review_status"] for g in _gates(env, "convergence_review")][0] == "COMPLETED"
+    assert _gates(env, "convergence_review")[-1]["review_status"] == "UNAVAILABLE"
+
+
+def _spy_resume(monkeypatch):
+    from office import gates
+    real, seen = gates.run_reviewer, []
+
+    def spy(con, run, gate, role, brief, **kw):
+        seen.append(kw.get("resume_from"))
+        return real(con, run, gate, role, brief, **kw)
+
+    monkeypatch.setattr(gates, "run_reviewer", spy)
+    return seen
+
+
+def test_a_lane_review_only_without_as_never_resumes_the_earlier_reviewer(env, monkeypatch):
+    _round_two_unavailable(env)
+    seen = _spy_resume(monkeypatch)
+    env.script(convergence_reviewer=[{"reply": APPROVED}])
+    env.office("review", "L-T1", check=0)
+    assert seen == [None], seen
+    assert _scope(env, "L-T1")["status"] == "approved"
+
+
+def test_a_pinned_reviewer_that_is_unchanged_keeps_resuming_its_session_across_rounds(env, monkeypatch):
+    adds = [GOOD_ADD + f"# r{i}\n" for i in range(3)]
+    _start(env, executor=[{"write": {"calc.py": a}, "submit": True} for a in adds],
+           convergence_reviewer=[{"reply": recheck(finding("F1"))}])
+    env.office("dispatch", "T1", "--review-as", _reviewer_name(), check=0)
+    seen = _spy_resume(monkeypatch)
+    env.office("rerun", "T1", "--fresh", check=0)
+    assert seen and seen[-1] is not None, seen  # a normal pinned round resumes; only a review-only re-run does not
+
+
+@V31
+@pytest.mark.parametrize("stale", [True, False])
+def test_every_review_only_path_refuses_a_terminal_run(env, tmp_path, stale):
+    """`stale`: the caller's run dict still says active while the database already says it ended."""
+    from office import convergence, gates, state
+    approved_run(env, executor=EXECUTOR, code_reviewer=[{"reply": "", "exit": 1}])
+    env.office("dispatch", "T1", check=0)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    con.execute("UPDATE runs SET phase='abandoned'")
+    con.commit()
+    caller = run if stale else {**run, "phase": "abandoned"}
+    report = tmp_path / "r.txt"
+    report.write_text(PASS)
+    for call in (lambda: gates.review_only(con, caller, "T1"),
+                 lambda: gates.orchestrator_task_review(con, caller, "T1", report)):
+        with pytest.raises(state.Refused) as err:
+            call()
+        assert err.value.category == "run-terminal"
+    assert len(_code_gates(env)) == 1 and task_row(env)["status"] == "blocked"
+
+
+def test_a_lane_fallback_and_review_only_refuse_a_terminal_run(env, tmp_path):
+    from office import convergence, gates, state
+    _start(env, executor=EXECUTOR, convergence_reviewer=[{"exit": 1}])
+    env.office("dispatch", "T1", check=0)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    con.execute("UPDATE runs SET phase='abandoned'")
+    con.commit()
+    report = tmp_path / "r.txt"
+    report.write_text(APPROVED)
+    for call in (lambda: convergence.fallback_review(con, run, "L-T1:convergence", report, inspected=[]),
+                 lambda: gates.review_only(con, run, "L-T1")):
+        with pytest.raises(state.Refused) as err:
+            call()
+        assert err.value.category == "run-terminal"
+    assert len(_gates(env, "convergence_review")) == 1 and _scope(env, "L-T1")["status"] == "unavailable"
+
+
+def test_rerun_review_as_needs_a_mode_when_the_task_is_not_blocked_on_its_review(env):
+    approved_run(env)
+    code, out = env.office("rerun", "T1", "--review-as", _reviewer_name())
+    assert code == 2 and "rerun-mode" in out, out
+    assert _pin(env) is None and not _executor_calls(env)
+
+
+def test_rerun_validates_the_review_route_before_it_pins_anything(env):
+    approved_run(env)
+    code, out = env.office("rerun", "T1", "--fresh", "--review-as", "pi/some-model@high")
+    assert code == 4 and "capability-missing" in out, out
+    assert _pin(env) is None
+
+
+def _reviewer_name():
+    return "claude/claude-opus-5-5@high"
+
+
 # ------------------------------------------------------------------ the re-prompt's pane identity fence
 
-def _reprompt(env, monkeypatch, fence, *, in_fence=(), gate_id=None, pane_id="w1:p7"):
+def _reprompt(env, monkeypatch, fence, *, in_fence=(), gate_id=None, pane_id="w1:p7", landed="landed"):
     from office import dispatch, gates, review_parse, state
     monkeypatch.setattr(gates, "_agent_alive", lambda name: True)
     sent = []
     monkeypatch.setattr(dispatch, "submit_prompt",
-                        lambda name, text, pane=None: sent.append((name, text, pane, bool(in_fence))) or "landed")
+                        lambda name, text, pane=None: sent.append((name, text, pane, bool(in_fence))) or landed)
     monkeypatch.setattr(dispatch, "fenced_pane", fence)
     monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_WAIT", "0")
     monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_POLL", "0")
@@ -653,3 +754,46 @@ def test_a_pane_that_is_not_the_reviewers_is_never_prompted(env, monkeypatch):
     assert sent == []
     assert "belongs to dispatch D9" in reason and "Office did not re-prompt it" in reason and "office resume" in reason, reason
     assert events and "re-prompt refused" in events[0]
+
+
+def _fenced(run, d):
+    import contextlib
+
+    @contextlib.contextmanager
+    def fence():
+        yield d["pane_id"]
+    return fence()
+
+
+def test_a_reprompt_that_stays_unsubmitted_names_the_review_only_command(env, monkeypatch):
+    _start(env, executor=EXECUTOR, convergence_reviewer=[GARBAGE])
+    env.office("dispatch", "T1", check=0)
+    gid = _gates(env, "convergence_review")[0]["id"]
+    sent, (_, _, reason), _ = _reprompt(env, monkeypatch, _fenced, gate_id=gid, landed="held")
+    assert len(sent) == 1 and "typed but unsubmitted" in reason, reason
+    assert "office review L-T1:convergence --as <harness>/<model>" in reason and "waive" not in reason, reason
+
+
+def test_a_pane_mismatch_names_the_review_only_command_for_its_gate(env, monkeypatch):
+    from office import dispatch
+    _start(env, executor=EXECUTOR, convergence_reviewer=[GARBAGE])
+    env.office("dispatch", "T1", check=0)
+    gid = _gates(env, "convergence_review")[0]["id"]
+
+    def refuse(run, d):
+        raise dispatch.PaneMismatch("pane w1:p7 belongs to dispatch D9, not D1")
+
+    sent, (_, _, reason), _ = _reprompt(env, monkeypatch, refuse, gate_id=gid)
+    assert sent == [] and "office review L-T1:convergence --as <harness>/<model>" in reason, reason
+
+
+def test_a_reviewer_with_no_recorded_pane_is_not_prompted(env, monkeypatch):
+    entered = []
+
+    def fence(run, d):
+        entered.append(d)
+        return _fenced(run, d)
+
+    _start(env, executor=EXECUTOR, convergence_reviewer=[GARBAGE])
+    sent, _, _ = _reprompt(env, monkeypatch, fence, pane_id=None)
+    assert sent == [] and entered == []
