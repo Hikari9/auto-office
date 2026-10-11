@@ -325,9 +325,12 @@ def visual_tasks(con, run: dict, scope: dict) -> list[tuple[dict, dict]]:
 
 def on_task_accepted(con, run: dict, task_id: str) -> None:
     """A task passed its own gate. Queue its lane once every lane task is
-    accepted, or record APPROVED cleanup. Caller holds the tx."""
+    accepted, or record APPROVED cleanup. A lane holding a task that is stale
+    against a dependency is not reviewed: that composition is about to be
+    restacked. Caller holds the tx."""
     for lane in lanes(con, run):
-        if task_id in lane["tasks"]:
+        if task_id in lane["tasks"] and not any(
+                gates.stale_dependency(con, run, state.get_task(con, run["id"], tid)) for tid in lane["tasks"]):
             _consider(con, run, lane)
     progress(con, state.get_run(con, run["id"]))
 

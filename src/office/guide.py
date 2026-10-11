@@ -148,6 +148,8 @@ def next_action(con, run: dict) -> str:
             if (t.get("pause_reason") or "").endswith("the session ended without submitting"):
                 return (f"{t['id']} {t['pause_reason']}: office rerun {t['id']} --resume (resubmit on the amended "
                         "contract) | --fresh")
+            if (t.get("pause_reason") or "").startswith("restack:"):
+                return f"{t['id']} {t['pause_reason']}: office rerun {t['id']} --resume | --fresh"
             return f"findings on {t['id']} wait for you: office rerun {t['id']} --resume | --fresh"
     for t in tasks:
         if t["status"] == "changes_required":
@@ -155,7 +157,7 @@ def next_action(con, run: dict) -> str:
             return (f"no action; {t['id']}'s worker is fixing its findings (if it stops: "
                     f"office rerun {t['id']} --resume | --fresh)")
     for t in tasks:
-        if t["status"] == "submitted":
+        if t["status"] in ("submitted", "accepted"):
             stale = gates_mod.stale_dependency(con, run, t)
             if stale:
                 return f"{t['id']} {stale}"
@@ -629,7 +631,7 @@ def _waiting_on(con, run: dict, task: dict) -> str:
             owner = gates_mod.owner_state(con, run, g) if g["status"] == "running" else ("", "")
             # An owner whose liveness cannot be read is shown, never reclaimed.
             parts.append(f"{g['kind']} {g['status']}" + (f" ({owner[1]})" if owner[0] == "unknown" else ""))
-        if task["status"] == "submitted" and not parts:
+        if task["status"] in ("submitted", "accepted") and not parts:
             from office import gates
             stale = gates.stale_dependency(con, run, task)
             if stale:
@@ -694,7 +696,7 @@ def piggyback(con, run: dict, res: Result) -> None:
 # Kinds that mean something failed or waits on the orchestrator. Everything else is informational.
 _URGENT_KINDS = frozenset({
     "task.blocked", "task.paused", "task.findings_queued", "task.scope_requested", "task.raised", "task.restack_needed",
-    "task.amend_undelivered", "submit.refused", "submit.rejected", "integration.conflict", "integration.failed",
+    "task.amend_undelivered", "submit.refused", "submit.rejected", "integration.conflict", "integration.stale", "integration.failed",
     "gate.unavailable", "gate.changes_required", "gate.attention", "gate.escalated", "gate.brief_defect",
     "plan.unavailable", "plan.changes_required", "plan.attention", "plan.escalated", "plan.defect",
     "plan.questions", "plan.contract_requested", "pr.error", "lease.revoked",
