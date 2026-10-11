@@ -49,7 +49,7 @@ Auto Office {ver}
                                     or a worker's `office raise`; a headless worker is queued the answer
   office dismiss <task|dispatch|--all>
                                     close the kept panes of ended dispatches (final text is saved first)
-  office self-improve               print the manual bug-filing workflow (no runtime reporter)
+  office self-improve               print the manual bug-filing workflow and the run's bug? signals
   office close                      finish the run after acceptance and landing
                                     (--landed-externally <pr>: its work merged through another PR)
   office benchmarks brief|submit <f> opted-in runs: one background refresh of missing benchmark scores
@@ -523,8 +523,12 @@ Landing and closeout never wait on this."""
 
 
 def emit(res: Result, args, ok: bool = True) -> int:
+    # `bug?:` hints ride in res.data["bug_hints"]: printed after the notices, a top-level `bug_hints` list in --json.
+    hints = res.data.get("bug_hints")
     if getattr(args, "json", False):
-        print(json.dumps({"ok": ok, "lines": res.lines, "notices": res.notices, "next": res.next, "data": res.data,
+        data = {k: v for k, v in res.data.items() if k != "bug_hints"}
+        print(json.dumps({"ok": ok, "lines": res.lines, "notices": res.notices, "next": res.next, "data": data,
+                          **({"bug_hints": hints} if hints is not None else {}),
                           **({"final": res.final} if res.final else {})},
                          indent=2, sort_keys=True, default=str))
         return res.exit_code
@@ -532,6 +536,7 @@ def emit(res: Result, args, ok: bool = True) -> int:
     if getattr(args, "verbose", False):
         out += res.verbose
     out += res.notices
+    out += hints or []
     if res.next:
         out.append(f"next: {res.next}")
     if res.final:
@@ -541,10 +546,12 @@ def emit(res: Result, args, ok: bool = True) -> int:
     return res.exit_code
 
 
-def emit_error(err: OfficeError, args) -> int:
+def emit_error(err: OfficeError, args, bug_hints: list[str] | None = None) -> int:
+    """`bug_hints` is None when no hint was looked for (no run resolved), else the `bug?:` lines to show."""
     if getattr(args, "json", False):
         print(json.dumps({"ok": False, "error": {"category": err.category, "message": err.message, "scope": err.scope,
-                                                 "preserved": err.preserved, "next": err.next_step, **err.data}},
+                                                 "preserved": err.preserved, "next": err.next_step, **err.data},
+                          **({"bug_hints": bug_hints} if bug_hints is not None else {})},
                          indent=2, sort_keys=True, default=str))
         return err.exit_code
     lines = [f"blocked: {err.category}: {err.message}"]
@@ -554,6 +561,7 @@ def emit_error(err: OfficeError, args) -> int:
         lines.append(f"scope: {err.scope}")
     if err.preserved:
         lines.append(f"preserved: {err.preserved}")
+    lines += bug_hints or []
     if err.next_step:
         lines.append(f"next: {err.next_step}")
     if err.data.get("final"):
@@ -598,9 +606,66 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "close":  # every office close path ends with its report line
             from office import closeout
             err.data.setdefault("final", closeout.done(f"stopped early ({err.category}); nothing closed or cleaned up"))
-        return emit_error(err, args)
+        return emit_error(err, args, _refusal_hints(err, args, argv))
+    except Exception as err:
+        from office import bughint  # the traceback and exit code stay as they were; the hint precedes them on stderr
+        print(bughint.line(bughint.internal_error_signal(err).text), file=sys.stderr)
+        raise
     except KeyboardInterrupt:
         return 130
+
+
+def _refusal_hints(err, args, argv: list[str]) -> list[str] | None:
+    """The `bug?:` line for a refusal of the command the run's `next:` names; None when no run was resolved."""
+    run_id = getattr(args, "_run_id", None)
+    if not run_id:
+        return None
+    from office import bughint, guide, state
+    if err.category in bughint.ROUTINE_REFUSALS:
+        return []
+    try:
+        con = _con()
+        try:
+            next_line = guide.next_action(con, state.get_run(con, run_id))
+        finally:
+            con.close()
+    except Exception:  # a hint must never replace the refusal it rides on
+        return None
+    signal = bughint.refusal_signal(err.category, args.cmd, argv, next_line)
+    return [bughint.line(signal.text)] if signal else []
+
+
+def _quiet_run_id(args) -> str | None:
+    """The run `office self-improve` reads, found without starting a process: --run, OFFICE_RUN_ID, else the one
+    run in this checkout's `.office/active` index (the stat-only projection the hooks read)."""
+    run_id = getattr(args, "run_arg", None) or os.environ.get("OFFICE_RUN_ID")
+    if run_id:
+        return run_id
+    from office import hooks
+    primary = hooks._primary_checkout(Path.cwd())
+    active = hooks._active_runs(primary) if primary else []
+    return active[0][0] if len(active) == 1 else None
+
+
+def _self_improve(args) -> Result:
+    """The workflow plus the run's current `bug?:` signals. Opens runs.db only when it exists and writes nothing."""
+    from office import bughint, paths, state
+    res = Result(lines=SELF_IMPROVE_STEPS.splitlines(),
+                 next="file each qualifying defect by hand as a sanitized GitHub issue")
+    run_id = _quiet_run_id(args)
+    if not run_id or not paths.runs_db().exists():
+        return res
+    try:
+        con = _con()
+        try:
+            run = state.find_run(con, run_id)
+            if run is not None:
+                res.data["bug_hints"] = bughint.lines(bughint.collect(con, run["id"]))
+        finally:
+            con.close()
+    except Exception:  # a hint never fails the command it rides on
+        pass
+    return res
 
 
 def _con():
@@ -638,8 +703,7 @@ def _run(args, unknown) -> int:
     cmd = args.cmd
     cwd = Path.cwd()
     if cmd == "self-improve":
-        return emit(Result(lines=SELF_IMPROVE_STEPS.splitlines(),
-                           next="file each qualifying defect by hand as a sanitized GitHub issue"), args)
+        return emit(_self_improve(args), args)
     if cmd == "_job":
         from office import jobs
         return jobs.main_job(args.job_id, args.job_attempt)
@@ -795,6 +859,7 @@ def _run(args, unknown) -> int:
                 res.notices.append(target.note)
             return emit(res, args)
         run = target.run
+        args._run_id = run["id"]
         res = _dispatch_command(con, run, args, unknown, cwd, target)
         if target.note:
             res.notices.append(target.note)
@@ -819,7 +884,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
             with db.transaction(con):
                 lifecycle.reconcile(con, run)
             jobs.kick(con, run["id"])
-        return guide.status(con, run, verbose=args.verbose, probe_panes=True)
+        return guide.add_bug_hints(con, run, guide.status(con, run, verbose=args.verbose, probe_panes=True))
     if cmd == "wait":
         from office import guide
         return guide.wait(con, run, timeout=args.timeout, poll=args.poll)
