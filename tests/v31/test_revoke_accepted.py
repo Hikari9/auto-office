@@ -230,3 +230,18 @@ def test_an_unchanged_tree_resubmit_after_revoke_and_rerun_is_ready(env):
     code, out = env.office("preflight", cwd=wt, env=wenv)
     assert code == 0 and "PREFLIGHT ready" in out and f"resubmit: {rev} is not accepted" in out, out
     assert "no open findings or amendments" not in out, out
+
+
+def test_a_revoke_of_a_blocked_task_with_no_amendment_delivery_is_not_restored_to_accepted(env):
+    """A refused submit blocked the task, but no amendment was delivered to it: nothing amendment-shaped demoted it,
+    so the revoke takes the lease back and pauses it rather than releasing the lease and restoring accepted."""
+    accepted = _accepted(env)
+    con = env.con()
+    con.execute("UPDATE tasks SET status='blocked', pause_reason='submit refused: outside-scope' WHERE id='T1'")
+    con.commit()
+    assert not con.execute("SELECT 1 FROM deliveries WHERE task_id='T1'").fetchone()
+    code, out = env.office("revoke", "T1", "--reason", "pane died")
+    t1 = task_row(env, "T1")
+    assert code == 0 and t1["status"] == "paused", (t1, out)
+    assert t1["accepted_revision_id"] == accepted["accepted_revision_id"]
+    assert "stays accepted" not in out and "lease revoked" in out, out

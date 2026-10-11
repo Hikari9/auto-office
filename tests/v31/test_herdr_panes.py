@@ -287,6 +287,7 @@ def test_label_refreshed_when_pr_lands_before_pane_id_is_recorded(env, monkeypat
     monkeypatch.setattr(dispatch, "write_agent_env", lambda *a, **k: Path("/dev/null"))
     monkeypatch.setattr(dispatch, "_shell_run", lambda *a, **k: True)
     monkeypatch.setattr(dispatch, "_record_launch", lambda *a, **k: None)
+    monkeypatch.setattr(dispatch, "_pane_identity_mismatch", lambda *a, **k: None)  # this test is about the label
     monkeypatch.setattr(dispatch, "_started_session", lambda out: "sess")
     monkeypatch.setattr(dispatch, "_set_dispatch", lambda *a, **k: None)
     monkeypatch.setattr(dispatch, "atomic_write_json", lambda *a, **k: None)

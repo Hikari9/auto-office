@@ -1039,11 +1039,14 @@ def revoke(con, run: dict, target: str, reason: str) -> Result:
 _REOPENED_FOR_WORK = ("RECHECK", "APPROVED cleanup", "restack:", "waiting for the amended")
 
 
-def _demoted_by_amendment(con, run_id: str, task: dict) -> bool:
+def _demoted_by_amendment(con, run_id: str, task: dict, pending: list) -> bool:
     """True when `task` is accepted, or left accepted work only by an amendment delivery and the relaunch or
-    refused submit that followed: it has no open task findings and no pause reason of `_REOPENED_FOR_WORK`."""
+    refused submit that followed: `pending` (its deliveries past the accepted revision) is the evidence, so a task
+    blocked for another reason has none, and it has no open task findings and no `_REOPENED_FOR_WORK` pause reason."""
     if task["status"] == "accepted":
         return True
+    if not pending:
+        return False
     if con.execute(f"SELECT 1 FROM findings WHERE run_id=? AND task_id=? AND {contract.TASK_WORK_FINDINGS}",
                    (run_id, task["id"])).fetchone():
         return False
@@ -1062,18 +1065,21 @@ def _revoke_standing(con, run_id: str, task: dict) -> tuple[str | None, str | No
     acceptance edits are enforced by the gate rerun the amendment triggered, and its delta is listed as unapplied.
     An unapplied amendment that is not ordinary (scope, interfaces, ownership) is changes_required naming it.
     A task that is not accepted now is restored only when an amendment delivery alone demoted it (`_demoted_by_amendment`):
-    open blocking findings (a convergence RECHECK, an APPROVED-cleanup fix), a restack or a hold reopened it without a
-    new revision, and that work is still owed. A cancelled task keeps its status."""
+    a task with no such delivery was blocked or paused for something else, open blocking findings (a convergence
+    RECHECK, an APPROVED-cleanup fix), a restack or a hold reopened it without a new revision, and that work is still
+    owed. A cancelled task keeps its status."""
     if task["status"] == "cancelled":
         return None, None, [], []
     rev_id = task.get("accepted_revision_id")
     rev = con.execute("SELECT applied_version FROM revisions WHERE id=?", (rev_id,)).fetchone() if rev_id else None
-    if rev is None or rev_id != task.get("current_revision_id") or not _demoted_by_amendment(con, run_id, task):
+    if rev is None or rev_id != task.get("current_revision_id"):
         return "paused", None, [], []
     pending = con.execute("SELECT d.amendment_id, COALESCE(a.class, 'contract') AS class FROM deliveries d "
                           "LEFT JOIN amendments a ON a.run_id=d.run_id AND a.id=substr(d.run_id, 1, 8) || ':' || d.amendment_id "
                           "WHERE d.run_id=? AND d.task_id=? AND d.target_version>? ORDER BY d.target_version",
                           (run_id, task["id"], rev["applied_version"] or 0)).fetchall()
+    if not _demoted_by_amendment(con, run_id, task, pending):
+        return "paused", None, [], []
     contract = list(dict.fromkeys(r["amendment_id"] for r in pending if r["class"] != "ordinary"))
     ordinary = [i for i in dict.fromkeys(r["amendment_id"] for r in pending) if i not in contract]
     if contract:
@@ -2035,30 +2041,89 @@ def _reserved_by(run: dict, pane: str) -> str | None:
     return _read_reservations(run).get(pane)
 
 
-def reported_identity(info: dict, agent: dict | None = None) -> dict:
-    """What Herdr reports for a pane: `pane get` carries the cwd, the agent KIND
-    (`agent`, e.g. "claude") and `agent_session.value`; the Office agent *name*
-    only exists on the `agent list` / `agent get` entry for that pane (`agent`).
-    None where it reports nothing."""
-    session = info.get("agent_session")
-    kind = info.get("agent")
-    return {"cwd": info.get("foreground_cwd") or info.get("cwd"),
-            "kind": kind or None,
-            "agent": (agent or {}).get("name") or None,
-            "session": session.get("value") if isinstance(session, dict) else None}
+def _reported_sessions(info: dict, record: dict) -> set[str]:
+    """Every session id Herdr reports for a pane and its agent record."""
+    running = info.get("agent")
+    found = set()
+    for node in (running if isinstance(running, dict) else {}, info, record):
+        shown = node.get("agent_session")
+        found.update(str(v) for v in (node.get("session_id"), node.get("agent_session_id"),
+                                      shown.get("value") if isinstance(shown, dict) else None) if v)
+    return found
 
 
-def _agent_at(pane: str) -> dict | None:
-    """The `agent list` entry whose pane is `pane`: Herdr's record of which named agent runs there."""
-    agents = _herdr_json(["agent", "list"]).get("agents")
-    return next((a for a in agents if isinstance(a, dict) and a.get("pane_id") == pane), None) \
-        if isinstance(agents, list) else None
+def reported_identity(info: dict, record: dict | None = None) -> dict:
+    """The cwd, agent and session Herdr reports for a pane (`pane get`) and, once
+    known, its agent record (`agent get`); None when it reports none."""
+    running = info.get("agent")
+    record = record or {}
+    shown = running.get("name") if isinstance(running, dict) else running
+    return {"cwd": info.get("foreground_cwd") or info.get("cwd"), "agent": record.get("name") or shown,
+            "session": min(_reported_sessions(info, record), default=None)}
 
 
-def _pane_identity(pane: str, *, named: bool = False) -> dict:
-    """The pane's reported identity (`reported_identity`); `named` also asks `agent list` for the agent name."""
-    info = _herdr_json(["pane", "get", pane]).get("pane") or {}
-    return reported_identity(info, _agent_at(pane) if named else None)
+def pane_snapshot(pane: str, agent: str | None = None) -> tuple[dict, dict]:
+    """What Herdr reports for the pane and, when `agent` is named, for that agent."""
+    info = _herdr_json(["pane", "get", pane]).get("pane")
+    record = _herdr_json(["agent", "get", agent]).get("agent") if agent else None
+    return (info if isinstance(info, dict) else {}), (record if isinstance(record, dict) else {})
+
+
+def _pane_identity_mismatch(run: dict, dispatch: dict, pane: str, cwd: Path, *,
+                            check_cwd: bool = True, agent: str | None = None, kind: str | None = None,
+                            snapshot: tuple[dict, dict] | None = None) -> str | None:
+    """Refuse a contradictory or unverifiable Herdr identity before crossing into a pane.
+
+    A pane Herdr cannot describe is refused. With `agent` (delivery into a started
+    agent) the pane must also prove it holds this dispatch's agent: Herdr's
+    `pane get` reports the agent kind, so the name comes from the `agent get`
+    record, which must be this agent's, in this pane, of this kind and session.
+    cwd and session are checked when Herdr reports them, as not every version
+    does and the dispatch-specific `_shell_run` marker confirms the setup ran.
+    """
+    try:
+        holder = _reserved_by(run, pane)
+    except ValueError as exc:
+        return f"pane {pane} cannot be trusted: {exc}"
+    if holder and holder != dispatch["id"]:
+        return f"pane {_identity_line(pane)} belongs to dispatch {_identity_line(holder)}, not {dispatch['id']} ({dispatch.get('task_id')})"
+    info, record = snapshot or pane_snapshot(pane, agent)
+    if not info:
+        return f"pane {_identity_line(pane)} cannot be inspected: Herdr reported no identity for it"
+    actual = info.get("foreground_cwd") or info.get("cwd")
+    if check_cwd and actual:
+        expected = os.path.realpath(str(cwd))
+        observed = os.path.realpath(str(actual))
+        if observed != expected and not observed.startswith(expected.rstrip(os.sep) + os.sep):
+            # A pane can report another task's path, never echo terminal control
+            # sequences from an untrusted shell path into the operator output.
+            return (f"pane {_identity_line(pane)} cwd {_identity_line(actual)} does not belong to {dispatch['id']} "
+                    f"({dispatch.get('task_id')}); expected {_identity_line(cwd)}")
+    running = info.get("agent")
+    token = running.get("name") or running.get("kind") if isinstance(running, dict) else running
+    if isinstance(running, dict) and not token:
+        return f"pane {_identity_line(pane)} has an agent without a verifiable identity"
+    if agent is None:
+        return f"pane {pane} already runs an agent; shell setup is unsafe for {dispatch['id']}" if token else None
+    if not token:
+        return f"pane {_identity_line(pane)} reports no agent, so {agent} for dispatch {dispatch['id']} is unverified"
+    if token not in (agent, kind or record.get("agent")):
+        return (f"pane {_identity_line(pane)} runs {_identity_line(token)}, "
+                f"not {_identity_line(agent)} for dispatch {dispatch['id']}")
+    recorded_session = dispatch.get("session_id")
+    if recorded_session and _reported_sessions(info, record) - {recorded_session}:
+        return f"pane {pane} session does not match dispatch {dispatch['id']}"
+    named = token == agent  # the pane itself names this agent; a bare kind needs the agent record to tie it
+    if record.get("name") not in ((agent, None) if named else (agent,)):
+        return (f"herdr does not report agent {_identity_line(agent)} for dispatch {dispatch['id']} "
+                f"(pane {_identity_line(pane)})")
+    listed_pane = record.get("pane_id")
+    if listed_pane != pane and (listed_pane or not named):
+        return (f"agent {_identity_line(agent)} is in pane {_identity_line(listed_pane or 'none')}, "
+                f"not {_identity_line(pane)} for dispatch {dispatch['id']}")
+    if kind and record.get("agent") not in (None, kind):
+        return f"agent {_identity_line(agent)} is a {_identity_line(record['agent'])}, not {_identity_line(kind)}"
+    return None
 
 
 def _herdr_kind(run: dict, dispatch: dict) -> str | None:
@@ -2069,52 +2134,6 @@ def _herdr_kind(run: dict, dispatch: dict) -> str | None:
     except (OSError, ValueError, AttributeError):
         kind = None
     return kind or dispatch.get("harness")
-
-
-def _pane_identity_mismatch(run: dict, dispatch: dict, pane: str, cwd: Path, *,
-                            check_cwd: bool = True, agent: str | None = None, kind: str | None = None,
-                            identity: dict | None = None) -> str | None:
-    """Refuse a *reported* contradictory Herdr identity before crossing into a pane.
-
-    Herdr versions do not all report cwd/session fields; the dispatch-specific
-    `_shell_run` marker separately confirms its setup ran. We never treat a
-    reported contradictory value as missing evidence or a successful prompt.
-    With `agent` (the expected Office agent name) the pane's agent kind must be
-    `kind`, `agent list` must name that agent at this pane and the reported
-    session must be the dispatch's. `identity` is a `_pane_identity` already read.
-    """
-    try:
-        holder = _reserved_by(run, pane)
-    except ValueError as exc:
-        return f"pane {pane} cannot be trusted: {exc}"
-    if holder and holder != dispatch["id"]:
-        return f"pane {_identity_line(pane)} belongs to dispatch {_identity_line(holder)}, not {dispatch['id']} ({dispatch.get('task_id')})"
-    seen = identity or _pane_identity(pane, named=agent is not None)
-    actual = seen["cwd"]
-    if check_cwd and actual:
-        expected = os.path.realpath(str(cwd))
-        observed = os.path.realpath(str(actual))
-        if observed != expected and not observed.startswith(expected.rstrip(os.sep) + os.sep):
-            # A pane can report another task's path, never echo terminal control
-            # sequences from an untrusted shell path into the operator output.
-            return (f"pane {_identity_line(pane)} cwd {_identity_line(actual)} does not belong to {dispatch['id']} "
-                    f"({dispatch.get('task_id')}); expected {_identity_line(cwd)}")
-    if agent is None:
-        if seen["kind"]:
-            return f"pane {pane} already runs an agent; shell setup is unsafe for {dispatch['id']}"
-        return None
-    if seen["agent"] and seen["agent"] != agent:
-        return (f"pane {_identity_line(pane)} runs {_identity_line(seen['agent'])}, "
-                f"not {_identity_line(agent)} for dispatch {dispatch['id']}")
-    if seen["kind"] and not seen["agent"]:
-        return f"pane {_identity_line(pane)} has an agent without a verifiable identity"
-    if kind and isinstance(seen["kind"], str) and seen["kind"] != kind:
-        return (f"pane {_identity_line(pane)} runs a {_identity_line(seen['kind'])} agent, "
-                f"not {_identity_line(kind)} for dispatch {dispatch['id']}")
-    recorded_session = dispatch.get("session_id")
-    if seen["session"] and recorded_session and seen["session"] != recorded_session:
-        return f"pane {pane} session does not match dispatch {dispatch['id']}"
-    return None
 
 
 class PaneMismatch(Exception):
@@ -2300,12 +2319,13 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     # The lock is held for the identity check only. Delivery waits (agent UI, landing
     # probes) run unlocked; each send re-checks the reservation inside the pane lock.
     with _pane_lock(run):
-        seen = _pane_identity(pane, named=True)
-        mismatch = _pane_identity_mismatch(run, dispatch, pane, cwd, agent=name, kind=herdr_kind, identity=seen)
+        snapshot = pane_snapshot(pane, name)
+        mismatch = _pane_identity_mismatch(run, dispatch, pane, cwd, agent=name, kind=herdr_kind, snapshot=snapshot)
+    reported = reported_identity(*snapshot)
     spec["pane_evidence"] = {"pane": pane, "dispatch": dispatch["id"],
                             "task": dispatch.get("task_id"), "expected_worktree": str(cwd),
-                            "reported_cwd": seen["cwd"], "reported_kind": seen["kind"], "reported_agent": seen["agent"],
-                            "reported_session": seen["session"], "mismatch": mismatch}
+                            "reported_cwd": reported["cwd"], "reported_agent": reported["agent"],
+                            "reported_session": reported["session"], "mismatch": mismatch}
     landed = False
     if not mismatch:
         try:

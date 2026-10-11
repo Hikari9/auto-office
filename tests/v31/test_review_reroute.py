@@ -812,6 +812,26 @@ def test_a_pane_mismatch_names_the_review_only_command_for_its_gate(env, monkeyp
     assert sent == [] and "office review L-T1:convergence --as <harness>/<model>" in reason, reason
 
 
+@pytest.mark.parametrize("snapshot", [
+    ({}, {}),
+    ({"agent": "claude"}, {}),
+    ({"agent": {}}, {}),
+    ({"agent": "claude"}, {"name": "someone-else", "pane_id": "w1:p7", "agent": "claude"}),
+    ({"agent": "claude"}, {"name": "office-D1", "pane_id": "w1:p9", "agent": "claude"}),
+], ids=["empty", "kind-only", "empty-agent", "other-name", "other-pane"])
+def test_an_empty_or_partial_herdr_report_never_receives_the_review_reprompt(env, monkeypatch, snapshot):
+    from office import dispatch
+    monkeypatch.setattr(dispatch, "pane_snapshot", lambda *a, **k: snapshot)
+    monkeypatch.setattr(dispatch, "herdr_agent_name", lambda _id: "office-D1")
+    _start(env, executor=EXECUTOR, convergence_reviewer=[GARBAGE])
+    env.office("dispatch", "T1", check=0)
+    gid = _gates(env, "convergence_review")[0]["id"]
+    sent, (_, _, reason), events = _reprompt(env, monkeypatch, dispatch.fenced_pane, gate_id=gid)
+    assert sent == [] and "Office did not re-prompt it" in reason, reason
+    assert "office review L-T1:convergence --as <harness>/<model>" in reason, reason
+    assert events and "re-prompt refused" in events[0]
+
+
 def test_a_reviewer_with_no_recorded_pane_is_not_prompted(env, monkeypatch):
     entered = []
 
