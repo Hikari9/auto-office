@@ -458,3 +458,14 @@ def test_an_unreachable_herdr_never_drops_the_own_tab(env, monkeypatch):
     assert dispatch._herdr_pane(run, env.repo) == "w1:p18"
     assert not any(c[:2] == ["tab", "create"] for c in _calls(state))
     assert json.loads(tab_file.read_text())["tab_id"] == "w1:tD"
+
+
+def test_label_appends_model_and_effort(env):
+    from office import dispatch
+    base = {"id": "D6bb5ffff", "role": "executor"}
+    assert dispatch.pane_label({"id": "r1"}, {**base, "harness": "claude", "model": "claude-opus-5-5", "effort": "high"}) \
+        == "plan executor D6bb5 [Claude Opus 5.5 (high)]"
+    assert dispatch.pane_label({"id": "r1"}, {**base, "harness": "agy", "model": "gemini-3.8-flash", "effort": "medium"}) \
+        == "plan executor D6bb5 [Gemini Flash 3.8 (medium)]"
+    assert dispatch.pane_label({"id": "r1"}, {**base, "harness": "codex", "model": "gpt-6-astra", "effort": "none"}) \
+        == "plan executor D6bb5 [GPT Astra 6]"

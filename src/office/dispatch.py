@@ -3205,9 +3205,33 @@ def _herdr_rename(pane: str, label: str) -> None:
         pass
 
 
+_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+
+def _ai_tag(harness, model, effort) -> str:
+    """`[Claude Opus 5.5 (high)]` / `[Gemini Flash 3.8 (medium)]`: a slug's words title-cased, version last."""
+    words = [w for w in str(model or "").split("-") if w]
+    if words and words[-1] in _EFFORTS:
+        effort = effort or words.pop()
+    ver, name, i = [], [], 0
+    while i < len(words):
+        w = words[i]
+        if w.replace(".", "").isdigit():
+            ver.append(w)
+        else:
+            name.append(w.upper() if w in ("gpt", "glm") else w.capitalize())
+        i += 1
+    if name and harness == "claude" and name[0] != "Claude":
+        name.insert(0, "Claude")
+    text = " ".join(name + [".".join(ver)] if ver else name)
+    if not text:
+        text = str(harness or "").capitalize()
+    return f"[{text}{f' ({effort})' if effort and effort != 'none' else ''}]" if text else ""
+
+
 def pane_label(run: dict, dispatch: dict, kind: str = "") -> str:
-    """What a human sees on a pane tab: `<task> <role> [PR#n] <short id>`, e.g.
-    `T3 executor PR#261 D4f2`. Integration and plan dispatches carry no task, so
+    """What a human sees on a pane tab: `<task> <role> [PR#n] <short id> [[Model Version (effort)]]`, e.g.
+    `T3 executor PR#261 D4f2 [Claude Opus 5.5 (high)]`. Integration and plan dispatches carry no task, so
     they lead with `integration` or `plan` (plus the integration PR when known)."""
     role = dispatch.get("role") or kind
     short = str(dispatch["id"])[:5]
@@ -3230,7 +3254,8 @@ def pane_label(run: dict, dispatch: dict, kind: str = "") -> str:
             con.close()
     except Exception:  # a label is cosmetic; fall back to the fields known without the DB
         pr = None
-    return " ".join(p for p in (scope, role, f"PR#{pr}" if pr else "", short) if p)
+    ai = _ai_tag(dispatch.get("harness"), dispatch.get("model"), dispatch.get("effort"))
+    return " ".join(p for p in (scope, role, f"PR#{pr}" if pr else "", short, ai) if p)
 
 
 def relabel_task_panes(run: dict, task_id: str) -> None:
