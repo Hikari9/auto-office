@@ -224,6 +224,56 @@ def test_a_branch_policy_refusal_is_not_recovered_or_pushed(env, monkeypatch):
     assert _head_of(env, bare, "T1") == t1_head and not _events(env, "pr.recovered")
 
 
+@pytest.mark.parametrize("mergeable,state", [("UNKNOWN", "UNKNOWN"), ("MERGEABLE", "BEHIND"), ("MERGEABLE", "DRAFT"),
+                                              ("UNKNOWN", "BLOCKED")], ids=["unknown", "not-up-to-date", "draft", "blocked"])
+def test_recovery_runs_only_when_github_reports_conflicting_or_dirty(env, monkeypatch, mergeable, state):
+    """`gh pr merge` can say "not mergeable" for reasons that are no conflict: GitHub's own mergeability decides."""
+    bare, _, _ = _run(env, monkeypatch, _plan("merge"))
+    t1_head = _head_of(env, bare, "T1")
+    s = gh(env)
+    s["merge_error"] = {"1": "X Pull request #1 is not mergeable: the merge commit cannot be cleanly created."}
+    s["mergeable"], s["merge_state"] = mergeable, state
+    (env.tmp / "gh.json").write_text(json.dumps(s))
+    code, out = env.office("land")
+    assert code == 4 and "merge-failed" in out, out
+    calls = gh(env)["calls"]
+    assert ["pr", "view", "1", "--json", "mergeable,mergeStateStatus"] in calls, calls
+    assert _head_of(env, bare, "T1") == t1_head and not _events(env, "pr.recovered"), "nothing was pushed"
+    assert "recovered" not in _task_pr(env, "T1") and "recovering" not in _task_pr(env, "T1")
+
+
+def test_a_conflicting_state_alone_does_not_recover_a_merge_that_failed_for_another_reason(env, monkeypatch):
+    bare, _, _ = _run(env, monkeypatch, _plan("merge"))
+    t1_head = _head_of(env, bare, "T1")
+    _conflict(env, 1, t1_head)
+    s = gh(env)
+    s["merge_error"] = {"1": "X Pull request #1 is not mergeable: the base branch policy prohibits the merge."}
+    (env.tmp / "gh.json").write_text(json.dumps(s))
+    code, out = env.office("land")
+    assert code == 4 and "merge-failed" in out and _head_of(env, bare, "T1") == t1_head, out
+
+
+def test_a_recovery_push_that_timed_out_does_not_claim_it_pushed_nothing(env, monkeypatch):
+    real = prs.push
+    monkeypatch.setattr(prs, "push", lambda run, dispatch, **kw: (False, "push timed out after 120s") if kw.get("force") else real(run, dispatch, **kw))
+    bare, _, _ = _run(env, monkeypatch, _plan("merge"))
+    _conflict(env, 1, _head_of(env, bare, "T1"))
+    code, out = env.office("land")
+    assert code == 4 and "recovery-push-failed" in out and "timed out" in out, out
+    assert "recovery pushed nothing" not in out and "may already hold the recovery merge" in out, out
+    rec = _task_pr(env, "T1")["recovering"]
+    assert rec["commit"][:12] in out, (rec, out)  # the head a retry will recognise as Office's own
+
+
+def test_a_recovery_push_that_failed_outright_still_says_it_pushed_nothing(env, monkeypatch):
+    real = prs.push
+    monkeypatch.setattr(prs, "push", lambda run, dispatch, **kw: (False, "remote: permission denied") if kw.get("force") else real(run, dispatch, **kw))
+    bare, _, _ = _run(env, monkeypatch, _plan("merge"))
+    _conflict(env, 1, _head_of(env, bare, "T1"))
+    code, out = env.office("land")
+    assert code == 4 and "recovery-push-failed" in out and "recovery pushed nothing" in out, out
+
+
 def test_recovery_pushes_from_the_task_worktree_and_a_push_timeout_is_a_refusal(monkeypatch):
     def slow(args, **kw):
         raise subprocess.TimeoutExpired(args, 120)
