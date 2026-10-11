@@ -1910,22 +1910,45 @@ def _reserved_by(run: dict, pane: str) -> str | None:
     return _read_reservations(run).get(pane)
 
 
-def reported_identity(info: dict) -> dict:
-    """The cwd, agent and session Herdr reports in a `pane get` record (None when it reports none)."""
+def _reported_sessions(info: dict, record: dict) -> set[str]:
+    """Every session id Herdr reports for a pane and its agent record."""
     running = info.get("agent")
-    nested = running if isinstance(running, dict) else {}
-    return {"cwd": info.get("foreground_cwd") or info.get("cwd"),
-            "agent": nested.get("name") if nested else running,
-            "session": (nested.get("session_id") or nested.get("agent_session_id")) or info.get("session_id")}
+    found = set()
+    for node in (running if isinstance(running, dict) else {}, info, record):
+        shown = node.get("agent_session")
+        found.update(str(v) for v in (node.get("session_id"), node.get("agent_session_id"),
+                                      shown.get("value") if isinstance(shown, dict) else None) if v)
+    return found
+
+
+def reported_identity(info: dict, record: dict | None = None) -> dict:
+    """The cwd, agent and session Herdr reports for a pane (`pane get`) and, once
+    known, its agent record (`agent get`); None when it reports none."""
+    running = info.get("agent")
+    record = record or {}
+    shown = running.get("name") if isinstance(running, dict) else running
+    return {"cwd": info.get("foreground_cwd") or info.get("cwd"), "agent": record.get("name") or shown,
+            "session": min(_reported_sessions(info, record), default=None)}
+
+
+def pane_snapshot(pane: str, agent: str | None = None) -> tuple[dict, dict]:
+    """What Herdr reports for the pane and, when `agent` is named, for that agent."""
+    info = _herdr_json(["pane", "get", pane]).get("pane")
+    record = _herdr_json(["agent", "get", agent]).get("agent") if agent else None
+    return (info if isinstance(info, dict) else {}), (record if isinstance(record, dict) else {})
 
 
 def _pane_identity_mismatch(run: dict, dispatch: dict, pane: str, cwd: Path, *,
-                            check_cwd: bool = True, agent: str | None = None) -> str | None:
-    """Refuse a *reported* contradictory Herdr identity before crossing into a pane.
+                            check_cwd: bool = True, agent: str | None = None, kind: str | None = None,
+                            snapshot: tuple[dict, dict] | None = None) -> str | None:
+    """Refuse a contradictory or unverifiable Herdr identity before crossing into a pane.
 
-    Herdr versions do not all report cwd/session fields; the dispatch-specific
-    `_shell_run` marker separately confirms its setup ran. We never treat a
-    reported contradictory value as missing evidence or a successful prompt.
+    A pane Herdr cannot describe is refused. With `agent` (delivery into a started
+    agent) the pane must also prove it holds this dispatch's agent: Herdr's
+    `pane get` reports the agent kind, so the name comes from the `agent get`
+    record, which must be this agent's, in this pane, of this kind and session.
+    cwd and session are checked when Herdr reports them, as not every version
+    does and the dispatch-specific `_shell_run` marker confirms the setup ran.
     """
     try:
         holder = _reserved_by(run, pane)
@@ -1933,7 +1956,9 @@ def _pane_identity_mismatch(run: dict, dispatch: dict, pane: str, cwd: Path, *,
         return f"pane {pane} cannot be trusted: {exc}"
     if holder and holder != dispatch["id"]:
         return f"pane {_identity_line(pane)} belongs to dispatch {_identity_line(holder)}, not {dispatch['id']} ({dispatch.get('task_id')})"
-    info = _herdr_json(["pane", "get", pane]).get("pane") or {}
+    info, record = snapshot or pane_snapshot(pane, agent)
+    if not info:
+        return f"pane {_identity_line(pane)} cannot be inspected: Herdr reported no identity for it"
     actual = info.get("foreground_cwd") or info.get("cwd")
     if check_cwd and actual:
         expected = os.path.realpath(str(cwd))
@@ -1944,20 +1969,41 @@ def _pane_identity_mismatch(run: dict, dispatch: dict, pane: str, cwd: Path, *,
             return (f"pane {_identity_line(pane)} cwd {_identity_line(actual)} does not belong to {dispatch['id']} "
                     f"({dispatch.get('task_id')}); expected {_identity_line(cwd)}")
     running = info.get("agent")
-    reported_name = running.get("name") if isinstance(running, dict) else running
-    if isinstance(running, dict) and not reported_name:
+    token = running.get("name") or running.get("kind") if isinstance(running, dict) else running
+    if isinstance(running, dict) and not token:
         return f"pane {_identity_line(pane)} has an agent without a verifiable identity"
-    if agent is None and reported_name:
-        return f"pane {pane} already runs an agent; shell setup is unsafe for {dispatch['id']}"
-    if agent and reported_name and reported_name != agent:
-        return (f"pane {_identity_line(pane)} runs {_identity_line(reported_name)}, "
+    if agent is None:
+        return f"pane {pane} already runs an agent; shell setup is unsafe for {dispatch['id']}" if token else None
+    if not token:
+        return f"pane {_identity_line(pane)} reports no agent, so {agent} for dispatch {dispatch['id']} is unverified"
+    if token not in (agent, kind or record.get("agent")):
+        return (f"pane {_identity_line(pane)} runs {_identity_line(token)}, "
                 f"not {_identity_line(agent)} for dispatch {dispatch['id']}")
-    reported_session = ((running.get("session_id") or running.get("agent_session_id"))
-                        if isinstance(running, dict) else None) or info.get("session_id")
     recorded_session = dispatch.get("session_id")
-    if agent and reported_session and recorded_session and reported_session != recorded_session:
+    if recorded_session and _reported_sessions(info, record) - {recorded_session}:
         return f"pane {pane} session does not match dispatch {dispatch['id']}"
+    named = token == agent  # the pane itself names this agent; a bare kind needs the agent record to tie it
+    if record.get("name") not in ((agent, None) if named else (agent,)):
+        return (f"herdr does not report agent {_identity_line(agent)} for dispatch {dispatch['id']} "
+                f"(pane {_identity_line(pane)})")
+    listed_pane = record.get("pane_id")
+    if listed_pane != pane and (listed_pane or not named):
+        return (f"agent {_identity_line(agent)} is in pane {_identity_line(listed_pane or 'none')}, "
+                f"not {_identity_line(pane)} for dispatch {dispatch['id']}")
+    if kind and record.get("agent") not in (None, kind):
+        return f"agent {_identity_line(agent)} is a {_identity_line(record['agent'])}, not {_identity_line(kind)}"
     return None
+
+
+def _ledger_kind(run: dict, dispatch: dict) -> str | None:
+    """The Herdr agent kind recorded when this dispatch's agent was started."""
+    try:
+        rows = [json.loads(line) for line in (paths.run_dir(run["id"]) / "panes.jsonl").read_text().splitlines() if line.strip()]
+    except (OSError, ValueError):
+        return None
+    kinds = [r.get("kind") for r in rows if isinstance(r, dict) and r.get("dispatch_id") == dispatch["id"]
+             and r.get("pane_id") == dispatch.get("pane_id")]
+    return kinds[-1] if kinds and isinstance(kinds[-1], str) else None
 
 
 class PaneMismatch(Exception):
@@ -1974,7 +2020,7 @@ def fenced_pane(run: dict, dispatch: dict):
     worktree = dispatch.get("worktree")
     with _pane_lock(run):
         mismatch = _pane_identity_mismatch(run, dispatch, pane, Path(worktree or ""), check_cwd=bool(worktree),
-                                           agent=herdr_agent_name(dispatch["id"]))
+                                           agent=herdr_agent_name(dispatch["id"]), kind=_ledger_kind(run, dispatch))
         if mismatch:
             raise PaneMismatch(mismatch)
         yield pane
@@ -2105,8 +2151,9 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     # ended dispatch's pane could be reassigned between inspection and send.
     # The reservation is still checked inside this critical section.
     with _pane_lock(run):
-        mismatch = _pane_identity_mismatch(run, dispatch, pane, cwd, agent=name)
-        reported = reported_identity(_herdr_json(["pane", "get", pane]).get("pane") or {})
+        snapshot = pane_snapshot(pane, name)
+        mismatch = _pane_identity_mismatch(run, dispatch, pane, cwd, agent=name, kind=herdr_kind, snapshot=snapshot)
+        reported = reported_identity(*snapshot)
         spec["pane_evidence"] = {"pane": pane, "dispatch": dispatch["id"],
                                 "task": dispatch.get("task_id"), "expected_worktree": str(cwd),
                                 "reported_cwd": reported["cwd"], "reported_agent": reported["agent"],
