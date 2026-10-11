@@ -342,3 +342,26 @@ def test_a_33_run_mid_plan_decision_is_not_moved_to_34(env):
         assert "reopened after APPROVED" in upgrade._plan_review_blocker(con, run, "3.4")
     finally:
         con.close()
+
+
+def test_unavailable_plan_review_attempts_spend_no_round(env):
+    """An UNAVAILABLE or INVALID_RESULT attempt is runtime status: it adds no substantive round, and
+    the retry is still the round it replaces."""
+    from office import plans, state
+    _start(env)
+    for status in ("UNAVAILABLE", "INVALID_RESULT"):
+        _ingest(env, status=status)
+        con = env.con()
+        try:
+            assert plans.substantive_rounds(con, state.get_run(con, _run(env)["id"])) == 0, status
+        finally:
+            con.close()
+        _o(env, "resume", check=0)
+        assert [g["round"] for g in _queued(env)] == [1], f"the retry after {status} is still round 1"
+    _ingest(env, recheck())
+    con = env.con()
+    try:
+        assert plans.substantive_rounds(con, state.get_run(con, _run(env)["id"])) == 1
+    finally:
+        con.close()
+
