@@ -24,6 +24,8 @@ ROUTINE_REFUSALS = frozenset({
     "orchestrator-quota-exhausted", "invalid-override", "no-task", "no-run", "no-active-run", "no-such-run",
     "ambiguous-run", "close-blocked", "unknown-task",
 })
+# Flags that only choose the output format, so they never make a refused command differ from the one `next:` names.
+OUTPUT_FLAGS = frozenset({"--json"})
 # A dispatch that ended in one of these classifications was lost to the runtime, not finished or stopped.
 LOST_DISPATCH = ("lost", "crashed")
 # A later event of one of these kinds on the same task (or run, for a task-less signal) means the signal was recovered.
@@ -67,6 +69,7 @@ class Signal:
 # ------------------------------------------------------------------ one-shot outcomes
 
 _NAMED = re.compile(r"\boffice\s+([a-z][a-z-]*)((?:\s+(?:[A-Z][A-Za-z0-9]*\d[A-Za-z0-9]*|<[a-z-]+>|--[a-z][a-z-]*))*)")
+_ID = re.compile(r"[A-Za-z][A-Za-z0-9]*\d[A-Za-z0-9]*")
 
 
 def named_commands(next_line: str | None) -> list[tuple[str, set[str], set[str]]]:
@@ -81,13 +84,14 @@ def named_commands(next_line: str | None) -> list[tuple[str, set[str], set[str]]
 
 def refusal_signal(category: str, command: str | None, argv: list[str], next_line: str | None) -> Signal | None:
     """A refusal is a signal only when it refuses the command the run's `next:` line names, as that line spells it
-    (the same ids and flags), and the category is not a routine one. `argv` is the refused command line."""
+    (exactly the same ids and `--` flags, no more), and the category is not a routine one. `argv` is the refused
+    command line."""
     if not command or not category or category in ROUTINE_REFUSALS:
         return None
-    ids = {w.upper() for w in argv if not w.startswith("-")}
-    flags = {w.split("=", 1)[0] for w in argv if w.startswith("--")}
+    ids = {w.upper() for w in argv if _ID.fullmatch(w)}
+    flags = {w.split("=", 1)[0] for w in argv if w.startswith("--")} - OUTPUT_FLAGS
     for name, want_ids, want_flags in named_commands(next_line):
-        if name == command and want_ids <= ids and want_flags <= flags:
+        if name == command and want_ids == ids and want_flags == flags:
             return Signal("refusal", f"office {command} {' '.join(sorted(want_ids))}".strip()
                           + f" was refused (blocked: {category}) though next: names it")
     return None
