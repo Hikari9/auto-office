@@ -574,7 +574,12 @@ def worker_signals(con, run: dict) -> tuple[list[str], int]:
 
 
 def _needs_orchestrator(con, run: dict) -> bool:
-    if any(t["status"] in ("paused", "blocked") for t in state.tasks(con, run["id"])):
+    tasks = state.tasks(con, run["id"])
+    if any(t["status"] in ("paused", "blocked") for t in tasks):
+        return True
+    # Preserve v3.1's existing changes-required wakeup. Convergence waits
+    # for the precise repair eligibility, including a live scope lease (#561).
+    if not contract.is_convergence(run) and any(t["status"] == "changes_required" for t in tasks):
         return True
     return not next_action(con, state.get_run(con, run["id"])).startswith(("exceptions only", "no action"))
 
@@ -607,7 +612,10 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         news = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=1)
         # Something already waiting on the orchestrator ends the wait at once;
         # otherwise a blocker present at the start would sit until the timeout.
-        pending = first and _needs_orchestrator(con, run)
+        # A scope lease may become dormant when its holder ends without a new
+        # task revision or status event. Recheck actionable work on every poll:
+        # the initial snapshot alone cannot observe that transition (#561).
+        pending = _needs_orchestrator(con, run)
         first = False
         if asked or stuck or changed or news or pending or state.is_terminal(state.get_run(con, run["id"])) \
                 or time.time() >= deadline:
