@@ -24,6 +24,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable, NamedTuple
 
 try:
     import termios
@@ -1033,6 +1034,23 @@ def revoke(con, run: dict, target: str, reason: str) -> Result:
     return _revoke_task(con, run, task_id, reason)
 
 
+# Pause reasons of a task reopened without a new revision for work that is still owed: a convergence RECHECK or
+# APPROVED-cleanup fix (also open findings), a restack onto a re-accepted dependency, a hold on an amended one.
+_REOPENED_FOR_WORK = ("RECHECK", "APPROVED cleanup", "restack:", "waiting for the amended")
+
+
+def _demoted_by_amendment(con, run_id: str, task: dict) -> bool:
+    """True when `task` is accepted, or left accepted work only by an amendment delivery and the relaunch or
+    refused submit that followed: it has no open task findings and no pause reason of `_REOPENED_FOR_WORK`."""
+    if task["status"] == "accepted":
+        return True
+    if con.execute(f"SELECT 1 FROM findings WHERE run_id=? AND task_id=? AND {contract.TASK_WORK_FINDINGS}",
+                   (run_id, task["id"])).fetchone():
+        return False
+    reason = task.get("pause_reason") or ""
+    return not any(marker in reason for marker in _REOPENED_FOR_WORK)
+
+
 def _revoke_standing(con, run_id: str, task: dict) -> tuple[str | None, str | None, list[str], list[str]]:
     """How a revoke leaves a task: (status to set or None to keep it, pause_reason, unapplied ordinary
     amendment ids, contract-class amendment ids that block keeping it accepted).
@@ -1043,12 +1061,14 @@ def _revoke_standing(con, run_id: str, task: dict) -> tuple[str | None, str | No
     already blocked it. A `contract_version` bump from an ordinary amendment does not demote: its check and
     acceptance edits are enforced by the gate rerun the amendment triggered, and its delta is listed as unapplied.
     An unapplied amendment that is not ordinary (scope, interfaces, ownership) is changes_required naming it.
-    A cancelled task keeps its status."""
+    A task that is not accepted now is restored only when an amendment delivery alone demoted it (`_demoted_by_amendment`):
+    open blocking findings (a convergence RECHECK, an APPROVED-cleanup fix), a restack or a hold reopened it without a
+    new revision, and that work is still owed. A cancelled task keeps its status."""
     if task["status"] == "cancelled":
         return None, None, [], []
     rev_id = task.get("accepted_revision_id")
     rev = con.execute("SELECT applied_version FROM revisions WHERE id=?", (rev_id,)).fetchone() if rev_id else None
-    if rev is None or rev_id != task.get("current_revision_id"):
+    if rev is None or rev_id != task.get("current_revision_id") or not _demoted_by_amendment(con, run_id, task):
         return "paused", None, [], []
     pending = con.execute("SELECT d.amendment_id, COALESCE(a.class, 'contract') AS class FROM deliveries d "
                           "LEFT JOIN amendments a ON a.run_id=d.run_id AND a.id=substr(d.run_id, 1, 8) || ':' || d.amendment_id "
@@ -2015,22 +2035,53 @@ def _reserved_by(run: dict, pane: str) -> str | None:
     return _read_reservations(run).get(pane)
 
 
-def reported_identity(info: dict) -> dict:
-    """The cwd, agent and session Herdr reports in a `pane get` record (None when it reports none)."""
-    running = info.get("agent")
-    nested = running if isinstance(running, dict) else {}
+def reported_identity(info: dict, agent: dict | None = None) -> dict:
+    """What Herdr reports for a pane: `pane get` carries the cwd, the agent KIND
+    (`agent`, e.g. "claude") and `agent_session.value`; the Office agent *name*
+    only exists on the `agent list` / `agent get` entry for that pane (`agent`).
+    None where it reports nothing."""
+    session = info.get("agent_session")
+    kind = info.get("agent")
     return {"cwd": info.get("foreground_cwd") or info.get("cwd"),
-            "agent": nested.get("name") if nested else running,
-            "session": (nested.get("session_id") or nested.get("agent_session_id")) or info.get("session_id")}
+            "kind": kind or None,
+            "agent": (agent or {}).get("name") or None,
+            "session": session.get("value") if isinstance(session, dict) else None}
+
+
+def _agent_at(pane: str) -> dict | None:
+    """The `agent list` entry whose pane is `pane`: Herdr's record of which named agent runs there."""
+    agents = _herdr_json(["agent", "list"]).get("agents")
+    return next((a for a in agents if isinstance(a, dict) and a.get("pane_id") == pane), None) \
+        if isinstance(agents, list) else None
+
+
+def _pane_identity(pane: str, *, named: bool = False) -> dict:
+    """The pane's reported identity (`reported_identity`); `named` also asks `agent list` for the agent name."""
+    info = _herdr_json(["pane", "get", pane]).get("pane") or {}
+    return reported_identity(info, _agent_at(pane) if named else None)
+
+
+def _herdr_kind(run: dict, dispatch: dict) -> str | None:
+    """The Herdr agent kind this dispatch was started with: recorded in its launch spec, else its harness."""
+    try:
+        spec = json.loads((paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json").read_text())
+        kind = ((spec.get("rendered_launches") or {}).get("herdr") or {}).get("herdr_kind")
+    except (OSError, ValueError, AttributeError):
+        kind = None
+    return kind or dispatch.get("harness")
 
 
 def _pane_identity_mismatch(run: dict, dispatch: dict, pane: str, cwd: Path, *,
-                            check_cwd: bool = True, agent: str | None = None) -> str | None:
+                            check_cwd: bool = True, agent: str | None = None, kind: str | None = None,
+                            identity: dict | None = None) -> str | None:
     """Refuse a *reported* contradictory Herdr identity before crossing into a pane.
 
     Herdr versions do not all report cwd/session fields; the dispatch-specific
     `_shell_run` marker separately confirms its setup ran. We never treat a
     reported contradictory value as missing evidence or a successful prompt.
+    With `agent` (the expected Office agent name) the pane's agent kind must be
+    `kind`, `agent list` must name that agent at this pane and the reported
+    session must be the dispatch's. `identity` is a `_pane_identity` already read.
     """
     try:
         holder = _reserved_by(run, pane)
@@ -2038,8 +2089,8 @@ def _pane_identity_mismatch(run: dict, dispatch: dict, pane: str, cwd: Path, *,
         return f"pane {pane} cannot be trusted: {exc}"
     if holder and holder != dispatch["id"]:
         return f"pane {_identity_line(pane)} belongs to dispatch {_identity_line(holder)}, not {dispatch['id']} ({dispatch.get('task_id')})"
-    info = _herdr_json(["pane", "get", pane]).get("pane") or {}
-    actual = info.get("foreground_cwd") or info.get("cwd")
+    seen = identity or _pane_identity(pane, named=agent is not None)
+    actual = seen["cwd"]
     if check_cwd and actual:
         expected = os.path.realpath(str(cwd))
         observed = os.path.realpath(str(actual))
@@ -2048,19 +2099,20 @@ def _pane_identity_mismatch(run: dict, dispatch: dict, pane: str, cwd: Path, *,
             # sequences from an untrusted shell path into the operator output.
             return (f"pane {_identity_line(pane)} cwd {_identity_line(actual)} does not belong to {dispatch['id']} "
                     f"({dispatch.get('task_id')}); expected {_identity_line(cwd)}")
-    running = info.get("agent")
-    reported_name = running.get("name") if isinstance(running, dict) else running
-    if isinstance(running, dict) and not reported_name:
-        return f"pane {_identity_line(pane)} has an agent without a verifiable identity"
-    if agent is None and reported_name:
-        return f"pane {pane} already runs an agent; shell setup is unsafe for {dispatch['id']}"
-    if agent and reported_name and reported_name != agent:
-        return (f"pane {_identity_line(pane)} runs {_identity_line(reported_name)}, "
+    if agent is None:
+        if seen["kind"]:
+            return f"pane {pane} already runs an agent; shell setup is unsafe for {dispatch['id']}"
+        return None
+    if seen["agent"] and seen["agent"] != agent:
+        return (f"pane {_identity_line(pane)} runs {_identity_line(seen['agent'])}, "
                 f"not {_identity_line(agent)} for dispatch {dispatch['id']}")
-    reported_session = ((running.get("session_id") or running.get("agent_session_id"))
-                        if isinstance(running, dict) else None) or info.get("session_id")
+    if seen["kind"] and not seen["agent"]:
+        return f"pane {_identity_line(pane)} has an agent without a verifiable identity"
+    if kind and isinstance(seen["kind"], str) and seen["kind"] != kind:
+        return (f"pane {_identity_line(pane)} runs a {_identity_line(seen['kind'])} agent, "
+                f"not {_identity_line(kind)} for dispatch {dispatch['id']}")
     recorded_session = dispatch.get("session_id")
-    if agent and reported_session and recorded_session and reported_session != recorded_session:
+    if seen["session"] and recorded_session and seen["session"] != recorded_session:
         return f"pane {pane} session does not match dispatch {dispatch['id']}"
     return None
 
@@ -2069,20 +2121,56 @@ class PaneMismatch(Exception):
     """Herdr reports a pane identity that contradicts the dispatch about to be sent to."""
 
 
-@contextlib.contextmanager
-def fenced_pane(run: dict, dispatch: dict):
-    """Yield the dispatch's recorded pane with the run's pane lock held, once its
-    reported cwd, agent and session are shown to be this dispatch's own; else
-    raise PaneMismatch. Send a prompt into a live agent's pane only inside this
-    block, so the pane cannot be reassigned between the check and the send."""
+class Fence(NamedTuple):
+    """A pane shown to be the dispatch's own, and the guard every send into it passes through."""
+    pane: str
+    guard: Callable[[], contextlib.AbstractContextManager]
+
+
+def _send_guard(run: dict, dispatch: dict, pane: str) -> Callable[[], contextlib.AbstractContextManager]:
+    """A context manager for one send into `pane`. It holds the run's pane lock only for that
+    send (one bounded herdr command) and re-checks the reservation inside it: a pane freed and
+    reassigned to another dispatch while a delivery waited is never typed into. Delivery waits
+    (agent UI, landing probes, Enter retries) run outside the lock, so they cannot starve
+    other launches' pane picks."""
+    @contextlib.contextmanager
+    def guard():
+        with _pane_lock(run):
+            try:
+                holder = _reserved_by(run, pane)
+            except ValueError as exc:
+                raise PaneMismatch(f"pane {_identity_line(pane)} cannot be trusted: {exc}") from None
+            if holder and holder != dispatch["id"]:
+                raise PaneMismatch(f"pane {_identity_line(pane)} was reassigned to dispatch {_identity_line(holder)}, "
+                                   f"not {dispatch['id']} ({dispatch.get('task_id')})")
+            yield
+    return guard
+
+
+def _guarded_herdr(guard):
+    """`_herdr_quiet`, each call made inside `guard` (a send guard) when there is one."""
+    if guard is None:
+        return lambda *args: _herdr_quiet(*args)
+
+    def send(*args: str) -> None:
+        with guard():
+            _herdr_quiet(*args)
+    return send
+
+
+def fenced_pane(run: dict, dispatch: dict) -> Fence:
+    """The dispatch's recorded pane, once its reported cwd, agent and session are shown to be
+    this dispatch's own; else raise PaneMismatch. The pane lock is held for the check only.
+    Send a prompt into a live agent's pane through `Fence.guard` (`submit_prompt(..., guard=)`):
+    it re-checks the reservation immediately before each send."""
     pane = dispatch["pane_id"]
     worktree = dispatch.get("worktree")
     with _pane_lock(run):
         mismatch = _pane_identity_mismatch(run, dispatch, pane, Path(worktree or ""), check_cwd=bool(worktree),
-                                           agent=herdr_agent_name(dispatch["id"]))
-        if mismatch:
-            raise PaneMismatch(mismatch)
-        yield pane
+                                           agent=herdr_agent_name(dispatch["id"]), kind=_herdr_kind(run, dispatch))
+    if mismatch:
+        raise PaneMismatch(mismatch)
+    return Fence(pane, _send_guard(run, dispatch, pane))
 
 
 def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
@@ -2199,31 +2287,35 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     from office import transcripts
     sent_at = time.time()
 
-    def seen() -> bool:
+    def seen_cb() -> bool:
         try:
             return transcripts.prompt_seen(dispatch.get("harness") or herdr_kind, marker=spec["prompt_file"],
                                            cwd=_session_cwd(spec, dispatch.get("harness") or herdr_kind, cwd), since=sent_at)
         except Exception:  # a landing probe must never abort the launch
             return False
 
-    # The same lock guards both pane assignment and delivery. Without it an
-    # ended dispatch's pane could be reassigned between inspection and send.
-    # The reservation is still checked inside this critical section.
+    # The lock is held for the identity check only. Delivery waits (agent UI, landing
+    # probes) run unlocked; each send re-checks the reservation inside the pane lock.
     with _pane_lock(run):
-        mismatch = _pane_identity_mismatch(run, dispatch, pane, cwd, agent=name)
-        reported = reported_identity(_herdr_json(["pane", "get", pane]).get("pane") or {})
-        spec["pane_evidence"] = {"pane": pane, "dispatch": dispatch["id"],
-                                "task": dispatch.get("task_id"), "expected_worktree": str(cwd),
-                                "reported_cwd": reported["cwd"], "reported_agent": reported["agent"],
-                                "reported_session": reported["session"], "mismatch": mismatch}
-        if mismatch:
-            # Once an agent starts, never launch a racing headless copy.
-            landed = False
-            spec["identity_failure"] = mismatch
-            _launch_notice(run, dispatch, f"pane-mismatch: {mismatch}; brief NOT sent; "
-                           f"inspect pane {pane} and use office revoke {dispatch.get('task_id') or dispatch['id']}")
-        else:
-            landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen)
+        seen = _pane_identity(pane, named=True)
+        mismatch = _pane_identity_mismatch(run, dispatch, pane, cwd, agent=name, kind=herdr_kind, identity=seen)
+    spec["pane_evidence"] = {"pane": pane, "dispatch": dispatch["id"],
+                            "task": dispatch.get("task_id"), "expected_worktree": str(cwd),
+                            "reported_cwd": seen["cwd"], "reported_kind": seen["kind"], "reported_agent": seen["agent"],
+                            "reported_session": seen["session"], "mismatch": mismatch}
+    landed = False
+    if not mismatch:
+        try:
+            landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen_cb,
+                                     guard=_send_guard(run, dispatch, pane))
+        except PaneMismatch as exc:
+            mismatch = str(exc)
+            spec["pane_evidence"]["mismatch"] = mismatch
+    if mismatch:
+        # Once an agent starts, never launch a racing headless copy.
+        spec["identity_failure"] = mismatch
+        _launch_notice(run, dispatch, f"pane-mismatch: {mismatch}; brief NOT sent; "
+                       f"inspect pane {pane} and use office revoke {dispatch.get('task_id') or dispatch['id']}")
     if not landed and not mismatch:
         # The agent is up in a pane the user can see; a second headless copy
         # would race it. Say so and leave the pane for a manual re-prompt.
@@ -2773,28 +2865,31 @@ def _submit_held(name: str, pane: str | None, prompt: str, timeout: float, *, ba
     return "held" if _composer_holds(view, prompt) else "landed"
 
 
-def submit_prompt(name: str, text: str, *, pane: str | None = None) -> str:
+def submit_prompt(name: str, text: str, *, pane: str | None = None, guard=None) -> str:
     """Send `text` to a live herdr agent with `agent prompt` and confirm it was
     submitted, pressing Enter for it when it is left in the composer. Returns
     'landed', 'held' (still unsubmitted after the bounded Enters) or '' (no
-    landed signal, nothing left in the composer). Never sends the text twice."""
+    landed signal, nothing left in the composer). Never sends the text twice.
+    `guard` (`Fence.guard`) wraps each send; it may raise PaneMismatch."""
     timeout = _land_timeout()
+    herdr = _guarded_herdr(guard)
     baseline = _ctx_k(_pane_view(name))
-    _herdr_quiet("agent", "prompt", name, text)
+    herdr("agent", "prompt", name, text)
     if _prompt_landed(name, timeout, baseline_ctx=baseline) == "landed":
         return "landed"
-    got = _submit_held(name, pane, text, timeout, baseline_ctx=baseline)
+    got = _submit_held(name, pane, text, timeout, baseline_ctx=baseline, herdr=herdr)
     return "" if got in ("absent", "unknown") else got
 
 
-def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = False, seen=None) -> bool:
+def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = False, seen=None, guard=None) -> bool:
     """Wait for the agent UI, send the one-line pointer and confirm it landed.
     A pointer left in the composer is submitted with Enter; a lost one is typed
     into the pane once and submitted (agy can drop a prompt sent right after
     `agent start` returns). Nothing is typed into a pane where herdr sees no
-    agent: that text would go to the shell."""
+    agent: that text would go to the shell. `guard` (a send guard) wraps every
+    send and may raise PaneMismatch."""
     timeout = _land_timeout()
-    herdr = _herdr_quiet
+    herdr = _guarded_herdr(guard)
     ui = _await_agent_ui(name, pane, timeout, answer_trust=answer_trust, herdr=herdr)
     if ui == "trust":
         return False
@@ -4672,8 +4767,8 @@ def job_notify_worker(con, run: dict, job: dict) -> dict:
         return {"sent": False}
     text = payload.get("text", "office status has an update for you.")
     try:
-        with fenced_pane(run, d) as pane:
-            landed = submit_prompt(pane, text, pane=pane)
+        fence = fenced_pane(run, d)
+        landed = submit_prompt(fence.pane, text, pane=fence.pane, guard=fence.guard)
     except PaneMismatch as exc:
         with db.transaction(con):
             state.emit(con, run, "prompt", f"{d.get('task_id') or d['id']} {d['id']}: native nudge refused, pane "

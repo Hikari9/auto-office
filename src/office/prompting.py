@@ -64,16 +64,16 @@ def prompt(con, run: dict, target: str | None, text: str) -> Result:
         raise Refused("dispatch-ended", f"{d['id']} ({who}) has no live agent; nothing is listening in its pane",
                       scope=who, next_step=nxt)
     try:
-        with dispatch.fenced_pane(run, d) as pane:
-            got = dispatch.submit_prompt(pane, text, pane=pane)
-            seen = dispatch.reported_identity(dispatch._herdr_json(["pane", "get", pane]).get("pane") or {})
+        fence = dispatch.fenced_pane(run, d)
+        pane = fence.pane
+        got = dispatch.submit_prompt(pane, text, pane=pane, guard=fence.guard)
+        seen = dispatch._pane_identity(pane, named=True)
     except dispatch.PaneMismatch as exc:
         raise Refused("pane-mismatch", f"{exc}; refusing to send the prompt", scope=who,
                       next_step=f"office inspect task {who}, then office revoke {who} if the pane is misassigned") from None
-    pane = d["pane_id"]
     # Herdr relays what the pane's shell reports: never echo its control sequences.
     where = (f"pane {pane}: herdr reports cwd {dispatch._identity_line(seen['cwd'] or 'none')}, "
-             f"agent {dispatch._identity_line(seen['agent'] or 'none')}; "
+             f"agent {dispatch._identity_line(seen['agent'] or seen['kind'] or 'none')}; "
              f"recorded worktree {d.get('worktree') or 'none'}")
     outcome = {"landed": "landed", "held": "typed but unsubmitted"}.get(got, "sent, not confirmed")
     with db.transaction(con):
