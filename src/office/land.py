@@ -624,6 +624,20 @@ def _merge_tree(repo: Path, ours: str, theirs: str) -> tuple[str, list[str] | No
                   f"{(proc.stderr or proc.stdout).strip()[:160]}", next_step=COMPOSE_BY_HAND.format(base="the default branch"))
 
 
+def _merge_bases(repo: Path, default: str, head: str) -> list[str]:
+    """Every best common ancestor: multiple bases identify criss-cross ancestry (#562).
+
+    `merge-base` (without `--all`) hides this history and can make a GitHub
+    CONFLICTING verdict look inexplicable beside a locally clean merge-tree.
+    """
+    proc = _git(repo, "merge-base", "--all", default, head)
+    if proc.returncode != 0:
+        raise Refused("merge-base-failed", f"cannot establish the common ancestry of {default[:12]} "
+                      f"and {head[:12]}: {(proc.stderr or proc.stdout).strip()[:160]}",
+                      next_step="inspect both branches by hand; do not rewrite or land them")
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
 def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: Result, merged_so_far: str) -> dict:
     """GitHub says the PR cannot be merged, though the reviewed work may still
     compose cleanly (a squash or rebase of the parent leaves the child's
@@ -643,6 +657,13 @@ def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: R
         raise Refused("fetch-failed", f"could not fetch origin/{base} and {branch}", preserved=untouched,
                       next_step="office land again")
     default, head = paths.git(repo, "rev-parse", base_ref), paths.git(repo, "rev-parse", f"{ns}/{tid}")
+    bases = _merge_bases(repo, default, head)
+    ancestry = (f"criss-cross ancestry: {len(bases)} merge bases "
+                f"({', '.join(b[:12] for b in bases[:4])})" if len(bases) > 1 else "")
+    if ancestry:
+        # The same reviewed-tree proof below applies, regardless of how many
+        # ancestors Git finds. Never substitute a clean merge-tree for that proof.
+        res.add(f"{tid} #{number} is CONFLICTING on GitHub; {ancestry}; verifying the merge result against the reviewed integration")
     accepted = _accepted_commit(con, task)
     ours = {accepted} | {(pr.get(k) or {}).get("commit") for k in ("restacked", "recovering", "recovered")}
     if head not in ours:
@@ -681,8 +702,14 @@ def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: R
                       preserved=untouched, next_step="office status")
     reviewed = _tree(repo, integrated)
     if trees[-1] != reviewed:
+        # A criss-cross merge can be clean yet duplicate code that was absent
+        # from the reviewed composition. Never push that unreviewed tree.
+        reason = (f" ({ancestry}; a clean merge may duplicate changes)" if ancestry else "")
         raise Refused("recovery-tree-mismatch", f"merging the open PRs onto {base} {default[:12]} gives tree {trees[-1][:12]}, "
-                      f"not the reviewed integration tree {reviewed[:12]}", preserved=untouched, next_step=by_hand)
+                      f"not the reviewed integration tree {reviewed[:12]}{reason}", preserved=untouched,
+                      next_step=(f"inspect the tree difference against reviewed {reviewed[:12]}, remove unreviewed duplicates, "
+                                 f"run the complete test suite and obtain an independent review; " + by_hand)
+                      if ancestry else by_hand)
     new = commit_tree(trees[0], (head, default), f"Merge {base} into {branch}\n\nOffice land recovery: GitHub reported "
                       f"#{number} not mergeable.\n\n{paths.office_trailer(run['id'])}")
     with db.transaction(con):  # before the push: a land killed after it still knows the head is Office's
@@ -706,7 +733,8 @@ def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: R
         state.update_task(con, run["id"], tid, pr=pr)
         state.emit(con, run, "pr.recovered", f"{tid} #{number} recovered: {base} {default[:12]} merged into {branch} "
                    f"({head[:12]} -> {new[:12]})", task_id=tid, payload={**pr["recovered"], "base": default})
-    res.add(f"{tid} #{number} was not mergeable; merged {base} {default[:12]} into {branch} ({new[:12]}), tree matches the reviewed integration")
+    res.add(f"{tid} #{number} was not mergeable; merged {base} {default[:12]} into {branch} ({new[:12]}), tree matches the reviewed integration"
+            + (f" despite {len(bases)} merge bases" if ancestry else ""))
     return pr
 
 
