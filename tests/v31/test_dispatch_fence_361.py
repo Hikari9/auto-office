@@ -13,6 +13,7 @@ import pytest
 
 from office import dispatch, prompting
 from office.state import Refused
+from test_herdr_agent_launch import real_herdr_json
 
 
 def _run(monkeypatch, tmp_path):
@@ -50,12 +51,45 @@ def test_sibling_with_same_prefix_is_not_this_worktree(monkeypatch, tmp_path):
 
 def test_other_agent_or_resumed_session_cannot_receive_brief(monkeypatch, tmp_path):
     run = _run(monkeypatch, tmp_path)
-    monkeypatch.setattr(dispatch, "_herdr_json", lambda _: {"pane": {
-        "cwd": "/tmp/office/T1", "agent": {"name": "office-other", "session_id": "session-B"}}})
+    monkeypatch.setattr(dispatch, "_herdr_json", real_herdr_json("w1:p1", name="office-other", cwd="/tmp/office/T1",
+                                                                 session="session-B"))
     assert "runs office-other" in dispatch._pane_identity_mismatch(
         run, _d(), "w1:p1", Path("/tmp/office/T1"), agent="office-a111")
     assert "session does not match" in dispatch._pane_identity_mismatch(
         run, _d(), "w1:p1", Path("/tmp/office/T1"), agent="office-other")
+
+
+def test_the_fence_reads_herdrs_real_json_agent_kind_name_from_agent_list_session_from_agent_session(monkeypatch, tmp_path):
+    """`pane get` has the kind ("claude") and agent_session.value, never a name; `agent list` names the agent at the pane."""
+    run = _run(monkeypatch, tmp_path)
+    name = dispatch.herdr_agent_name("Da111")
+    cwd = Path("/tmp/office/T1")
+    ok = real_herdr_json("w1:p1", name=name, kind="claude", cwd="/tmp/office/T1", session="session-A")
+    monkeypatch.setattr(dispatch, "_herdr_json", ok)
+    assert dispatch._pane_identity_mismatch(run, _d(), "w1:p1", cwd, agent=name, kind="claude") is None
+    assert dispatch.reported_identity(ok(["pane", "get", "w1:p1"])["pane"], ok(["agent", "list"])["agents"][0]) == {
+        "cwd": "/tmp/office/T1", "kind": "claude", "agent": name, "session": "session-A"}
+    for broken, why in [
+        (dict(kind="codex"), "runs a codex agent"),                      # the agent KIND must be the dispatch's harness
+        (dict(name="office-dother"), "runs office-dother"),              # the named agent at this pane is someone else's
+        (dict(name=None), "without a verifiable identity"),              # an agent with no Office name is not ours
+        (dict(session="session-B"), "session does not match"),
+    ]:
+        monkeypatch.setattr(dispatch, "_herdr_json", real_herdr_json(
+            "w1:p1", **{**dict(name=name, kind="claude", cwd="/tmp/office/T1", session="session-A"), **broken}))
+        assert why in dispatch._pane_identity_mismatch(run, _d(), "w1:p1", cwd, agent=name, kind="claude"), broken
+    # `agent list` naming this agent at another pane says nothing about this one.
+    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {"agents": [{"name": name, "agent": "claude", "pane_id": "w1:p9"}]}
+                        if args[:2] == ["agent", "list"] else {"pane": {"pane_id": "w1:p1", "agent": "claude", "cwd": "/tmp/office/T1"}})
+    assert "without a verifiable identity" in dispatch._pane_identity_mismatch(run, _d(), "w1:p1", cwd, agent=name, kind="claude")
+
+
+def test_a_shell_pane_has_no_agent_and_a_pane_with_a_running_agent_is_unsafe_for_shell_setup(monkeypatch, tmp_path):
+    run = _run(monkeypatch, tmp_path)
+    monkeypatch.setattr(dispatch, "_herdr_json", real_herdr_json("w1:p1", kind=None, cwd="/tmp/office/T1"))
+    assert dispatch._pane_identity_mismatch(run, _d(), "w1:p1", Path("/tmp/office/T1")) is None
+    monkeypatch.setattr(dispatch, "_herdr_json", real_herdr_json("w1:p1", name="office-other", cwd="/tmp/office/T1"))
+    assert "already runs an agent" in dispatch._pane_identity_mismatch(run, _d(), "w1:p1", Path("/tmp/office/T1"))
 
 
 def test_reserved_for_another_dispatch_refused_before_any_pane_commands(monkeypatch, tmp_path):
@@ -112,15 +146,14 @@ def test_parallel_pane_picks_keep_unique_reservations(monkeypatch, tmp_path):
 
 
 def _mock_started_herdr(monkeypatch, tmp_path, observed):
-    """Exercise the actual post-start delivery boundary with no harness process."""
+    """Exercise the actual post-start delivery boundary with no harness process.
+
+    `observed` are the real_herdr_json keywords Herdr reports once `agent start` has run; before it the pane is a clean shell."""
     import subprocess
-    calls = {"get": 0}
-    def pane_get(_):
-        calls["get"] += 1
-        # Before `agent start` this is a clean shell. After it, Herdr
-        # reports the actual agent identity (correct or cross-assigned).
-        return {"pane": {"cwd": "/tmp/office/T1"}} if calls["get"] <= 2 else {"pane": observed}
-    monkeypatch.setattr(dispatch, "_herdr_json", pane_get)
+    started = {"yes": False}
+    shell = real_herdr_json("w1:p1", kind=None, cwd="/tmp/office/T1")
+    after = real_herdr_json("w1:p1", **observed)
+    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: after(args) if started["yes"] else shell(args))
     monkeypatch.setattr(dispatch, "_shell_run", lambda *a, **kw: True)
     monkeypatch.setattr(dispatch, "write_agent_env", lambda *a, **kw: tmp_path / "agent.env")
     monkeypatch.setattr(dispatch, "write_launch_spec", lambda *a, **kw: None)
@@ -129,7 +162,11 @@ def _mock_started_herdr(monkeypatch, tmp_path, observed):
     monkeypatch.setattr(dispatch, "_record_pane_agent_group", lambda *a, **kw: None)
     monkeypatch.setattr(dispatch, "_pane_ledger", lambda *a, **kw: None)
     monkeypatch.setattr(dispatch, "pane_label", lambda *a, **kw: "T1 executor")
-    monkeypatch.setattr(dispatch.subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 0, "{}", ""))
+
+    def run(argv, **kw):
+        started["yes"] = started["yes"] or argv[1:3] == ["agent", "start"]
+        return subprocess.CompletedProcess(argv, 0, "{}", "")
+    monkeypatch.setattr(dispatch.subprocess, "run", run)
     class FakeWatcher:
         pid = 1234
     monkeypatch.setattr(dispatch.subprocess, "Popen", lambda *a, **kw: FakeWatcher())
@@ -137,8 +174,7 @@ def _mock_started_herdr(monkeypatch, tmp_path, observed):
 
 def test_post_start_cross_task_agent_never_gets_brief(monkeypatch, tmp_path):
     run = _run(monkeypatch, tmp_path)
-    _mock_started_herdr(monkeypatch, tmp_path, {
-        "foreground_cwd": "/tmp/office/T1", "agent": "office-the-other-task"})
+    _mock_started_herdr(monkeypatch, tmp_path, dict(name="office-the-other-task", kind="claude", cwd="/tmp/office/T1"))
     monkeypatch.setattr(dispatch, "_deliver_prompt", lambda *a, **kw: pytest.fail("brief sent to wrong agent"))
     notices = []
     monkeypatch.setattr(dispatch, "_launch_notice", lambda *a: notices.append(a[-1]))
@@ -151,18 +187,49 @@ def test_post_start_cross_task_agent_never_gets_brief(monkeypatch, tmp_path):
 
 
 def test_post_start_matching_agent_receives_one_brief(monkeypatch, tmp_path):
+    """A correctly launched dispatch, as real Herdr reports it, passes the fence and its brief is delivered."""
     run = _run(monkeypatch, tmp_path)
     d = _d()
     agent = dispatch.herdr_agent_name(d["id"])
-    _mock_started_herdr(monkeypatch, tmp_path, {"foreground_cwd": "/tmp/office/T1",
-                                                "agent": {"name": agent, "session_id": "session-A"}})
+    _mock_started_herdr(monkeypatch, tmp_path, dict(name=agent, kind="claude", cwd="/tmp/office/T1", session="session-A"))
     calls = []
-    monkeypatch.setattr(dispatch, "_deliver_prompt", lambda *a, **kw: calls.append(a) or True)
+    monkeypatch.setattr(dispatch, "_deliver_prompt", lambda *a, **kw: calls.append((a, kw)) or True)
     spec = {"kind": "worker", "prompt_file": str(tmp_path / "brief.md"), "images": []}
     out = dispatch._herdr_agent_start(run, d, spec, {}, ([], "claude"), "w1:p1",
                                       Path("/tmp/office/T1"), tmp_path)
-    assert out["prompt_landed"] is True and len(calls) == 1
-    assert spec["pane_evidence"]["reported_session"] == "session-A"
+    assert out["prompt_landed"] is True and len(calls) == 1 and spec["pane_evidence"]["mismatch"] is None
+    assert (spec["pane_evidence"]["reported_agent"], spec["pane_evidence"]["reported_kind"],
+            spec["pane_evidence"]["reported_session"]) == (agent, "claude", "session-A")
+
+
+def test_post_start_delivery_runs_outside_the_pane_lock_and_each_send_is_guarded(monkeypatch, tmp_path):
+    """The run-wide pane lock is held for the identity check only: delivery waits never block other launches' pane
+    picks, and every send re-checks the reservation inside the lock."""
+    from concurrent.futures import ThreadPoolExecutor
+    run = _run(monkeypatch, tmp_path)
+    d = _d()
+    agent = dispatch.herdr_agent_name(d["id"])
+    _mock_started_herdr(monkeypatch, tmp_path, dict(name=agent, kind="claude", cwd="/tmp/office/T1"))
+    seen = {}
+
+    def deliver(name, pane, pointer, **kw):
+        def other_launch_takes_the_lock():
+            with dispatch._pane_lock(run):
+                return True
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            seen["lock_free_during_delivery"] = pool.submit(other_launch_takes_the_lock).result(timeout=3)
+        seen["guard"] = kw["guard"]
+        return True
+    monkeypatch.setattr(dispatch, "_deliver_prompt", deliver)
+    spec = {"kind": "worker", "prompt_file": str(tmp_path / "brief.md"), "images": []}
+    out = dispatch._herdr_agent_start(run, d, spec, {}, ([], "claude"), "w1:p1", Path("/tmp/office/T1"), tmp_path)
+    assert out["prompt_landed"] is True and seen["lock_free_during_delivery"] is True
+    with seen["guard"]():  # reserved for this dispatch (or nobody): the send may proceed
+        pass
+    (tmp_path / run["id"] / "herdr-reservations.json").write_text(json.dumps({"w1:p1": "Dother"}))
+    with pytest.raises(dispatch.PaneMismatch, match="reassigned to dispatch Dother"):
+        with seen["guard"]():
+            pytest.fail("a send went into a pane reassigned to another dispatch")
 
 
 def test_rapid_resume_pane_claims_are_fenced_per_dispatch(monkeypatch, tmp_path):
@@ -193,8 +260,8 @@ def test_corrupt_reservation_ledger_fails_closed(monkeypatch, tmp_path, broken):
 
 def test_existing_agent_prevents_shell_setup_even_if_cwd_is_correct(monkeypatch, tmp_path):
     run = _run(monkeypatch, tmp_path)
-    monkeypatch.setattr(dispatch, "_herdr_json", lambda _: {"pane": {
-        "cwd": "/tmp/office/T1", "agent": "office-somebody-else"}})
+    monkeypatch.setattr(dispatch, "_herdr_json", real_herdr_json("w1:p1", name="office-somebody-else", kind="claude",
+                                                                 cwd="/tmp/office/T1"))
     monkeypatch.setattr(dispatch, "_shell_run", lambda *a, **kw: pytest.fail("wrong pane shell modified"))
     monkeypatch.setattr(dispatch, "write_launch_spec", lambda *a, **kw: None)
     monkeypatch.setattr(dispatch, "_launch_notice", lambda *a, **kw: None)
@@ -202,13 +269,43 @@ def test_existing_agent_prevents_shell_setup_even_if_cwd_is_correct(monkeypatch,
                                        ([], "claude"), "w1:p1", Path("/tmp/office/T1"), tmp_path) is None
 
 
-def test_manual_prompt_fences_reassignment_until_delivery_exits(monkeypatch, tmp_path):
-    from threading import Event
+def _live_pane(monkeypatch, tmp_path, d=None):
+    """`office prompt T1` against a pane that really is `d`'s: Herdr's JSON in its real shape."""
     run = _run(monkeypatch, tmp_path)
-    monkeypatch.setattr(prompting, "_resolve", lambda *a: _d())
+    d = d or _d()
+    monkeypatch.setattr(prompting, "_resolve", lambda *a: d)
     monkeypatch.setattr(prompting.gates, "_agent_alive", lambda *a: True)
-    monkeypatch.setattr(dispatch, "_herdr_json", lambda _: {"pane": {"cwd": "/tmp/office/T1"}})
-    entered, proceed, changed = Event(), Event(), Event()
+    monkeypatch.setattr(dispatch, "_herdr_json", real_herdr_json(
+        d["pane_id"], name=dispatch.herdr_agent_name(d["id"]), kind="claude", cwd=d["worktree"], session=d["session_id"]))
+    return run, d
+
+
+def test_manual_prompt_delivers_to_a_pane_that_is_this_dispatchs_in_real_herdr_json(monkeypatch, tmp_path):
+    import contextlib
+    run, d = _live_pane(monkeypatch, tmp_path)
+    sent = []
+
+    def submit(name, text, *, pane=None, guard=None):
+        with guard():
+            sent.append((name, text, pane))
+        return "landed"
+    monkeypatch.setattr(dispatch, "submit_prompt", submit)
+
+    class Con:  # prompt() only records an event after the send
+        pass
+    monkeypatch.setattr(prompting.db, "transaction", lambda con: contextlib.nullcontext())
+    monkeypatch.setattr(prompting.state, "emit", lambda *a, **kw: None)
+    res = prompting.prompt(Con(), run, "T1", "fix this")
+    assert sent == [("w1:p1", "fix this", "w1:p1")]
+    assert "landed" in res.lines[0] and f"agent {dispatch.herdr_agent_name(d['id'])}" in res.lines[0], res.lines
+
+
+def test_manual_prompt_holds_no_pane_lock_while_delivery_waits(monkeypatch, tmp_path):
+    """The lock covers the identity check and each single send, not the delivery's waits (the old lock was held
+    across every landing probe and Enter retry, stalling every other launch's pane pick)."""
+    from threading import Event
+    run, _ = _live_pane(monkeypatch, tmp_path)
+    entered, proceed, took_lock = Event(), Event(), Event()
 
     def send(*args, **kwargs):
         entered.set()
@@ -216,20 +313,61 @@ def test_manual_prompt_fences_reassignment_until_delivery_exits(monkeypatch, tmp
         raise RuntimeError("finished sending")
     monkeypatch.setattr(dispatch, "submit_prompt", send)
 
-    def move_reservation():
+    def other_launch():
         assert entered.wait(timeout=3)
         with dispatch._pane_lock(run):
-            changed.set()
+            took_lock.set()
     with ThreadPoolExecutor(max_workers=2) as pool:
         future = pool.submit(prompting.prompt, None, run, "T1", "fix this")
-        other = pool.submit(move_reservation)
-        assert entered.wait(timeout=3)
-        assert not changed.wait(timeout=0.05)  # assignment cannot interleave with send
+        other = pool.submit(other_launch)
+        assert took_lock.wait(timeout=3), "the pane lock was held while the delivery waited"
         proceed.set()
         with pytest.raises(RuntimeError, match="finished sending"):
             future.result(timeout=3)
         other.result(timeout=3)
-    assert changed.is_set()
+
+
+def test_manual_prompt_refuses_a_pane_reassigned_after_the_identity_check_and_sends_nothing(monkeypatch, tmp_path):
+    """The reservation is re-checked immediately before the send: a pane freed and handed to another dispatch while
+    the delivery prepared (the baseline pane read) is never typed into."""
+    run, d = _live_pane(monkeypatch, tmp_path)
+    ledger = tmp_path / run["id"] / "herdr-reservations.json"
+    sends = []
+
+    def reassign_while_preparing(name):
+        ledger.write_text(json.dumps({"w1:p1": "Dsomeoneelse"}))
+        return None
+    monkeypatch.setattr(dispatch, "_pane_view", reassign_while_preparing)
+    monkeypatch.setattr(dispatch, "_herdr_quiet", lambda *a: sends.append(a))
+    monkeypatch.setattr(dispatch, "_land_timeout", lambda: 0)
+    with pytest.raises(Refused, match="reassigned to dispatch Dsomeoneelse") as err:
+        prompting.prompt(None, run, "T1", "fix this")
+    assert err.value.category == "pane-mismatch" and sends == []
+
+
+def test_a_send_waits_for_the_pane_lock_so_a_pane_assignment_never_interleaves_with_it(monkeypatch, tmp_path):
+    from threading import Event
+    run, d = _live_pane(monkeypatch, tmp_path)
+    fence = dispatch.fenced_pane(run, d)
+    held, release, sent = Event(), Event(), Event()
+
+    def assignment():
+        with dispatch._pane_lock(run):  # a pane pick or layout edit in progress
+            held.set()
+            assert release.wait(timeout=3)
+
+    def send():
+        with fence.guard():
+            sent.set()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a = pool.submit(assignment)
+        assert held.wait(timeout=3)
+        b = pool.submit(send)
+        assert not sent.wait(timeout=0.2), "the send went ahead while a pane assignment held the lock"
+        release.set()
+        a.result(timeout=3)
+        b.result(timeout=3)
+    assert sent.is_set()
 
 
 def test_inspect_optional_pane_column_in_old_schema():
@@ -256,9 +394,9 @@ def test_empty_reservation_owner_is_not_authority(monkeypatch, tmp_path):
 
 def test_unidentified_agent_is_not_a_safe_shell(monkeypatch, tmp_path):
     run = _run(monkeypatch, tmp_path)
-    monkeypatch.setattr(dispatch, "_herdr_json", lambda _: {"pane": {
-        "cwd": "/tmp/office/T1", "agent": {"session_id": "session-B"}}})
-    assert "without a verifiable identity" in dispatch._pane_identity_mismatch(
+    monkeypatch.setattr(dispatch, "_herdr_json", real_herdr_json("w1:p1", name=None, kind="claude", cwd="/tmp/office/T1",
+                                                                 session="session-B"))
+    assert "already runs an agent" in dispatch._pane_identity_mismatch(
         run, _d(), "w1:p1", Path("/tmp/office/T1"), check_cwd=False)
     assert "without a verifiable identity" in dispatch._pane_identity_mismatch(
         run, _d(), "w1:p1", Path("/tmp/office/T1"), agent="office-a111")
@@ -277,11 +415,11 @@ def test_reported_control_chars_are_not_rendered(monkeypatch, tmp_path):
     assert control not in mismatch
 
 
-def test_empty_agent_object_is_unverified(monkeypatch, tmp_path):
+def test_an_agent_herdr_cannot_name_is_unverified(monkeypatch, tmp_path):
+    """`pane get` shows a running agent but `agent list` (unreachable, or not listing the pane) names none."""
     run = _run(monkeypatch, tmp_path)
-    monkeypatch.setattr(dispatch, "_herdr_json", lambda _: {"pane": {"cwd": "/tmp/office/T1", "agent": {}}})
-    assert "without a verifiable identity" in dispatch._pane_identity_mismatch(
-        run, _d(), "w1:p1", Path("/tmp/office/T1"), check_cwd=False)
+    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {} if args[:2] == ["agent", "list"] else
+                        {"pane": {"pane_id": "w1:p1", "cwd": "/tmp/office/T1", "agent": "claude"}})
     assert "without a verifiable identity" in dispatch._pane_identity_mismatch(
         run, _d(), "w1:p1", Path("/tmp/office/T1"), agent="office-a111")
 
@@ -369,7 +507,7 @@ class FakeHerdr:
     def __init__(self):
         import threading
         self.lock = threading.Lock()
-        self.panes, self.n, self.log, self.delivered = {}, 0, [], []
+        self.panes, self.agents, self.n, self.log, self.delivered = {}, {}, 0, [], []
         self.busy_once: set[str] = set()   # `agent start` here answers agent_pane_busy once
         self.foreign: dict[str, str] = {}  # pane -> name of an agent that appears there instead of the started one
 
@@ -383,6 +521,8 @@ class FakeHerdr:
             self.log.append(args)
             if args[:2] == ["pane", "get"]:
                 return {"pane": dict(self.panes[args[2]])} if args[2] in self.panes else {}
+            if args[:2] == ["agent", "list"]:
+                return {"agents": [dict(a) for a in self.agents.values()]}
             if args[:2] == ["pane", "split"]:
                 self.n += 1
                 self.add(f"w1:p{100 + self.n}")
@@ -407,7 +547,10 @@ class FakeHerdr:
                     self.busy_once.discard(pane)
                     out, code = '{"error": {"code": "agent_pane_busy"}}', 1
                 else:
-                    self.panes[pane]["agent"] = {"name": self.foreign.get(pane, name)}
+                    # Herdr's real shape: the pane reports the agent KIND; the named agent is in `agent list`.
+                    kind = argv[argv.index("--kind") + 1]
+                    self.panes[pane]["agent"] = kind
+                    self.agents[pane] = {"name": self.foreign.get(pane, name), "agent": kind, "pane_id": pane}
         return subprocess.CompletedProcess(argv, code, out, "")
 
     def deliver(self, name, pane, pointer, **kw):
@@ -488,7 +631,7 @@ def test_back_to_back_resume_launches_end_with_each_pane_matching_its_own_dispat
     assert r1["pane"] != r3["pane"] and r1["prompt_landed"] and r3["prompt_landed"]
     for d, res in ((d1, r1), (d3, r3)):
         pane = world.panes[res["pane"]]
-        assert pane["agent"]["name"] == dispatch.herdr_agent_name(d["id"])
+        assert pane["agent"] == "claude" and world.agents[res["pane"]]["name"] == dispatch.herdr_agent_name(d["id"])
         assert pane["cwd"] == d["worktree"]
     # Each brief went to the pane whose agent and cwd belong to the dispatch it names.
     assert sorted((name, pane, snap["cwd"]) for name, pane, snap in world.delivered) == sorted(
@@ -553,15 +696,17 @@ def test_retried_launch_into_a_foreign_agent_never_records_landed(world):
 # ------------------------------------------------------------ the native nudge uses the same fence
 
 def _nudged(env, monkeypatch, reported, **payload):
-    """A running herdr dispatch in pane w1:p7 whose pane Herdr reports as `reported`; returns (result, sends, events)."""
+    """A running herdr dispatch in pane w1:p7 whose pane Herdr reports (real JSON) with the keywords `reported(d)` gives
+    real_herdr_json; returns (result, sends, events)."""
     from test_herdr_agent_launch import _live_dispatch
     from office import state
     run, d = _live_dispatch(env, monkeypatch)
     con = env.con()
-    con.execute("UPDATE dispatches SET launcher='herdr', pane_id='w1:p7', status='running', worktree='/tmp/office/T1' "
-                "WHERE id=?", (d["id"],))
+    con.execute("UPDATE dispatches SET launcher='herdr', pane_id='w1:p7', status='running', worktree='/tmp/office/T1', "
+                "session_id='session-A' WHERE id=?", (d["id"],))
     con.commit()
-    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {"pane": reported(d)})
+    own = dict(name=dispatch.herdr_agent_name(d["id"]), kind=d["harness"], cwd="/tmp/office/T1", session="session-A")
+    monkeypatch.setattr(dispatch, "_herdr_json", real_herdr_json("w1:p7", **{**own, **reported(d)}))
     sends = []
     monkeypatch.setattr(dispatch, "submit_prompt", lambda target, text, **kw: sends.append((target, text)) or "landed")
     result = dispatch.job_notify_worker(con, state.get_run(con, run["id"]),
@@ -573,10 +718,11 @@ def _nudged(env, monkeypatch, reported, **payload):
 
 @pytest.mark.approved
 @pytest.mark.parametrize("reported", [
-    lambda d: {"cwd": "/tmp/office/T2", "agent": {"name": dispatch.herdr_agent_name(d["id"])}},  # another task's worktree
-    lambda d: {"cwd": "/tmp/office/T1", "agent": {"name": "office-dsomebodyelse"}},               # another dispatch's agent
-    lambda d: {"cwd": "/tmp/office/T1", "agent": {"name": dispatch.herdr_agent_name(d["id"]), "session_id": "other"}},
-], ids=["cwd", "agent", "session"])
+    lambda d: {"cwd": "/tmp/office/T2"},                          # another task's worktree
+    lambda d: {"name": "office-dsomebodyelse"},                   # another dispatch's agent
+    lambda d: {"session": "other"},                               # another session
+    lambda d: {"kind": "codex" if d["harness"] != "codex" else "claude"},  # another agent kind
+], ids=["cwd", "agent", "session", "kind"])
 def test_notify_worker_refuses_a_pane_that_belongs_to_another_dispatch(env, monkeypatch, reported):
     result, sends, events = _nudged(env, monkeypatch, reported)
     assert sends == [] and result["sent"] is False and "refused" in result
@@ -596,7 +742,6 @@ def test_notify_worker_refusal_keeps_an_unblock_amendment_undelivered(env, monke
 
 @pytest.mark.approved
 def test_notify_worker_sends_when_the_pane_is_this_dispatchs_own(env, monkeypatch):
-    result, sends, events = _nudged(env, monkeypatch, lambda d: {
-        "cwd": "/tmp/office/T1/src", "agent": {"name": dispatch.herdr_agent_name(d["id"])}})
+    result, sends, events = _nudged(env, monkeypatch, lambda d: {"cwd": "/tmp/office/T1/src"})
     assert result == {"sent": True, "landed": "landed"} and sends == [("w1:p7", "office status has an update")]
     assert events == []
