@@ -159,6 +159,47 @@ def test_a_revoke_of_a_plain_accepted_task_lists_unapplied_ordinary_amendments_a
     assert task_row(env, "T1")["status"] == "accepted"
 
 
+def _reopened(env, reason, *, finding=True):
+    """Accepted T1 reopened to changes_required with no new revision, the way a convergence RECHECK, an APPROVED-cleanup
+    fix or a restack does (same accepted and current revision, task not accepted)."""
+    accepted = _accepted(env)
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    con.execute("UPDATE tasks SET status='changes_required', pause_reason=? WHERE id='T1'", (reason,))
+    if finding:
+        con.execute("INSERT INTO findings (id, run_id, task_id, code, severity, location, summary, state, created_at) "
+                    "VALUES ('f1', ?, 'T1', 'F1', 'medium', 'calc.py:1', 'add() drops negatives', 'open', '2026-01-01')",
+                    (run_id,))
+    con.commit()
+    return accepted
+
+
+@pytest.mark.parametrize("reason,finding", [
+    ("S1 RECHECK: repair F1 calc.py:1 add() drops negatives", True),
+    ("APPROVED cleanup: fix F1 (no re-review)", True),
+    ("S1 RECHECK: repair F1 calc.py:1 add() drops negatives", False),
+    ("restack: T0 re-accepted on Rx", False),
+], ids=["recheck", "cleanup-fix", "recheck-reason-only", "restack"])
+def test_a_revoke_of_a_task_reopened_for_findings_or_a_restack_is_not_restored_to_accepted(env, reason, finding):
+    accepted = _reopened(env, reason, finding=finding)
+    code, out = env.office("revoke", "T1", "--reason", "pane died")
+    t1 = task_row(env, "T1")
+    assert code == 0 and t1["status"] == "paused", (t1, out)
+    assert t1["accepted_revision_id"] == accepted["accepted_revision_id"]  # the record is kept; the status is not restored
+    assert "stays accepted" not in out and "lease revoked" in out, out
+
+
+def test_a_revoke_of_a_task_reopened_only_by_an_ordinary_amendment_still_keeps_it_accepted(env):
+    _accepted(env)
+    env.office("amend", "T1", "--", DELTA, env=EXTERNAL, check=0)
+    con = env.con()
+    con.execute("UPDATE tasks SET status='changes_required', pause_reason='amended by A1' WHERE id='T1'")
+    con.commit()
+    code, out = env.office("revoke", "T1", "--reason", "ack-only session is not needed")
+    t1 = task_row(env, "T1")
+    assert code == 0 and t1["status"] == "accepted" and not t1["pause_reason"], (t1, out)
+
+
 def test_a_resubmitted_revision_is_not_the_accepted_one_so_revoke_still_pauses(env):
     _accepted(env)
     env.office("amend", "T1", "--", DELTA, env=EXTERNAL, check=0)
@@ -189,3 +230,18 @@ def test_an_unchanged_tree_resubmit_after_revoke_and_rerun_is_ready(env):
     code, out = env.office("preflight", cwd=wt, env=wenv)
     assert code == 0 and "PREFLIGHT ready" in out and f"resubmit: {rev} is not accepted" in out, out
     assert "no open findings or amendments" not in out, out
+
+
+def test_a_revoke_of_a_blocked_task_with_no_amendment_delivery_is_not_restored_to_accepted(env):
+    """A refused submit blocked the task, but no amendment was delivered to it: nothing amendment-shaped demoted it,
+    so the revoke takes the lease back and pauses it rather than releasing the lease and restoring accepted."""
+    accepted = _accepted(env)
+    con = env.con()
+    con.execute("UPDATE tasks SET status='blocked', pause_reason='submit refused: outside-scope' WHERE id='T1'")
+    con.commit()
+    assert not con.execute("SELECT 1 FROM deliveries WHERE task_id='T1'").fetchone()
+    code, out = env.office("revoke", "T1", "--reason", "pane died")
+    t1 = task_row(env, "T1")
+    assert code == 0 and t1["status"] == "paused", (t1, out)
+    assert t1["accepted_revision_id"] == accepted["accepted_revision_id"]
+    assert "stays accepted" not in out and "lease revoked" in out, out

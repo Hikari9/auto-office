@@ -389,20 +389,21 @@ def job_run_checks(con, run: dict, job: dict) -> dict:
 
 # ------------------------------------------------------------------ pre-existing failures
 
-_FAILURE_LINE = re.compile(r"\b(?:FAILED|FAIL|ERROR|FAILURES?)\b|✕|×|--- FAIL|^not ok\b")
+_FAILURE_LINE = re.compile(r"\b(?:FAILED|FAIL|ERRORS?|FAILURES?)\b|✕|✖|×|--- FAIL|^not ok\b", re.I)
 _VOLATILE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|seconds)\b|0x[0-9a-f]+", re.I)
 
 
 def failure_signature(out: str, roots: tuple[str, ...]) -> frozenset[str]:
     """The failures a check printed, with checkout paths and timings removed so
-    the same failure on two checkouts compares equal. Output with no
-    recognizable failure line is compared by its last lines."""
+    the same failure on two checkouts compares equal: every line carrying a
+    failure marker (any case). Output with none is compared whole, never by its
+    tail: a failure the task added higher up must not look pre-existing."""
     def norm(line: str) -> str:
         for root in roots:
             line = line.replace(root, "<root>")
         return " ".join(_VOLATILE.sub("<n>", line).split())
     lines = [norm(line) for line in out.splitlines() if line.strip()]
-    return frozenset(line for line in lines if _FAILURE_LINE.search(line)) or frozenset(lines[-12:])
+    return frozenset(line for line in lines if _FAILURE_LINE.search(line)) or frozenset(lines)
 
 
 def _roots(path: Path) -> tuple[str, ...]:
@@ -1231,16 +1232,6 @@ def mark_current(con, where: str, params: tuple, codes, states: tuple[str, ...],
     if ids:
         con.execute(f"UPDATE findings SET state=?, updated_at=? WHERE id IN ({','.join('?' * len(ids))})",
                     (new_state, now_iso(), *ids))
-
-
-def preexisting_codes(outcome: dict) -> set[str]:
-    return {p["code"] for p in outcome.get("preexisting") or []}
-
-
-def _preexisting_summary(outcome: dict, old: list[dict]) -> str:
-    base = (outcome.get("preexisting") or [{}])[0].get("base_commit") or ""
-    return (f"{outcome.get('summary', '')}; {len(old)} failing check(s) also fail the same way on base {base[:7]} "
-            f"({', '.join(f['code'] for f in old)}): pre-existing, not caused by this task")
 
 
 def preexisting_codes(outcome: dict) -> set[str]:

@@ -72,6 +72,26 @@ def test_failure_signature_differs_when_the_failures_differ():
     assert gates.failure_signature("boom\n", ()) != gates.failure_signature("other\n", ())
 
 
+LONG_TAIL = "".join(f"step {i} done\n" for i in range(1, 31))
+
+
+@pytest.mark.parametrize("added", ["error: cannot import name 'frob'", "✖ 1 problem (1 error, 0 warnings)",
+                                   "Traceback: ERROR in module x", "unexpected exception while loading"],
+                         ids=["lowercase-error", "glyph", "uppercase-marker", "no-marker-at-all"])
+def test_failure_signature_sees_a_new_failure_higher_up_in_a_long_output_with_the_same_tail(added):
+    base = "".join(f"step {i} done\n" for i in range(1, 6)) + LONG_TAIL
+    task = "".join(f"step {i} done\n" for i in range(1, 6)) + added + "\n" + LONG_TAIL
+    assert base.splitlines()[-12:] == task.splitlines()[-12:]
+    assert gates.failure_signature(base, ()) != gates.failure_signature(task, ())
+    assert gates.failure_signature(task, ()) == gates.failure_signature(task, ())
+
+
+def test_failure_signature_without_failure_markers_compares_the_whole_output_not_its_tail():
+    base = "".join(f"step {i}\n" for i in range(1, 40))
+    assert gates.failure_signature(base, ()) == gates.failure_signature(base.replace("step 5\n", "step 5 \n"), ())
+    assert gates.failure_signature(base, ()) != gates.failure_signature(base.replace("step 5\n", "step five\n"), ())
+
+
 # ------------------------------------------------------------------ v3.1
 
 @V31
@@ -189,3 +209,22 @@ def test_convergence_mixed_failures_block_only_on_the_new_one(env):
     rows = {r["code"]: r["state"] for r in _q(env, "SELECT code, state FROM findings WHERE gate_kind='checks'")}
     assert rows == {"C1": "minor", "C2": "open"}
     assert task_row(env)["status"] == "changes_required"
+
+
+# The error shows only once calc.py no longer raises NotImplementedError (the task's change), so the base fails
+# without it. The file name is split so the output never names a changed file.
+NEW_ERROR = ("python3 -c \"print('error: cannot import name frob') if 'Not' + 'Implemented' not in open('calc' + '.py').read() "
+             "else None; print(chr(10).join('step %d done' % i for i in range(1, 31))); raise SystemExit(1)\"")
+
+
+@V31
+def test_v31_a_new_error_higher_up_with_the_same_tail_is_not_preexisting(env):
+    """The check fails on the base too, with the same exit status and the same last lines; the task's run adds one
+    lowercase error above them. A tail-only comparison called that pre-existing and kept review running."""
+    plan = PLAN_ONE.replace('checks: python3 -c "import calc; assert calc.add(2, 3) == 5"', f"checks: {NEW_ERROR}")
+    _start(env, plan, executor=WORK, code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    assert _checks_gate(env)["verdict"] == "CHANGES_REQUIRED"
+    assert not _preexisting_events(env)
+    assert json.loads(_base_evidence(env)[0]["meta_json"])["preexisting"] is False
+    assert "code_reviewer" not in _roles(env) and task_row(env)["status"] == "changes_required"

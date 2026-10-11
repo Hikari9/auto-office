@@ -35,6 +35,14 @@ def conflicting(s: dict, pr: dict) -> bool:
     return remote_head(pr) == (s.get("conflicting") or {}).get(str(pr["number"]))
 
 
+def mergeability(s: dict, pr: dict) -> dict:
+    """`gh pr view --json mergeable,mergeStateStatus`: CONFLICTING/DIRTY while `conflicting` holds, else the
+    state's `mergeable` / `merge_state` (default MERGEABLE / CLEAN; tests set UNKNOWN, BEHIND, DRAFT, BLOCKED)."""
+    if conflicting(s, pr):
+        return {"mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY"}
+    return {"mergeable": s.get("mergeable", "MERGEABLE"), "mergeStateStatus": s.get("merge_state", "CLEAN")}
+
+
 def git_merge(pr: dict, method: str) -> None:
     """Really merge the PR head into its base on the bare origin."""
     origin = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
@@ -104,7 +112,7 @@ def main(argv: list[str]) -> int:
                 pr["state"], pr["merged_with"] = "merged", method
         elif argv[1] == "view":
             out = json.dumps({"number": pr["number"], "body": pr["body"], "state": pr["state"].upper(), "isDraft": pr["draft"],
-                              "baseRefName": pr["base"], "headRefOid": remote_head(pr), "mergeStateStatus": s.get("merge_state", "CLEAN"),
+                              "baseRefName": pr["base"], "headRefOid": remote_head(pr), **mergeability(s, pr),
                               "statusCheckRollup": s.get("checks", [])})
         elif argv[1] == "checks":
             code = s.get("checks_exit", 0)

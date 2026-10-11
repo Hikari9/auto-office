@@ -79,7 +79,11 @@ def test_failed_codex_start_names_the_screen(tmp_path, monkeypatch, screen, time
         if argv[1:3] == ["pane", "close"]:
             return subprocess.CompletedProcess(argv, 0, "{}", "")
         if argv[1:3] == ["pane", "get"]:
-            return subprocess.CompletedProcess(argv, 1, '{"error":{"code":"pane_not_found"}}', "")
+            if ["herdr", "pane", "close", "w1:p1"] in calls:
+                return subprocess.CompletedProcess(argv, 1, '{"error":{"code":"pane_not_found"}}', "")
+            # A real `herdr pane get` for a fresh shell pane: its id and cwd, no agent yet.
+            pane = {"pane_id": "w1:p1", "cwd": str(tmp_path), "foreground_cwd": str(tmp_path)}
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"result": {"pane": pane}}), "")
         assert argv[1:3] == ["pane", "read"]
         return subprocess.CompletedProcess(argv, 0, screen, "")
 

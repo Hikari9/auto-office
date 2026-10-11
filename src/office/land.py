@@ -18,7 +18,8 @@ must be up to date is updated once. After the last merge the default branch's
 tree is compared with the reviewed integration tree; if main moved meanwhile
 the run checks re-run on it before any prod deploy.
 
-A PR GitHub reports not mergeable gets one recovery attempt (`_recover_conflicting`):
+A PR GitHub reports conflicting (`gh pr view --json mergeable,mergeStateStatus` says CONFLICTING or
+DIRTY; not "not up to date", a draft or an unknown state) gets one recovery attempt (`_recover_conflicting`):
 if the remote branch is still the recorded head, the PR merges with the default
 branch without conflicts, and folding every open task onto it reproduces the
 reviewed integration tree, one merge commit of the default branch is pushed to
@@ -512,6 +513,18 @@ def _accepted_commit(con, task: dict) -> str:
 NOT_MERGEABLE = re.compile(r"cannot be cleanly created|not mergeable(?!: the base branch policy)", re.I)
 
 
+def _github_conflicting(run: dict, number: int) -> bool:
+    """GitHub itself reports the PR has a merge conflict (`mergeable` CONFLICTING or `mergeStateStatus` DIRTY).
+    Not "not up to date" (BEHIND), a draft, an unknown or still-computing state, or a policy block: no conflict is
+    behind those, so rewriting the branch cannot help. An unreadable answer is not a conflict."""
+    try:
+        proc = _gh(run, "pr", "view", str(number), "--json", "mergeable,mergeStateStatus")
+        info = json.loads(proc.stdout or "{}") if proc.returncode == 0 else {}
+    except (subprocess.SubprocessError, ValueError):
+        return False
+    return isinstance(info, dict) and (info.get("mergeable") == "CONFLICTING" or info.get("mergeStateStatus") == "DIRTY")
+
+
 def _merge_all(con, run: dict, res: Result) -> str:
     """Merge every task PR bottom-up. Returns the default branch's commit
     before the first merge (the rollback target)."""
@@ -551,7 +564,8 @@ def _merge_all(con, run: dict, res: Result) -> str:
             _gh(run, "pr", "update-branch", str(pr["number"]))
             _wait_checks(run, pr["number"])
             proc = _gh(run, "pr", "merge", str(pr["number"]), prs.MERGE_FLAGS[method])
-        if proc.returncode != 0 and method != "rebase" and NOT_MERGEABLE.search(proc.stderr + proc.stdout):
+        if (proc.returncode != 0 and method != "rebase" and NOT_MERGEABLE.search(proc.stderr + proc.stdout)
+                and _github_conflicting(run, pr["number"])):
             # GitHub's rebase merge replays the branch's own commits, so a merge commit pushed to it would change nothing.
             pr = _recover_conflicting(con, run, t, pr, base, res,
                                       f"merged so far: {', '.join(merged) or 'none'}; {base} was {before[:12]}")
@@ -677,6 +691,13 @@ def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: R
     ok, err = prs.push(run, {"worktree": str(wt if wt.is_dir() else repo), "branch": branch}, commit=new, force=True,
                        expected=head)
     if not ok:
+        if err.startswith("push timed out"):
+            # The push may have reached origin before the timeout: never claim it pushed nothing.
+            raise Refused("recovery-push-failed", f"push of {branch} failed: {err[:160]}",
+                          preserved=f"the push timed out, so origin may already hold the recovery merge {new[:12]} on {branch} "
+                                    f"(recorded as recovering, was {head[:12]}); {merged_so_far}",
+                          next_step=f"check {branch} on origin, then office land again (Office recognises its own recovery "
+                                    "head), or " + by_hand)
         raise Refused("recovery-push-failed", f"push of {branch} failed: {err[:160]}", preserved=untouched,
                       next_step="office land again, or " + by_hand)
     pr = {**{k: v for k, v in pr.items() if k != "recovering"},

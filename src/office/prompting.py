@@ -66,11 +66,10 @@ def prompt(con, run: dict, target: str | None, text: str) -> Result:
     try:
         with dispatch.fenced_pane(run, d) as pane:
             got = dispatch.submit_prompt(pane, text, pane=pane)
-            seen = dispatch.reported_identity(*dispatch.pane_snapshot(pane, dispatch.herdr_agent_name(d["id"])))
+        seen = dispatch.reported_identity(*dispatch.pane_snapshot(pane, dispatch.herdr_agent_name(d["id"])))
     except dispatch.PaneMismatch as exc:
         raise Refused("pane-mismatch", f"{exc}; refusing to send the prompt", scope=who,
                       next_step=f"office inspect task {who}, then office revoke {who} if the pane is misassigned") from None
-    pane = d["pane_id"]
     # Herdr relays what the pane's shell reports: never echo its control sequences.
     where = (f"pane {pane}: herdr reports cwd {dispatch._identity_line(seen['cwd'] or 'none')}, "
              f"agent {dispatch._identity_line(seen['agent'] or 'none')}; "
