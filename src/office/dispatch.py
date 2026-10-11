@@ -1039,11 +1039,14 @@ def revoke(con, run: dict, target: str, reason: str) -> Result:
 _REOPENED_FOR_WORK = ("RECHECK", "APPROVED cleanup", "restack:", "waiting for the amended")
 
 
-def _demoted_by_amendment(con, run_id: str, task: dict) -> bool:
+def _demoted_by_amendment(con, run_id: str, task: dict, pending: list) -> bool:
     """True when `task` is accepted, or left accepted work only by an amendment delivery and the relaunch or
-    refused submit that followed: it has no open task findings and no pause reason of `_REOPENED_FOR_WORK`."""
+    refused submit that followed: `pending` (its deliveries past the accepted revision) is the evidence, so a task
+    blocked for another reason has none, and it has no open task findings and no `_REOPENED_FOR_WORK` pause reason."""
     if task["status"] == "accepted":
         return True
+    if not pending:
+        return False
     if con.execute(f"SELECT 1 FROM findings WHERE run_id=? AND task_id=? AND {contract.TASK_WORK_FINDINGS}",
                    (run_id, task["id"])).fetchone():
         return False
@@ -1062,18 +1065,21 @@ def _revoke_standing(con, run_id: str, task: dict) -> tuple[str | None, str | No
     acceptance edits are enforced by the gate rerun the amendment triggered, and its delta is listed as unapplied.
     An unapplied amendment that is not ordinary (scope, interfaces, ownership) is changes_required naming it.
     A task that is not accepted now is restored only when an amendment delivery alone demoted it (`_demoted_by_amendment`):
-    open blocking findings (a convergence RECHECK, an APPROVED-cleanup fix), a restack or a hold reopened it without a
-    new revision, and that work is still owed. A cancelled task keeps its status."""
+    a task with no such delivery was blocked or paused for something else, open blocking findings (a convergence
+    RECHECK, an APPROVED-cleanup fix), a restack or a hold reopened it without a new revision, and that work is still
+    owed. A cancelled task keeps its status."""
     if task["status"] == "cancelled":
         return None, None, [], []
     rev_id = task.get("accepted_revision_id")
     rev = con.execute("SELECT applied_version FROM revisions WHERE id=?", (rev_id,)).fetchone() if rev_id else None
-    if rev is None or rev_id != task.get("current_revision_id") or not _demoted_by_amendment(con, run_id, task):
+    if rev is None or rev_id != task.get("current_revision_id"):
         return "paused", None, [], []
     pending = con.execute("SELECT d.amendment_id, COALESCE(a.class, 'contract') AS class FROM deliveries d "
                           "LEFT JOIN amendments a ON a.run_id=d.run_id AND a.id=substr(d.run_id, 1, 8) || ':' || d.amendment_id "
                           "WHERE d.run_id=? AND d.task_id=? AND d.target_version>? ORDER BY d.target_version",
                           (run_id, task["id"], rev["applied_version"] or 0)).fetchall()
+    if not _demoted_by_amendment(con, run_id, task, pending):
+        return "paused", None, [], []
     contract = list(dict.fromkeys(r["amendment_id"] for r in pending if r["class"] != "ordinary"))
     ordinary = [i for i in dict.fromkeys(r["amendment_id"] for r in pending) if i not in contract]
     if contract:
