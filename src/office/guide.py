@@ -134,6 +134,15 @@ def next_action(con, run: dict) -> str:
         if c.get(status):
             tid = c[status][0]
             t = next(x for x in tasks if x["id"] == tid)
+            from office import gates as gates_review
+            block = gates_review.unavailable_review_block(con, run, t)
+            if block:
+                return (f"{tid} code review of {block['revision_id']} returned no verdict "
+                        f"({block['verdict'] or block.get('review_status')}; runtime status, no round spent). Re-run only the "
+                        f"review on a fallback reviewer: office review {tid} [--as <harness>/<model>[@effort]]; or review it "
+                        f"yourself as the orchestrator (recorded degraded, non-independent; refused for the session that "
+                        f"produced it): office review {tid} --report <file>; office resume retries the same reviewer chain. "
+                        f"A waiver is the user's last resort: office approve waive {tid}:code --quote \"<words>\"")
             return f"resolve {tid} ({t.get('pause_reason') or status}); office inspect task {tid}"
     from office import gates as gates_mod
     if contract.is_convergence(run):

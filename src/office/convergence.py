@@ -690,7 +690,7 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
             str(checkout), int(gate["round"] or 1), state.current_requirements(con, run["id"])["frozen"],
             evidence=evidence, max_rounds=contract.round_cap(run),
             used_codes=gates.finding_codes(con, "run_id=? AND scope=?", (run["id"], scope["id"])))
-        exclude = list(st.get("exclude_routes") or [])
+        exclude = list(dict.fromkeys([*(st.get("exclude_routes") or []), *(job["payload"].get("exclude_routes") or [])]))
         resume = _same_reviewer(con, run, scope["id"], "convergence_review", int(gate.get("cycle") or 1))
         # A user-pinned reviewer (office dispatch --review-as) on any lane task reviews the lane.
         pinned = next((t["review_override"] for t in tasks if t.get("review_override")), None)
@@ -824,10 +824,11 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
         "", VISUAL_FORMAT]) + "\n"
     evdir = lane_receipt.parent
     resume = _same_reviewer(con, run, scope["id"], "visual", int(gate.get("cycle") or 1))
-    exclude = list(st.get("exclude_routes") or [])
+    exclude = list(dict.fromkeys([*(st.get("exclude_routes") or []), *(job["payload"].get("exclude_routes") or [])]))
     outcome = gates.run_reviewer(con, run, gate, "visual_reviewer", brief, cwd=evdir, visual=True, images=images,
                                  include_dirs=[evdir] + sorted({i.parent for i in images}), kind="vision",
-                                 exclude=exclude or None, resume_from=resume if not exclude else None)
+                                 exclude=exclude or None, resume_from=resume if not exclude else None,
+                                 review_override=job["payload"].get("review_override"))
     parsed = outcome.get("parsed")
     if parsed is not None:
         outcome["evidence_status"] = parsed.evidence_status
@@ -1226,12 +1227,14 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
         if fb:
             kind = "visual" if fb["kind"] == "visual" else "convergence"
             inspect = " --inspected <every screenshot>, only if you can view them" if kind == "visual" else ""
-            return (f"{sid}: no specialist reviewer returned a verdict (runtime status, not a verdict). As the "
-                    f"orchestrator you are authorized to review on the reviewer's behalf (independent only if you did not "
-                    f"produce the work; else it is refused or recorded as degraded): office review {sid}:{kind} --report <file>{inspect}; or office "
-                    f"resume retries the chain; or waive with landing authority")
+            return (f"{sid}: no specialist reviewer returned a verdict (runtime status, not a verdict, no round spent). Re-run "
+                    f"only the review on a fallback reviewer: office review {sid}:{kind} [--as <harness>/<model>[@effort]]; or, "
+                    f"as the orchestrator you are authorized to review on the reviewer's behalf (independent only if you did "
+                    f"not produce the work; else it is refused or recorded as degraded): office review {sid}:{kind} --report "
+                    f"<file>{inspect}; or office resume retries the chain; a waiver needs landing authority")
         if s["status"] == "unavailable":
-            return f"{sid}: a review is unavailable ({s['detail']}); office resume retries it, or waive it"
+            return (f"{sid}: a review is unavailable ({s['detail']}); re-run only the review on a fallback reviewer: office "
+                    f"review {sid} [--as <route>]; or office resume retries it; a waiver is the last resort")
         if s["status"] in ("evidence_blocked", "attention", "conflict", "blocked"):
             return (f"{sid} {s['status']}: {s['detail']}; fix the cause, then office resume (a waiver needs landing "
                     f"authority: office approve waive {sid}:<convergence|visual> ...)")
@@ -1679,6 +1682,56 @@ def fallback_gate(con, run: dict, scope_id: str, kind: str | None = None) -> dic
 
 def spec_defect_gate(con, run: dict, scope_id: str) -> dict | None:
     return next((g for g in _unreviewed_gates(con, run, scope_id) if g.get("evidence_status") == SPEC_DEFECT), None)
+
+
+def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[str]:
+    """`office review <scope>[:convergence|visual] [--as <route>]`: re-dispatch only the review of the
+    scope's current composition for each gate that returned no verdict, on the named route or the next
+    fallback one. No executor starts and no round is spent. A pinned reviewer is kept unless `pin`
+    re-pins it. Returns the result lines. Caller holds the tx."""
+    m = re.fullmatch(r"([LS]-[\w+.-]+)(?::(\w+))?", spec.strip())
+    kind = KIND_ALIASES.get(m.group(2).lower()) if m and m.group(2) else None
+    if not m or (m.group(2) and kind is None):
+        raise Usage("bad-review-target", f"cannot review {spec!r}", next_step="office review L-T1[:convergence|visual] --as <route>")
+    run = state.get_run(con, run["id"])
+    scope = find_scope(con, run, m.group(1))
+    if scope is None:
+        raise Usage("unknown-scope", f"no lane or shared scope {m.group(1)}", next_step="office inspect convergence")
+    blocked = [g for g in _unreviewed_gates(con, run, scope["id"])
+               if (kind is None or g["kind"] == kind) and g.get("evidence_status") != SPEC_DEFECT]
+    if not blocked:
+        raise Refused("nothing-to-review", f"{scope['id']} has no review that returned no verdict on its current composition; "
+                      "there is no review-only recovery to run", scope=scope["id"], next_step="office status")
+    if pin:
+        for tid in scope["tasks"]:
+            state.update_task(con, run["id"], tid, review_override=pin)
+    st = scope_state(run, scope["id"])
+    pinned = pin or next((t["review_override"] for t in (state.get_task(con, run["id"], tid) for tid in scope["tasks"])
+                          if t and t.get("review_override")), None)
+    lines = []
+    for g in blocked:
+        visual = g["kind"] == "visual"
+        payload: dict = {"scope": scope["id"]}
+        if pin and visual:
+            payload["review_override"] = pin  # a visual reviewer is not the task's pinned code reviewer
+        elif visual or not pinned:
+            tried = gates.tried_reviewer_routes(con, "g.run_id=? AND g.scope=? AND g.kind=? AND g.input_key=?",
+                                                (run["id"], scope["id"], g["kind"], g["input_key"]))
+            if tried:
+                payload["exclude_routes"] = tried
+        gid, _ = _new_gate(con, run, scope, _rev(scope["id"], st["commit"]), g["kind"], int(g["round"] or 1),
+                           int(g.get("cycle") or 1))
+        state.enqueue(con, run, "lane_visual" if visual else "convergence_review", {"gate_id": gid, **payload},
+                      dedup_key=f"{g['kind']}:{gid}", max_attempts=2)
+        who = (pin or ({} if visual else pinned) or {}).get("as")
+        how = (f"reviewer {who}" + ("" if pin else ", pinned by the user and kept; --as names another")) if who \
+            else "next fallback reviewer route"
+        lines.append(f"{scope['id']} {'visual' if visual else 'convergence'} review re-run on {st['commit'][:10]} "
+                     f"(gate {gid}, {how}); no executor launched, no round spent")
+    _set_scope(con, run, scope["id"], status="reviewing", detail="re-running the review on another reviewer route")
+    state.emit(con, run, "convergence.review_only", f"{scope['id']}: review-only re-run of "
+               f"{', '.join(g['kind'] for g in blocked)}" + (f" on {pin['as']}" if pin else ""))
+    return lines
 
 
 def fallback_review(con, run: dict, spec: str, report: Path, *, inspected: list[str]) -> Result:

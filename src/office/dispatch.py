@@ -212,11 +212,17 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
         if task is None or task["role"] == "planner":
             raise Usage("unknown-task", f"{tid} is not a task in plan p{run['plan_version']}",
                         next_step="office status lists the ready tasks")
-        if not (as_model or route or cli or external):
-            from office import gates
-            block = gates.unavailable_review_block(con, run, task)
-            if block:
-                continue
+        from office import gates
+        block = gates.unavailable_review_block(con, run, task)
+        if block and (as_model or route or cli or external):
+            # The submitted revision is final and only its review is missing: an executor would not unblock it.
+            raise Refused("review-only-block", f"{tid} is blocked only on its code review of {block['revision_id']} "
+                          f"({block['verdict'] or block.get('review_status')}); an executor would not unblock it and "
+                          "its submission is kept", scope=tid, preserved="the submitted revision",
+                          next_step=f"office review {tid} [--as <harness>/<model>[@effort]] re-runs only the review; "
+                                    f"office review {tid} --report <file> reviews it as the orchestrator")
+        if block:
+            continue
         if as_model:
             routes[tid] = candidates.declared_decision(as_model, role="executor",
                                                        config=state.pinned_config(run))
@@ -237,16 +243,14 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 # A submitted revision blocked only by an UNAVAILABLE code
                 # review needs its review re-run, not a fresh executor.
                 from office import gates
-                if review_as:
-                    state.update_task(con, run["id"], tid, review_override={
-                        "as": review_as, "cli": review_cli, "external": bool(review_external), "by": "user"})
-                gid = gates.rerun_unavailable_review(con, run, state.get_task(con, run["id"], tid))
+                gid = gates.rerun_unavailable_review(con, run, state.get_task(con, run["id"], tid),
+                                                     pin=gates.review_pin(review_as, review_cli, review_external))
                 if gid is None:
                     raise Refused("state-changed", f"{tid} is no longer blocked on its code review; re-run dispatch",
                                   scope=tid, next_step=f"office dispatch {tid}")
                 res.add(f"{tid} code review re-run on {task['current_revision_id']} (gate {gid}"
-                        + (f", reviewer {review_as}" if review_as else "") + "); the submission is kept, "
-                        "no executor launched")
+                        + (f", reviewer {review_as}" if review_as else "") + "); the submission is kept, no executor "
+                        f"launched (office review {tid} --as <harness>/<model>[@effort] names another reviewer)")
                 previous = tid
                 continue
             after = task.get("stack_after")
@@ -295,8 +299,8 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             decision = settle_discovery(con, run, task, decision, launching=not stack_after)
             _record_routing(con, run, decision)
             if review_as:
-                state.update_task(con, run["id"], tid, review_override={
-                    "as": review_as, "cli": review_cli, "external": bool(review_external), "by": "user"})
+                from office import gates
+                state.update_task(con, run["id"], tid, review_override=gates.review_pin(review_as, review_cli, review_external))
             if stack_after:
                 state.update_task(con, run["id"], tid, status="queued", stack_after=stack_after,
                                   pause_reason=f"stacked after {stack_after}")

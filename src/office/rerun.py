@@ -236,13 +236,17 @@ def _route_decision(con, run: dict, task: dict, parent: dict, *, as_model: str |
     return None
 
 
+def _mode_required(tid: str) -> Usage:
+    return Usage("rerun-mode", f"say how to rerun {tid}: --resume continues the ended session with its context "
+                 "(native harness resume); --fresh starts a new session with the open findings in its brief",
+                 next_step=f"office rerun {tid} --resume | {_fresh_cmd(tid)}")
+
+
 def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False,
           as_model: str | None = None, cli: str | None = None, external: bool = False,
           review_as: str | None = None, review_cli: str | None = None, review_external: bool = False) -> Result:
-    if resume == fresh:
-        raise Usage("rerun-mode", f"say how to rerun {tid}: --resume continues the ended session with its context "
-                    "(native harness resume); --fresh starts a new session with the open findings in its brief",
-                    next_step=f"office rerun {tid} --resume | {_fresh_cmd(tid)}")
+    if resume == fresh and review_as is None:
+        raise _mode_required(tid)
     if reroute and resume:
         raise Usage("rerun-mode", "--reroute starts a new session on another route; a resumed session keeps its own",
                     next_step=f"{_fresh_cmd(tid)} --reroute")
@@ -263,6 +267,16 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         raise Usage("unknown-task", f"no task {tid}")
     if task["status"] in ("accepted", "cancelled"):
         raise Refused("task-done", f"{tid} is {task['status']}; nothing to rerun", scope=tid)
+    if review_as is not None and gates.unavailable_review_block(con, run, task):
+        # The revision is final and only its review is missing: the rerun is the review, never an executor.
+        res = gates.review_only(con, run, tid, review_as=review_as, review_cli=review_cli, review_external=review_external)
+        ignored = [f"--{f}" for f, on in (("resume", resume), ("fresh", fresh), ("reroute", reroute), ("as", as_model),
+                                          ("cli", cli), ("external", external)) if on]
+        if ignored:
+            res.lines.append(f"{tid} {' '.join(ignored)} ignored: no executor rerun applies to a review-only block")
+        return res
+    if resume == fresh:
+        raise _mode_required(tid)
     live = gates.live_task_session(con, run["id"], tid)
     if live:
         raise Refused("worker-live", f"{tid} still has a live worker ({live})", scope=tid,
@@ -324,8 +338,7 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
             dispatch._record_routing(con, run, decision)
             dispatch.note_route(con, run, task, decision)
         if review_as is not None:
-            state.update_task(con, run["id"], tid, review_override={
-                "as": review_as, "cli": review_cli, "external": bool(review_external), "by": "user"})
+            state.update_task(con, run["id"], tid, review_override=gates.review_pin(review_as, review_cli, review_external))
         did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
                                       extra=extra, base=(restack or {}).get("base"), decision=launch)
         if restack and (restack["merged"] or restack["conflict"]):
