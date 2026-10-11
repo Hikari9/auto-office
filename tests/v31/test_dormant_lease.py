@@ -106,9 +106,36 @@ def test_a_stacked_task_runs_once_its_holder_submitted_and_ended(env):
     assert "already queued" not in out, out
 
 
-def test_an_accepted_task_with_an_ended_session_does_not_block_a_contract_change(env):
+@pytest.mark.review_contract("v3.1")
+def test_a_stacked_task_starts_when_its_holder_ends_through_finish(env, monkeypatch):
+    """The end a supervisor records (`_finish`), not a hand-written row: it is what starts the stacked task (#508)."""
+    from office import dispatch
+    approved_run(env, plan=PLAN_HELD, executor=[{}], code_reviewer=[{"reply": CHANGES}, {"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    w1, wt1 = _worker(env, "T1")
+    (wt1 / "calc.py").write_text(GOOD_ADD)
+    self_reviewed(wt1, "calc.py")
+    env.office("submit", cwd=wt1, env=w1, check=0)
+    env.office("dispatch", "T2", env=EXTERNAL, check=0)
+    code, out = env.office("dispatch", "T2", "T3", env=EXTERNAL)
+    assert code == 0 and task_row(env, "T3")["status"] == "queued", out
+    w2, wt2 = _worker(env, "T2")
+    (wt2 / "mul.py").write_text(GOOD_MUL)
+    self_reviewed(wt2, "mul.py")
+    env.office("submit", cwd=wt2, env=w2, check=0)
+    assert task_row(env, "T2")["status"] == "submitted"
+    assert task_row(env, "T3")["status"] == "queued", "T2's session is still live"
+    monkeypatch.setenv("OFFICE_WORKER_LAUNCHER", "external")  # the stacked launch records a session, no fake agent runs
+    dispatch._finish(w2["OFFICE_DISPATCH_ID"], 0, None, "success", 0.0)
+    assert task_row(env, "T3")["status"] in ("launching", "running"), task_row(env, "T3")["pause_reason"]
+    con = env.con()
+    assert con.execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T3' AND role='executor'").fetchone()[0] == 1
+    assert not con.execute("SELECT 1 FROM leases WHERE task_id='T2' AND revoked_at IS NOT NULL").fetchone()
+
+
+def _contract_change_beside_an_ended_ack_session(env, **reviewers):
     approved_run(env, plan=PLAN_TWO, executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}}, "submit": True}],
-                 code_reviewer=[{"reply": "VERDICT: PASS"}])
+                 code_reviewer=[{"reply": "VERDICT: PASS"}], **reviewers)
     env.office("dispatch", "T1", check=0)
     assert task_row(env, "T1")["status"] == "accepted"
     # The 3.5.0 shape: an amendment relaunched T1 only to acknowledge it, that session ended, and its lease stayed.
@@ -126,6 +153,17 @@ def test_an_accepted_task_with_an_ended_session_does_not_block_a_contract_change
     env.write_plan(PLAN_TWO.replace("scope: mul.py", "scope: mul.py, calc.py"))
     code, out = env.office("amend", "T2", "--contract", "--", "T2 also touches calc.py", env=EXTERNAL)
     assert code == 0 and "scope-held" not in out, out
+
+
+def test_an_accepted_task_with_an_ended_session_does_not_block_a_contract_change(env):
+    _contract_change_beside_an_ended_ack_session(env)
+
+
+@pytest.mark.review_contract("convergence-v1")
+def test_convergence_an_accepted_task_with_an_ended_session_does_not_block_a_contract_change(env):
+    _contract_change_beside_an_ended_ack_session(env, convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
+    from office import contract, state
+    assert contract.is_convergence(state.get_run(env.con(), env.con().execute("SELECT id FROM runs").fetchone()[0]))
 
 
 def test_an_ack_only_session_that_ends_leaves_the_task_resumable(env):
