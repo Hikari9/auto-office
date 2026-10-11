@@ -131,6 +131,11 @@ def test_any_signal_text_becomes_one_bounded_hint_line(raw):
     ("office rerun T8 --resume | office rerun T8 --fresh", ["rerun", "t8", "--fresh"], "no-pane", True),
     ("pause: office rerun T8 then office wait", ["wait"], "gate-busy", True),
     ("office rerun T8 --resume | office rerun T8 --fresh", ["rerun", "T8"], "rerun-mode", False),  # not as spelled
+    ("office rerun T8 --resume | office rerun T8 --fresh", ["rerun", "T8", "--resume", "--fresh"], "rerun-mode", False),  # superset of either
+    ("office dispatch T1", ["dispatch", "T1", "T2"], "dispatch-busy", False),        # an extra id
+    ("office dispatch T1", ["dispatch", "T1"], "dispatch-busy", True),
+    ("office dispatch T1", ["dispatch", "T1", "--json"], "dispatch-busy", True),      # output format is not a difference
+    ("office rerun T8 --fresh", ["rerun", "T8", "--fresh=1"], "no-pane", True),
     ("office rerun T8", ["rerun", "T9"], "rerun-mode", False),                       # another task
     ("office dispatch T1", ["rerun", "T1"], "rerun-mode", False),                    # another command
     ("no action; the planner is working", ["status"], "rerun-mode", False),          # next: names no command
