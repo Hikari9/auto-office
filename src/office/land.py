@@ -337,9 +337,11 @@ def _record_deployed(con, run: dict, target: str, commit: str, tree: str, by: st
 
 # ------------------------------------------------------------------ rebase
 
-COMPOSE_BY_HAND = ("compose by hand: a scratch worktree from origin/{base}, cherry-pick each accepted task's commits, "
-                   "resolve the conflicts, run the full suite, have an independent reviewer check the resolution, open "
-                   "one PR, close the task PRs as superseded, then office close --abandon \"landed as #<N>\"")
+COMPOSE_BY_HAND = ("compose by hand: start a scratch worktree from origin/{base}; merge the accepted task "
+                   "revisions in dependency order (they may be merge commits, so do not blindly cherry-pick); "
+                   "repair conflicts or duplicates, compare the final tree to the reviewed integration and "
+                   "have an independent review of any changed resolution; run the complete test suite, open one PR, close "
+                   "the task PRs as superseded, then office close --abandon \"landed as #<N>\"")
 
 
 def rebase(con, run: dict) -> Result:
@@ -692,7 +694,8 @@ def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: R
     for uid, commit in heads:
         tree, files = _merge_tree(repo, cur, commit)
         if files is not None:
-            raise Refused("merge-conflict", f"{uid} conflicts with {base} {default[:12]} on {', '.join(files) or 'files'}",
+            reason = f"; {ancestry}" if ancestry else ""
+            raise Refused("merge-conflict", f"{uid} conflicts with {base} {default[:12]} on {', '.join(files) or 'files'}{reason}",
                           preserved=untouched, next_step=by_hand)
         cur = commit_tree(tree, (cur, commit), f"office land: fold {uid} onto {base}")  # scratch: never pushed
         trees.append(tree)
@@ -702,13 +705,16 @@ def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: R
                       preserved=untouched, next_step="office status")
     reviewed = _tree(repo, integrated)
     if trees[-1] != reviewed:
-        # A criss-cross merge can be clean yet duplicate code that was absent
-        # from the reviewed composition. Never push that unreviewed tree.
+        # A criss-cross merge may appear clean while re-introducing code that
+        # was not in the reviewed tree. List concrete differing paths before
+        # refusing; do not write the merge result to the remote branch.
+        diff = _git(repo, "diff", "--name-only", reviewed, trees[-1])
+        paths_differ = (diff.stdout.splitlines() if diff.returncode == 0 else [])
+        files = f"; changed files: {', '.join(paths_differ[:6])}" if paths_differ else ""
         reason = (f" ({ancestry}; a clean merge may duplicate changes)" if ancestry else "")
         raise Refused("recovery-tree-mismatch", f"merging the open PRs onto {base} {default[:12]} gives tree {trees[-1][:12]}, "
-                      f"not the reviewed integration tree {reviewed[:12]}{reason}", preserved=untouched,
-                      next_step=(f"inspect the tree difference against reviewed {reviewed[:12]}, remove unreviewed duplicates, "
-                                 f"run the complete test suite and obtain an independent review; " + by_hand)
+                      f"not the reviewed integration tree {reviewed[:12]}{reason}{files}", preserved=untouched,
+                      next_step=(f"inspect the mismatching files and remove unreviewed duplicates; " + by_hand)
                       if ancestry else by_hand)
     new = commit_tree(trees[0], (head, default), f"Merge {base} into {branch}\n\nOffice land recovery: GitHub reported "
                       f"#{number} not mergeable.\n\n{paths.office_trailer(run['id'])}")

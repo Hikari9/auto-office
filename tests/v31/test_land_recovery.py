@@ -146,8 +146,17 @@ def test_criss_cross_tree_mismatch_refuses_unsafe_repair_without_pushing(env, mo
     code, out = env.office("land")
     assert code == 4 and "criss-cross ancestry: 2 merge bases" in out, out
     assert "clean merge may duplicate changes" in out and "independent review" in out, out
+    assert "changed files: NOTES.md" in out, out
     assert _head_of(env, bare, "T1") == head and remote_head(bare, "main") == main
     assert "recovered" not in _task_pr(env, "T1")
+
+
+def test_manual_recovery_instructions_work_with_merge_commit_revisions():
+    from office import land
+    instruction = land.COMPOSE_BY_HAND.format(base="main")
+    assert "merge the accepted task revisions" in instruction
+    assert "dependency order" in instruction and "do not blindly cherry-pick" in instruction
+    assert "reviewed integration" in instruction
 
 
 def test_a_real_conflict_refuses_naming_files_and_pushes_nothing(env, monkeypatch):
