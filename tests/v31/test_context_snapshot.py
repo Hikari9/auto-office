@@ -114,11 +114,9 @@ def _dump(env) -> str:
         con.close()
 
 
-def test_context_writes_nothing_on_a_self_improve_armed_run(env):
+def test_context_writes_nothing_with_a_failed_event_pending(env):
     con, run = _con_run(env)
     try:
-        from office import bugwatch
-        bugwatch.arm(con, run["id"])
         con.execute("INSERT INTO events(run_id, kind, audience, summary, office_version, created_at) "
                     "VALUES(?,?,?,?,?,?)", (run["id"], "worker.failed", "orchestrator", "boom", "t", "2030"))
     finally:

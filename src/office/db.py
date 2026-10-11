@@ -134,8 +134,8 @@ CREATE INDEX IF NOT EXISTS events_run ON events(run_id, audience, seq);
 CREATE TABLE IF NOT EXISTS cursors(run_id TEXT NOT NULL, consumer TEXT NOT NULL, last_seq INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(run_id, consumer));
 CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, kind TEXT NOT NULL, dedup_key TEXT NOT NULL UNIQUE, payload_json TEXT NOT NULL, office_version TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL DEFAULT 3, not_before TEXT, claimed_by TEXT, claimed_pid INTEGER, claimed_at TEXT, kicked_at TEXT, finished_at TEXT, result_json TEXT, error TEXT, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS outbox_run ON outbox(run_id, status);
--- Bug-watch state deliberately lives outside prunable per-run details. Runs may
--- close or be pruned before GitHub accepts an issue, all pending evidence survives.
+-- The self_improve_* tables are inert: nothing reads or writes them any more. They stay
+-- unchanged so older runtimes sharing this runs.db keep working.
 CREATE TABLE IF NOT EXISTS self_improve_runs(run_id TEXT PRIMARY KEY, armed INTEGER NOT NULL DEFAULT 0, cursor INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS self_improve_incidents(fingerprint TEXT PRIMARY KEY, run_id TEXT NOT NULL, kind TEXT NOT NULL, summary TEXT NOT NULL, origin TEXT NOT NULL, occurrences INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL, report_json TEXT, issue_url TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS self_improve_incidents_pending ON self_improve_incidents(status,next_retry_at);
