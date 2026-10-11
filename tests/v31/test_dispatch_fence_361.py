@@ -111,16 +111,21 @@ def test_parallel_pane_picks_keep_unique_reservations(monkeypatch, tmp_path):
     assert set(json.loads((tmp_path / run["id"] / "herdr-reservations.json").read_text()).values()) == {"Da111", "Db222"}
 
 
-def _mock_started_herdr(monkeypatch, tmp_path, observed):
+def _mock_started_herdr(monkeypatch, tmp_path, observed, record=None):
     """Exercise the actual post-start delivery boundary with no harness process."""
     import subprocess
     calls = {"get": 0}
-    def pane_get(_):
+    def herdr_json(args):
+        if args[:2] == ["agent", "get"]:
+            return {} if record is None else {"agent": record}
         calls["get"] += 1
         # Before `agent start` this is a clean shell. After it, Herdr
-        # reports the actual agent identity (correct or cross-assigned).
-        return {"pane": {"cwd": "/tmp/office/T1"}} if calls["get"] <= 2 else {"pane": observed}
-    monkeypatch.setattr(dispatch, "_herdr_json", pane_get)
+        # reports the actual agent identity (correct or cross-assigned);
+        # `observed` None is Herdr answering with nothing at all.
+        if calls["get"] <= 2:
+            return {"pane": {"cwd": "/tmp/office/T1"}}
+        return {} if observed is None else {"pane": observed}
+    monkeypatch.setattr(dispatch, "_herdr_json", herdr_json)
     monkeypatch.setattr(dispatch, "_shell_run", lambda *a, **kw: True)
     monkeypatch.setattr(dispatch, "write_agent_env", lambda *a, **kw: tmp_path / "agent.env")
     monkeypatch.setattr(dispatch, "write_launch_spec", lambda *a, **kw: None)
@@ -207,7 +212,8 @@ def test_manual_prompt_fences_reassignment_until_delivery_exits(monkeypatch, tmp
     run = _run(monkeypatch, tmp_path)
     monkeypatch.setattr(prompting, "_resolve", lambda *a: _d())
     monkeypatch.setattr(prompting.gates, "_agent_alive", lambda *a: True)
-    monkeypatch.setattr(dispatch, "_herdr_json", lambda _: {"pane": {"cwd": "/tmp/office/T1"}})
+    monkeypatch.setattr(dispatch, "_herdr_json", lambda _: {"pane": {
+        "cwd": "/tmp/office/T1", "agent": dispatch.herdr_agent_name(_d()["id"])}})
     entered, proceed, changed = Event(), Event(), Event()
 
     def send(*args, **kwargs):
@@ -364,7 +370,9 @@ def test_launch_with_a_broken_ledger_falls_back_headless_with_the_reason(env, mo
 # ------------------------------------------------------------ concurrent launches in one fake Herdr
 
 class FakeHerdr:
-    """An in-process Herdr: panes that each hold a cwd and an agent, changed only by what Office does to them."""
+    """An in-process Herdr: panes that each hold a cwd and an agent, changed only by what Office does to them.
+
+    Shaped like the real one: `pane get` reports the agent's kind, and its name and pane come from `agent get`."""
 
     def __init__(self):
         import threading
@@ -372,6 +380,7 @@ class FakeHerdr:
         self.panes, self.n, self.log, self.delivered = {}, 0, [], []
         self.busy_once: set[str] = set()   # `agent start` here answers agent_pane_busy once
         self.foreign: dict[str, str] = {}  # pane -> name of an agent that appears there instead of the started one
+        self.agents: dict[str, dict] = {}  # agent name -> its `agent get` record
 
     def add(self, pane, cwd="/home/shell"):
         self.panes[pane] = {"pane_id": pane, "cwd": cwd}
@@ -383,6 +392,8 @@ class FakeHerdr:
             self.log.append(args)
             if args[:2] == ["pane", "get"]:
                 return {"pane": dict(self.panes[args[2]])} if args[2] in self.panes else {}
+            if args[:2] == ["agent", "get"]:
+                return {"agent": dict(self.agents[args[2]])} if args[2] in self.agents else {}
             if args[:2] == ["pane", "split"]:
                 self.n += 1
                 self.add(f"w1:p{100 + self.n}")
@@ -407,7 +418,10 @@ class FakeHerdr:
                     self.busy_once.discard(pane)
                     out, code = '{"error": {"code": "agent_pane_busy"}}', 1
                 else:
-                    self.panes[pane]["agent"] = {"name": self.foreign.get(pane, name)}
+                    kind = argv[argv.index("--kind") + 1]
+                    shown = self.foreign.get(pane, name)
+                    self.panes[pane]["agent"] = kind
+                    self.agents[shown] = {"name": shown, "agent": kind, "pane_id": pane}
         return subprocess.CompletedProcess(argv, code, out, "")
 
     def deliver(self, name, pane, pointer, **kw):
@@ -488,7 +502,7 @@ def test_back_to_back_resume_launches_end_with_each_pane_matching_its_own_dispat
     assert r1["pane"] != r3["pane"] and r1["prompt_landed"] and r3["prompt_landed"]
     for d, res in ((d1, r1), (d3, r3)):
         pane = world.panes[res["pane"]]
-        assert pane["agent"]["name"] == dispatch.herdr_agent_name(d["id"])
+        assert world.agents[dispatch.herdr_agent_name(d["id"])]["pane_id"] == res["pane"] and pane["agent"] == "claude"
         assert pane["cwd"] == d["worktree"]
     # Each brief went to the pane whose agent and cwd belong to the dispatch it names.
     assert sorted((name, pane, snap["cwd"]) for name, pane, snap in world.delivered) == sorted(
@@ -547,12 +561,12 @@ def test_retried_launch_into_a_foreign_agent_never_records_landed(world):
     world.foreign = {"w1:p101": "office-someone-else"}
     d, res, spec = _resume_one(world, "T1", "Da111")
     assert res["prompt_landed"] is False and world.delivered == []
-    assert spec["prompt_landed"] is False and "someone-else" in spec["identity_failure"]
+    assert spec["prompt_landed"] is False and "does not report agent" in spec["identity_failure"]
 
 
 # ------------------------------------------------------------ the native nudge uses the same fence
 
-def _nudged(env, monkeypatch, reported, **payload):
+def _nudged(env, monkeypatch, reported, record=None, **payload):
     """A running herdr dispatch in pane w1:p7 whose pane Herdr reports as `reported`; returns (result, sends, events)."""
     from test_herdr_agent_launch import _live_dispatch
     from office import state
@@ -561,7 +575,12 @@ def _nudged(env, monkeypatch, reported, **payload):
     con.execute("UPDATE dispatches SET launcher='herdr', pane_id='w1:p7', status='running', worktree='/tmp/office/T1' "
                 "WHERE id=?", (d["id"],))
     con.commit()
-    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {"pane": reported(d)})
+    def herdr_json(args):
+        if args[:2] == ["agent", "get"]:
+            return {"agent": record(d)} if record else {}
+        shown = reported(d)
+        return {} if shown is None else {"pane": shown}
+    monkeypatch.setattr(dispatch, "_herdr_json", herdr_json)
     sends = []
     monkeypatch.setattr(dispatch, "submit_prompt", lambda target, text, **kw: sends.append((target, text)) or "landed")
     result = dispatch.job_notify_worker(con, state.get_run(con, run["id"]),
@@ -600,3 +619,81 @@ def test_notify_worker_sends_when_the_pane_is_this_dispatchs_own(env, monkeypatc
         "cwd": "/tmp/office/T1/src", "agent": {"name": dispatch.herdr_agent_name(d["id"])}})
     assert result == {"sent": True, "landed": "landed"} and sends == [("w1:p7", "office status has an update")]
     assert events == []
+
+
+# ------------------------------------------------------------ an unverifiable pane never gets a brief
+
+def _own(**extra):
+    return {"name": dispatch.herdr_agent_name(_d()["id"]), "agent": "claude", "pane_id": "w1:p1", **extra}
+
+
+@pytest.mark.parametrize("observed,record", [
+    (None, None),                                                    # Herdr answers nothing
+    ({}, _own()),                                                    # an empty pane record
+    ({"foreground_cwd": "/tmp/office/T1"}, _own()),                  # a pane with no agent
+    ({"foreground_cwd": "/tmp/office/T1", "agent": {}}, _own()),     # an agent object with no identity
+    ({"foreground_cwd": "/tmp/office/T1", "agent": "claude"}, None),                          # a kind, no agent record
+    ({"foreground_cwd": "/tmp/office/T1", "agent": "claude"}, {}),                            # an empty agent record
+    ({"foreground_cwd": "/tmp/office/T1", "agent": "claude"}, {"agent": "claude", "pane_id": "w1:p1"}),  # no name
+    ({"foreground_cwd": "/tmp/office/T1", "agent": "claude"}, _own(name="office-someone-else")),
+    ({"foreground_cwd": "/tmp/office/T1", "agent": "claude"}, _own(pane_id="w1:p9")),         # listed in another pane
+    ({"foreground_cwd": "/tmp/office/T1", "agent": "claude"}, _own(pane_id=None)),            # no pane to tie it to
+    ({"foreground_cwd": "/tmp/office/T1", "agent": "claude"}, _own(agent="codex")),           # another kind
+    ({"foreground_cwd": "/tmp/office/T1", "agent": "codex"}, _own()),                         # the pane runs another kind
+    ({"foreground_cwd": "/tmp/office/T1", "agent": "claude"}, _own(agent_session={"value": "session-B"})),
+], ids=["nothing", "empty-pane", "no-agent", "empty-agent", "kind-no-record", "empty-record", "record-no-name",
+        "other-name", "other-pane", "record-no-pane", "record-other-kind", "pane-other-kind", "other-session"])
+def test_unverifiable_pane_identity_never_receives_the_brief(monkeypatch, tmp_path, observed, record):
+    run = _run(monkeypatch, tmp_path)
+    _mock_started_herdr(monkeypatch, tmp_path, observed, record)
+    monkeypatch.setattr(dispatch, "_deliver_prompt", lambda *a, **kw: pytest.fail("brief sent to an unverified pane"))
+    notices = []
+    monkeypatch.setattr(dispatch, "_launch_notice", lambda *a: notices.append(a[-1]))
+    spec = {"kind": "worker", "prompt_file": str(tmp_path / "brief.md"), "images": []}
+    out = dispatch._herdr_agent_start(run, _d(), spec, {}, ([], "claude"), "w1:p1", Path("/tmp/office/T1"), tmp_path)
+    assert out["launcher"] == "herdr" and out["prompt_landed"] is False and spec["prompt_landed"] is False
+    assert spec["identity_failure"] and "brief NOT sent" in notices[-1]
+
+
+def test_real_herdr_shape_is_verified_by_the_agent_record(monkeypatch, tmp_path):
+    # `pane get` reports the kind; the agent record carries the name, the pane and the session.
+    run = _run(monkeypatch, tmp_path)
+    _mock_started_herdr(monkeypatch, tmp_path, {"foreground_cwd": "/tmp/office/T1", "agent": "claude"},
+                        _own(agent_session={"value": "session-A"}))
+    calls = []
+    monkeypatch.setattr(dispatch, "_deliver_prompt", lambda *a, **kw: calls.append(a) or True)
+    spec = {"kind": "worker", "prompt_file": str(tmp_path / "brief.md"), "images": []}
+    out = dispatch._herdr_agent_start(run, _d(), spec, {}, ([], "claude"), "w1:p1", Path("/tmp/office/T1"), tmp_path)
+    assert out["prompt_landed"] is True and len(calls) == 1 and spec["pane_evidence"]["mismatch"] is None
+    assert spec["pane_evidence"]["reported_agent"] == _own()["name"]
+    assert spec["pane_evidence"]["reported_session"] == "session-A"
+
+
+@pytest.mark.parametrize("snapshot", [({}, {}), ({"agent": "claude"}, {}), ({"agent": {}}, {})], ids=["empty", "kind", "agent"])
+def test_fenced_pane_refuses_an_empty_or_partial_report(monkeypatch, tmp_path, snapshot):
+    run = _run(monkeypatch, tmp_path)
+    monkeypatch.setattr(dispatch, "pane_snapshot", lambda *a: snapshot)
+    with pytest.raises(dispatch.PaneMismatch):
+        with dispatch.fenced_pane(run, _d()):
+            pytest.fail("entered the fence on an unverified pane")
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("reported", [
+    lambda d: None,
+    lambda d: {},
+    lambda d: {"cwd": "/tmp/office/T1"},
+    lambda d: {"cwd": "/tmp/office/T1", "agent": "claude"},
+], ids=["nothing", "empty", "no-agent", "kind-without-record"])
+def test_notify_worker_refuses_a_pane_herdr_cannot_describe(env, monkeypatch, reported):
+    result, sends, events = _nudged(env, monkeypatch, reported)
+    assert sends == [] and result["sent"] is False and "refused" in result
+    assert len(events) == 1 and "native nudge refused" in events[0]
+
+
+@pytest.mark.approved
+def test_notify_worker_sends_to_a_real_shaped_pane_tied_to_its_agent_record(env, monkeypatch):
+    result, sends, _ = _nudged(env, monkeypatch, lambda d: {"cwd": "/tmp/office/T1", "agent": "claude"},
+                               record=lambda d: {"name": dispatch.herdr_agent_name(d["id"]), "agent": "claude",
+                                                 "pane_id": "w1:p7"})
+    assert result["sent"] is True and sends == [("w1:p7", "office status has an update")]

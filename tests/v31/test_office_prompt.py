@@ -6,6 +6,8 @@ Claude takes the Enter written in the same chunk as part of the paste
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from test_herdr_agent_launch import BUSY, EMPTY, _calls, _fake, _live_dispatch
@@ -22,6 +24,11 @@ def _herdr_worker(env, monkeypatch, *, reads, status="running", agent="working")
     con = env.con()
     con.execute("UPDATE dispatches SET launcher='herdr', pane_id='w1:p7', status=? WHERE id=?", (status, d["id"]))
     con.commit()
+    # Herdr sees this dispatch's own agent in the pane, as it does once the agent has started.
+    from office import dispatch
+    held = json.loads(state_file.read_text())
+    held["pane_agents"] = {"w1:p7": dispatch.herdr_agent_name(d["id"])}
+    state_file.write_text(json.dumps(held))
     return state_file, run, d, con
 
 
@@ -101,12 +108,26 @@ def test_prompt_reports_the_cwd_and_agent_herdr_reports_not_only_the_recorded_wo
 
 
 @pytest.mark.approved
-def test_prompt_says_so_when_herdr_reports_no_cwd_or_agent(env, monkeypatch):
+def test_prompt_says_so_when_herdr_reports_no_cwd(env, monkeypatch):
     state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY, BUSY])
     from office import dispatch, prompting
-    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {"pane": {}})
+    agent = dispatch.herdr_agent_name(d["id"])
+    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {"pane": {"agent": agent}})
     res = prompting.prompt(con, run, "T1", TEXT)
-    assert "herdr reports cwd none, agent none" in res.lines[0], res.lines
+    assert f"herdr reports cwd none, agent {agent}" in res.lines[0], res.lines
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("reported", [{}, {"pane": {}}, {"pane": {"cwd": "/x"}}, {"pane": {"agent": {}}}],
+                         ids=["nothing", "empty-pane", "no-agent", "empty-agent"])
+def test_prompt_refuses_a_pane_herdr_cannot_describe(env, monkeypatch, reported):
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY, BUSY])
+    from office import dispatch, prompting
+    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: reported)
+    with pytest.raises(prompting.Refused) as err:
+        prompting.prompt(con, run, "T1", TEXT)
+    assert err.value.category == "pane-mismatch"
+    assert not _sent(_calls(state_file))[0]
 
 
 @pytest.mark.approved
