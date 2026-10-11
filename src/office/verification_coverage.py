@@ -36,10 +36,17 @@ def _complete_pytest_command(command: str) -> bool:
         words = shlex.split(command)
     except ValueError:
         return False
-    idx = next((i for i, token in enumerate(words) if token == "pytest" or token.endswith("/pytest")), None)
-    if idx is None:
+    if not words or any(token in ("&&", "||", ";", "|") for token in words):
         return False
-    args = words[idx + 1:]
+    # A mention of pytest in `echo`, `true`, etc. must never count as execution.
+    if Path(words[0]).name == "pytest":
+        args = words[1:]
+    elif Path(words[0]).name.startswith("python") and words[1:3] == ["-m", "pytest"]:
+        args = words[3:]
+    elif words[:2] == ["uv", "run"] and len(words) >= 3 and Path(words[2]).name == "pytest":
+        args = words[3:]
+    else:
+        return False
     if "--all" not in args or any(x in args for x in ("-k", "-m", "--ignore", "--ignore-glob", "--deselect",
                                                         "--lf", "--last-failed", "--collect-only", "--co")):
         return False
@@ -66,7 +73,18 @@ def audit(repo: Path, commit: str, commands: list[str]) -> tuple[str, str] | Non
         if _complete_pytest_command(command):
             return FULL, "full pytest selection (--all; no test-path or marker restriction)"
         # A documented validation script may run other static/adapter checks too.
-        if re.search(r"(?:^|[\s;&])(?:\./)?scripts/validate\.sh(?:[\s;&]|$)", command):
+        try:
+            words = shlex.split(command)
+        except ValueError:
+            words = []
+        if words[:1] == ["env"]:
+            words = words[1:]
+        while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+            words = words[1:]
+        # Do not accept `echo scripts/validate.sh`, chained ORs, or a mention
+        # in a command that did not actually execute the full gate.
+        if words in (["scripts/validate.sh"], ["./scripts/validate.sh"],
+                     ["bash", "scripts/validate.sh"]):
             script = _show(repo, commit, "scripts/validate.sh")
             if script and any(_complete_pytest_command(line) for line in script.splitlines() if not line.lstrip().startswith("#")):
                 return FULL, "scripts/validate.sh runs the full pytest --all selection"

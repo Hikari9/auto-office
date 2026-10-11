@@ -42,6 +42,10 @@ python3 -m pytest tests/ -q -n "${VALIDATE_WORKERS:-2}" --all
     ["pytest -q --all -k smoke"],
     ["pytest -q --all -m integration"],
     ["pytest -q --all --ignore tests/v31"],
+    ["echo pytest tests/ --all"],
+    ["echo scripts/validate.sh"],
+    ["cat scripts/validate.sh"],
+    ["pytest tests/ --all -k=smoke"],
 ])
 def test_partial_coverage_is_reported_not_credited_as_complete(tiered_repo, commands):
     root, sha = tiered_repo
@@ -57,6 +61,8 @@ def test_partial_coverage_is_reported_not_credited_as_complete(tiered_repo, comm
     ["python3 -m pytest --all"],
     ["scripts/validate.sh"],
     ["VALIDATE_WORKERS=1 scripts/validate.sh"],
+    ["bash scripts/validate.sh"],
+    ["uv run pytest tests/ --all"],
 ])
 def test_full_suite_commands_are_recognized_and_landable(tiered_repo, commands):
     root, sha = tiered_repo
