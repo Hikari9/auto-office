@@ -178,6 +178,12 @@ not report is unknown, never 0. Codex input includes its cached input, which is 
 `office inspect economics` shows usage by role and phase, cache share, cold resumes (only a resumed dispatch whose first measured
 turn wrote cache and read none; a long gap alone is not evidence), and coverage. `office config economics.collect false` stops it.
 
+## Bug reports
+
+Reporting an Office defect is the orchestrator's job, not the runtime's. The runtime prints a non-blocking `bug?:` line when an outcome looks
+like a defect, and `office self-improve` prints the workflow plus the run's current `bug?:` signals. It starts nothing and records nothing. Follow `skills/auto-self-improve/SKILL.md`: dedupe, sanitize, then `gh issue create` on Hikari9/auto-office,
+directly or through a cheap read-only subagent. Issues only; never fix the bug or open a PR as part of it.
+
 ## Historical material
 
 Everything under `references/OFFICE-SKILLS-V3-*.md`, `docs/v3-*.md` and the 3.0 spokes (`skills/auto-planning`,

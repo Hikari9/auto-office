@@ -12,10 +12,10 @@ Do not write JSON, receipts, or telemetry for Office, and do not read Office sou
 
 ## Issue-only self-improvement
 
-`office self-improve` arms run-wide monitoring across all subagents. Every `office land` and `office close` attempt audits the run's earlier
-evidence, including failed/refused attempts. A cheaper, read-only investigator prepares sanitized bug reports for **Hikari9/auto-office**; a
-restricted publisher creates GitHub issues only. Non-blocking, durable across close/prune; retry failures surface as notices. Never fix bugs
-or open PRs as part of self-improvement. See `skills/auto-self-improve/SKILL.md`.
+On a `bug?:` line, or on any Office defect you notice yourself (a `next:` line that contradicts a refusal, a wrong dispatch base), you run the
+bug-report workflow in `skills/auto-self-improve/SKILL.md`: decide it is an Office defect, dedupe against open and closed issues, sanitize, and
+file with `gh issue create` on **Hikari9/auto-office**, by hand or through a cheap read-only subagent. The runtime only prints the `bug?:` hint;
+it never investigates or files. Issues only: never fix the bug or open a PR as part of it, and never block the run on it.
 
 ## Permanent invariants
 

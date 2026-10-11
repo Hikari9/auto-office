@@ -511,14 +511,14 @@ def _parser() -> argparse.ArgumentParser:
 # ------------------------------------------------------------------ output
 
 SELF_IMPROVE_STEPS = """\
-Self-improvement is issue-only bug filing. Nothing runs in the background and Office records nothing.
-1. Note any Auto Office defect you meet: runtime, CLI, skills, routing, adapters, hooks.
-   Skip target-application bugs, normal gate refusals and third-party outages.
-2. Have a cheaper read-only investigator confirm it from the evidence; keep raw evidence private.
-3. Search open and closed issues in Hikari9/auto-office, and reuse a match instead of filing a duplicate.
-4. File a sanitized issue: expected vs actual behavior, impact, safe reproduction steps.
+Bug filing is issue-only and orchestrator-driven. Nothing runs in the background and Office records nothing.
+1. Trigger: a `bug?:` line, or any Auto Office defect you notice (runtime, CLI, skills, routing, adapters, hooks).
+2. Decide it is an Office defect. Skip target-application bugs, normal gate refusals and third-party outages.
+3. Gather the evidence yourself, or hand it to a cheap read-only subagent (model: haiku). Keep raw evidence private.
+4. Dedupe: gh issue list --repo Hikari9/auto-office --state all --search "<keywords>"; reuse a match.
+5. Sanitize: expected vs actual behavior, impact, safe reproduction steps.
    Leave out person, repository, path, account, credential and customer identifiers.
-5. Never fix the bug, edit source, commit, open a PR or close an issue as part of this.
+6. File: gh issue create --repo Hikari9/auto-office. Issues only: never fix the bug, edit source, commit, open a PR or close an issue.
 Landing and closeout never wait on this."""
 
 
