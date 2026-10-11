@@ -39,6 +39,9 @@ export PATH="$PWD/.venv/bin:$PATH"
 
 # scripts/ is the retained 3.0 helper surface; its own tests run as that pinned helper.
 export OFFICE_PINNED_LEGACY=1
+# Inherited pytest configuration can silently filter collection even with
+# --all (notably PYTEST_ADDOPTS='-m unit'). The gate owns its selection.
+unset PYTEST_ADDOPTS PYTEST_PLUGINS
 
 echo "== Ecosystem check"
 python3 scripts/check_ecosystem.py

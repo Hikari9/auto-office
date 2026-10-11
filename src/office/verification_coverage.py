@@ -14,7 +14,6 @@ from pathlib import Path
 
 FULL = "full"
 PARTIAL = "partial"
-OMITTED = "integration, legacy and slow"
 
 
 def _show(repo: Path, commit: str, path: str) -> str | None:
@@ -25,38 +24,67 @@ def _show(repo: Path, commit: str, path: str) -> str | None:
     return proc.stdout if proc.returncode == 0 else None
 
 
-def _complete_pytest_command(command: str) -> bool:
-    """Recognize an unfiltered, entire-suite `pytest --all`, not a selected test.
+# A pytest command cannot prove the full tier if it can alter collection,
+# swallow the exit status, or invoke a different config. Favor the documented
+# validation script over guessing the meaning of an unfamiliar pytest option.
+_SAFE_SWITCHES = frozenset({
+    "-q", "-qq", "-v", "-vv", "-vvv", "-s", "-x", "-ra", "-rA",
+    "--disable-warnings", "--strict-markers", "--strict-config",
+    "--no-header", "--no-summary", "--color=yes", "--color=no",
+})
+_SAFE_VALUES = frozenset({"-n", "--numprocesses", "--tb", "--maxfail", "--durations", "--dist"})
+_SAFE_EQUALS = ("--tb=", "--maxfail=", "--durations=", "--dist=", "--color=", "-n=")
 
-    A narrower command is never credited as complete just for including
-    ``--all`` (for example ``pytest tests/unit --all`` or ``pytest -k name --all``).
-    Unrecognised wrappers conservatively require the documented validation script.
-    """
+
+def _tokens(command: str) -> list[str]:
+    """Parse a single simple shell invocation; refuse chains and substitutions."""
+    if any(ch in command for ch in ";&|<>`\n") or "$(" in command:
+        return []
     try:
         words = shlex.split(command)
     except ValueError:
+        return []
+    if words and words[0] == "env":
+        words.pop(0)
+    while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+        key = words[0].split("=", 1)[0]
+        if key.startswith("PYTEST_"):
+            return []  # PYTEST_ADDOPTS can impose -m/-k without CLI flags
+        words.pop(0)
+    return words
+
+
+def _complete_pytest_command(command: str) -> bool:
+    """Only a real, unfiltered full-suite pytest invocation counts as evidence.
+
+    Unrecognized flags/configuration are not automatically credited: pytest
+    options and plugins can narrow collection without spelling `-k` or `-m`.
+    """
+    words = _tokens(command)
+    if words[:2] == ["uv", "run"]:
+        words = words[2:]
+    if not words:
         return False
-    if not words or any(token in ("&&", "||", ";", "|") for token in words):
-        return False
-    # A mention of pytest in `echo`, `true`, etc. must never count as execution.
-    if Path(words[0]).name == "pytest":
+    exe = Path(words[0]).name
+    if exe == "pytest":
         args = words[1:]
-    elif Path(words[0]).name.startswith("python") and words[1:3] == ["-m", "pytest"]:
-        args = words[3:]
-    elif words[:2] == ["uv", "run"] and len(words) >= 3 and Path(words[2]).name == "pytest":
+    elif re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)?)?", exe) and words[1:3] == ["-m", "pytest"]:
         args = words[3:]
     else:
         return False
-    if "--all" not in args or any(x in args for x in ("-k", "-m", "--ignore", "--ignore-glob", "--deselect",
-                                                        "--lf", "--last-failed", "--collect-only", "--co")):
+    if "--all" not in args:
         return False
-    if any(x.startswith(("-k=", "-m=", "--ignore=", "--deselect=", "--ignore-glob=")) for x in args):
-        return False
-    # A named test file/directory outside the entire tests root is partial.
-    if any(x.startswith("tests/") and x != "tests/" for x in args):
-        return False
-    if any(x.endswith(".py") for x in args):
-        return False
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--all" or arg in _SAFE_SWITCHES or arg in ("tests/", "tests", "."):
+            i += 1
+        elif arg in _SAFE_VALUES and i + 1 < len(args) and args[i + 1]:
+            i += 2
+        elif any(arg.startswith(prefix) and len(arg) > len(prefix) for prefix in _SAFE_EQUALS):
+            i += 1
+        else:
+            return False
     return True
 
 
@@ -73,18 +101,10 @@ def audit(repo: Path, commit: str, commands: list[str]) -> tuple[str, str] | Non
         if _complete_pytest_command(command):
             return FULL, "full pytest selection (--all; no test-path or marker restriction)"
         # A documented validation script may run other static/adapter checks too.
-        try:
-            words = shlex.split(command)
-        except ValueError:
-            words = []
-        if words[:1] == ["env"]:
+        words = _tokens(command)
+        if words[:1] in (["bash"], ["sh"]):
             words = words[1:]
-        while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
-            words = words[1:]
-        # Do not accept `echo scripts/validate.sh`, chained ORs, or a mention
-        # in a command that did not actually execute the full gate.
-        if words in (["scripts/validate.sh"], ["./scripts/validate.sh"],
-                     ["bash", "scripts/validate.sh"]):
+        if words in (["scripts/validate.sh"], ["./scripts/validate.sh"]):
             script = _show(repo, commit, "scripts/validate.sh")
             if script and any(_complete_pytest_command(line) for line in script.splitlines() if not line.lstrip().startswith("#")):
                 return FULL, "scripts/validate.sh runs the full pytest --all selection"

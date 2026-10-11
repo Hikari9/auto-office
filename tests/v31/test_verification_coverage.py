@@ -46,6 +46,16 @@ python3 -m pytest tests/ -q -n "${VALIDATE_WORKERS:-2}" --all
     ["echo scripts/validate.sh"],
     ["cat scripts/validate.sh"],
     ["pytest tests/ --all -k=smoke"],
+    ["pytest --all || true"],
+    ["pytest --all; exit 0"],
+    ["python3 -m pytest tests/ --all -c other.ini"],
+    ["pytest --all -o addopts=-m=unit"],
+    ["pytest --all -kfoo"],
+    ["pytest --all --noconftest"],
+    ["pytest --all $(echo tests/unit)"],
+    ["python3 -m pytest --all --override-ini addopts='-m not slow'"],
+    ["PYTEST_ADDOPTS='-m unit' python3 -m pytest --all"],
+    ["env PYTEST_ADDOPTS='-m unit' pytest --all"],
 ])
 def test_partial_coverage_is_reported_not_credited_as_complete(tiered_repo, commands):
     root, sha = tiered_repo
@@ -63,6 +73,8 @@ def test_partial_coverage_is_reported_not_credited_as_complete(tiered_repo, comm
     ["VALIDATE_WORKERS=1 scripts/validate.sh"],
     ["bash scripts/validate.sh"],
     ["uv run pytest tests/ --all"],
+    [".venv/bin/python -m pytest tests/ -q -n 2 --all"],
+    ["env CI=1 python3 -m pytest --all"],
 ])
 def test_full_suite_commands_are_recognized_and_landable(tiered_repo, commands):
     root, sha = tiered_repo
@@ -98,6 +110,7 @@ def test_repositories_own_validation_script_runs_all_tiers():
     script = (Path(__file__).resolve().parents[2] / "scripts" / "validate.sh").read_text()
     assert any(vc._complete_pytest_command(line) for line in script.splitlines()
                if line.strip().startswith("python3 -m pytest")), "validate.sh must run --all without tier filters"
+    assert "unset PYTEST_ADDOPTS PYTEST_PLUGINS" in script
 
 
 def test_land_cli_refuses_incomplete_tiered_integration_before_any_merge(env, monkeypatch):
@@ -130,3 +143,17 @@ def pytest_collection_modifyitems(config, items):
     assert "integration, legacy, slow" in out and "scripts/validate.sh" in out, out
     assert remote_head(bare, "main") == main
     assert all(p["state"] == "open" for p in gh(env)["prs"])
+
+    # A handoff close does not merge, but its terminal output and durable
+    # archive must still warn the recipient that the full tiers were omitted.
+    code, close = env.office("close", "--handoff", "https://github.com/o/r/pull/1")
+    assert code == 0 and "FULL SUITE NOT VERIFIED" in close, close
+    con = env.con()
+    try:
+        state_dir = con.execute("SELECT state_dir FROM runs LIMIT 1").fetchone()[0]
+    finally:
+        con.close()
+    receipt = Path(state_dir) / "archive-receipt.json"
+    assert receipt.exists()
+    import json
+    assert json.loads(receipt.read_text())["verification"]["status"] == "partial"
