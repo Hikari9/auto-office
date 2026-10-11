@@ -218,8 +218,10 @@ def orchestrator_task_review(con, run: dict, tid: str, report: Path) -> Result:
     recorded as a degraded, non-independent review with who, route and revision, never as a waiver.
     The session that produced the revision cannot review it."""
     from office import convergence
-    if os.environ.get("OFFICE_DISPATCH_ID"):
+    if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
         raise Refused("worker-cannot-review", "a producer or worker may not review; the fallback is the orchestrator's")
+    if state.is_terminal(run):
+        raise Refused("run-terminal", f"{run['id'][:8]} is {run['phase']}; nothing to review")
     if contract.is_convergence(run):
         raise Usage("bad-review-target", f"{tid} has no task code review under {contract.CONVERGENCE}: its lane "
                           "is reviewed", next_step=f"office review L-{tid}:convergence --report <file>")
@@ -237,12 +239,13 @@ def orchestrator_task_review(con, run: dict, tid: str, report: Path) -> Result:
             raise Refused("fallback-not-allowed", f"{tid}: the orchestrator reviews only a task blocked solely on a code "
                                 "review no reviewer answered", scope=tid, next_step="office status")
         rev_id = code["revision_id"]
-        mine = {k["id"] for k in convergence.orchestrator_session()["keys"] if k["harness"] not in ("herdr", "proc")}
-        if mine & convergence.producer_sessions(con, run, {"tasks": [tid]})[0]:
+        me = convergence.orchestrator_session()
+        if {k["id"] for k in me["keys"] if k["harness"] not in ("herdr", "proc")} \
+                & convergence.producer_sessions(con, run, {"tasks": [tid]})[0]:
             raise Refused("self-review-prohibited", f"{tid}: this session produced {rev_id}, so it cannot review it",
                                 scope=tid, next_step=f"office review {tid} --as <harness>/<model>[@effort] (another reviewer), "
                                                      "or a different orchestrator session may review it")
-        who = convergence.orchestrator_session()["primary"] or "orchestrator (session not identified)"
+        who = me["primary"] or "orchestrator (session not identified)"
         route = "orchestrator (degraded, non-independent)"
         gid = _new_gate(con, run, task, rev_id, "code_review", f"{code['input_key']}:orchestrator:{uuid.uuid4().hex[:6]}",
                         "queued", round_no=code["round"], escalated=code["escalated"])
@@ -272,10 +275,15 @@ def review_only(con, run: dict, target: str, *, review_as: str | None = None, re
         raise Usage("invalid-override", "--cli/--external need --as <harness>/<model>[@effort]")
     if review_cli and review_external:
         raise Usage("invalid-override", "a CLI review and an external review are mutually exclusive")
-    if review_as:
-        candidates.declared_decision(review_as, flag="--as")  # validates the route's shape
+    if state.is_terminal(run):
+        raise Refused("run-terminal", f"{run['id'][:8]} is {run['phase']}; nothing to review")
+    if review_as:  # the route's shape and capability, before any pin is written
+        candidates.declared_decision(review_as, flag="--as", role="code_reviewer", config=state.pinned_config(run))
     pin = review_pin(review_as, review_cli, review_external)
-    if re.match(r"[LS]-", target):
+    if ":" in target and not re.match(r"[LS]-", target, re.I):
+        raise Usage("bad-review-target", f"{target!r} is not a task, lane or shared scope",
+                    next_step="office review T1 | office review L-T1[:convergence|visual]")
+    if re.match(r"[LS]-", target, re.I):
         from office import convergence
         with db.transaction(con):
             lines = convergence.review_only(con, state.get_run(con, run["id"]), target, pin=pin)
@@ -597,19 +605,22 @@ def _check_env(run: dict) -> dict:
 def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path, plan_review: bool = False,
                  visual: bool = False, images: list[Path] | None = None, include_dirs: list[Path] | None = None,
                  exclude: list[str] | None = None, kind: str | None = None, resume_from: str | None = None,
-                 review_override: dict | None = None) -> dict:
+                 review_override: dict | None = None, prefer_not: list[str] | None = None) -> dict:
     """Route, launch, and parse one independent review, substituting routes on
     environment/adapter/schema failure up to the configured bound.
 
     `resume_from` names an earlier reviewer dispatch to continue (a plan-defect
     redirect with --reviewer same): its session is resumed when the harness can,
-    else a fresh session runs on the same route."""
+    else a fresh session runs on the same route. `prefer_not` lists routes a
+    review-only re-run starts away from: they are used again only when no other
+    route qualifies."""
     convergence = contract.is_convergence(run)
     # v3.1 bounds route substitution; the convergence contract walks the whole
     # eligible fallback chain before reporting the reviewer unavailable (#337),
     # and none of those attempts spends a substantive round.
     limit = int((run.get("gates") or {}).get("environment_retry_max", 2)) if not convergence else 12
     excluded = set(exclude or [])
+    soft = set(prefer_not or [])
     rc = contract.of(run)
     producer = _producer_route(con, gate)
     failures = []
@@ -639,7 +650,11 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             decision["launch"] = {k: pinned[k] for k in ("cli", "external") if pinned.get(k)}
         else:
             decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
-                                             exclude=excluded)
+                                             exclude=excluded | soft)
+            if decision.get("status") != "selected" and soft:
+                soft = set()  # nothing else qualifies: the routes tried before may have recovered
+                decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
+                                                 exclude=excluded)
         if decision.get("status") != "selected":
             failures.append(f"no qualifying {role} route ({decision.get('status')})"
                             + (f"; {candidates.protected_quota_remedy(run, role, gate.get('task_id'))}"
@@ -881,9 +896,14 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
 
 def _review_only_hint(con, d: dict) -> str:
     """The review-only command that re-runs this reviewer's review on another route."""
-    g = con.execute("SELECT task_id, scope FROM gates WHERE id=?", (d.get("gate_id"),)).fetchone() if d.get("gate_id") else None
-    target = (g["scope"] or g["task_id"]) if g else None
-    return f"office review {target} --as <harness>/<model>[@effort]" if target else "office resume"
+    g = con.execute("SELECT kind, task_id, scope FROM gates WHERE id=?", (d.get("gate_id"),)).fetchone() if d.get("gate_id") else None
+    if g and g["scope"]:
+        target = f"{g['scope']}:{'visual' if g['kind'] == 'visual' else 'convergence'}"
+    elif g and g["kind"] == "code_review" and g["task_id"]:
+        target = g["task_id"]
+    else:
+        return "office resume"
+    return f"office review {target} --as <harness>/<model>[@effort]"
 
 
 def _agent_alive(name: str) -> bool:
@@ -1064,9 +1084,9 @@ def job_review(con, run: dict, job: dict) -> dict:
                                          verify_only=_verify_only(con, run, gate),
                                          used_codes=finding_codes(con, "run_id=? AND task_id=? AND gate_kind='code_review'",
                                                                   (run["id"], task["id"])))
-        exclude = [*(job["payload"].get("exclude_routes") or []), *filter(None, [job["payload"].get("exclude_route")])] or None
+        exclude = [job["payload"]["exclude_route"]] if job["payload"].get("exclude_route") else None
         outcome = run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
-                               exclude=exclude)
+                               exclude=exclude, prefer_not=job["payload"].get("exclude_routes"))
     finally:
         remove_checkout(run, checkout)
     with db.transaction(con):

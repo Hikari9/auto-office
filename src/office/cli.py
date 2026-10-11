@@ -946,7 +946,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         if args.review_as or args.review_cli or args.review_external:
             raise Usage("invalid-override", "--as/--cli/--external name a reviewer route; --report is your own review",
                         next_step="office review <task|lane> --as <route>   or   office review <task|lane> --report <file>")
-        if not re.match(r"[LS]-", args.target):
+        if not re.match(r"[LS]-", args.target, re.I):
             return gates.orchestrator_task_review(con, run, args.target.upper(), Path(args.report).expanduser())
         return convergence.fallback_review(con, run, args.target, Path(args.report).expanduser(),
                                            inspected=args.inspected)
