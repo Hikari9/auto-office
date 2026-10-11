@@ -331,6 +331,11 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         from office import db
         with db.transaction(con):
             state.consume_events(con, run["id"], events)
+    # A successful check result is never evidence that the undispatched pytest
+    # tiers passed. Keep the omission visible even after its original event was read.
+    detail = ((run.get("landing") or {}).get("integration") or {}).get("detail") or ""
+    if "FULL SUITE NOT VERIFIED" in detail:
+        res.add(f"verification warning: {detail}")
     res.next = next_action(con, run)
     res.data = {"run_id": run["id"], "phase": run["phase"], "office_version": run["office_version"],
                 "requirements_version": run["requirements_version"], "plan_version": run["plan_version"],

@@ -42,7 +42,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from office import closeout, db, gates, integration, paths, prs, state
+from office import closeout, db, gates, integration, paths, prs, state, verification_coverage
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import now_iso, short
@@ -197,6 +197,10 @@ def _land_merge(con, run: dict, mode: str, snap: dict, deploy: dict, *, redeploy
     if mode == "e2e" and not (redeploy or mark_deployed):
         # Before any merge: a prod state Office cannot read refuses here, with nothing changed.
         _require_deploy_proof(con, run, _tree(repo, done) if current else _tree(repo, commit))
+    # Integration PASS alone proves only the checks the plan requested. In a
+    # repository that expressly deselects pytest tiers without --all, do not
+    # merge any task PR based on a partial selection (#563).
+    _require_run_coverage(run, commit)
     before = _merge_all(con, run, res)
     before = landing.get("rollback") or before  # a rerun's `before` already holds the merges
     _record(con, run, rollback=before)
@@ -466,6 +470,11 @@ def _waivers(con, run: dict) -> list[str]:
 
 def _ask(con, run: dict) -> Result:
     lines = _waivers(con, run) + ["integration verified; the task PRs are ready:"]
+    commit = integration.final_commit(con, run)
+    coverage = verification_coverage.audit(Path(run["repo_root"]), commit,
+                                           list((run.get("landing") or {}).get("run_checks") or [])) if commit else None
+    if coverage and coverage[0] == verification_coverage.PARTIAL:
+        lines.append(f"FULL SUITE NOT VERIFIED: {coverage[1]}. Office will refuse merge until full-tier integration checks pass.")
     for t in integration._topo(integration.accepted_set(con, run) or []):
         if not prs.has_pr(t):
             continue
@@ -523,6 +532,19 @@ def _github_conflicting(run: dict, number: int) -> bool:
     except (subprocess.SubprocessError, ValueError):
         return False
     return isinstance(info, dict) and (info.get("mergeable") == "CONFLICTING" or info.get("mergeStateStatus") == "DIRTY")
+
+
+def _require_run_coverage(run: dict, commit: str) -> None:
+    checks = list((run.get("landing") or {}).get("run_checks") or [])
+    coverage = verification_coverage.audit(Path(run["repo_root"]), commit, checks)
+    if coverage and coverage[0] == verification_coverage.PARTIAL:
+        raise Refused("integration-coverage-incomplete",
+                      f"integration checks are insufficient for landing: {coverage[1]}; "
+                      f"declared run-level checks: {checks or ['none']}",
+                      preserved="no additional task PRs were merged by this attempt",
+                      next_step="amend the plan's run-level checks: to scripts/validate.sh "
+                                "(or pytest tests/ --all), re-run integration verification "
+                                "against the same composed commit, then office land")
 
 
 def _merge_all(con, run: dict, res: Result) -> str:

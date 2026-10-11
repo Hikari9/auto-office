@@ -24,7 +24,7 @@ import time
 import uuid
 from pathlib import Path
 
-from office import briefs, contract, db, gates, jobs, paths, review_parse, state, worktree_setup
+from office import briefs, contract, db, gates, jobs, paths, review_parse, state, verification_coverage, worktree_setup
 from office.util import dumps, now_iso, sha256_obj
 
 
@@ -394,10 +394,17 @@ def _integrate(con, run: dict, job: dict) -> dict:
                                  detail=f"integration review {outcome['verdict']}: {detail[:200]}")
                 state.emit(con, run, "integration.failed", f"INTEGRATION review {outcome['verdict']}: {detail[:140]}")
             return results
+    coverage = verification_coverage.audit(repo, commit, run_checks)
+    incomplete = coverage and coverage[0] == verification_coverage.PARTIAL
+    detail = (f"composed result verified by declared checks; FULL SUITE NOT VERIFIED: {coverage[1]}"
+              if incomplete else "composed result verified")
     with db.transaction(con):
         if compose_base(state.get_run(con, run["id"])) != base:
             return {"skipped": "rebased while composing"}
-        _set_integration(con, run, status="accepted", detail="composed result verified")
+        _set_integration(con, run, status="accepted", detail=detail)
+        if incomplete:
+            state.emit(con, run, "integration.coverage_partial",
+                       f"integration {commit[:12]}: FULL SUITE NOT VERIFIED: {coverage[1]}")
         state.emit(con, run, "integration.accepted", f"READY: integration verified on {commit[:10]} ({branch})"
                    if contract.is_convergence(run) else f"READY: integration PASS on {commit[:10]} ({branch})")
     return results
