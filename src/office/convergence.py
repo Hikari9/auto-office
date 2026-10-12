@@ -1370,6 +1370,22 @@ def _close_reviewerless(con, run: dict, latest: dict[str, dict]) -> bool:
     return closed
 
 
+def _require_current_waiver_target(con, run: dict, scope: dict, st: dict) -> None:
+    """Never bind a waiver to a previous accepted-set composition (#530).
+
+    A producer may have been re-accepted after RECHECK while a compose job is
+    still queued. That changes the acceptance key before the composed commit;
+    a waiver of the old commit cannot authorize the new tree or permit landing.
+    """
+    key = _key(con, run, scope)
+    if key is None or st.get("key") != key or not st.get("commit"):
+        raise Refused("stale-composition", f"{scope['id']} acceptance changed since its reviewed composition; "
+                      "a waiver for the older commit would not cover the new accepted revision",
+                      scope=scope["id"], preserved="waiver authority unchanged; no stale waiver recorded",
+                      next_step=f'office decide {scope["id"]} review --quote "<user words>" to authorize a fresh '
+                                'composition/review cycle, then office status')
+
+
 def waive_kinds(con, run: dict, scope_id: str, kinds: list[str] | None, *, actor: str, quote: str | None,
                 reason: str | None) -> Result:
     """Waive the named gate kinds of a scope, or every unmet one (`kinds` None), in one
@@ -1390,6 +1406,7 @@ def waive_kinds(con, run: dict, scope_id: str, kinds: list[str] | None, *, actor
         if scope is None:
             raise Usage("unknown-scope", f"no lane or shared scope {scope_id}", next_step="office inspect convergence")
         st = scope_state(run, scope["id"])
+        _require_current_waiver_target(con, run, scope, st)
         commit = st.get("commit")
         latest = _latest(con, run, scope["id"], commit) if commit else {}
         if _close_reviewerless(con, run, latest):
@@ -1449,6 +1466,7 @@ def cap_waive(con, run: dict, scope_id: str, *, reason: str | None) -> Result:
             raise Refused("round-cap-not-reached", f"{scope['id']} is {st.get('status') or 'waiting'}: the orchestrator "
                           f"waives only a review that spent its {contract.round_cap(run)} substantive rounds still on "
                           "RECHECK", scope=scope["id"], next_step="office status")
+        _require_current_waiver_target(con, run, scope, st)
         commit = st.get("commit") or ""
         unmet = {k: g for k, g in _latest(con, run, scope["id"], commit).items() if not _satisfied(con, run, scope["id"], g, commit)}
         if not unmet:
