@@ -246,3 +246,11 @@ def test_issue_570_ambiguous_acceptance_drop_refused():
     plan = planfile.edit_task(PLAN, "T1", add_accept=["calc.add(2, 2) == 4"])
     with pytest.raises(ValueError, match="names 2"):
         planfile.edit_task(plan, "T1", drop_accept=["calc.add"])
+
+
+def test_issue_569_accepted_task_can_gain_local_default_branch_sync_criterion(cenv):
+    _accepted(cenv)
+    criterion = "Update the task branch from the default branch and resolve conflicts"
+    code, out = _amend(cenv, "--add-accept", criterion, delta="task branch hygiene without deployment")
+    assert code == 0 and "contract-level-change" not in out, out
+    assert criterion in json.loads(_task(cenv)["accept_json"])
