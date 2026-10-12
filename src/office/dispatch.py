@@ -31,7 +31,7 @@ try:
 except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
-from office import adapters, briefs, candidates, contract, db, frontdoor, jobs, paths, planfile, planpath, read_scope, route_policy, route_probe, routing, scoring, state, version, worktree_setup
+from office import adapters, briefs, candidates, contract, db, frontdoor, jobs, pane_labels, paths, planfile, planpath, read_scope, route_policy, route_probe, routing, scoring, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (DEAD, atomic_write_json, atomic_write_text, claim_signalable, dumps, now_iso, parse_iso,
@@ -1959,6 +1959,8 @@ def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pa
                 else f"; pane {pane} could not be read")
     if closed:
         observed += f"; the abandoned pane is closed (its last screen is in {tail})"
+    if not closed and not _pane_identity_mismatch(run, dispatch, pane, ddir, check_cwd=False):
+        _herdr_rename(pane, pane_labels.shell_label(run, dispatch))
     inspect = f"read {tail}" if closed else f"inspect it with `herdr pane read {pane}`"
     recovery = (f"orchestrator recovery: {inspect}; do not auto-approve trust, "
                 "credentials, or user-authority prompts; resolve a safe runtime blocker or choose another route, "
@@ -2264,7 +2266,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
             # The pane still holds an agent (a finished session herdr keeps):
             # split a fresh one and try once more before going headless (#200 B7).
             try:
-                fresh = _herdr_fresh_pane(run, cwd, pane, dispatch_id=dispatch["id"])
+                fresh = _herdr_fresh_pane(run, cwd, pane, dispatch_id=dispatch["id"], label=label)
             except ValueError:
                 fresh = None  # the ledger cannot vouch for a new pane: fall back below
             if fresh:
@@ -3205,44 +3207,21 @@ def _herdr_rename(pane: str, label: str) -> None:
         pass
 
 
-_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
-
-
-def _ai_tag(harness, model, effort) -> str:
-    """`[Claude Opus 5.5 (high)]` / `[Gemini Flash 3.8 (medium)]`: a slug's words title-cased, version last."""
-    words = [w for w in str(model or "").split("-") if w]
-    if words and words[-1] in _EFFORTS:
-        effort = effort or words.pop()
-    ver, name, i = [], [], 0
-    while i < len(words):
-        w = words[i]
-        if w.replace(".", "").isdigit():
-            ver.append(w)
-        else:
-            name.append(w.upper() if w in ("gpt", "glm") else w.capitalize())
-        i += 1
-    if name and harness == "claude" and name[0] != "Claude":
-        name.insert(0, "Claude")
-    text = " ".join(name + [".".join(ver)] if ver else name)
-    if not text:
-        text = str(harness or "").capitalize()
-    return f"[{text}{f' ({effort})' if effort and effort != 'none' else ''}]" if text else ""
-
-
 def pane_label(run: dict, dispatch: dict, kind: str = "") -> str:
-    """What a human sees on a pane tab: `<task> <role> [PR#n] <short id> [[Model Version (effort)]]`, e.g.
-    `T3 executor PR#261 D4f2 [Claude Opus 5.5 (high)]`. Integration and plan dispatches carry no task, so
-    they lead with `integration` or `plan` (plus the integration PR when known)."""
-    role = dispatch.get("role") or kind
-    short = str(dispatch["id"])[:5]
-    pr = None
+    """Repo-first, task-aware Herdr tab name; cosmetic and safe on DB failure."""
     scope = dispatch.get("task_id")
+    title = dispatch.get("task_title")
+    pr = None
+    role = dispatch.get("role") or kind
     try:
         con = db.connect()
         try:
             if scope:
                 task = state.get_task(con, run["id"], scope)
-                pr = ((task or {}).get("pr") or {}).get("number")
+                if task:
+                    title = task.get("title") or title
+                    pr = ((task.get("pr") or {}).get("number"))
+
             else:
                 gate = con.execute("SELECT subject FROM gates WHERE id=?", (dispatch.get("gate_id"),)).fetchone() \
                     if dispatch.get("gate_id") else None
@@ -3252,10 +3231,12 @@ def pane_label(run: dict, dispatch: dict, kind: str = "") -> str:
                     pr = pr.get("number") if isinstance(pr, dict) else pr
         finally:
             con.close()
-    except Exception:  # a label is cosmetic; fall back to the fields known without the DB
-        pr = None
-    ai = _ai_tag(dispatch.get("harness"), dispatch.get("model"), dispatch.get("effort"))
-    return " ".join(p for p in (scope, role, f"PR#{pr}" if pr else "", short, ai) if p)
+
+    except Exception:
+        pass  # A label must not prevent or interrupt a launch.
+    scope = scope or ("integration" if role == "integration_reviewer" else "plan")
+    return pane_labels.format_label(run, {**dispatch, "role": role}, scope, title, pr)
+
 
 
 def relabel_task_panes(run: dict, task_id: str) -> None:
@@ -3721,7 +3702,8 @@ def _set_dispatch(dispatch_id: str, **cols) -> None:
         con.close()
 
 
-def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str, dispatch_id: str | None = None) -> str | None:
+def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str, dispatch_id: str | None = None,
+                      label: str | None = None) -> str | None:
     """A new pane split from one herdr refused as busy, recorded in the run's layout
     and reserved for the dispatch, under the pane lock (review F2). Raises
     ValueError, before splitting, when the reservation ledger is unreadable."""
@@ -3742,6 +3724,8 @@ def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str, dispatch_id: str | N
             atomic_write_json(tab_file, layout)
         if dispatch_id:
             _reserve_pane(run, pane, dispatch_id)
+    if label:
+        _herdr_rename(pane, label)  # cosmetic, outside the lock
     return pane
 
 
