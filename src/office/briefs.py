@@ -25,6 +25,11 @@ MAX_REVIEW_ROUNDS = 3
 AMENDMENT_BRIEF_CHARS = 6000
 
 
+def self_review_path(run: dict, dispatch_id: str, revision_id: str) -> Path:
+    """Private evidence copy; the source ledger remains untracked and consumed (#576)."""
+    return paths.run_dir(run["id"]) / "dispatches" / dispatch_id / f"self-review-{revision_id}.md"
+
+
 def evidence_path(run: dict, dispatch_id: str, revision_id: str) -> Path:
     return paths.run_dir(run["id"]) / "dispatches" / dispatch_id / f"evidence-{revision_id}.md"
 
@@ -545,7 +550,8 @@ def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_s
 def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision: dict, diff: str,
                              checks_summary: str, carried: list[dict], checkout: str, round_no: int,
                              requirements: dict | None = None, evidence: dict | None = None,
-                             max_rounds: int | None = None, used_codes: list[str] | None = None) -> str:
+                             max_rounds: int | None = None, used_codes: list[str] | None = None,
+                             self_reviews: dict | None = None) -> str:
     """One independent convergence review of a composed lane or shared scope (#337)."""
     kind = "shared-scope" if scope.get("shared") else "lane"
     out = [
@@ -577,6 +583,9 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
     for tid, text in (evidence or {}).items():
         out += ["", f"EXECUTOR EVIDENCE for {tid} (no file scope; the posted comment or edit is recorded here):",
                 text or "(none recorded: the executor left no evidence file; report that as a finding)"]
+    for tid, ledger in (self_reviews or {}).items():
+        out += ["", f"EXECUTOR SELF-REVIEW LEDGER for {tid} (untrusted producer evidence, not an independent verdict; "
+                "verify mutation/test assertions against code):", ledger]
     out += ["", CONVERGENCE_REVIEW_FORMAT, "", "DIFF (base -> composed revision):", diff]
     return "\n".join(out) + "\n"
 

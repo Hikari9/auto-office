@@ -678,6 +678,20 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
                             "ORDER BY created_at DESC LIMIT 1", (t["accepted_revision_id"],)).fetchone()
             checks.append(f"{t['id']} {g['verdict'] if g else 'none declared'}")
         evidence = {}
+        self_reviews = {}
+        for t in tasks:
+            rev = con.execute("SELECT dispatch_id, self_review_json FROM revisions WHERE id=?",
+                              (t["accepted_revision_id"],)).fetchone()
+            receipt = json.loads(rev["self_review_json"] or "null") if rev else None
+            if receipt and receipt.get("kind") == "ledger":
+                ledger = briefs.self_review_path(run, rev["dispatch_id"], t["accepted_revision_id"])
+                # The receipt digest binds this exact record to the accepted
+                # producer revision; never trust a stale or changed file.
+                raw = ledger.read_text(encoding="utf-8", errors="replace") if ledger.is_file() and not ledger.is_symlink() else None
+                from office.util import sha256_bytes
+                self_reviews[t["id"]] = (raw if raw is not None and sha256_bytes(raw.encode("utf-8")) == receipt["sha256"]
+                                          else "Ledger detail unavailable for this revision; the receipt alone cannot prove "
+                                               "mutation/test assertions. Verify against in-tree tests.")
         for t in tasks:
             if not t.get("scope"):
                 # A task with no file scope (a comment or issue edit): its executor's evidence file.
@@ -688,7 +702,7 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
             run, scope, tasks, _rev(scope["id"], commit), diff, "; ".join(checks), _carried(con, run, scope["id"],
                                                                                          "convergence_review"),
             str(checkout), int(gate["round"] or 1), state.current_requirements(con, run["id"])["frozen"],
-            evidence=evidence, max_rounds=contract.round_cap(run),
+            evidence=evidence, self_reviews=self_reviews, max_rounds=contract.round_cap(run),
             used_codes=gates.finding_codes(con, "run_id=? AND scope=?", (run["id"], scope["id"])))
         exclude = list(st.get("exclude_routes") or [])
         resume = _same_reviewer(con, run, scope["id"], "convergence_review", int(gate.get("cycle") or 1))

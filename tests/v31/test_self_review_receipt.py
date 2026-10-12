@@ -235,3 +235,36 @@ def test_the_revisions_column_is_nullable_and_added_to_an_older_database(tmp_pat
     con.commit()
     db.migrate(con)
     assert "self_review_json" in db._columns(con, "revisions")
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+def test_issue_576_submit_archives_private_ledger_for_convergence_review(env):
+    from office import briefs
+    from office.util import sha256_bytes
+    wenv, wt, d = _dispatch(env)
+    src = write_ledger(wt)
+    expected = src.read_text()
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert code == 0, out
+    rev = _rev(env)
+    archived = briefs.self_review_path({"id": d["run_id"]}, d["id"], rev["id"])
+    assert archived.read_text() == expected
+    assert not src.exists(), "the working-tree ledger is still consumed"
+    row = env.con().execute("SELECT sha256 FROM evidence WHERE revision_id=? AND kind='self_review_ledger'",
+                            (rev["id"],)).fetchone()
+    assert row and row[0] == sha256_bytes(expected.encode("utf-8"))
+
+
+def test_issue_576_review_brief_includes_ledger_test_and_mutation_evidence():
+    from office import briefs
+    ledger = "FINDING medium test-strength tests/test_guard.py:2 | guard | fixed tests/test_guard.py mutation=failed"
+    brief = briefs.convergence_review_brief(
+        {"gear": "direct"}, {"id": "L-T1"},
+        [{"id": "T1", "title": "guard", "scope": ["src/"], "accept": ["mutation evidence available"],
+          "depends": [], "interfaces": []}],
+        {"id": "R1", "commit_sha": "a" * 40}, "diff", "T1 APPROVED", [], "/tmp/check", 1,
+        self_reviews={"T1": ledger})
+    assert "EXECUTOR SELF-REVIEW LEDGER for T1" in brief
+    assert "tests/test_guard.py mutation=failed" in brief
+    assert "not an independent verdict" in brief
