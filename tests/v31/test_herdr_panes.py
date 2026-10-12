@@ -548,3 +548,28 @@ def test_herdr_repo_short_override_uses_normal_config_resolution(env):
     effective, warnings = config.resolve(env.repo, sets=["herdr.repo_short=my-app"])
     assert effective["herdr"]["repo_short"] == "my-app"
     assert not [w for w in warnings if w.get("key") == "herdr.repo_short"]
+
+
+def test_issue_579_live_herdr_registry_blocks_pane_even_when_pane_get_omits_agent(env, monkeypatch):
+    # Stale DB state and pane-get status are not permission to reassign a
+    # reviewer still in Herdr's separate agent registry.
+    _fake(env, monkeypatch)
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
+    from office import dispatch, questions
+    run = _run(env)
+    first = dispatch._herdr_pane(run, env.repo)
+    monkeypatch.setattr(questions, "_herdr_agents", lambda: [
+        {"name": "review-older", "pane_id": first, "agent_status": "working"}])
+    assert first in dispatch._busy_panes(run)
+    second = dispatch._herdr_pane(run, env.repo)
+    assert second != first
+
+
+def test_issue_579_empty_agent_registry_keeps_existing_pane_fencing(monkeypatch):
+    from office import dispatch, questions
+    monkeypatch.setattr(questions, "_herdr_agents", lambda: None)
+    assert dispatch._agent_occupied_panes() == set()
+    monkeypatch.setattr(questions, "_herdr_agents", lambda: [{"pane_id": "x"},
+                                                              {"pane_id": ""},
+                                                              {"pane_id": "w1:p1"}])
+    assert dispatch._agent_occupied_panes() == {"x", "w1:p1"}
