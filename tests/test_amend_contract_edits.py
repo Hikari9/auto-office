@@ -231,3 +231,17 @@ def test_two_edit_amendments_in_a_row_keep_both_through_the_draft(cenv):
         code, out = _amend(cenv, "--add-check", check)
         assert code == 0, out
     assert len(json.loads(_task(cenv)["checks_json"])) == 3
+
+
+def test_issue_567_contract_amend_refuses_unapplied_deploy_edit(cenv):
+    _accepted(cenv)
+    before = _rows(cenv, "SELECT plan_version, requirements_version FROM runs")[0]
+    before_dispatches = _rows(cenv, "SELECT id, role, triple FROM dispatches ORDER BY started_at")
+    # Requirements-level command changes cannot be silently stored in plan
+    # while the frozen deploy instruction still points elsewhere.
+    cenv.write_plan(PLAN.replace("blast_radius: repo", "blast_radius: repo\ndeploy_prod: echo new-deploy"))
+    code, out = cenv.office("amend", "plan", "--contract", "--", "change deploy command", env=EXTERNAL)
+    assert code != 0, out
+    assert "requirements-change" in out and "office amend requirements" in out
+    assert _rows(cenv, "SELECT plan_version, requirements_version FROM runs")[0] == before
+    assert _rows(cenv, "SELECT id, role, triple FROM dispatches ORDER BY started_at") == before_dispatches

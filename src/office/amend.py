@@ -414,6 +414,17 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
     if parsed.errors:
         raise Refused("plan-invalid", "plan has problems: " + "; ".join(parsed.errors[:5]),
                       next_step=f"fix {planpath.rel(run)}, then retry the amendment")
+    # A contract amendment must never silently accept a Requirements-level deploy
+    # change while continuing to execute the older, frozen command at land (#567).
+    # Deploy changes are user-owned requirements changes, not task contracts.
+    current_plan = state.current_plan(con, run["id"]) or {}
+    previous_deploy = (current_plan.get("requirements") or {}).get("deploy") or {}
+    proposed_deploy = parsed.requirements.get("deploy") or {}
+    if proposed_deploy != previous_deploy:
+        raise Refused("requirements-change", "deploy command changed in the Requirements section; a plan contract "
+                      "amendment cannot apply it. No task or reviewer route was changed", scope="requirements",
+                      preserved="the authorized deploy command and plan are unchanged",
+                      next_step='office amend requirements --quote "<user words>" -- "<deploy change>"')
     _require_contract_edit(con, run, scope_ids, delta, text, parsed)
     with db.transaction(con):
         run = state.get_run(con, run["id"])
