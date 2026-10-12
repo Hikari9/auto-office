@@ -1240,7 +1240,15 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
         if s["status"] == "unavailable":
             return (f"{sid}: a review is unavailable ({s['detail']}); re-run only the review on a fallback reviewer: office "
                     f"review {sid} [--as <route>]; or office resume retries it; a waiver is the last resort")
-        if s["status"] in ("evidence_blocked", "attention", "conflict", "blocked"):
+        if s["status"] == "evidence_blocked":
+            # No valid visual evidence means a review fallback cannot inspect
+            # the required screenshots. Retrying the same deterministic capture
+            # will loop; the orchestrator must correct the visual contract (#573).
+            return (f"{sid} evidence_blocked: {s['detail']}; correct the visual: capture contract "
+                    f"(for example its start: command or missing assets) via office amend <task> --contract -- "
+                    f"\"<capture setup correction>\", then office resume re-captures. "
+                    f"The degraded fallback is not available without inspectable evidence; a waiver needs landing authority")
+        if s["status"] in ("attention", "conflict", "blocked"):
             return (f"{sid} {s['status']}: {s['detail']}; fix the cause, then office resume (a waiver needs landing "
                     f"authority: office approve waive {sid}:<convergence|visual> ...)")
     nb = undispositioned(con, run) if dispositions else []
@@ -1776,7 +1784,10 @@ def fallback_review(con, run: dict, spec: str, report: Path, *, inspected: list[
         if g is None:
             raise Refused("fallback-not-allowed", f"{scope['id']} {kind}: the degraded fallback is only for a review "
                           "no specialist reviewer returned a verdict for", scope=scope["id"],
-                          next_step="office resume retries the reviewer chain")
+                          next_step=("correct the visual: capture contract with office amend <task> --contract -- "
+                                     "\"<capture setup correction>\", then office resume recaptures"
+                                     if kind == "visual" and st.get("status") == "evidence_blocked"
+                                     else "office resume retries the reviewer chain"))
         if kind == "visual":
             row = con.execute("SELECT path FROM evidence WHERE gate_id=? AND kind='capture_receipt' ORDER BY created_at "
                               "DESC LIMIT 1", (g["id"],)).fetchone()
