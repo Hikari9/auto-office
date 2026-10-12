@@ -10,6 +10,9 @@ paths:
   local_data: ~/.local/share/auto-office
   runs_db: ~/.local/share/auto-office/runs.db
   catalog_dir: ~/.local/share/auto-office/catalog
+herdr:
+  # Optional repository prefix on dispatched pane labels; empty uses the repo directory.
+  repo_short: ""
 worktree:
   # A repo-declared command Office runs once in each new worktree (#255), e.g.
   # "pnpm install --offline --frozen-lockfile || pnpm install --frozen-lockfile".
