@@ -182,3 +182,20 @@ def test_an_ack_only_session_that_ends_leaves_the_task_resumable(env):
     counts = next(line for line in out.splitlines() if line.startswith("accepted "))
     assert "live T1" not in counts, counts
     assert "office rerun T1 --resume" in out.splitlines()[-1], out
+
+
+def test_issue_539_rechecks_older_stack_after_unrelated_lease_released(monkeypatch):
+    from office import dispatch, state
+    tasks = [
+        {"id": "T4", "status": "accepted", "depends": []},
+        {"id": "T2", "status": "accepted", "depends": []},
+        {"id": "T3", "status": "queued", "stack_after": "T4", "depends": []},
+    ]
+    monkeypatch.setattr(state, "tasks", lambda con, run_id: tasks)
+    monkeypatch.setattr(dispatch, "stack_released", lambda con, run, tid: "accepted" if tid in ("T4", "T2") else None)
+    monkeypatch.setattr(dispatch, "scope_holder", lambda con, run, t: None)
+    monkeypatch.setattr(dispatch, "_base_for", lambda con, run, t, graph, after, parents: "base:" + after)
+    launches = []
+    monkeypatch.setattr(dispatch, "_launch_or_block", lambda con, run, tid, **kw: launches.append((tid, kw["base"])) or "D1")
+    assert dispatch.start_stacked(None, {"id": "run"}, "T2") == ["T3"]
+    assert launches == [("T3", "base:T4")]

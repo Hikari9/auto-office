@@ -4882,20 +4882,26 @@ def _live_session(con, run_id: str, task_id: str) -> str | None:
 
 
 def start_stacked(con, run: dict, holder_task: str) -> list[str]:
-    """Launch tasks the orchestrator stacked after `holder_task` once it is accepted, or has
-    submitted with no live session (stack_released). A stacked task whose scope another live
-    session holds stays queued. Caller holds tx."""
+    """Revisit eligible queued stacks whenever a holder's lease is released.
+
+    Also retry stacks whose original holder released earlier, but whose own
+    scopes were still held by an unrelated active dispatch (#539). A stacked
+    task whose scope remains live stays queued. Caller holds tx."""
     started = []
     if not stack_released(con, run, holder_task):
         return started
+    # A queued task may still be stacked behind an older, already-accepted
+    # holder: when a different task's lease clears, retry all eligible stacks
+    # instead of only those whose original holder just ended (#539).
     for t in state.tasks(con, run["id"]):
-        if t["status"] == "queued" and t.get("stack_after") == holder_task:
+        after = t.get("stack_after")
+        if t["status"] == "queued" and after and stack_released(con, run, after):
             if scope_holder(con, run, t):
                 continue
             graph = {x["id"]: x["depends"] for x in state.tasks(con, run["id"])}
             parts: list = []
             try:
-                base = _base_for(con, run, t, graph, holder_task, parents=parts)
+                base = _base_for(con, run, t, graph, after, parents=parts)
             except Refused as err:
                 # Acceptance must not raise out of its own transition: pause the dependent with the reason.
                 state.update_task(con, run["id"], t["id"], status="paused", pause_reason=err.message)
