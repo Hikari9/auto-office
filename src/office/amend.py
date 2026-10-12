@@ -61,9 +61,10 @@ def _send_is_report(after: str) -> bool:
 
 
 _OTHER_TERMS = re.compile(
-    r"\b(?<!\w-)(?:deploy|production|prod|publish|release|email|notify users|delete|drop table|truncate|"
+    r"\b(?<!\w-)(?:deploy|publish|release|email|notify users|delete|drop table|truncate|"
     r"force.?push|merge (?:to|into) main|migrat(?:e|ion) (?:prod|production)|payment|charge|"
     r"rotate (?:key|secret)|credentials?)\b(?!-\w)", re.I)
+_PROD_FLAG = re.compile(r"(?<![\w-])--prod\b", re.I)
 _SEND_WORD = re.compile(r"\b(?<!\w-)send\b(?!-\w)", re.I)
 
 
@@ -73,6 +74,9 @@ class _AuthorityTerms:
 
     def search(self, text: str):
         found = _OTHER_TERMS.search(text)
+        prod_flag = _PROD_FLAG.search(text)
+        if prod_flag and (found is None or prod_flag.start() < found.start()):
+            found = prod_flag
         for m in _SEND_WORD.finditer(text):
             after = text[m.end():].lstrip(" \t")
             if not _send_is_report(after) and (found is None or m.start() < found.start()):
@@ -361,6 +365,12 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
     if delivered:
         parts.append(f"delivering to {','.join(delivered)}")
     res.add(" | ".join(parts))
+    old_tasks = {t["id"]: t for t in current.get("tasks") or []}
+    for task in parsed.tasks:
+        prior = old_tasks.get(task["id"]) or {}
+        for criterion in prior.get("accept") or []:
+            if criterion not in (task.get("accept") or []):
+                res.add(f"dropped {task['id']} acceptance criterion: {criterion}")
     plans.show_diagram(con, state.get_run(con, run["id"]), version, parsed.tasks, plan_path, res)
     from office import guide
     res.next = guide.next_action(con, state.get_run(con, run["id"]))

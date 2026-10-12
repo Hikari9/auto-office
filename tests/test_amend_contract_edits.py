@@ -231,3 +231,18 @@ def test_two_edit_amendments_in_a_row_keep_both_through_the_draft(cenv):
         code, out = _amend(cenv, "--add-check", check)
         assert code == 0, out
     assert len(json.loads(_task(cenv)["checks_json"])) == 3
+
+
+def test_issue_570_dropped_criterion_is_echoed_verbatim(cenv):
+    _accepted(cenv)
+    added, detail = _amend(cenv, "--add-accept", "calc.add(0, 0) == 0")
+    assert added == 0, detail
+    code, out = _amend(cenv, "--drop-accept", "2, 3")
+    assert code == 0, out
+    assert "dropped T1 acceptance criterion: calc.add(2, 3) == 5" in out
+
+
+def test_issue_570_ambiguous_acceptance_drop_refused():
+    plan = planfile.edit_task(PLAN, "T1", add_accept=["calc.add(2, 2) == 4"])
+    with pytest.raises(ValueError, match="names 2"):
+        planfile.edit_task(plan, "T1", drop_accept=["calc.add"])

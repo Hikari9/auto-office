@@ -248,3 +248,13 @@ def test_the_fixed_report_endings_are_exempt(ending):
 def test_reverify_52fb0a1_leaks_are_refused(text):
     from office.amend import AUTHORITY_TERMS
     assert AUTHORITY_TERMS.search(text) is not None, text
+
+@pytest.mark.parametrize("text", [
+    "no production behaviour changes", "keep production code untouched",
+    "playwright.prod.config.ts forwards ports to a test server",
+    "the prod directory is referenced by the test harness",
+    "update the task branch from the default branch and resolve conflicts",
+])
+def test_issue_543_578_569_descriptive_and_local_branch_changes_are_ordinary(text):
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is None

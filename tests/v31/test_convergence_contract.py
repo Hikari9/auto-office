@@ -880,3 +880,10 @@ def test_intake_gap_answer_reviews_the_same_composition_again(env):
     gates = _gates(env, "convergence_review")
     assert len(gates) == 2 and gates[-1]["verdict"] == "APPROVED" and gates[-1]["cycle"] == 2, gates
     assert _scope(env, "L-T1")["status"] == "approved"
+
+
+@pytest.mark.parametrize("session,expected", [(None, "--fresh"), ("session-123", "--resume|--fresh")])
+def test_issue_581_rerun_hint_depends_on_stored_session(monkeypatch, session, expected):
+    from office import convergence, rerun
+    monkeypatch.setattr(rerun, "_last_ended_executor", lambda con, run, tid: {"session_id": session})
+    assert convergence._rerun_modes(None, {}, "T4") == expected

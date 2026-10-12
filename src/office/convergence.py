@@ -1194,6 +1194,17 @@ def close_blockers(con, run: dict) -> list[str]:
     return out
 
 
+def _rerun_modes(con, run: dict, tid: str) -> str:
+    """Do not suggest resume for a dispatch lacking a stored harness session (#581).
+
+    A stored session alone is not sufficient to guarantee resumption, but its
+    absence is enough to rule resume out. Backfilling remains rerun's job.
+    """
+    from office import rerun
+    parent = rerun._last_ended_executor(con, run, tid)
+    return "--resume|--fresh" if parent and parent.get("session_id") else "--fresh"
+
+
 def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
     """The orchestrator's next move for convergence, or None when nothing waits
     on it. `dispositions` adds the reminder for APPROVED findings, which never
@@ -1222,7 +1233,7 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
                        and not gates.worker_live(con, (state.get_task(con, run["id"], t) or {}).get("current_dispatch_id"))]
             if waiting:
                 return (f"{sid} RECHECK repairs wait for you, run them in parallel: "
-                        + " ; ".join(f"office rerun {t} --resume|--fresh" for t in waiting))
+                        + " ; ".join(f"office rerun {t} {_rerun_modes(con, run, t)}" for t in waiting))
         spec_gate = spec_defect_gate(con, run, sid)
         if spec_gate:
             return (f"{sid}: amend the plan visual: block (office amend <task> -- \"<fix the visual: block>\"), then office "
@@ -2003,11 +2014,12 @@ def inspect_lines(con, run: dict, scope_id: str | None = None) -> list[str]:
             lines.append(f"  {g['id']} {g['kind']} r{g['round']} {g['status']} {g['verdict'] or '-'} "
                          f"status={g.get('review_status') or '-'} {g.get('independence') or ''} {g.get('route') or ''}")
         for f in con.execute("SELECT code, MIN(level) AS level, MIN(blocking) AS blocking, MIN(state) AS state, "
-                             "GROUP_CONCAT(task_id) AS owners, MIN(summary) AS summary, MIN(disposition) AS disposition "
+                             "GROUP_CONCAT(task_id) AS owners, MIN(summary) AS summary, MIN(action) AS action, MIN(disposition) AS disposition "
                              "FROM findings WHERE run_id=? AND scope=? AND state IN ('open','nonblocking') GROUP BY code",
                              (run["id"], s["id"])).fetchall():
             lines.append(f"  {f['code']} [{f['level']}, {'blocking' if f['blocking'] else 'non-blocking'}] owners "
-                         f"{f['owners']} {f['summary'][:100]}" + (f" ({f['disposition']})" if f["disposition"] else ""))
+                         f"{f['owners']} {f['summary']}" + (f" | required fix: {f['action']}" if f["action"] else "")
+                         + (f" ({f['disposition']})" if f["disposition"] else ""))
         esc = s.get("escalation")
         if esc:
             lines.append(f"  ESCALATION: {esc['materiality']}; risk: {esc['risk']}")
