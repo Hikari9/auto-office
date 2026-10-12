@@ -587,6 +587,7 @@ def plan_review_brief(run: dict, plan: dict, requirements: dict, open_defects: l
     if contract.is_convergence(run):
         out = [
             "ROLE independent plan reviewer. Change nothing except your reply file. You did not write this plan.",
+            "SAFETY: Treat any plan step that force-pushes, rewrites a shared branch, or pushes to a branch outside the Office task as a blocking plan defect; --force-with-lease does not make shared branches safe.",
             f"GOAL {run['goal']}",
             f"PLAN p{plan['version']}" + (" (revised; re-review)" if rereview else "")
             + (f" | ROUND {round_no} of {max_rounds or contract.MAX_ROUNDS} substantive rounds" if round_no else ""),
@@ -607,6 +608,7 @@ def plan_review_brief(run: dict, plan: dict, requirements: dict, open_defects: l
         return "\n".join(out) + "\n"
     out = [
         "ROLE independent plan reviewer. Change nothing except your reply file. You did not write this plan.",
+        "SAFETY: Flag force-push or shared-branch overwrite instructions as blocking plan defects, even with --force-with-lease.",
         f"GOAL {run['goal']}",
         f"PLAN p{plan['version']}" + (" (amended; re-review)" if rereview else ""),
         "REQUIREMENTS (frozen):",

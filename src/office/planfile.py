@@ -252,6 +252,22 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
     }
 
 
+_FORCE_PUSH_COMMAND = re.compile(r"\bgit\s+push\b[^\n]{0,240}\s(?:--force(?:-with-lease|-if-includes)?|-f)(?:\s|$)", re.I)
+
+
+def _unsafe_force_push_in_plan(task: dict) -> str | None:
+    """Reject plans telling executors to rewrite remote branch history (#571).
+
+    The worker's own task branch is handled by Office's leased PR sync. A plan
+    must not authorize an executor's arbitrary force-push to shared branches.
+    """
+    for instruction in [*(task.get("notes") or []), *(task.get("checks") or []),
+                        *(task.get("accept") or [])]:
+        if _FORCE_PUSH_COMMAND.search(instruction):
+            return instruction
+    return None
+
+
 def _validate(plan: ParsedPlan) -> None:
     ids = [t["id"] for t in plan.tasks]
     if not plan.tasks:
@@ -271,6 +287,10 @@ def _validate(plan: ParsedPlan) -> None:
                 err = f"{t['id']} (line {line}): {ENTRY_ERROR} {entry!r} {problem}"
                 plan.errors.append(err)
                 plan.entry_problems.append((t["id"], entry, err))
+        forbidden_push = _unsafe_force_push_in_plan(t)
+        if forbidden_push:
+            plan.errors.append(f"{t['id']}: unsafe force-push to a possibly shared remote branch in plan; "
+                               "remove it and use the Office-owned task PR workflow")
         if not t["accept"]:
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `accept:` criteria")
         if t["checks"] is None:

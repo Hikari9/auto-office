@@ -231,3 +231,11 @@ def test_two_edit_amendments_in_a_row_keep_both_through_the_draft(cenv):
         code, out = _amend(cenv, "--add-check", check)
         assert code == 0, out
     assert len(json.loads(_task(cenv)["checks_json"])) == 3
+
+
+def test_issue_571_plan_rejects_force_push_to_shared_branch():
+    malicious = PLAN.replace("visual: none", "notes:\n- run git push origin HEAD:shared-preview --force-with-lease\nvisual: none")
+    parsed = planfile.parse(malicious)
+    assert any("unsafe force-push" in error for error in parsed.errors)
+    ordinary = PLAN.replace("visual: none", "notes:\n- git push -u origin HEAD:office/abcd/T1\nvisual: none")
+    assert not any("force-push" in error for error in planfile.parse(ordinary).errors)
