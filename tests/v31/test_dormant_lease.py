@@ -182,3 +182,12 @@ def test_an_ack_only_session_that_ends_leaves_the_task_resumable(env):
     counts = next(line for line in out.splitlines() if line.startswith("accepted "))
     assert "live T1" not in counts, counts
     assert "office rerun T1 --resume" in out.splitlines()[-1], out
+
+
+def test_issue_540_disjoint_file_suffix_globs_do_not_lease_each_other():
+    from office import planfile
+    assert not planfile.scopes_overlap(["tests/*.test.ts"], ["tests/*.test.tsx"])
+    assert not planfile.scopes_overlap(["tests/**/*.test.ts"], ["tests/**/*.test.tsx"])
+    assert planfile.scopes_overlap(["tests/*.test.ts"], ["tests/*.ts"])
+    assert planfile.scopes_overlap(["tests/**/*.test.tsx"], ["tests/*.tsx"])
+    assert planfile.scopes_overlap(["src/**"], ["src/handlers/*.ts"])

@@ -490,11 +490,29 @@ def literal_prefix(pattern: str) -> str:
     return pattern[: m.start()] if m else pattern
 
 
+def _incompatible_glob_suffixes(a: str, b: str) -> bool:
+    """Conservatively prove two file globs cannot name the same path (#540).
+
+    Only reject overlap when *both* globs have nonempty fixed trailing text
+    after the last wildcard. A shared filename must end with both suffixes;
+    incompatible suffixes make that impossible. Unknown patterns still overlap.
+    """
+    if not any(c in a for c in "*?") or not any(c in b for c in "*?"):
+        return False
+    end_a = max(a.rfind("*"), a.rfind("?"))
+    end_b = max(b.rfind("*"), b.rfind("?"))
+    suffix_a, suffix_b = a[end_a + 1:], b[end_b + 1:]
+    return bool(suffix_a and suffix_b and
+                not (suffix_a.endswith(suffix_b) or suffix_b.endswith(suffix_a)))
+
+
 def scopes_overlap(a: list[str], b: list[str]) -> bool:
     for pa in a:
         for pb in b:
             if is_shared(pa) and is_shared(pb) and not (shared_tree(pa) or shared_tree(pb)):
                 continue  # both append to a shared registry file; compose resolves it
+            if _incompatible_glob_suffixes(pa.lstrip(SHARED), pb.lstrip(SHARED)):
+                continue
             la, lb = literal_prefix(pa.lstrip(SHARED)), literal_prefix(pb.lstrip(SHARED))
             if la.startswith(lb) or lb.startswith(la):
                 return True
