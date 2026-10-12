@@ -852,10 +852,16 @@ def _base_for(con, run: dict, task: dict, graph: dict, stack_after: str | None, 
         return None
     if parents is not None:
         parents.extend(heads)
+    # A run whose integration moved onto a newer default branch must not
+    # spawn new executor work from its original, now-stale base (#580).
+    onto = integration.compose_base(run)
     if not heads:
-        return run["base_sha"]
+        return onto
+    parents_for_base = [(h["task"], h["commit"]) for h in heads]
+    if onto != run["base_sha"]:
+        parents_for_base.insert(0, ("rebased default branch", onto))
     try:
-        return integration.combine(run, [(h["task"], h["commit"]) for h in heads])
+        return integration.combine(run, parents_for_base)
     except integration.CombineConflict as exc:
         raise Refused("dependency-conflict", f"{task['id']} cannot build on both {exc.left} and {exc.right}: their "
                       f"accepted revisions conflict on {', '.join(exc.paths[:6])}", scope=task["id"],
@@ -2342,21 +2348,18 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         _launch_notice(run, dispatch, f"pane-mismatch: {mismatch}; brief NOT sent; "
                        f"inspect pane {pane} and use office revoke {dispatch.get('task_id') or dispatch['id']}")
     if not landed and not mismatch:
-        # The agent is up in a pane the user can see; a second headless copy
-        # would race it. Say so and leave the pane for a manual re-prompt.
+        # A pi-harness pane can keep the already-submitted brief in scrollback.
+        # Never promote a stale composer match into an actionable "send Enter"
+        # notice while Herdr says the agent is doing work (#583).
+        sample = _herdr_agent_sample(name)
+        working = bool(sample and (sample.get("status") == "working" or sample.get("busy") is True))
         view = _pane_view(name)
-        if _composer_holds(view, pointer):
-            # Prompting again would submit the pointer twice.
-            _launch_notice(run, dispatch, f"brief pointer is typed but unsubmitted in herdr agent {name} (pane "
-                                          f"{pane}); submit it: herdr pane send-keys {pane} Enter")
+        if working and _composer_holds(view, pointer):
+            # The pointer also occurs in a working agent's recent scrollback.
+            # A matching substring cannot prove its composer is waiting.
+            spec["landing_unconfirmed_working"] = True
         else:
-            screen = _startup_screen(view)
-            title = ("folder-trust dialog" if screen == TRUST_SCREEN else screen if screen == EXTERNAL_IMPORTS_SCREEN
-                     else f"{screen} screen")
-            why = (f" the {title} holds the composer; review or skip it in the pane and"
-                   if screen else "")
-            _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
-                                          f"re-prompt it: office prompt {dispatch['id']} -- {shlex.quote(pointer)}")
+            _describe_unconfirmed_prompt(run, dispatch, name, pane, pointer, view)
     spec["prompt_landed"] = landed
     write_launch_spec(run, dispatch["id"], spec)
     if not session and landed and not dispatch.get("resumed_from"):
@@ -2381,6 +2384,23 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     finally:
         log.close()
     return {"launcher": "herdr", "pane": pane, "agent": name, "watcher_pid": watcher.pid, "prompt_landed": landed}
+
+
+def _describe_unconfirmed_prompt(run: dict, dispatch: dict, name: str, pane: str, pointer: str,
+                                 view: str | None) -> None:
+    """Emit action only after liveness proved the agent is not working (#583)."""
+    if _composer_holds(view, pointer):
+        # Prompting again would submit the pointer twice.
+        _launch_notice(run, dispatch, f"brief pointer is typed but unsubmitted in herdr agent {name} (pane "
+                                      f"{pane}); submit it: herdr pane send-keys {pane} Enter")
+    else:
+        screen = _startup_screen(view)
+        title = ("folder-trust dialog" if screen == TRUST_SCREEN else screen if screen == EXTERNAL_IMPORTS_SCREEN
+                 else f"{screen} screen")
+        why = (f" the {title} holds the composer; review or skip it in the pane and"
+               if screen else "")
+        _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
+                                      f"re-prompt it: office prompt {dispatch['id']} -- {shlex.quote(pointer)}")
 
 
 def _herdr_agent_sample(name: str) -> dict | None:
@@ -3256,6 +3276,23 @@ def relabel_task_panes(run: dict, task_id: str) -> None:
         pass
 
 
+def _agent_occupied_panes() -> set[str]:
+    """Read Herdr's agent registry in addition to pane/dispatch records (#579).
+
+    A live reviewer can outlast its dispatch row or Herdr's `pane get` agent
+    field may omit a pi-harness agent. The registry's pane ids are direct
+    occupation evidence, even when a previous dispatch record looks ended.
+    Missing/unavailable list data adds no speculative entries; the existing
+    dispatch reservations and pane identity checks still apply.
+    """
+    from office import questions
+    agents = questions._herdr_agents()
+    if not agents:
+        return set()
+    return {a["pane_id"] for a in agents if isinstance(a, dict)
+            and isinstance(a.get("pane_id"), str) and a["pane_id"].strip()}
+
+
 def _busy_panes(run: dict) -> set:
     con = db.connect()
     try:
@@ -3266,6 +3303,7 @@ def _busy_panes(run: dict) -> set:
     finally:
         con.close()
     busy |= _reserved_panes(run, open_ids)
+    busy |= _agent_occupied_panes()
     # A failed startup can leave the harness TUI alive in a pane even though
     # Herdr never registered an agent. Each dispatch records that pane in its
     # own launch.json; derive reservations from those per-dispatch records so
@@ -4882,20 +4920,26 @@ def _live_session(con, run_id: str, task_id: str) -> str | None:
 
 
 def start_stacked(con, run: dict, holder_task: str) -> list[str]:
-    """Launch tasks the orchestrator stacked after `holder_task` once it is accepted, or has
-    submitted with no live session (stack_released). A stacked task whose scope another live
-    session holds stays queued. Caller holds tx."""
+    """Revisit eligible queued stacks whenever a holder's lease is released.
+
+    Also retry stacks whose original holder released earlier, but whose own
+    scopes were still held by an unrelated active dispatch (#539). A stacked
+    task whose scope remains live stays queued. Caller holds tx."""
     started = []
     if not stack_released(con, run, holder_task):
         return started
+    # A queued task may still be stacked behind an older, already-accepted
+    # holder: when a different task's lease clears, retry all eligible stacks
+    # instead of only those whose original holder just ended (#539).
     for t in state.tasks(con, run["id"]):
-        if t["status"] == "queued" and t.get("stack_after") == holder_task:
+        after = t.get("stack_after")
+        if t["status"] == "queued" and after and stack_released(con, run, after):
             if scope_holder(con, run, t):
                 continue
             graph = {x["id"]: x["depends"] for x in state.tasks(con, run["id"])}
             parts: list = []
             try:
-                base = _base_for(con, run, t, graph, holder_task, parents=parts)
+                base = _base_for(con, run, t, graph, after, parents=parts)
             except Refused as err:
                 # Acceptance must not raise out of its own transition: pause the dependent with the reason.
                 state.update_task(con, run["id"], t["id"], status="paused", pause_reason=err.message)
