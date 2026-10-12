@@ -2342,21 +2342,18 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         _launch_notice(run, dispatch, f"pane-mismatch: {mismatch}; brief NOT sent; "
                        f"inspect pane {pane} and use office revoke {dispatch.get('task_id') or dispatch['id']}")
     if not landed and not mismatch:
-        # The agent is up in a pane the user can see; a second headless copy
-        # would race it. Say so and leave the pane for a manual re-prompt.
+        # A pi-harness pane can keep the already-submitted brief in scrollback.
+        # Never promote a stale composer match into an actionable "send Enter"
+        # notice while Herdr says the agent is doing work (#583).
+        sample = _herdr_agent_sample(name)
+        working = bool(sample and (sample.get("status") == "working" or sample.get("busy") is True))
         view = _pane_view(name)
-        if _composer_holds(view, pointer):
-            # Prompting again would submit the pointer twice.
-            _launch_notice(run, dispatch, f"brief pointer is typed but unsubmitted in herdr agent {name} (pane "
-                                          f"{pane}); submit it: herdr pane send-keys {pane} Enter")
+        if working and _composer_holds(view, pointer):
+            # The pointer also occurs in a working agent's recent scrollback.
+            # A matching substring cannot prove its composer is waiting.
+            spec["landing_unconfirmed_working"] = True
         else:
-            screen = _startup_screen(view)
-            title = ("folder-trust dialog" if screen == TRUST_SCREEN else screen if screen == EXTERNAL_IMPORTS_SCREEN
-                     else f"{screen} screen")
-            why = (f" the {title} holds the composer; review or skip it in the pane and"
-                   if screen else "")
-            _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
-                                          f"re-prompt it: office prompt {dispatch['id']} -- {shlex.quote(pointer)}")
+            _describe_unconfirmed_prompt(run, dispatch, name, pane, pointer, view)
     spec["prompt_landed"] = landed
     write_launch_spec(run, dispatch["id"], spec)
     if not session and landed and not dispatch.get("resumed_from"):
@@ -2381,6 +2378,23 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     finally:
         log.close()
     return {"launcher": "herdr", "pane": pane, "agent": name, "watcher_pid": watcher.pid, "prompt_landed": landed}
+
+
+def _describe_unconfirmed_prompt(run: dict, dispatch: dict, name: str, pane: str, pointer: str,
+                                 view: str | None) -> None:
+    """Emit action only after liveness proved the agent is not working (#583)."""
+    if _composer_holds(view, pointer):
+        # Prompting again would submit the pointer twice.
+        _launch_notice(run, dispatch, f"brief pointer is typed but unsubmitted in herdr agent {name} (pane "
+                                      f"{pane}); submit it: herdr pane send-keys {pane} Enter")
+    else:
+        screen = _startup_screen(view)
+        title = ("folder-trust dialog" if screen == TRUST_SCREEN else screen if screen == EXTERNAL_IMPORTS_SCREEN
+                 else f"{screen} screen")
+        why = (f" the {title} holds the composer; review or skip it in the pane and"
+               if screen else "")
+        _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
+                                      f"re-prompt it: office prompt {dispatch['id']} -- {shlex.quote(pointer)}")
 
 
 def _herdr_agent_sample(name: str) -> dict | None:
