@@ -3256,6 +3256,23 @@ def relabel_task_panes(run: dict, task_id: str) -> None:
         pass
 
 
+def _agent_occupied_panes() -> set[str]:
+    """Read Herdr's agent registry in addition to pane/dispatch records (#579).
+
+    A live reviewer can outlast its dispatch row or Herdr's `pane get` agent
+    field may omit a pi-harness agent. The registry's pane ids are direct
+    occupation evidence, even when a previous dispatch record looks ended.
+    Missing/unavailable list data adds no speculative entries; the existing
+    dispatch reservations and pane identity checks still apply.
+    """
+    from office import questions
+    agents = questions._herdr_agents()
+    if not agents:
+        return set()
+    return {a["pane_id"] for a in agents if isinstance(a, dict)
+            and isinstance(a.get("pane_id"), str) and a["pane_id"].strip()}
+
+
 def _busy_panes(run: dict) -> set:
     con = db.connect()
     try:
@@ -3266,6 +3283,7 @@ def _busy_panes(run: dict) -> set:
     finally:
         con.close()
     busy |= _reserved_panes(run, open_ids)
+    busy |= _agent_occupied_panes()
     # A failed startup can leave the harness TUI alive in a pane even though
     # Herdr never registered an agent. Each dispatch records that pane in its
     # own launch.json; derive reservations from those per-dispatch records so
