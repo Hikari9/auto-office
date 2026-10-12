@@ -1,6 +1,8 @@
 # Model Registry & Routing Policy — Wayfinder Prototype (Issue #606)
 
-**Status: three interactive exploratory UI options; direction NOT yet selected.**  
+**Status: DESIGN LOCKED — Hybrid A + C on desktop, B-style cards on mobile (maintainer approved 2026-10-13).**
+
+[Canonical locked interaction contract](LOCKED-CONTRACT.md) · [Static desktop/mobile reference](locked-hybrid.svg) · [Interactive hybrid default](index.html).  
 **Parent:** [Auto-Office deterministic catalog lifecycle Wayfinder](https://github.com/Hikari9/auto-office/issues/601).  
 **Decision ticket:** [Prototype model catalog and user-routing settings without YAML edits](https://github.com/Hikari9/auto-office/issues/606).
 
@@ -12,7 +14,7 @@ This is a **sanitized sample-state design artifact** for the already-selected Au
 
 The current production Settings surface already has a real Machine → Repository → Run cascade with provenance. The current `office onboard` uses native harness question UI and validated CLI writes. The new model-policy experience must **extend** rather than silently replace those authorities. Global user-owned model policy ships first; repo-scoped exceptions are later work [#607](https://github.com/Hikari9/auto-office/issues/607); run-pinned values are read-only. The Workstation layout is already the chosen shell in `docs/prototypes/auto-office-web-v2/LOCKED-CONTRACT.md`.
 
-## Compare three information architectures
+## Compared information architectures (historical alternatives)
 
 | Option | Concept | Best use | Cost / trade-off |
 |---|---|---|---|
@@ -20,7 +22,7 @@ The current production Settings surface already has a real Machine → Repositor
 | **B — Model Cards** | Responsive card gallery showing route variants, policy and status at a glance | First-run overview, exploration and touch/mobile | More space per route; comparatively slow for dozens of models |
 | **C — Split Inspector** | Compact model list beside persistent detail inspector with evidence, provenance, each effort and editable policy | Deep inspection and source-traceable decisions | Less table-wide comparison; inspector moves under list on mobile |
 
-A/B/C are **alternatives for the Model Registry surface only**. All share the same policy, update and CLI contract. They do **not** reopen the earlier selected Workstation shell.
+**Approved synthesis:** A's dense registry table and C's persistent detail inspector form a single desktop screen. B-style expandable cards are used for mobile/narrow screens. The original A/B/C prototypes remain available through the comparison switch; none is a competing production layout. The previously selected Workstation shell is unchanged.
 
 ### Prototype interaction checklist
 
@@ -32,9 +34,11 @@ A/B/C are **alternatives for the Model Registry surface only**. All share the sa
 6. **Updates & rollback**: see six-stage pipeline, routine verified auto-publish classification, approval-required *validated* capability change (demo approval), withheld unverified effort mapping and invalid model rejection. Preview a before/after diff, inspect snapshot history and preview rollback.
 7. **CLI parity**: copy proposed future command shapes clearly labeled **not yet implemented**.
 
-### Recommended next design decision (requires maintainer feedback)
+### Locked human decision
 
-Select A, B, C, or a hybrid. Suggested hybrid: **A for desktop registry comparisons + C as its inspector + B-like cards for narrow/mobile widths**. This avoids three parallel production registry UIs while preserving inspectability and mobile readability.
+**Selected by maintainer:** Hybrid **A + C desktop, B on mobile**. Implement one hybrid surface, not three competing registry screens. Desktop table rows select an always-available contextual inspector; on mobile each card expands its own evidence and user-policy section. Continue using the Workstation Settings shell, existing config provenance, and the real runtime/CLI authority.
+
+For detailed desktop/mobile state handling, policy and availability boundaries, update review, onboarding prompt, accessibility, and acceptance criteria, use [LOCKED-CONTRACT.md](LOCKED-CONTRACT.md). This document and the HTML prototype are implementation reference only, not delivered runtime behavior.
 
 ## UX implementation invariants
 
@@ -46,11 +50,11 @@ Select A, B, C, or a hybrid. Suggested hybrid: **A for desktop registry comparis
 - **Rollback/replay:** transactional snapshot restore never rewrites user preferences or live pinned runs. Preview diff shows effect and provenance before action.
 - **Runtime ownership:** Web invokes the same Office CLI/runtime mutations and re-reads confirmed values; browser state is never the authority. Respect source freshness and idempotency receipts.
 - **Quota and per-task allocation:** economically expensive routes remain user-permitted, planner gets a route economics sheet, runtime obeys binding primary/fallback envelopes and passive headroom reassessment. Detailed cost telemetry remains opt-in.
-- **Presentation:** desktop Workstation blue/green/purple, semantic yellow/red. Grid sticky first column + horizontal overflow; cards responsive 3→2→1; split inspector collapses to vertical flow. Mobile rail becomes horizontal header. No credentials or private process details embedded in this artifact.
+- **Presentation:** desktop Workstation blue/green/purple, semantic yellow/red. Grid sticky first column + horizontal overflow, with a persistent inspector on desktop; switch the same record to one-column expandable cards on mobile; preserve selection/filter/scroll. Mobile rail becomes horizontal header. No credentials or private process details embedded in this artifact.
 - **Accessibility:** controls have labels, dialog semantics, keyboard Escape close and focus target. Production must additionally implement full focus trapping/restoration and server-reconciled pending/error states.
 
 ## Review and next steps
 
-The human-in-loop prototype ticket must remain OPEN until the maintainer chooses a direction. After selection, record the locked desktop/mobile interaction contract, replace the exploratory branch with a durable canonical reference (plus visual screenshot), and feed implementation from the issue; **do not mistake creating this prototype for shipping the model policy/runtime changes**.
+The maintainer **approved the A + C desktop / B mobile hybrid**. The canonical visual reference is [locked-hybrid.svg](locked-hybrid.svg), with [interactive behavior](index.html) and [LOCKED-CONTRACT.md](LOCKED-CONTRACT.md) as the implementation handoff. The Wayfinder design decision may close once the issue links are verified. **No model-registry, runtime, CLI, or real user policy changes are implemented by this prototype.**
 
 Grounding: [Model lineage](https://github.com/Hikari9/auto-office/issues/602), [User policy](https://github.com/Hikari9/auto-office/issues/605), [Catalog publish](https://github.com/Hikari9/auto-office/issues/603), [Planner/router handoff](https://github.com/Hikari9/auto-office/issues/604), [Repo follow-up](https://github.com/Hikari9/auto-office/issues/607), `src/office/web/static/settings.js`, `src/office/web/static/settings.css`, `src/office/web/settings.py`, `docs/web-ui.md`, and `docs/onboarding.md`.
