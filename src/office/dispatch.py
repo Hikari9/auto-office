@@ -852,10 +852,16 @@ def _base_for(con, run: dict, task: dict, graph: dict, stack_after: str | None, 
         return None
     if parents is not None:
         parents.extend(heads)
+    # A run whose integration moved onto a newer default branch must not
+    # spawn new executor work from its original, now-stale base (#580).
+    onto = integration.compose_base(run)
     if not heads:
-        return run["base_sha"]
+        return onto
+    parents_for_base = [(h["task"], h["commit"]) for h in heads]
+    if onto != run["base_sha"]:
+        parents_for_base.insert(0, ("rebased default branch", onto))
     try:
-        return integration.combine(run, [(h["task"], h["commit"]) for h in heads])
+        return integration.combine(run, parents_for_base)
     except integration.CombineConflict as exc:
         raise Refused("dependency-conflict", f"{task['id']} cannot build on both {exc.left} and {exc.right}: their "
                       f"accepted revisions conflict on {', '.join(exc.paths[:6])}", scope=task["id"],

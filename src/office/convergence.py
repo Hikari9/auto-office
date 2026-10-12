@@ -125,12 +125,14 @@ def group_planned_tasks(tasks: list[dict]) -> list[dict]:
 
 
 def _changed(con, run: dict, task: dict) -> set[str]:
-    rev = con.execute("SELECT changed_json, commit_sha FROM revisions WHERE id=?",
+    rev = con.execute("SELECT changed_json, commit_sha, base_commit FROM revisions WHERE id=?",
                       (task.get("accepted_revision_id"),)).fetchone()
     if rev is None:
         return set()
     files = set(json.loads(rev["changed_json"] or "[]"))
-    files |= set(paths.git(Path(run["repo_root"]), "diff", "--name-only", run["base_sha"], rev["commit_sha"],
+    # Task ownership is relative to *its* recorded base, not the run's old
+    # default base or the newer base used for composed review (#580).
+    files |= set(paths.git(Path(run["repo_root"]), "diff", "--name-only", rev["base_commit"] or run["base_sha"], rev["commit_sha"],
                            check=False).split())
     return files
 

@@ -443,7 +443,8 @@ def review_boundary(con, run: dict, tasks: list[dict], revs: dict) -> tuple[bool
     if len(tasks) < 2:
         return False, "single task: composed result equals the accepted revision"
     changed = {t["id"]: set(json.loads(revs[t["id"]].get("changed_json") or "[]")) |
-               set(paths.git(Path(run["repo_root"]), "diff", "--name-only", run["base_sha"], revs[t["id"]]["commit_sha"]).split())
+               set(paths.git(Path(run["repo_root"]), "diff", "--name-only",
+                             revs[t["id"]].get("base_commit") or run["base_sha"], revs[t["id"]]["commit_sha"]).split())
                for t in tasks}
     ids = [t["id"] for t in tasks]
     for i, a in enumerate(ids):
