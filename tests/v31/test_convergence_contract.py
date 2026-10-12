@@ -880,3 +880,11 @@ def test_intake_gap_answer_reviews_the_same_composition_again(env):
     gates = _gates(env, "convergence_review")
     assert len(gates) == 2 and gates[-1]["verdict"] == "APPROVED" and gates[-1]["cycle"] == 2, gates
     assert _scope(env, "L-T1")["status"] == "approved"
+
+
+def test_issue_542_plan_reviewer_persists_model_and_effort(env):
+    # Guard plan review route evidence, which is essential for #526-#528.
+    _start(env, gear="express", approve=False, plan_reviewer=[{"reply": APPROVED}])
+    rows = _q(env, "SELECT role, triple, model, effort FROM dispatches WHERE role='plan_reviewer'")
+    assert rows, "a plan review must record a reviewer dispatch"
+    assert all(r["model"] and r["effort"] for r in rows), rows
