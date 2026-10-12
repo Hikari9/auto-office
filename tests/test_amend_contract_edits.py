@@ -231,3 +231,46 @@ def test_two_edit_amendments_in_a_row_keep_both_through_the_draft(cenv):
         code, out = _amend(cenv, "--add-check", check)
         assert code == 0, out
     assert len(json.loads(_task(cenv)["checks_json"])) == 3
+
+
+def test_issue_570_dropped_criterion_is_echoed_verbatim(cenv):
+    _accepted(cenv)
+    added, detail = _amend(cenv, "--add-accept", "calc.add(0, 0) == 0")
+    assert added == 0, detail
+    code, out = _amend(cenv, "--drop-accept", "2, 3")
+    assert code == 0, out
+    assert "dropped T1 acceptance criterion: calc.add(2, 3) == 5" in out
+
+
+def test_issue_570_ambiguous_acceptance_drop_refused():
+    plan = planfile.edit_task(PLAN, "T1", add_accept=["calc.add(2, 2) == 4"])
+    with pytest.raises(ValueError, match="names 2"):
+        planfile.edit_task(plan, "T1", drop_accept=["calc.add"])
+
+
+def test_issue_569_accepted_task_can_gain_local_default_branch_sync_criterion(cenv):
+    _accepted(cenv)
+    criterion = "Update the task branch from the default branch and resolve conflicts"
+    code, out = _amend(cenv, "--add-accept", criterion, delta="task branch hygiene without deployment")
+    assert code == 0 and "contract-level-change" not in out, out
+    assert criterion in json.loads(_task(cenv)["accept_json"])
+
+def test_issue_567_contract_amend_refuses_unapplied_deploy_edit(cenv):
+    _accepted(cenv)
+    before = _rows(cenv, "SELECT plan_version, requirements_version FROM runs")[0]
+    before_dispatches = _rows(cenv, "SELECT id, role, triple FROM dispatches ORDER BY started_at")
+    # Requirements-level command changes cannot be silently stored in plan
+    # while the frozen deploy instruction still points elsewhere.
+    cenv.write_plan(PLAN.replace("blast_radius: repo", "blast_radius: repo\ndeploy_prod: echo new-deploy"))
+    code, out = cenv.office("amend", "plan", "--contract", "--", "change deploy command", env=EXTERNAL)
+    assert code != 0, out
+    assert "requirements-change" in out and "office amend requirements" in out
+    assert _rows(cenv, "SELECT plan_version, requirements_version FROM runs")[0] == before
+    assert _rows(cenv, "SELECT id, role, triple FROM dispatches ORDER BY started_at") == before_dispatches
+
+def test_issue_571_plan_rejects_force_push_to_shared_branch():
+    malicious = PLAN.replace("visual: none", "notes:\n- run git push origin HEAD:shared-preview --force-with-lease\nvisual: none")
+    parsed = planfile.parse(malicious)
+    assert any("unsafe force-push" in error for error in parsed.errors)
+    ordinary = PLAN.replace("visual: none", "notes:\n- git push -u origin HEAD:office/abcd/T1\nvisual: none")
+    assert not any("force-push" in error for error in planfile.parse(ordinary).errors)

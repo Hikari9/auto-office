@@ -55,9 +55,23 @@ def _prior_lines(con, run_id: str) -> set[str]:
 
 def blockers(con, run_id: str) -> list[str]:
     """Live dispatches and claimed jobs, named, that an upgrade must not strand."""
-    out = [f"dispatch {r['id']} ({r['kind'] or 'agent'} {r['task_id'] or ''}, {r['status']})".replace(" ,", ",")
-           for r in con.execute("SELECT id, kind, task_id, status FROM dispatches WHERE run_id=? AND ended_at IS NULL "
-                                "AND status IN ('launching','running') ORDER BY started_at", (run_id,)).fetchall()]
+    out = []
+    for r in con.execute("SELECT d.id, d.kind, d.task_id, d.status, t.status AS task_status, "
+                         "t.accepted_producer_dispatch_id AS accepted_producer "
+                         "FROM dispatches d LEFT JOIN tasks t ON t.run_id=d.run_id AND t.id=d.task_id "
+                         "WHERE d.run_id=? AND d.ended_at IS NULL "
+                         "AND d.status IN ('launching','running') ORDER BY d.started_at", (run_id,)).fetchall():
+        # Accepted immutable revisions do not hold mutable scope. A supervisor
+        # launch error can leave their dispatch row running forever (#541).
+        # Do not ignore any unaccepted worker, reviewer, or active lease.
+        accepted = (r["kind"] == "executor" and r["task_status"] == "accepted"
+                    and r["accepted_producer"] == r["id"])
+        live_lease = con.execute("SELECT 1 FROM leases WHERE run_id=? AND task_id=? "
+                                 "AND released_at IS NULL AND revoked_at IS NULL LIMIT 1",
+                                 (run_id, r["task_id"])).fetchone() is not None
+        if accepted and not live_lease:
+            continue
+        out.append(f"dispatch {r['id']} ({r['kind'] or 'agent'} {r['task_id'] or ''}, {r['status']})".replace(" ,", ","))
     out += [f"job {r['id']} ({r['kind']}, claimed)"
             for r in con.execute("SELECT id, kind FROM outbox WHERE run_id=? AND status='claimed'", (run_id,)).fetchall()]
     return out

@@ -262,6 +262,101 @@ def test_consolidated_recheck_routes_to_every_owner_then_same_reviewer(env):
     assert not _q(env, "SELECT 1 FROM findings WHERE scope='L-core' AND state='open'")
 
 
+def test_recheck_guidance_obeys_the_same_scope_lease_as_rerun(env, monkeypatch):
+    """#561: an idle dependent must not be advertised while its parent owns the scope."""
+    from office import convergence, dispatch, gates, guide, state
+
+    _start(env, plan=PLAN_LANE,
+           executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": GOOD_MUL}},
+                      "submit": True}],
+           convergence_reviewer=[{"reply": recheck(finding("F1", "T1"),
+                                                   finding("F2", "T2", where="mul.py:1"))}])
+    env.office("dispatch", "T1", "T2", "--parallel", check=0)
+    con = env.con()
+    try:
+        run = state.get_run(con, _run_row(env)["id"])
+        # T2's *real* launch gate is the common lease checker. Simulate an
+        # overlapping scope while the parent repair session is running.
+        owner = {"T1": None, "T2": "T1"}
+        monkeypatch.setattr(dispatch, "scope_holder", lambda c, r, t: owner[t["id"]])
+        initial = convergence.next_action(con, run)
+        assert "office rerun T1" in initial and "office rerun T2" not in initial, initial
+        assert "T2 waits for T1" in initial, initial
+
+        t1 = state.get_task(con, run["id"], "T1")
+        real_live = gates.worker_live
+        monkeypatch.setattr(gates, "worker_live", lambda c, did: bool(did == t1["current_dispatch_id"])
+                            or real_live(c, did))
+        waiting = guide.next_action(con, run)
+        assert waiting.startswith("no action;"), waiting
+        assert "T2 waits for T1" in waiting and "office rerun T2" not in waiting, waiting
+        assert not guide._needs_orchestrator(con, run), waiting
+
+        # When T1's lease really releases, T2 becomes the one legal repair.
+        owner["T2"] = None
+        released = guide.next_action(con, run)
+        assert "office rerun T2" in released and "office rerun T1" not in released, released
+        assert guide._needs_orchestrator(con, run)
+    finally:
+        con.close()
+
+
+def test_recheck_real_scope_lease_holds_dependent_until_parent_session_ends(env):
+    """#561: query the actual leases table and resume readiness after release."""
+    from office import convergence, db, dispatch, guide, state
+
+    _start(env, plan=PLAN_LANE,
+           executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": GOOD_MUL}},
+                      "submit": True}],
+           convergence_reviewer=[{"reply": recheck(finding("F1", "T1"),
+                                                   finding("F2", "T2", where="mul.py:1"))}])
+    env.office("dispatch", "T1", "T2", "--parallel", check=0)
+    con = env.con()
+    try:
+        run = state.get_run(con, _run_row(env)["id"])
+        t1, t2 = [state.get_task(con, run["id"], tid) for tid in ("T1", "T2")]
+        with db.transaction(con):
+            # Reproduce overlapping dependency envelopes: scope-holder uses
+            # the real DB lease and its live/dormant semantics, not a fake.
+            state.update_task(con, run["id"], "T2", scope=t1["scope"])
+            state.update_task(con, run["id"], "T1", status="running")
+            lease = dispatch.acquire_lease(con, run, t1, "Dparentrepair", "executor")
+        held = convergence.next_action(con, run)
+        assert "T2 waits for T1" in held and "office rerun T2" not in held, held
+        assert guide.next_action(con, run).startswith("no action;"), held
+        assert not guide._needs_orchestrator(con, run)
+        with db.transaction(con):
+            con.execute("UPDATE leases SET released_at='2026-10-11T00:00:00Z' WHERE id=?", (lease["id"],))
+        assert dispatch.scope_holder(con, run, state.get_task(con, run["id"], "T2")) is None
+        ready = guide.next_action(con, run)
+        assert "office rerun T2" in ready, ready
+        assert guide._needs_orchestrator(con, run)
+    finally:
+        con.close()
+
+
+def test_wait_rechecks_action_readiness_without_a_task_snapshot_change(env, monkeypatch):
+    """The lease transition can wake wait without a change to tasks/status."""
+    from office import guide, state
+
+    _start(env)
+    con = env.con()
+    try:
+        run = state.get_run(con, _run_row(env)["id"])
+        monkeypatch.setattr(guide, "_snapshot", lambda *_: ("unchanged",))
+        monkeypatch.setattr(guide, "worker_signals", lambda *_: ([], 0))
+        monkeypatch.setattr(guide, "stalls", lambda *_, **__: [])
+        monkeypatch.setattr(state, "unread_events", lambda *_, **__: [])
+        from office import questions
+        monkeypatch.setattr(questions, "scan", lambda *_: ([], None, {}))
+        states = iter((False, True))
+        monkeypatch.setattr(guide, "_needs_orchestrator", lambda *_: next(states))
+        result = guide.wait(con, run, timeout=1.0, poll=0.001)
+        assert result.exit_code == 0, result.lines
+    finally:
+        con.close()
+
+
 def test_convergence_round_cap_escalates_to_the_operator(env):
     """5, 15, 40-43: three RECHECK rounds stop; the operator gets the remaining findings,
     attempts, risk, the recommendation and the choices. No fourth review, no INTAKE_GAP."""
@@ -880,3 +975,17 @@ def test_intake_gap_answer_reviews_the_same_composition_again(env):
     gates = _gates(env, "convergence_review")
     assert len(gates) == 2 and gates[-1]["verdict"] == "APPROVED" and gates[-1]["cycle"] == 2, gates
     assert _scope(env, "L-T1")["status"] == "approved"
+
+
+@pytest.mark.parametrize("session,expected", [(None, "--fresh"), ("session-123", "--resume|--fresh")])
+def test_issue_581_rerun_hint_depends_on_stored_session(monkeypatch, session, expected):
+    from office import convergence, rerun
+    monkeypatch.setattr(rerun, "_last_ended_executor", lambda con, run, tid: {"session_id": session})
+    assert convergence._rerun_modes(None, {}, "T4") == expected
+
+def test_issue_542_plan_reviewer_persists_model_and_effort(env):
+    # Guard plan review route evidence, which is essential for #526-#528.
+    _start(env, gear="express", approve=False, plan_reviewer=[{"reply": APPROVED}])
+    rows = _q(env, "SELECT role, triple, model, effort FROM dispatches WHERE role='plan_reviewer'")
+    assert rows, "a plan review must record a reviewer dispatch"
+    assert all(r["model"] and r["effort"] for r in rows), rows
