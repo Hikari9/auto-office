@@ -214,6 +214,14 @@ def moved_base(con, run: dict) -> str | None:
     return new if ahead.returncode == 0 else None
 
 
+def _failed_check_logs(outcome: dict) -> str:
+    """Surface the precise failed check and its recorded evidence path (#577)."""
+    failures = [(i, row) for i, row in enumerate(outcome.get("results") or [], start=1)
+                if row.get("exit") != 0]
+    return "; ".join(f"check {i} exit {row['exit']} log {row.get('log') or 'unavailable'}"
+                     for i, row in failures)
+
+
 def _set_integration(con, run: dict, **fields) -> None:
     run = state.get_run(con, run["id"])
     landing = dict(run.get("landing") or {})
@@ -349,6 +357,9 @@ def _integrate(con, run: dict, job: dict) -> dict:
         results["checks"] = outcome["verdict"]
         if outcome["verdict"] != "PASS":
             detail = blocked_detail(outcome)
+            failed_logs = _failed_check_logs(outcome)
+            if failed_logs:
+                detail += f" | failing evidence: {failed_logs}"
             hint = missing_deps_hint(outcome)
             if hint:
                 detail += f" | {hint}"
@@ -365,7 +376,7 @@ def _integrate(con, run: dict, job: dict) -> dict:
                                             "and re-checking")
                     state.emit(con, run, "integration.auto_rebase", f"INTEGRATION checks {outcome['verdict']} on base "
                                f"{base[:12]}; the default branch moved to {onto[:12]}, so the run rebases onto it and "
-                               "re-checks")
+                               "re-checks" + (f"; {failed_logs}" if failed_logs else ""))
                     return results
                 _set_integration(con, run, status="blocked", detail=detail)
                 state.emit(con, run, "integration.failed", f"INTEGRATION checks {outcome['verdict']} on the composed result"
