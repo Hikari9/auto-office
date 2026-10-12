@@ -24,7 +24,7 @@ import time
 import uuid
 from pathlib import Path
 
-from office import briefs, contract, db, gates, jobs, paths, review_parse, state, worktree_setup
+from office import briefs, contract, db, gates, jobs, paths, review_parse, state, verification_coverage, worktree_setup
 from office.util import dumps, now_iso, sha256_obj
 
 
@@ -214,6 +214,14 @@ def moved_base(con, run: dict) -> str | None:
     return new if ahead.returncode == 0 else None
 
 
+def _failed_check_logs(outcome: dict) -> str:
+    """Surface the precise failed check and its recorded evidence path (#577)."""
+    failures = [(i, row) for i, row in enumerate(outcome.get("results") or [], start=1)
+                if row.get("exit") != 0]
+    return "; ".join(f"check {i} exit {row['exit']} log {row.get('log') or 'unavailable'}"
+                     for i, row in failures)
+
+
 def _set_integration(con, run: dict, **fields) -> None:
     run = state.get_run(con, run["id"])
     landing = dict(run.get("landing") or {})
@@ -349,6 +357,9 @@ def _integrate(con, run: dict, job: dict) -> dict:
         results["checks"] = outcome["verdict"]
         if outcome["verdict"] != "PASS":
             detail = blocked_detail(outcome)
+            failed_logs = _failed_check_logs(outcome)
+            if failed_logs:
+                detail += f" | failing evidence: {failed_logs}"
             hint = missing_deps_hint(outcome)
             if hint:
                 detail += f" | {hint}"
@@ -365,7 +376,7 @@ def _integrate(con, run: dict, job: dict) -> dict:
                                             "and re-checking")
                     state.emit(con, run, "integration.auto_rebase", f"INTEGRATION checks {outcome['verdict']} on base "
                                f"{base[:12]}; the default branch moved to {onto[:12]}, so the run rebases onto it and "
-                               "re-checks")
+                               "re-checks" + (f"; {failed_logs}" if failed_logs else ""))
                     return results
                 _set_integration(con, run, status="blocked", detail=detail)
                 state.emit(con, run, "integration.failed", f"INTEGRATION checks {outcome['verdict']} on the composed result"
@@ -394,10 +405,17 @@ def _integrate(con, run: dict, job: dict) -> dict:
                                  detail=f"integration review {outcome['verdict']}: {detail[:200]}")
                 state.emit(con, run, "integration.failed", f"INTEGRATION review {outcome['verdict']}: {detail[:140]}")
             return results
+    coverage = verification_coverage.audit(repo, commit, run_checks)
+    incomplete = coverage and coverage[0] == verification_coverage.PARTIAL
+    detail = (f"composed result verified by declared checks; FULL SUITE NOT VERIFIED: {coverage[1]}"
+              if incomplete else "composed result verified")
     with db.transaction(con):
         if compose_base(state.get_run(con, run["id"])) != base:
             return {"skipped": "rebased while composing"}
-        _set_integration(con, run, status="accepted", detail="composed result verified")
+        _set_integration(con, run, status="accepted", detail=detail)
+        if incomplete:
+            state.emit(con, run, "integration.coverage_partial",
+                       f"integration {commit[:12]}: FULL SUITE NOT VERIFIED: {coverage[1]}")
         state.emit(con, run, "integration.accepted", f"READY: integration verified on {commit[:10]} ({branch})"
                    if contract.is_convergence(run) else f"READY: integration PASS on {commit[:10]} ({branch})")
     return results
@@ -443,7 +461,8 @@ def review_boundary(con, run: dict, tasks: list[dict], revs: dict) -> tuple[bool
     if len(tasks) < 2:
         return False, "single task: composed result equals the accepted revision"
     changed = {t["id"]: set(json.loads(revs[t["id"]].get("changed_json") or "[]")) |
-               set(paths.git(Path(run["repo_root"]), "diff", "--name-only", run["base_sha"], revs[t["id"]]["commit_sha"]).split())
+               set(paths.git(Path(run["repo_root"]), "diff", "--name-only",
+                             revs[t["id"]].get("base_commit") or run["base_sha"], revs[t["id"]]["commit_sha"]).split())
                for t in tasks}
     ids = [t["id"] for t in tasks]
     for i, a in enumerate(ids):

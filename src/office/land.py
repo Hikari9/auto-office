@@ -42,7 +42,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from office import closeout, db, gates, integration, paths, prs, state
+from office import closeout, db, gates, integration, paths, prs, state, verification_coverage
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import now_iso, short
@@ -197,6 +197,10 @@ def _land_merge(con, run: dict, mode: str, snap: dict, deploy: dict, *, redeploy
     if mode == "e2e" and not (redeploy or mark_deployed):
         # Before any merge: a prod state Office cannot read refuses here, with nothing changed.
         _require_deploy_proof(con, run, _tree(repo, done) if current else _tree(repo, commit))
+    # Integration PASS alone proves only the checks the plan requested. In a
+    # repository that expressly deselects pytest tiers without --all, do not
+    # merge any task PR based on a partial selection (#563).
+    _require_run_coverage(run, commit)
     before = _merge_all(con, run, res)
     before = landing.get("rollback") or before  # a rerun's `before` already holds the merges
     _record(con, run, rollback=before)
@@ -337,9 +341,11 @@ def _record_deployed(con, run: dict, target: str, commit: str, tree: str, by: st
 
 # ------------------------------------------------------------------ rebase
 
-COMPOSE_BY_HAND = ("compose by hand: a scratch worktree from origin/{base}, cherry-pick each accepted task's commits, "
-                   "resolve the conflicts, run the full suite, have an independent reviewer check the resolution, open "
-                   "one PR, close the task PRs as superseded, then office close --abandon \"landed as #<N>\"")
+COMPOSE_BY_HAND = ("compose by hand: start a scratch worktree from origin/{base}; merge the accepted task "
+                   "revisions in dependency order (they may be merge commits, so do not blindly cherry-pick); "
+                   "repair conflicts or duplicates, compare the final tree to the reviewed integration and "
+                   "have an independent review of any changed resolution; run the complete test suite, open one PR, close "
+                   "the task PRs as superseded, then office close --abandon \"landed as #<N>\"")
 
 
 def rebase(con, run: dict) -> Result:
@@ -466,6 +472,11 @@ def _waivers(con, run: dict) -> list[str]:
 
 def _ask(con, run: dict) -> Result:
     lines = _waivers(con, run) + ["integration verified; the task PRs are ready:"]
+    commit = integration.final_commit(con, run)
+    coverage = verification_coverage.audit(Path(run["repo_root"]), commit,
+                                           list((run.get("landing") or {}).get("run_checks") or [])) if commit else None
+    if coverage and coverage[0] == verification_coverage.PARTIAL:
+        lines.append(f"FULL SUITE NOT VERIFIED: {coverage[1]}. Office will refuse merge until full-tier integration checks pass.")
     for t in integration._topo(integration.accepted_set(con, run) or []):
         if not prs.has_pr(t):
             continue
@@ -523,6 +534,19 @@ def _github_conflicting(run: dict, number: int) -> bool:
     except (subprocess.SubprocessError, ValueError):
         return False
     return isinstance(info, dict) and (info.get("mergeable") == "CONFLICTING" or info.get("mergeStateStatus") == "DIRTY")
+
+
+def _require_run_coverage(run: dict, commit: str) -> None:
+    checks = list((run.get("landing") or {}).get("run_checks") or [])
+    coverage = verification_coverage.audit(Path(run["repo_root"]), commit, checks)
+    if coverage and coverage[0] == verification_coverage.PARTIAL:
+        raise Refused("integration-coverage-incomplete",
+                      f"integration checks are insufficient for landing: {coverage[1]}; "
+                      f"declared run-level checks: {checks or ['none']}",
+                      preserved="no additional task PRs were merged by this attempt",
+                      next_step="amend the plan's run-level checks: to scripts/validate.sh "
+                                "(or pytest tests/ --all), re-run integration verification "
+                                "against the same composed commit, then office land")
 
 
 def _merge_all(con, run: dict, res: Result) -> str:
@@ -624,6 +648,20 @@ def _merge_tree(repo: Path, ours: str, theirs: str) -> tuple[str, list[str] | No
                   f"{(proc.stderr or proc.stdout).strip()[:160]}", next_step=COMPOSE_BY_HAND.format(base="the default branch"))
 
 
+def _merge_bases(repo: Path, default: str, head: str) -> list[str]:
+    """Every best common ancestor: multiple bases identify criss-cross ancestry (#562).
+
+    `merge-base` (without `--all`) hides this history and can make a GitHub
+    CONFLICTING verdict look inexplicable beside a locally clean merge-tree.
+    """
+    proc = _git(repo, "merge-base", "--all", default, head)
+    if proc.returncode != 0:
+        raise Refused("merge-base-failed", f"cannot establish the common ancestry of {default[:12]} "
+                      f"and {head[:12]}: {(proc.stderr or proc.stdout).strip()[:160]}",
+                      next_step="inspect both branches by hand; do not rewrite or land them")
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
 def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: Result, merged_so_far: str) -> dict:
     """GitHub says the PR cannot be merged, though the reviewed work may still
     compose cleanly (a squash or rebase of the parent leaves the child's
@@ -643,6 +681,13 @@ def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: R
         raise Refused("fetch-failed", f"could not fetch origin/{base} and {branch}", preserved=untouched,
                       next_step="office land again")
     default, head = paths.git(repo, "rev-parse", base_ref), paths.git(repo, "rev-parse", f"{ns}/{tid}")
+    bases = _merge_bases(repo, default, head)
+    ancestry = (f"criss-cross ancestry: {len(bases)} merge bases "
+                f"({', '.join(b[:12] for b in bases[:4])})" if len(bases) > 1 else "")
+    if ancestry:
+        # The same reviewed-tree proof below applies, regardless of how many
+        # ancestors Git finds. Never substitute a clean merge-tree for that proof.
+        res.add(f"{tid} #{number} is CONFLICTING on GitHub; {ancestry}; verifying the merge result against the reviewed integration")
     accepted = _accepted_commit(con, task)
     ours = {accepted} | {(pr.get(k) or {}).get("commit") for k in ("restacked", "recovering", "recovered")}
     if head not in ours:
@@ -671,7 +716,8 @@ def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: R
     for uid, commit in heads:
         tree, files = _merge_tree(repo, cur, commit)
         if files is not None:
-            raise Refused("merge-conflict", f"{uid} conflicts with {base} {default[:12]} on {', '.join(files) or 'files'}",
+            reason = f"; {ancestry}" if ancestry else ""
+            raise Refused("merge-conflict", f"{uid} conflicts with {base} {default[:12]} on {', '.join(files) or 'files'}{reason}",
                           preserved=untouched, next_step=by_hand)
         cur = commit_tree(tree, (cur, commit), f"office land: fold {uid} onto {base}")  # scratch: never pushed
         trees.append(tree)
@@ -681,8 +727,17 @@ def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: R
                       preserved=untouched, next_step="office status")
     reviewed = _tree(repo, integrated)
     if trees[-1] != reviewed:
+        # A criss-cross merge may appear clean while re-introducing code that
+        # was not in the reviewed tree. List concrete differing paths before
+        # refusing; do not write the merge result to the remote branch.
+        diff = _git(repo, "diff", "--name-only", reviewed, trees[-1])
+        paths_differ = (diff.stdout.splitlines() if diff.returncode == 0 else [])
+        files = f"; changed files: {', '.join(paths_differ[:6])}" if paths_differ else ""
+        reason = (f" ({ancestry}; a clean merge may duplicate changes)" if ancestry else "")
         raise Refused("recovery-tree-mismatch", f"merging the open PRs onto {base} {default[:12]} gives tree {trees[-1][:12]}, "
-                      f"not the reviewed integration tree {reviewed[:12]}", preserved=untouched, next_step=by_hand)
+                      f"not the reviewed integration tree {reviewed[:12]}{reason}{files}", preserved=untouched,
+                      next_step=(f"inspect the mismatching files and remove unreviewed duplicates; " + by_hand)
+                      if ancestry else by_hand)
     new = commit_tree(trees[0], (head, default), f"Merge {base} into {branch}\n\nOffice land recovery: GitHub reported "
                       f"#{number} not mergeable.\n\n{paths.office_trailer(run['id'])}")
     with db.transaction(con):  # before the push: a land killed after it still knows the head is Office's
@@ -706,7 +761,8 @@ def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: R
         state.update_task(con, run["id"], tid, pr=pr)
         state.emit(con, run, "pr.recovered", f"{tid} #{number} recovered: {base} {default[:12]} merged into {branch} "
                    f"({head[:12]} -> {new[:12]})", task_id=tid, payload={**pr["recovered"], "base": default})
-    res.add(f"{tid} #{number} was not mergeable; merged {base} {default[:12]} into {branch} ({new[:12]}), tree matches the reviewed integration")
+    res.add(f"{tid} #{number} was not mergeable; merged {base} {default[:12]} into {branch} ({new[:12]}), tree matches the reviewed integration"
+            + (f" despite {len(bases)} merge bases" if ancestry else ""))
     return pr
 
 

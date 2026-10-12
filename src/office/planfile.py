@@ -252,6 +252,22 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
     }
 
 
+_FORCE_PUSH_COMMAND = re.compile(r"\bgit\s+push\b[^\n]{0,240}\s(?:--force(?:-with-lease|-if-includes)?|-f)(?:\s|$)", re.I)
+
+
+def _unsafe_force_push_in_plan(task: dict) -> str | None:
+    """Reject plans telling executors to rewrite remote branch history (#571).
+
+    The worker's own task branch is handled by Office's leased PR sync. A plan
+    must not authorize an executor's arbitrary force-push to shared branches.
+    """
+    for instruction in [*(task.get("notes") or []), *(task.get("checks") or []),
+                        *(task.get("accept") or [])]:
+        if _FORCE_PUSH_COMMAND.search(instruction):
+            return instruction
+    return None
+
+
 def _validate(plan: ParsedPlan) -> None:
     ids = [t["id"] for t in plan.tasks]
     if not plan.tasks:
@@ -271,6 +287,10 @@ def _validate(plan: ParsedPlan) -> None:
                 err = f"{t['id']} (line {line}): {ENTRY_ERROR} {entry!r} {problem}"
                 plan.errors.append(err)
                 plan.entry_problems.append((t["id"], entry, err))
+        forbidden_push = _unsafe_force_push_in_plan(t)
+        if forbidden_push:
+            plan.errors.append(f"{t['id']}: unsafe force-push to a possibly shared remote branch in plan; "
+                               "remove it and use the Office-owned task PR workflow")
         if not t["accept"]:
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `accept:` criteria")
         if t["checks"] is None:
@@ -490,11 +510,29 @@ def literal_prefix(pattern: str) -> str:
     return pattern[: m.start()] if m else pattern
 
 
+def _incompatible_glob_suffixes(a: str, b: str) -> bool:
+    """Conservatively prove two file globs cannot name the same path (#540).
+
+    Only reject overlap when *both* globs have nonempty fixed trailing text
+    after the last wildcard. A shared filename must end with both suffixes;
+    incompatible suffixes make that impossible. Unknown patterns still overlap.
+    """
+    if not any(c in a for c in "*?") or not any(c in b for c in "*?"):
+        return False
+    end_a = max(a.rfind("*"), a.rfind("?"))
+    end_b = max(b.rfind("*"), b.rfind("?"))
+    suffix_a, suffix_b = a[end_a + 1:], b[end_b + 1:]
+    return bool(suffix_a and suffix_b and
+                not (suffix_a.endswith(suffix_b) or suffix_b.endswith(suffix_a)))
+
+
 def scopes_overlap(a: list[str], b: list[str]) -> bool:
     for pa in a:
         for pb in b:
             if is_shared(pa) and is_shared(pb) and not (shared_tree(pa) or shared_tree(pb)):
                 continue  # both append to a shared registry file; compose resolves it
+            if _incompatible_glob_suffixes(pa.lstrip(SHARED), pb.lstrip(SHARED)):
+                continue
             la, lb = literal_prefix(pa.lstrip(SHARED)), literal_prefix(pb.lstrip(SHARED))
             if la.startswith(lb) or lb.startswith(la):
                 return True

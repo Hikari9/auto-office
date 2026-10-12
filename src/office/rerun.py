@@ -115,7 +115,14 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
         return None
     wt = Path(worktree)
     head = paths.git(wt, "rev-parse", "HEAD")
+    from office import integration
+    onto = integration.compose_base(run)
+    rebased = onto != run["base_sha"]
     accepted, pending, reopened = [], [], []
+    if rebased:
+        accepted.append(("rebased default branch", onto))
+        if not gates._is_ancestor(run, onto, head):
+            pending.append(("rebased default branch", "base", onto))
     for dep in task["depends"]:
         dt = state.get_task(con, run["id"], dep)
         rev_id = (dt or {}).get("accepted_revision_id")
@@ -129,6 +136,14 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
             reopened.append({"task": dep, "status": dt["status"], "revision": rev_id})
     note = ", ".join(f"{r['task']} is {r['status']} and was not restacked" for r in reopened)
     if not pending:
+        if rebased:
+            try:
+                base = integration.combine(run, accepted)
+            except (integration.CombineConflict, paths.GitError) as exc:
+                raise Refused("rebase-conflict", f"{task['id']} cannot combine the rebased main with accepted dependencies: {exc}",
+                              preserved="task worktree and accepted revisions", next_step="resolve the conflicting base, then rerun") from exc
+            return {"base": base, "merged": [], "conflict": None, "reopened": reopened,
+                    "line": "; ".join(x for x in ("task base updated to the rebased default branch", note) if x)}
         return {"base": None, "merged": [], "conflict": None, "reopened": reopened, "line": note} if reopened else None
     env = {**os.environ, **paths.commit_identity_env(wt)}
     merged = []
@@ -138,6 +153,12 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
                               capture_output=True, text=True, env=env)
         if proc.returncode != 0:
             subprocess.run(["git", "-C", str(wt), "merge", "--abort"], capture_output=True)
+            if rebased:
+                raise Refused("rebase-conflict", f"{task['id']} cannot restack onto {dep} {sha[:12]} on the "
+                              "rebased default branch; no stale-base executor was launched",
+                              scope=task["id"], preserved="the existing task worktree; resolve the merge conflict explicitly",
+                              next_step="resolve the merge in the task worktree and run office rerun "
+                                        f"{task['id']} --fresh")
             # Every dependency still to merge, the conflicting one first: the executor makes all of them.
             unmerged = [{"task": t, "revision": r, "commit": c} for t, r, c in pending[i:]]
             return {"base": None, "merged": merged, "conflict": {"task": dep, "revision": rev_id, "commit": sha},
@@ -145,10 +166,12 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
                     "line": "; ".join(x for x in (f"restack onto {dep} {rev_id} conflicts; the executor merges {sha[:7]} first",
                                            note) if x)}
         merged.append({"task": dep, "revision": rev_id, "commit": sha})
-    from office import integration
     try:
         base = integration.combine(run, accepted)
-    except (integration.CombineConflict, paths.GitError):
+    except (integration.CombineConflict, paths.GitError) as exc:
+        if rebased:
+            raise Refused("rebase-conflict", f"{task['id']} cannot combine the rebased base with dependencies: {exc}",
+                          preserved="the task worktree", next_step="resolve the conflicting base, then rerun") from exc
         base = None  # the dispatch keeps the base it had
     return {"base": base, "merged": merged, "conflict": None, "reopened": reopened,
             "line": "; ".join(x for x in ("restacked onto " + ", ".join(f"{m['task']} {m['revision']}" for m in merged),
