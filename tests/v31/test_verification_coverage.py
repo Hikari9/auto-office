@@ -165,3 +165,56 @@ def test_issue_563_unreachable_script_pytest_is_not_full(tiered_repo):
     sha = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
     assert vc.audit(root, sha, ["scripts/validate.sh"])[0] == vc.PARTIAL
     assert vc.supplemental_checks(root, sha, ["scripts/validate.sh"]) == [vc._ATTEST_PYTEST]
+
+@pytest.mark.review_contract("v3.1")
+def test_issue_563_full_suite_proof_survives_independent_integration_review(env):
+    """Checks PASS + separate review PASS must keep the checks gate, command and receipt."""
+    from conftest import GOOD_ADD, GOOD_MUL, PLAN_TWO, approved_run
+    from office import integration, lifecycle, state
+
+    (env.repo / "tests").mkdir()
+    (env.repo / "tests" / "conftest.py").write_text(
+        'def pytest_addoption(parser):\n'
+        '    parser.addoption("--all", action="store_true")\n'
+        'def pytest_collection_modifyitems(config, items):\n'
+        '    if config.getoption("--all"):\n'
+        '        return\n'
+        '# integration, legacy, slow are normally deselected\n')
+    env.git("add", "-A")
+    env.git("commit", "-qm", "fixture: tiered test collection")
+    # An isolated no-op pytest executable proves which command Office actually
+    # invoked without recursively running this repo's real pytest suite.
+    (env.bin / "pytest").write_text("#!/bin/sh\necho direct test command executed\nexit 0\n")
+    (env.bin / "pytest").chmod(0o755)
+    plan = PLAN_TWO.replace("blast_radius: repo\n", "blast_radius: repo\nchecks: pytest tests/ --all -q\n")
+    plan = plan.replace('scope: mul.py\ndepends: none', 'scope: mul.py\ndepends: T1')
+    approved_run(env, plan=plan,
+                 executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD},
+                                              "T2": {"mul.py": GOOD_MUL}}, "submit": True}],
+                 code_reviewer=[{"reply": "VERDICT: PASS"}],
+                 integration_reviewer=[{"reply": "VERDICT: PASS"}])
+    code, out = env.office("dispatch", "T1", "T2", check=0)
+    assert code == 0, out
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs LIMIT 1").fetchone()[0]
+    run = state.get_run(con, run_id)
+    artifact = (run["landing"] or {}).get("integration") or {}
+    assert artifact["status"] == "accepted", artifact
+    check = con.execute("SELECT id, verdict FROM gates WHERE kind='checks' AND input_key=?",
+                        ("integration:" + artifact["commit"],)).fetchone()
+    review = con.execute("SELECT id, verdict FROM gates WHERE kind='integration_review'").fetchone()
+    assert check and check["verdict"] == "PASS"
+    assert review and review["verdict"] == "PASS"
+    assert check["id"] != review["id"]
+    proof = artifact.get("full_suite")
+    assert proof and proof["gate"] == check["id"] and proof["commit"] == artifact["commit"], artifact
+    assert vc.attested_checks(con, run, artifact["commit"]) == ["pytest tests/ --all -q"]
+    assert lifecycle._verified_test_tiers(con, run)["status"] == vc.FULL
+    assert "FULL SUITE NOT VERIFIED" not in "\n".join(land._ask(con, run).lines)
+    code, output = env.office("close", "--handoff", "https://github.com/example/repo/pull/1")
+    assert code == 0, output
+    state_dir = con.execute("SELECT state_dir FROM runs LIMIT 1").fetchone()[0]
+    import json
+    receipt = json.loads((Path(state_dir) / "archive-receipt.json").read_text())
+    assert receipt["verification"]["status"] == vc.FULL
+    assert "FULL SUITE NOT VERIFIED" not in output

@@ -271,9 +271,11 @@ def test_issue_567_contract_amend_refuses_unapplied_deploy_edit(cenv):
 def test_issue_571_plan_rejects_force_push_to_shared_branch():
     malicious = PLAN.replace("visual: none", "notes:\n- run git push origin HEAD:shared-preview --force-with-lease\nvisual: none")
     parsed = planfile.parse(malicious)
-    assert any("unsafe force-push" in error for error in parsed.errors)
+    assert any("unsafe manual git push" in error for error in parsed.errors)
+    # A plan cannot establish who owns any remote destination: even a
+    # plausible-looking task branch is managed by Office, not this plan.
     ordinary = PLAN.replace("visual: none", "notes:\n- git push -u origin HEAD:office/abcd/T1\nvisual: none")
-    assert not any("force-push" in error for error in planfile.parse(ordinary).errors)
+    assert any("unsafe manual git push" in error for error in planfile.parse(ordinary).errors)
 
 @pytest.mark.parametrize("command", [
     "git push origin +HEAD:shared-preview",
@@ -286,6 +288,35 @@ def test_issue_571_adversarial_force_push(command):
     from office import planfile
     assert planfile._unsafe_force_push_instruction(command)
     task = PLAN.replace("visual: none", f"notes:\n- {command}\nvisual: none")
-    assert any("unsafe force-push" in error for error in planfile.parse(task).errors)
+    assert any("unsafe manual git push" in error for error in planfile.parse(task).errors)
     req = PLAN.replace("## Tasks", f"checks: {command}\n\n## Tasks")
-    assert any("unsafe force-push" in error for error in planfile.parse(req).errors)
+    assert any("unsafe manual git push" in error for error in planfile.parse(req).errors)
+
+@pytest.mark.parametrize("command", [
+    "git push --mirror origin",
+    "git -C . push --mirror origin",
+    "git --no-optional-locks push --mirror origin",
+    "git --config-env=core.editor=MY_EDITOR push origin :shared-preview",
+    "git -c protocol.version=2 --no-pager -C . push --mirror origin",
+    "git push origin --delete shared-preview",
+    "git push -d origin shared-preview",
+    "git push origin :shared-preview",
+    "git push origin :refs/heads/main",
+    "git push --all origin",
+    "git push --prune origin",
+    "git push origin HEAD:shared-preview",
+    "git push origin main",
+    "git push -u origin HEAD:refs/heads/office/some-run/T1",
+])
+def test_issue_571_no_unowned_manual_push_escapes_admission(command):
+    assert planfile._unsafe_force_push_instruction(command), command
+    task = PLAN.replace("visual: none", f"notes:\n- {command}\nvisual: none")
+    assert any("unsafe manual git push" in err for err in planfile.parse(task).errors)
+    requirements = PLAN.replace("## Tasks", f"checks: {command}\n\n## Tasks")
+    assert any("unsafe manual git push" in err for err in planfile.parse(requirements).errors)
+
+
+@pytest.mark.parametrize("command", ["git status --porcelain", "git fetch origin main",
+                                      "git show --format=fuller HEAD", "git switch -c feature"])
+def test_issue_571_other_git_operations_are_not_pushes(command):
+    assert not planfile._unsafe_force_push_instruction(command)

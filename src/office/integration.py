@@ -334,6 +334,7 @@ def _integrate(con, run: dict, job: dict) -> dict:
                 _set_integration(con, run, key=key, status="conflict", detail=detail, branch=branch)
                 state.emit(con, run, "integration.conflict", f"INTEGRATION CONFLICT: {detail}")
             return {"status": "conflict"}
+        preserve_shared_append_multiplicity(wt, t, previous, env=genv)
         previous.append(t)
     commit = paths.git(wt, "rev-parse", "HEAD")
     tree = paths.git(wt, "rev-parse", "HEAD^{tree}")
@@ -352,13 +353,17 @@ def _integrate(con, run: dict, job: dict) -> dict:
         _set_integration(con, run, key=key, status="verifying", detail=why, branch=branch, commit=commit,
                          review=needs_review)
     results = {}
+    check_outcome = None
+    checks_gate_id = None
     if run_checks:
         # The merged lockfile is in place; install before the checks that need it.
         worktree_setup.prepare(run, wt, "integration", paths.run_dir(run["id"]) / "setup" / "integration.log", created=True)
         gid = _gate(con, run, integ_rev, "checks", commit)
+        checks_gate_id = gid
         extra_checks = verification_coverage.supplemental_checks(repo, commit, run_checks)
         outcome = gates.run_commands(con, run, [*run_checks, *extra_checks], wt, integ_rev,
                                      {"id": gid, "task_id": None}, check_tree=False)
+        check_outcome = outcome
         with db.transaction(con):
             con.execute("UPDATE gates SET status='done', verdict=?, summary=?, finished_at=? WHERE id=?",
                         (outcome["verdict"], outcome.get("summary"), now_iso(), gid))
@@ -413,8 +418,10 @@ def _integrate(con, run: dict, job: dict) -> dict:
                                  detail=f"integration review {outcome['verdict']}: {detail[:200]}")
                 state.emit(con, run, "integration.failed", f"INTEGRATION review {outcome['verdict']}: {detail[:140]}")
             return results
-    executed = ([r["command"] for r in outcome.get("results") or [] if r.get("exit") == 0]
-                if run_checks else [])
+    # An independent integration reviewer has its own outcome/gate. The proof
+    # must come from the original passing check gate, not the last reviewer.
+    executed = ([r["command"] for r in check_outcome.get("results") or [] if r.get("exit") == 0]
+                if check_outcome is not None else [])
     coverage = verification_coverage.audit(repo, commit, run_checks, verified_commands=executed)
     incomplete = coverage and coverage[0] == verification_coverage.PARTIAL
     detail = (f"composed result verified by declared checks; FULL SUITE NOT VERIFIED: {coverage[1]}"
@@ -423,7 +430,7 @@ def _integrate(con, run: dict, job: dict) -> dict:
         if compose_base(state.get_run(con, run["id"])) != base:
             return {"skipped": "rebased while composing"}
         direct = next((c for c in executed if verification_coverage._complete_pytest_command(c)), None)
-        proof = ({"commit": commit, "gate": gid, "command": direct} if direct else None)
+        proof = ({"commit": commit, "gate": checks_gate_id, "command": direct} if direct else None)
         _set_integration(con, run, status="accepted", detail=detail, full_suite=proof)
         if incomplete:
             state.emit(con, run, "integration.coverage_partial",
@@ -501,6 +508,72 @@ def review_boundary(con, run: dict, tasks: list[dict], revs: dict) -> tuple[bool
 
 # ------------------------------------------------------------------ combining revisions
 
+def preserve_shared_append_multiplicity(wt: Path, task: dict, previous: list[dict], *, env: dict) -> bool:
+    """Fix Git's *clean* merge collapsing identical independent appends (#537).
+
+    Only touch a literal shared path when both parents are regular UTF-8 files
+    that strictly preserve one common base and append complete lines. A branch
+    that inherited another's additions has those lines in the common base and
+    is not counted twice. Preserve all non-shared merge results unchanged.
+    """
+    shared = {x[1:] for x in task.get("scope") or []
+              if planfile.is_shared(x) and not any(c in x for c in "*?[]")}
+    prior = {x[1:] for t in previous for x in t.get("scope") or [] if planfile.is_shared(x)}
+    if not shared.intersection(prior):
+        return False
+    parents = paths.git(wt, "rev-list", "--parents", "-n", "1", "HEAD").split()
+    if len(parents) != 3:
+        return False
+    bases = paths.git(wt, "merge-base", "--all", parents[1], parents[2]).splitlines()
+    if len(bases) != 1:
+        return False  # ambiguous criss-cross ancestry requires human resolution
+
+    def read_regular(commit: str, path: str) -> bytes | None:
+        mode = subprocess.run(["git", "-C", str(wt), "ls-tree", commit, "--", path],
+                              capture_output=True)
+        if mode.returncode or not mode.stdout.startswith((b"100644 blob ", b"100755 blob ")):
+            return None
+        contents = subprocess.run(["git", "-C", str(wt), "show", f"{commit}:{path}"],
+                                  capture_output=True)
+        if contents.returncode or b"\0" in contents.stdout:
+            return None
+        try:
+            contents.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        return contents.stdout
+
+    changes = {}
+    for path in sorted(shared & prior):
+        base, ours, theirs = (read_regular(commit, path) for commit in
+                             (bases[0], parents[1], parents[2]))
+        if base is None or ours is None or theirs is None:
+            continue
+        if not ours.startswith(base) or not theirs.startswith(base) or (base and not base.endswith(b"\n")):
+            continue
+        a, b = ours[len(base):], theirs[len(base):]
+        if any(suffix and not suffix.endswith(b"\n") for suffix in (a, b)):
+            continue
+        expected = base + a + b
+        target = wt / path
+        if target.is_symlink() or not target.is_file():
+            continue
+        if target.read_bytes() != expected:
+            changes[path] = expected
+    if not changes:
+        return False
+    for path, content in changes.items():
+        fd = os.open(wt / path, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+        paths.git(wt, "add", "--", path)
+    # HEAD is a scratch composition commit; amend its tree, retain its two
+    # parents, and never rewrite an accepted task's commit or shared branch.
+    paths.git(wt, "-c", "commit.gpgsign=false", "commit", "--amend", "--no-edit",
+              env={**os.environ, **env})
+    return True
+
+
 def finish_shared_append_merge(wt: Path, task: dict, previous: list[dict], *, env: dict) -> bool:
     """Union only provable append-only changes to identically declared shared files."""
     shared = {x[1:] for x in task.get("scope") or [] if planfile.is_shared(x)
@@ -551,13 +624,10 @@ def finish_shared_append_merge(wt: Path, task: dict, previous: list[dict], *, en
         a, b = ours[len(base):], theirs[len(base):]
         if any(v and not v.endswith(b"\n") for v in (a,b)):
             return False
-        lines = a.splitlines(keepends=True)
-        seen = set(lines)
-        for line in b.splitlines(keepends=True):
-            if line not in seen:
-                lines.append(line)
-                seen.add(line)
-        output[path] = base + b"".join(lines)
+        # Both suffixes are independent append operations. Set-deduplication
+        # silently discards repeated records (even when they are intentional).
+        # Preserve each side's byte-exact lines and their multiplicity.
+        output[path] = base + a + b
     for path, content in output.items():
         target = wt / path
         if target.is_symlink() or not target.is_file():

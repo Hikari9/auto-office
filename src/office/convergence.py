@@ -508,6 +508,7 @@ def _compose(con, run: dict, scope: dict) -> dict:
                 subprocess.run(["git", "-C", str(wt), "merge", "--abort"], capture_output=True)
                 return {"status": "conflict", "detail": f"{t['id']} conflicts with the rest of {scope['id']} on "
                                                        f"{conflicted.replace(chr(10), ', ') or 'files'}"}
+            integration.preserve_shared_append_multiplicity(wt, t, previous, env=genv)
             previous.append(t)
         commit = paths.git(wt, "rev-parse", "HEAD")
         tree = paths.git(wt, "rev-parse", "HEAD^{tree}")

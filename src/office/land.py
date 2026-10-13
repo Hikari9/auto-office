@@ -473,8 +473,10 @@ def _waivers(con, run: dict) -> list[str]:
 def _ask(con, run: dict) -> Result:
     lines = _waivers(con, run) + ["integration verified; the task PRs are ready:"]
     commit = integration.final_commit(con, run)
-    coverage = verification_coverage.audit(Path(run["repo_root"]), commit,
-                                           list((run.get("landing") or {}).get("run_checks") or [])) if commit else None
+    coverage = verification_coverage.audit(
+        Path(run["repo_root"]), commit,
+        list((run.get("landing") or {}).get("run_checks") or []),
+        verified_commands=verification_coverage.attested_checks(con, run, commit)) if commit else None
     if coverage and coverage[0] == verification_coverage.PARTIAL:
         lines.append(f"FULL SUITE NOT VERIFIED: {coverage[1]}. Office will refuse merge until full-tier integration checks pass.")
     for t in integration._topo(integration.accepted_set(con, run) or []):

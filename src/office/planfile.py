@@ -253,18 +253,21 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
 
 
 _GIT_PUSH = re.compile(
-    r"\bgit(?:\s+(?:-C|-c|--git-dir|--work-tree)\s+\S+"
-    r"|\s+--(?:git-dir|work-tree)=\S+|\s+--no-pager)*\s+push(?=\s|$)", re.I)
-_FORCE_OPTION = re.compile(r"(?<!\S)(?:--force(?:-with-lease|-if-includes)?(?:=\S+)?|-f)(?=\s|$)", re.I)
-_FORCED_REFSPEC = re.compile(r"(?<!\S)\+[^\s]+", re.I)
+    # Git's global options can precede push in arbitrary order. The plan
+    # parser cannot prove ownership of any remote destination.
+    r"\bgit(?:\s+(?:-C|-c|--git-dir|--work-tree|--config-env|--namespace)\s+\S+"
+    r"|\s+--[a-z][a-z0-9-]*(?:=\S+)?|\s+-[a-z]+)*\s+push(?=\s|$)", re.I)
 
 
 def _unsafe_force_push_instruction(instruction: str) -> bool:
-    for match in _GIT_PUSH.finditer(instruction):
-        tail = re.split(r"[;&|\n]", instruction[match.end():], maxsplit=1)[0]
-        if _FORCE_OPTION.search(tail) or _FORCED_REFSPEC.search(tail):
-            return True
-    return False
+    """Reject planned manual pushes when remote branch ownership cannot be proven.
+
+    The name remains for callers written for the original force-push guard.
+    Mirror, deletion, all-branches and ordinary pushes to shared branches can
+    change history or remove data without --force. Office's own PR sync is
+    responsible for choosing and authenticating a task-owned destination.
+    """
+    return bool(_GIT_PUSH.search(instruction))
 
 
 def _unsafe_force_push_in_plan(task: dict) -> str | None:
@@ -294,7 +297,7 @@ def _validate(plan: ParsedPlan) -> None:
         plan.errors.append(f"{d}: duplicate task id")
     known = set(ids)
     if _unsafe_force_push_requirement(plan):
-        plan.errors.append("run-level Requirements: unsafe force-push to a possibly shared remote branch in plan; "
+        plan.errors.append("run-level Requirements: unsafe manual git push with unverified remote ownership; "
                            "use the Office-owned task PR workflow")
     for t in plan.tasks:
         if not t["scope"] and not t.get("scope_none"):
@@ -309,7 +312,7 @@ def _validate(plan: ParsedPlan) -> None:
                 plan.entry_problems.append((t["id"], entry, err))
         forbidden_push = _unsafe_force_push_in_plan(t)
         if forbidden_push:
-            plan.errors.append(f"{t['id']}: unsafe force-push to a possibly shared remote branch in plan; "
+            plan.errors.append(f"{t['id']}: unsafe manual git push with unverified remote ownership; "
                                "remove it and use the Office-owned task PR workflow")
         if not t["accept"]:
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `accept:` criteria")

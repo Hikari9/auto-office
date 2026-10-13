@@ -524,7 +524,9 @@ def _verified_test_tiers(con, run: dict) -> dict | None:
     if not commit:
         return None
     commands = list((run.get("landing") or {}).get("run_checks") or [])
-    result = verification_coverage.audit(Path(run["repo_root"]), commit, commands)
+    result = verification_coverage.audit(
+        Path(run["repo_root"]), commit, commands,
+        verified_commands=verification_coverage.attested_checks(con, run, commit))
     return {"commit": commit, "status": result[0], "detail": result[1]} if result else None
 
 
