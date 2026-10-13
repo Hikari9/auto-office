@@ -764,9 +764,11 @@ def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | N
 
 
 def model_list(harness: str | None = None) -> Result:
-    from office import benchmarks
+    from office import benchmarks, config as cfg, route_policy
     index = benchmarks.index_version()
-    user_keys = {(r.get("invocation_harness"), r.get("model_id"), r.get("effort")) for r in user_catalog.load()["models"]}
+    policy = route_policy.user_policy(cfg.resolve(None)[0])
+    overlay = user_catalog.load()
+    user_keys = {(r.get("invocation_harness"), r.get("model_id"), r.get("effort")) for r in overlay["models"]}
     lines, data = [], []
     for r in _catalog_rows():
         h = r.get("invocation_harness")
@@ -775,11 +777,19 @@ def model_list(harness: str | None = None) -> Result:
         key = (h, r.get("model_id"), r.get("effort"))
         score = (r.get("benchmark_indexes") or {}).get(index)
         enabled = r.get("dispatchable") is not False
+        denied = route_policy.is_denied({"harness": h, **r}, policy)
+        legacy_denied = any(user_catalog.matches(d, r) for d in overlay["disabled"])
         origin = "user" if key in user_keys else "seed"
         lines.append(f"{h}/{r.get('model_id')}@{r.get('effort')}  slug {r.get('invocation_model_id') or '-'}  "
-                     f"score {score if score is not None else '-'}  {origin}{'' if enabled else '  disabled'}")
+                     f"score {score if score is not None else '-'}  {origin}"
+                     + ("  user disabled (legacy overlay)" if legacy_denied else
+                        ("  technically gated" if not enabled else ""))
+                     + (f"  user denied ({denied})" if denied else ""))
         data.append({"harness": h, "model_id": r.get("model_id"), "effort": r.get("effort"),
-                     "slug": r.get("invocation_model_id"), "score": score, "origin": origin, "dispatchable": enabled})
+                     "slug": r.get("invocation_model_id"), "score": score, "origin": origin, "dispatchable": enabled,
+                     "lineage_key": r.get("lineage_key"), "generation_version": r.get("generation_version"),
+                     "user_denied": bool(denied or legacy_denied), "denial_reason": denied or
+                     ("legacy user-catalog overlay" if legacy_denied else None)})
     seed = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8")) or {}
     lines += [f"warning: {w}" for w in user_catalog.merge(list(seed.get("models") or []))[1]]
     return Result(lines=lines or [f"no catalog rows{' for ' + harness if harness else ''}"],
@@ -807,3 +817,89 @@ def model_disable(ident: str | None, *, reason: str | None = None) -> Result:
     return Result(lines=[f"disabled {rows} (dispatchable: false) in {target}"],
                   next="routing skips it from the next candidate build; office model list shows it disabled",
                   data={"disabled": ident, "rows": len(live), "changed": True, "path": str(target)})
+
+
+
+def model_enable(ident: str | None) -> Result:
+    """Undo a legacy user-catalog disable; never override a technical seed gate."""
+    m = re.fullmatch(r"(?P<h>[a-z0-9-]+)/(?P<m>[A-Za-z0-9_.-]+)(?:@(?P<e>[a-z]+))?", (ident or "").strip())
+    if not m:
+        raise _usage("name the row as <harness>/<model>[@effort]", next_step="office model list")
+    entry = {"harness": m["h"], "model_id": m["m"]}
+    if m["e"]:
+        entry["effort"] = m["e"]
+    overlay = _overlay_for_write()
+    kept = [d for d in overlay["disabled"] if not user_catalog.matches(entry, d_as_row(d))]
+    removed = len(overlay["disabled"]) - len(kept)
+    if not removed:
+        return Result(lines=[f"{ident} has no user-overlay disable to remove"], data={"changed": False})
+    overlay["disabled"] = kept
+    target = user_catalog.save(overlay)
+    return Result(lines=[f"removed {removed} user-overlay disable(s) for {ident} from {target}",
+                         "technical catalog gates and explicit denied_models still apply"],
+                  next="office model list", data={"changed": True, "removed": removed, "path": str(target)})
+
+
+def d_as_row(entry: dict) -> dict:
+    return {"invocation_harness": entry.get("harness"), "model_id": entry.get("model_id"),
+            "effort": entry.get("effort")}
+
+
+def model_ceiling(lineage: str | None, *, through: str | None) -> Result:
+    """Write just the *global user-owned* version ceiling through config validation."""
+    from office import configcmd, model_lineages
+    if not isinstance(lineage, str) or not model_lineages.LINEAGE_KEY_RE.fullmatch(lineage):
+        raise _usage("name an explicit provider/lineage, e.g. openai/gpt-sol")
+    if through is not None:
+        try:
+            model_lineages.version_parts(through)
+        except model_lineages.LineageError as exc:
+            raise _usage(str(exc)) from exc
+        if lineage not in {v["lineage_key"] for v in model_lineages.load().values()}:
+            raise _usage(f"{lineage!r} is not in the canonical lineage registry")
+    path = configcmd._tier_path("user", Path.cwd())
+    data = configcmd._load(path)
+    policy = ((data.get("routing") or {}).get("user_policy") or {})
+    ceilings = dict(policy.get("version_ceilings") or {})
+    if through is None:
+        if lineage not in ceilings:
+            return Result(lines=[f"no global version ceiling is set for {lineage}"], data={"changed": False})
+        ceilings.pop(lineage)
+    else:
+        if ceilings.get(lineage) == through:
+            return Result(lines=[f"{lineage} already denies generation {through} and older"], data={"changed": False})
+        ceilings[lineage] = through
+    res = configcmd.apply_changes("user", [("routing.user_policy.version_ceilings", ceilings)])
+    res.lines.append((f"global user ceiling: {lineage} <= {through}" if through is not None
+                      else f"removed global user ceiling for {lineage}") + "; existing runs keep their pinned policy")
+    res.data.update({"lineage": lineage, "through": through, "changed": True})
+    return res
+
+
+def model_policy() -> Result:
+    """Report the effective global model preference; no account/quota guesses."""
+    from office import config as cfg, route_policy
+    p = route_policy.user_policy(cfg.resolve(None)[0])
+    lines = ["global model routing policy (technical qualification is independent):",
+             f"  denied routes: {', '.join(p['denied']) or '(none)'}",
+             f"  manual-only/overkill rules: {len(p['overkill'])}"]
+    lines.extend(f"  deny {lineage} <= {version}" for lineage, version in sorted(p["ceilings"].items()))
+    if not p["ceilings"]:
+        lines.append("  lineage version ceilings: (none)")
+    return Result(lines=lines, next="office model ceiling openai/gpt-sol --through 5.6, or office model unceil openai/gpt-sol",
+                  data={"policy": p})
+
+
+def model_registry() -> Result:
+    """Read-only staging window, not an unreviewed catalog publication."""
+    from office import candidates, model_lineages
+    p = model_lineages.partition(candidates.catalog_rows())
+    rows = p["active"]
+    seen = sorted({(r["lineage_key"], r["generation_version"]) for r in rows})
+    lines = ["catalog lineage staging view (not a publication or proof of account access):"]
+    lines.extend(f"  {lineage} {version}" for lineage, version in seen)
+    lines.append(f"active variants: {len(rows)}; archived variants: {len(p['archived'])}; "
+                 f"pending identity: {len(p['pending'])}; aliases: {len(p['aliases'])}")
+    return Result(lines=lines, next="office model list shows effort and harness route details",
+                  data={"generations": [{"lineage": lineage, "version": version} for lineage, version in seen],
+                        "counts": {k: len(v) for k, v in p.items()}})

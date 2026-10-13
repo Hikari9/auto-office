@@ -635,7 +635,7 @@ def test_route_flag_refuses_a_denied_route_and_a_plan_route_choice_is_ignored_wi
 def test_shipped_defaults_contain_no_denied_or_overkill_entries(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "none.yaml"))
-    assert cfg.resolve(None)[0]["routing"]["user_policy"] == {"denied_models": [], "overkill_rules": []}
+    assert cfg.resolve(None)[0]["routing"]["user_policy"] == {"denied_models": [], "overkill_rules": [], "version_ceilings": {}}
     assert candidates.current_user_policies() == []
 
 

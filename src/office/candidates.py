@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, paths, route_policy, routing, state
+from office import adapters, model_lineages, paths, route_policy, routing, state
 
 KIND_FOR_ROLE = {
     "planner": "worker",
@@ -39,7 +39,7 @@ _QUOTA_TTL = 60.0
 def catalog_rows() -> list[dict]:
     data = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8")) or {}
     from office import user_catalog
-    return resolve_aliases(user_catalog.apply(list(data.get("models") or [])))
+    return model_lineages.annotate(resolve_aliases(user_catalog.apply(list(data.get("models") or []))))
 
 
 _ALIAS_FIELDS = ("benchmark_indexes", "task_benchmarks", "price_fields", "speed_fields", "release_date")
@@ -49,61 +49,123 @@ def _version_key(version: str) -> tuple[int, ...]:
     return tuple(int(p) for p in re.findall(r"\d+", version))
 
 
-def resolve_aliases(rows: list[dict]) -> list[dict]:
-    """A row with `alias_family` (a regex with a `version` group over model_id) follows the
-    highest-version matching row at the same harness, so `opus` and `luna` track each new
-    model as the catalog adds it. The alias is offered at every effort that newest model
-    offers, taking its invocation and scores; an effort the alias row declares but the
-    newest model lacks keeps its own static fields. With no match, the alias keeps its own
-    static fields. A target without a proven invocation_source inherits the alias's."""
-    # Disabled concrete rows may identify the newest model and supply benchmark
-    # fields, but they must not make dynamic family aliases dispatchable.
+def _legacy_custom_alias(row: dict, own: dict, concrete: list[dict]) -> list[dict]:
+    """Compatibility for explicit user/test regex aliases absent from shipped lineage map.
+
+    This does not classify or retire *canonical* named model generations. A later
+    catalog migration can require their identity/provenance before publication.
+    """
+    pattern = row.get("alias_family")
+    best = None
+    for route in concrete:
+        match = re.match(pattern, route.get("model_id") or "")
+        if not match or route.get("invocation_harness") != row.get("invocation_harness"):
+            continue
+        key = _version_key(match.group("version"))
+        if best is None or key > best[0]:
+            best = (key, route["model_id"])
+    by_effort = {r.get("effort"): r for r in concrete
+                 if best and r.get("model_id") == best[1] and
+                    r.get("invocation_harness") == row.get("invocation_harness")}
+    out = []
+    for effort in dict.fromkeys([*own, *by_effort]):
+        base = own.get(effort) or {**row, "effort": effort, "effort_confidence": "mapped"}
+        target = by_effort.get(effort)
+        if target is None:
+            out.append(base)
+            continue
+        resolved = dict(base)
+        if target.get("dispatchable") is False or base.get("dispatchable") is False:
+            resolved["dispatchable"] = False
+            if base.get("dispatchable") is not False:
+                for field in ("discovery", "discovery_reason"):
+                    if target.get(field):
+                        resolved[field] = target[field]
+            else:
+                resolved.pop("discovery", None)
+            resolved["status_reason"] = route_policy.alias_status(resolved, target)["reason"]
+        resolved["invocation_model_id"] = target.get("invocation_model_id") or target["model_id"]
+        source = str(target.get("invocation_source") or "")
+        if source.startswith(("local-evidence:", "documented:")):
+            resolved["invocation_source"] = source
+        for field in _ALIAS_FIELDS:
+            if target.get(field):
+                resolved[field] = target[field]
+        resolved["source_effort"] = target.get("source_effort") or resolved.get("source_effort")
+        resolved["alias_resolved_to"] = target["model_id"]
+        out.append(resolved)
+    return out
+
+
+def resolve_aliases(rows: list[dict], *, manifest: dict[str, dict] | None = None,
+                    aliases: dict[str, str] | None = None) -> list[dict]:
+    """Bind known aliases to concrete *explicitly released* lineage generations.
+
+    Existing alias regex is retained as seed metadata, not as authority to infer
+    an unverified vendor release. Aliases never resurrect an archived third
+    generation or leap to an ambiguous preview. Per-effort technical gates and
+    invocation provenance are copied from the exact concrete route.
+    """
+    manifest = model_lineages.load() if manifest is None else manifest
+    aliases = model_lineages.alias_lineages() if aliases is None else aliases
     concrete = [r for r in rows if not r.get("alias_family")]
     out = []
     expanded: set[tuple] = set()
+    # Keep exactly the newest two released identities per named lineage.
+    window = model_lineages.partition(concrete, manifest=manifest)["active"]
     for row in rows:
-        pattern = row.get("alias_family")
-        if not pattern:
+        if not row.get("alias_family"):
             out.append(row)
             continue
-        group = (row.get("model_id"), row.get("invocation_harness"), pattern)
+        lineage = aliases.get(row.get("model_id"))
+        group = (row.get("model_id"), row.get("invocation_harness"), row.get("alias_family"))
         if group in expanded:
             continue
         expanded.add(group)
         own = {r.get("effort"): r for r in rows
                if (r.get("model_id"), r.get("invocation_harness"), r.get("alias_family")) == group}
-        best = None
-        for r in concrete:
-            m = re.match(pattern, r.get("model_id") or "")
-            if not m or r.get("invocation_harness") != row.get("invocation_harness"):
-                continue
-            key = _version_key(m.group("version"))
-            if best is None or key > best[0]:
-                best = (key, r["model_id"])
-        by_effort = {r.get("effort"): r for r in concrete
-                     if best and r.get("model_id") == best[1] and r.get("invocation_harness") == row.get("invocation_harness")}
-        for effort in dict.fromkeys([*own, *by_effort]):
-            base = own.get(effort) or {**row, "effort": effort, "effort_confidence": "mapped"}
-            target = by_effort.get(effort)
+        if not lineage:
+            out.extend(_legacy_custom_alias(row, own, concrete))
+            continue
+        eligible = [r for r in window if r.get("lineage_key") == lineage and
+                    r.get("invocation_harness") == row.get("invocation_harness")]
+        if not eligible:
+            out.extend(own.values())
+            continue
+        latest = max(model_lineages.version_parts(r["generation_version"]) for r in eligible)
+        current = {r.get("effort"): r for r in eligible
+                   if model_lineages.version_parts(r["generation_version"]) == latest}
+        for effort in dict.fromkeys([*own, *current]):
+            original = own.get(effort) or row
+            target = current.get(effort)
             if target is None:
-                out.append(base)
+                # Preserve a previously declared effort as-is; never fabricate
+                # a newer model's missing effort or bypass its conformance gate.
+                if effort in own:
+                    out.append(original)
                 continue
-            resolved = dict(base)
-            if target.get("dispatchable") is False:
+            resolved = dict(original)
+            for key in _ALIAS_FIELDS + ("invocation_model_id", "invocation_source", "source_identifier",
+                                         "dispatchable", "discovery", "discovery_reason", "status_reason"):
+                if key in target:
+                    resolved[key] = target[key]
+                else:
+                    resolved.pop(key, None)
+            # A user-disabled alias or a technically gated target must remain
+            # gated. The alias cannot launder either denial into availability.
+            if original.get("dispatchable") is False:
                 resolved["dispatchable"] = False
-                # An alias is never more available than its exact target, and says why (#494).
-                for field in ("discovery", "discovery_reason"):
-                    if target.get(field):
-                        resolved[field] = target[field]
+                resolved.pop("discovery", None)
+                resolved.pop("discovery_reason", None)
+            elif target.get("dispatchable") is False:
+                resolved["dispatchable"] = False
+            if target.get("dispatchable") is False:
                 resolved["status_reason"] = route_policy.alias_status(resolved, target)["reason"]
-            resolved["invocation_model_id"] = target.get("invocation_model_id") or target["model_id"]
             source = str(target.get("invocation_source") or "")
-            if source.startswith(("local-evidence:", "documented:")):
-                resolved["invocation_source"] = source
-            for field in _ALIAS_FIELDS:
-                if target.get(field):
-                    resolved[field] = target[field]
+            if not source.startswith(("local-evidence:", "documented:")):
+                resolved["invocation_source"] = original.get("invocation_source")
             resolved["source_effort"] = target.get("source_effort") or resolved.get("source_effort")
+            resolved["effort"] = effort
             resolved["alias_resolved_to"] = target["model_id"]
             out.append(resolved)
     return out
@@ -155,7 +217,7 @@ def live_user_policies(repo_root=None) -> list[dict]:
         policy = route_policy.user_policy(effective)
         _POLICY_CACHE.clear()
         _POLICY_CACHE[cache_key] = policy
-    return [policy] if policy["denied"] or policy["overkill"] else []
+    return [policy] if policy["denied"] or policy["overkill"] or policy["ceilings"] else []
 
 
 def required_user_policies(repo_root=None) -> list[dict]:
@@ -429,6 +491,8 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
             "harness": harness,
             "harness_version": version,
             "model_id": row.get("model_id"),
+            "lineage_key": row.get("lineage_key"),
+            "generation_version": row.get("generation_version"),
             "invocation_model_id": row.get("invocation_model_id") or row.get("model_id"),
             "invocation_source": row.get("invocation_source"),
             "effort": row.get("effort"),
@@ -538,7 +602,9 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
     named = {"harness": harness, "model_id": (row or {}).get("model_id") or model,
              "invocation_model_id": (row or {}).get("invocation_model_id") or model,
              "alias_resolved_to": (row or {}).get("alias_resolved_to"),
-             "effort": effort or (row or {}).get("effort") or "none"}
+             "effort": effort or (row or {}).get("effort") or "none",
+             "lineage_key": (row or {}).get("lineage_key"),
+             "generation_version": (row or {}).get("generation_version")}
     for policy in required_user_policies():
         denied = route_policy.is_denied(named, policy)
         if denied:
@@ -791,7 +857,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         if discovery_input:
             request["discovery_input"] = discovery_input
     policies = [pol for pol in (route_policy.user_policy(config), *live)
-                if pol["denied"] or pol["overkill"]]
+                if pol["denied"] or pol["overkill"] or pol["ceilings"]]
     if policies:
         request["user_policies"] = policies
         request["size_class"] = (run.get("risk") or {}).get("size_class")

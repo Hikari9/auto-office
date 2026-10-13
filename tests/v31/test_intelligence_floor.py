@@ -1,5 +1,5 @@
 """Role floors gate on intelligence, aliases carry scores, and seeds can vary by size (#183)."""
-from office import candidates, config, paths, scoring
+from office import candidates, config, model_lineages, paths, scoring
 
 INDEX = "Artificial Analysis Intelligence Index v4.3.2"
 
@@ -51,7 +51,7 @@ def test_agy_is_a_builder_and_gemini_low_is_trusted():
     assert scoring.trust_baseline()["agy@1/gemini-3.8-flash@low"] == "proven"
 
 
-def test_alias_follows_newest_family_member():
+def test_named_alias_waits_for_explicit_release_evidence():
     alias = {"model_id": "opus", "alias_family": r"^claude-opus-(?P<version>\d+(?:-\d+)*)$",
              "invocation_harness": "claude", "invocation_model_id": "claude-opus-5-5",
              "invocation_source": "documented: alias", "effort": "low", "benchmark_indexes": {}}
@@ -62,8 +62,26 @@ def test_alias_follows_newest_family_member():
              "invocation_source": "unverified: new", "benchmark_indexes": {INDEX: 60}},
             {"model_id": "claude-opus-6", "invocation_harness": "claude", "effort": "high",
              "invocation_source": "documented: x", "benchmark_indexes": {INDEX: 70}}]
-    resolved = candidates.resolve_aliases(rows)[0]
-    assert resolved["invocation_model_id"] == "claude-opus-6"
-    assert resolved["benchmark_indexes"] == {INDEX: 60}
-    assert resolved["invocation_source"] == "documented: alias"
+    # The number 6 in a regex match is not verified release provenance.
+    # The unclassified candidate must not displace the released 5.5.
+    resolved = candidates.resolve_aliases(rows)
+    assert resolved[0]["alias_resolved_to"] == "claude-opus-5-5"
+    assert resolved[0]["benchmark_indexes"] == {INDEX: 42}
+    assert "invocation_model_id" not in resolved[0]  # no proven concrete slug in fixture
+    assert not any(r["model_id"] == "opus" and r["effort"] == "high" for r in resolved)
+    # Without a classified concrete generation, retain the seed alias unchanged.
     assert candidates.resolve_aliases([alias])[0]["invocation_model_id"] == "claude-opus-5-5"
+
+    # Only a reviewed explicit release record may advance the alias; even then,
+    # unverified effort variants must remain technically non-dispatchable.
+    reviewed = {**model_lineages.load(), "claude-opus-6": {
+        "lineage_key": "anthropic/claude-opus", "generation_version": "6",
+        "release_status": "released", "provenance": "reviewed-test-fixture",
+    }}
+    reviewed_rows = [dict(r) for r in rows]
+    reviewed_rows[2]["invocation_model_id"] = "claude-opus-6"
+    after_review = candidates.resolve_aliases(reviewed_rows, manifest=reviewed)
+    assert after_review[0]["alias_resolved_to"] == "claude-opus-6"
+    assert after_review[0]["invocation_model_id"] == "claude-opus-6"
+    assert after_review[0]["benchmark_indexes"] == {INDEX: 60}
+    assert after_review[0]["dispatchable"] is False
