@@ -188,3 +188,20 @@ def test_mobile_no_match_is_visible_and_cards_show_evidence_without_expansion(pa
         "el => ({width:el.getBoundingClientRect().width,screen:window.innerWidth})")
     assert dims["width"] <= dims["screen"] + 2
     assert errors == []
+
+
+def test_scoped_manual_only_is_not_mislabeled_fully_allowed_or_globally_manual(page, registry_site):
+    import os
+    from pathlib import Path
+
+    url, _ = registry_site
+    Path(os.environ["OFFICE_USER_CONFIG"]).write_text(
+        "routing:\n  user_policy:\n    overkill_rules:\n      - route: codex/gpt-6.1-sol\n        roles: [executor]\n")
+    page.set_viewport_size({"width": 1500, "height": 950})
+    errors = navigate(page, url)
+    row = page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]').first
+    expect(row.locator('[data-testid=model-grid-policy]')).to_contain_text("Scoped manual-only by you")
+    page.locator('[data-testid=model-policy-filter]').select_option("scoped-manual")
+    expect(page.locator('[data-testid=model-registry-row]')).to_have_count(1)
+    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]')).to_have_count(1)
+    assert errors == []

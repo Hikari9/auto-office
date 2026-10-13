@@ -56,6 +56,7 @@
 .model-grid-main a { color: var(--blue); text-decoration: underline; text-underline-offset: 2px; }
 .model-empty { margin: 8px 0 12px; padding: 12px; border: 1px dashed var(--line-2); border-radius: 8px; color: var(--muted); }
 .model-card-facts { font-size: 11px; margin: 5px 0; color: var(--text-2); overflow-wrap: anywhere; line-height: 1.5; }
+.model-card-source { display: inline-block; margin: 2px 0 6px; font-size: 11px; color: var(--blue); text-decoration: underline; text-underline-offset: 2px; }
 
 .model-inspector-wrap { padding: 12px; overflow-wrap: anywhere; }
 .model-evidence h3 { font-size: 16px; margin: 0 0 4px; }

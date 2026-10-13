@@ -42,10 +42,12 @@ function factualStatus(g) {
 
 function policyStatus(g, data) {
   if (g.user_denied) return { key: "denied", label: "Denied by you" };
-  const globallyManual = (data.policy?.overkill_rules || []).some((rule) =>
-    rule && rule.route === routeSpec(g) && Object.keys(rule).length === 1);
-  return globallyManual ? { key: "manual-only", label: "Manual-only by you" }
-    : { key: "allowed", label: "Allowed by you" };
+  const matchingRules = (data.policy?.overkill_rules || []).filter((rule) => rule && rule.route === routeSpec(g));
+  if (matchingRules.some((rule) => Object.keys(rule).length === 1))
+    return { key: "manual-only", label: "Manual-only by you" };
+  // A role/size-specific overkill rule is not a blanket manual-only switch.
+  if (matchingRules.length) return { key: "scoped-manual", label: "Scoped manual-only by you" };
+  return { key: "allowed", label: "Allowed by you" };
 }
 
 function provenance(sample) {
@@ -240,7 +242,9 @@ export function render(ctx, data, editable = true) {
           h("p", { class: "model-card-facts", text: factualStatus(g).label + " · " + policyStatus(g, data).label }),
           h("p", { class: "model-card-facts", text: sample ?
             "Benchmark " + sample.benchmark_score + " (" + sample.effort + ") · " + sample.benchmark_index : "Benchmark not scored" }),
-          h("p", { class: "model-card-facts", text: "Source: " + source.label + " · " + source.identifier + " · " + source.date })),
+          h("p", { class: "model-card-facts", text: "Source: " + source.label + " · " + source.identifier + " · " + source.date }),
+          source.url ? h("a", { class: "model-card-source", href: source.url, target: "_blank",
+            rel: "noopener noreferrer" }, "Open benchmark evidence") : null),
         h("button", { class: "btn", type: "button", "aria-expanded": String(open),
           onclick: () => { open ? ui.expanded.delete(g.key) : ui.expanded.add(g.key); ctx.rerender(); } },
           open ? "Collapse" : "Expand evidence & policy")),
@@ -271,7 +275,8 @@ export function render(ctx, data, editable = true) {
         h("select", { class: "field", "aria-label": "Filter my model policy", dataset: { key: "model-policy", testid: "model-policy-filter" },
           onchange: (ev) => { ui.policy = ev.target.value; ctx.rerender(); } },
           h("option", { value: "", text: "All policy states" }),
-          [["allowed", "Allowed by you"], ["manual-only", "Manual-only by you"], ["denied", "Denied by you"]].map(
+          [["allowed", "Allowed by you"], ["manual-only", "Manual-only by you"],
+            ["scoped-manual", "Scoped manual-only by you"], ["denied", "Denied by you"]].map(
             ([value, label]) => h("option", { value, selected: ui.policy === value, text: label })))),
       !matches.length ? h("p", { class: "model-empty", role: "status", "aria-live": "polite",
         dataset: { testid: "model-empty" }, text: "No matching models; adjust search, harness or status filters." }) : null,
