@@ -24,8 +24,8 @@ def layer(value):
 def test_new_defaults_have_no_hard_ceiling_or_user_policy():
     cfg = resolve()
     assert policy.budget_ceiling(cfg) == {"usd": None, "source": "shipped"}
-    assert policy.user_policy(cfg) == {"denied": [], "overkill": [],
-                                       "sources": {"denied_models": "shipped", "overkill_rules": "shipped"}}
+    assert policy.user_policy(cfg) == {"denied": [], "ceilings": {}, "ceiling_sources": {}, "overkill": [],
+                                       "sources": {"denied_models": "shipped", "version_ceilings": None, "overkill_rules": "shipped"}}
     settings = policy.discovery_settings(cfg)
     # shipped config turns discovery on (#494 T6); the code constant stays off, the safe default for a pre-#494 pin
     assert settings == {**policy.DISCOVERY_DEFAULTS, "enabled": True}
@@ -76,7 +76,7 @@ def test_each_policy_leaf_records_the_winning_tier_even_when_value_equals_defaul
     assert provenance["routing.discovery.roles"] == "shipped"
     user = policy.user_policy(cfg)
     assert user["denied"] == ["harness:codex"]
-    assert user["sources"] == {"denied_models": "user", "overkill_rules": "repo"}
+    assert user["sources"] == {"denied_models": "user", "version_ceilings": None, "overkill_rules": "repo"}
     assert user["overkill"][0]["roles"] == ["worker"]
 
 
