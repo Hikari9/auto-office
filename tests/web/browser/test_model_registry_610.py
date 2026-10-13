@@ -26,7 +26,9 @@ def registry_site(tmp_path, monkeypatch):
 def navigate(page, url):
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
-    page.goto(url)
+    # The test server keeps an SSE stream open; DOM readiness plus the actual
+    # issue-row/registry assertions is the deterministic navigation gate.
+    page.goto(url, wait_until="domcontentloaded")
     page.wait_for_selector("[data-testid=issue-row]", timeout=20000)
     page.locator(".product-rail").get_by_text("Settings").click()
     page.wait_for_selector("[data-testid=model-registry]", timeout=10000)
@@ -52,6 +54,7 @@ def test_desktop_grid_and_persistent_inspector_use_distinct_policy_and_facts(pag
     expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]')).to_have_count(0, timeout=5000)
     expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6-luna"]')).not_to_have_count(0, timeout=5000)
     page.locator('[data-testid=model-search]').fill("")
+    expect(rows.first.get_by_role("button", name="Inspect")).to_have_attribute("aria-pressed", "true")
     assert errors == []
 
 
@@ -100,4 +103,88 @@ def test_confirmed_global_deny_uses_settings_command_and_never_optimistically_mu
     # The UI must continue showing the re-read server value, not a fake success.
     page.wait_for_timeout(450)
     assert "Allowed by you" in inspector.text_content()
+    assert errors == []
+
+
+def test_grid_compares_named_effort_benchmark_provenance_and_factual_state(page, registry_site):
+    from office.web import model_registry
+
+    url, _ = registry_site
+    page.set_viewport_size({"width": 1500, "height": 950})
+    errors = navigate(page, url)
+    headings = page.locator(".model-table thead").inner_text()
+    for heading in ("Benchmark sample", "Provenance", "Factual availability", "My policy"):
+        assert heading in headings
+    record = next(g for g in model_registry.view()["generations"] if g["model_id"] == "gpt-6.1-sol")
+    sample = next(e for e in record["efforts"] if e["effort"] == "medium")
+    row = page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]').first
+    bench = row.locator('[data-testid=model-grid-benchmark]')
+    expect(bench).to_contain_text(f'{sample["benchmark_score"]} · medium')
+    expect(bench).to_contain_text(sample["benchmark_index"])
+    provenance = row.locator('[data-testid=model-grid-provenance]')
+    expect(provenance).to_contain_text(sample["source_name"])
+    expect(provenance).to_contain_text(sample["source_identifier"])
+    expect(provenance).to_contain_text(sample["source_metadata"]["fetched_at"][:10])
+    assert provenance.locator("a").get_attribute("href") == sample["source_metadata"]["url"]
+    fact = row.locator('[data-testid=model-grid-factual]')
+    assert fact.inner_text().strip() and "per-effort" in fact.inner_text().lower()
+    assert row.locator('[data-testid=model-grid-policy]').inner_text() == "Allowed by you"
+    assert row.locator("th[scope=row]").evaluate("el => getComputedStyle(el).position") == "sticky"
+    wrap = page.locator(".model-table-wrap")
+    assert wrap.evaluate("el => el.scrollWidth > el.clientWidth")
+    wrap.evaluate("el => { el.scrollLeft = el.scrollWidth; }")
+    assert abs(row.locator("th[scope=row]").bounding_box()["x"] - wrap.bounding_box()["x"]) < 4
+    assert errors == []
+
+
+def test_registry_filters_independent_policy_from_runtime_facts(page, registry_site):
+    import os
+    from pathlib import Path
+
+    url, _ = registry_site
+    Path(os.environ["OFFICE_USER_CONFIG"]).write_text(
+        "routing:\n  user_policy:\n    version_ceilings:\n      openai/gpt-sol: '5.6'\n")
+    page.set_viewport_size({"width": 1500, "height": 950})
+    errors = navigate(page, url)
+    policy = page.locator('[data-testid=model-policy-filter]')
+    factual = page.locator('[data-testid=model-factual-filter]')
+    policy.select_option("denied")
+    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-5.6-sol"]')).to_have_count(1)
+    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]')).to_have_count(0)
+    policy.select_option("allowed")
+    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-5.6-sol"]')).to_have_count(0)
+    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]')).to_have_count(1)
+    policy.select_option("")  # factual filters must operate independently of user denials
+    facts = factual.evaluate("el => [...el.options].filter(o => o.value).map(o => ({value:o.value,label:o.textContent}))")
+    assert facts, "At least one factual state must be filterable independently"
+    factual.select_option(facts[0]["value"])
+    cells = page.locator('[data-testid=model-grid-factual]').all()
+    assert cells, "Selecting an available factual state should find a model"
+    for cell in cells:
+        assert facts[0]["label"] in cell.inner_text()
+    assert errors == []
+
+
+def test_mobile_no_match_is_visible_and_cards_show_evidence_without_expansion(page, registry_site):
+    url, _ = registry_site
+    page.set_viewport_size({"width": 390, "height": 844})
+    errors = navigate(page, url)
+    card = page.locator('[data-testid=model-registry-card][data-model="gpt-6.1-sol"]').first
+    expect(card).to_be_visible()
+    assert "Benchmark" in card.inner_text()
+    assert "Source:" in card.inner_text()
+    assert "Allowed by you" in card.inner_text()
+    page.locator('[data-testid=model-search]').fill("nonexistent-model-9999")
+    expect(page.locator('[data-testid=model-empty]')).to_be_visible()
+    expect(page.locator('[data-testid=model-registry-card]')).to_have_count(0)
+    page.locator('[data-testid=model-search]').fill("")
+    expect(card).to_be_visible()
+    policy = page.locator('[data-testid=model-policy-filter]')
+    policy.select_option("denied")
+    expect(page.locator('[data-testid=model-empty]')).to_be_visible()
+    policy.select_option("")
+    expect(card).to_be_visible()
+    dims = page.locator('[data-testid=model-registry]').evaluate(
+        "el => ({width:el.getBoundingClientRect().width,screen:window.innerWidth})")
+    assert dims["width"] <= dims["screen"] + 2
     assert errors == []

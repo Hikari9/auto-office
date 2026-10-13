@@ -1,7 +1,7 @@
 // Models & Routing: a single Office-authored registry projection. The browser
 // may request a global user-policy mutation only through settings_set receipts;
 // it never opens YAML, guesses live quota or grants adapter trust.
-const ui = { query: "", harness: "", tab: "registry", selected: null, expanded: new Set(), confirm: null };
+const ui = { query: "", harness: "", factual: "", policy: "", tab: "registry", selected: null, expanded: new Set(), confirm: null };
 const title = (g) => g.model_id + " · " + g.version;
 const routeSpec = (g) => g.harness + "/" + g.model_id;
 const show = (v) => v === null || v === undefined ? "Unknown" : String(v);
@@ -9,6 +9,52 @@ const defined = (v) => v !== null && v !== undefined;
 const caption = (e) => e.technical_state === "available" ? "Catalog route listed; live probe not run"
   : e.technical_state === "not-installed" ? "Harness not installed"
   : e.technical_state.replaceAll("-", " ");
+
+// The row-level benchmark is one clearly named effort sample, not an average,
+// rank, or permission/technical qualification. Inspect exposes every effort.
+function sampleEffort(g) {
+  const scored = (g.efforts || []).filter((e) => typeof e.benchmark_score === "number" && Number.isFinite(e.benchmark_score));
+  return ["medium", "high", "low", "xhigh", "max"].map((effort) =>
+    scored.find((e) => e.effort === effort)).find(Boolean) || scored[0] || null;
+}
+
+function factualStatus(g) {
+  const efforts = g.efforts || [];
+  if (!g.installed) return { key: "not-installed", label: "Harness not installed",
+    detail: "Local harness absent; no live account/model probe performed" };
+  const states = [...new Set(efforts.map((e) => e.technical_state || "unknown"))];
+  if (!states.length) return { key: "unknown", label: "Technical status unknown", detail: "No effort evidence" };
+  if (states.length > 1) return { key: "mixed", label: "Mixed effort states",
+    detail: efforts.map((e) => e.effort + ": " + caption(e)).join(" · ") };
+  const labels = {
+    available: "Catalog listed — live unverified",
+    "discovered-unconfirmed": "Discovery unconfirmed",
+    "probe-pending": "Probe needed",
+    "probe-passed": "Probe passed (not rechecked)",
+    "temporarily-unavailable": "Temporarily unavailable",
+    "confirmed-unsupported": "Unsupported effort",
+    "not-installed": "Harness not installed",
+  };
+  const key = states[0];
+  return { key, label: labels[key] || key.replaceAll("-", " "),
+    detail: efforts.map((e) => e.effort + ": " + caption(e)).join(" · ") };
+}
+
+function policyStatus(g, data) {
+  if (g.user_denied) return { key: "denied", label: "Denied by you" };
+  const globallyManual = (data.policy?.overkill_rules || []).some((rule) =>
+    rule && rule.route === routeSpec(g) && Object.keys(rule).length === 1);
+  return globallyManual ? { key: "manual-only", label: "Manual-only by you" }
+    : { key: "allowed", label: "Allowed by you" };
+}
+
+function provenance(sample) {
+  if (!sample) return { label: "Not sourced", identifier: "No scored effort", date: "Date unknown", url: null };
+  const url = sample.source_metadata?.url;
+  return { label: show(sample.source_name), identifier: show(sample.source_identifier),
+    date: sample.source_metadata?.fetched_at ? "Fetched " + sample.source_metadata.fetched_at.slice(0, 10) : "Date unknown",
+    url: typeof url === "string" && /^https:\/\/[^\s/]+/.test(url) ? url : null };
+}
 
 function intentFor(g, d, action) {
   const policy = d.policy || {};
@@ -136,31 +182,65 @@ export function render(ctx, data, editable = true) {
   const all = data.generations;
   const q = ui.query.trim().toLowerCase();
   const harnesses = [...new Set(all.map((g) => g.harness))].sort();
+  const factualOptions = [...new Map(all.map((g) => {
+    const fact = factualStatus(g);
+    return [fact.key, fact.label];
+  })).entries()].sort((a, b) => a[1].localeCompare(b[1]));
   const matches = all.filter((g) => (!ui.harness || g.harness === ui.harness) &&
+    (!ui.factual || factualStatus(g).key === ui.factual) &&
+    (!ui.policy || policyStatus(g, data).key === ui.policy) &&
     (!q || [g.model_id, g.lineage, g.harness, g.version].some((v) => String(v || "").toLowerCase().includes(q))));
+  // A temporary filter must not overwrite the user's earlier inspector choice.
   const selected = matches.find((g) => g.key === ui.selected) || matches[0] || null;
-  if (selected && selected.key !== ui.selected) ui.selected = selected.key;
+  const selectedKey = selected?.key || null;
   const active = ui.tab === "registry";
   const rowButton = (g) => h("button", {
-    type: "button", class: "btn", "aria-pressed": String(g.key === ui.selected),
+    type: "button", class: "btn", "aria-pressed": String(g.key === selectedKey),
     onclick: () => { ui.selected = g.key; ui.confirm = null; ctx.rerender(); },
   }, "Inspect");
-  const rows = matches.map((g) => h("tr", { class: g.key === ui.selected ? "selected" : "",
-    dataset: { testid: "model-registry-row", model: g.model_id } },
-    h("th", { scope: "row", text: g.model_id }),
-    h("td", { text: g.version }),
-    h("td", { text: g.harness }),
-    h("td", { text: (g.efforts || []).map((e) => e.effort).join(", ") }),
-    h("td", { text: g.installed ? "Detected" : "Not installed" }),
-    h("td", { text: g.user_denied ? "Denied by you" : "Allowed by you" }),
-    h("td", {}, rowButton(g))));
+  const rows = matches.map((g) => {
+    const sample = sampleEffort(g);
+    const source = provenance(sample);
+    const fact = factualStatus(g);
+    return h("tr", { class: g.key === selectedKey ? "selected" : "",
+      dataset: { testid: "model-registry-row", model: g.model_id } },
+      h("th", { scope: "row", title: g.lineage },
+        h("span", { class: "model-grid-main", text: g.model_id }),
+        h("span", { class: "model-grid-sub", text: g.lineage })),
+      h("td", { text: g.version }),
+      h("td", {}, h("span", { class: "model-grid-main", text: g.harness }),
+        h("span", { class: "model-grid-sub", title: sample?.invocation_model_id || "Invocation not verified",
+          text: sample?.invocation_model_id ? sample.effort + ": " + sample.invocation_model_id : "Invocation not verified" })),
+      h("td", { text: (g.efforts || []).map((e) => e.effort).join(", ") }),
+      h("td", { dataset: { testid: "model-grid-benchmark" }, title: sample ?
+        sample.effort + ": " + sample.benchmark_score + " · " + sample.benchmark_index : "No benchmark score" },
+        h("span", { class: "model-grid-main", text: sample ? sample.benchmark_score + " · " + sample.effort : "Not scored" }),
+        h("span", { class: "model-grid-sub", title: sample?.benchmark_index || data.index,
+          text: sample?.benchmark_index || data.index || "Index unknown" })),
+      h("td", { dataset: { testid: "model-grid-provenance" } },
+        h("span", { class: "model-grid-main" }, source.url ?
+          h("a", { href: source.url, target: "_blank", rel: "noopener noreferrer" }, source.label) : source.label),
+        h("span", { class: "model-grid-sub", title: source.identifier, text: source.identifier }),
+        h("span", { class: "model-grid-sub", text: source.date })),
+      h("td", { dataset: { testid: "model-grid-factual" }, title: fact.detail },
+        h("span", { class: "model-grid-main", text: fact.label }),
+        h("span", { class: "model-grid-sub", text: "Per-effort status in Inspector" })),
+      h("td", { text: g.installed ? "Detected" : "Not installed" }),
+      h("td", { dataset: { testid: "model-grid-policy" }, text: policyStatus(g, data).label }),
+      h("td", {}, rowButton(g)));
+  });
   const cards = matches.map((g) => {
     const open = ui.expanded.has(g.key);
+    const sample = sampleEffort(g);
+    const source = provenance(sample);
     return h("article", { class: "model-card", dataset: { testid: "model-registry-card", model: g.model_id } },
       h("div", { class: "model-card-heading" },
         h("div", {}, h("h3", { text: title(g) }),
           h("p", { class: "sub", text: g.harness + " · " + (g.efforts || []).map((e) => e.effort).join(" / ") }),
-          h("p", { class: "model-reason", text: g.user_denied ? "Denied by you" : "Allowed by you" })),
+          h("p", { class: "model-card-facts", text: factualStatus(g).label + " · " + policyStatus(g, data).label }),
+          h("p", { class: "model-card-facts", text: sample ?
+            "Benchmark " + sample.benchmark_score + " (" + sample.effort + ") · " + sample.benchmark_index : "Benchmark not scored" }),
+          h("p", { class: "model-card-facts", text: "Source: " + source.label + " · " + source.identifier + " · " + source.date })),
         h("button", { class: "btn", type: "button", "aria-expanded": String(open),
           onclick: () => { open ? ui.expanded.delete(g.key) : ui.expanded.add(g.key); ctx.rerender(); } },
           open ? "Collapse" : "Expand evidence & policy")),
@@ -178,20 +258,30 @@ export function render(ctx, data, editable = true) {
     active ? h("div", {},
       h("div", { class: "model-toolbar" },
         h("input", { type: "search", class: "field", value: ui.query, "aria-label": "Search model registry",
-          placeholder: "Find model, lineage, version or harness…", dataset: { testid: "model-search" },
+          placeholder: "Find model, lineage, version or harness…", dataset: { key: "model-search", testid: "model-search" },
           oninput: (ev) => { ui.query = ev.target.value; ctx.rerender(); } }),
-        h("select", { class: "field", "aria-label": "Filter model harness", dataset: { testid: "model-harness" },
+        h("select", { class: "field", "aria-label": "Filter model harness", dataset: { key: "model-harness", testid: "model-harness" },
           onchange: (ev) => { ui.harness = ev.target.value; ctx.rerender(); } },
           h("option", { value: "", text: "All harnesses" }),
-          harnesses.map((value) => h("option", { value, selected: ui.harness === value, text: value })))),
+          harnesses.map((value) => h("option", { value, selected: ui.harness === value, text: value }))),
+        h("select", { class: "field", "aria-label": "Filter factual availability", dataset: { key: "model-factual", testid: "model-factual-filter" },
+          onchange: (ev) => { ui.factual = ev.target.value; ctx.rerender(); } },
+          h("option", { value: "", text: "All factual states" }),
+          factualOptions.map(([value, label]) => h("option", { value, selected: ui.factual === value, text: label }))),
+        h("select", { class: "field", "aria-label": "Filter my model policy", dataset: { key: "model-policy", testid: "model-policy-filter" },
+          onchange: (ev) => { ui.policy = ev.target.value; ctx.rerender(); } },
+          h("option", { value: "", text: "All policy states" }),
+          [["allowed", "Allowed by you"], ["manual-only", "Manual-only by you"], ["denied", "Denied by you"]].map(
+            ([value, label]) => h("option", { value, selected: ui.policy === value, text: label })))),
+      !matches.length ? h("p", { class: "model-empty", role: "status", "aria-live": "polite",
+        dataset: { testid: "model-empty" }, text: "No matching models; adjust search, harness or status filters." }) : null,
       h("div", { class: "model-layout" },
-        h("div", { class: "model-table-wrap" },
+        h("div", { class: "model-table-wrap", dataset: { scrollKey: "model-grid" } },
           h("table", { class: "model-table", "aria-label": "Current model generation registry" },
-            h("thead", {}, h("tr", {}, ...["Model", "Version", "Harness", "Efforts", "Installed", "My policy", "Details"]
-              .map((s) => h("th", { scope: "col", text: s })))),
-            h("tbody", {}, rows)),
-          !matches.length ? h("p", { class: "muted", text: "No matching models; adjust search or harness." }) : null),
-        h("aside", { class: "model-inspector-wrap", "aria-label": "Model details" },
+            h("thead", {}, h("tr", {}, ...["Model", "Version", "Harness / invocation", "Efforts", "Benchmark sample", "Provenance", "Factual availability", "Installed", "My policy", "Details"]
+              .map((label) => h("th", { scope: "col", text: label })))),
+            h("tbody", {}, rows))),
+        h("aside", { class: "model-inspector-wrap", "aria-label": "Model details", dataset: { scrollKey: "model-inspector-scroll" } },
           selected ? evidence(ctx, selected, data, { editable }) : h("p", { class: "muted", text: "Select a model to inspect." })),
         h("div", { class: "model-mobile-cards" }, cards)),
       editable ? confirmation(ctx, data, editable) : null,

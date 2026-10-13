@@ -46,6 +46,17 @@
 .model-table thead th:first-child { z-index: 3; }
 .model-table tr.selected td, .model-table tr.selected th { background: var(--panel-2, var(--panel)); }
 .model-table td:last-child { text-align: right; }
+/* Dense comparison: a benchmark is a named effort sample with an auditable source;
+   the user and technical gates remain independent. The grid scrolls under a sticky identity. */
+.model-grid-main, .model-grid-sub { display: block; }
+.model-grid-main { font-weight: 600; }
+.model-grid-sub { font-size: 11px; color: var(--muted); max-width: 205px; overflow: hidden; text-overflow: ellipsis; }
+.model-table [data-testid="model-grid-provenance"] { min-width: 185px; }
+.model-table [data-testid="model-grid-factual"] { min-width: 170px; }
+.model-grid-main a { color: var(--blue); text-decoration: underline; text-underline-offset: 2px; }
+.model-empty { margin: 8px 0 12px; padding: 12px; border: 1px dashed var(--line-2); border-radius: 8px; color: var(--muted); }
+.model-card-facts { font-size: 11px; margin: 5px 0; color: var(--text-2); overflow-wrap: anywhere; line-height: 1.5; }
+
 .model-inspector-wrap { padding: 12px; overflow-wrap: anywhere; }
 .model-evidence h3 { font-size: 16px; margin: 0 0 4px; }
 .model-evidence h4 { margin: 14px 0 8px; font-size: 12px; color: var(--text-2); }
