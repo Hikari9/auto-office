@@ -158,7 +158,11 @@ def test_registry_filters_independent_policy_from_runtime_facts(page, registry_s
     facts = factual.evaluate("el => [...el.options].filter(o => o.value).map(o => ({value:o.value,label:o.textContent}))")
     assert facts, "At least one factual state must be filterable independently"
     factual.select_option(facts[0]["value"])
-    cells = page.locator('[data-testid=model-grid-factual]').all()
+    # ctx.rerender replaces the grid after the select event; wait for the new
+    # rows before taking a static locator snapshot with all().
+    factual_cells = page.locator('[data-testid=model-grid-factual]')
+    expect(factual_cells.first).to_contain_text(facts[0]["label"], timeout=5000)
+    cells = factual_cells.all()
     assert cells, "Selecting an available factual state should find a model"
     for cell in cells:
         assert facts[0]["label"] in cell.inner_text()
