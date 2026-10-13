@@ -10,12 +10,14 @@ from collections import defaultdict
 
 import yaml
 
-from office import adapters, candidates, config, model_lineages, paths, route_policy
+from office import adapters, candidates, config, model_lineages, paths, route_policy, user_catalog
 from office.benchmarks import index_version
 
 
 def view() -> dict:
-    policy = route_policy.user_policy(config.resolve(None)[0])
+    effective = config.resolve(None)[0]
+    policy = route_policy.user_policy(effective)
+    overlay = user_catalog.load()
     rows = candidates.catalog_rows()
     catalog = model_lineages.partition(rows)
     index = index_version()
@@ -30,6 +32,8 @@ def view() -> dict:
     for (lineage, version, model_id, harness), variants in sorted(by_identity.items()):
         variants = sorted(variants, key=lambda r: (str(r.get("effort")), str(r.get("source_identifier"))))
         permission = route_policy.is_denied({"model_id": model_id, "harness": harness}, policy)
+        legacy_denied = any(user_catalog.matches(denial, variant)
+                            for denial in overlay["disabled"] for variant in variants)
         specs = []
         for r in variants:
             route_state = route_policy.row_status(r)
@@ -53,8 +57,11 @@ def view() -> dict:
             "lineage": lineage, "version": version, "model_id": model_id,
             "harness": harness, "installed": installed.get(harness, False),
             "efforts": specs,
-            "user_denied": bool(permission), "user_denial_reason": permission,
-            "user_policy_source": (policy.get("sources") or {}).get("denied_models"),
+            "user_denied": bool(permission or legacy_denied),
+            "user_denial_reason": permission or ("legacy user-catalog overlay deny" if legacy_denied else None),
+            "legacy_overlay_denied": legacy_denied,
+            "user_policy_source": ("legacy user-catalog overlay" if legacy_denied and not permission
+                                   else (policy.get("sources") or {}).get("denied_models")),
             "version_ceiling": (policy.get("ceilings") or {}).get(lineage),
             "ceiling_source": (policy.get("ceiling_sources") or {}).get(lineage),
             "status_source": "runtime facts (no live probe in Settings)",
@@ -93,5 +100,6 @@ def view() -> dict:
             "overkill_rules": policy["overkill"], "sources": policy["sources"],
         },
         "authority": "Office model registry / global user config (read-only projection)",
-        "quota_probed": False, "telemetry_opt_in": False,
+        "quota_probed": False,
+        "telemetry_opt_in": bool((effective.get("economics") or {}).get("collect", False)),
     }

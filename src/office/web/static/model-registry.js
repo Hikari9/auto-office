@@ -96,7 +96,8 @@ function evidence(ctx, g, data, opts = {}) {
         h("tbody", {}, rows))),
     h("p", { class: "model-reason", text: "Benchmark: " + data.index + ". A score never grants harness conformance or trust. Live availability is separately verified at launch." }),
     h("div", { class: "model-actions", "aria-label": "Global user model policy" },
-      directDenied ? action("Remove direct denial", "allow") : action("Deny this model", "deny"),
+      g.legacy_overlay_denied ? h("p", { class: "model-reason", text: "Legacy overlay denial: use office model enable " + rule + " from the CLI, then re-read Settings." }) :
+        (directDenied ? action("Remove direct denial", "allow") : action("Deny this model", "deny")),
       manual ? action("Remove manual-only", "automatic") : action("Make manual-only", "manual"),
       g.version_ceiling ? action("Clear lineage ceiling", "unceil") : action("Deny this generation and older", "ceiling")),
     !live ? h("p", { class: "model-reason", text: "The Office service is not live. Model policy changes are unavailable." }) : null,

@@ -42,3 +42,22 @@ def test_registry_shipped_efforts_are_not_compressed_into_a_fabricated_single_sc
     assert {e["effort"] for e in sol["efforts"]} == {"low", "medium", "high", "xhigh", "max"}
     assert all(e["source_metadata"] is not None for e in sol["efforts"])
     assert len({e["source_identifier"] for e in sol["efforts"]}) == 5
+
+
+def test_registry_never_misstates_legacy_user_overlay_as_a_technical_disable(tmp_path, monkeypatch):
+    from office import user_catalog
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "user.yaml"))
+    monkeypatch.setenv("OFFICE_USER_CATALOG", str(tmp_path / "legacy.yaml"))
+    user_catalog.save({"models": [], "disabled": [{"harness": "codex", "model_id": "gpt-6.1-sol"}]})
+    out = model_registry.view()
+    g = next(g for g in out["generations"] if g["model_id"] == "gpt-6.1-sol" and g["harness"] == "codex")
+    assert g["legacy_overlay_denied"] and g["user_denied"]
+    assert "legacy" in g["user_denial_reason"]
+    assert "legacy" in g["user_policy_source"]
+
+
+def test_registry_telemetry_flag_reflects_actual_opt_in(tmp_path, monkeypatch):
+    p = tmp_path / "user.yaml"
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(p))
+    p.write_text("economics:\n  collect: true\n")
+    assert model_registry.view()["telemetry_opt_in"] is True
