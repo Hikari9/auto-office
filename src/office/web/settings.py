@@ -80,7 +80,10 @@ def entries(*, repo_root: Path | None = None, pinned: dict | None = None) -> lis
 
 
 def view(*, scope: str, repo_root: Path | None = None, pinned: dict | None = None, **ids) -> dict:
-    return {"scope": scope, **ids, "tiers": list(TIERS), "entries": entries(repo_root=repo_root, pinned=pinned)}
+    from office.web import model_registry
+    return {"scope": scope, **ids, "tiers": list(TIERS),
+            "entries": entries(repo_root=repo_root, pinned=pinned),
+            "model_registry": model_registry.view()}
 
 
 def config_args(kind: str, tier: str, key: str, value: Any = None) -> list[str]:

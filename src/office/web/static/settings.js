@@ -1,3 +1,4 @@
+import { render as renderModelRegistry } from "./model-registry.js";
 // Settings: the Machine -> Repository -> Run cascade from GET /api/settings. Each row shows the
 // effective value, the tier it comes from and whether it is inherited or overridden; inspection
 // shows every tier. Edits go through settings_set / settings_unset, only on tiers the service
@@ -206,6 +207,7 @@ export function render(ctx) {
   return [
     head, lastLine,
     h("p", { class: "scope-now", dataset: { testid: "settings-scope", scope: d.scope }, text: `Showing effective values for: ${scopeText}` }),
+    renderModelRegistry(ctx, d.model_registry, ui.scope === "machine"),
     h("section", { class: "scard", dataset: { testid: "settings-intake" }, "aria-label": "Auto Intake repository defaults" },
       h("h2", { text: "Auto Intake repository defaults" }),
       h("p", { class: "sub", text: "Whether issues queue automatically, the authorization they inherit, and whether queued work may reach Ready to Land. Landing authority stays explicit policy." }),
