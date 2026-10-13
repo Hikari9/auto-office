@@ -810,6 +810,11 @@ def _verify_main(con, run: dict, integrated: str, res: Result) -> str:
         checkout = gates.detached_checkout(run, main, "land-verify", purpose="check")
         try:
             for cmd in checks:
+                from office import shell_safety
+                if shell_safety.unsafe_manual_push(cmd):
+                    raise Refused("unsafe-check-command", "unowned manual Git push in main verification",
+                                  preserved="no verification command was executed",
+                                  next_step="amend the plan and run integration checks again")
                 proc = subprocess.run(cmd, shell=True, cwd=checkout, capture_output=True, text=True, timeout=1800)
                 if proc.returncode != 0:
                     raise Refused("main-checks-failed", f"`{cmd}` fails on merged {s['base_branch']} {main[:12]}",
@@ -843,6 +848,11 @@ def _deploy(con, run: dict, target: str, deploy: dict, cwd: Path, res: Result, r
             with db.transaction(con):
                 state.emit(con, run, "land.deploy.start", f"{target} deploy of {commit[:12]} started in {cwd}",
                            payload=ident, audience="runtime")
+        from office import shell_safety
+        if shell_safety.unsafe_manual_push(cmd):
+            raise Refused("unsafe-deploy-command", "unowned manual Git push in deploy command",
+                          preserved="no deploy/verify command was executed",
+                          next_step="amend the plan to use an authorized deploy command")
         proc = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=3600)
         header = f"# office land {target} {step}\n# cwd: {cwd}\n# commit: {commit}\n# command: {cmd}\n\n"
         (log_dir / f"{target}-{step}.log").write_text(header + proc.stdout + proc.stderr, encoding="utf-8")

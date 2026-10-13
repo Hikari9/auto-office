@@ -500,15 +500,16 @@ def _compose(con, run: dict, scope: dict) -> dict:
             proc = subprocess.run(["git", "-C", str(wt), "merge", "--no-ff", "--no-edit", "-m",
                                    f"office: converge {scope['id']} {t['id']}\n\n{paths.office_trailer(run['id'])}", commit],
                                   capture_output=True, text=True, env=genv)
-            if proc.returncode != 0 and integration.finish_shared_append_merge(wt, t, previous, env=genv):
-                previous.append(t)
-                continue
-            if proc.returncode != 0:
+            if proc.returncode != 0 and not integration.finish_shared_append_merge(wt, t, previous, env=genv):
                 conflicted = paths.git(wt, "diff", "--name-only", "--diff-filter=U", check=False)
                 subprocess.run(["git", "-C", str(wt), "merge", "--abort"], capture_output=True)
                 return {"status": "conflict", "detail": f"{t['id']} conflicts with the rest of {scope['id']} on "
                                                        f"{conflicted.replace(chr(10), ', ') or 'files'}"}
-            integration.preserve_shared_append_multiplicity(wt, t, previous, env=genv)
+            try:
+                integration.preserve_shared_append_multiplicity(wt, t, previous, env=genv)
+            except integration.SharedAppendUnsafe as exc:
+                return {"status": "conflict", "detail":
+                        f"{t['id']}: shared append integrity unverified: {exc}; serialize tasks or repair the append-only history, then office resume"}
             previous.append(t)
         commit = paths.git(wt, "rev-parse", "HEAD")
         tree = paths.git(wt, "rev-parse", "HEAD^{tree}")

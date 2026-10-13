@@ -216,6 +216,18 @@ def push(run: dict, dispatch: dict, *, commit: str = "HEAD", force: bool = False
     if force and not expected:
         raise ValueError("a forced push needs the expected remote sha")
     branch = dispatch["branch"]
+    run_id = run.get("id")
+    if run_id:
+        task_id = dispatch.get("task_id")
+        # Land recovery can pass a synthesized dispatch without task_id.
+        # Its exact run-prefixed Tn ref remains Office-owned, and a forced
+        # update additionally requires a remote SHA lease.
+        owned = (branch == f"office/{run_id[:8]}/{task_id}" if task_id
+                 else bool(re.fullmatch(rf"office/{re.escape(run_id[:8])}/T[0-9]+", branch)))
+        if not owned:
+            return False, "refusing remote write to a branch not owned by this Office task"
+        if force and not re.fullmatch(r"[0-9a-f]{40}", expected or ""):
+            return False, "forced push must be pinned to a complete recorded remote SHA"
     args = ["git", "-C", dispatch["worktree"], "push", "origin", f"{commit}:refs/heads/{branch}"]
     if force:
         args.insert(4, f"--force-with-lease=refs/heads/{branch}:{expected}")

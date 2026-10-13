@@ -252,22 +252,10 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
     }
 
 
-_GIT_PUSH = re.compile(
-    # Git's global options can precede push in arbitrary order. The plan
-    # parser cannot prove ownership of any remote destination.
-    r"\bgit(?:\s+(?:-C|-c|--git-dir|--work-tree|--config-env|--namespace)\s+\S+"
-    r"|\s+--[a-z][a-z0-9-]*(?:=\S+)?|\s+-[a-z]+)*\s+push(?=\s|$)", re.I)
-
-
 def _unsafe_force_push_instruction(instruction: str) -> bool:
-    """Reject planned manual pushes when remote branch ownership cannot be proven.
-
-    The name remains for callers written for the original force-push guard.
-    Mirror, deletion, all-branches and ordinary pushes to shared branches can
-    change history or remove data without --force. Office's own PR sync is
-    responsible for choosing and authenticating a task-owned destination.
-    """
-    return bool(_GIT_PUSH.search(instruction))
+    """Reject manual pushes; Office-owned PR sync manages task refs."""
+    from office import shell_safety
+    return shell_safety.unsafe_manual_push(instruction, prose=True)
 
 
 def _unsafe_force_push_in_plan(task: dict) -> str | None:
@@ -275,13 +263,16 @@ def _unsafe_force_push_in_plan(task: dict) -> str | None:
                         *(task.get("accept") or []), *(task.get("interfaces") or [])]:
         if _unsafe_force_push_instruction(instruction):
             return instruction
+    visual = task.get("visual") or {}
+    if visual.get("start") and _unsafe_force_push_instruction(visual["start"]):
+        return visual["start"]
     return None
 
 
 def _unsafe_force_push_requirement(plan: ParsedPlan) -> str | None:
     req = plan.requirements
-    entries = [*plan.run_checks, *(req.get("done_criteria") or []),
-               *(req.get("non_goals") or [])]
+    entries = [*plan.run_checks, *(req.get("done_criteria") or [])]
+    # non_goals is a prohibition, never a command authorization.
     entries += [v for v in (req.get("deploy") or {}).values() if isinstance(v, str)]
     entries += [f"{entry.get('action') or ''} {' '.join(entry.get('preconditions') or [])}"
                 for entry in req.get("named_actions") or []]

@@ -323,10 +323,7 @@ def _integrate(con, run: dict, job: dict) -> dict:
             continue
         proc = subprocess.run(["git", "-C", str(wt), "merge", "--no-ff", "--no-edit", "-m", f"office: land {t['id']}\n\n{paths.office_trailer(run['id'])}", commit],
                               capture_output=True, text=True, env=genv)
-        if proc.returncode != 0 and finish_shared_append_merge(wt, t, previous, env=genv):
-            previous.append(t)
-            continue
-        if proc.returncode != 0:
+        if proc.returncode != 0 and not finish_shared_append_merge(wt, t, previous, env=genv):
             conflicted = paths.git(wt, "diff", "--name-only", "--diff-filter=U", check=False)
             subprocess.run(["git", "-C", str(wt), "merge", "--abort"], capture_output=True)
             detail = f"{t['id']} conflicts with earlier tasks on {conflicted.replace(chr(10), ', ') or 'files'}"
@@ -334,7 +331,14 @@ def _integrate(con, run: dict, job: dict) -> dict:
                 _set_integration(con, run, key=key, status="conflict", detail=detail, branch=branch)
                 state.emit(con, run, "integration.conflict", f"INTEGRATION CONFLICT: {detail}")
             return {"status": "conflict"}
-        preserve_shared_append_multiplicity(wt, t, previous, env=genv)
+        try:
+            preserve_shared_append_multiplicity(wt, t, previous, env=genv)
+        except SharedAppendUnsafe as exc:
+            detail = f"{t['id']}: shared append integrity unverified: {exc}; resolve shared edits or serialize tasks, then office resume"
+            with db.transaction(con):
+                _set_integration(con, run, key=key, status="conflict", detail=detail, branch=branch)
+                state.emit(con, run, "integration.conflict", f"INTEGRATION CONFLICT: {detail}")
+            return {"status": "conflict", "detail": detail}
         previous.append(t)
     commit = paths.git(wt, "rev-parse", "HEAD")
     tree = paths.git(wt, "rev-parse", "HEAD^{tree}")
@@ -508,69 +512,85 @@ def review_boundary(con, run: dict, tasks: list[dict], revs: dict) -> tuple[bool
 
 # ------------------------------------------------------------------ combining revisions
 
-def preserve_shared_append_multiplicity(wt: Path, task: dict, previous: list[dict], *, env: dict) -> bool:
-    """Fix Git's *clean* merge collapsing identical independent appends (#537).
+class SharedAppendUnsafe(Exception):
+    """An append-only shared file cannot be proved safe to compose."""
 
-    Only touch a literal shared path when both parents are regular UTF-8 files
-    that strictly preserve one common base and append complete lines. A branch
-    that inherited another's additions has those lines in the common base and
-    is not counted twice. Preserve all non-shared merge results unchanged.
+
+def preserve_shared_append_multiplicity(wt: Path, task: dict, previous: list[dict], *, env: dict) -> bool:
+    """Verify *every* shared path after a clean merge, not just conflict cases.
+
+    This is a proof-or-refuse operation: Git's clean result cannot authorize a
+    non-append rewrite, missing file, mode change, ambiguous merge ancestry,
+    binary data, or duplicate-line collapse.  Only the scratch composition
+    commit may be amended; accepted task commits are untouched.
     """
     shared = {x[1:] for x in task.get("scope") or []
               if planfile.is_shared(x) and not any(c in x for c in "*?[]")}
     prior = {x[1:] for t in previous for x in t.get("scope") or [] if planfile.is_shared(x)}
-    if not shared.intersection(prior):
+    eligible = shared & prior
+    if not eligible:
         return False
     parents = paths.git(wt, "rev-list", "--parents", "-n", "1", "HEAD").split()
     if len(parents) != 3:
-        return False
+        raise SharedAppendUnsafe("merge has no two parents; cannot verify shared append ancestry")
     bases = paths.git(wt, "merge-base", "--all", parents[1], parents[2]).splitlines()
     if len(bases) != 1:
-        return False  # ambiguous criss-cross ancestry requires human resolution
+        raise SharedAppendUnsafe("multiple or missing merge bases; shared append ancestry is ambiguous")
 
-    def read_regular(commit: str, path: str) -> bytes | None:
-        mode = subprocess.run(["git", "-C", str(wt), "ls-tree", commit, "--", path],
-                              capture_output=True)
-        if mode.returncode or not mode.stdout.startswith((b"100644 blob ", b"100755 blob ")):
-            return None
-        contents = subprocess.run(["git", "-C", str(wt), "show", f"{commit}:{path}"],
-                                  capture_output=True)
-        if contents.returncode or b"\0" in contents.stdout:
-            return None
+    def blob(commit: str, path: str) -> tuple[str, bytes]:
+        if Path(path).is_absolute() or ".." in Path(path).parts:
+            raise SharedAppendUnsafe(f"invalid shared path {path!r}")
+        entry = subprocess.run(["git", "-C", str(wt), "ls-tree", commit, "--", path],
+                               capture_output=True)
+        if entry.returncode or not entry.stdout:
+            raise SharedAppendUnsafe(f"{path}: missing shared file in merge ancestry")
+        mode = entry.stdout.split(b" ", 1)[0].decode("ascii", "replace")
+        if mode not in ("100644", "100755") or b" blob " not in entry.stdout:
+            raise SharedAppendUnsafe(f"{path}: shared path is not a regular file")
+        raw = subprocess.run(["git", "-C", str(wt), "show", f"{commit}:{path}"],
+                             capture_output=True)
+        if raw.returncode or b"\0" in raw.stdout:
+            raise SharedAppendUnsafe(f"{path}: binary or unreadable shared file")
         try:
-            contents.stdout.decode("utf-8")
+            raw.stdout.decode("utf-8")
         except UnicodeDecodeError:
-            return None
-        return contents.stdout
+            raise SharedAppendUnsafe(f"{path}: invalid UTF-8 shared file") from None
+        return mode, raw.stdout
 
     changes = {}
-    for path in sorted(shared & prior):
-        base, ours, theirs = (read_regular(commit, path) for commit in
-                             (bases[0], parents[1], parents[2]))
-        if base is None or ours is None or theirs is None:
-            continue
-        if not ours.startswith(base) or not theirs.startswith(base) or (base and not base.endswith(b"\n")):
-            continue
-        a, b = ours[len(base):], theirs[len(base):]
+    for path in sorted(eligible):
+        (base_mode, base), (left_mode, left), (right_mode, right), (merged_mode, merged) = (
+            blob(commit, path) for commit in (bases[0], parents[1], parents[2], parents[0]))
+        if len({base_mode, left_mode, right_mode, merged_mode}) != 1:
+            raise SharedAppendUnsafe(f"{path}: shared file mode changed")
+        if not left.startswith(base) or not right.startswith(base):
+            raise SharedAppendUnsafe(f"{path}: non-append edit or truncated shared file")
+        if base and not base.endswith(b"\n") and (left != base or right != base):
+            raise SharedAppendUnsafe(f"{path}: append to an incomplete base line")
+        a, b = left[len(base):], right[len(base):]
         if any(suffix and not suffix.endswith(b"\n") for suffix in (a, b)):
-            continue
-        expected = base + a + b
+            raise SharedAppendUnsafe(f"{path}: incomplete appended record")
         target = wt / path
         if target.is_symlink() or not target.is_file():
-            continue
-        if target.read_bytes() != expected:
+            raise SharedAppendUnsafe(f"{path}: worktree shared path is not a regular file")
+        if target.read_bytes() != merged:
+            raise SharedAppendUnsafe(f"{path}: worktree contents differ from composition HEAD")
+        expected = base + a + b
+        if merged != expected:
             changes[path] = expected
     if not changes:
         return False
-    for path, content in changes.items():
-        fd = os.open(wt / path, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
-        paths.git(wt, "add", "--", path)
-    # HEAD is a scratch composition commit; amend its tree, retain its two
-    # parents, and never rewrite an accepted task's commit or shared branch.
-    paths.git(wt, "-c", "commit.gpgsign=false", "commit", "--amend", "--no-edit",
-              env={**os.environ, **env})
+    try:
+        for path, content in changes.items():
+            target = wt / path
+            fd = os.open(target, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(content)
+            paths.git(wt, "add", "--", path)
+        paths.git(wt, "-c", "commit.gpgsign=false", "commit", "--amend", "--no-edit",
+                  env={**os.environ, **env})
+    except (OSError, paths.GitError) as exc:
+        raise SharedAppendUnsafe(f"shared append correction failed; retry from clean composition: {exc}") from exc
     return True
 
 
@@ -580,6 +600,11 @@ def finish_shared_append_merge(wt: Path, task: dict, previous: list[dict], *, en
               and not any(c in x for c in "*?[]")}
     earlier = {x[1:] for t in previous for x in t.get("scope") or [] if planfile.is_shared(x)}
     eligible = shared & earlier
+    merging = paths.git(wt, "rev-parse", "MERGE_HEAD", check=False).strip()
+    if merging:
+        bases = paths.git(wt, "merge-base", "--all", "HEAD", merging).splitlines()
+        if len(bases) != 1:
+            return False  # ambiguous ancestry must never be resolved automatically
     proc = subprocess.run(["git", "-C", str(wt), "diff", "--name-only", "--diff-filter=U", "-z"],
                           capture_output=True)
     try:

@@ -514,6 +514,14 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
         if verification_coverage._complete_pytest_command(command):
             environment.pop("PYTEST_ADDOPTS", None)
             environment.pop("PYTEST_PLUGINS", None)
+        from office import shell_safety
+        if shell_safety.unsafe_manual_push(command):
+            detail = "refusing unowned manual Git push in check command; use Office-owned task PR sync"
+            return {"verdict": "CHANGES_REQUIRED",
+                    "parsed": review_parse.Parsed(verdict="CHANGES_REQUIRED", findings=[{
+                        "code": f"C{i}", "severity": "material", "location": command,
+                        "summary": detail, "action": "remove the unsafe manual remote write"}]),
+                    "route": "deterministic", "summary": detail, "results": results}
         code, out = _run_check(command, cwd, timeout, environment)
         # Office's own timeout (124) or a test runner's per-test timeout (exit 1)
         # under host load is the environment, not the code (issue #267 A2).

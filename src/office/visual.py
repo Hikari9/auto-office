@@ -463,6 +463,11 @@ def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Pat
                 "cause": f"{url} is not a local/test origin; capture is limited to authorized local and preview environments",
                 "product_failures": []}
     if spec.get("start"):
+        from office import shell_safety
+        if shell_safety.unsafe_manual_push(spec["start"]):
+            return {"evidence_status": "CAPTURE_BLOCKED",
+                    "cause": "visual.start contains an unowned manual Git push; use Office-owned task PR sync",
+                    "product_failures": []}
         conflict = _capture_port_conflict(url, con, run, worktree)
         if conflict:
             return {"evidence_status": "CAPTURE_BLOCKED", "cause": conflict, "product_failures": []}
