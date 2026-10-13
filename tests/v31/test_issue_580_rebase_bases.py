@@ -114,3 +114,43 @@ def test_stale_main_merge_conflict_refuses_rerun_without_corrupting_task_head(tm
         rerun._restack(None, run, {"id": "T1", "depends": []}, str(wt))
     assert git(wt, "rev-parse", "HEAD") == before
     assert not git(wt, "diff", "--name-only", "--diff-filter=U")
+
+def test_second_merge_conflict_does_not_advance_original_task_head(tmp_path, monkeypatch):
+    from office import state
+    repo = tmp_path / "atomic"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.name", "Reviewer")
+    git(repo, "config", "user.email", "review@example.test")
+    (repo / "shared.txt").write_text("base\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "base")
+    old = git(repo, "rev-parse", "HEAD")
+    git(repo, "switch", "-qc", "task")
+    (repo / "task.py").write_text("task = True\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "task")
+    git(repo, "switch", "-q", "main")
+    (repo / "shared.txt").write_text("main\n")
+    git(repo, "commit", "-qam", "new main")
+    new = git(repo, "rev-parse", "HEAD")
+    git(repo, "switch", "-qc", "dep", old)
+    (repo / "shared.txt").write_text("other dependency\n")
+    git(repo, "commit", "-qam", "dependency")
+    dep = git(repo, "rev-parse", "HEAD")
+    git(repo, "switch", "-q", "main")
+    wt = tmp_path / "task-worktree"
+    git(repo, "worktree", "add", "-q", str(wt), "task")
+    before = git(wt, "rev-parse", "HEAD")
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.execute("CREATE TABLE revisions (id TEXT PRIMARY KEY, commit_sha TEXT)")
+    con.execute("INSERT INTO revisions VALUES ('R2',?)", (dep,))
+    monkeypatch.setattr(state, "get_task", lambda con, rid, tid: {
+        "id": tid, "status": "accepted", "accepted_revision_id": "R2"})
+    run = {"id": "c" * 32, "repo_root": str(repo), "base_sha": old,
+           "landing": {"rebase": {"onto": new}}}
+    with pytest.raises(Refused, match="cannot restack"):
+        rerun._restack(con, run, {"id": "T1", "depends": ["T2"]}, str(wt))
+    assert git(wt, "rev-parse", "HEAD") == before
+    assert git(wt, "status", "--porcelain") == ""

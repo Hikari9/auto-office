@@ -989,3 +989,35 @@ def test_issue_542_plan_reviewer_persists_model_and_effort(env):
     rows = _q(env, "SELECT role, triple, model, effort FROM dispatches WHERE role='plan_reviewer'")
     assert rows, "a plan review must record a reviewer dispatch"
     assert all(r["model"] and r["effort"] for r in rows), rows
+
+
+
+@pytest.mark.parametrize("gear", ["express", "full"])
+def test_issue_542_alternate_plan_review_routes_persist_model_effort(env, gear):
+    _start(env, gear=gear, approve=False, plan_reviewer=[{"reply": APPROVED}])
+    rows = _q(env, "SELECT triple, model, effort, route_json FROM dispatches WHERE role='plan_reviewer'")
+    assert rows
+    for row in rows:
+        route = json.loads(row["route_json"])["candidate"]
+        assert row["model"] == route["invocation_model_id"]
+        assert row["effort"] == route["effort"]
+
+
+def test_issue_542_historical_backfill_uses_only_durable_route_evidence(tmp_path):
+    from office import db
+    con = db.connect(tmp_path / "routes.db")
+    try:
+        pairs = [
+            ("known", json.dumps({"candidate": {"invocation_model_id": "original-model", "effort": "high"}})),
+            ("unknown", json.dumps({"candidate": {"model_id": "unproven"}})),
+        ]
+        for did, route in pairs:
+            con.execute("INSERT INTO dispatches(id, role, route_json) VALUES (?, 'plan_reviewer', ?)", (did, route))
+        with db.transaction(con):
+            assert db._repair_historical_plan_review_routes(con) == (1, 1)
+        rows = {r["id"]: (r["model"], r["effort"]) for r in con.execute(
+            "SELECT id, model, effort FROM dispatches")}
+        assert rows["known"] == ("original-model", "high")
+        assert rows["unknown"] == (None, None)
+    finally:
+        con.close()
