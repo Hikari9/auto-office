@@ -355,10 +355,10 @@ def test_s05_overkill_skips_a_route_only_in_the_automatic_selection_its_scope_ma
 def test_s05_shipped_defaults_hold_no_denied_or_overkill_entries(monkeypatch, tmp_path):
     import yaml
     shipped = yaml.safe_load((paths.resources_root() / "config" / "config.default.yaml").read_text())
-    assert shipped["routing"]["user_policy"] == {"denied_models": [], "overkill_rules": []}
+    assert shipped["routing"]["user_policy"] == {"denied_models": [], "overkill_rules": [], "version_ceilings": {}}
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "none.yaml"))
-    assert cfg.resolve(None)[0]["routing"]["user_policy"] == {"denied_models": [], "overkill_rules": []}
+    assert cfg.resolve(None)[0]["routing"]["user_policy"] == {"denied_models": [], "overkill_rules": [], "version_ceilings": {}}
     assert candidates.current_user_policies() == []
     # nothing in the shipped catalog or config marks a route denied or overkill by brand, price, size or age
     assert "overkill" not in json.dumps({k: v for k, v in shipped.items() if k != "routing"}).lower()
