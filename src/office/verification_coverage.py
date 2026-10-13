@@ -88,25 +88,63 @@ def _complete_pytest_command(command: str) -> bool:
     return True
 
 
-def audit(repo: Path, commit: str, commands: list[str]) -> tuple[str, str] | None:
-    """Known pytest tier coverage, or None when no custom --all suite is declared."""
+def _tiered_repo(repo: Path, commit: str) -> list[str]:
     conftest = _show(repo, commit, "tests/conftest.py")
     if not conftest or "pytest_addoption" not in conftest or '"--all"' not in conftest \
             or "pytest_collection_modifyitems" not in conftest:
-        return None
-    tiers = [name for name in ("integration", "legacy", "slow") if name in conftest]
+        return []
+    return [name for name in ("integration", "legacy", "slow") if name in conftest]
+
+
+def _is_validate_script(command: str) -> bool:
+    words = _tokens(command)
+    if words[:1] in (["bash"], ["sh"]):
+        words = words[1:]
+    return words in (["scripts/validate.sh"], ["./scripts/validate.sh"])
+
+
+_ATTEST_PYTEST = ".venv/bin/python3 -m pytest tests/ -q -n 2 --all"
+
+
+def supplemental_checks(repo: Path, commit: str, commands: list[str]) -> list[str]:
+    if (_tiered_repo(repo, commit) and any(_is_validate_script(c) for c in commands)
+            and not any(_complete_pytest_command(c) for c in commands)):
+        return [_ATTEST_PYTEST]
+    return []
+
+
+def audit(repo: Path, commit: str, commands: list[str], *,
+          verified_commands: list[str] | None = None) -> tuple[str, str] | None:
+    tiers = _tiered_repo(repo, commit)
     if not tiers:
         return None
-    for command in commands:
-        if _complete_pytest_command(command):
-            return FULL, "full pytest selection (--all; no test-path or marker restriction)"
-        # A documented validation script may run other static/adapter checks too.
-        words = _tokens(command)
-        if words[:1] in (["bash"], ["sh"]):
-            words = words[1:]
-        if words in (["scripts/validate.sh"], ["./scripts/validate.sh"]):
-            script = _show(repo, commit, "scripts/validate.sh")
-            if script and any(_complete_pytest_command(line) for line in script.splitlines() if not line.lstrip().startswith("#")):
-                return FULL, "scripts/validate.sh runs the full pytest --all selection"
-    return PARTIAL, (f"run-level checks do not demonstrate the complete pytest suite; "
-                     f"{', '.join(tiers)} tests can be deselected by default")
+    selected = commands if verified_commands is None else verified_commands
+    if any(_complete_pytest_command(c) for c in selected):
+        return FULL, "full pytest --all selection executed by integration checks"
+    return PARTIAL, ("run-level checks do not demonstrate the complete pytest suite; "
+                     f"{', '.join(tiers)} tests can be deselected by default; "
+                     "shell script text is not execution evidence")
+
+
+def attested_checks(con, run: dict, commit: str) -> list[str]:
+    import json
+    proof = ((run.get("landing") or {}).get("integration") or {}).get("full_suite") or {}
+    if con is None or proof.get("commit") != commit or not proof.get("gate"):
+        return []
+    row = con.execute("SELECT status, verdict, input_key FROM gates "
+                      "WHERE id=? AND run_id=? AND kind='checks'",
+                      (proof["gate"], run["id"])).fetchone()
+    if not row or row["status"] != "done" or row["verdict"] != "PASS" or row["input_key"] != f"integration:{commit}":
+        return []
+    expected = proof.get("command")
+    if not expected or not _complete_pytest_command(expected):
+        return []
+    for record in con.execute("SELECT meta_json FROM evidence WHERE run_id=? AND gate_id=? AND kind='check_output'",
+                              (run["id"], proof["gate"])):
+        try:
+            meta = json.loads(record["meta_json"] or "{}")
+        except (ValueError, TypeError):
+            continue
+        if meta.get("command") == expected and meta.get("exit") == 0:
+            return [expected]
+    return []

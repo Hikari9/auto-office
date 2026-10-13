@@ -509,7 +509,12 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
             return {"verdict": "STALE", "summary": "worktree changed after submit; checks cannot bind to the revision"}
         log = evdir / f"check-{i}.log"
         started = time.time()
-        code, out = _run_check(command, cwd, timeout, _check_env(run))
+        environment = _check_env(run)
+        from office import verification_coverage
+        if verification_coverage._complete_pytest_command(command):
+            environment.pop("PYTEST_ADDOPTS", None)
+            environment.pop("PYTEST_PLUGINS", None)
+        code, out = _run_check(command, cwd, timeout, environment)
         # Office's own timeout (124) or a test runner's per-test timeout (exit 1)
         # under host load is the environment, not the code (issue #267 A2).
         loaded = host_overloaded() if code == 124 or (code != 0 and runner_timeout(out)) else None

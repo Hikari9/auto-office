@@ -764,9 +764,17 @@ def _stage_self_review(run: dict, d: dict, rev_id: str, wt: Path, receipt: dict 
     source = wt / briefs.LEDGER_FILE
     dest = briefs.self_review_path(run, d["id"], rev_id)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(dest, flags, 0o600)
+    except FileExistsError as exc:
+        raise Refused("self-review-collision",
+                      "self-review evidence already exists; cannot overwrite another revision") from exc
+    except OSError as exc:
+        raise Refused("self-review-archive-unavailable", "cannot securely archive self-review evidence") from exc
     staged.append((source, dest))
-    dest.write_text(raw, encoding="utf-8")
-    dest.chmod(0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as file:
+        file.write(raw)
     return dest
 
 

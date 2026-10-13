@@ -69,9 +69,6 @@ def test_partial_coverage_is_reported_not_credited_as_complete(tiered_repo, comm
 @pytest.mark.parametrize("commands", [
     ["pytest tests/ --all -q"],
     ["python3 -m pytest --all"],
-    ["scripts/validate.sh"],
-    ["VALIDATE_WORKERS=1 scripts/validate.sh"],
-    ["bash scripts/validate.sh"],
     ["uv run pytest tests/ --all"],
     [".venv/bin/python -m pytest tests/ -q -n 2 --all"],
     ["env CI=1 python3 -m pytest --all"],
@@ -157,3 +154,14 @@ def pytest_collection_modifyitems(config, items):
     assert receipt.exists()
     import json
     assert json.loads(receipt.read_text())["verification"]["status"] == "partial"
+
+def test_issue_563_unreachable_script_pytest_is_not_full(tiered_repo):
+    root, sha = tiered_repo
+    script = root / "scripts" / "validate.sh"
+    script.write_text("#!/bin/sh\nexit 0\npython3 -m pytest tests/ -q --all\n")
+    subprocess.run(["git", "-C", str(root), "add", "scripts/validate.sh"], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-qm", "unreachable test"], check=True)
+    sha = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    assert vc.audit(root, sha, ["scripts/validate.sh"])[0] == vc.PARTIAL
+    assert vc.supplemental_checks(root, sha, ["scripts/validate.sh"]) == [vc._ATTEST_PYTEST]

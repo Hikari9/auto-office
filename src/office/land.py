@@ -200,7 +200,7 @@ def _land_merge(con, run: dict, mode: str, snap: dict, deploy: dict, *, redeploy
     # Integration PASS alone proves only the checks the plan requested. In a
     # repository that expressly deselects pytest tiers without --all, do not
     # merge any task PR based on a partial selection (#563).
-    _require_run_coverage(run, commit)
+    _require_run_coverage(run, commit, con=con)
     before = _merge_all(con, run, res)
     before = landing.get("rollback") or before  # a rerun's `before` already holds the merges
     _record(con, run, rollback=before)
@@ -536,9 +536,11 @@ def _github_conflicting(run: dict, number: int) -> bool:
     return isinstance(info, dict) and (info.get("mergeable") == "CONFLICTING" or info.get("mergeStateStatus") == "DIRTY")
 
 
-def _require_run_coverage(run: dict, commit: str) -> None:
+def _require_run_coverage(run: dict, commit: str, *, con=None) -> None:
     checks = list((run.get("landing") or {}).get("run_checks") or [])
-    coverage = verification_coverage.audit(Path(run["repo_root"]), commit, checks)
+    coverage = verification_coverage.audit(Path(run["repo_root"]), commit, checks,
+                                            verified_commands=verification_coverage.attested_checks(con, run, commit)
+                                            if con is not None else None)
     if coverage and coverage[0] == verification_coverage.PARTIAL:
         raise Refused("integration-coverage-incomplete",
                       f"integration checks are insufficient for landing: {coverage[1]}; "

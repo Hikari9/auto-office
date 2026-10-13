@@ -490,19 +490,25 @@ def _compose(con, run: dict, scope: dict) -> dict:
     from office import integration
     tasks = integration._topo([state.get_task(con, run["id"], tid) for tid in scope["tasks"]])
     try:
+        previous = []
         for t in tasks:
             commit = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (t["accepted_revision_id"],)).fetchone()[0]
             if subprocess.run(["git", "-C", str(wt), "merge-base", "--is-ancestor", commit, "HEAD"],
                               capture_output=True).returncode == 0:
+                previous.append(t)
                 continue
             proc = subprocess.run(["git", "-C", str(wt), "merge", "--no-ff", "--no-edit", "-m",
                                    f"office: converge {scope['id']} {t['id']}\n\n{paths.office_trailer(run['id'])}", commit],
                                   capture_output=True, text=True, env=genv)
+            if proc.returncode != 0 and integration.finish_shared_append_merge(wt, t, previous, env=genv):
+                previous.append(t)
+                continue
             if proc.returncode != 0:
                 conflicted = paths.git(wt, "diff", "--name-only", "--diff-filter=U", check=False)
                 subprocess.run(["git", "-C", str(wt), "merge", "--abort"], capture_output=True)
                 return {"status": "conflict", "detail": f"{t['id']} conflicts with the rest of {scope['id']} on "
                                                        f"{conflicted.replace(chr(10), ', ') or 'files'}"}
+            previous.append(t)
         commit = paths.git(wt, "rev-parse", "HEAD")
         tree = paths.git(wt, "rev-parse", "HEAD^{tree}")
     finally:
@@ -1162,6 +1168,25 @@ def _converge_scope(con, run: dict, scope: dict, *, basis: str) -> None:
 
 # ------------------------------------------------------------------ status, blockers
 
+def _historical_waiver_stale(con, run: dict, scope: dict, st: dict) -> bool:
+    key = _key(con, run, scope)
+    return st.get("status") in ("waived", "stale_waiver") and key is not None and st.get("key") != key
+
+
+def _reconcile_historical_waivers(con, run: dict) -> list[str]:
+    """Preserve historic waiver records and require fresh user-authorized review."""
+    found = []
+    for scope in all_scopes(con, run):
+        st = scope_state(run, scope["id"])
+        if st.get("status") == "waived" and _historical_waiver_stale(con, run, scope, st):
+            _set_scope(con, run, scope["id"], status="stale_waiver",
+                       detail="historical waiver covers earlier accepted set; fresh review required")
+            state.emit(con, run, "convergence.stale_waiver",
+                       f"{scope['id']}: prior waiver preserved, new acceptance needs independent review")
+            found.append(scope["id"])
+    return found
+
+
 def summary(con, run: dict) -> list[dict]:
     run = state.get_run(con, run["id"])
     out = []
@@ -1169,7 +1194,9 @@ def summary(con, run: dict) -> list[dict]:
         st = scope_state(run, s["id"])
         key = _key(con, run, s)
         status = st.get("status") or "waiting"
-        held = status in ("recheck", "escalated", "stopped", "intake_gap")
+        if _historical_waiver_stale(con, run, s, st):
+            status = "stale_waiver"
+        held = status in ("recheck", "escalated", "stopped", "intake_gap", "stale_waiver")
         if key is None and not held:
             status = "waiting"
         elif key is not None and st.get("key") != key and status in CONVERGED:
@@ -1228,6 +1255,9 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
     held_rechecks = []
     for s in summary(con, run):
         sid = s["id"]
+        if s["status"] == "stale_waiver":
+            return (f"{sid} historical waiver is stale and cannot authorize the latest accepted revision; "
+                    f"record a new review decision: office decide {sid} review --quote \"<user words>\"")
         if s["status"] == "escalated":
             esc = s.get("escalation") or {}
             if contract.has_cap_waiver(run):
@@ -1313,6 +1343,8 @@ def retry_blocked(con, run: dict) -> list[str]:
     """`office resume`: re-run unavailable, attention, or evidence-blocked scope
     reviews on the same composed revision. No round is spent. Caller holds tx."""
     out = []
+    run = state.get_run(con, run["id"])
+    out.extend(_reconcile_historical_waivers(con, run))
     run = state.get_run(con, run["id"])
     for s in all_scopes(con, run):
         st = scope_state(run, s["id"])
@@ -1609,7 +1641,13 @@ def decide(con, run: dict, scope_id: str, choice: str, *, quote: str | None, rea
         if scope is None:
             raise Usage("unknown-scope", f"no lane or shared scope {scope_id}", next_step="office inspect convergence")
         st = scope_state(run, scope["id"])
-        if st.get("status") not in ("escalated", "stopped", "intake_gap"):
+        if _historical_waiver_stale(con, run, scope, st):
+            _reconcile_historical_waivers(con, run)
+            st = scope_state(state.get_run(con, run["id"]), scope["id"])
+        if st.get("status") == "stale_waiver" and choice != "review":
+            raise Refused("stale-waiver-decision", f"{scope['id']} needs a new independent review",
+                          next_step=f'office decide {scope["id"]} review --quote "<user words>"')
+        if st.get("status") not in ("escalated", "stopped", "intake_gap", "stale_waiver"):
             raise Refused("no-decision-pending", f"{scope['id']} is {st.get('status') or 'waiting'}; nothing waits on "
                           "an operator decision", next_step="office status")
         con.execute("INSERT INTO authorizations(id, run_id, kind, target, requirements_version, authorized_by, quote, "

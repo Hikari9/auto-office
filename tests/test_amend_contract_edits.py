@@ -274,3 +274,18 @@ def test_issue_571_plan_rejects_force_push_to_shared_branch():
     assert any("unsafe force-push" in error for error in parsed.errors)
     ordinary = PLAN.replace("visual: none", "notes:\n- git push -u origin HEAD:office/abcd/T1\nvisual: none")
     assert not any("force-push" in error for error in planfile.parse(ordinary).errors)
+
+@pytest.mark.parametrize("command", [
+    "git push origin +HEAD:shared-preview",
+    "git -C . push origin HEAD:shared-preview --force-with-lease",
+    "git push origin HEAD:shared-preview --force-with-lease=refs/heads/shared-preview:deadbeef",
+    "git --git-dir=.git push origin HEAD:shared-preview -f",
+    "git -c core.logallrefupdates=true push origin +HEAD:shared-preview",
+])
+def test_issue_571_adversarial_force_push(command):
+    from office import planfile
+    assert planfile._unsafe_force_push_instruction(command)
+    task = PLAN.replace("visual: none", f"notes:\n- {command}\nvisual: none")
+    assert any("unsafe force-push" in error for error in planfile.parse(task).errors)
+    req = PLAN.replace("## Tasks", f"checks: {command}\n\n## Tasks")
+    assert any("unsafe force-push" in error for error in planfile.parse(req).errors)

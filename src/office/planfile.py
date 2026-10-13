@@ -252,20 +252,37 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
     }
 
 
-_FORCE_PUSH_COMMAND = re.compile(r"\bgit\s+push\b[^\n]{0,240}\s(?:--force(?:-with-lease|-if-includes)?|-f)(?:\s|$)", re.I)
+_GIT_PUSH = re.compile(
+    r"\bgit(?:\s+(?:-C|-c|--git-dir|--work-tree)\s+\S+"
+    r"|\s+--(?:git-dir|work-tree)=\S+|\s+--no-pager)*\s+push(?=\s|$)", re.I)
+_FORCE_OPTION = re.compile(r"(?<!\S)(?:--force(?:-with-lease|-if-includes)?(?:=\S+)?|-f)(?=\s|$)", re.I)
+_FORCED_REFSPEC = re.compile(r"(?<!\S)\+[^\s]+", re.I)
+
+
+def _unsafe_force_push_instruction(instruction: str) -> bool:
+    for match in _GIT_PUSH.finditer(instruction):
+        tail = re.split(r"[;&|\n]", instruction[match.end():], maxsplit=1)[0]
+        if _FORCE_OPTION.search(tail) or _FORCED_REFSPEC.search(tail):
+            return True
+    return False
 
 
 def _unsafe_force_push_in_plan(task: dict) -> str | None:
-    """Reject plans telling executors to rewrite remote branch history (#571).
-
-    The worker's own task branch is handled by Office's leased PR sync. A plan
-    must not authorize an executor's arbitrary force-push to shared branches.
-    """
     for instruction in [*(task.get("notes") or []), *(task.get("checks") or []),
-                        *(task.get("accept") or [])]:
-        if _FORCE_PUSH_COMMAND.search(instruction):
+                        *(task.get("accept") or []), *(task.get("interfaces") or [])]:
+        if _unsafe_force_push_instruction(instruction):
             return instruction
     return None
+
+
+def _unsafe_force_push_requirement(plan: ParsedPlan) -> str | None:
+    req = plan.requirements
+    entries = [*plan.run_checks, *(req.get("done_criteria") or []),
+               *(req.get("non_goals") or [])]
+    entries += [v for v in (req.get("deploy") or {}).values() if isinstance(v, str)]
+    entries += [f"{entry.get('action') or ''} {' '.join(entry.get('preconditions') or [])}"
+                for entry in req.get("named_actions") or []]
+    return next((e for e in entries if _unsafe_force_push_instruction(e)), None)
 
 
 def _validate(plan: ParsedPlan) -> None:
@@ -276,6 +293,9 @@ def _validate(plan: ParsedPlan) -> None:
     for d in sorted(dup):
         plan.errors.append(f"{d}: duplicate task id")
     known = set(ids)
+    if _unsafe_force_push_requirement(plan):
+        plan.errors.append("run-level Requirements: unsafe force-push to a possibly shared remote branch in plan; "
+                           "use the Office-owned task PR workflow")
     for t in plan.tasks:
         if not t["scope"] and not t.get("scope_none"):
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `scope:` (paths this task may write)")

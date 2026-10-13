@@ -24,7 +24,7 @@ import time
 import uuid
 from pathlib import Path
 
-from office import briefs, contract, db, gates, jobs, paths, review_parse, state, verification_coverage, worktree_setup
+from office import briefs, contract, db, gates, jobs, paths, planfile, review_parse, state, verification_coverage, worktree_setup
 from office.util import dumps, now_iso, sha256_obj
 
 
@@ -315,12 +315,17 @@ def _integrate(con, run: dict, job: dict) -> dict:
         return {"status": "blocked"}
     import os
     genv = dict(os.environ, **paths.commit_identity_env(repo))
+    previous = []
     for t in tasks:
         commit = revs[t["id"]]["commit_sha"]
         if subprocess.run(["git", "-C", str(wt), "merge-base", "--is-ancestor", commit, "HEAD"], capture_output=True).returncode == 0:
+            previous.append(t)
             continue
         proc = subprocess.run(["git", "-C", str(wt), "merge", "--no-ff", "--no-edit", "-m", f"office: land {t['id']}\n\n{paths.office_trailer(run['id'])}", commit],
                               capture_output=True, text=True, env=genv)
+        if proc.returncode != 0 and finish_shared_append_merge(wt, t, previous, env=genv):
+            previous.append(t)
+            continue
         if proc.returncode != 0:
             conflicted = paths.git(wt, "diff", "--name-only", "--diff-filter=U", check=False)
             subprocess.run(["git", "-C", str(wt), "merge", "--abort"], capture_output=True)
@@ -329,6 +334,7 @@ def _integrate(con, run: dict, job: dict) -> dict:
                 _set_integration(con, run, key=key, status="conflict", detail=detail, branch=branch)
                 state.emit(con, run, "integration.conflict", f"INTEGRATION CONFLICT: {detail}")
             return {"status": "conflict"}
+        previous.append(t)
     commit = paths.git(wt, "rev-parse", "HEAD")
     tree = paths.git(wt, "rev-parse", "HEAD^{tree}")
     needs_review, why = review_boundary(con, run, tasks, revs)
@@ -350,7 +356,9 @@ def _integrate(con, run: dict, job: dict) -> dict:
         # The merged lockfile is in place; install before the checks that need it.
         worktree_setup.prepare(run, wt, "integration", paths.run_dir(run["id"]) / "setup" / "integration.log", created=True)
         gid = _gate(con, run, integ_rev, "checks", commit)
-        outcome = gates.run_commands(con, run, run_checks, wt, integ_rev, {"id": gid, "task_id": None}, check_tree=False)
+        extra_checks = verification_coverage.supplemental_checks(repo, commit, run_checks)
+        outcome = gates.run_commands(con, run, [*run_checks, *extra_checks], wt, integ_rev,
+                                     {"id": gid, "task_id": None}, check_tree=False)
         with db.transaction(con):
             con.execute("UPDATE gates SET status='done', verdict=?, summary=?, finished_at=? WHERE id=?",
                         (outcome["verdict"], outcome.get("summary"), now_iso(), gid))
@@ -405,14 +413,18 @@ def _integrate(con, run: dict, job: dict) -> dict:
                                  detail=f"integration review {outcome['verdict']}: {detail[:200]}")
                 state.emit(con, run, "integration.failed", f"INTEGRATION review {outcome['verdict']}: {detail[:140]}")
             return results
-    coverage = verification_coverage.audit(repo, commit, run_checks)
+    executed = ([r["command"] for r in outcome.get("results") or [] if r.get("exit") == 0]
+                if run_checks else [])
+    coverage = verification_coverage.audit(repo, commit, run_checks, verified_commands=executed)
     incomplete = coverage and coverage[0] == verification_coverage.PARTIAL
     detail = (f"composed result verified by declared checks; FULL SUITE NOT VERIFIED: {coverage[1]}"
               if incomplete else "composed result verified")
     with db.transaction(con):
         if compose_base(state.get_run(con, run["id"])) != base:
             return {"skipped": "rebased while composing"}
-        _set_integration(con, run, status="accepted", detail=detail)
+        direct = next((c for c in executed if verification_coverage._complete_pytest_command(c)), None)
+        proof = ({"commit": commit, "gate": gid, "command": direct} if direct else None)
+        _set_integration(con, run, status="accepted", detail=detail, full_suite=proof)
         if incomplete:
             state.emit(con, run, "integration.coverage_partial",
                        f"integration {commit[:12]}: FULL SUITE NOT VERIFIED: {coverage[1]}")
@@ -488,6 +500,76 @@ def review_boundary(con, run: dict, tasks: list[dict], revs: dict) -> tuple[bool
 
 
 # ------------------------------------------------------------------ combining revisions
+
+def finish_shared_append_merge(wt: Path, task: dict, previous: list[dict], *, env: dict) -> bool:
+    """Union only provable append-only changes to identically declared shared files."""
+    shared = {x[1:] for x in task.get("scope") or [] if planfile.is_shared(x)
+              and not any(c in x for c in "*?[]")}
+    earlier = {x[1:] for t in previous for x in t.get("scope") or [] if planfile.is_shared(x)}
+    eligible = shared & earlier
+    proc = subprocess.run(["git", "-C", str(wt), "diff", "--name-only", "--diff-filter=U", "-z"],
+                          capture_output=True)
+    try:
+        conflicts = [x.decode("utf8") for x in proc.stdout.split(b"\0") if x]
+    except UnicodeDecodeError:
+        return False
+    if proc.returncode or not conflicts or not set(conflicts) <= eligible:
+        return False
+    output = {}
+    for path in conflicts:
+        if Path(path).is_absolute() or ".." in Path(path).parts:
+            return False
+        ls = subprocess.run(["git", "-C", str(wt), "ls-files", "-u", "-z", "--", path],
+                            capture_output=True)
+        modes = {}
+        for entry in ls.stdout.split(b"\0"):
+            if not entry:
+                continue
+            try:
+                metadata, name = entry.split(b"\t", 1)
+                mode, _, stage = metadata.split(b" ")
+                if name.decode("utf-8") == path:
+                    modes[int(stage)] = mode
+            except (UnicodeDecodeError, ValueError):
+                return False
+        if ls.returncode or set(modes) != {1, 2, 3} or len(set(modes.values())) != 1                 or modes[1] not in (b"100644", b"100755"):
+            return False
+        parts = []
+        for i in (1, 2, 3):
+            o = subprocess.run(["git", "-C", str(wt), "show", f":{i}:{path}"], capture_output=True)
+            if o.returncode or b"\0" in o.stdout:
+                return False
+            try:
+                o.stdout.decode("utf8")
+            except UnicodeDecodeError:
+                return False
+            parts.append(o.stdout)
+        base, ours, theirs = parts
+        if (not ours.startswith(base) or not theirs.startswith(base)
+                or (base and not base.endswith(b"\n"))):
+            return False
+        a, b = ours[len(base):], theirs[len(base):]
+        if any(v and not v.endswith(b"\n") for v in (a,b)):
+            return False
+        lines = a.splitlines(keepends=True)
+        seen = set(lines)
+        for line in b.splitlines(keepends=True):
+            if line not in seen:
+                lines.append(line)
+                seen.add(line)
+        output[path] = base + b"".join(lines)
+    for path, content in output.items():
+        target = wt / path
+        if target.is_symlink() or not target.is_file():
+            return False
+        fd = os.open(target, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+        if subprocess.run(["git", "-C", str(wt), "add", "--", path], capture_output=True).returncode:
+            return False
+    return subprocess.run(["git", "-C", str(wt), "commit", "--no-edit"],
+                          capture_output=True, env=env).returncode == 0
+
 
 class CombineConflict(Exception):
     """Two heads cannot be merged. `left` and `right` label them, `paths` are the conflicting files."""
