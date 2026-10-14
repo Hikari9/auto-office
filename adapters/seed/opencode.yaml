@@ -1,0 +1,105 @@
+id: opencode
+verified_state: valid-unverified
+version_fingerprint:
+  command: [opencode, --version]
+  parser: first-line
+model_source:
+  type: cli
+  command: [opencode, models]
+# Checked before each headless launch; a failure stops the launch with the
+# reason recorded (`preflight_failed`), never a silent wrong-model dispatch.
+# model_check also requires the dispatch's pinned slug in the listed models.
+# `opencode auth list` exits 0 whether signed in or not, so sign-in is read
+# from its output (see onboarding.credentials), not from the exit code.
+preflight:
+  model_check: [opencode, models]
+  auth_check: [opencode, auth, list]
+# Office effort -> the opencode model variant suffix on --model
+# (provider/model#variant, the documented per-run variant selector).
+# Variants are model-specific: an unknown variant fails model resolution with
+# `Variant unavailable` instead of running a silently wrong effort.
+effort_mapping:
+  none: none
+  low: low
+  medium: medium
+  high: high
+  xhigh: xhigh
+  max: max
+benchmark_slug_mapping: {}
+invocation:
+  executable: opencode
+  argv: [run, --model, "{model}#{effort}"]
+  prompt_transport: argv
+  cwd_transport: process-cwd
+safe_prompt_passing:
+  shell: false
+  supports_prompt_file: false
+  notes: >-
+    Pass the prompt as one argv element after the run flags; never build a
+    shell line. The model variant (Office effort) rides on --model as
+    provider/model#variant, the documented per-run variant selector; an unknown
+    variant fails model resolution instead of running a silently wrong effort.
+dispatch_forms: [cli]
+trusted_for: [discovery, read-only-investigation, prototype, reversible-sandbox-worker, conformance]
+quota_probe:
+  type: external-primitive
+  command: null
+  unknown_is_unlimited: false
+shallow_review:
+  supported: false
+  minimum_effort: null
+agentic_capability:
+  default: unknown
+failure_signatures:
+  - {id: unknown-variant-fails-resolution, attribution: adapter, pattern: "Variant unavailable for"}
+  - {id: unknown-model-fails-resolution, attribution: harness, pattern: "Model unavailable:"}
+  - {id: permission-prompt-blocks-headless, attribution: harness, pattern: "permission prompt with no --auto in a headless run blocks instead of auto-approving"}
+conformance:
+  deterministic: pending
+  live: pending
+source_notes: >-
+  opencode v2.0.29 registered 2026-10-14; the flags below were re-verified
+  against that version on 2026-10-14 via `opencode --help`,
+  `opencode run --help`, `opencode mini --help`, `opencode models` and live
+  `opencode run --model` probes. The headless form is
+  `opencode run --model provider/model#variant "message"`: the message travels
+  as one argv element (no shell), the #variant suffix is the documented
+  per-run effort selector, and --auto (auto-approve permissions not explicitly
+  denied) is deliberately omitted from every dispatched form so a permission
+  prompt can never auto-approve in an Office worktree. `opencode models` lists
+  provider/model slugs one per line; preflight requires the pinned slug there
+  before every launch. Probed 2026-10-14 on
+  opencode/muse-spark-1.3-contributor-free: low/medium/high/xhigh launch
+  (READY), while #none and #max fail fast with `Variant unavailable`, a bogus
+  variant fails fast the same way, and an unknown model fails fast with `Model
+  unavailable`. Free opencode Zen models run without login, so onboarding reads
+  sign-in from `opencode auth list` output ("No authenticated integrations"
+  when signed out) rather than the exit code. No reviewer or vision profile is
+  declared: opencode has no verified read-only isolation, so it is not a code
+  or visual reviewer, and its quota is always unknown (no probe; never treated
+  as unlimited). Session identity is not declared; opencode keeps its own
+  sessions (opencode.db, --session exists) which Office does not read, so no
+  headless resume form exists yet. A pane-hosted interactive form is declared
+  for Herdr delegation (herdr_kind opencode, `mini --model` with the same trust
+  posture and pinned model/effort; mini is the interactive surface that accepts
+  --model, verified to require a TTY rather than reject the flag). Conformance
+  stays pending and variant names stay model-specific: an unknown variant fails
+  fast at launch, never silently.
+session:
+  id: none
+capabilities: [builder]
+office_profiles:
+  worker:
+    argv: [run, --model, "{model}#{effort}"]
+    prompt: argv
+    output: stdout
+    herdr_kind: opencode
+    # Pane-hosted interactive form (visible delegation under Herdr): the same
+    # trust posture (no --auto), the model and effort still pinned. `mini` is
+    # the interactive surface that accepts --model; the headless `run` form
+    # above stays the dispatch-of-record for smoke and conformance.
+    interactive:
+      argv: [mini, --model, "{model}#{effort}"]
+    # opencode run has no timeout of its own, so the supervisor's wall cap
+    # stops a stuck dispatch instead of holding the task open forever.
+    max_minutes: 60

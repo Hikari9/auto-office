@@ -107,6 +107,27 @@ def _claude_signed_in() -> tuple[bool, str]:
     return False, f"no credentials in {home} or the keychain (run claude and log in)"
 
 
+def _opencode_signed_in() -> tuple[bool, str]:
+    if shutil.which("opencode") is None:
+        return False, "opencode is not installed"
+    try:
+        proc = subprocess.run(["opencode", "auth", "list"], capture_output=True, text=True, timeout=10,
+                              stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return False, "could not run opencode auth list"
+    out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    # `auth list` exits 0 either way; sign-in is in the output, not the code.
+    if "No authenticated integrations" in out:
+        return False, "no authenticated integrations (run opencode auth login)"
+    if proc.returncode != 0:
+        detail = next((ln.strip() for ln in reversed(out.splitlines()) if ln.strip()), "")
+        return False, (f"opencode auth list exited {proc.returncode}: {detail}" if detail
+                       else f"opencode auth list exited {proc.returncode}")
+    if not out:
+        return False, "opencode auth list printed nothing (run opencode auth login)"
+    return True, "opencode auth list"
+
+
 def _files_or_env(files: list[Path], env: tuple[str, ...], hint: str) -> tuple[bool, str]:
     if any(os.environ.get(k) for k in env):
         return True, "environment"
@@ -138,6 +159,8 @@ def credentials(harness: str) -> tuple[str, str]:
     elif harness == "gemini":
         ok, where = _files_or_env([gemini_home / "oauth_creds.json"], ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
                                   "sign in to gemini")
+    elif harness == "opencode":
+        ok, where = _opencode_signed_in()
     else:
         return "unknown", "Office has no sign-in check for this harness"
     return ("found" if ok else "missing"), where
