@@ -42,6 +42,7 @@ function factualStatus(g) {
 
 function policyStatus(g, data) {
   if (g.user_denied) return { key: "denied", label: "Denied by you" };
+  if (g.partial_user_denial) return { key: "partially-denied", label: "Some efforts denied by you" };
   const matchingRules = (data.policy?.overkill_rules || []).filter((rule) => rule && rule.route === routeSpec(g));
   if (matchingRules.some((rule) => Object.keys(rule).length === 1))
     return { key: "manual-only", label: "Manual-only by you" };
@@ -114,8 +115,10 @@ function evidence(ctx, g, data, opts = {}) {
     type: "button", class: "btn", disabled: disabled || pending,
     onclick: () => { ui.confirm = { ...intentFor(g, data, which), modelKey: g.key }; ctx.rerender(); },
   }, label);
-  const rows = (g.efforts || []).map((e) => h("tr", {},
+  const rows = (g.efforts || []).map((e) => h("tr", { dataset: { effort: e.effort } },
     h("td", { text: show(e.effort) }),
+    h("td", { title: e.user_denial_reason || "No user-policy denial",
+      text: e.user_denied ? "Denied by you" : "Allowed by you" }),
     h("td", { text: defined(e.benchmark_score) ? String(e.benchmark_score) : "Unknown" }),
     h("td", { text: caption(e) }),
     h("td", { text: show(e.source_name) + " / " + show(e.source_identifier) })));
@@ -124,7 +127,7 @@ function evidence(ctx, g, data, opts = {}) {
     h("p", { class: "sub", text: g.lineage + " · " + g.harness + " · current generation" }),
     h("dl", { class: "model-facts" },
       h("dt", { text: "User permission" }),
-      h("dd", { text: g.user_denied ? "Denied by you" : "Allowed by you" }),
+      h("dd", { text: policyStatus(g, data).label }),
       h("dt", { text: "Installed harness" }),
       h("dd", { text: g.installed ? "Detected" : "Not installed or not verified" }),
       h("dt", { text: "Live quota" }),
@@ -136,11 +139,11 @@ function evidence(ctx, g, data, opts = {}) {
       h("dt", { text: "Run pinning" }),
       h("dd", { text: "Changes affect future/unpinned choices; existing running routes remain pinned" })),
     g.user_denial_reason ? h("p", { class: "model-reason", text: g.user_denial_reason }) : null,
-    h("h4", { text: "Effort-specific benchmark & technical evidence" }),
+    h("h4", { text: "Effort-specific benchmark, user policy & technical evidence" }),
     h("div", { class: "model-effort-scroll" },
       h("table", { class: "model-efforts" },
         h("thead", {}, h("tr", {},
-          ...["Effort", "Score", "Technical state", "Source / identifier"].map((s) => h("th", { scope: "col", text: s })))),
+          ...["Effort", "User permission", "Score", "Technical state", "Source / identifier"].map((s) => h("th", { scope: "col", text: s })))),
         h("tbody", {}, rows))),
     h("p", { class: "model-reason", text: "Benchmark: " + data.index + ". A score never grants harness conformance or trust. Live availability is separately verified at launch." }),
     h("div", { class: "model-actions", "aria-label": "Global user model policy" },
@@ -276,7 +279,8 @@ export function render(ctx, data, editable = true) {
           onchange: (ev) => { ui.policy = ev.target.value; ctx.rerender(); } },
           h("option", { value: "", text: "All policy states" }),
           [["allowed", "Allowed by you"], ["manual-only", "Manual-only by you"],
-            ["scoped-manual", "Scoped manual-only by you"], ["denied", "Denied by you"]].map(
+            ["scoped-manual", "Scoped manual-only by you"], ["partially-denied", "Some efforts denied by you"],
+            ["denied", "Denied by you"]].map(
             ([value, label]) => h("option", { value, selected: ui.policy === value, text: label })))),
       !matches.length ? h("p", { class: "model-empty", role: "status", "aria-live": "polite",
         dataset: { testid: "model-empty" }, text: "No matching models; adjust search, harness or status filters." }) : null,

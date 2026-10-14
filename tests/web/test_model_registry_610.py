@@ -61,3 +61,48 @@ def test_registry_telemetry_flag_reflects_actual_opt_in(tmp_path, monkeypatch):
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(p))
     p.write_text("economics:\n  collect: true\n")
     assert model_registry.view()["telemetry_opt_in"] is True
+
+
+def test_registry_effort_scoped_deny_is_partial_and_preserves_other_efforts(tmp_path, monkeypatch):
+    config_file = tmp_path / "user.yaml"
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(config_file))
+    config_file.write_text(
+        "routing:\n  user_policy:\n    denied_models:\n      - codex/gpt-6.1-sol@medium\n"
+    )
+    record = next(g for g in model_registry.view()["generations"]
+                  if g["model_id"] == "gpt-6.1-sol" and g["harness"] == "codex")
+    assert record["user_denied"] is False
+    assert record["partial_user_denial"] is True
+    by_effort = {row["effort"]: row for row in record["efforts"]}
+    assert by_effort["medium"]["user_denied"] is True
+    assert "medium" in by_effort["medium"]["user_denial_reason"]
+    assert all(not row["user_denied"] for name, row in by_effort.items() if name != "medium")
+    assert "medium" in record["user_denial_reason"]
+    assert all(row["technical_state"] for row in by_effort.values())
+
+
+def test_registry_model_wide_deny_is_not_partial(tmp_path, monkeypatch):
+    config_file = tmp_path / "user.yaml"
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(config_file))
+    config_file.write_text(
+        "routing:\n  user_policy:\n    denied_models:\n      - codex/gpt-6.1-sol\n"
+    )
+    record = next(g for g in model_registry.view()["generations"]
+                  if g["model_id"] == "gpt-6.1-sol" and g["harness"] == "codex")
+    assert record["user_denied"] is True
+    assert record["partial_user_denial"] is False
+    assert all(row["user_denied"] for row in record["efforts"])
+
+
+def test_registry_legacy_overlay_can_deny_one_effort_without_denial_of_all(tmp_path, monkeypatch):
+    from office import user_catalog
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "user.yaml"))
+    monkeypatch.setenv("OFFICE_USER_CATALOG", str(tmp_path / "legacy.yaml"))
+    user_catalog.save({"models": [], "disabled": [
+        {"harness": "codex", "model_id": "gpt-6.1-sol", "effort": "medium"}
+    ]})
+    record = next(g for g in model_registry.view()["generations"]
+                  if g["model_id"] == "gpt-6.1-sol" and g["harness"] == "codex")
+    assert record["legacy_overlay_denied"] and record["partial_user_denial"]
+    assert record["user_denied"] is False
+    assert [r["effort"] for r in record["efforts"] if r["user_denied"]] == ["medium"]

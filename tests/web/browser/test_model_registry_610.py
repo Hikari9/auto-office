@@ -209,3 +209,37 @@ def test_scoped_manual_only_is_not_mislabeled_fully_allowed_or_globally_manual(p
     expect(page.locator('[data-testid=model-registry-row]')).to_have_count(1)
     expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]')).to_have_count(1)
     assert errors == []
+
+
+def test_effort_scoped_denial_shows_partial_policy_in_grid_inspector_mobile_and_filter(page, registry_site):
+    import os
+    from pathlib import Path
+
+    url, _ = registry_site
+    Path(os.environ["OFFICE_USER_CONFIG"]).write_text(
+        "routing:\n  user_policy:\n    denied_models:\n      - codex/gpt-6.1-sol@medium\n"
+    )
+    page.set_viewport_size({"width": 1500, "height": 950})
+    errors = navigate(page, url)
+    row = page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]').first
+    expect(row.locator('[data-testid=model-grid-policy]')).to_have_text("Some efforts denied by you")
+    row.get_by_role("button", name="Inspect").click()
+    inspector = page.locator('[data-testid=model-inspector]')
+    expect(inspector).to_contain_text("Some efforts denied by you")
+    expect(inspector.locator('.model-efforts tr[data-effort="medium"]')).to_contain_text("Denied by you")
+    expect(inspector.locator('.model-efforts tr[data-effort="high"]')).to_contain_text("Allowed by you")
+    policy_filter = page.locator("[data-testid=model-policy-filter]")
+    policy_filter.select_option("partially-denied")
+    expect(page.locator('[data-testid=model-registry-row]')).to_have_count(1)
+    policy_filter.select_option("allowed")
+    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]')).to_have_count(0)
+    policy_filter.select_option("partially-denied")
+
+    page.set_viewport_size({"width": 390, "height": 844})
+    card = page.locator('[data-testid=model-registry-card][data-model="gpt-6.1-sol"]').first
+    expect(card).to_be_visible()
+    expect(card).to_contain_text("Some efforts denied by you")
+    card.get_by_role("button", name="Expand evidence & policy").click()
+    expect(card.locator('.model-efforts tr[data-effort="medium"]')).to_contain_text("Denied by you")
+    expect(card.locator('.model-efforts tr[data-effort="high"]')).to_contain_text("Allowed by you")
+    assert errors == []

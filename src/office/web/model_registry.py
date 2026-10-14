@@ -31,13 +31,23 @@ def view() -> dict:
     generations = []
     for (lineage, version, model_id, harness), variants in sorted(by_identity.items()):
         variants = sorted(variants, key=lambda r: (str(r.get("effort")), str(r.get("source_identifier"))))
-        permission = route_policy.is_denied({"model_id": model_id, "harness": harness}, policy)
-        legacy_denied = any(user_catalog.matches(denial, variant)
-                            for denial in overlay["disabled"] for variant in variants)
+        # User policy is evaluated against the concrete route, *including*
+        # effort. A generation can be denied at one effort but allowed at others.
         specs = []
+        policy_reasons = []
+        legacy_denied = False
         for r in variants:
             route_state = route_policy.row_status(r)
+            permission = route_policy.is_denied({**r, "harness": harness}, policy)
+            if permission:
+                policy_reasons.append(permission)
+            legacy_effort_denied = any(user_catalog.matches(denial, r)
+                                       for denial in overlay["disabled"])
+            legacy_denied |= legacy_effort_denied
             specs.append({
+                "user_denied": bool(permission or legacy_effort_denied),
+                "user_denial_reason": permission or ("legacy user-catalog overlay deny" if legacy_effort_denied else None),
+                "legacy_overlay_denied": legacy_effort_denied,
                 "effort": r.get("effort"),
                 "invocation_model_id": r.get("invocation_model_id"),
                 "source_identifier": r.get("source_identifier"),
@@ -52,13 +62,21 @@ def view() -> dict:
                                      else route_state["reason"]),
                 "dispatchable_seed": r.get("dispatchable") is not False,
             })
+        denied_efforts = [r for r in specs if r["user_denied"]]
+        fully_denied = len(denied_efforts) == len(specs)
+        partially_denied = bool(denied_efforts) and not fully_denied
+        permission = next(iter(policy_reasons), None)
+        denial_reason = (("Some efforts denied by you: " + "; ".join(
+            f"{r['effort']} ({r['user_denial_reason']})" for r in denied_efforts))
+            if partially_denied else (permission or ("legacy user-catalog overlay deny" if legacy_denied else None)))
         generations.append({
             "key": f"{lineage}/{version}/{harness}",
             "lineage": lineage, "version": version, "model_id": model_id,
             "harness": harness, "installed": installed.get(harness, False),
             "efforts": specs,
-            "user_denied": bool(permission or legacy_denied),
-            "user_denial_reason": permission or ("legacy user-catalog overlay deny" if legacy_denied else None),
+            "user_denied": fully_denied,
+            "partial_user_denial": partially_denied,
+            "user_denial_reason": denial_reason,
             "legacy_overlay_denied": legacy_denied,
             "user_policy_source": ("legacy user-catalog overlay" if legacy_denied and not permission
                                    else (policy.get("sources") or {}).get("denied_models")),
