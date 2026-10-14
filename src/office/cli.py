@@ -53,7 +53,7 @@ Auto Office {ver}
   office close                      finish the run after acceptance and landing
                                     (--landed-externally <pr>: its work merged through another PR)
   office benchmarks brief|submit <f> opted-in runs: one background refresh of missing benchmark scores
-  office harness scaffold|validate|smoke|list
+  office harness scaffold|validate|smoke|list|sync|manifest
                                     register a harness: draft a user adapter, check it, one throwaway-repo launch
   office model add|list|disable|enable|registry|policy|ceiling|unceil
                                     catalog, global user policy and lineage retention
@@ -341,7 +341,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--from-session", dest="usage_session", help="session id for --file")
     s.add_argument("--role", dest="usage_role", help="role for --file rows (root, executor, reviewer, planner)")
     s = sp.add_parser("harness", parents=[common])
-    s.add_argument("action", choices=["scaffold", "validate", "smoke", "list"])
+    s.add_argument("action", choices=["scaffold", "validate", "smoke", "list", "sync", "manifest"])
     s.add_argument("ident", nargs="?", help="harness (adapter) id")
     s.add_argument("--binary", help="scaffold: the harness executable to probe")
     s.add_argument("--force", action="store_true", help="scaffold: redraft an existing user adapter")
@@ -784,6 +784,10 @@ def _run(args, unknown) -> int:
         if args.action == "smoke":
             return emit(harnesscmd.smoke(args.ident, args.model, effort=args.effort, timeout=args.timeout,
                                          allow_unsafe_flags=args.allow_unsafe_flags), args)
+        if args.action == "sync":
+            return emit(harnesscmd.manifest_sync(), args)
+        if args.action == "manifest":
+            return emit(harnesscmd.manifest_list(), args)
         con = _con()
         try:
             return emit(harnesscmd.harness_list(con), args)
