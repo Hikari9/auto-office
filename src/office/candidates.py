@@ -605,9 +605,13 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
     # A row named exactly what the user typed beats an alias that invokes it.
     rows.sort(key=lambda r: r.get("model_id") != model)
     row = rows[0] if len(rows) == 1 or (rows and effort) else None
-    free_model = route_policy.is_free_model(row or {})
+    # Only a route the catalog does not know at all can be judged by its slug; any catalog
+    # match, even an ambiguous one, keeps the catalog's answer.
+    named_free = not rows and route_policy.is_explicit_free_slug(harness, model)
+    free_model = route_policy.is_free_model(row or {}) or named_free
     if free_model and not onboarding.free_models_enabled():
-        raise Refused("free-model-opt-in", f"{harness}/{model} is marked free and requires explicit opt-in",
+        why = "names itself free" if named_free else "is marked free"
+        raise Refused("free-model-opt-in", f"{harness}/{model} {why} and requires explicit opt-in",
                       next_step="office onboard --enable-free-models")
     # A user-denied route is not selectable by any manual route either (--as, --review-as,
     # amend route). Overkill is automatic-only and never blocks a declared route (#494).

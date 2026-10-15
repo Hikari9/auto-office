@@ -67,6 +67,11 @@ def is_free_model(row: dict) -> bool:
     return row.get("free_model") is True
 
 
+def is_explicit_free_slug(harness: str | None, *slugs: str | None) -> bool:
+    """Whether an opencode slug names itself free (the `-free` suffix convention)."""
+    return harness == "opencode" and any(isinstance(s, str) and s.strip().lower().endswith("-free") for s in slugs)
+
+
 def alias_status(alias_row: dict, target_row: dict) -> dict:
     """Inherit the exact target's status, including its probe refinement."""
     inherited = row_status(target_row)

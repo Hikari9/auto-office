@@ -212,6 +212,47 @@ def test_free_model_discovery_does_not_change_auth_or_enable_candidates(fake, mo
     assert candidates.declared_candidate("opencode", MODEL_ID, "xhigh")["free_model"] is True
 
 
+def _declare(monkeypatch, rows, harness, model, effort=None):
+    monkeypatch.setattr(candidates, "catalog_rows", lambda: rows)
+    return candidates.declared_candidate(harness, model, effort)
+
+
+def test_uncatalogued_free_slug_requires_opt_in_like_a_marked_row(monkeypatch, tmp_path):
+    cfg = tmp_path / "user-config.yaml"
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(cfg))
+    for name in ("some-new-model-free", "opencode/some-new-model-free"):
+        with pytest.raises(Refused, match="names itself free and requires explicit opt-in") as exc:
+            _declare(monkeypatch, [], "opencode", name, "high")
+        assert exc.value.category == "free-model-opt-in"
+    cfg.write_text("onboarding:\n  free_models_enabled: true\n")
+    cand = _declare(monkeypatch, [], "opencode", "some-new-model-free", "high")
+    assert cand["free_model"] is True and cand["override"] is True
+
+
+def test_uncatalogued_non_free_routes_are_unchanged(monkeypatch, tmp_path):
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "user-config.yaml"))
+    assert _declare(monkeypatch, [], "opencode", "opencode/big-pickle", "high")["free_model"] is False
+    # The suffix convention is opencode's; another harness's slug is not read as free.
+    assert _declare(monkeypatch, [], "agy", "gemini-free", "high")["free_model"] is False
+
+
+def test_ambiguous_catalog_match_keeps_the_catalog_answer(monkeypatch, tmp_path):
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "user-config.yaml"))
+    base = {"model_id": "mystery-free", "invocation_harness": "opencode", "dispatchable": True}
+    rows = [{**base, "effort": "low", "free_model": True}, {**base, "effort": "high"}]
+    # Catalogued but ambiguous (several rows, no effort): behaves as before, slug and free row unread.
+    assert _declare(monkeypatch, rows, "opencode", "mystery-free")["free_model"] is False
+
+
+def test_catalogued_rows_ignore_the_slug_convention(monkeypatch, tmp_path):
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "user-config.yaml"))
+    row = {"model_id": "named-free", "invocation_harness": "opencode", "effort": "high", "dispatchable": True}
+    assert _declare(monkeypatch, [row], "opencode", "named-free", "high")["free_model"] is False
+    marked = {**row, "model_id": "plain", "free_model": True}
+    with pytest.raises(Refused, match="plain is marked free and requires explicit opt-in"):
+        _declare(monkeypatch, [marked], "opencode", "plain", "high")
+
+
 def test_opted_in_free_model_passes_preflight_without_login(fake, monkeypatch):
     monkeypatch.setenv("FAKE_OPENCODE_AUTH", "missing")
     assert onboarding.credentials("opencode")[0] == "missing"
