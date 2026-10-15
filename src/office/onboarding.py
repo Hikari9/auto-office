@@ -128,6 +128,40 @@ def _opencode_signed_in() -> tuple[bool, str]:
     return True, "opencode auth list"
 
 
+def _opencode_free_model() -> tuple[str | None, str]:
+    """Return a listed model explicitly named as free, or why none was found."""
+    try:
+        proc = subprocess.run(["opencode", "models"], capture_output=True, text=True, timeout=10,
+                              stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return None, "opencode models timed out"
+    except (OSError, subprocess.SubprocessError):
+        return None, "could not run opencode models"
+    if proc.returncode != 0:
+        detail = next((ln.strip() for ln in reversed((proc.stderr or proc.stdout or "").splitlines())
+                       if ln.strip()), "")
+        return None, (f"opencode models exited {proc.returncode}: {detail}" if detail
+                      else f"opencode models exited {proc.returncode}")
+    for line in (proc.stdout or "").splitlines():
+        for token in line.split():
+            slug = token.strip(" ,")
+            if slug.endswith("-free") and "/" in slug:
+                return slug, ""
+    return None, "opencode models lists no explicitly free model"
+
+
+def _opencode_usable() -> tuple[bool, str]:
+    signed_in, auth_detail = _opencode_signed_in()
+    if signed_in:
+        return True, "authenticated OpenCode"
+    if shutil.which("opencode") is None:
+        return False, auth_detail
+    model, model_detail = _opencode_free_model()
+    if model:
+        return True, f"credential-free model available: {model}"
+    return False, f"{auth_detail}; {model_detail}"
+
+
 def _files_or_env(files: list[Path], env: tuple[str, ...], hint: str) -> tuple[bool, str]:
     if any(os.environ.get(k) for k in env):
         return True, "environment"
@@ -138,10 +172,9 @@ def _files_or_env(files: list[Path], env: tuple[str, ...], hint: str) -> tuple[b
 
 
 def credentials(harness: str) -> tuple[str, str]:
-    """`found`, `missing` or `unknown`, with where it looked. A binary on PATH
-    is not a sign-in: this checks the credential each harness stores, without
-    reading any secret. OFFICE_AUTH_FIXTURE ({"claude": "found", ...}) replaces
-    the check in tests."""
+    """`found`, `missing` or `unknown`, with where it looked. For OpenCode,
+    `found` means authenticated or explicitly usable without credentials.
+    OFFICE_AUTH_FIXTURE ({"claude": "found", ...}) replaces the check in tests."""
     fixture = os.environ.get("OFFICE_AUTH_FIXTURE")
     if fixture:
         import json
@@ -160,7 +193,7 @@ def credentials(harness: str) -> tuple[str, str]:
         ok, where = _files_or_env([gemini_home / "oauth_creds.json"], ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
                                   "sign in to gemini")
     elif harness == "opencode":
-        ok, where = _opencode_signed_in()
+        ok, where = _opencode_usable()
     else:
         return "unknown", "Office has no sign-in check for this harness"
     return ("found" if ok else "missing"), where

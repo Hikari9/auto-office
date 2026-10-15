@@ -6,8 +6,9 @@ validates with no TODO, its worker pins the model and effort (`--model
 provider/model#variant`, the documented per-run variant selector) with the
 prompt as one argv element and no shell, no dispatched form carries `--auto`,
 the Herdr pane form pins the same model/effort, preflight gates the pinned
-slug and sign-in, capabilities stay builder-only, onboarding checks sign-in
-from `auth list` output, and install records the hook posture as unsupported.
+slug without treating auth-list exit 0 as sign-in evidence, capabilities stay
+builder-only, onboarding recognizes a listed free model as a credential-free
+usable path, and install records the hook posture as unsupported.
 """
 from __future__ import annotations
 
@@ -31,11 +32,20 @@ args = sys.argv[1:]
 if args[:1] == ["--version"]:
     print("opencode v2.0.29"); sys.exit(0)
 if args[:1] == ["models"]:
+    state = os.environ.get("FAKE_OPENCODE_MODELS", "listed")
+    if state == "fail":
+        print("model listing failed", file=sys.stderr); sys.exit(2)
+    if state == "empty":
+        sys.exit(0)
+    if state == "unlisted":
+        print("opencode/big-pickle"); sys.exit(0)
     print("{SLUG}"); print("opencode/big-pickle"); sys.exit(0)
 if args[:2] == ["auth", "list"]:
     state = os.environ.get("FAKE_OPENCODE_AUTH", "ok")
     if state == "fail":
         print("boom", file=sys.stderr); sys.exit(1)
+    if state == "crash":
+        raise RuntimeError("auth list crashed")
     if state == "missing":
         print("No authenticated integrations"); sys.exit(0)
     print("opencode  authenticated (oauth)"); sys.exit(0)
@@ -150,14 +160,22 @@ def test_herdr_pane_form_pins_the_same_model_and_effort(fake, tmp_path):
     assert "--auto" not in rendered
 
 
-def test_preflight_passes_for_the_listed_slug_and_fails_otherwise(fake, monkeypatch):
+def test_preflight_uses_model_listing_without_auth_list_gate(fake, monkeypatch):
+    monkeypatch.setenv("FAKE_OPENCODE_AUTH", "missing")
     ok, _ = adapters.run_preflight(_adapter(), SLUG)
     assert ok is True
     ok, detail = adapters.run_preflight(_adapter(), "opencode/no-such-model")
     assert ok is False and "model_check" in detail
     monkeypatch.setenv("FAKE_OPENCODE_AUTH", "fail")
     ok, detail = adapters.run_preflight(_adapter(), SLUG)
-    assert ok is False and "auth_check" in detail
+    assert ok is True and detail == ""
+
+
+def test_preflight_signed_out_unlisted_model_fails_model_check(fake, monkeypatch):
+    monkeypatch.setenv("FAKE_OPENCODE_AUTH", "missing")
+    monkeypatch.setenv("FAKE_OPENCODE_MODELS", "unlisted")
+    ok, detail = adapters.run_preflight(_adapter(), SLUG)
+    assert ok is False and "model_check" in detail and SLUG in detail
 
 
 def test_capabilities_are_builder_only(fake):
@@ -166,11 +184,28 @@ def test_capabilities_are_builder_only(fake):
     assert set(adapter["office_profiles"]) == {"worker"}
 
 
-def test_onboarding_sign_in_check_uses_auth_list(fake, monkeypatch):
+def test_onboarding_reports_explicit_credential_free_model_as_usable(fake, monkeypatch):
     assert onboarding.credentials("opencode")[0] == "found"
     monkeypatch.setenv("FAKE_OPENCODE_AUTH", "missing")
     state, where = onboarding.credentials("opencode")
-    assert state == "missing" and "auth" in where
+    assert state == "found"
+    assert where == f"credential-free model available: {SLUG}"
+
+
+@pytest.mark.parametrize("auth_state, expected", [
+    ("missing", "no authenticated integrations"),
+    ("fail", "exited 1"),
+    ("crash", "auth list crashed"),
+])
+def test_onboarding_auth_list_failures_are_explicit_when_no_model_is_usable(fake, monkeypatch, auth_state, expected):
+    monkeypatch.setenv("FAKE_OPENCODE_AUTH", auth_state)
+    monkeypatch.setenv("FAKE_OPENCODE_MODELS", "empty")
+    state, where = onboarding.credentials("opencode")
+    assert state == "missing" and expected in where
+    assert "no explicitly free model" in where
+
+
+def test_onboarding_auth_fixture_and_unknown_harness(fake, monkeypatch):
     monkeypatch.setenv("OFFICE_AUTH_FIXTURE", json.dumps({"opencode": "found"}))
     assert onboarding.credentials("opencode") == ("found", "fixture")
     assert onboarding.credentials("hermes")[0] == "unknown"
