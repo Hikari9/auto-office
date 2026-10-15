@@ -227,6 +227,9 @@ def credentials(harness: str) -> tuple[str, str]:
                                   "sign in to gemini")
     elif harness == "opencode":
         ok, where = _opencode_signed_in()
+    elif harness == "kilo":
+        ok, where = _files_or_env([Path.home() / ".local" / "share" / "kilo" / "auth.json"], (),
+                                  "run kilo auth login")
     else:
         return "unknown", "Office has no sign-in check for this harness"
     return ("found" if ok else "missing"), where

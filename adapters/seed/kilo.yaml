@@ -1,0 +1,71 @@
+id: kilo
+verified_state: valid-unverified
+version_fingerprint:
+  command: [kilo, --version]
+  parser: first-line
+model_source:
+  type: cli
+  command: [kilo, models]
+preflight:
+  model_check: [kilo, models]
+effort_mapping:
+  none: null
+  low: low
+  medium: medium
+  high: high
+  xhigh: xhigh
+  max: max
+benchmark_slug_mapping: {}
+invocation:
+  executable: kilo
+  argv: [run, --model, "{model}", --variant, "{effort}", --format, json, --pure, --auto]
+  prompt_transport: argv
+  cwd_transport: process-cwd
+safe_prompt_passing:
+  shell: false
+  supports_prompt_file: false
+  notes: >-
+    The prompt is appended as one argv element. Never construct a shell line or
+    pass the prompt as a template token.
+dispatch_forms: [cli, in-session]
+trusted_for: [discovery, read-only-investigation, prototype, reversible-sandbox-worker, conformance]
+session:
+  id: detected
+  sources: [output]
+  output_pattern: '"session_id"\s*:\s*"(ses_[^"]+)"'
+capabilities: [builder]
+quota_probe:
+  type: external-primitive
+  command: null
+  unknown_is_unlimited: false
+shallow_review:
+  supported: false
+  minimum_effort: null
+agentic_capability:
+  default: unknown
+failure_signatures:
+  - {id: paid-model-auth-required, attribution: harness, pattern: "You need to sign in to use this model."}
+conformance:
+  deterministic: pending
+  live: pending
+source_notes: >-
+  Kilo 7.8.8 probed 2026-10-14. Free Kilo Gateway models run with zero
+  credentials. --variant values pass through unvalidated, including bogus
+  values, so catalog rows must pin only efforts proven to launch. Kilo exposes
+  no exit-code-able credential check: `kilo auth list` exits 0 with zero
+  credentials, while paid models fail loudly at launch with “You need to sign
+  in to use this model.” --pure disables external plugins and declines
+  project-scoped untrusted input. --auto is required for autonomous use;
+  without it, bash is auto-rejected and the run exits 1. The CLI's TUI keeps
+  its own variant state (ctrl+t), so pane launch omits --variant.
+office_profiles:
+  worker:
+    argv: [run, --model, "{model}", --variant, "{effort}", --format, json, --pure, --auto]
+    prompt: argv
+    output: stdout
+    max_minutes: 60
+    herdr_kind: kilo
+    headless_resume_argv: [--session, "{session_id}"]
+    interactive:
+      argv: [--model, "{model}", --pure, --auto]
+      resume_argv: [-s, "{session_id}"]

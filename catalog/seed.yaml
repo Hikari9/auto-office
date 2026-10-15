@@ -1170,5 +1170,54 @@ models:
     speed_fields: {output_tok_per_s: 220.9, ttft_ms: 28990}
     release_date: '2026-09'
     source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/muse-spark-1-3-xhigh', release_url: 'https://artificialanalysis.ai/models/releases/muse-spark-1-3', fetched_at: '2026-10-14T12:50:00Z', metrics_as_of: '2026-10-14', metrics_context: 'AA first-party API performance; not local CLI conformance', page_title: 'Muse Spark 1.3 (Xhigh)'}
+  - model_id: step-5-preview-free
+    invocation_model_id: kilo/stepfun/step-5-preview-free
+    invocation_harness: kilo
+    invocation_source: 'local-evidence: `kilo run --model kilo/stepfun/step-5-preview-free --variant high --format json --pure --auto "<probe-prompt>"` on 2026-10-14 exited 0 with a real model answer at cost 0 (exit 0 is launch evidence, not model conformance: no identity readback yet)'
+    dispatchable: true
+    source_identifier: step-5-preview-free
+    source_name: kilo-model-list
+    effort: high
+    source_effort: high
+    effort_confidence: mapped
+    benchmark_indexes:
+    price_fields:
+    speed_fields:
+    release_date:
+    source_snapshot_metadata: {kind: local-harness-launch-evidence, command_date: '2026-10-14', notes: 'Free Kilo Gateway model launch; exit 0 is not model conformance because model identity is not read back'}
+    content_hash:
+    supersession_metadata:
+  - model_id: mimo-v2.6-pro
+    invocation_model_id: kilo/xiaomi/mimo-v2.6-pro
+    invocation_harness: kilo
+    invocation_source: 'local-evidence: `kilo models` on 2026-10-15 listed kilo/xiaomi/mimo-v2.6-pro; Artificial Analysis index v4.3.2 data is recorded in this row; launch has not been exercised because it requires `kilo auth login`'
+    dispatchable: true
+    source_identifier: mimo-v2-6-pro
+    source_name: artificial-analysis
+    effort: medium
+    source_effort: 'default reasoning (AA publishes no effort tier for this model)'
+    effort_confidence: mapped
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 46}
+    price_fields: {input_per_mtok: 0.43, output_per_mtok: 0.87, currency: USD, as_of: '2026-10-09'}
+    speed_fields: {output_tok_per_s: 42.5, ttft_ms: 4110}
+    release_date: '2026-09'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/mimo-v2-6-pro', release_url: 'https://artificialanalysis.ai/models/releases/mimo-v2-6-pro', fetched_at: '2026-10-09T11:34:27Z', metrics_as_of: '2026-10-09', metrics_context: 'AA evaluates one MiMo-V2.6-Pro entry with no effort tier (fixed 2000 reasoning tokens); office effort medium does not claim AA measured that level', page_title: 'MiMo-V2.6-Pro'}
+    content_hash:
+    supersession_metadata:
+  - model_id: mimo-v2.6-flash
+    invocation_model_id: kilo/xiaomi/mimo-v2.6-flash
+    invocation_harness: kilo
+    invocation_source: 'local-evidence: `kilo models` on 2026-10-15 listed kilo/xiaomi/mimo-v2.6-flash; Artificial Analysis index v4.3.2 data is recorded in this row; launch has not been exercised because it requires `kilo auth login`'
+    dispatchable: true
+    source_identifier: mimo-v2-6-flash
+    source_name: artificial-analysis
+    effort: medium
+    source_effort: 'default reasoning (AA publishes no effort tier for this model)'
+    effort_confidence: mapped
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 38}
+    price_fields: {input_per_mtok: 0.14, output_per_mtok: 0.28, currency: USD, as_of: '2026-10-09'}
+    speed_fields: {output_tok_per_s: 57.5, ttft_ms: 3370}
+    release_date: '2026-09'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/mimo-v2-6-flash', release_url: 'https://artificialanalysis.ai/models/releases/mimo-v2-6-flash', fetched_at: '2026-10-09T11:34:27Z', metrics_as_of: '2026-10-09', metrics_context: 'AA evaluates one MiMo-V2.6-Flash entry with no effort tier (fixed 2000 reasoning tokens); office effort medium does not claim AA measured that level', page_title: 'MiMo-V2.6-Flash'}
     content_hash:
     supersession_metadata:
