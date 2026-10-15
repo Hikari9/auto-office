@@ -50,7 +50,25 @@ if args[:2] == ["auth", "list"]:
         raise RuntimeError("auth list crashed")
     if state == "missing":
         print("No authenticated integrations"); sys.exit(0)
-    print("opencode  authenticated (oauth)"); sys.exit(0)
+    if state == "empty":
+        sys.exit(0)
+    if state == "junk":
+        print("opencode  authenticated (oauth)"); sys.exit(0)
+    if state == "stderr-only":
+        print("Anthropic  work  stored", file=sys.stderr); sys.exit(0)
+    if state == "fail-with-entry":
+        print("Anthropic".ljust(11) + "work".ljust(28) + "stored"); sys.exit(1)
+    if state == "contradictory":
+        print("No authenticated integrations")
+        print("Anthropic".ljust(11) + "work".ljust(28) + "stored"); sys.exit(0)
+    if state == "env":
+        print("OpenAI".ljust(8) + "OPENAI_API_KEY".ljust(28) + "environment"); sys.exit(0)
+    if state == "long":
+        print("Anthropic".ljust(11) + "someone.longname@example.com" + "stored"); sys.exit(0)
+    if state == "multi":
+        print("Anthropic".ljust(14) + "work".ljust(28) + "stored")
+        print("OpenAI Codex".ljust(14) + "OPENAI_API_KEY".ljust(28) + "environment"); sys.exit(0)
+    print("Anthropic".ljust(11) + "work".ljust(28) + "stored"); sys.exit(0)
 if args[:1] == ["run"]:
     model = None
     for i, a in enumerate(args):
@@ -69,7 +87,7 @@ print("unknown", file=sys.stderr); sys.exit(1)
 @pytest.fixture
 def fake(tmp_path, monkeypatch):
     """A fake `opencode` first on PATH. FAKE_OPENCODE_AUTH controls `auth list`:
-    ok (signed in), missing (signed out, exit 0), fail (exit 1)."""
+    ok (stored credential, the real `auth list` row shape), missing (signed out, exit 0), fail (exit 1)."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     exe = bin_dir / "opencode"
@@ -266,7 +284,12 @@ def test_opted_in_free_model_passes_preflight_without_login(fake, monkeypatch):
 @pytest.mark.parametrize("auth_state, expected", [
     ("missing", "no authenticated integrations"),
     ("fail", "exited 1"),
+    ("fail-with-entry", "exited 1"),
     ("crash", "auth list crashed"),
+    ("empty", "printed nothing"),
+    ("junk", "no recognizable integration entry"),
+    ("stderr-only", "printed nothing"),
+    ("contradictory", "no authenticated integrations"),
 ])
 def test_onboarding_auth_list_failures_are_explicit_when_no_model_is_usable(fake, monkeypatch, auth_state, expected):
     monkeypatch.setenv("FAKE_OPENCODE_AUTH", auth_state)
@@ -276,6 +299,31 @@ def test_onboarding_auth_list_failures_are_explicit_when_no_model_is_usable(fake
     assert "no explicitly free model" not in where
     model, detail = onboarding._opencode_free_model()
     assert model is None and "no explicitly free model" in detail
+
+
+def test_auth_list_missing_reasons_are_distinct(fake, monkeypatch):
+    reasons = {}
+    for auth_state in ("missing", "fail", "empty", "junk", "crash"):
+        monkeypatch.setenv("FAKE_OPENCODE_AUTH", auth_state)
+        state, where = onboarding.credentials("opencode")
+        assert state == "missing"
+        reasons[auth_state] = where
+    assert len(set(reasons.values())) == len(reasons)
+
+
+@pytest.mark.parametrize("auth_state, count", [("ok", 1), ("env", 1), ("long", 1), ("multi", 2)])
+def test_auth_list_recognizes_real_entry_shapes(fake, monkeypatch, auth_state, count):
+    monkeypatch.setenv("FAKE_OPENCODE_AUTH", auth_state)
+    state, where = onboarding.credentials("opencode")
+    assert state == "found"
+    assert f"{count} authenticated integration" in where
+
+
+def test_auth_list_timeout_is_reported_as_timeout(fake, monkeypatch):
+    def hang(*a, **k):
+        raise subprocess.TimeoutExpired(a[0], 10)
+    monkeypatch.setattr(onboarding.subprocess, "run", hang)
+    assert onboarding._opencode_signed_in() == (False, "opencode auth list timed out")
 
 
 def test_onboarding_auth_fixture_and_unknown_harness(fake, monkeypatch):
