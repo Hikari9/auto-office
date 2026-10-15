@@ -868,6 +868,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     }
     if declared:
         request["declared_route"] = declared
+    if exact:
+        request["exact_route"] = exact
     if role in routing.ADAPTIVE_ROLES:
         request.update(adaptive_inputs(con, config, run, role, candidates, task_id=task_id,
                                        dispatch_kind=dispatch_kind, plan_version=run.get("plan_version"),

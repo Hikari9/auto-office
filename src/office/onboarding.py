@@ -266,10 +266,18 @@ def role_routes(con, config: dict, role: str) -> tuple[list[dict], dict[str, str
                                                  family_floors=config.get("model_family_floors"))
     why_not = {s["candidate"]: s["reason"] for s in skipped}
     usable = []
+    # Each sign-in check and model listing can spawn the harness CLI, so ask once per harness/slug.
+    signed_in: dict[str, tuple[str, str]] = {}
+    listings: dict[str | None, tuple[str | None, str]] = {}
     for c in built:
-        state, where = credentials(c["harness"])
+        if c["harness"] not in signed_in:
+            signed_in[c["harness"]] = credentials(c["harness"])
+        state, where = signed_in[c["harness"]]
         if c.get("free_model") and c.get("harness") == "opencode":
-            listed, availability = _opencode_free_model(c.get("invocation_model_id"))
+            slug = c.get("invocation_model_id")
+            if slug not in listings:
+                listings[slug] = _opencode_free_model(slug)
+            listed, availability = listings[slug]
             if not listed:
                 why_not[route_text(c)] = f"free model unavailable: {availability}"
                 continue
@@ -283,6 +291,7 @@ def role_routes(con, config: dict, role: str) -> tuple[list[dict], dict[str, str
     policy = candidates.role_policy(config, role)
     result = routing.route({
         "role": role, "adaptive": False, "candidates": usable, "runs_db": str(paths.runs_db()),
+        "allow_free_models": free_models_enabled(),
         "policy": {"required_capabilities": list(policy.get("required_capabilities") or []),
                    "floor": policy.get("floor")},
     })

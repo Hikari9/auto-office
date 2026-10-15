@@ -355,3 +355,15 @@ def test_onboarding_auth_fixture_and_unknown_harness(fake, monkeypatch):
 def test_install_records_unsupported_hook_posture():
     status = install.integration_status("opencode")
     assert status["state"] == "unsupported" and status["reason"]
+
+
+def test_onboarding_role_routes_honour_the_free_model_opt_in(fake, monkeypatch, tmp_path):
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "user-config.yaml"))
+    monkeypatch.setenv("OFFICE_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("FAKE_OPENCODE_AUTH", "missing")
+    row = {"model_id": MODEL_ID, "invocation_model_id": SLUG, "invocation_harness": "opencode",
+           "effort": "xhigh", "dispatchable": True, "free_model": True}
+    monkeypatch.setattr(candidates, "catalog_rows", lambda: [row])
+    (tmp_path / "user-config.yaml").write_text("onboarding:\n  free_models_enabled: true\n")
+    _, why_not = onboarding.role_routes(sqlite3.connect(":memory:"), {}, "worker")
+    assert not any("opt-in" in reason for reason in why_not.values()), why_not

@@ -135,7 +135,7 @@ class DerivedRoutingTests(unittest.TestCase):
         free['free_model'] = True
         request = {'role': 'worker', 'playbook': 'Change', 'runs_db': self.db_path,
                    'cost_policy': 'money_saver', 'candidates': [free, regular]}
-        result = routing.route(request)
+        result = current_routing.route(request)
         self.assertEqual(result['selected'], 'agy@1/regular@high')
         rejected = [r for r in result['rejected'] if r.get('category') == 'free-model-opt-in']
         self.assertEqual(len(rejected), 1)
@@ -155,6 +155,20 @@ class DerivedRoutingTests(unittest.TestCase):
         self.assertEqual(result['selected'], 'agy@1/regular@high')
         self.assertEqual([r['candidate'] for r in result['rejected']
                           if r.get('category') == 'free-model-fallback'], ['agy@1/free@high'])
+
+    def test_user_named_free_route_is_not_treated_as_a_fallback(self):
+        regular = cand('agy', model_id='regular', money=5.0)
+        free = cand('agy', model_id='free', money=0.0)
+        free['free_model'] = True
+        for key, candidates_in in (('declared_route', [free, regular]), ('exact_route', [free])):
+            request = {
+                'role': 'worker', 'playbook': 'Change', 'runs_db': self.db_path,
+                'adaptive': False, 'allow_free_models': True, 'cost_policy': 'money_saver',
+                'preferred_seed': [{'model_id': 'preferred', 'harness': 'agy', 'effort': 'high'}],
+                'candidates': candidates_in, key: 'agy@1/free@high',
+            }
+            result = current_routing.route(request)
+            self.assertFalse([r for r in result['rejected'] if r.get('category') == 'free-model-fallback'], key)
 
     def test_adaptive_opt_in_does_not_replace_an_unavailable_preferred_route(self):
         regular = cand('agy', model_id='regular', money=5.0)

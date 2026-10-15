@@ -440,9 +440,12 @@ def route(request: dict, discovery_input: dict | None = None) -> dict:
             }
 
         if preferred_seed and not any(preferred_rank(c, preferred_seed) is not None for c in stage):
+            # A route the user named (a declared route, or an exact re-qualification of a recorded
+            # one) is the user's choice, not a replacement, so it keeps its place.
+            named = {request.get("declared_route"), request.get("exact_route")} - {None}
             fallback = []
             for c in stage:
-                if route_policy.is_free_model(c):
+                if route_policy.is_free_model(c) and candidate_id(c) not in named:
                     rejected.append({"candidate": candidate_id(c), "stage": 7,
                                      "reason": "free model cannot replace an unavailable preferred route",
                                      "category": "free-model-fallback"})
