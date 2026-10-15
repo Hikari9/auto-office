@@ -28,3 +28,66 @@
 .edit { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .edit .field { min-width: 160px; }
 @media (max-width: 1300px) { .srow .line { display: flex; flex-wrap: wrap; } .srow .k { flex: 1 1 100%; } }
+
+/* Issue #610: one Registry Grid + persistent Inspector on desktop, cards on mobile.
+   The browser is a controller/view, never a second policy or catalog authority. */
+.model-registry { margin-top: 12px; }
+.model-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.model-tabs, .model-toolbar, .model-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.model-toolbar { margin: 12px 0; }
+.model-toolbar .field { min-width: 175px; max-width: 100%; }
+.model-toolbar input.field { flex: 1 1 240px; }
+.model-layout { display: grid; grid-template-columns: minmax(0, 3fr) minmax(270px, 2fr); gap: 12px; align-items: start; }
+.model-table-wrap, .model-inspector-wrap { min-width: 0; max-height: 580px; overflow: auto; border: 1px solid var(--line-2); border-radius: 8px; }
+.model-table, .model-efforts { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12px; }
+.model-table th, .model-table td, .model-efforts th, .model-efforts td { border-bottom: 1px solid var(--line-2); padding: 9px 8px; text-align: left; white-space: nowrap; }
+.model-table thead th, .model-efforts thead th { position: sticky; top: 0; background: var(--panel); z-index: 2; color: var(--text-2); }
+.model-table th:first-child { position: sticky; left: 0; z-index: 1; background: var(--panel); color: var(--text); }
+.model-table thead th:first-child { z-index: 3; }
+.model-table tr.selected td, .model-table tr.selected th { background: var(--panel-2, var(--panel)); }
+.model-table td:last-child { text-align: right; }
+/* Dense comparison: a benchmark is a named effort sample with an auditable source;
+   the user and technical gates remain independent. The grid scrolls under a sticky identity. */
+.model-grid-main, .model-grid-sub { display: block; }
+.model-grid-main { font-weight: 600; }
+.model-grid-sub { font-size: 11px; color: var(--muted); max-width: 205px; overflow: hidden; text-overflow: ellipsis; }
+.model-table [data-testid="model-grid-provenance"] { min-width: 185px; }
+.model-table [data-testid="model-grid-factual"] { min-width: 170px; }
+.model-grid-main a { color: var(--blue); text-decoration: underline; text-underline-offset: 2px; }
+.model-empty { margin: 8px 0 12px; padding: 12px; border: 1px dashed var(--line-2); border-radius: 8px; color: var(--muted); }
+.model-card-facts { font-size: 11px; margin: 5px 0; color: var(--text-2); overflow-wrap: anywhere; line-height: 1.5; }
+.model-card-source { display: inline-block; margin: 2px 0 6px; font-size: 11px; color: var(--blue); text-decoration: underline; text-underline-offset: 2px; }
+
+.model-inspector-wrap { padding: 12px; overflow-wrap: anywhere; }
+.model-evidence h3 { font-size: 16px; margin: 0 0 4px; }
+.model-evidence h4 { margin: 14px 0 8px; font-size: 12px; color: var(--text-2); }
+.model-facts { display: grid; grid-template-columns: minmax(105px, 1fr) minmax(100px, 1.5fr); gap: 8px; font-size: 12px; }
+.model-facts dt { color: var(--muted); }
+.model-facts dd { margin: 0; overflow-wrap: anywhere; }
+.model-effort-scroll { overflow-x: auto; max-width: 100%; }
+.model-reason { font-size: 11px; color: var(--muted); line-height: 1.5; }
+.model-actions { margin: 10px 0; }
+.model-confirm { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-top: 10px; }
+.model-confirm h4 { margin-top: 0; }
+.model-mobile-cards { display: none; }
+.model-card { border: 1px solid var(--line-2); border-radius: 8px; padding: 12px; }
+.model-card h3 { font-size: 14px; margin: 0 0 4px; }
+.model-card-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+.model-card .model-evidence { border-top: 1px solid var(--line-2); margin-top: 12px; padding-top: 12px; }
+.model-history { margin: 10px 0; max-height: 450px; overflow-y: auto; }
+.model-registry button:focus-visible, .model-registry input:focus-visible, .model-registry select:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+@media (max-width: 1130px) {
+  .model-layout { grid-template-columns: minmax(0, 1fr); }
+  .model-inspector-wrap { max-height: 450px; }
+}
+@media (max-width: 780px) {
+  .model-table-wrap, .model-inspector-wrap { display: none; }
+  .model-layout { display: block; }
+  .model-mobile-cards { display: grid; gap: 8px; }
+  .model-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .model-toolbar input.field, .model-toolbar select.field { width: 100%; max-width: none; min-width: 0; }
+  .model-facts { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .model-registry * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}

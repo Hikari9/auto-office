@@ -263,7 +263,8 @@ def snapshot_hashes() -> dict:
     root = paths.resources_root()
     from office import adapters as adapter_mod, user_catalog
     key = (adapter_mod.files_stamp(),
-           adapter_mod._file_stamp([root / "catalog" / "seed.yaml", user_catalog.path(), default_config_path()]))
+           adapter_mod._file_stamp([root / "catalog" / "seed.yaml", root / "catalog" / "lineages.yaml",
+                                    user_catalog.path(), default_config_path()]))
     cached = _HASHES_CACHE.get(key)
     if cached is not None:
         return dict(cached)
@@ -272,10 +273,11 @@ def snapshot_hashes() -> dict:
         if origin != "seed" and data.get("office_profiles"):
             adapters["user/" + p.name] = data
     catalog = load_yaml(root / "catalog" / "seed.yaml")
+    lineages = load_yaml(root / "catalog" / "lineages.yaml")
     overlay = user_catalog.raw()
     out = {
         "policy_hash": sha256_file(default_config_path()),
-        "catalog_hash": sha256_obj(catalog if overlay is None else {"seed": catalog, "user": overlay}),
+        "catalog_hash": sha256_obj({"seed": catalog, "lineages": lineages, "user": overlay}),
         "adapter_hash": sha256_obj(adapters),
     }
     _HASHES_CACHE.clear()

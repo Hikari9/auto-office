@@ -12,8 +12,9 @@ import math
 import re
 
 from office.util import dumps, new_run_id, now_iso, sha256_obj
+from office import model_lineages
 
-POLICY_VERSION = "route-discovery-1"
+POLICY_VERSION = "route-discovery-2"
 PROVENANCE_KEY = "_provenance"
 DIGEST_KEY = "_route_policy_digest"
 CEILING_KEY = "routing.adaptive.budget_ceiling_usd"
@@ -59,6 +60,16 @@ def row_status(row: dict, probe: dict | None = None) -> dict:
             if result in ("pending", "pass", "fail"):
                 reason = ": ".join(str(v) for v in (result, category, probe.get("detail")) if v)
     return {"status": status, "reason": reason, "discovery_eligible": eligible}
+
+
+def is_free_model(row: dict) -> bool:
+    """Whether the catalog explicitly marks this route as a free model."""
+    return row.get("free_model") is True
+
+
+def is_explicit_free_slug(harness: str | None, *slugs: str | None) -> bool:
+    """Whether an opencode slug names itself free (the `-free` suffix convention)."""
+    return harness == "opencode" and any(isinstance(s, str) and s.strip().lower().endswith("-free") for s in slugs)
 
 
 def alias_status(alias_row: dict, target_row: dict) -> dict:
@@ -122,9 +133,12 @@ def user_policy(config: dict) -> dict:
     raw = (config.get("routing") or {}).get("user_policy") or {}
     provenance = config.get(PROVENANCE_KEY) or {}
     return {"denied": deepcopy(raw.get("denied_models") or []),
+            "ceilings": deepcopy(raw.get("version_ceilings") or {}),
+            "ceiling_sources": {lineage: provenance.get(f"routing.user_policy.version_ceilings.{lineage}")
+                                for lineage in (raw.get("version_ceilings") or {})},
             "overkill": deepcopy(raw.get("overkill_rules") or []),
             "sources": {key: provenance.get(f"routing.user_policy.{key}")
-                        for key in ("denied_models", "overkill_rules")}}
+                        for key in ("denied_models", "version_ceilings", "overkill_rules")}}
 
 
 def _valid_spec(spec) -> bool:
@@ -139,6 +153,18 @@ def validate_user_policy(config: dict) -> list[str]:
     denied = raw.get("denied_models", [])
     if not isinstance(denied, list) or any(not _valid_spec(spec) for spec in denied):
         problems.append("routing.user_policy.denied_models must be a list of model, harness/model[@effort], or harness:<name>")
+    ceilings = raw.get("version_ceilings", {})
+    if not isinstance(ceilings, dict):
+        problems.append("routing.user_policy.version_ceilings must be a mapping of provider/lineage to numeric version")
+    else:
+        for lineage, ceiling in ceilings.items():
+            if not isinstance(lineage, str) or not model_lineages.LINEAGE_KEY_RE.fullmatch(lineage):
+                problems.append(f"routing.user_policy.version_ceilings: invalid lineage {lineage!r}")
+                continue
+            try:
+                model_lineages.version_parts(ceiling)
+            except model_lineages.LineageError:
+                problems.append(f"routing.user_policy.version_ceilings.{lineage} must be a quoted numeric generation")
     overkill = raw.get("overkill_rules", [])
     if not isinstance(overkill, list):
         return problems + ["routing.user_policy.overkill_rules must be a list"]
@@ -171,8 +197,28 @@ def _policy_reason(kind: str, spec: str, policy: dict, key: str) -> str:
 
 
 def is_denied(cand: dict, policy: dict) -> str | None:
-    return next((_policy_reason("denied", spec, policy, "denied_models")
-                 for spec in policy.get("denied", []) if _matches(cand, spec)), None)
+    explicit = next((_policy_reason("denied", spec, policy, "denied_models")
+                     for spec in policy.get("denied", []) if _matches(cand, spec)), None)
+    if explicit:
+        return explicit
+    ceilings = policy.get("ceilings") or {}
+    if not ceilings:
+        return None
+    # Prefer an audited, concrete route target over an alias's UI name.
+    identity = model_lineages.identify(cand.get("model_id"), aliases=cand)
+    # Denial uses authoritative catalog identity, never caller-provided claims.
+    # User-created/unclassified routes cannot spoof their version to escape a
+    # ceiling; they remain subject to the separate unverified/trust gates.
+    lineage = (identity or {}).get("lineage_key")
+    version = (identity or {}).get("generation_version")
+    if lineage not in ceilings or not version:
+        return None  # unknown identity is not a fabricated user denial
+    if model_lineages.version_parts(version) <= model_lineages.version_parts(ceilings[lineage]):
+        source = ((policy.get("ceiling_sources") or {}).get(lineage)
+                  or (policy.get("sources") or {}).get("version_ceilings") or "run")
+        return (f"denied by {source} routing.user_policy.version_ceilings: "
+                f"{lineage} <= {ceilings[lineage]} (concrete generation {version})")
+    return None
 
 
 def is_overkill(cand: dict, role: str, size_class: str | None, policy: dict) -> str | None:

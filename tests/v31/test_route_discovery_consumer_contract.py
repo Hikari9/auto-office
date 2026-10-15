@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from office import adaptive, candidates, config as cfg, db, paths, route_policy, route_probe, routing, scoring, state
+from office import adapters, adaptive, candidates, config as cfg, db, paths, route_policy, route_probe, routing, scoring, state
 
 ROOT = Path(__file__).resolve().parents[2]
 FAKE = ROOT / "tests" / "fixtures" / "route_probe" / "fake_harness.py"
@@ -57,6 +57,8 @@ class World:
         self.codex = tmp / "bin" / "codex"
         self.codex.write_text(f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
         self.codex.chmod(0o755)
+        # Discovery fixtures model one fake codex. Do not enlist real host CLIs.
+        monkeypatch.setattr(adapters, "installed", lambda adapter: adapters.executable(adapter) == "codex")
         if route_probe.write_boundary_reason() is not None:
             # No OS write boundary here: the launch path still runs, only the sandbox wrapper is dropped.
             monkeypatch.setattr(route_probe, "write_boundary_reason", lambda: None)
@@ -635,7 +637,7 @@ def test_route_flag_refuses_a_denied_route_and_a_plan_route_choice_is_ignored_wi
 def test_shipped_defaults_contain_no_denied_or_overkill_entries(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "none.yaml"))
-    assert cfg.resolve(None)[0]["routing"]["user_policy"] == {"denied_models": [], "overkill_rules": []}
+    assert cfg.resolve(None)[0]["routing"]["user_policy"] == {"denied_models": [], "overkill_rules": [], "version_ceilings": {}}
     assert candidates.current_user_policies() == []
 
 

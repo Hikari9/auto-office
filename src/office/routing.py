@@ -317,6 +317,9 @@ def route(request: dict, discovery_input: dict | None = None) -> dict:
                 (why for pol in policies if (why := route_policy.is_overkill(c, role, size_class, pol))), None)
             if c.get("hard_excluded") or c.get("local_hard_excluded"):
                 rejected.append({"candidate": cid, "stage": 1, "reason": "hard exclusion"})
+            elif route_policy.is_free_model(c) and not request.get("allow_free_models", False):
+                rejected.append({"candidate": cid, "stage": 1, "reason": "free model opt-in is disabled",
+                                 "category": "free-model-opt-in"})
             elif denied:
                 rejected.append({"candidate": cid, "stage": 1, "reason": denied, "category": "denied"})
             elif overkill:
@@ -435,6 +438,23 @@ def route(request: dict, discovery_input: dict | None = None) -> dict:
                 "selected": None, "status": "protected_quota_would_be_consumed", "rejected": rejected,
                 "action": "choose a smaller/cheaper valid strategy, propose another route, or obtain explicit user authority",
             }
+
+        if preferred_seed and not any(preferred_rank(c, preferred_seed) is not None for c in stage):
+            # A route the user named (a declared route, or an exact re-qualification of a recorded
+            # one) is the user's choice, not a replacement, so it keeps its place.
+            named = {request.get("declared_route"), request.get("exact_route")} - {None}
+            fallback = []
+            for c in stage:
+                if route_policy.is_free_model(c) and candidate_id(c) not in named:
+                    rejected.append({"candidate": candidate_id(c), "stage": 7,
+                                     "reason": "free model cannot replace an unavailable preferred route",
+                                     "category": "free-model-fallback"})
+                else:
+                    fallback.append(c)
+            stage = fallback
+            if not stage:
+                _reject_pool(pool, rejected, "no qualifying known-working route, so no fallback exists")
+                return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
 
         if adaptive_role:
             return _adaptive(request, role, playbook, policy, stage, rejected, eligibility, learned,

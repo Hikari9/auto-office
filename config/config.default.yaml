@@ -59,6 +59,9 @@ routing:
     probe_timeout_s: 120
   user_policy:
     denied_models: []
+    # Inclusive generation ceiling per explicitly named provider/lineage.
+    # e.g. openai/gpt-sol: "5.6" denies Sol 5.6 and older, not Sol 6.1.
+    version_ceilings: {}
     overkill_rules: []
   adaptive:
     competitive_band: 0.05
