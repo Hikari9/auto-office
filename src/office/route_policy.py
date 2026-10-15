@@ -62,6 +62,11 @@ def row_status(row: dict, probe: dict | None = None) -> dict:
     return {"status": status, "reason": reason, "discovery_eligible": eligible}
 
 
+def is_free_model(row: dict) -> bool:
+    """Whether the catalog explicitly marks this route as a free model."""
+    return row.get("free_model") is True
+
+
 def alias_status(alias_row: dict, target_row: dict) -> dict:
     """Inherit the exact target's status, including its probe refinement."""
     inherited = row_status(target_row)

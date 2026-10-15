@@ -42,6 +42,12 @@ def test_status_derivations(row, probe, status, can_probe):
         assert probe["reason_class"] in result["reason"]
 
 
+def test_free_model_marker_requires_exact_true():
+    assert policy.is_free_model({"free_model": True}) is True
+    assert policy.is_free_model({"free_model": False}) is False
+    assert policy.is_free_model({"free_model": "true"}) is False
+
+
 @pytest.mark.parametrize("status", policy.ROUTE_STATUSES)
 def test_alias_inherits_target_status_with_target_reason(status):
     target = eligible(route_status=status, status_reason="exact target status", dispatchable=status == "available")

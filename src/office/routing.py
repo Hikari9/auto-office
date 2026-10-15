@@ -317,6 +317,9 @@ def route(request: dict, discovery_input: dict | None = None) -> dict:
                 (why for pol in policies if (why := route_policy.is_overkill(c, role, size_class, pol))), None)
             if c.get("hard_excluded") or c.get("local_hard_excluded"):
                 rejected.append({"candidate": cid, "stage": 1, "reason": "hard exclusion"})
+            elif route_policy.is_free_model(c) and not request.get("allow_free_models", False):
+                rejected.append({"candidate": cid, "stage": 1, "reason": "free model opt-in is disabled",
+                                 "category": "free-model-opt-in"})
             elif denied:
                 rejected.append({"candidate": cid, "stage": 1, "reason": denied, "category": "denied"})
             elif overkill:
