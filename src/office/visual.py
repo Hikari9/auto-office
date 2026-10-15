@@ -463,6 +463,11 @@ def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Pat
                 "cause": f"{url} is not a local/test origin; capture is limited to authorized local and preview environments",
                 "product_failures": []}
     if spec.get("start"):
+        from office import shell_safety
+        if shell_safety.unsafe_manual_push(spec["start"]):
+            return {"evidence_status": "CAPTURE_BLOCKED",
+                    "cause": "visual.start contains an unowned manual Git push; use Office-owned task PR sync",
+                    "product_failures": []}
         conflict = _capture_port_conflict(url, con, run, worktree)
         if conflict:
             return {"evidence_status": "CAPTURE_BLOCKED", "cause": conflict, "product_failures": []}
@@ -642,6 +647,19 @@ def _capture_frames(browser, url: str, spec: dict, evdir: Path, ref: Path | None
     return {"frames": frames, "environment": env}
 
 
+def _invalid_probe_selector(page, selectors: list[str]) -> dict | None:
+    """Check selectors with the DOM's plain-CSS parser, not Playwright's selector engine (#574)."""
+    if not selectors:
+        return None
+    return page.evaluate("""(selectors) => {
+      for (const selector of selectors) {
+        try { document.querySelector(selector); }
+        catch (error) { return {selector, detail: String(error.message || error).slice(0, 160)}; }
+      }
+      return null;
+    }""", selectors)
+
+
 def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference=False) -> dict:
     from playwright.sync_api import Error as PWError
     ctx = browser.new_context(viewport={"width": w, "height": h}, device_scale_factor=1)
@@ -673,6 +691,10 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
             page.evaluate("document.fonts ? document.fonts.ready.then(() => true) : true")
         except PWError:
             pass
+        bad = _invalid_probe_selector(page, selectors)
+        if bad:
+            return {"cause": "spec", "invalid":
+                    f"visual selectors: accepts plain CSS only; selector {bad['selector']!r} is invalid: {bad['detail']}"}
         auth = (spec.get("auth") or "").strip()
         if auth and not reference and page.query_selector(auth) is None:
             return {"invalid": f"wrong authenticated state: {auth} not present at {w}x{h}"}

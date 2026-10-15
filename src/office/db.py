@@ -11,6 +11,7 @@ the same file without schema errors.
 """
 from __future__ import annotations
 
+import json
 import random
 import re
 import sqlite3
@@ -24,7 +25,7 @@ from office import paths
 # Bump when SHARED_COLUMNS or the DDL changes. The version is a record, not the
 # gate: every open also runs the additive column pass (see `migrate`), so a
 # column added without a bump still reaches existing databases.
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -249,9 +250,35 @@ def migrate(con: sqlite3.Connection) -> None:
         con.execute("CREATE INDEX IF NOT EXISTS runs_repo ON runs(git_common_dir, phase)")
         con.execute("CREATE INDEX IF NOT EXISTS findings_task ON findings(run_id, task_id, state)")
         con.execute("CREATE INDEX IF NOT EXISTS dispatches_run ON dispatches(run_id, task_id)")
+        _repair_historical_plan_review_routes(con)
         # Never lower a stamp a newer runtime wrote; drift repair runs below it.
         con.execute("INSERT OR REPLACE INTO schema_meta(key, value) VALUES('office_schema', ?)",
                     (str(max(SCHEMA_VERSION, _schema_version(con))),))
+
+
+
+def _repair_historical_plan_review_routes(con: sqlite3.Connection) -> tuple[int, int]:
+    """Recover original route evidence only; unknown values stay NULL."""
+    repaired = 0
+    for row in con.execute("SELECT id, model, effort, route_json FROM dispatches "
+                           "WHERE role='plan_reviewer' AND (model IS NULL OR model='' "
+                           "OR effort IS NULL OR effort='')"):
+        try:
+            payload = json.loads(row["route_json"] or "{}")
+        except (ValueError, TypeError):
+            payload = {}
+        candidate = payload.get("candidate") if isinstance(payload, dict) else None
+        if not isinstance(candidate, dict):
+            continue
+        model = row["model"] or candidate.get("invocation_model_id")
+        effort = row["effort"] or candidate.get("effort")
+        if not isinstance(model, str) or not model.strip() or not isinstance(effort, str) or not effort.strip():
+            continue
+        con.execute("UPDATE dispatches SET model=?, effort=? WHERE id=?", (model, effort, row["id"]))
+        repaired += 1
+    unknown = con.execute("SELECT COUNT(*) FROM dispatches WHERE role='plan_reviewer' "
+                          "AND (model IS NULL OR model='' OR effort IS NULL OR effort='')").fetchone()[0]
+    return repaired, unknown
 
 
 def missing_columns(con: sqlite3.Connection) -> list[str]:

@@ -50,7 +50,16 @@ def inspect(con, run: dict, what: str | None, ident: str | None) -> Result:
     if what in ("convergence", "lane", "lanes", "scope"):
         from office import convergence
         lines = convergence.inspect_lines(con, run, ident)
-        return Result(lines=lines, data=convergence.receipt(con, run) if contract.is_convergence(run) else {})
+        data = convergence.receipt(con, run) if contract.is_convergence(run) else {}
+        if contract.is_convergence(run):
+            query = "SELECT scope, code, task_id, gate_kind, level, severity, state, location, summary, action, disposition FROM findings WHERE run_id=?"
+            params = [run["id"]]
+            if ident:
+                query += " AND LOWER(scope)=LOWER(?)"
+                params.append(ident)
+            query += " ORDER BY created_at"
+            data = {**data, "findings": [dict(f) for f in con.execute(query, params)]}
+        return Result(lines=lines, data=data)
     raise Usage("unknown-view", f"cannot inspect {what!r}",
                 next_step="office inspect run|plan|task|gate|evidence|amendments|events|route|learner|trust|convergence|economics [id]")
 
@@ -145,9 +154,9 @@ def _task(con, run, tid) -> Result:
             shown = contract.display_verdict(g["verdict"], g["contract"]) if g["verdict"] else ""
             lines.append(f"  gate {g['id']} {g['kind']} {g['status']} {shown} {g['evidence_status'] or ''} "
                          f"round {g['round']}{' escalated' if g['escalated'] else ''} {g['route'] or ''} {(g['summary'] or '')[:100]}")
-    for f in con.execute("SELECT code, gate_kind, severity, state, location, summary FROM findings WHERE run_id=? AND task_id=? "
+    for f in con.execute("SELECT code, gate_kind, severity, state, location, summary, action FROM findings WHERE run_id=? AND task_id=? "
                          "ORDER BY created_at", (run["id"], tid)).fetchall():
-        lines.append(f"finding {f['code']} {f['gate_kind']} {f['severity']} {f['state']} {f['location'] or ''} {f['summary'][:100]}")
+        lines.append(f"finding {f['code']} {f['gate_kind']} {f['severity']} {f['state']} {f['location'] or ''} {f['summary']}" + (f" | required fix: {f['action']}" if f["action"] else ""))
     for dl in con.execute("SELECT amendment_id, status, target_version, delivered_count FROM deliveries WHERE run_id=? AND task_id=?",
                           (run["id"], tid)).fetchall():
         lines.append(f"amendment {dl['amendment_id']} -> p{dl['target_version']} {dl['status']} (delivered {dl['delivered_count']}x)")

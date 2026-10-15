@@ -252,6 +252,33 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
     }
 
 
+def _unsafe_force_push_instruction(instruction: str) -> bool:
+    """Reject manual pushes; Office-owned PR sync manages task refs."""
+    from office import shell_safety
+    return shell_safety.unsafe_manual_push(instruction, prose=True)
+
+
+def _unsafe_force_push_in_plan(task: dict) -> str | None:
+    for instruction in [*(task.get("notes") or []), *(task.get("checks") or []),
+                        *(task.get("accept") or []), *(task.get("interfaces") or [])]:
+        if _unsafe_force_push_instruction(instruction):
+            return instruction
+    visual = task.get("visual") or {}
+    if visual.get("start") and _unsafe_force_push_instruction(visual["start"]):
+        return visual["start"]
+    return None
+
+
+def _unsafe_force_push_requirement(plan: ParsedPlan) -> str | None:
+    req = plan.requirements
+    entries = [*plan.run_checks, *(req.get("done_criteria") or [])]
+    # non_goals is a prohibition, never a command authorization.
+    entries += [v for v in (req.get("deploy") or {}).values() if isinstance(v, str)]
+    entries += [f"{entry.get('action') or ''} {' '.join(entry.get('preconditions') or [])}"
+                for entry in req.get("named_actions") or []]
+    return next((e for e in entries if _unsafe_force_push_instruction(e)), None)
+
+
 def _validate(plan: ParsedPlan) -> None:
     ids = [t["id"] for t in plan.tasks]
     if not plan.tasks:
@@ -260,6 +287,9 @@ def _validate(plan: ParsedPlan) -> None:
     for d in sorted(dup):
         plan.errors.append(f"{d}: duplicate task id")
     known = set(ids)
+    if _unsafe_force_push_requirement(plan):
+        plan.errors.append("run-level Requirements: unsafe manual git push with unverified remote ownership; "
+                           "use the Office-owned task PR workflow")
     for t in plan.tasks:
         if not t["scope"] and not t.get("scope_none"):
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `scope:` (paths this task may write)")
@@ -271,6 +301,10 @@ def _validate(plan: ParsedPlan) -> None:
                 err = f"{t['id']} (line {line}): {ENTRY_ERROR} {entry!r} {problem}"
                 plan.errors.append(err)
                 plan.entry_problems.append((t["id"], entry, err))
+        forbidden_push = _unsafe_force_push_in_plan(t)
+        if forbidden_push:
+            plan.errors.append(f"{t['id']}: unsafe manual git push with unverified remote ownership; "
+                               "remove it and use the Office-owned task PR workflow")
         if not t["accept"]:
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `accept:` criteria")
         if t["checks"] is None:
@@ -490,11 +524,29 @@ def literal_prefix(pattern: str) -> str:
     return pattern[: m.start()] if m else pattern
 
 
+def _incompatible_glob_suffixes(a: str, b: str) -> bool:
+    """Conservatively prove two file globs cannot name the same path (#540).
+
+    Only reject overlap when *both* globs have nonempty fixed trailing text
+    after the last wildcard. A shared filename must end with both suffixes;
+    incompatible suffixes make that impossible. Unknown patterns still overlap.
+    """
+    if not any(c in a for c in "*?") or not any(c in b for c in "*?"):
+        return False
+    end_a = max(a.rfind("*"), a.rfind("?"))
+    end_b = max(b.rfind("*"), b.rfind("?"))
+    suffix_a, suffix_b = a[end_a + 1:], b[end_b + 1:]
+    return bool(suffix_a and suffix_b and
+                not (suffix_a.endswith(suffix_b) or suffix_b.endswith(suffix_a)))
+
+
 def scopes_overlap(a: list[str], b: list[str]) -> bool:
     for pa in a:
         for pb in b:
             if is_shared(pa) and is_shared(pb) and not (shared_tree(pa) or shared_tree(pb)):
                 continue  # both append to a shared registry file; compose resolves it
+            if _incompatible_glob_suffixes(pa.lstrip(SHARED), pb.lstrip(SHARED)):
+                continue
             la, lb = literal_prefix(pa.lstrip(SHARED)), literal_prefix(pb.lstrip(SHARED))
             if la.startswith(lb) or lb.startswith(la):
                 return True

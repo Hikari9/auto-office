@@ -659,6 +659,10 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
             # The digest is the duplicate guard for every later submit of this task.
             state.record_evidence(con, run["id"], EVIDENCE_KIND, dest, task_id=task["id"], revision_id=rev_id,
                                   digest=evidence[2])
+        ledger_copy = _stage_self_review(run, d, rev_id, wt, receipt, staged)
+        if ledger_copy:
+            state.record_evidence(con, run["id"], "self_review_ledger", ledger_copy, task_id=task["id"],
+                                  revision_id=rev_id, digest=receipt["sha256"])
         if prs.enabled(run):
             prs.advance_branch(run, d, commit)
             prs.queue(con, run, task["id"], "revision", rev_id)
@@ -747,6 +751,31 @@ def _self_review_receipt(wt: Path, task: dict, run: dict, head: str, tree: str, 
     if not substantive:
         return {"kind": "exempt", "type": "empty", "tree": tree, "tier": tier}
     return {"kind": "exempt", "type": exempt, "reason": reason.strip(), "tree": tree, "tier": tier}
+
+
+def _stage_self_review(run: dict, d: dict, rev_id: str, wt: Path, receipt: dict | None,
+                       staged: list) -> Path | None:
+    """Archive the exact self-review ledger bound to this revision, privately (#576)."""
+    if not receipt or receipt.get("kind") != "ledger":
+        return None
+    raw = _read_untracked_text(wt, briefs.LEDGER_FILE, briefs.LEDGER_MAX_CHARS)
+    if raw is None or sha256_bytes(raw.encode("utf-8")) != receipt["sha256"]:
+        raise Refused("self-review-stale", "self-review ledger changed before recording this revision")
+    source = wt / briefs.LEDGER_FILE
+    dest = briefs.self_review_path(run, d["id"], rev_id)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(dest, flags, 0o600)
+    except FileExistsError as exc:
+        raise Refused("self-review-collision",
+                      "self-review evidence already exists; cannot overwrite another revision") from exc
+    except OSError as exc:
+        raise Refused("self-review-archive-unavailable", "cannot securely archive self-review evidence") from exc
+    staged.append((source, dest))
+    with os.fdopen(fd, "w", encoding="utf-8") as file:
+        file.write(raw)
+    return dest
 
 
 def _executor_ledger(wt: Path) -> Path | None:
