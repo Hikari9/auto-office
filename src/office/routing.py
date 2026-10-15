@@ -445,28 +445,6 @@ def route(request: dict, discovery_input: dict | None = None) -> dict:
                 "action": "choose a smaller/cheaper valid strategy, propose another route, or obtain explicit user authority",
             }
 
-        if preferred_seed:
-            # A free model never displaces the preferred route, whether that route is available
-            # (adaptive scoring) or not (fallback), and never enters as a discovery trial. A route
-            # the user named (a declared route, or an exact re-qualification of a recorded one)
-            # or a free route that is itself in the preferred seed is the user's choice and keeps
-            # its place.
-            named = {request.get("declared_route"), request.get("exact_route")} - {None}
-
-            def displaces(c):
-                return (route_policy.is_free_model(c) and candidate_id(c) not in named
-                        and preferred_rank(c, preferred_seed) is None)
-
-            for c in [c for c in stage + pool if displaces(c)]:
-                rejected.append({"candidate": candidate_id(c), "stage": 7,
-                                 "reason": "free model cannot displace the preferred route",
-                                 "category": "free-model-fallback"})
-            stage = [c for c in stage if not displaces(c)]
-            pool = [c for c in pool if not displaces(c)]
-            if not stage:
-                _reject_pool(pool, rejected, "no qualifying known-working route, so no fallback exists")
-                return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
-
         if adaptive_role:
             return _adaptive(request, role, playbook, policy, stage, rejected, eligibility, learned,
                              preferred_seed, allow_advisory_undercut, override_applies, override_record,
