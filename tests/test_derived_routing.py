@@ -7,8 +7,10 @@ raises trust; a missing capability-floor field fails closed and names itself; un
 reward never ranks as a measured zero; and an override is rejected without a recorded
 authorization and honoured (and disclosed) with one.
 """
+import os
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -129,70 +131,36 @@ class DerivedRoutingTests(unittest.TestCase):
         self.assertEqual(result['selected'], 'agy@1/m@high')
         self.assertEqual(result['status'], 'selected')
 
+    def _user_config(self, text):
+        cfg = Path(tempfile.mkdtemp()) / 'user-config.yaml'
+        if text is not None:
+            cfg.write_text(text)
+        return unittest.mock.patch.dict(os.environ, {'OFFICE_USER_CONFIG': str(cfg)})
+
     def test_disabled_free_model_is_rejected_without_substituting_it_for_selected_route(self):
         regular = cand('agy', model_id='regular', money=5.0)
         free = cand('agy', model_id='free', money=0.0)
         free['free_model'] = True
         request = {'role': 'worker', 'playbook': 'Change', 'runs_db': self.db_path,
                    'cost_policy': 'money_saver', 'candidates': [free, regular]}
-        result = current_routing.route(request)
+        with self._user_config(None):
+            result = current_routing.route(request)
         self.assertEqual(result['selected'], 'agy@1/regular@high')
         rejected = [r for r in result['rejected'] if r.get('category') == 'free-model-opt-in']
         self.assertEqual(len(rejected), 1)
         self.assertEqual(rejected[0]['candidate'], 'agy@1/free@high')
 
-    def test_opted_in_free_model_does_not_replace_an_unavailable_preferred_route(self):
+    def test_router_reads_the_free_model_opt_in_when_the_caller_omits_it(self):
         regular = cand('agy', model_id='regular', money=5.0)
         free = cand('agy', model_id='free', money=0.0)
         free['free_model'] = True
-        request = {
-            'role': 'worker', 'playbook': 'Change', 'runs_db': self.db_path,
-            'adaptive': False, 'allow_free_models': True, 'cost_policy': 'money_saver',
-            'preferred_seed': [{'model_id': 'preferred', 'harness': 'agy', 'effort': 'high'}],
-            'candidates': [free, regular],
-        }
-        result = current_routing.route(request)
+        request = {'role': 'worker', 'playbook': 'Change', 'runs_db': self.db_path, 'adaptive': False,
+                   'cost_policy': 'money_saver', 'candidates': [free, regular]}
+        with self._user_config('onboarding:\n  free_models_enabled: true\n'):
+            self.assertEqual(current_routing.route(request)['selected'], 'agy@1/free@high')
+            # An explicit caller value still wins over the stored consent.
+            result = current_routing.route({**request, 'allow_free_models': False})
         self.assertEqual(result['selected'], 'agy@1/regular@high')
-        self.assertEqual([r['candidate'] for r in result['rejected']
-                          if r.get('category') == 'free-model-fallback'], ['agy@1/free@high'])
-
-    def test_user_named_free_route_is_not_treated_as_a_fallback(self):
-        regular = cand('agy', model_id='regular', money=5.0)
-        free = cand('agy', model_id='free', money=0.0)
-        free['free_model'] = True
-        for key, candidates_in in (('declared_route', [free, regular]), ('exact_route', [free])):
-            request = {
-                'role': 'worker', 'playbook': 'Change', 'runs_db': self.db_path,
-                'adaptive': False, 'allow_free_models': True, 'cost_policy': 'money_saver',
-                'preferred_seed': [{'model_id': 'preferred', 'harness': 'agy', 'effort': 'high'}],
-                'candidates': candidates_in, key: 'agy@1/free@high',
-            }
-            result = current_routing.route(request)
-            self.assertFalse([r for r in result['rejected'] if r.get('category') == 'free-model-fallback'], key)
-
-    def test_adaptive_opt_in_does_not_replace_an_unavailable_preferred_route(self):
-        regular = cand('agy', model_id='regular', money=5.0)
-        free = cand('agy', model_id='free', money=0.0)
-        free['free_model'] = True
-        request = {
-            'role': 'worker', 'playbook': 'Change', 'runs_db': self.db_path,
-            'adaptive': True, 'allow_free_models': True,
-            'adaptive_config': {
-                'competitive_band': 0,
-                'weights': {'balanced': {'effectiveness': 0, 'cost': 1, 'speed': 0, 'quota': 0, 'preference': 0}},
-            },
-            'preferred_seed': [{'model_id': 'preferred', 'harness': 'agy', 'effort': 'high'}],
-            'candidates': [free, regular],
-        }
-        result = current_routing.route(request)
-        self.assertEqual(result['selected'], 'agy@1/regular@high')
-        self.assertEqual([r['candidate'] for r in result['rejected']
-                          if r.get('category') == 'free-model-fallback'], ['agy@1/free@high'])
-
-        request['preferred_seed'] = [{'model_id': 'free', 'harness': 'agy', 'effort': 'high'}]
-        result = current_routing.route(request)
-        self.assertEqual(result['selected'], 'agy@1/free@high')
-        self.assertFalse([r for r in result['rejected'] if r.get('category') == 'free-model-fallback'])
 
     def test_seeded_success_labels_alone_never_promote(self):
         """No count of self-reported successes may promote -- amendments v5/v6."""

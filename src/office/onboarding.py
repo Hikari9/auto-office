@@ -146,21 +146,30 @@ def _opencode_entries(lines: list[str]) -> int:
     return len(rows)
 
 
-def _opencode_signed_in() -> tuple[bool, str]:
-    if shutil.which("opencode") is None:
-        return False, "opencode is not installed"
+def _run_opencode(*args: str) -> tuple[subprocess.CompletedProcess | None, str]:
+    """Run one opencode command; on failure return None and a one-line reason."""
+    label = "opencode " + " ".join(args)
     try:
-        proc = subprocess.run(["opencode", "auth", "list"], capture_output=True, text=True, timeout=10,
+        proc = subprocess.run(["opencode", *args], capture_output=True, text=True, timeout=10,
                               stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
-        return False, "opencode auth list timed out"
+        return None, f"{label} timed out"
     except (OSError, subprocess.SubprocessError):
-        return False, "could not run opencode auth list"
+        return None, f"could not run {label}"
     if proc.returncode != 0:
         out = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip()
         detail = next((ln.strip() for ln in reversed(out.splitlines()) if ln.strip()), "")
-        return False, (f"opencode auth list exited {proc.returncode}: {detail}" if detail
-                       else f"opencode auth list exited {proc.returncode}")
+        return None, (f"{label} exited {proc.returncode}: {detail}" if detail
+                      else f"{label} exited {proc.returncode}")
+    return proc, ""
+
+
+def _opencode_signed_in() -> tuple[bool, str]:
+    if shutil.which("opencode") is None:
+        return False, "opencode is not installed"
+    proc, why = _run_opencode("auth", "list")
+    if proc is None:
+        return False, why
     lines = [ln.rstrip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
     if not lines:
         return False, "opencode auth list printed nothing (run opencode auth login)"
@@ -174,18 +183,9 @@ def _opencode_signed_in() -> tuple[bool, str]:
 
 def _opencode_free_model(expected: str | None = None) -> tuple[str | None, str]:
     """Return a listed free model, optionally requiring one exact catalog slug."""
-    try:
-        proc = subprocess.run(["opencode", "models"], capture_output=True, text=True, timeout=10,
-                              stdin=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        return None, "opencode models timed out"
-    except (OSError, subprocess.SubprocessError):
-        return None, "could not run opencode models"
-    if proc.returncode != 0:
-        detail = next((ln.strip() for ln in reversed((proc.stderr or proc.stdout or "").splitlines())
-                       if ln.strip()), "")
-        return None, (f"opencode models exited {proc.returncode}: {detail}" if detail
-                      else f"opencode models exited {proc.returncode}")
+    proc, why = _run_opencode("models")
+    if proc is None:
+        return None, why
     for line in (proc.stdout or "").splitlines():
         for token in line.split():
             slug = token.strip(" ,")
