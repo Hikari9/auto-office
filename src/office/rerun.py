@@ -194,7 +194,7 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
             subprocess.run(["git", "-C", str(run["repo_root"]), "worktree", "remove", "--force", str(scratch)],
                            capture_output=True)
     return {"base": base, "merged": merged, "conflict": None, "reopened": reopened,
-            "line": "restacked onto " + ", ".join(f"{m['task']} {m['revision']}" for m in merged)}
+            "line": "; ".join(x for x in ("restacked onto " + ", ".join(f"{m['task']} {m['revision']}" for m in merged), note) if x)}
 
 
 def _sticky_check(con, run: dict, task: dict, parent: dict) -> str | None:

@@ -8,7 +8,23 @@ import sys
 
 import pytest
 
-from conftest import GOOD_ADD, SRC, approved_run, start_inline
+
+def _emit_many(args):
+    db_path, run_id, n, tag = args
+    from pathlib import Path as _Path
+    import sys as _sys
+    _SRC = _Path(__file__).resolve().parents[2] / "src"
+    _sys.path.insert(0, str(_SRC))
+    import os
+    os.environ["AUTO_OFFICE_RUNS_DB"] = db_path
+    from office import db, state
+    con = db.connect()
+    run = state.get_run(con, run_id)
+    for i in range(n):
+        with db.transaction(con):
+            state.emit(con, run, "t", f"{tag}-{i}")
+            state.advance_cursor(con, run_id, "c", i + 1)
+    con.close()
 
 
 def test_version_identity_is_exact_pep440(env):
@@ -21,6 +37,7 @@ def test_version_identity_is_exact_pep440(env):
 
 @pytest.mark.approved
 def test_every_run_and_packet_carries_office_version(env):
+    from conftest import GOOD_ADD, approved_run
     from office import version
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", check=0)
@@ -37,6 +54,7 @@ def test_every_run_and_packet_carries_office_version(env):
 
 
 def test_packet_version_mismatch_is_rejected(env):
+    from conftest import start_inline
     start_inline(env)
     from office import state
     con = env.con()
@@ -50,6 +68,7 @@ def test_packet_version_mismatch_is_rejected(env):
 
 
 def test_job_with_foreign_office_version_never_executes(env, monkeypatch):
+    from conftest import start_inline
     monkeypatch.setenv("OFFICE_JOBS", "manual")
     start_inline(env)
     from office import db, jobs, state
@@ -68,6 +87,7 @@ def test_job_with_foreign_office_version_never_executes(env, monkeypatch):
 def test_crash_after_commit_before_external_work_recovers_once(env, monkeypatch):
     """The dispatch transition commits its launch job; the process dies before
     running it. The next office command runs it exactly once."""
+    from conftest import GOOD_ADD, approved_run
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env={"OFFICE_JOBS": "manual"}, check=0)
     con = env.con()
@@ -81,22 +101,8 @@ def test_crash_after_commit_before_external_work_recovers_once(env, monkeypatch)
     assert con.execute("SELECT COUNT(*) FROM dispatches WHERE role='executor'").fetchone()[0] == 1
 
 
-def _emit_many(args):
-    db_path, run_id, n, tag = args
-    sys.path.insert(0, str(SRC))
-    import os
-    os.environ["AUTO_OFFICE_RUNS_DB"] = db_path
-    from office import db, state
-    con = db.connect()
-    run = state.get_run(con, run_id)
-    for i in range(n):
-        with db.transaction(con):
-            state.emit(con, run, "t", f"{tag}-{i}")
-            state.advance_cursor(con, run_id, "c", i + 1)
-    con.close()
-
-
 def test_concurrent_event_writers_neither_lose_nor_duplicate(env):
+    from conftest import start_inline
     start_inline(env)
     from office import paths
     con = env.con()
@@ -134,6 +140,7 @@ def test_31_findings_must_name_a_recorded_dispatch(env):
 
 
 def test_projection_edits_have_no_effect(env):
+    from conftest import start_inline
     start_inline(env)
     from office import state
     con = env.con()
