@@ -221,7 +221,7 @@ def test_uncatalogued_free_slug_requires_opt_in_like_a_marked_row(monkeypatch, t
     cfg = tmp_path / "user-config.yaml"
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(cfg))
     for name in ("some-new-model-free", "opencode/some-new-model-free"):
-        with pytest.raises(Refused, match="requires explicit opt-in") as exc:
+        with pytest.raises(Refused, match="names itself free and requires explicit opt-in") as exc:
             _declare(monkeypatch, [], "opencode", name, "high")
         assert exc.value.category == "free-model-opt-in"
     cfg.write_text("onboarding:\n  free_models_enabled: true\n")
@@ -236,14 +236,12 @@ def test_uncatalogued_non_free_routes_are_unchanged(monkeypatch, tmp_path):
     assert _declare(monkeypatch, [], "agy", "gemini-free", "high")["free_model"] is False
 
 
-def test_ambiguous_catalog_match_with_a_free_row_fails_closed(monkeypatch, tmp_path):
+def test_ambiguous_catalog_match_keeps_the_catalog_answer(monkeypatch, tmp_path):
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "user-config.yaml"))
-    base = {"model_id": "mystery", "invocation_harness": "opencode", "dispatchable": True}
+    base = {"model_id": "mystery-free", "invocation_harness": "opencode", "dispatchable": True}
     rows = [{**base, "effort": "low", "free_model": True}, {**base, "effort": "high"}]
-    with pytest.raises(Refused, match="requires explicit opt-in"):
-        _declare(monkeypatch, rows, "opencode", "mystery")
-    paid = [{**base, "effort": "low"}, {**base, "effort": "high"}]
-    assert _declare(monkeypatch, paid, "opencode", "mystery")["free_model"] is False
+    # Catalogued but ambiguous (several rows, no effort): behaves as before, slug and free row unread.
+    assert _declare(monkeypatch, rows, "opencode", "mystery-free")["free_model"] is False
 
 
 def test_catalogued_rows_ignore_the_slug_convention(monkeypatch, tmp_path):
@@ -251,7 +249,7 @@ def test_catalogued_rows_ignore_the_slug_convention(monkeypatch, tmp_path):
     row = {"model_id": "named-free", "invocation_harness": "opencode", "effort": "high", "dispatchable": True}
     assert _declare(monkeypatch, [row], "opencode", "named-free", "high")["free_model"] is False
     marked = {**row, "model_id": "plain", "free_model": True}
-    with pytest.raises(Refused, match="requires explicit opt-in"):
+    with pytest.raises(Refused, match="plain is marked free and requires explicit opt-in"):
         _declare(monkeypatch, [marked], "opencode", "plain", "high")
 
 
