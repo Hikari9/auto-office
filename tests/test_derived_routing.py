@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 import office_routing as routing
 import office_runtime
 import office_scoring as scoring
+from office import routing as current_routing
 
 
 def cand(harness, model_id='m', effort='high', money=1.0, remaining=80, burn=1,
@@ -139,6 +140,21 @@ class DerivedRoutingTests(unittest.TestCase):
         rejected = [r for r in result['rejected'] if r.get('category') == 'free-model-opt-in']
         self.assertEqual(len(rejected), 1)
         self.assertEqual(rejected[0]['candidate'], 'agy@1/free@high')
+
+    def test_opted_in_free_model_does_not_replace_an_unavailable_preferred_route(self):
+        regular = cand('agy', model_id='regular', money=5.0)
+        free = cand('agy', model_id='free', money=0.0)
+        free['free_model'] = True
+        request = {
+            'role': 'worker', 'playbook': 'Change', 'runs_db': self.db_path,
+            'adaptive': False, 'allow_free_models': True, 'cost_policy': 'money_saver',
+            'preferred_seed': [{'model_id': 'preferred', 'harness': 'agy', 'effort': 'high'}],
+            'candidates': [free, regular],
+        }
+        result = current_routing.route(request)
+        self.assertEqual(result['selected'], 'agy@1/regular@high')
+        self.assertEqual([r['candidate'] for r in result['rejected']
+                          if r.get('category') == 'free-model-fallback'], ['agy@1/free@high'])
 
     def test_seeded_success_labels_alone_never_promote(self):
         """No count of self-reported successes may promote -- amendments v5/v6."""

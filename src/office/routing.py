@@ -450,7 +450,20 @@ def route(request: dict, discovery_input: dict | None = None) -> dict:
         # which is itself config/request data, never a candidate's self-assertion.
         if preferred_seed:
             matched = [c for c in stage if preferred_rank(c, preferred_seed) is not None]
-            advisory = matched if matched else stage
+            if matched:
+                advisory = matched
+            else:
+                advisory = []
+                for c in stage:
+                    if route_policy.is_free_model(c):
+                        rejected.append({"candidate": candidate_id(c), "stage": 7,
+                                         "reason": "free model cannot replace an unavailable preferred route",
+                                         "category": "free-model-fallback"})
+                    else:
+                        advisory.append(c)
+                stage = advisory
+                if not advisory:
+                    return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
         else:
             advisory = stage
         if advisory and not allow_advisory_undercut:
