@@ -614,7 +614,15 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         asked, _, acts = questions.scan(con, run)
         stuck = stalls(con, run, since=started_at, acts=acts) + signals
         changed = _snapshot(con, run) != start
-        news = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=1)
+        # Only an *actionable* orchestrator event warrants an exit 0: a task paused on a
+        # refused submit, a gate failure, a recheck the orchestrator must route. A pure
+        # lifecycle notification (a launch.session, a setup.done) carries no command to
+        # run, so an event older than the cursor must not wake an otherwise-idle wait into
+        # exit 0, which an orchestrator reads as "act now" and busy-loops on. Stalls and
+        # signals that DO carry a next step wake via the stall pass; real state
+        # transitions still wake via `changed`. (#296)
+        news = [e for e in state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=64)
+                if _urgent(e)]
         # Something already waiting on the orchestrator ends the wait at once;
         # otherwise a blocker present at the start would sit until the timeout.
         # A scope lease may become dormant when its holder ends without a new

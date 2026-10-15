@@ -47,6 +47,26 @@ def test_wait_returns_0_at_once_when_a_task_already_needs_the_orchestrator(env):
     assert code == 0 and "blocker:" in out, out
 
 
+@pytest.mark.approved
+def test_an_informative_event_does_not_wake_wait_into_exit_0(env):
+    """#296: a pure lifecycle event that an old cursor carries (a launch.session or a
+    setup.done) has no next step, so it must not turn a wait that would otherwise time
+    out into an unattended exit 0, which an orchestrator reads as 'act now' and
+    busy-loops on. An actionable event (a stall, a blocker) still wakes."""
+    from office import state
+    _go(env)
+    code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
+    assert code == 124 and "nothing new" in out, out
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    with con:
+        state.emit(con, run, "launch.session", "agent started", task_id="T1", audience="orchestrator")
+        state.emit(con, run, "setup.done", "worktree is ready", task_id="T1", audience="orchestrator")
+        con.commit()
+    code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
+    assert code == 124 and "nothing new" in out, out
+
+
 # ---- a worker stopped on something only the orchestrator resolves
 
 def _executor(env):
