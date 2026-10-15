@@ -172,6 +172,45 @@ def _opencode_signed_in() -> tuple[bool, str]:
     return True, f"opencode auth list ({entries} authenticated integration{'s' if entries != 1 else ''})"
 
 
+_KILO_CREDENTIAL_COUNT = re.compile(r"\s*(\d{1,9}) credentials? in (\S(?:.*\S)?)\s*", re.I)
+_KILO_CREDENTIAL_ENTRY = re.compile(r"\s*([\w.-][\w .-]{0,63})\s*[:|]\s*(?:API key|OAuth|token|credential)\s*", re.I)
+_KILO_AUTH_MAX_LINE = 512
+
+
+def _kilo_signed_in() -> tuple[bool, str]:
+    if shutil.which("kilo") is None:
+        return False, "kilo is not installed"
+    try:
+        proc = subprocess.run(["kilo", "auth", "list"], capture_output=True, text=True, timeout=10,
+                              stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return False, "kilo auth list timed out"
+    except (OSError, subprocess.SubprocessError):
+        return False, "could not run kilo auth list"
+    if proc.returncode != 0:
+        return False, f"kilo auth list exited {proc.returncode}"
+
+    lines = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    if not lines:
+        return False, "kilo auth list printed nothing"
+    counts = [_KILO_CREDENTIAL_COUNT.fullmatch(line) if len(line) <= _KILO_AUTH_MAX_LINE else None
+              for line in lines]
+    count_lines = [match for match in counts if match]
+    if count_lines:
+        if len(count_lines) != 1:
+            return False, "kilo auth list printed unparseable credential counts"
+        count = int(count_lines[0][1])
+        if count == 0:
+            return False, "kilo auth list reported zero credentials"
+        return True, f"kilo auth list ({count} credential{'s' if count != 1 else ''})"
+
+    entries = [match for line in lines if len(line) <= _KILO_AUTH_MAX_LINE
+               and (match := _KILO_CREDENTIAL_ENTRY.fullmatch(line))]
+    if entries and len(entries) == len(lines):
+        return True, f"kilo auth list ({len(entries)} credential entr{'y' if len(entries) == 1 else 'ies'})"
+    return False, "kilo auth list printed no recognizable credential entry"
+
+
 def _opencode_free_model(expected: str | None = None) -> tuple[str | None, str]:
     """Return a listed free model, optionally requiring one exact catalog slug."""
     try:
@@ -228,8 +267,7 @@ def credentials(harness: str) -> tuple[str, str]:
     elif harness == "opencode":
         ok, where = _opencode_signed_in()
     elif harness == "kilo":
-        ok, where = _files_or_env([Path.home() / ".local" / "share" / "kilo" / "auth.json"], (),
-                                  "run kilo auth login")
+        ok, where = _kilo_signed_in()
     else:
         return "unknown", "Office has no sign-in check for this harness"
     return ("found" if ok else "missing"), where
