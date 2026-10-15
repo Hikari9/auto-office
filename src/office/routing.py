@@ -439,6 +439,20 @@ def route(request: dict, discovery_input: dict | None = None) -> dict:
                 "action": "choose a smaller/cheaper valid strategy, propose another route, or obtain explicit user authority",
             }
 
+        if preferred_seed and not any(preferred_rank(c, preferred_seed) is not None for c in stage):
+            fallback = []
+            for c in stage:
+                if route_policy.is_free_model(c):
+                    rejected.append({"candidate": candidate_id(c), "stage": 7,
+                                     "reason": "free model cannot replace an unavailable preferred route",
+                                     "category": "free-model-fallback"})
+                else:
+                    fallback.append(c)
+            stage = fallback
+            if not stage:
+                _reject_pool(pool, rejected, "no qualifying known-working route, so no fallback exists")
+                return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
+
         if adaptive_role:
             return _adaptive(request, role, playbook, policy, stage, rejected, eligibility, learned,
                              preferred_seed, allow_advisory_undercut, override_applies, override_record,
@@ -450,20 +464,7 @@ def route(request: dict, discovery_input: dict | None = None) -> dict:
         # which is itself config/request data, never a candidate's self-assertion.
         if preferred_seed:
             matched = [c for c in stage if preferred_rank(c, preferred_seed) is not None]
-            if matched:
-                advisory = matched
-            else:
-                advisory = []
-                for c in stage:
-                    if route_policy.is_free_model(c):
-                        rejected.append({"candidate": candidate_id(c), "stage": 7,
-                                         "reason": "free model cannot replace an unavailable preferred route",
-                                         "category": "free-model-fallback"})
-                    else:
-                        advisory.append(c)
-                stage = advisory
-                if not advisory:
-                    return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
+            advisory = matched if matched else stage
         else:
             advisory = stage
         if advisory and not allow_advisory_undercut:
