@@ -48,6 +48,21 @@ def test_free_model_marker_requires_exact_true():
     assert policy.is_free_model({"free_model": "true"}) is False
 
 
+@pytest.mark.parametrize("harness,slug,expected", [
+    ("opencode", "opencode/some-model-free", True),
+    ("opencode", "some-model-free", True),
+    ("opencode", "opencode/Some-Model-FREE", True),
+    ("opencode", "opencode/some-model", False),
+    ("opencode", "opencode/free-tier-model", False),
+    ("opencode", None, False),
+    ("pi", "some-model-free", False),
+    (None, "some-model-free", False),
+])
+def test_explicit_free_slug_is_opencode_suffix_only(harness, slug, expected):
+    assert policy.is_explicit_free_slug(harness, slug) is expected
+    assert policy.is_explicit_free_slug(harness, None, slug) is expected
+
+
 @pytest.mark.parametrize("status", policy.ROUTE_STATUSES)
 def test_alias_inherits_target_status_with_target_reason(status):
     target = eligible(route_status=status, status_reason="exact target status", dispatchable=status == "available")
