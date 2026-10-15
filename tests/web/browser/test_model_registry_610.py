@@ -5,9 +5,10 @@ import json
 import threading
 
 import pytest
-from playwright.sync_api import expect
 
 from office.web import server
+
+expect = pytest.importorskip("playwright.sync_api").expect
 
 
 @pytest.fixture
