@@ -60,3 +60,84 @@ def test_office_owned_sync_refuses_unowned_branch(monkeypatch):
     dispatch["branch"] = "office/" + run["id"][:8] + "/T1"
     ok, reason = prs.push(run, dispatch, commit="deadbeef", force=True, expected="bad")
     assert not ok and "complete recorded remote SHA" in reason
+
+
+# --- P0 dynamic shell-wrapper admission (fail-closed) ---
+
+@pytest.mark.parametrize("command", [
+    # Authoritative P0 cases: field-splitting via unquoted expansion.
+    "env -u $P origin HEAD:main",
+    "timeout $D origin HEAD:main",
+    "timeout -s $P origin HEAD:main",
+])
+def test_p0_wrapper_field_splitting_denied(command):
+    assert shell_safety.unsafe_manual_push(command)
+    assert planfile._unsafe_force_push_instruction(command)
+
+
+@pytest.mark.parametrize("command", [
+    # Variable / field-expansion operands smuggling the inner command.
+    "env $X git push",
+    "timeout 5 $CMD",
+    "sudo $X git push",
+    "nice $ADJ git push",
+    "env -u $P git push",
+    "env --unset=$P git push",
+    "timeout --duration=$D git push",
+    "timeout $D git push",
+    "time -f $F git push",
+    "time --format=$F git push",
+    # Glob operands: unquoted expansion, unverifiable statically.
+    "env $X git push",
+    "timeout * git push",
+    "env * git push",
+    "sudo * git push",
+    # Command substitution in wrapper operands.
+    "timeout $(echo 5) git push",
+    "timeout `echo 5` git push",
+    "env -u $(id) git push",
+    "env --unset=`id` git push",
+    # Brace expansion forms.
+    "timeout {5} git push",
+    "env -u {HOME,USER} git push",
+    "timeout --signal={TERM,KILL} git push",
+    # Tilde / extra dynamic duration and unset variants.
+    "timeout ~ git push",
+    "timeout --duration=~ git push",
+    "env --unset=~ git push",
+    "time -f ~ git push",
+    # Wrapper stacking with a dynamic link anywhere in the chain.
+    "env FOO=1 timeout $D git push",
+    "sudo env -u $P git push",
+    "nice timeout $D git push",
+    "nohup $X git push",
+    "stdbuf -o $O git push",
+    "command $X git push",
+    "time $X git push",
+])
+def test_wrapper_dynamic_operands_denied(command):
+    assert shell_safety.unsafe_manual_push(command), command
+    assert planfile._unsafe_force_push_instruction(command), command
+
+
+@pytest.mark.parametrize("command", [
+    "git status",
+    "git fetch origin main",
+    "git show HEAD",
+    "git log --oneline",
+    "docker push my-image",
+    # Static wrapped harmless reads stay permitted (behavior-preserving).
+    "env CI=1 git status",
+    "timeout 5 git status",
+    "nice git status",
+    "time git status",
+    "nohup git status",
+    "sudo git status",
+    "command git status",
+    "stdbuf -o0 git status",
+    "time -f %e git status",
+    "timeout --signal=TERM 5 git status",
+    "env --unset=HOME git status",
+])
+def test_wrapper_static_harmless_permitted(command):
+    assert not shell_safety.unsafe_manual_push(command), command
