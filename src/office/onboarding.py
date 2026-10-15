@@ -117,13 +117,33 @@ def _claude_signed_in() -> tuple[bool, str]:
 
 
 # `opencode auth list` (default --format), from opencode 2.0.29's own command: it lists
-# connections only, one line each, `<integration><2+ spaces><source padded to 28><type>`, where
-# type is `stored` (a saved credential, source is its label) or `environment` (source is the
-# variable name). With no connection it prints exactly "No authenticated integrations". Exit
-# status is 0 either way, so sign-in is recognized from stdout entries alone. The source column
-# is padded, not delimited: a source of 28+ characters runs straight into the type.
+# connections only, one line each: integration.padEnd(W) + source.padEnd(28) + type, where W is
+# the longest integration name on any line plus 2 and type is `stored` (source is the saved
+# credential's label) or `environment` (source is the variable name). With no connection it
+# prints exactly "No authenticated integrations". Exit status is 0 either way, so sign-in is
+# recognized from stdout alone, and only when every line has that column structure: a source
+# of 28+ characters runs straight into the type, a shorter one is space-padded to 28.
 _OPENCODE_NO_INTEGRATIONS = "No authenticated integrations"
-_OPENCODE_ENTRY = re.compile(r"\S.*? {2,}(?:.*\s|.{28,})?(?:stored|environment)")
+_OPENCODE_ENTRY = re.compile(r"(\S.*?)( {2,})(.*)(stored|environment)")
+_OPENCODE_SOURCE_WIDTH = 28
+_OPENCODE_MAX_LINE = 512
+
+
+def _opencode_entries(lines: list[str]) -> int:
+    """Number of integration entries when every line is one and the integration column is the
+    shared width the contract produces; 0 for anything else."""
+    rows = []  # (integration length, spaces after it, length from integration end to type)
+    for ln in lines:
+        m = _OPENCODE_ENTRY.fullmatch(ln) if len(ln) <= _OPENCODE_MAX_LINE else None
+        if not m:
+            return 0
+        rows.append((len(m[1]), len(m[2]), len(ln) - len(m[4]) - len(m[1])))
+    width = max(name for name, _, _ in rows) + 2
+    for name, gap, tail in rows:
+        pad = width - name
+        if gap < pad or tail - pad < _OPENCODE_SOURCE_WIDTH:
+            return 0
+    return len(rows)
 
 
 def _opencode_signed_in() -> tuple[bool, str]:
@@ -146,7 +166,7 @@ def _opencode_signed_in() -> tuple[bool, str]:
         return False, "opencode auth list printed nothing (run opencode auth login)"
     if any(ln.lstrip().startswith(_OPENCODE_NO_INTEGRATIONS) for ln in lines):
         return False, "no authenticated integrations (run opencode auth login)"
-    entries = sum(1 for ln in lines if len(ln) <= 512 and _OPENCODE_ENTRY.fullmatch(ln))
+    entries = _opencode_entries(lines)
     if not entries:
         return False, "opencode auth list printed no recognizable integration entry (output not echoed)"
     return True, f"opencode auth list ({entries} authenticated integration{'s' if entries != 1 else ''})"

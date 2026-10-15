@@ -64,7 +64,23 @@ if args[:2] == ["auth", "list"]:
     if state == "env":
         print("OpenAI".ljust(8) + "OPENAI_API_KEY".ljust(28) + "environment"); sys.exit(0)
     if state == "long":
-        print("Anthropic".ljust(11) + "someone.longname@example.com" + "stored"); sys.exit(0)
+        print("Anthropic".ljust(11) + "someone.much.longer.name@example.com" + "stored"); sys.exit(0)
+    if state == "empty-source":
+        print("Anthropic".ljust(11) + "".ljust(28) + "stored"); sys.exit(0)
+    if state == "short-columns":
+        print("Fake  junk stored"); sys.exit(0)
+    if state == "one-space":
+        print("Anthropic work".ljust(39) + "stored"); sys.exit(0)
+    if state == "bad-type":
+        print("Anthropic".ljust(11) + "work".ljust(28) + "oauth"); sys.exit(0)
+    if state == "misaligned":
+        print("Anthropic".ljust(11) + "work".ljust(28) + "stored")
+        print("OpenAI Codex".ljust(14) + "OPENAI_API_KEY".ljust(28) + "environment"); sys.exit(0)
+    if state == "mixed":
+        print("Anthropic".ljust(11) + "work".ljust(28) + "stored")
+        print("warning: stale cache"); sys.exit(0)
+    if state == "overlong":
+        print("Anthropic".ljust(11) + "x" * 600 + "stored"); sys.exit(0)
     if state == "multi":
         print("Anthropic".ljust(14) + "work".ljust(28) + "stored")
         print("OpenAI Codex".ljust(14) + "OPENAI_API_KEY".ljust(28) + "environment"); sys.exit(0)
@@ -288,6 +304,12 @@ def test_opted_in_free_model_passes_preflight_without_login(fake, monkeypatch):
     ("junk", "no recognizable integration entry"),
     ("stderr-only", "printed nothing"),
     ("contradictory", "no authenticated integrations"),
+    ("short-columns", "no recognizable integration entry"),
+    ("one-space", "no recognizable integration entry"),
+    ("bad-type", "no recognizable integration entry"),
+    ("misaligned", "no recognizable integration entry"),
+    ("mixed", "no recognizable integration entry"),
+    ("overlong", "no recognizable integration entry"),
 ])
 def test_onboarding_auth_list_failures_are_explicit_when_no_model_is_usable(fake, monkeypatch, auth_state, expected):
     monkeypatch.setenv("FAKE_OPENCODE_AUTH", auth_state)
@@ -309,7 +331,7 @@ def test_auth_list_missing_reasons_are_distinct(fake, monkeypatch):
     assert len(set(reasons.values())) == len(reasons)
 
 
-@pytest.mark.parametrize("auth_state, count", [("ok", 1), ("env", 1), ("long", 1), ("multi", 2)])
+@pytest.mark.parametrize("auth_state, count", [("ok", 1), ("env", 1), ("long", 1), ("empty-source", 1), ("multi", 2)])
 def test_auth_list_recognizes_real_entry_shapes(fake, monkeypatch, auth_state, count):
     monkeypatch.setenv("FAKE_OPENCODE_AUTH", auth_state)
     state, where = onboarding.credentials("opencode")
