@@ -16,7 +16,6 @@ preflight:
 # Variants are model-specific: an unknown variant fails model resolution with
 # `Variant unavailable` instead of running a silently wrong effort.
 effort_mapping:
-  none: none
   low: low
   medium: medium
   high: high
@@ -67,7 +66,8 @@ source_notes: >-
   provider/model slugs one per line; preflight requires the pinned slug there
   before every launch. Probed 2026-10-14 on
   opencode/muse-spark-1.3-contributor-free: low/medium/high/xhigh launch
-  (READY), while #none and #max fail fast with `Variant unavailable`, a bogus
+  (READY), while #none and #max fail fast with `Variant unavailable` (none is
+  left unmapped so route amendments reject it; max stays mapped), a bogus
   variant fails fast the same way, and an unknown model fails fast with `Model
   unavailable`. Preflight requires the pinned slug in `opencode models`;
   `auth list` exit status is not sign-in evidence or a launch gate; onboarding

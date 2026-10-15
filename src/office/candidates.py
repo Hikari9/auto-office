@@ -608,7 +608,10 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
     # Only a route the catalog does not know at all can be judged by its slug; any catalog
     # match, even an ambiguous one, keeps the catalog's answer.
     named_free = not rows and route_policy.is_explicit_free_slug(harness, model)
-    free_model = route_policy.is_free_model(row or {}) or named_free
+    # An ambiguous match (several rows, no effort) is free if any matching row is, so an
+    # omitted effort cannot step around the opt-in.
+    free_model = (route_policy.is_free_model(row) if row is not None
+                  else any(route_policy.is_free_model(r) for r in rows)) or named_free
     if free_model and not onboarding.free_models_enabled():
         why = "names itself free" if named_free else "is marked free"
         raise Refused("free-model-opt-in", f"{harness}/{model} {why} and requires explicit opt-in",
