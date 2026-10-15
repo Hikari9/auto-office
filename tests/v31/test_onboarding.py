@@ -122,10 +122,27 @@ def test_reviewer_and_executor_routes_follow_derived_trust(h):
 
 def test_status_lists_installed_harnesses_with_sign_in_and_never_writes(h):
     data = h.status()
+    assert data["free_models"] == {"enabled": False, "default": False, "options": ["enable", "disable"]}
     rows = {r["harness"]: r for r in data["harnesses"]}
     assert rows["claude"]["installed"] and rows["claude"]["version"] == "2.1.300" and rows["claude"]["auth"] == "found"
     assert rows["gemini"]["installed"] is False
     assert not h.user.exists() and not h.claude_settings.exists()
+
+
+def test_free_model_opt_in_is_explicit_and_survives_reonboarding(h):
+    assert h.status()["free_models"]["enabled"] is False
+    code, out = h.office("onboard", "--enable-free-models")
+    assert code == 0, out
+    assert h.user_data()["onboarding"]["free_models_enabled"] is True
+    assert h.status()["free_models"]["enabled"] is True
+
+    code, out = h.office("onboard", "--planner", "claude/opus@medium")
+    assert code == 0, out
+    assert h.user_data()["onboarding"]["free_models_enabled"] is True
+
+    code, out = h.office("onboard", "--disable-free-models")
+    assert code == 0, out
+    assert h.user_data()["onboarding"]["free_models_enabled"] is False
 
 
 def test_current_harness_detection_order(h, monkeypatch):
@@ -221,7 +238,8 @@ def test_existing_preferences_are_prefilled_with_repo_override_shown(h):
 
 def test_skip_marks_complete_and_keeps_every_preference(h):
     prefs = {"cost_policy": {"default": "money_saver"},
-             "roles": {"executor": {"preferred_seed": [{"model_id": "sonnet", "harness": "claude", "effort": "high"}]}}}
+             "roles": {"executor": {"preferred_seed": [{"model_id": "sonnet", "harness": "claude", "effort": "high"}]}},
+             "onboarding": {"free_models_enabled": True}}
     h.user.write_text(yaml.safe_dump(prefs))
     h.repo_config.parent.mkdir(parents=True)
     h.repo_config.write_text("roles:\n  planner:\n    preferred_seed: [{model_id: astra}]\n")
@@ -230,7 +248,8 @@ def test_skip_marks_complete_and_keeps_every_preference(h):
     repo_before, settings_before = h.repo_config.read_bytes(), h.claude_settings.read_bytes()
     code, out = h.office("onboard", "--skip")
     assert code == 0 and "preferences unchanged" in out, out
-    assert h.user_data() == {**prefs, "onboarding": {"schema_version": onboarding.SCHEMA_VERSION}}
+    assert h.user_data() == {**prefs, "onboarding": {"schema_version": onboarding.SCHEMA_VERSION,
+                                                       "free_models_enabled": True}}
     assert h.repo_config.read_bytes() == repo_before and h.claude_settings.read_bytes() == settings_before
     assert h.status()["due"] is False
     # Skipping again writes nothing.

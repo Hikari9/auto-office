@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -21,7 +22,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from office import adapters, harnesscmd, install, onboarding
+from office import adapters, candidates, harnesscmd, install, onboarding, route_policy
+from office.state import Refused
 
 SLUG = "opencode/muse-spark-1.3-contributor-free"
 MODEL_ID = "muse-spark-1.3-contributor-free"
@@ -184,12 +186,38 @@ def test_capabilities_are_builder_only(fake):
     assert set(adapter["office_profiles"]) == {"worker"}
 
 
-def test_onboarding_reports_explicit_credential_free_model_as_usable(fake, monkeypatch):
-    assert onboarding.credentials("opencode")[0] == "found"
+def test_free_model_discovery_does_not_change_auth_or_enable_candidates(fake, monkeypatch, tmp_path):
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "user-config.yaml"))
     monkeypatch.setenv("FAKE_OPENCODE_AUTH", "missing")
-    state, where = onboarding.credentials("opencode")
-    assert state == "found"
-    assert where == f"credential-free model available: {SLUG}"
+    row = {"model_id": MODEL_ID, "invocation_model_id": SLUG, "invocation_harness": "opencode",
+           "effort": "xhigh", "dispatchable": True, "free_model": True}
+    monkeypatch.setattr(candidates, "catalog_rows", lambda: [row])
+
+    assert onboarding.credentials("opencode")[0] == "missing"
+    assert onboarding._opencode_free_model()[0] == SLUG
+    assert route_policy.is_free_model(row)
+    built, skipped = candidates.build_candidates(sqlite3.connect(":memory:"), "worker", probe=False,
+                                                  user_policies=[])
+    assert built == []
+    assert skipped[0]["category"] == "free-model-opt-in"
+    with pytest.raises(Refused, match="requires explicit opt-in"):
+        candidates.declared_candidate("opencode", MODEL_ID, "xhigh")
+
+    (tmp_path / "user-config.yaml").write_text("onboarding:\n  free_models_enabled: true\n")
+    built, skipped = candidates.build_candidates(sqlite3.connect(":memory:"), "worker", probe=False,
+                                                  user_policies=[])
+    assert [c["invocation_model_id"] for c in built] == [SLUG]
+    assert built[0]["free_model"] is True
+    assert skipped == []
+    assert candidates.declared_candidate("opencode", MODEL_ID, "xhigh")["free_model"] is True
+
+
+def test_opted_in_free_model_passes_preflight_without_login(fake, monkeypatch):
+    monkeypatch.setenv("FAKE_OPENCODE_AUTH", "missing")
+    assert onboarding.credentials("opencode")[0] == "missing"
+    assert onboarding._opencode_free_model()[0] == SLUG
+    ok, detail = adapters.run_preflight(_adapter(), SLUG)
+    assert ok is True and detail == ""
 
 
 @pytest.mark.parametrize("auth_state, expected", [
@@ -202,7 +230,9 @@ def test_onboarding_auth_list_failures_are_explicit_when_no_model_is_usable(fake
     monkeypatch.setenv("FAKE_OPENCODE_MODELS", "empty")
     state, where = onboarding.credentials("opencode")
     assert state == "missing" and expected in where
-    assert "no explicitly free model" in where
+    assert "no explicitly free model" not in where
+    model, detail = onboarding._opencode_free_model()
+    assert model is None and "no explicitly free model" in detail
 
 
 def test_onboarding_auth_fixture_and_unknown_harness(fake, monkeypatch):

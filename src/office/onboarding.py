@@ -28,8 +28,9 @@ from office.result import Result
 from office.state import OfficeError
 
 # Bump only when the questions change enough that existing users should see them again.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCHEMA_KEY = "onboarding.schema_version"
+FREE_MODELS_KEY = "onboarding.free_models_enabled"
 DISCLAIMER = ("Office favors this route according to its routing policy, but may choose another model or effort "
               "when availability, quota, task fit, capability, evidence, or policy calls for it.")
 # (answer flag, question, config roles it writes, what the preference does)
@@ -59,6 +60,13 @@ def completed_schema() -> int:
     data = configcmd._load(paths.user_config_path())
     value = (data.get("onboarding") or {}).get("schema_version") if isinstance(data.get("onboarding"), dict) else None
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def free_models_enabled() -> bool:
+    """Read the user's explicit free-model consent; auth and availability are separate."""
+    data = configcmd._load(paths.user_config_path())
+    onboarding = data.get("onboarding")
+    return isinstance(onboarding, dict) and onboarding.get("free_models_enabled") is True
 
 
 def due_reason(completed: int) -> str | None:
@@ -128,8 +136,8 @@ def _opencode_signed_in() -> tuple[bool, str]:
     return True, "opencode auth list"
 
 
-def _opencode_free_model() -> tuple[str | None, str]:
-    """Return a listed model explicitly named as free, or why none was found."""
+def _opencode_free_model(expected: str | None = None) -> tuple[str | None, str]:
+    """Return a listed free model, optionally requiring one exact catalog slug."""
     try:
         proc = subprocess.run(["opencode", "models"], capture_output=True, text=True, timeout=10,
                               stdin=subprocess.DEVNULL)
@@ -145,21 +153,10 @@ def _opencode_free_model() -> tuple[str | None, str]:
     for line in (proc.stdout or "").splitlines():
         for token in line.split():
             slug = token.strip(" ,")
-            if slug.endswith("-free") and "/" in slug:
+            if slug.endswith("-free") and "/" in slug and (expected is None or slug == expected):
                 return slug, ""
-    return None, "opencode models lists no explicitly free model"
-
-
-def _opencode_usable() -> tuple[bool, str]:
-    signed_in, auth_detail = _opencode_signed_in()
-    if signed_in:
-        return True, "authenticated OpenCode"
-    if shutil.which("opencode") is None:
-        return False, auth_detail
-    model, model_detail = _opencode_free_model()
-    if model:
-        return True, f"credential-free model available: {model}"
-    return False, f"{auth_detail}; {model_detail}"
+    return None, (f"opencode models does not list {expected}" if expected else
+                  "opencode models lists no explicitly free model")
 
 
 def _files_or_env(files: list[Path], env: tuple[str, ...], hint: str) -> tuple[bool, str]:
@@ -193,7 +190,7 @@ def credentials(harness: str) -> tuple[str, str]:
         ok, where = _files_or_env([gemini_home / "oauth_creds.json"], ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
                                   "sign in to gemini")
     elif harness == "opencode":
-        ok, where = _opencode_usable()
+        ok, where = _opencode_signed_in()
     else:
         return "unknown", "Office has no sign-in check for this harness"
     return ("found" if ok else "missing"), where
@@ -209,6 +206,9 @@ def harnesses() -> list[dict]:
         if row["installed"]:
             row["version"] = adapters.harness_version(a) or "unknown"
             row["auth"], row["auth_detail"] = credentials(aid)
+            if aid == "opencode":
+                model, detail = _opencode_free_model()
+                row["free_model_availability"] = {"listed_model": model, "detail": detail}
         out.append(row)
     return out
 
@@ -232,6 +232,14 @@ def role_routes(con, config: dict, role: str) -> tuple[list[dict], dict[str, str
     usable = []
     for c in built:
         state, where = credentials(c["harness"])
+        if c.get("free_model") and c.get("harness") == "opencode":
+            listed, availability = _opencode_free_model(c.get("invocation_model_id"))
+            if not listed:
+                why_not[route_text(c)] = f"free model unavailable: {availability}"
+                continue
+            if state != "found":
+                usable.append(c)
+                continue
         if state == "missing":
             why_not[route_text(c)] = f"{c['harness']} is not signed in: {where}"
             continue
@@ -382,14 +390,18 @@ def status(*, harness: str | None = None, cwd: Path | None = None) -> Result:
     finally:
         con.close()
     commands = {"apply": "office onboard --planner <answer> --executor <answer> --reviewer <answer>",
-                "skip": "office onboard --skip"}
+                "skip": "office onboard --skip",
+                "enable_free_models": "office onboard --enable-free-models",
+                "disable_free_models": "office onboard --disable-free-models"}
     if offer and name:
         commands["install_recommended"] = f"office install --only {name}"
         commands["install_items"] = f"office install --only {name} --item <id> [--item <id> ...]"
+    free_models = {"enabled": free_models_enabled(), "default": False, "options": ["enable", "disable"]}
     data = {"schema_version": SCHEMA_VERSION, "completed_schema": completed, "due": reason is not None,
             "reason": reason or "current", "user_config": str(paths.user_config_path()),
             "harness": {"current": name, "source": source, "integration": integration, "offer": offer},
-            "harnesses": harnesses(), "questions": qs, "disclaimer": DISCLAIMER, "commands": commands,
+            "harnesses": harnesses(), "questions": qs, "free_models": free_models,
+            "disclaimer": DISCLAIMER, "commands": commands,
             "answers": "office (Let Office decide), keep, or harness/model@effort"}
     lines = [f"onboarding: {'due' if reason else 'current'} (schema {SCHEMA_VERSION}, completed {completed})"
              + (f": {reason}" if reason else "")]
@@ -401,6 +413,8 @@ def status(*, harness: str | None = None, cwd: Path | None = None) -> Result:
     lines.append("harnesses: " + ", ".join(
         f"{h['harness']} " + (f"{h['version']} sign-in {h['auth']}" if h["installed"] else "not installed")
         for h in data["harnesses"]))
+    lines.append(f"free models: {'enabled' if free_models['enabled'] else 'disabled'} "
+                 "(default off; use --enable-free-models to opt in)")
     for q in qs:
         cur = q["current"]
         now = (OFFICE if cur["choice"] == OFFICE else cur["value"] if cur["choice"] == "route"
@@ -417,13 +431,14 @@ def status(*, harness: str | None = None, cwd: Path | None = None) -> Result:
     return Result(lines=lines, next=nxt, data=data)
 
 
-def apply(answers: dict[str, str | None], *, skip: bool = False, cwd: Path | None = None) -> Result:
+def apply(answers: dict[str, str | None], *, skip: bool = False, enable_free_models: bool | None = None,
+          cwd: Path | None = None) -> Result:
     """Write the accepted answers and the completed schema in one atomic user-file
     write. Skip writes only the marker. Any invalid answer writes nothing."""
     given = {k: v for k, v in answers.items() if v is not None}
-    if skip and given:
+    if skip and (given or enable_free_models is not None):
         raise _usage("--skip keeps every preference; it takes no answers", next_step="office onboard --skip")
-    if not skip and not given:
+    if not skip and not given and enable_free_models is None:
         raise _usage("name at least one answer, or --skip",
                      next_step="office onboard --planner <answer> --executor <answer> --reviewer <answer>")
     changes: list[tuple[str, object]] = []
@@ -448,6 +463,10 @@ def apply(answers: dict[str, str | None], *, skip: bool = False, cwd: Path | Non
                 if answer != KEEP and prefs[role]["repo"] is not None:
                     repo_notes.append(f"{role} ({_show_seed(prefs[role]['repo'])})")
             lines.append(f"{title}: " + {OFFICE: "Let Office decide", KEEP: "kept"}.get(answer, answer))
+        if enable_free_models is not None:
+            if free_models_enabled() is not enable_free_models:
+                changes.append((FREE_MODELS_KEY, enable_free_models))
+            lines.append(f"Free models: {'enabled' if enable_free_models else 'disabled'}")
     if completed_schema() != SCHEMA_VERSION:
         changes.append((SCHEMA_KEY, SCHEMA_VERSION))
     if changes:
@@ -457,6 +476,7 @@ def apply(answers: dict[str, str | None], *, skip: bool = False, cwd: Path | Non
     res = Result(lines=[("onboarding skipped: preferences unchanged" if skip else "onboarding complete")
                         + f" (schema {SCHEMA_VERSION})", *lines],
                  data={"schema_version": SCHEMA_VERSION, "skipped": skip,
+                       "free_models_enabled": free_models_enabled(),
                        "changed": written.data.get("changed", []), "path": str(paths.user_config_path())})
     res.notices += written.notices
     if repo_notes:
