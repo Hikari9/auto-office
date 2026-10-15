@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from office import adapters, candidates, harnesscmd, install, onboarding, route_policy
+from office import adapters, candidates, harnesscmd, install, onboarding, route_policy, routing
 from office.state import Refused
 
 SLUG = "opencode/muse-spark-1.3-contributor-free"
@@ -46,6 +46,8 @@ if args[:2] == ["auth", "list"]:
     state = os.environ.get("FAKE_OPENCODE_AUTH", "ok")
     if state == "fail":
         print("boom", file=sys.stderr); sys.exit(1)
+    if state == "mixed-failure":
+        print("stderr detail", file=sys.stderr); print("stdout detail"); sys.exit(1)
     if state == "crash":
         raise RuntimeError("auth list crashed")
     if state == "missing":
@@ -354,6 +356,33 @@ def test_auth_list_timeout_is_reported_as_timeout(fake, monkeypatch):
         raise subprocess.TimeoutExpired(a[0], 10)
     monkeypatch.setattr(onboarding.subprocess, "run", hang)
     assert onboarding._opencode_signed_in() == (False, "opencode auth list timed out")
+
+
+@pytest.mark.parametrize(("auth_state", "expected_detail"), [("fail", "boom"), ("mixed-failure", "stdout detail")])
+def test_opencode_command_failure_detail_combines_stderr_and_stdout(fake, monkeypatch, auth_state, expected_detail):
+    monkeypatch.setenv("FAKE_OPENCODE_AUTH", auth_state)
+    state, detail = onboarding.credentials("opencode")
+    assert state == "missing"
+    assert f"opencode auth list exited 1: {expected_detail}" in detail
+
+
+def test_explicit_free_consent_value_precedes_configured_consent(monkeypatch, tmp_path):
+    cfg = tmp_path / "user-config.yaml"
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(cfg))
+    candidate = {"harness": "agy", "harness_version": "1", "model_id": "free", "effort": "high",
+                 "free_model": True, "capabilities": ["builder"], "supported_playbooks": ["Change"],
+                 "invocation_source": "local-evidence:test",
+                 "price_fields": {"input_per_mtok": 0, "output_per_mtok": 0},
+                 "quota": {"status": "ok", "tightest_remaining_percent": 80, "projected_burn_percent": 1},
+                 "cost": {"money_estimate": 0, "quota_burn": 1, "wall_clock_seconds": 1}}
+    request = {"role": "worker", "playbook": "Change", "adaptive": False, "candidates": [candidate]}
+
+    cfg.write_text("onboarding:\n  free_models_enabled: true\n")
+    assert routing.route(request)["selected"] == "agy@1/free@high"
+    assert routing.route({**request, "allow_free_models": False})["selected"] is None
+
+    cfg.write_text("onboarding:\n  free_models_enabled: false\n")
+    assert routing.route({**request, "allow_free_models": True})["selected"] == "agy@1/free@high"
 
 
 def test_onboarding_auth_fixture_and_unknown_harness(fake, monkeypatch):
