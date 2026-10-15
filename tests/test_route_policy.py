@@ -9,7 +9,7 @@ import jsonschema
 import pytest
 import yaml
 
-from office import config, db, paths, route_policy as policy
+from office import config, db, paths, route_learning, route_policy as policy, routing
 
 
 def eligible(**extra):
@@ -318,3 +318,154 @@ def test_event_requires_cap_snapshot_and_freshness(tmp_path, missing):
         policy.record_event(con, **fields)
     assert con.execute("SELECT count(*) FROM route_discovery_events").fetchone()[0] == 0
     con.close()
+
+
+# ---- free models compete on merit: the opt-in is the only categorical rule ----
+
+COST_ONLY = {"effectiveness": 0, "cost": 1, "speed": 0, "quota": 0, "preference": 0}
+PREFERENCE_ONLY = {"effectiveness": 0, "cost": 0, "speed": 0, "quota": 0, "preference": 1}
+EFFECTIVENESS_ONLY = {"effectiveness": 1, "cost": 0, "speed": 0, "quota": 0, "preference": 0}
+REGULAR = "agy@1/regular@high"
+FREE = "agy@1/free@high"
+SEED_REGULAR = [{"model_id": "regular", "harness": "agy", "effort": "high"}]
+PASSED = {"result": "pass", "reason_class": None, "probed_at": "2026-10-10T00:00:00+00:00", "fresh": True}
+
+
+def route_candidate(model_id, *, money, **extra):
+    return {"harness": "agy", "harness_version": "1", "model_id": model_id, "effort": "high",
+            "capabilities": ["builder"], "supported_playbooks": ["Change"],
+            "invocation_source": "local-evidence:x",
+            "price_fields": {"output_per_mtok": money, "input_per_mtok": money / 4},
+            "quota": {"status": "ok", "tightest_remaining_percent": 80, "projected_burn_percent": 1},
+            "cost": {"money_estimate": money, "quota_burn": 1, "wall_clock_seconds": 10}, **extra}
+
+
+@pytest.fixture
+def pair():
+    return route_candidate("free", money=0.01, free_model=True), route_candidate("regular", money=5.0)
+
+
+def free_request(candidates, *, weights=COST_ONLY, **extra):
+    return {"role": "worker", "playbook": "Change", "allow_free_models": True, "adaptive": True,
+            "adaptive_config": {"competitive_band": 0, "weights": {"balanced": weights, "money_saver": weights}},
+            "cost_policy": "money_saver", "candidates": candidates, **extra}
+
+
+def categories(result):
+    return {r["candidate"]: r.get("category") for r in result["rejected"] if r.get("category")}
+
+
+def test_free_wins_on_policy_score_even_when_a_regular_route_is_seeded(pair):
+    result = routing.route(free_request(list(pair), preferred_seed=SEED_REGULAR))
+    assert result["selected"] == FREE
+    assert "free-model-fallback" not in categories(result).values()
+
+
+def test_free_wins_unseeded_non_adaptive_routing_on_cost(pair):
+    assert routing.route(free_request(list(pair), adaptive=False))["selected"] == FREE
+
+
+def test_free_loses_on_preference_where_the_policy_ranks_by_preference(pair):
+    adaptive = routing.route(free_request(list(pair), weights=PREFERENCE_ONLY, preferred_seed=SEED_REGULAR))
+    assert adaptive["selected"] == REGULAR
+    non_adaptive = routing.route(free_request(list(pair), adaptive=False, preferred_seed=SEED_REGULAR))
+    assert non_adaptive["selected"] == REGULAR
+    assert "free-model-fallback" not in {*categories(adaptive).values(), *categories(non_adaptive).values()}
+
+
+def test_free_loses_on_effectiveness_where_the_policy_weights_it(pair):
+    free, regular = pair
+    evidence = {"routes": {
+        route_learning.candidate_key(free): {"successes": 0, "failures": 12, "n_effective": 12.0, "n_raw": 12},
+        route_learning.candidate_key(regular): {"successes": 12, "failures": 0, "n_effective": 12.0, "n_raw": 12},
+    }, "pooling": {"prior_strength": 8}}
+    result = routing.route(free_request([free, regular], weights=EFFECTIVENESS_ONLY, evidence=evidence))
+    assert result["selected"] == REGULAR
+    # The same evidence does not matter under a cost-only policy: free wins on that score.
+    assert routing.route(free_request([free, regular], evidence=evidence))["selected"] == FREE
+
+
+def test_free_loses_on_capability_to_a_route_that_qualifies(pair):
+    free, regular = pair
+    free["capabilities"] = ["review"]
+    result = routing.route(free_request([free, regular], required_capabilities=["builder"]))
+    assert result["selected"] == REGULAR
+    assert [(r["stage"], r.get("category")) for r in result["rejected"] if r["candidate"] == FREE] == [(3, None)]
+
+
+@pytest.mark.parametrize("adaptive", [True, False])
+def test_free_is_the_fallback_when_the_preferred_route_is_not_a_candidate(pair, adaptive):
+    seed = [{"model_id": "preferred", "harness": "agy", "effort": "high"}]
+    result = routing.route(free_request(list(pair), adaptive=adaptive, preferred_seed=seed))
+    assert result["selected"] == FREE
+    assert "free-model-fallback" not in categories(result).values()
+
+
+def test_free_is_the_fallback_when_the_preferred_route_is_unavailable(pair):
+    free, regular = pair
+    regular["route_status"] = "unavailable"
+    result = routing.route(free_request([free, regular], preferred_seed=SEED_REGULAR))
+    assert result["selected"] == FREE
+    assert "free-model-fallback" not in categories(result).values()
+
+
+def untried_free(probe):
+    free = route_candidate("free", money=0.0, free_model=True, route_status="discovered-unconfirmed",
+                           status_reason="documented; probe required", discovery=True,
+                           probe_key="agy|1|free|high|hash|worker", probe=probe)
+    return free, route_candidate("regular", money=5.0)
+
+
+def discovery_request(candidates):
+    settings = {**policy.DISCOVERY_DEFAULTS, "enabled": True, "max_trial_percent_rolling_20": 100}
+    request = free_request(candidates, routing_seed="seed-1", preferred_seed=SEED_REGULAR, discovery={
+        "settings": settings,
+        "allocation": {"probes": {"used": 0, "max": 2}, "trials": {"used": 0, "max": 1},
+                       "rolling": {"used": 0, "max": 3, "window": 20, "warmup": False}},
+        "known_working": [REGULAR], "quarantined": [],
+        "risk": {"size_class": "S", "blast_radius": "repo", "irreversible": False}})
+    request["adaptive_config"]["exploration"] = {"rate": 0.0, "margin": 1.0, "max_cost_vs_primary_percent": 100000}
+    return request
+
+
+def trial_handle(free):
+    return {"candidate": FREE, "probe_key": free["probe_key"], "reservation_id": "A1", "attempt_id": "A1"}
+
+
+def test_free_is_discoverable_as_a_trial_under_a_fresh_passing_probe():
+    free, regular = untried_free(PASSED)
+    result = routing.route(discovery_request([free, regular]), trial_handle(free))
+    assert result["selected"] == FREE
+    assert result["discovery"]["intent"] == "trial" and result["discovery"]["fallback"] == REGULAR
+    assert "free-model-fallback" not in categories(result).values()
+
+
+def test_free_discovery_still_needs_a_valid_probe():
+    failed = {**PASSED, "result": "fail", "reason_class": "unsupported-model-effort"}
+    free, regular = untried_free(failed)
+    result = routing.route(discovery_request([free, regular]), trial_handle(free))
+    assert result["selected"] == REGULAR
+    assert categories(result).get(FREE) not in ("free-model-fallback", "free-model-opt-in")
+
+
+def test_free_discovery_is_rejected_without_the_opt_in():
+    free, regular = untried_free(PASSED)
+    result = routing.route({**discovery_request([free, regular]), "allow_free_models": False}, trial_handle(free))
+    assert result["selected"] == REGULAR
+    assert categories(result) == {FREE: "free-model-opt-in"}
+
+
+@pytest.mark.parametrize("adaptive", [True, False])
+def test_free_is_rejected_without_the_opt_in(pair, adaptive):
+    result = routing.route({**free_request(list(pair), adaptive=adaptive), "allow_free_models": False})
+    assert result["selected"] == REGULAR
+    assert categories(result) == {FREE: "free-model-opt-in"}
+
+
+@pytest.mark.parametrize("key", ["declared_route", "exact_route"])
+def test_user_named_free_route_is_selected_under_its_gates_and_consent(pair, key):
+    request = free_request([pair[0]], adaptive=False, **{key: FREE})
+    assert routing.route(request)["selected"] == FREE
+    refused = routing.route({**request, "allow_free_models": False})
+    assert refused["selected"] is None
+    assert categories(refused) == {FREE: "free-model-opt-in"}
