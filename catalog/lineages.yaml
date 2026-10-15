@@ -17,6 +17,7 @@ generations:
   gemini-3.8-flash: {lineage_key: google/gemini-flash, generation_version: '3.8', release_status: released, provenance: shipped-catalog}
   mimo-v2.6-pro: {lineage_key: xiaomi/mimo-pro, generation_version: '2.6', release_status: released, provenance: shipped-catalog}
   mimo-v2.6-flash: {lineage_key: xiaomi/mimo-flash, generation_version: '2.6', release_status: released, provenance: shipped-catalog}
+  muse-spark-1.3-contributor-free: {lineage_key: meta/muse-spark, generation_version: '1.3', release_status: released, provenance: shipped-catalog}
 
 # Alias names are model-series labels, NOT regex-derived model generations.
 # They may resolve only to explicit released generations in the registry.

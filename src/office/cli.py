@@ -91,6 +91,8 @@ Auto Office {ver}
   office onboard [--harness H]      first-run onboarding: status, eligible routes, current-harness integration
   office onboard --planner|--executor|--reviewer <office|keep|harness/model@effort> | --skip
                                     record onboarding answers as user-level preferences (or keep them all)
+  office onboard [--enable-free-models | --disable-free-models]
+                                    opt in to catalog models marked free (default off)
   office doctor                     check the installation, hooks, and runtimes
   office update [--check]           update Auto Office itself; --check looks for release/source updates
   office upgrade [run] [--to X.Y]   move a run to a newer release line (dry run; --apply)
@@ -401,6 +403,12 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--executor", help="office | keep | harness/model@effort")
     s.add_argument("--reviewer", help="office | keep | harness/model@effort (plan and code review)")
     s.add_argument("--skip", action="store_true", help="keep every preference and mark onboarding complete")
+    free_models = s.add_mutually_exclusive_group()
+    free_models.add_argument("--enable-free-models", dest="enable_free_models", action="store_const", const=True,
+                             help="explicitly allow catalog models marked free; default is off")
+    free_models.add_argument("--disable-free-models", dest="enable_free_models", action="store_const", const=False,
+                             help="disable free-model routes")
+    s.set_defaults(enable_free_models=None)
     s = sp.add_parser("doctor", parents=[common])
     s.add_argument("--fix", action="store_true")
     s.add_argument("--probe-vision", action="store_true", help="run image-capability probes on visual routes (uses quota)")
@@ -822,8 +830,8 @@ def _run(args, unknown) -> int:
     if cmd == "onboard":
         from office import onboarding
         answers = {"planner": args.planner, "executor": args.executor, "reviewer": args.reviewer}
-        if args.skip or any(answers.values()):
-            return emit(onboarding.apply(answers, skip=args.skip, cwd=cwd), args)
+        if args.skip or any(answers.values()) or args.enable_free_models is not None:
+            return emit(onboarding.apply(answers, skip=args.skip, enable_free_models=args.enable_free_models, cwd=cwd), args)
         return emit(onboarding.status(harness=args.harness, cwd=cwd), args)
     if cmd == "doctor":
         from office import doctor

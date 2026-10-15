@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 import office_routing as routing
 import office_runtime
 import office_scoring as scoring
+from office import routing as current_routing
 
 
 def cand(harness, model_id='m', effort='high', money=1.0, remaining=80, burn=1,
@@ -127,6 +128,71 @@ class DerivedRoutingTests(unittest.TestCase):
         result = routing.route(request)
         self.assertEqual(result['selected'], 'agy@1/m@high')
         self.assertEqual(result['status'], 'selected')
+
+    def test_disabled_free_model_is_rejected_without_substituting_it_for_selected_route(self):
+        regular = cand('agy', model_id='regular', money=5.0)
+        free = cand('agy', model_id='free', money=0.0)
+        free['free_model'] = True
+        request = {'role': 'worker', 'playbook': 'Change', 'runs_db': self.db_path,
+                   'cost_policy': 'money_saver', 'candidates': [free, regular]}
+        result = current_routing.route(request)
+        self.assertEqual(result['selected'], 'agy@1/regular@high')
+        rejected = [r for r in result['rejected'] if r.get('category') == 'free-model-opt-in']
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]['candidate'], 'agy@1/free@high')
+
+    def test_opted_in_free_model_does_not_replace_an_unavailable_preferred_route(self):
+        regular = cand('agy', model_id='regular', money=5.0)
+        free = cand('agy', model_id='free', money=0.0)
+        free['free_model'] = True
+        request = {
+            'role': 'worker', 'playbook': 'Change', 'runs_db': self.db_path,
+            'adaptive': False, 'allow_free_models': True, 'cost_policy': 'money_saver',
+            'preferred_seed': [{'model_id': 'preferred', 'harness': 'agy', 'effort': 'high'}],
+            'candidates': [free, regular],
+        }
+        result = current_routing.route(request)
+        self.assertEqual(result['selected'], 'agy@1/regular@high')
+        self.assertEqual([r['candidate'] for r in result['rejected']
+                          if r.get('category') == 'free-model-fallback'], ['agy@1/free@high'])
+
+    def test_user_named_free_route_is_not_treated_as_a_fallback(self):
+        regular = cand('agy', model_id='regular', money=5.0)
+        free = cand('agy', model_id='free', money=0.0)
+        free['free_model'] = True
+        for key, candidates_in in (('declared_route', [free, regular]), ('exact_route', [free])):
+            request = {
+                'role': 'worker', 'playbook': 'Change', 'runs_db': self.db_path,
+                'adaptive': False, 'allow_free_models': True, 'cost_policy': 'money_saver',
+                'preferred_seed': [{'model_id': 'preferred', 'harness': 'agy', 'effort': 'high'}],
+                'candidates': candidates_in, key: 'agy@1/free@high',
+            }
+            result = current_routing.route(request)
+            self.assertFalse([r for r in result['rejected'] if r.get('category') == 'free-model-fallback'], key)
+
+    def test_adaptive_opt_in_does_not_replace_an_unavailable_preferred_route(self):
+        regular = cand('agy', model_id='regular', money=5.0)
+        free = cand('agy', model_id='free', money=0.0)
+        free['free_model'] = True
+        request = {
+            'role': 'worker', 'playbook': 'Change', 'runs_db': self.db_path,
+            'adaptive': True, 'allow_free_models': True,
+            'adaptive_config': {
+                'competitive_band': 0,
+                'weights': {'balanced': {'effectiveness': 0, 'cost': 1, 'speed': 0, 'quota': 0, 'preference': 0}},
+            },
+            'preferred_seed': [{'model_id': 'preferred', 'harness': 'agy', 'effort': 'high'}],
+            'candidates': [free, regular],
+        }
+        result = current_routing.route(request)
+        self.assertEqual(result['selected'], 'agy@1/regular@high')
+        self.assertEqual([r['candidate'] for r in result['rejected']
+                          if r.get('category') == 'free-model-fallback'], ['agy@1/free@high'])
+
+        request['preferred_seed'] = [{'model_id': 'free', 'harness': 'agy', 'effort': 'high'}]
+        result = current_routing.route(request)
+        self.assertEqual(result['selected'], 'agy@1/free@high')
+        self.assertFalse([r for r in result['rejected'] if r.get('category') == 'free-model-fallback'])
 
     def test_seeded_success_labels_alone_never_promote(self):
         """No count of self-reported successes may promote -- amendments v5/v6."""

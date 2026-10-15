@@ -42,7 +42,7 @@ def catalog_rows() -> list[dict]:
     return model_lineages.annotate(resolve_aliases(user_catalog.apply(list(data.get("models") or []))))
 
 
-_ALIAS_FIELDS = ("benchmark_indexes", "task_benchmarks", "price_fields", "speed_fields", "release_date")
+_ALIAS_FIELDS = ("benchmark_indexes", "task_benchmarks", "price_fields", "speed_fields", "release_date", "free_model")
 
 
 def _version_key(version: str) -> tuple[int, ...]:
@@ -454,17 +454,23 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
     user's current policy) removes denied routes; routing passes [] and rejects
     denied routes itself, with the policy source, at stage 1.
     """
-    from office import route_probe
+    from office import onboarding, route_probe
     kind = KIND_FOR_ROLE.get(role, "worker")
     sources = adapters.load_sources()
     all_adapters = {aid: entry[0] for aid, entry in sources.items()}
     policies = current_user_policies() if user_policies is None else user_policies
     candidates, skipped, not_routable = [], [], []
+    free_models_allowed = onboarding.free_models_enabled()
     for row in catalog_rows():
         harness = row.get("invocation_harness")
         adapter = all_adapters.get(harness)
         label = f"{harness}/{row.get('model_id')}@{row.get('effort')}"
         state = route_policy.row_status(row)
+        is_free_model = route_policy.is_free_model(row)
+        if is_free_model and not free_models_allowed:
+            skipped.append({"candidate": label, "category": "free-model-opt-in",
+                            "reason": "free model excluded because user opt-in is disabled"})
+            continue
         if row.get("status_reason"):
             state = {**state, "reason": row["status_reason"]}
         if row.get("dispatchable") is False and not (discovery and state["discovery_eligible"]):
@@ -505,6 +511,7 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
             "price_fields": row.get("price_fields") or {},
             "speed_fields": row.get("speed_fields") or {},
             "route_status": state["status"], "status_reason": state["reason"],
+            "free_model": is_free_model,
             "discovery": state["discovery_eligible"], "probe_key": None,
         }
         if row.get("alias_resolved_to"):
@@ -585,7 +592,8 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
     registry, trust, and floors, but still resolves through the catalog when a
     row matches, so `agy/gemini-3.8-flash@medium` invokes the combined slug
     `gemini-3.8-flash-medium` the harness actually accepts."""
-    from office.state import Usage
+    from office import onboarding
+    from office.state import Refused, Usage
     adapter = adapters.load_all().get(harness)
     if adapter is None:
         raise Usage("unknown-harness", f"--as names harness {harness!r}, which has no adapter",
@@ -597,6 +605,14 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
     # A row named exactly what the user typed beats an alias that invokes it.
     rows.sort(key=lambda r: r.get("model_id") != model)
     row = rows[0] if len(rows) == 1 or (rows and effort) else None
+    # Only a route the catalog does not know at all can be judged by its slug; any catalog
+    # match, even an ambiguous one, keeps the catalog's answer.
+    named_free = not rows and route_policy.is_explicit_free_slug(harness, model)
+    free_model = route_policy.is_free_model(row or {}) or named_free
+    if free_model and not onboarding.free_models_enabled():
+        why = "names itself free" if named_free else "is marked free"
+        raise Refused("free-model-opt-in", f"{harness}/{model} {why} and requires explicit opt-in",
+                      next_step="office onboard --enable-free-models")
     # A user-denied route is not selectable by any manual route either (--as, --review-as,
     # amend route). Overkill is automatic-only and never blocks a declared route (#494).
     named = {"harness": harness, "model_id": (row or {}).get("model_id") or model,
@@ -626,6 +642,7 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
         "cost": _cost(row or {}),
         "price_fields": (row or {}).get("price_fields") or {},
         "speed_fields": (row or {}).get("speed_fields") or {},
+        "free_model": free_model,
         "quota": {"status": "unknown", "tightest_remaining_percent": None},
         "override": True,
     }
@@ -772,6 +789,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     `exact` keeps only the candidate with that route identity (harness@major/model@effort).
     Executor and worker requests carry the adaptive inputs (#300); `wave_load`
     counts routes already planned for other tasks of the same wave."""
+    from office import onboarding
+
     live = required_user_policies(run.get("repo_root"))
     policy_cfg = role_policy(config, role)
     # An explicit --route names its model, so it is not held to the family floor.
@@ -838,6 +857,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "policy": policy,
         "preferred_seed": seed,
         "cost_policy": cost_policy,
+        "allow_free_models": onboarding.free_models_enabled(),
         "allow_advisory_undercut": bool(gear.get("allow_advisory_undercut", True)),
         "runs_db": str(paths.runs_db()),
         "run_id": run.get("id"),
@@ -848,6 +868,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     }
     if declared:
         request["declared_route"] = declared
+    if exact:
+        request["exact_route"] = exact
     if role in routing.ADAPTIVE_ROLES:
         request.update(adaptive_inputs(con, config, run, role, candidates, task_id=task_id,
                                        dispatch_kind=dispatch_kind, plan_version=run.get("plan_version"),

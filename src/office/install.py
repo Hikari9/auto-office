@@ -31,6 +31,7 @@ UNVERIFIED = {
     "codex": "Codex hook config location and denial path are unverified (architecture R1/§8); explicit office commands cover it",
     "agy": "agy exposes no session-start event; the skill runs office status explicitly",
     "hermes": "Hermes hook schema is list-of-dicts and profile-scoped; not written by 3.1.0",
+    "opencode": "opencode hook/event schema is unverified; no hooks written (explicit office commands cover it)",
 }
 WRITE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|write_file|replace"
 # Opt-in (office install --shell-guard): one more PreToolUse entry, on Bash only,
