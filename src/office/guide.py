@@ -591,8 +591,8 @@ def _needs_orchestrator(con, run: dict) -> bool:
 
 def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
     """Block until something needs the orchestrator, then print status.
-    Exit 0: a task, phase, plan or requirements change, or a new orchestrator
-    event. Exit 3: a stall (work marked in progress that nothing can advance).
+    Exit 0: a task, phase, plan or requirements change, or a new actionable
+    orchestrator event. Exit 3: a stall (work marked in progress that nothing can advance).
     Exit 5: an agent is waiting on a question (a `question:` line names it and
     the `office answer` command). Exit 124: timeout with nothing new. A watcher
     keys on the exit code, never on matching status text."""
@@ -620,8 +620,10 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         # run, so an event older than the cursor must not wake an otherwise-idle wait into
         # exit 0, which an orchestrator reads as "act now" and busy-loops on. Stalls and
         # signals that DO carry a next step wake via the stall pass; real state
-        # transitions still wake via `changed`. (#296)
-        news = [e for e in state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=64)
+        # transitions still wake via `changed`. (#296) Scan *all* unread events, not a
+        # bounded prefix: many older informational events must not hide a newer urgent
+        # one (e.g. a late pr.error behind 64 launch.session/setup.done notes).
+        news = [e for e in state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=None)
                 if _urgent(e)]
         # Something already waiting on the orchestrator ends the wait at once;
         # otherwise a blocker present at the start would sit until the timeout.

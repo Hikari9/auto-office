@@ -67,6 +67,42 @@ def test_an_informative_event_does_not_wake_wait_into_exit_0(env):
     assert code == 124 and "nothing new" in out, out
 
 
+@pytest.mark.approved
+def test_an_urgent_event_wakes_wait_into_exit_0(env):
+    """#296 positive twin: a fresh urgent orchestrator event alone wakes `wait`
+    into exit 0, even when no task/phase/gate state changed. This pins the
+    `news` wake path so the #296 filter never collapses urgent events too."""
+    from office import state
+    _go(env)
+    env.office("status", check=0)  # drain the dispatch/lifecycle events behind the cursor
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    with con:
+        state.emit(con, run, "pr.error", f"T1 PR {run['id']}: refused", task_id="T1", audience="orchestrator")
+        con.commit()
+    code, out = env.office("wait", "--timeout", "5", "--poll", "0.2", env=EXTERNAL)
+    assert code == 0 and "nothing new" not in out, out
+
+
+@pytest.mark.approved
+def test_an_urgent_event_behind_a_full_window_of_other_events_still_wakes_wait(env):
+    """#296 regression for the limit truncation: many older informational events
+    must not hide a newer urgent one. A late pr.error behind 64 launch notes must
+    still wake exit 0 (unread_events is scanned untruncated, not prefix-capped)."""
+    from office import state
+    _go(env)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    with con:
+        for i in range(64):
+            state.emit(con, run, "note", f"earlier orchestrator event {i}", task_id="T1",
+                       audience="orchestrator")
+        state.emit(con, run, "pr.error", "T1 PR refused", task_id="T1", audience="orchestrator")
+        con.commit()
+    code, out = env.office("wait", "--timeout", "5", "--poll", "0.2", env=EXTERNAL)
+    assert code == 0 and "nothing new" not in out, out
+
+
 # ---- a worker stopped on something only the orchestrator resolves
 
 def _executor(env):
