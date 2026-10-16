@@ -439,12 +439,15 @@ def route(request: dict, discovery_input: dict | None = None) -> dict:
                 "action": "choose a smaller/cheaper valid strategy, propose another route, or obtain explicit user authority",
             }
 
-        if preferred_seed and not any(preferred_rank(c, preferred_seed) is not None for c in stage):
+        if preferred_seed:
+            # A free model survives only when it is itself a preferred route. Otherwise it
+            # would silently replace the preferred route, whether that route is unavailable
+            # or an available paid one that adaptive routing could undercut on cost.
             fallback = []
             for c in stage:
-                if route_policy.is_free_model(c):
+                if route_policy.is_free_model(c) and preferred_rank(c, preferred_seed) is None:
                     rejected.append({"candidate": candidate_id(c), "stage": 7,
-                                     "reason": "free model cannot replace an unavailable preferred route",
+                                     "reason": "free model cannot replace a preferred route",
                                      "category": "free-model-fallback"})
                 else:
                     fallback.append(c)

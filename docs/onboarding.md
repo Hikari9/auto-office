@@ -10,7 +10,10 @@ eligibility, validation and persistence, so the skill never writes config or jud
 |---|---|
 | `office onboard --harness <h> [--json]` | Status only, never prompts or writes: `due`, `reason`, the current harness and its Office integration, every harness with its sign-in state, the three questions with current values, options, eligible and unavailable routes. |
 | `office onboard --planner A --executor A --reviewer A` | Validates every answer, then writes the accepted preferences and `onboarding.schema_version` to the user file in one atomic write. An omitted flag means `keep`. |
-| `office onboard --skip` | Writes only `onboarding.schema_version`. Every preference stays as it was. |
+| `office onboard --skip` | Writes only `onboarding.schema_version`. Every preference stays as it was, including the free-model opt-in. |
+| `office onboard --enable-free-models` / `--disable-free-models` | Writes `onboarding.free_models_enabled` (`true` / `false`) with the schema marker, alone or together with answers. Not allowed with `--skip`. |
+
+Free models are off by default. A catalog route marked `free_model` is not offered to routing until the user opts in, and `--disable-free-models` turns it off again. The opt-in persists in the user file, and the status output reports it (`free_models`). Opting in does not make a free route a substitute: when a preferred route is configured, a free route is considered only if it is itself a preferred route. Otherwise it is excluded, whether the preferred route is available or not.
 
 An answer is `office` (Let Office decide), `keep`, or a full `harness/model@effort` route.
 
@@ -44,7 +47,7 @@ ships no seed (adaptive routing decides), so its question offers Let Office deci
 
 ## Versioning
 
-`office.onboarding.SCHEMA_VERSION` (currently 1) is independent of the package version and of the config `schema_version`.
+`office.onboarding.SCHEMA_VERSION` (currently 2; version 2 added the free-model opt-in) is independent of the package version and of the config `schema_version`.
 Onboarding is due when the user file's `onboarding.schema_version` is lower than it. Bump the constant only when the questions change
 enough that existing users should answer again. They then see their current preferences prefilled. A repo file cannot set
 `onboarding` (`office config --repo` refuses it and resolution ignores it). `office config onboarding.schema_version 0` makes onboarding due again.
