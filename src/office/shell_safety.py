@@ -31,6 +31,9 @@ _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
 _SEPARATORS = frozenset({";", "&", "|", "(", ")"})
 
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# In plan prose, matching Markdown code delimiters are formatting, not shell
+# substitution. Retain the code text so actual git pushes/aliases still scan.
+_INLINE_CODE = re.compile(r"(?<!`)(`+)([^`\n]+?)\1(?!`)")
 
 
 def _is_dynamic(token: str) -> bool:
@@ -53,11 +56,17 @@ def unsafe_manual_push(command: str, *, prose: bool = False) -> bool:
         return False
     if prose and _NEGATED.match(command) and not re.search(r"[;&|\n]", command):
         return False
+    if prose:
+        command = _INLINE_CODE.sub(lambda match: match.group(2), command)
     return _scan(command, 0)
 
 
 def _scan(command: str, depth: int) -> bool:
     if depth > 5:
+        return True
+    # For executable shell fields, scan backtick substitution bodies before
+    # shlex tokenizes them; a non-leading substitution can otherwise be missed.
+    if any(_scan(span.group(2), depth + 1) for span in _INLINE_CODE.finditer(command)):
         return True
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>")
