@@ -20,6 +20,9 @@ def test_start_names_the_run_draft(env):
     code, data = env.ojson("start", "add a feature", "--planner", "inline")
     assert code == 0, data
     assert f".office/plans/{data['data']['run_id'][:8]}/PLAN.md" in data["next"], data["next"]
+    draft = _draft(env, data["data"]["run_id"])
+    assert draft.parent.is_dir(), "office start should create the advertised plan directory"
+    assert not draft.exists(), "the inline planner should author PLAN.md itself"
 
 
 def test_a_new_run_does_not_see_another_runs_draft(env):
