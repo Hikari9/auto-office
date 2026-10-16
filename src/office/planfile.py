@@ -259,24 +259,35 @@ def _unsafe_force_push_instruction(instruction: str) -> bool:
 
 
 def _unsafe_force_push_in_plan(task: dict) -> str | None:
-    for instruction in [*(task.get("notes") or []), *(task.get("checks") or []),
-                        *(task.get("accept") or []), *(task.get("interfaces") or [])]:
+    from office import shell_safety
+    for instruction in [*(task.get("notes") or []), *(task.get("accept") or []),
+                        *(task.get("interfaces") or [])]:
         if _unsafe_force_push_instruction(instruction):
             return instruction
+    # These fields run as shell commands, not prose. Keep command-substitution
+    # detection strict even when a command happens to contain backticks.
+    for command in (task.get("checks") or []):
+        if shell_safety.unsafe_manual_push(command):
+            return command
     visual = task.get("visual") or {}
-    if visual.get("start") and _unsafe_force_push_instruction(visual["start"]):
+    if visual.get("start") and shell_safety.unsafe_manual_push(visual["start"]):
         return visual["start"]
     return None
 
 
 def _unsafe_force_push_requirement(plan: ParsedPlan) -> str | None:
     req = plan.requirements
-    entries = [*plan.run_checks, *(req.get("done_criteria") or [])]
+    from office import shell_safety
+    entries = [*(req.get("done_criteria") or [])]
     # non_goals is a prohibition, never a command authorization.
-    entries += [v for v in (req.get("deploy") or {}).values() if isinstance(v, str)]
     entries += [f"{entry.get('action') or ''} {' '.join(entry.get('preconditions') or [])}"
                 for entry in req.get("named_actions") or []]
-    return next((e for e in entries if _unsafe_force_push_instruction(e)), None)
+    unsafe = next((e for e in entries if _unsafe_force_push_instruction(e)), None)
+    if unsafe:
+        return unsafe
+    commands = [*plan.run_checks, *(v for v in (req.get("deploy") or {}).values()
+                                    if isinstance(v, str))]
+    return next((cmd for cmd in commands if shell_safety.unsafe_manual_push(cmd)), None)
 
 
 def _validate(plan: ParsedPlan) -> None:
