@@ -45,3 +45,11 @@ def test_actual_shell_command_fields_keep_strict_substitution_guard(command_fiel
     else:
         plan = PLAN_ONE.replace("visual: none", "visual:\n  url: http://127.0.0.1:3000\n  start: " + command)
     assert any("unsafe manual git push" in e for e in planfile.parse(plan).errors)
+
+
+@pytest.mark.parametrize("deploy_field", ["deploy_preview", "deploy_prod", "deploy_verify"])
+def test_run_level_deploy_commands_keep_strict_substitution_guard(deploy_field):
+    # A negated prose phrase is exempt from the prose scan, so this fails if the
+    # deploy path were treated as Markdown prose.
+    plan = PLAN_ONE.replace("blast_radius: repo", f"blast_radius: repo\n{deploy_field}: never `git push`")
+    assert any("unsafe manual git push" in e for e in planfile.parse(plan).errors)
