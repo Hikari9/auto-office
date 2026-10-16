@@ -179,6 +179,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                 planner_note = "planner P1 queued"
         _ensure_local_exclude(common)
         state.write_projection(con, run_id)
+        # Inline planners must be able to write the plan path advertised by next.
+        # Keep PLAN.md absent until the orchestrator actually authors it.
+        if planner_mode == "inline":
+            planpath.draft(top, run).parent.mkdir(parents=True, exist_ok=True)
         if source and source.get("plan"):
             draft = planpath.draft(top, run)
             draft.parent.mkdir(parents=True, exist_ok=True)
