@@ -17,6 +17,7 @@ Re-onboarding keys on SCHEMA_VERSION alone, never on the package version.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -115,41 +116,76 @@ def _claude_signed_in() -> tuple[bool, str]:
     return False, f"no credentials in {home} or the keychain (run claude and log in)"
 
 
+# `opencode auth list` (default --format), from opencode 2.0.29's own command: it lists
+# connections only, one line each: integration.padEnd(W) + source.padEnd(28) + type, where W is
+# the longest integration name on any line plus 2 and type is `stored` (source is the saved
+# credential's label) or `environment` (source is the variable name). With no connection it
+# prints exactly "No authenticated integrations". Exit status is 0 either way, so sign-in is
+# recognized from stdout alone, and only when every line has that column structure: a source
+# of 28+ characters runs straight into the type, a shorter one is space-padded to 28.
+_OPENCODE_NO_INTEGRATIONS = "No authenticated integrations"
+_OPENCODE_ENTRY = re.compile(r"(\S.*?)( {2,})(.*)(stored|environment)")
+_OPENCODE_SOURCE_WIDTH = 28
+_OPENCODE_MAX_LINE = 512
+
+
+def _opencode_entries(lines: list[str]) -> int:
+    """Number of integration entries when every line is one and the integration column is the
+    shared width the contract produces; 0 for anything else."""
+    rows = []  # (integration length, spaces after it, length from integration end to type)
+    for ln in lines:
+        m = _OPENCODE_ENTRY.fullmatch(ln) if len(ln) <= _OPENCODE_MAX_LINE else None
+        if not m:
+            return 0
+        rows.append((len(m[1]), len(m[2]), len(ln) - len(m[4]) - len(m[1])))
+    width = max(name for name, _, _ in rows) + 2
+    for name, gap, tail in rows:
+        pad = width - name
+        if gap < pad or tail - pad < _OPENCODE_SOURCE_WIDTH:
+            return 0
+    return len(rows)
+
+
+def _run_opencode(*args: str) -> tuple[subprocess.CompletedProcess | None, str]:
+    """Run one opencode command; on failure return None and a one-line reason."""
+    label = "opencode " + " ".join(args)
+    try:
+        proc = subprocess.run(["opencode", *args], capture_output=True, text=True, timeout=10,
+                              stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return None, f"{label} timed out"
+    except (OSError, subprocess.SubprocessError):
+        return None, f"could not run {label}"
+    if proc.returncode != 0:
+        out = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip()
+        detail = next((ln.strip() for ln in reversed(out.splitlines()) if ln.strip()), "")
+        return None, (f"{label} exited {proc.returncode}: {detail}" if detail
+                      else f"{label} exited {proc.returncode}")
+    return proc, ""
+
+
 def _opencode_signed_in() -> tuple[bool, str]:
     if shutil.which("opencode") is None:
         return False, "opencode is not installed"
-    try:
-        proc = subprocess.run(["opencode", "auth", "list"], capture_output=True, text=True, timeout=10,
-                              stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.SubprocessError):
-        return False, "could not run opencode auth list"
-    out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
-    # `auth list` exits 0 either way; sign-in is in the output, not the code.
-    if "No authenticated integrations" in out:
-        return False, "no authenticated integrations (run opencode auth login)"
-    if proc.returncode != 0:
-        detail = next((ln.strip() for ln in reversed(out.splitlines()) if ln.strip()), "")
-        return False, (f"opencode auth list exited {proc.returncode}: {detail}" if detail
-                       else f"opencode auth list exited {proc.returncode}")
-    if not out:
+    proc, why = _run_opencode("auth", "list")
+    if proc is None:
+        return False, why
+    lines = [ln.rstrip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    if not lines:
         return False, "opencode auth list printed nothing (run opencode auth login)"
-    return True, "opencode auth list"
+    if any(ln.lstrip().startswith(_OPENCODE_NO_INTEGRATIONS) for ln in lines):
+        return False, "no authenticated integrations (run opencode auth login)"
+    entries = _opencode_entries(lines)
+    if not entries:
+        return False, "opencode auth list printed no recognizable integration entry (output not echoed)"
+    return True, f"opencode auth list ({entries} authenticated integration{'s' if entries != 1 else ''})"
 
 
 def _opencode_free_model(expected: str | None = None) -> tuple[str | None, str]:
     """Return a listed free model, optionally requiring one exact catalog slug."""
-    try:
-        proc = subprocess.run(["opencode", "models"], capture_output=True, text=True, timeout=10,
-                              stdin=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        return None, "opencode models timed out"
-    except (OSError, subprocess.SubprocessError):
-        return None, "could not run opencode models"
-    if proc.returncode != 0:
-        detail = next((ln.strip() for ln in reversed((proc.stderr or proc.stdout or "").splitlines())
-                       if ln.strip()), "")
-        return None, (f"opencode models exited {proc.returncode}: {detail}" if detail
-                      else f"opencode models exited {proc.returncode}")
+    proc, why = _run_opencode("models")
+    if proc is None:
+        return None, why
     for line in (proc.stdout or "").splitlines():
         for token in line.split():
             slug = token.strip(" ,")
@@ -191,6 +227,9 @@ def credentials(harness: str) -> tuple[str, str]:
                                   "sign in to gemini")
     elif harness == "opencode":
         ok, where = _opencode_signed_in()
+    elif harness == "kilo":
+        ok, where = _files_or_env([Path.home() / ".local" / "share" / "kilo" / "auth.json"], (),
+                                  "run kilo auth login")
     else:
         return "unknown", "Office has no sign-in check for this harness"
     return ("found" if ok else "missing"), where
@@ -230,10 +269,18 @@ def role_routes(con, config: dict, role: str) -> tuple[list[dict], dict[str, str
                                                  family_floors=config.get("model_family_floors"))
     why_not = {s["candidate"]: s["reason"] for s in skipped}
     usable = []
+    # Each sign-in check and model listing can spawn the harness CLI, so ask once per harness/slug.
+    signed_in: dict[str, tuple[str, str]] = {}
+    listings: dict[str | None, tuple[str | None, str]] = {}
     for c in built:
-        state, where = credentials(c["harness"])
+        if c["harness"] not in signed_in:
+            signed_in[c["harness"]] = credentials(c["harness"])
+        state, where = signed_in[c["harness"]]
         if c.get("free_model") and c.get("harness") == "opencode":
-            listed, availability = _opencode_free_model(c.get("invocation_model_id"))
+            slug = c.get("invocation_model_id")
+            if slug not in listings:
+                listings[slug] = _opencode_free_model(slug)
+            listed, availability = listings[slug]
             if not listed:
                 why_not[route_text(c)] = f"free model unavailable: {availability}"
                 continue
@@ -247,6 +294,7 @@ def role_routes(con, config: dict, role: str) -> tuple[list[dict], dict[str, str
     policy = candidates.role_policy(config, role)
     result = routing.route({
         "role": role, "adaptive": False, "candidates": usable, "runs_db": str(paths.runs_db()),
+        "allow_free_models": free_models_enabled(),
         "policy": {"required_capabilities": list(policy.get("required_capabilities") or []),
                    "floor": policy.get("floor")},
     })

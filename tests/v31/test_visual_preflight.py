@@ -49,3 +49,18 @@ def test_missing_capture_backend_warns(monkeypatch):
     assert errors == []
     assert len(warnings) == 1 and "CAPTURE_BLOCKED" in warnings[0] and "install it" in warnings[0]
     assert visual.preflight([{"id": "T2", "visual": {"none": True}}]) == ([], [])
+
+
+def test_issue_574_probe_requires_plain_css_and_names_invalid_selector():
+    from office.visual import _invalid_probe_selector
+
+    class Page:
+        def evaluate(self, script, selectors):
+            assert "document.querySelector(selector)" in script
+            assert selectors == ['button:has-text("Next")']
+            return {"selector": selectors[0], "detail": "not a valid selector"}
+
+    invalid = _invalid_probe_selector(Page(), ['button:has-text("Next")'])
+    assert invalid["selector"] == 'button:has-text("Next")'
+    assert invalid["detail"] == "not a valid selector"
+    assert _invalid_probe_selector(Page(), []) is None

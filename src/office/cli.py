@@ -265,7 +265,8 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--review-external", action="store_true",
                    help="with --review-as: you start the reviewer; Office reads its review file")
     sp.add_parser("preflight", parents=[common])
-    s = sp.add_parser("submit", parents=[common], add_help=False)
+    s = sp.add_parser("submit", parents=[common], add_help=False,
+                      description="Visual selectors: must be plain CSS (document.querySelector), not Playwright-only selectors; state steps may use Playwright selectors.")
     s.add_argument("-h", "--help", action="store_true")
     s.add_argument("--plan", help=argparse.SUPPRESS)
     s.add_argument("--quote", help="the user's words (a defect redirect)")

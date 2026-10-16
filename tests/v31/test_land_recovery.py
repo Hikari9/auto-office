@@ -81,6 +81,84 @@ def test_clean_ancestry_only_conflict_recovers_and_main_matches_the_integration(
     assert merges[-1][-2:] == ["--match-head-commit", rec["commit"]], merges  # pinned to the proven head
 
 
+def test_multiple_merge_bases_identify_a_real_criss_cross_history(tmp_path):
+    """#562: separate merges of A/B in opposite order yield two best bases."""
+    from office import land
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                              text=True, check=True).stdout.strip()
+    git("config", "user.email", "test@example.test")
+    git("config", "user.name", "Test")
+    (repo / "common.txt").write_text("root\n")
+    git("add", ".")
+    git("commit", "-qm", "root")
+    root = git("rev-parse", "HEAD")
+    git("checkout", "-qb", "A", root)
+    (repo / "a.py").write_text("def a():\n    return 1\n")
+    git("add", ".")
+    git("commit", "-qm", "A")
+    git("checkout", "-qb", "B", root)
+    (repo / "b.py").write_text("def b():\n    return 2\n")
+    git("add", ".")
+    git("commit", "-qm", "B")
+    git("checkout", "main")
+    git("merge", "--no-ff", "--no-edit", "A")
+    git("merge", "--no-ff", "--no-edit", "B")
+    main = git("rev-parse", "HEAD")
+    git("checkout", "-qb", "task", root)
+    git("merge", "--no-ff", "--no-edit", "B")
+    git("merge", "--no-ff", "--no-edit", "A")
+    head = git("rev-parse", "HEAD")
+
+    bases = land._merge_bases(repo, main, head)
+    assert len(bases) == 2 and set(bases) == {git("rev-parse", "A"), git("rev-parse", "B")}
+    tree, conflicts = land._merge_tree(repo, main, head)
+    assert conflicts is None and tree == git("rev-parse", "main^{tree}")
+
+
+def test_criss_cross_recovery_succeeds_only_for_a_proven_matching_tree(env, monkeypatch):
+    from office import land
+
+    bare, _, _ = _run(env, monkeypatch, _plan("merge"))
+    head = _head_of(env, bare, "T1")
+    _conflict(env, 1, head)
+    monkeypatch.setattr(land, "_merge_bases", lambda *args: ["a" * 40, "b" * 40])
+    code, out = env.office("land")
+    assert code == 0 and "criss-cross ancestry: 2 merge bases" in out, out
+    assert "matches the reviewed integration despite 2 merge bases" in out, out
+    assert _main_tree(env, bare) == _integration_tree(env)
+
+
+def test_criss_cross_tree_mismatch_refuses_unsafe_repair_without_pushing(env, monkeypatch):
+    from office import land
+
+    bare, _, _ = _run(env, monkeypatch, _plan("merge"))
+    head = _head_of(env, bare, "T1")
+    # This local bare fixture has no default HEAD until explicitly assigned.
+    subprocess.run(["git", "--git-dir", str(bare), "symbolic-ref", "HEAD", "refs/heads/main"], check=True)
+    _advance_main(env, bare, "NOTES.md", "unreviewed\n")
+    main = remote_head(bare, "main")
+    _conflict(env, 1, head)
+    monkeypatch.setattr(land, "_merge_bases", lambda *args: ["a" * 40, "b" * 40])
+    code, out = env.office("land")
+    assert code == 4 and "criss-cross ancestry: 2 merge bases" in out, out
+    assert "clean merge may duplicate changes" in out and "independent review" in out, out
+    assert "changed files: NOTES.md" in out, out
+    assert _head_of(env, bare, "T1") == head and remote_head(bare, "main") == main
+    assert "recovered" not in _task_pr(env, "T1")
+
+
+def test_manual_recovery_instructions_work_with_merge_commit_revisions():
+    from office import land
+    instruction = land.COMPOSE_BY_HAND.format(base="main")
+    assert "merge the accepted task revisions" in instruction
+    assert "dependency order" in instruction and "do not blindly cherry-pick" in instruction
+    assert "reviewed integration" in instruction
+
+
 def test_a_real_conflict_refuses_naming_files_and_pushes_nothing(env, monkeypatch):
     bare, _, _ = _run(env, monkeypatch, _plan("merge"))
     t1_head = _head_of(env, bare, "T1")

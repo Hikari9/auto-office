@@ -714,3 +714,15 @@ class DerivedRoutingRoundTripTest(unittest.TestCase):
         import office_scoring as scoring
         self.assertLess(scoring.reward_sort_key(None), scoring.reward_sort_key(0.0))
         self.assertLess(scoring.reward_sort_key(0.5), scoring.reward_sort_key(None))
+
+
+def test_issue_577_failed_integration_check_evidence_includes_log():
+    from office.integration import _failed_check_logs
+    outcome = {"results": [
+        {"command": "pytest unit", "exit": 0, "log": "/tmp/evidence/check-1.log"},
+        {"command": "pytest e2e", "exit": 1, "log": "/tmp/evidence/check-2.log"},
+    ]}
+    message = _failed_check_logs(outcome)
+    assert "check 2 exit 1 log /tmp/evidence/check-2.log" in message
+    assert "check-1.log" not in message
+    assert _failed_check_logs({"results": outcome["results"][:1]}) == ""

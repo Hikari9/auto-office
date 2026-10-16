@@ -24,7 +24,7 @@ import time
 import uuid
 from pathlib import Path
 
-from office import briefs, contract, db, gates, jobs, paths, review_parse, state, worktree_setup
+from office import briefs, contract, db, gates, jobs, paths, planfile, review_parse, state, verification_coverage, worktree_setup
 from office.util import dumps, now_iso, sha256_obj
 
 
@@ -214,6 +214,14 @@ def moved_base(con, run: dict) -> str | None:
     return new if ahead.returncode == 0 else None
 
 
+def _failed_check_logs(outcome: dict) -> str:
+    """Surface the precise failed check and its recorded evidence path (#577)."""
+    failures = [(i, row) for i, row in enumerate(outcome.get("results") or [], start=1)
+                if row.get("exit") != 0]
+    return "; ".join(f"check {i} exit {row['exit']} log {row.get('log') or 'unavailable'}"
+                     for i, row in failures)
+
+
 def _set_integration(con, run: dict, **fields) -> None:
     run = state.get_run(con, run["id"])
     landing = dict(run.get("landing") or {})
@@ -307,13 +315,15 @@ def _integrate(con, run: dict, job: dict) -> dict:
         return {"status": "blocked"}
     import os
     genv = dict(os.environ, **paths.commit_identity_env(repo))
+    previous = []
     for t in tasks:
         commit = revs[t["id"]]["commit_sha"]
         if subprocess.run(["git", "-C", str(wt), "merge-base", "--is-ancestor", commit, "HEAD"], capture_output=True).returncode == 0:
+            previous.append(t)
             continue
         proc = subprocess.run(["git", "-C", str(wt), "merge", "--no-ff", "--no-edit", "-m", f"office: land {t['id']}\n\n{paths.office_trailer(run['id'])}", commit],
                               capture_output=True, text=True, env=genv)
-        if proc.returncode != 0:
+        if proc.returncode != 0 and not finish_shared_append_merge(wt, t, previous, env=genv):
             conflicted = paths.git(wt, "diff", "--name-only", "--diff-filter=U", check=False)
             subprocess.run(["git", "-C", str(wt), "merge", "--abort"], capture_output=True)
             detail = f"{t['id']} conflicts with earlier tasks on {conflicted.replace(chr(10), ', ') or 'files'}"
@@ -321,6 +331,15 @@ def _integrate(con, run: dict, job: dict) -> dict:
                 _set_integration(con, run, key=key, status="conflict", detail=detail, branch=branch)
                 state.emit(con, run, "integration.conflict", f"INTEGRATION CONFLICT: {detail}")
             return {"status": "conflict"}
+        try:
+            preserve_shared_append_multiplicity(wt, t, previous, env=genv)
+        except SharedAppendUnsafe as exc:
+            detail = f"{t['id']}: shared append integrity unverified: {exc}; resolve shared edits or serialize tasks, then office resume"
+            with db.transaction(con):
+                _set_integration(con, run, key=key, status="conflict", detail=detail, branch=branch)
+                state.emit(con, run, "integration.conflict", f"INTEGRATION CONFLICT: {detail}")
+            return {"status": "conflict", "detail": detail}
+        previous.append(t)
     commit = paths.git(wt, "rev-parse", "HEAD")
     tree = paths.git(wt, "rev-parse", "HEAD^{tree}")
     needs_review, why = review_boundary(con, run, tasks, revs)
@@ -338,17 +357,26 @@ def _integrate(con, run: dict, job: dict) -> dict:
         _set_integration(con, run, key=key, status="verifying", detail=why, branch=branch, commit=commit,
                          review=needs_review)
     results = {}
+    check_outcome = None
+    checks_gate_id = None
     if run_checks:
         # The merged lockfile is in place; install before the checks that need it.
         worktree_setup.prepare(run, wt, "integration", paths.run_dir(run["id"]) / "setup" / "integration.log", created=True)
         gid = _gate(con, run, integ_rev, "checks", commit)
-        outcome = gates.run_commands(con, run, run_checks, wt, integ_rev, {"id": gid, "task_id": None}, check_tree=False)
+        checks_gate_id = gid
+        extra_checks = verification_coverage.supplemental_checks(repo, commit, run_checks)
+        outcome = gates.run_commands(con, run, [*run_checks, *extra_checks], wt, integ_rev,
+                                     {"id": gid, "task_id": None}, check_tree=False)
+        check_outcome = outcome
         with db.transaction(con):
             con.execute("UPDATE gates SET status='done', verdict=?, summary=?, finished_at=? WHERE id=?",
                         (outcome["verdict"], outcome.get("summary"), now_iso(), gid))
         results["checks"] = outcome["verdict"]
         if outcome["verdict"] != "PASS":
             detail = blocked_detail(outcome)
+            failed_logs = _failed_check_logs(outcome)
+            if failed_logs:
+                detail += f" | failing evidence: {failed_logs}"
             hint = missing_deps_hint(outcome)
             if hint:
                 detail += f" | {hint}"
@@ -365,7 +393,7 @@ def _integrate(con, run: dict, job: dict) -> dict:
                                             "and re-checking")
                     state.emit(con, run, "integration.auto_rebase", f"INTEGRATION checks {outcome['verdict']} on base "
                                f"{base[:12]}; the default branch moved to {onto[:12]}, so the run rebases onto it and "
-                               "re-checks")
+                               "re-checks" + (f"; {failed_logs}" if failed_logs else ""))
                     return results
                 _set_integration(con, run, status="blocked", detail=detail)
                 state.emit(con, run, "integration.failed", f"INTEGRATION checks {outcome['verdict']} on the composed result"
@@ -394,10 +422,23 @@ def _integrate(con, run: dict, job: dict) -> dict:
                                  detail=f"integration review {outcome['verdict']}: {detail[:200]}")
                 state.emit(con, run, "integration.failed", f"INTEGRATION review {outcome['verdict']}: {detail[:140]}")
             return results
+    # An independent integration reviewer has its own outcome/gate. The proof
+    # must come from the original passing check gate, not the last reviewer.
+    executed = ([r["command"] for r in check_outcome.get("results") or [] if r.get("exit") == 0]
+                if check_outcome is not None else [])
+    coverage = verification_coverage.audit(repo, commit, run_checks, verified_commands=executed)
+    incomplete = coverage and coverage[0] == verification_coverage.PARTIAL
+    detail = (f"composed result verified by declared checks; FULL SUITE NOT VERIFIED: {coverage[1]}"
+              if incomplete else "composed result verified")
     with db.transaction(con):
         if compose_base(state.get_run(con, run["id"])) != base:
             return {"skipped": "rebased while composing"}
-        _set_integration(con, run, status="accepted", detail="composed result verified")
+        direct = next((c for c in executed if verification_coverage._complete_pytest_command(c)), None)
+        proof = ({"commit": commit, "gate": checks_gate_id, "command": direct} if direct else None)
+        _set_integration(con, run, status="accepted", detail=detail, full_suite=proof)
+        if incomplete:
+            state.emit(con, run, "integration.coverage_partial",
+                       f"integration {commit[:12]}: FULL SUITE NOT VERIFIED: {coverage[1]}")
         state.emit(con, run, "integration.accepted", f"READY: integration verified on {commit[:10]} ({branch})"
                    if contract.is_convergence(run) else f"READY: integration PASS on {commit[:10]} ({branch})")
     return results
@@ -443,7 +484,8 @@ def review_boundary(con, run: dict, tasks: list[dict], revs: dict) -> tuple[bool
     if len(tasks) < 2:
         return False, "single task: composed result equals the accepted revision"
     changed = {t["id"]: set(json.loads(revs[t["id"]].get("changed_json") or "[]")) |
-               set(paths.git(Path(run["repo_root"]), "diff", "--name-only", run["base_sha"], revs[t["id"]]["commit_sha"]).split())
+               set(paths.git(Path(run["repo_root"]), "diff", "--name-only",
+                             revs[t["id"]].get("base_commit") or run["base_sha"], revs[t["id"]]["commit_sha"]).split())
                for t in tasks}
     ids = [t["id"] for t in tasks]
     for i, a in enumerate(ids):
@@ -469,6 +511,160 @@ def review_boundary(con, run: dict, tasks: list[dict], revs: dict) -> tuple[bool
 
 
 # ------------------------------------------------------------------ combining revisions
+
+class SharedAppendUnsafe(Exception):
+    """An append-only shared file cannot be proved safe to compose."""
+
+
+def preserve_shared_append_multiplicity(wt: Path, task: dict, previous: list[dict], *, env: dict) -> bool:
+    """Verify *every* shared path after a clean merge, not just conflict cases.
+
+    This is a proof-or-refuse operation: Git's clean result cannot authorize a
+    non-append rewrite, missing file, mode change, ambiguous merge ancestry,
+    binary data, or duplicate-line collapse.  Only the scratch composition
+    commit may be amended; accepted task commits are untouched.
+    """
+    shared = {x[1:] for x in task.get("scope") or []
+              if planfile.is_shared(x) and not any(c in x for c in "*?[]")}
+    prior = {x[1:] for t in previous for x in t.get("scope") or [] if planfile.is_shared(x)}
+    eligible = shared & prior
+    if not eligible:
+        return False
+    parents = paths.git(wt, "rev-list", "--parents", "-n", "1", "HEAD").split()
+    if len(parents) != 3:
+        raise SharedAppendUnsafe("merge has no two parents; cannot verify shared append ancestry")
+    bases = paths.git(wt, "merge-base", "--all", parents[1], parents[2]).splitlines()
+    if len(bases) != 1:
+        raise SharedAppendUnsafe("multiple or missing merge bases; shared append ancestry is ambiguous")
+
+    def blob(commit: str, path: str) -> tuple[str, bytes]:
+        if Path(path).is_absolute() or ".." in Path(path).parts:
+            raise SharedAppendUnsafe(f"invalid shared path {path!r}")
+        entry = subprocess.run(["git", "-C", str(wt), "ls-tree", commit, "--", path],
+                               capture_output=True)
+        if entry.returncode or not entry.stdout:
+            raise SharedAppendUnsafe(f"{path}: missing shared file in merge ancestry")
+        mode = entry.stdout.split(b" ", 1)[0].decode("ascii", "replace")
+        if mode not in ("100644", "100755") or b" blob " not in entry.stdout:
+            raise SharedAppendUnsafe(f"{path}: shared path is not a regular file")
+        raw = subprocess.run(["git", "-C", str(wt), "show", f"{commit}:{path}"],
+                             capture_output=True)
+        if raw.returncode or b"\0" in raw.stdout:
+            raise SharedAppendUnsafe(f"{path}: binary or unreadable shared file")
+        try:
+            raw.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            raise SharedAppendUnsafe(f"{path}: invalid UTF-8 shared file") from None
+        return mode, raw.stdout
+
+    changes = {}
+    for path in sorted(eligible):
+        (base_mode, base), (left_mode, left), (right_mode, right), (merged_mode, merged) = (
+            blob(commit, path) for commit in (bases[0], parents[1], parents[2], parents[0]))
+        if len({base_mode, left_mode, right_mode, merged_mode}) != 1:
+            raise SharedAppendUnsafe(f"{path}: shared file mode changed")
+        if not left.startswith(base) or not right.startswith(base):
+            raise SharedAppendUnsafe(f"{path}: non-append edit or truncated shared file")
+        if base and not base.endswith(b"\n") and (left != base or right != base):
+            raise SharedAppendUnsafe(f"{path}: append to an incomplete base line")
+        a, b = left[len(base):], right[len(base):]
+        if any(suffix and not suffix.endswith(b"\n") for suffix in (a, b)):
+            raise SharedAppendUnsafe(f"{path}: incomplete appended record")
+        target = wt / path
+        if target.is_symlink() or not target.is_file():
+            raise SharedAppendUnsafe(f"{path}: worktree shared path is not a regular file")
+        if target.read_bytes() != merged:
+            raise SharedAppendUnsafe(f"{path}: worktree contents differ from composition HEAD")
+        expected = base + a + b
+        if merged != expected:
+            changes[path] = expected
+    if not changes:
+        return False
+    try:
+        for path, content in changes.items():
+            target = wt / path
+            fd = os.open(target, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(content)
+            paths.git(wt, "add", "--", path)
+        paths.git(wt, "-c", "commit.gpgsign=false", "commit", "--amend", "--no-edit",
+                  env={**os.environ, **env})
+    except (OSError, paths.GitError) as exc:
+        raise SharedAppendUnsafe(f"shared append correction failed; retry from clean composition: {exc}") from exc
+    return True
+
+
+def finish_shared_append_merge(wt: Path, task: dict, previous: list[dict], *, env: dict) -> bool:
+    """Union only provable append-only changes to identically declared shared files."""
+    shared = {x[1:] for x in task.get("scope") or [] if planfile.is_shared(x)
+              and not any(c in x for c in "*?[]")}
+    earlier = {x[1:] for t in previous for x in t.get("scope") or [] if planfile.is_shared(x)}
+    eligible = shared & earlier
+    merging = paths.git(wt, "rev-parse", "MERGE_HEAD", check=False).strip()
+    if merging:
+        bases = paths.git(wt, "merge-base", "--all", "HEAD", merging).splitlines()
+        if len(bases) != 1:
+            return False  # ambiguous ancestry must never be resolved automatically
+    proc = subprocess.run(["git", "-C", str(wt), "diff", "--name-only", "--diff-filter=U", "-z"],
+                          capture_output=True)
+    try:
+        conflicts = [x.decode("utf8") for x in proc.stdout.split(b"\0") if x]
+    except UnicodeDecodeError:
+        return False
+    if proc.returncode or not conflicts or not set(conflicts) <= eligible:
+        return False
+    output = {}
+    for path in conflicts:
+        if Path(path).is_absolute() or ".." in Path(path).parts:
+            return False
+        ls = subprocess.run(["git", "-C", str(wt), "ls-files", "-u", "-z", "--", path],
+                            capture_output=True)
+        modes = {}
+        for entry in ls.stdout.split(b"\0"):
+            if not entry:
+                continue
+            try:
+                metadata, name = entry.split(b"\t", 1)
+                mode, _, stage = metadata.split(b" ")
+                if name.decode("utf-8") == path:
+                    modes[int(stage)] = mode
+            except (UnicodeDecodeError, ValueError):
+                return False
+        if ls.returncode or set(modes) != {1, 2, 3} or len(set(modes.values())) != 1                 or modes[1] not in (b"100644", b"100755"):
+            return False
+        parts = []
+        for i in (1, 2, 3):
+            o = subprocess.run(["git", "-C", str(wt), "show", f":{i}:{path}"], capture_output=True)
+            if o.returncode or b"\0" in o.stdout:
+                return False
+            try:
+                o.stdout.decode("utf8")
+            except UnicodeDecodeError:
+                return False
+            parts.append(o.stdout)
+        base, ours, theirs = parts
+        if (not ours.startswith(base) or not theirs.startswith(base)
+                or (base and not base.endswith(b"\n"))):
+            return False
+        a, b = ours[len(base):], theirs[len(base):]
+        if any(v and not v.endswith(b"\n") for v in (a,b)):
+            return False
+        # Both suffixes are independent append operations. Set-deduplication
+        # silently discards repeated records (even when they are intentional).
+        # Preserve each side's byte-exact lines and their multiplicity.
+        output[path] = base + a + b
+    for path, content in output.items():
+        target = wt / path
+        if target.is_symlink() or not target.is_file():
+            return False
+        fd = os.open(target, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+        if subprocess.run(["git", "-C", str(wt), "add", "--", path], capture_output=True).returncode:
+            return False
+    return subprocess.run(["git", "-C", str(wt), "commit", "--no-edit"],
+                          capture_output=True, env=env).returncode == 0
+
 
 class CombineConflict(Exception):
     """Two heads cannot be merged. `left` and `right` label them, `paths` are the conflicting files."""

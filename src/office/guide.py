@@ -331,6 +331,11 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         from office import db
         with db.transaction(con):
             state.consume_events(con, run["id"], events)
+    # A successful check result is never evidence that the undispatched pytest
+    # tiers passed. Keep the omission visible even after its original event was read.
+    detail = ((run.get("landing") or {}).get("integration") or {}).get("detail") or ""
+    if "FULL SUITE NOT VERIFIED" in detail:
+        res.add(f"verification warning: {detail}")
     res.next = next_action(con, run)
     res.data = {"run_id": run["id"], "phase": run["phase"], "office_version": run["office_version"],
                 "requirements_version": run["requirements_version"], "plan_version": run["plan_version"],
@@ -574,15 +579,20 @@ def worker_signals(con, run: dict) -> tuple[list[str], int]:
 
 
 def _needs_orchestrator(con, run: dict) -> bool:
-    if any(t["status"] in ("paused", "blocked", "changes_required") for t in state.tasks(con, run["id"])):
+    tasks = state.tasks(con, run["id"])
+    if any(t["status"] in ("paused", "blocked") for t in tasks):
+        return True
+    # Preserve v3.1's existing changes-required wakeup. Convergence waits
+    # for the precise repair eligibility, including a live scope lease (#561).
+    if not contract.is_convergence(run) and any(t["status"] == "changes_required" for t in tasks):
         return True
     return not next_action(con, state.get_run(con, run["id"])).startswith(("exceptions only", "no action"))
 
 
 def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
     """Block until something needs the orchestrator, then print status.
-    Exit 0: a task, phase, plan or requirements change, or a new orchestrator
-    event. Exit 3: a stall (work marked in progress that nothing can advance).
+    Exit 0: a task, phase, plan or requirements change, or a new actionable
+    orchestrator event. Exit 3: a stall (work marked in progress that nothing can advance).
     Exit 5: an agent is waiting on a question (a `question:` line names it and
     the `office answer` command). Exit 124: timeout with nothing new. A watcher
     keys on the exit code, never on matching status text."""
@@ -604,10 +614,23 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         asked, _, acts = questions.scan(con, run)
         stuck = stalls(con, run, since=started_at, acts=acts) + signals
         changed = _snapshot(con, run) != start
-        news = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=1)
+        # Only an *actionable* orchestrator event warrants an exit 0: a task paused on a
+        # refused submit, a gate failure, a recheck the orchestrator must route. A pure
+        # lifecycle notification (a launch.session, a setup.done) carries no command to
+        # run, so an event older than the cursor must not wake an otherwise-idle wait into
+        # exit 0, which an orchestrator reads as "act now" and busy-loops on. Stalls and
+        # signals that DO carry a next step wake via the stall pass; real state
+        # transitions still wake via `changed`. (#296) Scan *all* unread events, not a
+        # bounded prefix: many older informational events must not hide a newer urgent
+        # one (e.g. a late pr.error behind 64 launch.session/setup.done notes).
+        news = [e for e in state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=None)
+                if _urgent(e)]
         # Something already waiting on the orchestrator ends the wait at once;
         # otherwise a blocker present at the start would sit until the timeout.
-        pending = first and _needs_orchestrator(con, run)
+        # A scope lease may become dormant when its holder ends without a new
+        # task revision or status event. Recheck actionable work on every poll:
+        # the initial snapshot alone cannot observe that transition (#561).
+        pending = _needs_orchestrator(con, run)
         first = False
         if asked or stuck or changed or news or pending or state.is_terminal(state.get_run(con, run["id"])) \
                 or time.time() >= deadline:

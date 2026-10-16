@@ -179,6 +179,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                 planner_note = "planner P1 queued"
         _ensure_local_exclude(common)
         state.write_projection(con, run_id)
+        # Inline planners must be able to write the plan path advertised by next.
+        # Keep PLAN.md absent until the orchestrator actually authors it.
+        if planner_mode == "inline":
+            planpath.draft(top, run).parent.mkdir(parents=True, exist_ok=True)
         if source and source.get("plan"):
             draft = planpath.draft(top, run)
             draft.parent.mkdir(parents=True, exist_ok=True)
@@ -336,6 +340,7 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
     planpath.remove(Path(run["repo_root"]), run)
     res = Result(lines=[f"{short(run['id'])} closed | archive receipt {receipt['digest'][7:15]}"],
                  data={"archive_digest": receipt["digest"]})
+    _append_verification_disclosure(res, receipt)
     _closeout(con, run, landing, res, handoff=handoff)
     return res
 
@@ -456,6 +461,7 @@ def close_landed_externally(con, run: dict, ref: str, quote: str | None = None) 
         lines.append(f"not in the merge commit, closed on the user's word: {', '.join(unproven)}")
     res = Result(lines=lines + [f"archive receipt {receipt['digest'][7:15]}"], data={"archive_digest": receipt["digest"],
                                                                                    "landing": landing})
+    _append_verification_disclosure(res, receipt)
     _closeout(con, run, landing, res, pr=f"PR #{pr['number']}" if pr.get("number") else pr["url"])
     return res
 
@@ -515,6 +521,26 @@ def _end_bindings(con, run_id: str) -> None:
     con.execute("UPDATE session_bindings SET ended_at=? WHERE run_id=? AND ended_at IS NULL", (now_iso(), run_id))
 
 
+def _verified_test_tiers(con, run: dict) -> dict | None:
+    """Record the integration-check scope in closeout, not only in status (#563)."""
+    from office import integration, verification_coverage
+    commit = integration.final_commit(con, run)
+    if not commit:
+        return None
+    commands = list((run.get("landing") or {}).get("run_checks") or [])
+    result = verification_coverage.audit(
+        Path(run["repo_root"]), commit, commands,
+        verified_commands=verification_coverage.attested_checks(con, run, commit))
+    return {"commit": commit, "status": result[0], "detail": result[1]} if result else None
+
+
+def _append_verification_disclosure(res: Result, receipt: dict) -> None:
+    verified = receipt["body"].get("verification") or {}
+    if verified.get("status") == "partial":
+        res.notices.append("FULL SUITE NOT VERIFIED: " + verified["detail"])
+        res.data["verification"] = verified
+
+
 def _archive_receipt(con, run: dict, landing: dict, handoff: str | None) -> dict:
     tasks = [{"id": t["id"], "status": t["status"], "accepted_revision": t["accepted_revision_id"]}
              for t in state.tasks(con, run["id"])]
@@ -525,6 +551,9 @@ def _archive_receipt(con, run: dict, landing: dict, handoff: str | None) -> dict
             "policy_hash": run["policy_hash"], "config_hash": run["config_hash"], "tasks": tasks,
             "accepted_commits": {t["id"]: revs.get(t["accepted_revision"]) for t in tasks},
             "landing": landing, "handoff": handoff}
+    verification = _verified_test_tiers(con, run)
+    if verification:
+        body["verification"] = verification
     from office import contract
     body["review_contract"] = contract.of(run)
     from office import risk as risk_mod

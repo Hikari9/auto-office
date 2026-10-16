@@ -25,6 +25,14 @@ settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "office"))
 _SCRUBBED_PREFIXES = ("OFFICE_", "HERDR_", "AUTO_OFFICE_")
 
 
+@pytest.fixture(scope="session")
+def _empty_office_user_config(tmp_path_factory):
+    """Keep the invoking user's routing preferences out of test configuration."""
+    path = tmp_path_factory.mktemp("office-user-config") / "config.yaml"
+    path.write_text("", encoding="utf-8")
+    return path
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _libyaml_safe_load():
     """Parse YAML with libyaml for the whole session.
@@ -45,14 +53,16 @@ def _libyaml_safe_load():
 
 
 @pytest.fixture(autouse=True)
-def _clean_office_identity(request, monkeypatch):
+def _clean_office_identity(request, monkeypatch, _empty_office_user_config):
     """Start every test with no Office/herdr identity from the launching shell.
 
     A test run started by an Office worker inherits OFFICE_RUN_ID and friends,
     which make hooks and helpers resolve that run instead of the test's own.
+    User configuration is isolated too; individual tests can still override it.
     """
     for key in [k for k in os.environ if k.startswith(_SCRUBBED_PREFIXES)]:
         monkeypatch.delenv(key)
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(_empty_office_user_config))
     if "v31" not in Path(str(request.fspath)).parts:
         monkeypatch.setenv("OFFICE_PINNED_LEGACY", "1")
     yield

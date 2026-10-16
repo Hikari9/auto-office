@@ -13,7 +13,7 @@ eligibility, validation and persistence, so the skill never writes config or jud
 | `office onboard --skip` | Writes only `onboarding.schema_version`. Every preference stays as it was, including the free-model opt-in. |
 | `office onboard --enable-free-models` / `--disable-free-models` | Writes `onboarding.free_models_enabled` (`true` / `false`) with the schema marker, alone or together with answers. Not allowed with `--skip`. |
 
-Free models are off by default. A catalog route marked `free_model` is not offered to routing until the user opts in, and `--disable-free-models` turns it off again. The opt-in persists in the user file, and the status output reports it (`free_models`). Opting in does not make a free route a substitute: when a preferred route is configured, a free route is considered only if it is itself a preferred route. Otherwise it is excluded, whether the preferred route is available or not.
+Free models are off by default. A catalog route marked `free_model` is not offered to routing until the user opts in, and `--disable-free-models` turns it off again. The opt-in persists in the user file, and the status output reports it (`free_models`). Once opted in, a free route competes on merit through normal qualification, scoring and fallback like any other route.
 
 An answer is `office` (Let Office decide), `keep`, or a full `harness/model@effort` route.
 

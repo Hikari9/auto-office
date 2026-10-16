@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from office import adapters, candidates, harnesscmd, install, onboarding, route_policy
+from office import adapters, candidates, harnesscmd, install, onboarding, route_policy, routing
 from office.state import Refused
 
 SLUG = "opencode/muse-spark-1.3-contributor-free"
@@ -46,11 +46,47 @@ if args[:2] == ["auth", "list"]:
     state = os.environ.get("FAKE_OPENCODE_AUTH", "ok")
     if state == "fail":
         print("boom", file=sys.stderr); sys.exit(1)
+    if state == "mixed-failure":
+        print("stderr detail", file=sys.stderr); print("stdout detail"); sys.exit(1)
     if state == "crash":
         raise RuntimeError("auth list crashed")
     if state == "missing":
         print("No authenticated integrations"); sys.exit(0)
-    print("opencode  authenticated (oauth)"); sys.exit(0)
+    if state == "empty":
+        sys.exit(0)
+    if state == "junk":
+        print("opencode  authenticated (oauth)"); sys.exit(0)
+    if state == "stderr-only":
+        print("Anthropic  work  stored", file=sys.stderr); sys.exit(0)
+    if state == "fail-with-entry":
+        print("Anthropic".ljust(11) + "work".ljust(28) + "stored"); sys.exit(1)
+    if state == "contradictory":
+        print("No authenticated integrations")
+        print("Anthropic".ljust(11) + "work".ljust(28) + "stored"); sys.exit(0)
+    if state == "env":
+        print("OpenAI".ljust(8) + "OPENAI_API_KEY".ljust(28) + "environment"); sys.exit(0)
+    if state == "long":
+        print("Anthropic".ljust(11) + "someone.much.longer.name@example.com" + "stored"); sys.exit(0)
+    if state == "empty-source":
+        print("Anthropic".ljust(11) + "".ljust(28) + "stored"); sys.exit(0)
+    if state == "short-columns":
+        print("Fake  junk stored"); sys.exit(0)
+    if state == "one-space":
+        print("Anthropic work".ljust(39) + "stored"); sys.exit(0)
+    if state == "bad-type":
+        print("Anthropic".ljust(11) + "work".ljust(28) + "oauth"); sys.exit(0)
+    if state == "misaligned":
+        print("Anthropic".ljust(11) + "work".ljust(28) + "stored")
+        print("OpenAI Codex".ljust(14) + "OPENAI_API_KEY".ljust(28) + "environment"); sys.exit(0)
+    if state == "mixed":
+        print("Anthropic".ljust(11) + "work".ljust(28) + "stored")
+        print("warning: stale cache"); sys.exit(0)
+    if state == "overlong":
+        print("Anthropic".ljust(11) + "x" * 600 + "stored"); sys.exit(0)
+    if state == "multi":
+        print("Anthropic".ljust(14) + "work".ljust(28) + "stored")
+        print("OpenAI Codex".ljust(14) + "OPENAI_API_KEY".ljust(28) + "environment"); sys.exit(0)
+    print("Anthropic".ljust(11) + "work".ljust(28) + "stored"); sys.exit(0)
 if args[:1] == ["run"]:
     model = None
     for i, a in enumerate(args):
@@ -69,7 +105,7 @@ print("unknown", file=sys.stderr); sys.exit(1)
 @pytest.fixture
 def fake(tmp_path, monkeypatch):
     """A fake `opencode` first on PATH. FAKE_OPENCODE_AUTH controls `auth list`:
-    ok (signed in), missing (signed out, exit 0), fail (exit 1)."""
+    ok (stored credential, the real `auth list` row shape), missing (signed out, exit 0), fail (exit 1)."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     exe = bin_dir / "opencode"
@@ -212,6 +248,57 @@ def test_free_model_discovery_does_not_change_auth_or_enable_candidates(fake, mo
     assert candidates.declared_candidate("opencode", MODEL_ID, "xhigh")["free_model"] is True
 
 
+def _declare(monkeypatch, rows, harness, model, effort=None):
+    monkeypatch.setattr(candidates, "catalog_rows", lambda: rows)
+    return candidates.declared_candidate(harness, model, effort)
+
+
+def test_uncatalogued_free_slug_requires_opt_in_like_a_marked_row(monkeypatch, tmp_path):
+    cfg = tmp_path / "user-config.yaml"
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(cfg))
+    for name in ("some-new-model-free", "opencode/some-new-model-free"):
+        with pytest.raises(Refused, match="names itself free and requires explicit opt-in") as exc:
+            _declare(monkeypatch, [], "opencode", name, "high")
+        assert exc.value.category == "free-model-opt-in"
+    cfg.write_text("onboarding:\n  free_models_enabled: true\n")
+    cand = _declare(monkeypatch, [], "opencode", "some-new-model-free", "high")
+    assert cand["free_model"] is True and cand["override"] is True
+
+
+def test_uncatalogued_non_free_routes_are_unchanged(monkeypatch, tmp_path):
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "user-config.yaml"))
+    assert _declare(monkeypatch, [], "opencode", "opencode/big-pickle", "high")["free_model"] is False
+    # The suffix convention is opencode's; another harness's slug is not read as free.
+    assert _declare(monkeypatch, [], "agy", "gemini-free", "high")["free_model"] is False
+
+
+def test_ambiguous_catalog_match_with_a_free_row_requires_opt_in(monkeypatch, tmp_path):
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "user-config.yaml"))
+    base = {"model_id": "mystery-free", "invocation_harness": "opencode", "dispatchable": True}
+    rows = [{**base, "effort": "low", "free_model": True}, {**base, "effort": "high"}]
+    # Catalogued but ambiguous (several rows, no effort): any free row makes the route free,
+    # so omitting the effort cannot step around the opt-in.
+    with pytest.raises(Refused, match="mystery-free is marked free") as exc:
+        _declare(monkeypatch, rows, "opencode", "mystery-free")
+    assert exc.value.category == "free-model-opt-in"
+    (tmp_path / "user-config.yaml").write_text("onboarding:\n  free_models_enabled: true\n")
+    assert _declare(monkeypatch, rows, "opencode", "mystery-free")["free_model"] is True
+
+
+def test_opencode_adapter_does_not_map_the_unlaunchable_none_variant():
+    mapping = adapters.load_all()["opencode"]["effort_mapping"]
+    assert "none" not in mapping and "max" in mapping
+
+
+def test_catalogued_rows_ignore_the_slug_convention(monkeypatch, tmp_path):
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "user-config.yaml"))
+    row = {"model_id": "named-free", "invocation_harness": "opencode", "effort": "high", "dispatchable": True}
+    assert _declare(monkeypatch, [row], "opencode", "named-free", "high")["free_model"] is False
+    marked = {**row, "model_id": "plain", "free_model": True}
+    with pytest.raises(Refused, match="plain is marked free and requires explicit opt-in"):
+        _declare(monkeypatch, [marked], "opencode", "plain", "high")
+
+
 def test_opted_in_free_model_passes_preflight_without_login(fake, monkeypatch):
     monkeypatch.setenv("FAKE_OPENCODE_AUTH", "missing")
     assert onboarding.credentials("opencode")[0] == "missing"
@@ -223,7 +310,18 @@ def test_opted_in_free_model_passes_preflight_without_login(fake, monkeypatch):
 @pytest.mark.parametrize("auth_state, expected", [
     ("missing", "no authenticated integrations"),
     ("fail", "exited 1"),
+    ("fail-with-entry", "exited 1"),
     ("crash", "auth list crashed"),
+    ("empty", "printed nothing"),
+    ("junk", "no recognizable integration entry"),
+    ("stderr-only", "printed nothing"),
+    ("contradictory", "no authenticated integrations"),
+    ("short-columns", "no recognizable integration entry"),
+    ("one-space", "no recognizable integration entry"),
+    ("bad-type", "no recognizable integration entry"),
+    ("misaligned", "no recognizable integration entry"),
+    ("mixed", "no recognizable integration entry"),
+    ("overlong", "no recognizable integration entry"),
 ])
 def test_onboarding_auth_list_failures_are_explicit_when_no_model_is_usable(fake, monkeypatch, auth_state, expected):
     monkeypatch.setenv("FAKE_OPENCODE_AUTH", auth_state)
@@ -235,6 +333,58 @@ def test_onboarding_auth_list_failures_are_explicit_when_no_model_is_usable(fake
     assert model is None and "no explicitly free model" in detail
 
 
+def test_auth_list_missing_reasons_are_distinct(fake, monkeypatch):
+    reasons = {}
+    for auth_state in ("missing", "fail", "empty", "junk", "crash"):
+        monkeypatch.setenv("FAKE_OPENCODE_AUTH", auth_state)
+        state, where = onboarding.credentials("opencode")
+        assert state == "missing"
+        reasons[auth_state] = where
+    assert len(set(reasons.values())) == len(reasons)
+
+
+@pytest.mark.parametrize("auth_state, count", [("ok", 1), ("env", 1), ("long", 1), ("empty-source", 1), ("multi", 2)])
+def test_auth_list_recognizes_real_entry_shapes(fake, monkeypatch, auth_state, count):
+    monkeypatch.setenv("FAKE_OPENCODE_AUTH", auth_state)
+    state, where = onboarding.credentials("opencode")
+    assert state == "found"
+    assert f"{count} authenticated integration" in where
+
+
+def test_auth_list_timeout_is_reported_as_timeout(fake, monkeypatch):
+    def hang(*a, **k):
+        raise subprocess.TimeoutExpired(a[0], 10)
+    monkeypatch.setattr(onboarding.subprocess, "run", hang)
+    assert onboarding._opencode_signed_in() == (False, "opencode auth list timed out")
+
+
+@pytest.mark.parametrize(("auth_state", "expected_detail"), [("fail", "boom"), ("mixed-failure", "stdout detail")])
+def test_opencode_command_failure_detail_combines_stderr_and_stdout(fake, monkeypatch, auth_state, expected_detail):
+    monkeypatch.setenv("FAKE_OPENCODE_AUTH", auth_state)
+    state, detail = onboarding.credentials("opencode")
+    assert state == "missing"
+    assert f"opencode auth list exited 1: {expected_detail}" in detail
+
+
+def test_explicit_free_consent_value_precedes_configured_consent(monkeypatch, tmp_path):
+    cfg = tmp_path / "user-config.yaml"
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(cfg))
+    candidate = {"harness": "agy", "harness_version": "1", "model_id": "free", "effort": "high",
+                 "free_model": True, "capabilities": ["builder"], "supported_playbooks": ["Change"],
+                 "invocation_source": "local-evidence:test",
+                 "price_fields": {"input_per_mtok": 0, "output_per_mtok": 0},
+                 "quota": {"status": "ok", "tightest_remaining_percent": 80, "projected_burn_percent": 1},
+                 "cost": {"money_estimate": 0, "quota_burn": 1, "wall_clock_seconds": 1}}
+    request = {"role": "worker", "playbook": "Change", "adaptive": False, "candidates": [candidate]}
+
+    cfg.write_text("onboarding:\n  free_models_enabled: true\n")
+    assert routing.route(request)["selected"] == "agy@1/free@high"
+    assert routing.route({**request, "allow_free_models": False})["selected"] is None
+
+    cfg.write_text("onboarding:\n  free_models_enabled: false\n")
+    assert routing.route({**request, "allow_free_models": True})["selected"] == "agy@1/free@high"
+
+
 def test_onboarding_auth_fixture_and_unknown_harness(fake, monkeypatch):
     monkeypatch.setenv("OFFICE_AUTH_FIXTURE", json.dumps({"opencode": "found"}))
     assert onboarding.credentials("opencode") == ("found", "fixture")
@@ -244,3 +394,15 @@ def test_onboarding_auth_fixture_and_unknown_harness(fake, monkeypatch):
 def test_install_records_unsupported_hook_posture():
     status = install.integration_status("opencode")
     assert status["state"] == "unsupported" and status["reason"]
+
+
+def test_onboarding_role_routes_honour_the_free_model_opt_in(fake, monkeypatch, tmp_path):
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "user-config.yaml"))
+    monkeypatch.setenv("OFFICE_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("FAKE_OPENCODE_AUTH", "missing")
+    row = {"model_id": MODEL_ID, "invocation_model_id": SLUG, "invocation_harness": "opencode",
+           "effort": "xhigh", "dispatchable": True, "free_model": True}
+    monkeypatch.setattr(candidates, "catalog_rows", lambda: [row])
+    (tmp_path / "user-config.yaml").write_text("onboarding:\n  free_models_enabled: true\n")
+    _, why_not = onboarding.role_routes(sqlite3.connect(":memory:"), {}, "worker")
+    assert not any("opt-in" in reason for reason in why_not.values()), why_not
