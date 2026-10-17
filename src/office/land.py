@@ -595,6 +595,34 @@ def _merge_all(con, run: dict, res: Result) -> str:
             raise Refused("no-pr", f"{t['id']} has no PR", next_step="office status (a pr.error notice names why)")
         if pr.get("merged"):
             continue
+        # A user may already have merged this task PR outside Office. Read
+        # GitHub state before restacking the accepted revision: a squash
+        # merged branch can no longer be rebased onto the new default (#654).
+        remote = _gh(run, "pr", "view", str(pr["number"]), "--json", "state,baseRefName")
+        if remote.returncode == 0:
+            try:
+                remote_details = json.loads(remote.stdout or "{}")
+                remote_state = (remote_details.get("state") or "").upper()
+                remote_base = remote_details.get("baseRefName")
+            except (ValueError, TypeError, AttributeError):
+                remote_state, remote_base = "", None
+            if remote_state == "MERGED" and remote_base != base:
+                raise Refused("merged-to-other-base",
+                              f"#{pr['number']} ({t['id']}) was merged into {remote_base or 'an unknown branch'}, "
+                              f"not {base}; it cannot be adopted as landed on {base}",
+                              preserved="no new task merges by this attempt",
+                              next_step="verify where this PR was merged, then bring its reviewed tree to "
+                                        f"{base} through an authorized reviewed PR")
+            if remote_state == "MERGED":
+                with db.transaction(con):
+                    state.update_task(con, run["id"], t["id"],
+                                      pr={**pr, "merged": True, "base": base, "merged_externally": True})
+                    state.emit(con, run, "pr.merged",
+                               f"{t['id']} #{pr['number']} already merged on GitHub; adopted by Office",
+                               task_id=t["id"])
+                res.add(f"{t['id']} #{pr['number']} already merged externally; adopted")
+                merged.append(t["id"])
+                continue
         up = prs.parent(con, run, t)
         if up is not None and pr.get("base") != base:
             if method != "merge" and (pr.get("restacked") or {}).get("base") != base:
