@@ -1,5 +1,6 @@
 """#668: Type notation and normal prose never masquerade as a manual git push."""
 import pytest
+from hypothesis import given, strategies as st
 
 from conftest import PLAN_ONE
 from office import planfile, shell_safety
@@ -89,6 +90,24 @@ def test_plain_prose_does_not_trigger_manual_push_guard(text):
     "Never run git push, but never forget to run git push origin main",
     "Never run git push, whereas you may do so",
     "Never run git push, but it is fine to do that",
+    "Do not just push origin main",
+    "Never simply run git push origin main",
+    "Never run git push, but run git fetch instead",
+    "Never run git push, or you should run git push origin main",
+    "Never run git push, but do not forget to run git push origin main",
+    "Never skipping git push origin main",
+    "Never run git push or",
+    "Never run git push or or git push --force",
+    "Never run or git push",
+    "Never run git push\nto main",
+    "Never run git push to main; git push origin main",
+    "Never push; push origin main",
+    "Never push, run it",
+    "Never run git push or $(git push)",
+    "Never run git push or `git push` && git push",
+    "Never run `git push",
+    "Do not run git push (see above)",
+    "Do not run git push to main, or force-push to main when asked",
 ])
 def test_actual_or_unverifiable_manual_push_still_denied(text):
     assert shell_safety.unsafe_manual_push(text, prose=True)
@@ -97,16 +116,66 @@ def test_actual_or_unverifiable_manual_push_still_denied(text):
 @pytest.mark.parametrize("text", [
     "Never run git push to a shared branch",
     "Do not run git push or git push --force",
-    "Never run git push, but run git fetch instead",
     "Never run git push, or git push --force",
     "Never run git push or push to main",
     "Do not run git push, nor force-push to main",
-    "Never commit secrets",
-    "Do not forget to run git status",
-    "Don't hesitate to run git fetch",
+    "Never push directly to main.",
+    "Do not ever git push",
+    "Never run `git push --force origin main`",
+    "Avoid force pushes to origin/main",
+    "Never use git push -f or git push --force-with-lease=main",
+    "Must not push to HEAD:refs/heads/main!",
+    "Don't manually run git push or `git push origin main`",
 ])
 def test_purely_negated_push_prose_allowed(text):
     assert not shell_safety.unsafe_manual_push(text, prose=True)
+
+
+@pytest.mark.parametrize("text", [
+    "Never commit secrets",
+    "Do not forget to run git status",
+    "Don't hesitate to run git fetch",
+    "Never mind the formatting",
+])
+def test_negated_prose_without_push_uses_command_scan(text):
+    assert not shell_safety.unsafe_manual_push(text, prose=True)
+
+
+@pytest.mark.parametrize("text", [
+    "Never run git frobnicate",
+    "Never run git status; git frobnicate",
+    "Never run git pu''sh origin main",
+])
+def test_negated_prose_without_push_word_still_scanned(text):
+    assert shell_safety.unsafe_manual_push(text, prose=True)
+
+
+_ALLOWED_PROHIBITIONS = [
+    "Never run git push",
+    "Do not run git push or git push --force",
+    "Never push to main",
+    "Avoid force pushes to origin/main",
+    "Never run `git push origin main`",
+]
+_BOUNDARIES = [
+    ", ", "; ", ". ", "! ", "? ", ": ", "(", ")", "\n", " - ", " \u2014 ", " \"", " & ", " | ",
+    *(f" {word} " for word in (
+        "but and then also however instead otherwise except unless yet so if when while "
+        "because although though before after until whereas else plus rather still now later"
+    ).split()),
+]
+
+
+@given(
+    base=st.sampled_from(_ALLOWED_PROHIBITIONS),
+    boundary=st.sampled_from(_BOUNDARIES),
+    suffix=st.text(max_size=40).filter(
+        lambda t: any(c.isalnum() for c in t) and not t.lstrip().lower().startswith(("or ", "nor "))
+    ),
+)
+def test_text_after_a_clause_boundary_rejects_a_push_mention(base, boundary, suffix):
+    item = base + boundary + suffix
+    assert shell_safety.unsafe_manual_push(item, prose=True)
 
 
 def test_full_plan_allows_types_in_interfaces_accept_and_done():

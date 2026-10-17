@@ -11,51 +11,30 @@ import shlex
 from pathlib import PurePosixPath
 
 _NEGATED = re.compile(r"^\s*(?:never(?!\s+mind\b)|do\s+not|don't|must\s+not|avoid|forbid)\b", re.I)
-_CONNECTORS = (
-    "but|and|then|also|however|instead|otherwise|except|unless|yet|so|if|when|while|"
-    "because|although|though|before|after|until|whereas|else|plus|rather|still|now|later|or|nor"
-)
-# Splits on punctuation, brackets, quotes, dashes, sentence ends and connectors.
-# The captured connector (if any) is used to decide whether a clause continues a
-# prohibition.
-_CLAUSE_SPLIT = re.compile(
-    r"[,()\[\]\"\u201c\u201d:]|[.!?]\s|\s[-\u2013\u2014]+\s|[\u2013\u2014]"
-    r"|\s(" + _CONNECTORS + r")\s",
-    re.I,
-)
-# A clause after "or"/"nor" continues a prohibition only when it is a bare
-# repetition of the prohibited command, with no subject, modal or verb.
-_BARE_PUSH = re.compile(
-    r"^\s*(?:to\s+)?(?:git\s+)?(?:(?:force|--force)[\s-]*)?push\b[\w\s\-./:@=+]*$", re.I
-)
-_POSITIVE_WORDS = re.compile(
-    r"\b(?:should|must|can|could|may|might|will|would|shall|please|run|execute|do|does|"
-    r"go|ahead|feel|free|try|need|needs|want|let|you|we|i|they|it|just|ok|okay|fine|use|"
-    r"perform|issue|invoke|make|start|is|are|be|allowed|permitted|required|then|now)\b",
-    re.I,
-)
-# A negation exempts a prose item only when it is directly followed by a verb
-# that prohibits the action. Anything else ("do not forget to", "never fail to",
-# "don't hesitate to", "avoid skipping") may be a double negation: scan it as a
-# positive instruction.
-_PROHIBITIVE = re.compile(
-    r"^\s*(?:never|do\s+not|don't|must\s+not|avoid|forbid)\s+"
-    r"(?:(?:ever|manually|directly|simply|just|actually|under\s+any\s+circumstances)\s+)*"
+# A prose item that mentions a push is safe only when the whole item is one
+# prohibition: negation, neutral adverbs, prohibitive verb, then an object made
+# of push forms, remote-write command text, refs, flags, inline code, or
+# "or"/"nor" repetitions of it. Anything else is rejected; no list of positive
+# words decides safety.
+_PROHIBITION = re.compile(
+    r"^(?:never|do\s+not|don't|must\s+not|avoid|forbid)[ \t]+"
+    r"(?:(?:ever|manually|directly|actually|under\s+any\s+circumstances)[ \t]+)*"
     r"(?:run|running|use|using|execute|executing|invoke|invoking|call|calling|perform|"
     r"performing|issue|issuing|attempt|attempting|trigger|triggering|do|doing|force|"
-    r"forcing|push|pushing|git|publish|publishing|send|sending|make|making)\b",
+    r"forcing|push|pushing|git|publish|publishing|send|sending|make|making)(?=[ \t]|\Z)",
     re.I,
 )
-_PUSH_WORD = re.compile(r"\b(?:push|pushes|pushed|pushing|publish\w*)\b", re.I)
-# Words that signal a permission or an elided/anaphoric verb phrase ("when you
-# should", "but do it", "go ahead", "feel free").
-_ELLIPTIC = re.compile(
-    r"\b(?:should|must|can|could|may|might|will|would|shall|ought|need|needs|want|wants|"
-    r"please|do|does|go|ahead|feel|free|try|let|ok|okay|fine|just|allowed|permitted|"
-    r"required|anyway|again|so)\b"
-    r"|\b(?:run|use|execute|perform|issue|invoke|call|make)\s+(?:it|that|this|them|the\s+same)\b",
+_PUSH_MENTION = re.compile(r"push|publish", re.I)
+_OBJECT_WORD = re.compile(
+    r"git|push(?:es|ed|ing)?|force(?:-?push(?:es|ing)?)?|publish(?:es|ed|ing)?|"
+    r"to|on|onto|into|from|a|an|the|any|every|shared|protected|remotes?|upstream|"
+    r"branch(?:es)?|refs?|repos?|repository|directly|manually|"
+    r"main|master|origin|head|develop|trunk",
     re.I,
 )
+_OBJECT_FLAG = re.compile(r"--?[A-Za-z][\w-]*(?:=[\w@~^+/.:-]*\w)?")
+# Ref-shaped: word characters joined by at least one of / : . @ ~ ^, ending in a word character.
+_OBJECT_REF = re.compile(r"[\w@~^+-]+(?:[/:.@~^][\w@~^+-]+)+")
 _GLOBAL_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--config-env", "--namespace",
                       "--exec-path", "--super-prefix"}
 
@@ -99,56 +78,46 @@ def unsafe_manual_push(command: str, *, prose: bool = False) -> bool:
     """Recognize prohibited manual push via POSIX shell quoting and wrappers."""
     if not isinstance(command, str) or not command.strip():
         return False
-    if prose and _NEGATED.match(command) and not re.search(r"[;&|\n]", command):
+    if prose and _NEGATED.match(command):
         return _negated_prose_unsafe(command)
     if prose:
         command = _INLINE_CODE.sub(lambda match: match.group(2), command)
     return _scan(command, 0, prose=prose)
 
 
-def _bare_continuation(clause: str) -> bool:
-    return bool(_BARE_PUSH.match(clause)) and not _POSITIVE_WORDS.search(clause)
+def _is_prohibition(text: str) -> bool:
+    """True when the whole item is one prohibition of the push (see `_PROHIBITION`)."""
+    opener = _PROHIBITION.match(text)
+    if not opener:
+        return False
+    rest = re.sub(r"[.!]\Z", "", text[opener.end():])
+    rest = re.sub(r",[ \t]+(?=(?:or|nor)[ \t])", " ", rest, flags=re.I)
+    words = [w for w in re.split(r"[ \t]+", rest) if w]
+    joiner = True  # no object may start or end with a joiner, or repeat one
+    for word in words:
+        if word.lower() in ("or", "nor"):
+            if joiner:
+                return False
+            joiner = True
+        elif (_OBJECT_WORD.fullmatch(word) or _OBJECT_FLAG.fullmatch(word)
+              or _OBJECT_REF.fullmatch(word)):
+            joiner = False
+        else:
+            return False
+    return not words or not joiner
 
 
 def _negated_prose_unsafe(command: str) -> bool:
-    """Scan a prose line that opens with a negation, failing closed.
+    """Decide a prose item that opens with a negation, failing closed.
 
-    Exemption is structural and narrow. The opening clause is exempt only when
-    its negation is directly followed by a prohibitive verb (`_PROHIBITIVE`);
-    "do not forget to", "never fail to", "don't hesitate to" are not. A later
-    clause stays exempt only when it is another such prohibitive clause or a bare
-    "or"/"nor" repetition of the prohibited command. Every other clause is
-    scanned as a positive instruction. Once a push has been mentioned inside the
-    exemption, any later non-exempt clause carrying an elliptic or modal
-    permission ("when you should", "but do it", "go ahead") is rejected, because
-    its elided verb phrase cannot be proven not to be the push.
+    1. No push mentioned: the ordinary command-shaped scan decides.
+    2. A push is mentioned: safe only when the whole item is one prohibition.
+    3. Everything else is unsafe.
     """
-    if not _PROHIBITIVE.match(command):
-        text = _INLINE_CODE.sub(lambda m: m.group(2), command)
+    text = _INLINE_CODE.sub(lambda m: m.group(2), command.strip())
+    if not _PUSH_MENTION.search(text):
         return _scan(re.sub(r"(?<=\w)'(?=\w)", "", text), 0, prose=True)
-    pieces: list[tuple[str, str]] = []
-    connector, pos = "", 0
-    for match in _CLAUSE_SPLIT.finditer(command):
-        pieces.append((connector, command[pos:match.start()]))
-        connector, pos = (match.group(1) or "").lower(), match.end()
-    pieces.append((connector, command[pos:]))
-    push_seen = bool(_PUSH_WORD.search(pieces[0][1]))
-    prohibited = True  # the opening clause is a proven prohibition
-    for connector, clause in pieces[1:]:
-        if not clause.strip():
-            continue
-        if _PROHIBITIVE.match(clause):
-            push_seen = push_seen or bool(_PUSH_WORD.search(clause))
-            continue
-        if prohibited and connector in ("or", "nor") and _bare_continuation(clause):
-            push_seen = True
-            continue
-        prohibited = False
-        if unsafe_manual_push(clause, prose=True):
-            return True
-        if push_seen and _ELLIPTIC.search(clause):
-            return True
-    return False
+    return not _is_prohibition(text)
 
 
 def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
