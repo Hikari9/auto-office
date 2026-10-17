@@ -92,14 +92,20 @@ def test_approve_trust_resolves_agy_alias_and_refuses_unknown_without_writing(re
                                   "submit": False}] * 3)
 
     route = "agy@1/claude-sonnet-5-5@medium"
+    alias = "agy/claude-sonnet-5-5@medium"
+    con = env.con()
+    canonical_before = con.execute("SELECT COUNT(*) FROM adapter_trust_acts WHERE triple=?", (route,)).fetchone()[0]
+    alias_before = con.execute("SELECT COUNT(*) FROM adapter_trust_acts WHERE triple=?", (alias,)).fetchone()[0]
     code, output = env.office("approve", "trust", "agy/claude-sonnet-5-5@medium",
                               "--quote", "Approve this cataloged Agy route")
     assert code == 0, output
     assert f"{route} trust recorded as proven" in output
-    assert "remaining gate:" in output and "remedy:" in output
-    con = env.con()
-    recorded_route = con.execute("SELECT triple, target_state FROM adapter_trust_acts WHERE triple=?", (route,)).fetchall()
-    assert [tuple(row) for row in recorded_route] == [(route, "proven")]
+    assert "remaining gate: conformance probe required" in output
+    assert "remedy: office doctor --probe-route agy/claude-sonnet-5-5@medium" in output
+    canonical_after = con.execute("SELECT COUNT(*) FROM adapter_trust_acts WHERE triple=?", (route,)).fetchone()[0]
+    alias_after = con.execute("SELECT COUNT(*) FROM adapter_trust_acts WHERE triple=?", (alias,)).fetchone()[0]
+    assert canonical_after == canonical_before + 1
+    assert alias_after == alias_before
     _, trust = scoring.evaluate_trust_state(con, route)
     assert trust == "proven"
     recorded = con.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0]
