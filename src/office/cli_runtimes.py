@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,8 +99,14 @@ def resolve(entry: Entry, field: str) -> Path:
 
 
 def _projection_rows(rows: list[dict], harness: str) -> list[dict]:
+    # This is a *derived* diagnostics view, not an authority for routing,
+    # economics, or user trust. Include technical provenance so revoking model
+    # invocation evidence also invalidates an already-generated model list.
     keep = ("model_id", "invocation_model_id", "effort", "dispatchable", "lineage_key",
-            "generation_version", "alias_resolved_to", "source_identifier")
+            "generation_version", "canonical_generation_id", "alias_resolved_to",
+            "source_identifier", "source_name", "invocation_source", "source_effort",
+            "effort_confidence", "source_snapshot_metadata", "supersession_metadata",
+            "discovery", "discovery_reason", "status_reason")
     mine = [{k: r.get(k) for k in keep} for r in rows if r.get("invocation_harness") == harness]
     return sorted(mine, key=lambda r: (str(r["model_id"]), str(r["effort"]), str(r["invocation_model_id"])))
 
@@ -227,10 +234,22 @@ def statuses() -> tuple[list[dict], bool]:
                 model_state = "ok" if actual == expected else "stale"
             except (OSError, UnicodeError, ValueError):
                 model_state = "invalid"
-        skill_ok = skill.is_file()
+        skill_state = "missing"
+        if skill.is_file():
+            # is_file() does not check read permission; even root can sometimes
+            # read chmod-000 files. Both mode bits and an actual read must pass.
+            try:
+                if not skill.stat().st_mode & (stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH):
+                    skill_state = "unreadable"
+                else:
+                    with skill.open("rb") as stream:
+                        stream.read(1)
+                    skill_state = "ok"
+            except OSError:
+                skill_state = "unreadable"
         adapter_ok = entry.key in adapters_loaded and bool(adapters_loaded[entry.key][0].get("office_profiles"))
         out.append({"key": entry.key, "skill_path": str(skill), "models_path": str(model_file),
-                    "skill": "ok" if skill_ok else "missing", "models": model_state,
+                    "skill": skill_state, "models": model_state,
                     "adapter": "registered" if adapter_ok else "missing", "model_count": len(expected["models"]),
-                    "configured": skill_ok and model_state == "ok" and adapter_ok})
+                    "configured": skill_state == "ok" and model_state == "ok" and adapter_ok})
     return out, saved
