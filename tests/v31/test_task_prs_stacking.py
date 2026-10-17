@@ -4,6 +4,7 @@ an accepted sync that beats the revision sync still opens the PR and readies it,
 from __future__ import annotations
 
 import json
+import re
 import sys
 
 from conftest import GOOD_ADD, GOOD_MUL, PLAN_TWO, start_inline
@@ -34,7 +35,7 @@ def test_task_stacked_at_dispatch_without_depends_targets_the_branch_it_was_cut_
     code, out = env.office("dispatch", "T1", "T2")
     assert code == 0 and "T2 stacked after T1" in out, out
     assert env.ojson("status")[1]["data"]["tasks"] == {"T1": "accepted", "T2": "accepted"}
-    prs = {p["title"].split(":")[0]: p for p in gh(env)["prs"]}
+    prs = {re.search(r"(T\d+): ", p["title"]).group(1): p for p in gh(env)["prs"]}
     assert prs["T1"]["base"] == "main"
     assert prs["T2"]["base"] == prs["T1"]["head"], prs
     assert "stacked on T1 (#1)" in prs["T2"]["body"], prs["T2"]["body"]

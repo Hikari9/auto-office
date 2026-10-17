@@ -161,8 +161,15 @@ def merge_body(current: str, managed: str) -> str:
     return before + managed + after
 
 
+def task_pr_title(run: dict, task: dict) -> str:
+    """A readable run identity, stable through task changes and distinct across runs (#659)."""
+    goal = re.sub(r"[^a-z0-9]+", "-", str(run.get("goal") or "").lower()).strip("-")
+    slug = f"{goal[:48].rstrip('-') or 'run'}-{run['id'][:8]}"
+    return f"{slug} {task['id']}: {task['title']}"
+
+
 def create_command(con, run: dict, task: dict, dispatch: dict, body_path: Path) -> str:
-    title = f"{task['id']}: {task['title']}".replace('"', "'")
+    title = task_pr_title(run, task).replace('"', "'")
     return (f'gh pr create --draft --base {pr_base(con, run, task)} --head {dispatch["branch"]} '
             f'--title "{title}" --body-file {body_path}')
 
@@ -262,22 +269,40 @@ def ensure_pr(con, run: dict, task: dict, dispatch: dict) -> dict:
     body_path.write_text(body(con, run, task, dispatch), encoding="utf-8")
     base = pr_base(con, run, task)
     found = _find(repo, dispatch["branch"])
+    title = task_pr_title(run, task)
     if found is None:
         proc = _gh(["pr", "create", "--draft", "--base", base, "--head", dispatch["branch"],
-                    "--title", f"{task['id']}: {task['title']}", "--body-file", str(body_path)], repo)
+                    "--title", title, "--body-file", str(body_path)], repo)
         if proc.returncode != 0:
             raise RuntimeError(f"gh pr create failed: {(proc.stderr or proc.stdout).strip()}"[:300])
         url = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
         found = {"number": _number(url), "url": url, "baseRefName": base, "isDraft": True}
     else:
-        view = _gh(["pr", "view", str(found["number"]), "--json", "body"], repo)
+        view = _gh(["pr", "view", str(found["number"]), "--json", "body,title"], repo)
         if view.returncode == 0:
-            current = json.loads(view.stdout or "{}").get("body") or ""
-            body_path.write_text(merge_body(current, body_path.read_text(encoding="utf-8")), encoding="utf-8")
-        args = ["pr", "edit", str(found["number"]), "--body-file", str(body_path)]
-        if found.get("baseRefName") != base:
-            args += ["--base", base]
-        _gh(args, repo)
+            current = json.loads(view.stdout or "{}")
+            old_body = current.get("body") or ""
+            ownership_marker = f"<!-- office:pr run={run['id']} task={task['id']} -->"
+            # Never adopt a manually managed PR just because it uses this
+            # branch. Pre-marker Office bodies still carry the run ID and
+            # managed BEGIN fence, so they can migrate on their next sync.
+            owned = ownership_marker in old_body or (
+                BEGIN in old_body and f"Office run `{run['id'][:8]}`" in old_body
+            )
+            if not owned:
+                raise RuntimeError(f"PR #{found['number']} is not Office-managed for {task['id']}; not changing it")
+            body_path.write_text(merge_body(old_body, body_path.read_text(encoding="utf-8")), encoding="utf-8")
+            args = ["pr", "edit", str(found["number"]), "--body-file", str(body_path)]
+            if found.get("baseRefName") != base:
+                args += ["--base", base]
+            if current.get("title") != title:
+                args += ["--title", title]
+            edited = _gh(args, repo)
+            if edited.returncode != 0:
+                raise RuntimeError(f"gh pr edit #{found['number']} failed: "
+                                   f"{(edited.stderr or edited.stdout).strip()}"[:300])
+        # If gh pr view is unavailable, link the task to the existing PR as
+        # before, but do not edit remote title/body without ownership proof.
     pr = {**(task.get("pr") or {}), "number": found["number"], "url": found["url"], "base": base,
           "branch": dispatch["branch"]}
     with db.transaction(con):

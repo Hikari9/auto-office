@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -60,7 +61,7 @@ def test_stacked_tasks_get_stacked_draft_prs_that_leave_draft_on_accept(env, mon
     code, data = env.ojson("status")
     assert data["data"]["tasks"] == {"T1": "accepted", "T2": "accepted"}, data
     state = gh(env)
-    prs = {p["title"].split(":")[0]: p for p in state["prs"]}
+    prs = {re.search(r"(T\d+): ", p["title"]).group(1): p for p in state["prs"]}
     assert set(prs) == {"T1", "T2"}, state["prs"]
     t1, t2 = prs["T1"], prs["T2"]
     assert t1["base"] == "main" and t2["base"] == t1["head"], (t1, t2)
@@ -128,6 +129,6 @@ def test_a_transient_repo_view_failure_is_probed_again_at_dispatch(env, monkeypa
     assert landing["prs"]["enabled"] is False and landing["prs"]["transient"] is True, landing["prs"]
     env.office("approve", "plan", "--quote", "go", check=0)
     env.office("dispatch", "T1", check=0)
-    assert [p["title"].split(":")[0] for p in gh(env)["prs"]] == ["T1"], gh(env)["prs"]
+    assert [re.search(r"(T\d+): ", p["title"]).group(1) for p in gh(env)["prs"]] == ["T1"], gh(env)["prs"]
     code, out = env.office("inspect", "events")
     assert "task PRs on: GitHub answered after an earlier failure" in out, out
