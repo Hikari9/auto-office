@@ -181,6 +181,21 @@ def doctor(fix: bool = False, probe_vision: bool = False, probe_route: str | Non
     for aid, a in sorted(all_adapters.items()):
         if a.get("office_profiles"):
             res.add(f"adapter {aid}: " + (f"installed {adapters.harness_version(a)}" if adapters.installed(a) else "not installed"))
+    # A registry row never establishes adapter trust, sign-in or actual launchability.
+    from office import cli_runtimes
+    try:
+        runtimes, saved = cli_runtimes.statuses()
+        configured = sum(r["configured"] for r in runtimes)
+        res.add(f"CLI runtime TSV: {cli_runtimes.location()} ("
+                f"{'saved' if saved else 'bundled defaults; office harness sync to save'}, "
+                f"{configured}/{len(runtimes)} configured)")
+        for r in runtimes:
+            if not r["configured"]:
+                res.add(f"  {r['key']}: unconfigured (skill {r['skill']}, models {r['models']}, "
+                        f"adapter {r['adapter']})")
+    except (cli_runtimes.ManifestError, OSError) as exc:
+        problems += 1
+        res.add(f"CLI runtime TSV: invalid: {exc} (repair the TSV before office harness sync)")
     visual_status, _ = _visual_capture_status()
     res.add(visual_status)
     con = db.connect()

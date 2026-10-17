@@ -28,9 +28,9 @@ Adapters are data, never separate lifecycles. A new harness needs no Python edit
 5. `office harness smoke <id> --model <m>`: one launch in a throwaway git repo, no run
    identity, no pty. Recorded in `harness-smoke.jsonl` as launch evidence only. It refuses
    a form with a permission/trust flag unless `--allow-unsafe-flags` is passed.
-6. `office harness list` shows origin, install, version, sign-in, rows, trust and last smoke.
-   `office model list [<id>]`; `office model disable <id>/<model>[@effort] --reason ...`
-   sets `dispatchable: false` through the overlay.
+6. `office harness list` shows install/sign-in/trust and the path lookup;
+   `office model list|disable` controls catalog rows. `office harness sync`
+   saves the TSV/derived models; `office harness manifest --json` checks paths.
 
 ## Trust posture
 
