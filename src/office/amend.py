@@ -644,7 +644,11 @@ def _amended_holds(con, run: dict, task_ids: list[str]) -> list[str]:
     for tid in order:
         task = changed[tid]
         deps = task["depends"]
-        unaccepted = [dep for dep in deps if (state.get_task(con, run["id"], dep) or {}).get("status") != "accepted"]
+        # A changed dependency that _deliver reopens (it has a dispatch) is no longer accepted once this
+        # amendment lands, so its dependant waits for it even when the scopes are disjoint.
+        unaccepted = [dep for dep in deps
+                      if (dep in changed and changed[dep].get("current_dispatch_id"))
+                      or (state.get_task(con, run["id"], dep) or {}).get("status") != "accepted"]
         if unaccepted or any(planfile.scopes_overlap(task["scope"], prev["scope"]) for prev in launching):
             hold.append(tid)
         elif task.get("current_dispatch_id"):

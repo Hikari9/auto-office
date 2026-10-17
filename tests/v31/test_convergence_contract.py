@@ -1073,3 +1073,20 @@ def test_atomic_two_task_contract_amend_defers_the_overlapping_dependent(env):
     con = env.con()
     nxt = guide.next_action(con, state.get_run(con, _run_row(env)["id"]))
     assert "office rerun T1" not in nxt, nxt
+
+
+def test_contract_amend_holds_a_changed_dependent_of_a_changed_accepted_parent(env):
+    """#674 F1: both tasks change with disjoint scopes; the reopened parent must run before the dependent."""
+    work = {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": GOOD_MUL}}
+    _start(env, plan=PLAN_TWO, executor=[{"write_by_task": work, "submit": True}],
+           convergence_reviewer=[{"reply": APPROVED}])
+    env.office("dispatch", "T1", "T2", "--parallel", check=0)
+    assert task_row(env, "T1")["status"] == task_row(env, "T2")["status"] == "accepted"
+    edited = PLAN_TWO.replace("scope: calc.py\ndepends: none", "scope: calc.py, extra_a.py\ndepends: none").replace(
+        "scope: mul.py\ndepends: none", "scope: mul.py, extra_b.py\ndepends: T1")
+    env.write_plan(edited)
+    code, out = env.office("amend", "T1,T2", "--contract", "--", "T1 widens, T2 builds on it", env={
+        "OFFICE_WORKER_LAUNCHER": "external"})
+    assert code == 0, out
+    assert task_row(env, "T1")["status"] in ("running", "launching"), out
+    assert task_row(env, "T2")["status"] == "changes_required", out
