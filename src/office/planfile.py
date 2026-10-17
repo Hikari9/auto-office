@@ -357,13 +357,45 @@ def _validate(plan: ParsedPlan) -> None:
         t.pop("entry_lines", None)  # only for messages; stored tasks keep their shape
 
 
+_PLACEHOLDER_SENTINELS = {"manual", "none", "n/a", "na", "skip", "skipped", "no deploy", "not applicable",
+                          "tbd", "tba", "todo", "pending", "later", "deferred", "nothing", "no", "-", "--"}
+# A deploy value that opens with one of these words is prose, never a program name.
+_PLACEHOLDER_LEADS = {"manual", "manually", "handoff", "hand", "human", "operator", "tbd", "tba", "todo", "n/a", "na",
+                      "none", "skip", "skipped", "pending", "deferred", "not", "no", "nothing", "n.a", "later"}
+_PROSE_KEYWORD = re.compile(r"\b(manual(ly)?|hand[- ]?off|hand[- ]?over|by hand|human|operator|tbd|todo|n/a|"
+                            r"not applicable|no deploy)\b", re.I)
+_KNOWN_COMMANDS = frozenset("""
+make npm pnpm yarn npx bun bunx uv uvx python python3 pip pip3 poetry ruby rake bundle cargo go docker podman
+kubectl helm terraform tofu ansible ansible-playbook git gh vercel fly flyctl heroku aws gcloud az sh bash zsh node
+deno just task echo cd env sudo time ssh scp rsync curl wget office cap mvn gradle dotnet php composer pulumi sam
+serverless sls wrangler netlify firebase railway render doctl kamal mage nix exec eval source test true false
+""".split())
+_SHELL_SYNTAX = re.compile(r"""[/=|&<>$`()'"\\*~{}\[\]@#%]|^-|\s-\w|\.\w""")
+
+
 def manual_deploy_placeholder(command: object) -> bool:
-    """A manual handoff is documentation, never an executable deploy command (#662)."""
+    """True when a deploy value is a manual handoff or other prose, never a shell command (#662).
+
+    shell=True would run the prose, so ambiguous prose fails closed: the value must
+    either lead with a program-looking token (path, env assignment, flag, known
+    command word) or carry shell syntax. A real command that merely contains the
+    word manual or handoff (`make manual`, `./scripts/manual-deploy.sh`) stays valid."""
     if not isinstance(command, str):
         return False
     text = command.strip()
-    return bool(re.match(r"^manual\s*:", text, re.I) or
-                text.lower() in {"manual", "none", "n/a", "skip", "skipped", "no deploy", "not applicable"})
+    if not text:
+        return False
+    low = re.sub(r"\s+", " ", text.lower()).rstrip(".!")
+    if low in _PLACEHOLDER_SENTINELS:
+        return True
+    words = text.split()
+    lead = words[0].lower().rstrip(":,.;!-")
+    if lead in _PLACEHOLDER_LEADS:
+        return True
+    if len(words) < 2 or not lead.isalpha() or lead in _KNOWN_COMMANDS:
+        return False
+    rest = " ".join(words[1:])
+    return bool(_PROSE_KEYWORD.search(text)) and not _SHELL_SYNTAX.search(rest)
 
 
 def end_state_problems(end: str | None, deploy: dict, repo=None) -> tuple[list[str], list[str]]:

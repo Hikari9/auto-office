@@ -92,3 +92,58 @@ def test_deploy_internal_guard_refuses_before_env_copy_or_subprocess(tmp_path, m
         land._deploy(None, {"id": "R1", "repo_root": str(tmp_path)}, "prod",
                      {"prod": HANDOFF}, checkout, Result(), commit="sha", tree="tree")
     assert caught.value.category == "manual-deploy-command"
+
+
+PROSE_PLACEHOLDERS = [
+    "manual handoff", "manual deployment required", "Manual deploy: see runbook", "hand off to ops",
+    "Handoff to the release manager", "deploy by hand", "deploy manually after merge", "TBD", "todo",
+    "TODO: add deploy", "N/A", "n/a - handled elsewhere", "operator will deploy", "Human deploys this",
+    "Deployment is handled by a human", "handoff required", "manual; see runbook.", "No deploy in this run",
+    "pending manual approval", "Ask the operator to deploy", "run deploy by hand", "deferred to ops",
+    "Handled by hand after merge",
+]
+REAL_COMMANDS = [
+    "./scripts/manual-deploy.sh", "make manual", "ansible-playbook manual.yml", "npm run manual-deploy",
+    "FOO=1 ./deploy.sh --manual", "bash scripts/handoff.sh", "python3 tools/handoff.py --operator ci",
+    "uv run handoff", "./deploy --manual", "cd app && make manual", "echo manual",
+    "kubectl apply -f manual.yaml", "deploy --manual", "vercel deploy --prod",
+]
+
+
+@pytest.mark.parametrize("value", PROSE_PLACEHOLDERS)
+def test_colonless_handoff_prose_is_a_placeholder(value):
+    assert planfile.manual_deploy_placeholder(value)
+    errors, _ = planfile.end_state_problems("e2e", {"prod": value})
+    assert any("deploy_prod" in e for e in errors), errors
+
+
+@pytest.mark.parametrize("value", REAL_COMMANDS)
+def test_real_commands_mentioning_manual_or_handoff_are_accepted(value):
+    assert not planfile.manual_deploy_placeholder(value)
+    errors, _ = planfile.end_state_problems("e2e", {"prod": value})
+    assert not errors, errors
+
+
+@pytest.mark.parametrize("value", ["manual handoff", "manual deployment required"])
+def test_colonless_prose_refused_before_merge_on_land(monkeypatch, value):
+    called = []
+    monkeypatch.setattr(land, "_snapshot", lambda *a: {"commit": "deadbeef"})
+    monkeypatch.setattr(land, "end_state", lambda *a: {"mode": "e2e", "deploy": {"prod": value}})
+    monkeypatch.setattr(land, "_land_lock", lambda *a: nullcontext())
+    monkeypatch.setattr(land, "_require_unchanged", lambda *a, **k: None)
+    monkeypatch.setattr(land, "_land_merge", lambda *a, **k: called.append(True) or Result())
+    with pytest.raises(Refused) as caught:
+        land.land(None, {"id": "deadbeef", "repo_root": "/tmp/unmodified"})
+    assert caught.value.category == "manual-deploy-command"
+    assert not called
+
+
+@pytest.mark.parametrize("value", ["manual handoff", "manual deployment required"])
+def test_colonless_prose_is_rejected_during_plan_submit(env, value):
+    from test_land import _plan
+    code, out = env.office("start", "manual deploy case", "--planner", "inline")
+    assert code == 0, out
+    env.write_plan(_plan("e2e", prod=value))
+    code, out = env.office("submit")
+    assert code == 4, out
+    assert "deploy_prod" in out, out
