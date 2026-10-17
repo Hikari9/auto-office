@@ -537,12 +537,14 @@ def preserve_shared_append_multiplicity(wt: Path, task: dict, previous: list[dic
     if len(bases) != 1:
         raise SharedAppendUnsafe("multiple or missing merge bases; shared append ancestry is ambiguous")
 
-    def blob(commit: str, path: str) -> tuple[str, bytes]:
+    def blob(commit: str, path: str, *, absent_ok: bool = False) -> tuple[str, bytes] | None:
         if Path(path).is_absolute() or ".." in Path(path).parts:
             raise SharedAppendUnsafe(f"invalid shared path {path!r}")
         entry = subprocess.run(["git", "-C", str(wt), "ls-tree", commit, "--", path],
                                capture_output=True)
         if entry.returncode or not entry.stdout:
+            if absent_ok and not entry.returncode:
+                return None
             raise SharedAppendUnsafe(f"{path}: missing shared file in merge ancestry")
         mode = entry.stdout.split(b" ", 1)[0].decode("ascii", "replace")
         if mode not in ("100644", "100755") or b" blob " not in entry.stdout:
@@ -559,8 +561,16 @@ def preserve_shared_append_multiplicity(wt: Path, task: dict, previous: list[dic
 
     changes = {}
     for path in sorted(eligible):
-        (base_mode, base), (left_mode, left), (right_mode, right), (merged_mode, merged) = (
-            blob(commit, path) for commit in (bases[0], parents[1], parents[2], parents[0]))
+        base_blob = blob(bases[0], path, absent_ok=True)
+        (left_mode, left), (right_mode, right), (merged_mode, merged) = (
+            blob(commit, path) for commit in (parents[1], parents[2], parents[0]))
+        if base_blob is None:
+            # Added on both sides: byte-identical adds converge to one file (#655). Differing adds
+            # are an add/add conflict that Git already refuses, so nothing here may append them.
+            if len({left_mode, right_mode, merged_mode}) != 1 or not left == right == merged:
+                raise SharedAppendUnsafe(f"{path}: missing shared file in merge ancestry")
+            continue
+        base_mode, base = base_blob
         if len({base_mode, left_mode, right_mode, merged_mode}) != 1:
             raise SharedAppendUnsafe(f"{path}: shared file mode changed")
         if not left.startswith(base) or not right.startswith(base):
