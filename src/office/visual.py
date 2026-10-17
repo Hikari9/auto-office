@@ -313,19 +313,28 @@ def job_capture(con, run: dict, job: dict) -> dict:
     return {"evidence_status": status}
 
 
-def _wait_url(url: str, timeout: float) -> str | None:
-    deadline = time.time() + timeout
-    last = None
-    while time.time() < deadline:
+def _wait_url(url: str, timeout: float, *, require_success: bool = False) -> str | None:
+    # Wait for healthy HTTP responses, not just a listening preview port (#669).
+    # A self-started preview needs HTTP <400. A supplied server may serve a
+    # genuine 4xx route, which the browser will report as a product defect.
+    deadline = time.monotonic() + timeout
+    last = "not reachable: no response"
+    while time.monotonic() < deadline:
+        remaining = max(0.1, deadline - time.monotonic())
         try:
-            with urllib.request.urlopen(url, timeout=5) as resp:
-                return None if resp.status < 500 else f"HTTP {resp.status}"
+            with urllib.request.urlopen(url, timeout=min(5.0, remaining)) as resp:
+                code = resp.status
         except urllib.error.HTTPError as exc:
-            return None if exc.code < 500 else f"HTTP {exc.code}"
+            code = exc.code
         except (urllib.error.URLError, OSError) as exc:
-            last = str(exc)
-            time.sleep(1)
-    return f"not reachable: {last}"
+            last = f"not reachable: {exc}"
+            time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+            continue
+        if code < 400 or (not require_success and code < 500):
+            return None
+        last = f"HTTP {code} (server not ready)"
+        time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+    return last
 
 
 def _capture_port_conflict(url: str, con, run: dict, worktree: Path) -> str | None:
@@ -540,9 +549,10 @@ def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Pat
             server = subprocess.Popen(spec["start"], shell=True, cwd=str(worktree), stdout=server_log, stderr=server_log,
                                       start_new_session=True, env=gates._check_env(run))
             server_started = True
-        problem = _wait_url(url, 90 if spec.get("start") else 10)
-        if problem and problem.startswith("not reachable"):
-            capture_block = f"{url} {problem}"
+        problem = _wait_url(url, 90 if spec.get("start") else 10,
+                            require_success=bool(spec.get("start")))
+        if problem:
+            capture_block = f"{url} not ready for visual capture: {problem}"
         else:
             missing = capture_backend_missing()
             if missing:
@@ -615,6 +625,14 @@ def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Pat
                                           meta={"viewport": frame["viewport"], "state": frame["state"], "role": key})
         state.record_evidence(con, run["id"], "capture_receipt", receipt_path, task_id=task["id"], revision_id=rev["id"],
                               gate_id=gate["id"])
+    # All-HTTP-error captures containing a 5xx provide no reliable evidence of
+    # product defects. A mix of healthy routes and errors still produces findings.
+    codes = [f.get("http_status") for f in result["frames"]]
+    if codes and all(isinstance(c, int) and c >= 400 for c in codes) and any(c >= 500 for c in codes):
+        return {"evidence_status": "CAPTURE_BLOCKED",
+                "cause": f"all visual routes returned HTTP errors ({', '.join(str(c) for c in sorted(set(codes)))}); "
+                         "preview may still be booting; verify the visual url is ready before capture",
+                "product_failures": [], "receipt_path": str(receipt_path), "receipt_digest": digest}
     invalid = [f for f in result["frames"] if f.get("invalid")]
     if invalid:
         return {"evidence_status": "INVALID_COMPARISON", "cause": invalid[0]["invalid"], "product_failures": [],
@@ -737,6 +755,7 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
         except PWError as exc:
             return {"invalid": f"page did not settle at {w}x{h}: {str(exc)[:120]}"}
         out["url"] = page.url or target_url
+        out["http_status"] = resp.status if resp is not None else None
         if resp is not None and resp.status >= 400 and not reference:
             out["failures"] = [{"location": f"{target_url} @ {w}x{h}", "summary": f"page returned HTTP {resp.status}",
                                 "action": "the route must load", "measurement": "method: http"}]
@@ -760,10 +779,10 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
                        target.partition(" ")[0] if step["verb"] == "type" else target)
                 try:
                     if page.query_selector(sel) is None:
-                        return {"cause": "spec",
+                        return {**out, "cause": "spec",
                                 "invalid": f"selector '{sel}' absent from page in state '{st['name']}'"}
                 except PWError as exc:
-                    return {"cause": "spec",
+                    return {**out, "cause": "spec",
                             "invalid": f"selector '{sel}' query failed in state '{st['name']}': {str(exc)[:120]}"}
             try:
                 if step["verb"] == "click":
@@ -792,14 +811,14 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
                     return {"invalid": f"reference cannot reach state {st['name']}: {str(exc)[:100]}"}
                 lines = str(exc).splitlines()
                 err_line = lines[0][:120] if lines else str(exc)[:120]
-                return {"failures": [{"location": f"{target} @ {w}x{h} state {st['name']}",
+                return {**out, "failures": [{"location": f"{target} @ {w}x{h} state {st['name']}",
                                       "summary": f"interaction '{step['verb']} {target}' failed: {err_line}",
                                       "action": "the intended interaction must work", "measurement": "method: dom"}]}
             page.wait_for_timeout(400)
         if st.get("expect") and page.query_selector(st["expect"]) is None:
             if reference:
                 return {"invalid": f"reference is not in state {st['name']}"}
-            return {"failures": [{"location": f"{st['expect']} @ {w}x{h}",
+            return {**out, "failures": [{"location": f"{st['expect']} @ {w}x{h}",
                                   "summary": f"state '{st['name']}' did not produce {st['expect']} after its interaction",
                                   "action": "fix the interaction so the intended state appears", "measurement": "method: dom"}]}
         page.wait_for_timeout(300)
