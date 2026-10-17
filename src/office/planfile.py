@@ -357,6 +357,15 @@ def _validate(plan: ParsedPlan) -> None:
         t.pop("entry_lines", None)  # only for messages; stored tasks keep their shape
 
 
+def manual_deploy_placeholder(command: object) -> bool:
+    """A manual handoff is documentation, never an executable deploy command (#662)."""
+    if not isinstance(command, str):
+        return False
+    text = command.strip()
+    return bool(re.match(r"^manual\s*:", text, re.I) or
+                text.lower() in {"manual", "none", "n/a", "skip", "skipped", "no deploy", "not applicable"})
+
+
 def end_state_problems(end: str | None, deploy: dict, repo=None) -> tuple[list[str], list[str]]:
     """(errors, warnings) for an end state and its deploy commands, checked on
     the merged requirements (start flags plus the plan). `repo` (default: the
@@ -368,6 +377,13 @@ def end_state_problems(end: str | None, deploy: dict, repo=None) -> tuple[list[s
         errors.append("end_state e2e needs `deploy_prod: <command>`")
     if end in ("preview", "e2e") and not deploy.get("verify"):
         warnings.append("no `deploy_verify:` command; the deploy is recorded without verification")
+    # A plan may name its manual handoff as deploy_prod: or deploy_verify:.
+    # Reject that plan before approval; landing must never execute the prose.
+    fields = ("preview", "verify") if end == "preview" else ("prod", "verify") if end == "e2e" else ()
+    for key in fields:
+        if manual_deploy_placeholder(deploy.get(key)):
+            errors.append(f"end_state {end}: deploy_{key} is a manual handoff, not an executable command; "
+                          "use a real deploy command or choose a non-deploy end state and hand off")
     from pathlib import Path
     from office import land, paths
     if repo is None and (ident := paths.repo_identity()):
