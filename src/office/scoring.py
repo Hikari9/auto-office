@@ -271,7 +271,12 @@ def record_trust_act(
         )
 
     triple = normalize_triple(triple.strip())
-    con = sqlite3.connect(str(db_path))
+    close = False
+    if isinstance(db_path, sqlite3.Connection):
+        con = db_path
+    else:
+        con = sqlite3.connect(str(db_path))
+        close = True
     try:
         ensure_trust_schema(con)
         act_id = str(uuid.uuid4())
@@ -282,7 +287,8 @@ def record_trust_act(
         )
         con.commit()
     finally:
-        con.close()
+        if close:
+            con.close()
     return {
         "trust_act_id": act_id,
         "triple": triple,

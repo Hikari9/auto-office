@@ -19,6 +19,8 @@ Discovery (#494) lets one explicitly discovery-eligible, unverified executor or 
 | Learned effectiveness / eligibility | Comparable accepted task outcomes support task fitness under maturity and replay rules | Does not promote adapter trust or clear quarantine |
 | Adapter trust | Baseline or an explicit recorded trust act grants `proven` | Automatic discovery and learning never mint a trust act |
 
+User trust promotion via `office approve trust <harness/model@effort>` (with or without `@version`) resolves aliases through catalog expansion, recording the trust act on every triple routing reads for that route (both the alias row and its `alias_resolved_to` concrete row when both are candidates). Trust approval checks and reports any remaining gate that still blocks the route (conformance probe required, discovery off or blocked, not dispatchable) along with its remedy, and does not claim the route is usable when gates remain.
+
 A catalog route becomes probe-able only when the catalog marks it `discovery: eligible` with a concrete invocation model ID and a documented or local-evidence reason. `dispatchable: false` alone does not establish that it can run. Benchmark-only, confirmed-unsupported and archived retired rows stay excluded. Aliases carry the target's availability and reason. Unknown support is distinct from a confirmed unsupported invocation.
 
 Availability states are `available`, `discovered-unconfirmed`, `probe-pending`, `probe-passed`, `temporarily-unavailable` and `confirmed-unsupported`. Availability still leaves role, permission, capability, trust, task and quota gates to check.
