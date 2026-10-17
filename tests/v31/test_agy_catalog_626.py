@@ -4,7 +4,7 @@ from __future__ import annotations
 import yaml
 
 from conftest import approved_run
-from office import adapters, candidates, paths
+from office import adapters, candidates, paths, scoring
 
 
 DISPLAY = {
@@ -84,4 +84,27 @@ def test_unknown_model_refusal_lists_catalog_add_remediation(request):
     assert code == 2
     assert "office model add <harness>/<model> --effort <efforts>" in output
     assert "names reported by <harness> models need a catalog row" in output
+
+
+def test_approve_trust_resolves_agy_alias_and_refuses_unknown_without_writing(request):
+    env = request.getfixturevalue("env")
+    approved_run(env, executor=[{"write": {"calc.py": "def add(a, b):\n    return a + b\n"},
+                                  "submit": False}] * 3)
+
+    route = "agy@1/claude-sonnet-5-5@medium"
+    code, output = env.office("approve", "trust", "agy/claude-sonnet-5-5@medium",
+                              "--quote", "Approve this cataloged Agy route")
+    assert code == 0, output
+    assert f"{route} trust recorded as proven" in output
+    assert "remaining gate:" in output and "remedy:" in output
+    con = env.con()
+    _, trust = scoring.evaluate_trust_state(con, route)
+    assert trust == "proven"
+    recorded = con.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0]
+
+    code, output = env.office("approve", "trust", "agy/not-in-catalog@medium",
+                              "--quote", "Refuse this unknown route")
+    assert code != 0
+    assert "unknown route" in output.lower()
+    assert con.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0] == recorded
 
