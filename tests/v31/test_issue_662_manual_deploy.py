@@ -48,6 +48,22 @@ def test_land_refuses_manual_placeholder_before_any_merging(monkeypatch, deploy)
     assert not called, "land must refuse before any PR is merged"
 
 
+@pytest.mark.parametrize("override", ["merge", "preview"])
+def test_explicit_override_of_saved_e2e_run_still_refuses_manual_placeholder(monkeypatch, override):
+    called = []
+    monkeypatch.setattr(land, "_snapshot", lambda *a: {"commit": "deadbeef"})
+    monkeypatch.setattr(land, "end_state", lambda *a: {"mode": "e2e", "deploy": {"prod": HANDOFF}})
+    monkeypatch.setattr(land, "_authorize", lambda *a, **k: called.append("authorize"))
+    monkeypatch.setattr(land, "_land_lock", lambda *a: nullcontext())
+    monkeypatch.setattr(land, "_require_unchanged", lambda *a, **k: None)
+    monkeypatch.setattr(land, "_land_merge", lambda *a, **k: called.append("merge") or Result())
+    monkeypatch.setattr(land, "_land_preview", lambda *a, **k: called.append("preview") or Result())
+    with pytest.raises(Refused) as caught:
+        land.land(None, {"id": "deadbeef"}, mode=override, quote="land it now")
+    assert caught.value.category == "manual-deploy-command"
+    assert not called, "no authorization or merge before the refusal"
+
+
 def test_manual_placeholder_is_rejected_during_plan_submit(env):
     from test_land import _plan
     code, out = env.office("start", "manual deploy case", "--planner", "inline")

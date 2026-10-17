@@ -90,6 +90,9 @@ def land(con, run: dict, *, mode: str | None = None, quote: str | None = None, r
         mode = es["mode"]
     # No user authorization or PR merge is recorded for a manual handoff.
     _require_executable_deploy(mode, es["deploy"])
+    if explicit_mode and es["mode"] != mode:
+        # An override (e.g. --merge over a saved e2e run) must not bypass the frozen end state's check.
+        _require_executable_deploy(es["mode"], es["deploy"])
     if explicit_mode:
         _authorize(con, run, mode, quote)
     if mode == "ask":
