@@ -47,6 +47,11 @@ def _safe_start_base(repo: Path, explicit: str | None) -> str:
                                   capture_output=True).returncode == 0]
         if len(refs) == 1:
             default = refs[0]
+        elif len(refs) > 1:
+            raise Usage("ambiguous-default-branch",
+                        "origin/HEAD is not set and both origin/main and origin/master exist, "
+                        "so the default branch cannot be determined to check the run base",
+                        next_step="run git remote set-head origin -a to configure origin/HEAD, then retry")
     if not default:
         return candidate  # Local-only/offline worktrees retain existing behavior.
     check = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", candidate, default],

@@ -60,6 +60,20 @@ def test_origin_main_without_origin_head_still_protects_run(env):
     assert code != 0 and "unsafe-run-base" in out, out
 
 
+def test_both_default_candidates_without_origin_head_refuse_start(env):
+    base = remote_main(env)
+    env.git("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+    env.git("update-ref", "refs/remotes/origin/master", base)
+    env.git("switch", "-q", "--orphan", "feature-unrelated")
+    (env.repo / "unrelated.py").write_text("UNRELATED = True\n")
+    env.git("add", "unrelated.py")
+    env.git("commit", "-qm", "unrelated feature-only root")
+    code, out = env.office("start", "docs-only change", "--planner", "inline")
+    assert code != 0 and "ambiguous-default-branch" in out, out
+    assert "git remote set-head origin -a" in out
+    assert not env.con().execute("SELECT id FROM runs").fetchone()
+
+
 def test_commits_already_contained_in_remote_main_are_allowed(env):
     base = remote_main(env)
     feature = feature_commit(env, base)
