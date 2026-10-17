@@ -635,6 +635,12 @@ lists). Legacy commas before another action verb still work. Native `<select>` c
 The selector itself may contain spaces when you use an explicit `label:` or `value:` choice. These state-step selectors may use Playwright selectors; `visual.selectors:` for DOM measurements
 accepts plain CSS only.
 
+For a self-started visual preview, Office waits for its URL to return HTTP 2xx/3xx
+before taking screenshots. A port returning boot-time 502 or 404 is not ready.
+When every captured route fails with HTTP errors and any is 5xx, evidence is
+CAPTURE_BLOCKED rather than consuming a review round. Healthy routes with
+failing subroutes still produce application findings.
+
 Install the visual extra when you expect browser/UI work:
 
 ```bash
