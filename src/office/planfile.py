@@ -39,6 +39,11 @@ from office import task_descriptors
 TASK_HEADING = re.compile(r"^###\s+(T\d+)\s*[:.\-–]\s*(.+?)\s*$")
 SECTION = re.compile(r"^##\s+(.+?)\s*$")
 KEYVAL = re.compile(r"^([A-Za-z_][A-Za-z_ ]*?)\s*:\s*(.*)$")
+# Run-level Requirements fields; an indented `key:` line with one of these ends a wrapped list item.
+REQUIREMENT_KEYS = frozenset({
+    "goal", "done", "non_goals", "actions", "checks", "blast_radius", "irreversible",
+    "size_class", "lightweight", "end_state", "deploy_preview", "deploy_prod", "deploy_verify",
+})
 BLAST = ("local", "repo", "production", "production-data")
 SIZES = ("S", "M", "L", "XL")
 # How far a run goes after its PRs (3.2): stop and ask, preview deploy only,
@@ -127,9 +132,11 @@ def parse(text: str) -> ParsedPlan:
                 req.setdefault(list_key, []).append(item)
             continue
         m = KEYVAL.match(stripped)
-        if (m is None and section == "requirements" and task is None and
+        if (section == "requirements" and task is None and
                 list_key and indented and
-                isinstance(req.get(list_key), list) and req[list_key]):
+                isinstance(req.get(list_key), list) and req[list_key] and
+                (m is None or
+                 m.group(1).strip().lower().replace(" ", "_") not in REQUIREMENT_KEYS)):
             # Markdown soft-wrapped list item: preserve the full user requirement.
             req[list_key][-1] += " " + stripped
             continue

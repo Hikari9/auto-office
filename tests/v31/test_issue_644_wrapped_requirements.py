@@ -29,3 +29,17 @@ done:
     result = planfile.parse(text)
     assert result.requirements["done_criteria"] == ["Keep this criterion."]
     assert result.requirements["blast_radius"] == "low"
+
+
+def test_wrapped_criterion_containing_colon_is_preserved():
+    text = """## Requirements
+done:
+- Criterion starts here.
+  For example: check the member status.
+- Second criterion.
+"""
+    result = planfile.parse(text)
+    assert result.requirements["done_criteria"] == [
+        "Criterion starts here. For example: check the member status.",
+        "Second criterion.",
+    ]
