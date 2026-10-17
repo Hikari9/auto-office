@@ -22,7 +22,7 @@ SQUASH_ONLY = {"nameWithOwner": "o/r", "defaultBranchRef": {"name": "main"}, "me
 
 
 def _head_of(env, bare, task: str) -> str:
-    return remote_head(bare, next(p["head"] for p in gh(env)["prs"] if p["title"].startswith(f"{task}:")))
+    return remote_head(bare, next(p["head"] for p in gh(env)["prs"] if f" {task}:" in p["title"]))
 
 
 def _conflict(env, number: int, head: str) -> None:
@@ -173,7 +173,7 @@ def test_a_real_conflict_refuses_naming_files_and_pushes_nothing(env, monkeypatc
 
 def test_a_moved_remote_branch_refuses_branch_moved(env, monkeypatch):
     bare, _, _ = _run(env, monkeypatch, _plan("merge"))
-    branch = next(p["head"] for p in gh(env)["prs"] if p["title"].startswith("T1:"))
+    branch = next(p["head"] for p in gh(env)["prs"] if " T1:" in p["title"])
     moved = _push_to_branch(env, bare, branch, "extra.txt", "not reviewed\n")
     assert moved != _accepted_commit(env, "T1")
     _conflict(env, 1, moved)
