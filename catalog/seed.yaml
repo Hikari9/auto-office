@@ -834,6 +834,120 @@ models:
     source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-opus-5-5-low', release_url: 'https://artificialanalysis.ai/models/releases/claude-opus-5-5', fetched_at: '2026-09-27T14:55:06Z', page_title: 'Claude Opus 5.5 (Adaptive Reasoning, Low Effort, Default Fallback)'}
     content_hash:
     supersession_metadata:
+  - model_id: claude-sonnet-5-5
+    invocation_model_id: Claude Sonnet 5.5 (Low)
+    invocation_harness: agy
+    invocation_source: 'local-evidence:agy models'
+    dispatchable: false
+    discovery: eligible
+    discovery_reason: 'Local Agy display-name evidence; exact route conformance probe required'
+    source_identifier:
+    source_name: shipped-seed
+    effort: low
+    source_effort: Low Effort
+    effort_confidence: exact
+    benchmark_indexes: {}
+    price_fields:
+    speed_fields:
+    release_date:
+    source_snapshot_metadata: {kind: no-published-benchmark, notes: 'No published Claude Sonnet 5.5 benchmark exists at low effort.'}
+    content_hash:
+    supersession_metadata:
+  - model_id: claude-sonnet-5-5
+    invocation_model_id: Claude Sonnet 5.5 (Medium)
+    invocation_harness: agy
+    invocation_source: 'local-evidence:agy models'
+    dispatchable: false
+    discovery: eligible
+    discovery_reason: 'Local Agy display-name evidence; exact route conformance probe required'
+    source_identifier: claude-sonnet-5-5-medium
+    source_name: artificial-analysis
+    effort: medium
+    source_effort: Medium Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 41}
+    price_fields:
+    speed_fields:
+    release_date: '2026-09'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-sonnet-5-5-medium', release_url: 'https://artificialanalysis.ai/models/releases/claude-sonnet-5-5', fetched_at: '2026-09-30T18:20:04Z', page_title: 'Claude Sonnet 5.5 (Adaptive Reasoning, Medium Effort, Default Fallback)'}
+    content_hash:
+    supersession_metadata:
+  - model_id: claude-sonnet-5-5
+    invocation_model_id: Claude Sonnet 5.5 (High)
+    invocation_harness: agy
+    invocation_source: 'local-evidence:agy models'
+    dispatchable: false
+    discovery: eligible
+    discovery_reason: 'Local Agy display-name evidence; exact route conformance probe required'
+    source_identifier: claude-sonnet-5-5-high
+    source_name: artificial-analysis
+    effort: high
+    source_effort: High Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 47}
+    price_fields: {input_per_mtok: 2.0, output_per_mtok: 10.0, currency: USD, as_of: '2026-09-29'}
+    speed_fields:
+    release_date: '2026-09'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-sonnet-5-5-high', release_url: 'https://artificialanalysis.ai/models/releases/claude-sonnet-5-5', fetched_at: '2026-09-29T04:10:00Z', page_title: 'Claude Sonnet 5.5 (Adaptive Reasoning, High Effort, Default Fallback)'}
+    content_hash:
+    supersession_metadata:
+  - model_id: claude-opus-5-5
+    invocation_model_id: Claude Opus 5.5 (Low)
+    invocation_harness: agy
+    invocation_source: 'local-evidence:agy models'
+    dispatchable: false
+    discovery: eligible
+    discovery_reason: 'Local Agy display-name evidence; exact route conformance probe required'
+    source_identifier: claude-opus-5-5-low
+    source_name: artificial-analysis
+    effort: low
+    source_effort: Low Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 42}
+    price_fields: {input_per_mtok: 4.0, output_per_mtok: 20.0, currency: USD, as_of: '2026-09-27'}
+    speed_fields: {output_tok_per_s: 80.4, ttft_ms: 6560}
+    release_date: '2026-09'
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-opus-5-5-low', release_url: 'https://artificialanalysis.ai/models/releases/claude-opus-5-5', fetched_at: '2026-09-27T14:55:06Z', page_title: 'Claude Opus 5.5 (Adaptive Reasoning, Low Effort, Default Fallback)'}
+    content_hash:
+    supersession_metadata:
+  - model_id: claude-opus-5-5
+    invocation_model_id: Claude Opus 5.5 (Medium)
+    invocation_harness: agy
+    invocation_source: 'local-evidence:agy models'
+    dispatchable: false
+    discovery: eligible
+    discovery_reason: 'Local Agy display-name evidence; exact route conformance probe required'
+    source_identifier: claude-opus-5-5-medium
+    source_name: artificial-analysis
+    effort: medium
+    source_effort: Medium Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 51}
+    price_fields: {input_per_mtok: 4.0, output_per_mtok: 20.0, currency: USD, as_of: '2026-09-27'}
+    speed_fields: {output_tok_per_s: 81.4, ttft_ms: 14050}
+    release_date: 2026-09
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-opus-5-5-medium', release_url: 'https://artificialanalysis.ai/models/releases/claude-opus-5-5', fetched_at: '2026-09-27T14:55:06Z', page_title: 'Claude Opus 5.5 (Adaptive Reasoning, Medium Effort, Default Fallback)'}
+    content_hash:
+    supersession_metadata:
+  - model_id: claude-opus-5-5
+    invocation_model_id: Claude Opus 5.5 (High)
+    invocation_harness: agy
+    invocation_source: 'local-evidence:agy models'
+    dispatchable: false
+    discovery: eligible
+    discovery_reason: 'Local Agy display-name evidence; exact route conformance probe required'
+    source_identifier: claude-opus-5-5-high
+    source_name: artificial-analysis
+    effort: high
+    source_effort: High Effort
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 54}
+    price_fields: {input_per_mtok: 4.0, output_per_mtok: 20.0, currency: USD, as_of: '2026-09-27'}
+    speed_fields: {output_tok_per_s: 81.7, ttft_ms: 33220}
+    release_date: 2026-09
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/claude-opus-5-5-high', release_url: 'https://artificialanalysis.ai/models/releases/claude-opus-5-5', fetched_at: '2026-09-27T14:55:06Z', page_title: 'Claude Opus 5.5 (Adaptive Reasoning, High Effort, Default Fallback)'}
+    content_hash:
+    supersession_metadata:
   - model_id: gpt-6-luna
     invocation_model_id: gpt-6-luna
     invocation_harness: codex

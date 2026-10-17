@@ -186,7 +186,10 @@ def _require_known(harness: str, model: str, effort: str | None) -> None:
     models = sorted({m for r in rows for m in (r.get("model_id"), r.get("invocation_model_id")) if m})
     if model not in models:
         raise Usage("unknown-model", f"{harness} has no model {model!r}",
-                    next_step=f"known {harness} models: {', '.join(models) or 'none'}", exit_code=2)
+                    next_step=(f"known {harness} models: {', '.join(models) or 'none'}; "
+                               "add a catalog row: office model add <harness>/<model> "
+                               "--effort <efforts>; names reported by <harness> models "
+                               "need a catalog row"), exit_code=2)
     efforts = sorted(adapter.get("effort_mapping") or {}) \
         or sorted({r["effort"] for r in rows if r.get("effort")})
     if effort and effort not in efforts:

@@ -536,10 +536,13 @@ def test_discovery_on_returns_eligible_rows_as_candidates_with_status_and_a_prob
     for c in pool:
         assert c["discovery"] is True and c["route_status"] == "discovered-unconfirmed" and c["probe_key"]
         assert c["probe_key"].split("|")[:4] == [c["harness"], "2.0.0", c["invocation_model_id"], c["effort"]]
-    # benchmark-only and ineligible rows are never offered for discovery
+    # Benchmark-only and ineligible rows are never offered for discovery.
     cat = {s["candidate"]: s["category"] for s in skipped}
     assert cat["codex/gpt-6-luna@none"] == "not-eligible"
-    assert not [c for c in pool if c["model_id"] in ("claude-sonnet-5-5", "gpt-6-luna")]
+    agy_sonnet = [c for c in pool if c["harness"] == "agy" and c["model_id"] == "claude-sonnet-5-5"]
+    assert {label(c) for c in agy_sonnet} == {
+        f"agy/claude-sonnet-5-5@{effort}" for effort in ("low", "medium", "high")}
+    assert not [c for c in pool if c["model_id"] == "gpt-6-luna"]
 
 
 def test_a_fresh_exact_pass_attaches_to_exactly_that_candidate(installed, tmp_path):
