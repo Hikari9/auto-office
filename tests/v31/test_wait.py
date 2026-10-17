@@ -5,6 +5,8 @@ silent through an amendment deadlock and a stalled gate that printed none of the
 """
 from __future__ import annotations
 
+import time
+
 import pytest
 from pathlib import Path
 
@@ -720,3 +722,42 @@ def test_a_codex_pane_herdr_calls_working_but_idle_times_out_to_a_stall(env):
     con.commit()
     code, out = _wait(env, e, timeout="3")
     assert code == 3 and "stall:" in out and d["id"] in out and "idle" in out, out
+
+@pytest.mark.approved
+def test_the_same_pending_action_wakes_only_once_across_wait_invocations(env):
+    """#561: unchanged blocked/rerun guidance is not a new event every second."""
+    _go(env)
+    env.office("revoke", "T1", check=0)
+    code, out = _wait(env, EXTERNAL)
+    assert code == 0 and "blocker:" in out, out
+    code, out = _wait(env, EXTERNAL)
+    assert code == 124 and "nothing new" in out, out
+
+
+def test_idle_terminal_refused_submit_overrides_a_stale_busy_spinner(env):
+    """#671: the terminal executor status line wins over old pane busy markers."""
+    _go(env)
+    e = _herdr(env, status="idle", pane=(
+        "esc to cancel\n"
+        "TASK=T1 SUBMIT=refused: stop after self-review round cap "
+        "NEXT=orchestrator must resolve the remaining review issue\n"
+    ))
+    e["OFFICE_EXECUTOR_IDLE_STALL_S"] = "1800"
+    d = _as_herdr(env)
+    from office import dispatch
+    assert dispatch._pane_busy("esc to cancel"), "must reproduce the stale busy marker"
+    code, out = _wait(env, e, timeout="3")
+    assert code == 3 and "SUBMIT=refused" in out and "stall:" in out, out
+
+
+@pytest.mark.approved
+def test_wait_on_an_already_terminal_run_returns_at_once_not_124(env):
+    _go(env)
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()[0]
+    con.execute("UPDATE runs SET phase='abandoned' WHERE id=?", (run_id,))
+    con.commit()
+    started = time.monotonic()
+    code, out = env.office("wait", "--run", run_id, "--timeout", "60", "--poll", "0.2", env=EXTERNAL)
+    assert time.monotonic() - started < 30, "wait did not wake at once on a terminal run"
+    assert code == 0 and "abandoned" in out and "nothing new" not in out, out
