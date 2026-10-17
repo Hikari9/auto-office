@@ -12,6 +12,7 @@ bound to the scope's composed commit.
 from __future__ import annotations
 
 import re
+import sqlite3
 import uuid
 from pathlib import Path
 
@@ -112,14 +113,21 @@ def _envelope_entry(con, run, entry_id, quote) -> Result:
 
 
 def _trust(con, run, triple: str, quote: str) -> Result:
-    """#134: the missing CLI path for an explicit, attributed trust act."""
-    from office import paths
-    act = scoring.record_trust_act(paths.runs_db(), triple, "proven", "user",
-                                   f"user authorized in run {short(run['id'])}: {quote.strip()}",
-                                   evidence_reference=f"run:{run['id']}")
-    return Result(lines=[f"{triple} trust recorded as proven (attributed to the user)"],
-                  next="retry the dispatch that needed it",
-                  data={"trust_act_id": act["trust_act_id"]})
+    """#134, #625: the CLI path for an explicit, attributed trust act."""
+    from office import candidates, paths
+    triples, gate_lines, next_action = candidates.resolve_trust_targets(triple, con=con, run=run)
+    db_target = con if isinstance(con, sqlite3.Connection) else paths.runs_db()
+    run_id = (run or {}).get("id")
+    ev_ref = f"run:{run_id}" if run_id else None
+    run_label = f" in run {short(run_id)}" if run_id else ""
+    reason = f"user authorized{run_label}: {quote.strip()}"
+    acts = scoring.record_trust_acts(db_target, triples, "proven", "user", reason,
+                                     evidence_reference=ev_ref)
+    lines = [f"{t} trust recorded as proven (attributed to the user)" for t in triples] + gate_lines
+    return Result(lines=lines,
+                  next=next_action,
+                  data={"trust_act_id": acts[0]["trust_act_id"],
+                        "trust_act_ids": [a["trust_act_id"] for a in acts]})
 
 
 def _waive(con, run, spec: str, quote: str, root_cause: str | None = None) -> Result:

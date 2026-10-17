@@ -933,3 +933,193 @@ def trust_report(con: sqlite3.Connection) -> tuple[list[str], list[str]]:
         tally = ", ".join(f"{n} {state}" for state, n in sorted(counts.items()))
         summary.append(f"trust {role}: {len(cands)} routes ({tally}) | per-route detail: office inspect trust")
     return summary, detail
+
+
+def canonical_trust_routes() -> list[str]:
+    """All canonical route triples `harness@major/model_id@effort` across active catalog rows."""
+    from office import scoring
+    sources = adapters.load_sources()
+    all_adapters = {aid: entry[0] for aid, entry in sources.items()}
+    triples: set[str] = set()
+    for row in catalog_rows():
+        harness = row.get("invocation_harness")
+        adapter = all_adapters.get(harness)
+        if not adapter:
+            continue
+        version = adapters.route_version(harness, adapter, sources)
+        cand = {
+            "harness": harness,
+            "harness_version": version,
+            "model_id": row.get("model_id"),
+            "effort": row.get("effort"),
+        }
+        triples.add(routing.candidate_id(cand))
+    return sorted(triples)
+
+
+def resolve_trust_targets(spec: str, con: sqlite3.Connection | None = None,
+                          run: dict | None = None) -> tuple[list[str], list[str], str]:
+    """Resolve a user-provided route `harness/model@effort` (alias or concrete, with or without
+    @version) through the catalog expansion into canonical routing triples and any remaining gate notices.
+    """
+    import difflib
+    from office import scoring
+    clean_spec = (spec or "").strip()
+    m = re.match(r"^(?P<harness>[^@/]+)(?:@(?P<version>[^/]*))?/(?P<model>[^@/]+)@(?P<effort>[^@/]+)$", clean_spec)
+    canonical = canonical_trust_routes()
+    if not m:
+        nearest = difflib.get_close_matches(clean_spec, canonical, n=3, cutoff=0.3)
+        msg = (f"unknown route {clean_spec!r}; nearest canonical routes: {', '.join(nearest)}"
+               if nearest else f"unknown route {clean_spec!r}; see available routes with office inspect trust")
+        raise state.Refused("unknown-route", msg, next_step="office inspect trust")
+
+    harness = m.group("harness")
+    spec_version = m.group("version")
+    model = m.group("model")
+    effort = m.group("effort")
+
+    sources = adapters.load_sources()
+    all_adapters = {aid: entry[0] for aid, entry in sources.items()}
+    adapter = all_adapters.get(harness)
+    if not adapter:
+        nearest = difflib.get_close_matches(clean_spec, canonical, n=3, cutoff=0.3)
+        msg = (f"unknown route {clean_spec!r}; nearest canonical routes: {', '.join(nearest)}"
+               if nearest else f"unknown route {clean_spec!r}; see available routes with office inspect trust")
+        raise state.Refused("unknown-route", msg, next_step="office inspect trust")
+
+    harness_ver = adapters.route_version(harness, adapter, sources)
+    installed_major = scoring.harness_major(harness_ver)
+    if spec_version is not None and scoring.harness_major(spec_version) != installed_major:
+        nearest = difflib.get_close_matches(clean_spec, canonical, n=3, cutoff=0.3)
+        msg = (f"unknown route {clean_spec!r}; nearest canonical routes: {', '.join(nearest)}"
+               if nearest else f"unknown route {clean_spec!r}; see available routes with office inspect trust")
+        raise state.Refused("unknown-route", msg, next_step="office inspect trust")
+
+    rows = catalog_rows()
+    matching = [
+        r for r in rows
+        if r.get("invocation_harness") == harness
+        and r.get("effort") == effort
+        and (r.get("model_id") == model or r.get("invocation_model_id") == model)
+    ]
+    matching.sort(key=lambda r: r.get("model_id") != model)
+    if not matching:
+        nearest = difflib.get_close_matches(clean_spec, canonical, n=3, cutoff=0.3)
+        msg = (f"unknown route {clean_spec!r}; nearest canonical routes: {', '.join(nearest)}"
+               if nearest else f"unknown route {clean_spec!r}; see available routes with office inspect trust")
+        raise state.Refused("unknown-route", msg, next_step="office inspect trust")
+
+    primary_row = matching[0]
+    triples: list[str] = []
+
+    if primary_row.get("alias_resolved_to"):
+        alias_cand = {
+            "harness": harness,
+            "harness_version": harness_ver,
+            "model_id": primary_row["model_id"],
+            "effort": effort,
+        }
+        alias_triple = routing.candidate_id(alias_cand)
+        triples.append(alias_triple)
+        target_model = primary_row["alias_resolved_to"]
+        concrete_rows = [
+            r for r in rows
+            if r.get("invocation_harness") == harness
+            and r.get("effort") == effort
+            and r.get("model_id") == target_model
+            and not r.get("alias_family")
+        ]
+        if concrete_rows:
+            conc_cand = {
+                "harness": harness,
+                "harness_version": harness_ver,
+                "model_id": target_model,
+                "effort": effort,
+            }
+            conc_triple = routing.candidate_id(conc_cand)
+            if conc_triple not in triples:
+                triples.append(conc_triple)
+    else:
+        conc_cand = {
+            "harness": harness,
+            "harness_version": harness_ver,
+            "model_id": primary_row["model_id"],
+            "effort": effort,
+        }
+        triples.append(routing.candidate_id(conc_cand))
+
+    # Evaluate remaining gates on the route
+    gate_lines: list[str] = []
+    remedy: str | None = None
+
+    if primary_row.get("dispatchable") is False:
+        discovery_eligible = bool(primary_row.get("discovery") == "eligible" and primary_row.get("invocation_model_id"))
+        if not discovery_eligible:
+            gate_lines.append("remaining gate: not dispatchable (remedy: route is non-dispatchable in catalog; select an available route)")
+            remedy = remedy or "route is not dispatchable; select an available route"
+        else:
+            # Check discovery configuration
+            repo = paths.repo_identity()
+            repo_root = Path(run["repo_root"]) if (run and run.get("repo_root")) else (repo[0] if repo else None)
+            from office.config import resolve
+            config_error = None
+            live_cfg = None
+            try:
+                live_cfg, _ = resolve(repo_root)
+            except Exception as exc:
+                config_error = str(exc)
+
+            if config_error:
+                gate_lines.append(f"remaining gate: config unreadable (remedy: repair the unreadable config: {config_error})")
+                remedy = remedy or f"repair the unreadable config: {config_error}"
+            else:
+                is_existing_run = bool(run and (run.get("id") or run.get("policy")))
+                if is_existing_run:
+                    pinned_policy = run.get("policy")
+                    if pinned_policy is None and con is not None and run.get("id"):
+                        try:
+                            loaded = state.get_run(con, run["id"])
+                            if loaded:
+                                pinned_policy = loaded.get("policy")
+                        except Exception:
+                            pass
+                    run_disc = route_policy.discovery_settings(pinned_policy or {})
+                    if not run_disc.get("enabled"):
+                        gate_lines.append("remaining gate: discovery off or blocked (remedy: enable discovery at the applicable config tier and then authorize office config --run <id> --apply-routing --quote \"<words>\" for this run)")
+                        remedy = remedy or "enable discovery at the applicable config tier and then authorize office config --run <id> --apply-routing --quote \"<words>\" for this run"
+                else:
+                    disc_settings = route_policy.discovery_settings(live_cfg or {})
+                    if not disc_settings.get("enabled"):
+                        gate_lines.append("remaining gate: discovery off or blocked (remedy: office config routing.discovery.enabled true)")
+                        remedy = remedy or "office config routing.discovery.enabled true"
+
+            # Check exact conformance probe status
+            disc_settings = route_policy.discovery_settings(
+                (run.get("policy") if (run and run.get("policy")) else live_cfg) or {}
+            )
+            probe_passed = False
+            if con is not None:
+                try:
+                    from office import route_probe
+                    probe_cand = {
+                        "harness": harness,
+                        "harness_version": harness_ver,
+                        "model_id": primary_row.get("model_id"),
+                        "invocation_model_id": primary_row.get("invocation_model_id") or primary_row.get("model_id"),
+                        "effort": effort,
+                        "adapter_id": adapter.get("id"),
+                    }
+                    status = route_probe.status(con, probe_cand, adapter=adapter,
+                                                ttl_days=disc_settings.get("probe_ttl_days", 7),
+                                                timeout_s=disc_settings.get("probe_timeout_s", 120))
+                    if status and status.get("result") == "pass":
+                        probe_passed = True
+                except Exception:
+                    probe_passed = False
+            if not probe_passed:
+                probe_spec = f"{harness}/{primary_row.get('model_id')}@{effort}"
+                gate_lines.append(f"remaining gate: conformance probe required (remedy: office doctor --probe-route {probe_spec})")
+                remedy = remedy or f"office doctor --probe-route {probe_spec}"
+
+    next_action = remedy if gate_lines else "retry the dispatch that needed it"
+    return triples, gate_lines, next_action
