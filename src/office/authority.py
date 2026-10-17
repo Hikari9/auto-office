@@ -121,11 +121,8 @@ def _trust(con, run, triple: str, quote: str) -> Result:
     ev_ref = f"run:{run_id}" if run_id else None
     run_label = f" in run {short(run_id)}" if run_id else ""
     reason = f"user authorized{run_label}: {quote.strip()}"
-    acts = []
-    for t in triples:
-        act = scoring.record_trust_act(db_target, t, "proven", "user",
-                                       reason, evidence_reference=ev_ref)
-        acts.append(act)
+    acts = scoring.record_trust_acts(db_target, triples, "proven", "user", reason,
+                                     evidence_reference=ev_ref)
     lines = [f"{t} trust recorded as proven (attributed to the user)" for t in triples] + gate_lines
     return Result(lines=lines,
                   next=next_action,

@@ -243,20 +243,39 @@ def record_trust_act(
     reason: str,
     evidence_reference: str | None = None,
 ) -> dict:
-    """Appends an explicit, attributed trust act for `triple` to the append-only
-    `adapter_trust_acts` log (§7.1.4). This is the only function permitted to raise a
+    """Appends one explicit, attributed trust act for `triple` to the append-only
+    `adapter_trust_acts` log (§7.1.4). See `record_trust_acts`."""
+    return record_trust_acts(db_path, [triple], target_state, actor_id, reason,
+                             evidence_reference)[0]
+
+
+def record_trust_acts(
+    db_path,
+    triples,
+    target_state: str,
+    actor_id: str,
+    reason: str,
+    evidence_reference: str | None = None,
+) -> list[dict]:
+    """Appends an explicit, attributed trust act for each of `triples` to the
+    append-only `adapter_trust_acts` log (§7.1.4) in ONE transaction: either every
+    act is durable or none is, so one approval never leaves only some of the
+    identities routing reads trusted. This is the only function permitted to raise a
     triple's trust state; `recorded_at` is stamped here at call time and is never
     accepted as a caller-supplied argument, so an act cannot be backdated to win the
     `ORDER BY recorded_at DESC` tiebreak in `evaluate_trust_state` against a later,
-    more authoritative act.
+    more authoritative act. A caller that already holds a transaction on the
+    connection owns its commit.
     """
     if target_state not in ("valid-unverified", "proven"):
         raise ValueError(f"illegal trust act target_state: {target_state!r}")
-    if not isinstance(triple, str) or not triple.strip():
-        raise ValueError(
-            "trust act triple must be a non-empty string identifying the exact "
-            "routable triple"
-        )
+    triples = list(triples)
+    for triple in triples:
+        if not isinstance(triple, str) or not triple.strip():
+            raise ValueError(
+                "trust act triple must be a non-empty string identifying the exact "
+                "routable triple"
+            )
     if not actor_id or not str(actor_id).strip():
         raise ValueError("trust act actor_id must identify a real, non-empty holder")
     if str(actor_id).strip().lower() in ("system", "automated"):
@@ -270,34 +289,45 @@ def record_trust_act(
             "(>=10 non-whitespace characters)"
         )
 
-    triple = normalize_triple(triple.strip())
     close = False
     if isinstance(db_path, sqlite3.Connection):
         con = db_path
     else:
         con = sqlite3.connect(str(db_path))
         close = True
+    acts = []
     try:
         ensure_trust_schema(con)
-        act_id = str(uuid.uuid4())
-        recorded_at = datetime.now(timezone.utc).isoformat()
-        con.execute(
-            "INSERT INTO adapter_trust_acts VALUES (?,?,?,?,?,?,?)",
-            (act_id, triple, target_state, actor_id, reason, evidence_reference, recorded_at),
-        )
-        con.commit()
+        own_txn = not con.in_transaction
+        if own_txn:
+            con.execute("BEGIN IMMEDIATE")
+        try:
+            for triple in triples:
+                act = {
+                    "trust_act_id": str(uuid.uuid4()),
+                    "triple": normalize_triple(triple.strip()),
+                    "target_state": target_state,
+                    "actor_id": actor_id,
+                    "reason": reason,
+                    "evidence_reference": evidence_reference,
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                }
+                con.execute(
+                    "INSERT INTO adapter_trust_acts VALUES (?,?,?,?,?,?,?)",
+                    (act["trust_act_id"], act["triple"], target_state, actor_id, reason,
+                     evidence_reference, act["recorded_at"]),
+                )
+                acts.append(act)
+        except BaseException:
+            if own_txn:
+                con.execute("ROLLBACK")
+            raise
+        if own_txn:
+            con.execute("COMMIT")
     finally:
         if close:
             con.close()
-    return {
-        "trust_act_id": act_id,
-        "triple": triple,
-        "target_state": target_state,
-        "actor_id": actor_id,
-        "reason": reason,
-        "evidence_reference": evidence_reference,
-        "recorded_at": recorded_at,
-    }
+    return acts
 
 
 def get_current_trust_state(db_path, triple: str) -> str:

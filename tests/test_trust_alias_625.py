@@ -213,3 +213,53 @@ def test_gated_route_pinned_run_with_discovery_enabled_omits_discovery_gate(test
     # Conformance probe gate remains because it has not been probed yet
     assert any("remaining gate: conformance probe required" in l for l in res.lines)
 
+
+
+_FAIL_SECOND_WRITE = (
+    "CREATE TRIGGER fail_concrete BEFORE INSERT ON adapter_trust_acts "
+    "WHEN NEW.triple = 'codex@0/gpt-6-luna@medium' "
+    "BEGIN SELECT RAISE(ABORT, 'simulated second-write failure'); END"
+)
+
+
+def test_alias_approval_is_atomic_when_second_write_fails(test_db):
+    """The alias row is written before the concrete row; a failure on the second
+    insert must leave no act behind, so routing never sees a half-approved route."""
+    con = test_db
+    con.execute(_FAIL_SECOND_WRITE)
+
+    with pytest.raises(sqlite3.DatabaseError, match="simulated second-write failure"):
+        authority.approve(con, {"id": "run-atomic-001"}, "trust", "approve luna medium for production",
+                          ["codex/luna@medium"])
+
+    assert con.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0] == 0
+    assert not con.in_transaction
+    _, state = scoring.evaluate_trust_state(con, "codex@0/luna@medium")
+    assert state != "proven"
+
+
+def test_record_trust_acts_is_atomic_on_a_path_connection(tmp_path):
+    """Same guarantee when the helper opens (and closes) its own connection."""
+    path = tmp_path / "runs.db"
+    setup = sqlite3.connect(str(path))
+    scoring.ensure_trust_schema(setup)
+    setup.execute(_FAIL_SECOND_WRITE)
+    setup.commit()
+
+    with pytest.raises(sqlite3.DatabaseError):
+        scoring.record_trust_acts(path, ["codex@0/luna@medium", "codex@0/gpt-6-luna@medium"], "proven",
+                                  "user", "user authorized: atomic batch")
+    assert setup.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0] == 0
+
+    acts = scoring.record_trust_acts(path, ["codex@0/luna@medium", "codex@0/luna@high"], "proven",
+                                     "user", "user authorized: atomic batch")
+    assert len(acts) == 2
+    assert setup.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0] == 2
+    setup.close()
+
+
+def test_record_trust_acts_validates_before_writing(test_db):
+    with pytest.raises(ValueError):
+        scoring.record_trust_acts(test_db, ["codex@0/luna@medium", "  "], "proven", "user",
+                                  "user authorized: validation")
+    assert test_db.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0] == 0
