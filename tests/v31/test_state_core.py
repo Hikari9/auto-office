@@ -5,6 +5,7 @@ import json
 import multiprocessing
 import sqlite3
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -31,7 +32,8 @@ def test_version_identity_is_exact_pep440(env):
     from office import version
     v = version.current()
     assert version.is_exact(v), v
-    assert v.startswith("3.6.3")
+    release = (Path(__file__).resolve().parents[2] / "VERSION").read_text().strip()
+    assert v.startswith(release), (v, release)
     assert not version.is_exact("dev") and not version.is_exact("3.1-dev")
 
 

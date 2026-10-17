@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from conftest import GOOD_ADD, approved_run
 
-from office import guide, state
+from office import dispatch, guide, state
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 FINAL = ("● Done.\n\n"
@@ -23,8 +23,8 @@ def _setup(env, monkeypatch):
     return con, state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0]), did
 
 
-def _stalls(con, run, did, text, busy=False):
-    act = {"alive": True, "busy": busy, "hash": str(hash(text)), "text": text, "status": "idle"}
+def _stalls(con, run, did, text, busy=False, status="idle"):
+    act = {"alive": True, "busy": busy, "hash": str(hash(text)), "text": text, "status": status}
     return guide._idle_executors(con, run, {did: act})
 
 
@@ -50,7 +50,23 @@ def test_an_accepted_status_line_does_not_stall_early(env, monkeypatch):
 
 def test_a_busy_agent_with_a_final_line_does_not_stall(env, monkeypatch):
     con, run, did = _setup(env, monkeypatch)
-    assert _stalls(con, run, did, FINAL, busy=True) == []
+    # herdr reports the agent working: the status line is not the end.
+    assert _stalls(con, run, did, FINAL, busy=True, status="working") == []
+    # agy reports idle mid-turn: a busy marker below the status line decides.
+    resumed = FINAL + "\nesc to interrupt\n"
+    assert dispatch._pane_busy(resumed.split("NEXT=")[1]), "must reproduce a real busy marker"
+    assert _stalls(con, run, did, resumed, busy=True) == []
+    spinner = FINAL + "\n✽ Harmonizing… (1m 2s)\n"
+    assert dispatch._pane_busy(spinner.split("NEXT=")[1])
+    assert _stalls(con, run, did, spinner, busy=True) == []
+
+
+def test_a_busy_marker_only_above_the_final_line_still_stalls(env, monkeypatch):
+    con, run, did = _setup(env, monkeypatch)
+    text = "esc to interrupt\n" + FINAL
+    assert dispatch._pane_busy("esc to interrupt")
+    lines = _stalls(con, run, did, text, busy=True)
+    assert len(lines) == 1 and "SUBMIT=not attempted" in lines[0], lines
 
 
 def test_a_final_line_scrolled_above_a_newer_turn_does_not_stall(env, monkeypatch):
