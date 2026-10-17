@@ -34,6 +34,28 @@ _POSITIVE_WORDS = re.compile(
     r"perform|issue|invoke|make|start|is|are|be|allowed|permitted|required|then|now)\b",
     re.I,
 )
+# A negation exempts a prose item only when it is directly followed by a verb
+# that prohibits the action. Anything else ("do not forget to", "never fail to",
+# "don't hesitate to", "avoid skipping") may be a double negation: scan it as a
+# positive instruction.
+_PROHIBITIVE = re.compile(
+    r"^\s*(?:never|do\s+not|don't|must\s+not|avoid|forbid)\s+"
+    r"(?:(?:ever|manually|directly|simply|just|actually|under\s+any\s+circumstances)\s+)*"
+    r"(?:run|running|use|using|execute|executing|invoke|invoking|call|calling|perform|"
+    r"performing|issue|issuing|attempt|attempting|trigger|triggering|do|doing|force|"
+    r"forcing|push|pushing|git|publish|publishing|send|sending|make|making)\b",
+    re.I,
+)
+_PUSH_WORD = re.compile(r"\b(?:push|pushes|pushed|pushing|publish\w*)\b", re.I)
+# Words that signal a permission or an elided/anaphoric verb phrase ("when you
+# should", "but do it", "go ahead", "feel free").
+_ELLIPTIC = re.compile(
+    r"\b(?:should|must|can|could|may|might|will|would|shall|ought|need|needs|want|wants|"
+    r"please|do|does|go|ahead|feel|free|try|let|ok|okay|fine|just|allowed|permitted|"
+    r"required|anyway|again|so)\b"
+    r"|\b(?:run|use|execute|perform|issue|invoke|call|make)\s+(?:it|that|this|them|the\s+same)\b",
+    re.I,
+)
 _GLOBAL_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--config-env", "--namespace",
                       "--exec-path", "--super-prefix"}
 
@@ -91,28 +113,40 @@ def _bare_continuation(clause: str) -> bool:
 def _negated_prose_unsafe(command: str) -> bool:
     """Scan a prose line that opens with a negation, failing closed.
 
-    Only the opening clause is exempt. Every later clause is scanned as a
-    positive instruction unless it clearly continues the prohibition: a bare
-    "or"/"nor" repetition of the prohibited command while the prohibition is
-    still in force, or another negated clause.
+    Exemption is structural and narrow. The opening clause is exempt only when
+    its negation is directly followed by a prohibitive verb (`_PROHIBITIVE`);
+    "do not forget to", "never fail to", "don't hesitate to" are not. A later
+    clause stays exempt only when it is another such prohibitive clause or a bare
+    "or"/"nor" repetition of the prohibited command. Every other clause is
+    scanned as a positive instruction. Once a push has been mentioned inside the
+    exemption, any later non-exempt clause carrying an elliptic or modal
+    permission ("when you should", "but do it", "go ahead") is rejected, because
+    its elided verb phrase cannot be proven not to be the push.
     """
+    if not _PROHIBITIVE.match(command):
+        text = _INLINE_CODE.sub(lambda m: m.group(2), command)
+        return _scan(re.sub(r"(?<=\w)'(?=\w)", "", text), 0, prose=True)
     pieces: list[tuple[str, str]] = []
     connector, pos = "", 0
     for match in _CLAUSE_SPLIT.finditer(command):
         pieces.append((connector, command[pos:match.start()]))
         connector, pos = (match.group(1) or "").lower(), match.end()
     pieces.append((connector, command[pos:]))
-    prohibited = True  # the opening clause is negated
+    push_seen = bool(_PUSH_WORD.search(pieces[0][1]))
+    prohibited = True  # the opening clause is a proven prohibition
     for connector, clause in pieces[1:]:
         if not clause.strip():
             continue
-        if _NEGATED.match(clause):
-            prohibited = True
+        if _PROHIBITIVE.match(clause):
+            push_seen = push_seen or bool(_PUSH_WORD.search(clause))
             continue
         if prohibited and connector in ("or", "nor") and _bare_continuation(clause):
+            push_seen = True
             continue
         prohibited = False
         if unsafe_manual_push(clause, prose=True):
+            return True
+        if push_seen and _ELLIPTIC.search(clause):
             return True
     return False
 
