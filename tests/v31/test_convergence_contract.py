@@ -709,11 +709,12 @@ def test_a_blocking_finding_is_dismissed_only_with_the_users_quote(env):
     """#455: `office disposition <scope>:<code> dismissed --quote` settles an open blocking finding on the
     user's authority; without --quote it is refused and names --quote."""
     _escalate(env)
-    for how in ("dismissed", "fixed", "follow-up"):
+    for how in ("dismissed", "follow-up"):
         code, out = env.office("disposition", "L-T1:F1", how, "--", "not a bug")
         assert code == 2 and "--quote" in out, (how, out)
-    code, out = env.office("disposition", "L-T1:F1", "fixed", "--quote", "it is fixed")
-    assert code == 2 and "--quote" in out, "only dismissal takes the user's words"
+    for args in (("--", "the fix is done"), ("--quote", "it is fixed")):
+        code, out = env.office("disposition", "L-T1:F1", "fixed", *args)
+        assert code == 4 and "fix-unverified" in out and "not a dismissal" in out, out
     code, out = env.office("disposition", "L-T1:F1", "dismissed", "--quote", "x", env={"OFFICE_DISPATCH_ID": "D1"})
     assert code == 4 and "worker-cannot-disposition" in out, out
     assert _scope(env, "L-T1")["status"] == "escalated"
@@ -1021,3 +1022,54 @@ def test_issue_542_historical_backfill_uses_only_durable_route_evidence(tmp_path
         assert rows["unknown"] == (None, None)
     finally:
         con.close()
+
+def test_a_multi_owner_blocker_can_be_fixed_by_a_later_accepted_coowner_without_user_waiver(env):
+    """#670: T2 repaired F2; T1's unchanged accepted revision needs no no-op rerun.
+
+    A fresh composed lane review, not a disposition alone, authorizes progress.
+    """
+    work = {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": GOOD_MUL}}
+    repair = {"T2": {"mul.py": GOOD_MUL2}}
+    _start(env, plan=PLAN_LANE,
+           executor=[{"write_by_task": work, "submit": True}, {"write_by_task": work, "submit": True},
+                     {"write_by_task": repair, "submit": True}],
+           convergence_reviewer=[{"reply": recheck(finding("F2", "T1,T2", where="mul.py:1"))},
+                                 {"reply": APPROVED}])
+    env.office("dispatch", "T1", "T2", "--parallel", check=0)
+    assert _scope(env, "L-core")["status"] == "recheck"
+    old_t1 = task_row(env, "T1")["accepted_revision_id"]
+    code, out = env.office("disposition", "L-core:F2", "fixed", "--", "T2 repaired the shared issue")
+    assert code == 4 and "fix-unverified" in out, out
+    env.office("rerun", "T2", "--fresh", check=0)
+    assert task_row(env, "T2")["status"] == "accepted"
+    code, out = env.office("disposition", "L-core:F2", "fixed", "--", "T2 accepted a correction")
+    assert code == 0 and "recheck required" in out, out
+    assert task_row(env, "T1")["accepted_revision_id"] == old_t1
+    assert task_row(env, "T1")["status"] == "accepted"
+    assert not _q(env, "SELECT 1 FROM authorizations WHERE kind='dismissal'")
+    assert len(_gates(env, "convergence_review")) == 2, "reviewer must independently reverify"
+    assert _gates(env, "convergence_review")[-1]["verdict"] == "APPROVED"
+    assert _scope(env, "L-core")["status"] == "approved"
+    assert _q(env, "SELECT disposition FROM findings WHERE scope='L-core' AND code='F2'")[0]["disposition"] == "fixed"
+
+
+def test_atomic_two_task_contract_amend_defers_the_overlapping_dependent(env):
+    """#660: one edit changing both scopes and ordering cannot self-block on T2's new lease."""
+    work = {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": GOOD_MUL}}
+    _start(env, plan=PLAN_TWO, executor=[{"write_by_task": work, "submit": True}],
+           convergence_reviewer=[{"reply": APPROVED}])
+    env.office("dispatch", "T1", "T2", "--parallel", check=0)
+    assert task_row(env, "T1")["status"] == task_row(env, "T2")["status"] == "accepted"
+    edited = PLAN_TWO.replace("scope: calc.py\ndepends: none", "scope: calc.py\ndepends: T2").replace(
+        "scope: mul.py\ndepends: none", "scope: calc.py, mul.py\ndepends: none")
+    env.write_plan(edited)
+    code, out = env.office("amend", "T1,T2", "--contract", "--", "T2 goes first and owns shared calc", env={
+        "OFFICE_WORKER_LAUNCHER": "external"})
+    assert code == 0 and "scope-held" not in out, out
+    assert task_row(env, "T1")["status"] == "changes_required", out
+    assert task_row(env, "T2")["status"] in ("running", "launching"), out
+    assert "T2" in task_row(env, "T1")["depends_json"], task_row(env, "T1")
+    from office import guide, state
+    con = env.con()
+    nxt = guide.next_action(con, state.get_run(con, _run_row(env)["id"]))
+    assert "office rerun T1" not in nxt, nxt

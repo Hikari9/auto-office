@@ -13,7 +13,7 @@ from pathlib import Path
 
 from office import amend, contract, paths, planpath, plans, route_learning, state
 from office.result import Result
-from office.util import atomic_write_text, short
+from office.util import atomic_write_text, short, sha256_obj
 
 ORCH_EVENT_KINDS = None  # every orchestrator-audience event
 
@@ -152,8 +152,22 @@ def next_action(con, run: dict) -> str:
         nxt = convergence.next_action(con, run)
         if nxt:
             return nxt
+    # A rerun is only actionable if its dependency barrier and scope lease will
+    # admit it. Otherwise `office wait` would wake to suggest a refused command.
+    from office import dispatch
+    by_id = {t["id"]: t for t in tasks}
+    held_repairs = []
     for t in tasks:
         if t["status"] == "changes_required" and not gates_mod.worker_live(con, t.get("current_dispatch_id")):
+            dependencies = unaccepted_dependencies(t, by_id)
+            holder = dispatch.scope_holder(con, run, t)
+            if dependencies or holder:
+                why = "; ".join(x for x in (
+                    f"unaccepted dependencies: {', '.join(dependencies)}" if dependencies else "",
+                    f"scope held by {holder}'s live session" if holder else "",
+                ) if x)
+                held_repairs.append(f"{t['id']} waits for {why}")
+                continue
             # Findings wait for the orchestrator's choice (R8); nothing relaunches on its own.
             if (t.get("pause_reason") or "").endswith("the session ended without submitting"):
                 return (f"{t['id']} {t['pause_reason']}: office rerun {t['id']} --resume (resubmit on the amended "
@@ -161,6 +175,8 @@ def next_action(con, run: dict) -> str:
             if (t.get("pause_reason") or "").startswith("restack:"):
                 return f"{t['id']} {t['pause_reason']}: office rerun {t['id']} --resume | --fresh"
             return f"findings on {t['id']} wait for you: office rerun {t['id']} --resume | --fresh"
+    if held_repairs:
+        return "no action; " + "; ".join(held_repairs) + "; office wait for the holder or dependency to finish"
     for t in tasks:
         if t["status"] == "changes_required":
             # Its live worker has the findings; the repair path stays the next action.
@@ -470,7 +486,10 @@ def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:
                 con.execute("UPDATE dispatches SET stall_kind=NULL, resets_at=NULL, limit_label=NULL, "
                             "limit_fingerprint=NULL WHERE id=?", (d["id"],))
         changed = act["hash"] is not None and d.get("idle_hash") not in (None, act["hash"])
-        final = None if act["busy"] else _final_status(act["text"])
+        # Herdr's explicit idle state plus the executor's terminal status line
+        # wins over a stale spinner/busy marker in scrollback (#671). Do not
+        # trust idle alone: agy reports idle while a turn is still progressing.
+        final = (_final_status(act["text"]) if not act["busy"] or act.get("status") == "idle" else None)
         if final is not None:
             tail = _write_pane_tail(run, d, act)
             out.append(f"{who}: ended its turn with SUBMIT={final['submit']}{why}; NEXT={final['next']}; "
@@ -578,15 +597,34 @@ def worker_signals(con, run: dict) -> tuple[list[str], int]:
     return out, last
 
 
+WAIT_ACTION_KIND = "wait.action_reported"
+
+
+def _action_signature(con, run: dict) -> str | None:
+    """The currently actionable guidance, including its source state.
+
+    Office wait runs in separate CLI processes. A persistent event prevents the
+    same unchanged next: line from waking each invocation into a busy loop.
+    """
+    action = next_action(con, state.get_run(con, run["id"]))
+    if action.startswith(("exceptions only", "no action", "none;")):
+        return None
+    return sha256_obj((_snapshot(con, run), action))
+
+
+def _fresh_action(con, run: dict) -> tuple[bool, str | None]:
+    signature = _action_signature(con, run)
+    if signature is None:
+        return False, None
+    row = con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind=? ORDER BY seq DESC LIMIT 1",
+                      (run["id"], WAIT_ACTION_KIND)).fetchone()
+    prior = json.loads(row["payload_json"] or "{}").get("signature") if row else None
+    return signature != prior, signature
+
+
 def _needs_orchestrator(con, run: dict) -> bool:
-    tasks = state.tasks(con, run["id"])
-    if any(t["status"] in ("paused", "blocked") for t in tasks):
-        return True
-    # Preserve v3.1's existing changes-required wakeup. Convergence waits
-    # for the precise repair eligibility, including a live scope lease (#561).
-    if not contract.is_convergence(run) and any(t["status"] == "changes_required" for t in tasks):
-        return True
-    return not next_action(con, state.get_run(con, run["id"])).startswith(("exceptions only", "no action"))
+    """Read-only actionable state check (also used by status regressions)."""
+    return _fresh_action(con, run)[0]
 
 
 def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
@@ -631,10 +669,22 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         # task revision or status event. Recheck actionable work on every poll:
         # the initial snapshot alone cannot observe that transition (#561).
         pending = _needs_orchestrator(con, run)
+        action_signature = _action_signature(con, run) if pending else None
         first = False
-        if asked or stuck or changed or news or pending or state.is_terminal(state.get_run(con, run["id"])) \
-                or time.time() >= deadline:
+        if asked or stuck or changed or news or pending or time.time() >= deadline:
             res = status(con, run)
+            if pending:
+                with db.transaction(con):
+                    state.emit(con, run, WAIT_ACTION_KIND, "orchestrator action reported by office wait",
+                               audience="runtime", payload={"signature": action_signature})
+            if news:
+                # status shows a bounded prefix of events; a newer urgent event
+                # behind a long informational backlog must be shown and consumed
+                # now, rather than wake every subsequent wait with the same news.
+                res.lines[1:1] = [f"· {e['summary']}" for e in news[-6:]
+                                  if f"· {e['summary']}" not in res.lines]
+                with db.transaction(con):
+                    state.consume_events(con, run["id"], news)
             if signals:
                 with db.transaction(con):
                     state.advance_cursor(con, run["id"], state.SIGNAL_CONSUMER, signals_seq)

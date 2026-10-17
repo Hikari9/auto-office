@@ -302,9 +302,10 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
     # delta-only amendment by its delta, which becomes plan text.
     old_lines = set(current["body"].splitlines())
     added = "\n".join(line for line in new_text.splitlines() if line not in old_lines)
-    if AUTHORITY_TERMS.search(added):
-        raise Refused("contract-level-change", "this delta touches the authority envelope (external, irreversible, or "
-                      "destructive action); it is not an ordinary amendment", scope=scope,
+    authority = AUTHORITY_TERMS.search(added)
+    if authority:
+        raise Refused("contract-level-change", f"this delta names authority action {authority.group(0)!r} "
+                      "(external, irreversible, or destructive); it is not an ordinary amendment", scope=scope,
                       next_step=f'office amend {scope} --contract -- "<request>" (and user authorization for the new action)')
     changes = _diff(con, run, parsed.tasks)
     contract_hits = changes["contract"] + [f"{t} (new, overlapping scope)" for t in changes["overlap_new"]]
@@ -462,7 +463,8 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
         ripple = _ripple(con, run, prior_graph, sync)
         affected -= set(ripple)
         affected = sorted(affected)
-        _deliver(con, run, amendment_id, affected, delta.strip(), version)
+        _deliver(con, run, amendment_id, affected, delta.strip(), version,
+                 hold=_amended_holds(con, run, affected))
         _deliver(con, run, amendment_id, ripple, f"{delta.strip()} (a task you build on changed its contract)", version,
                  hold=ripple)
         flagged = _envelope_changes(con, run, parsed)
@@ -537,11 +539,15 @@ def contract_from_planner(con, run: dict, amendment_id: str | None, changes: dic
     """Deliver a planner-submitted contract revision. Caller holds tx."""
     aid = amendment_id or "P" + str(version)
     affected = sorted(set(changes.get("contract", [])) | set(changes.get("acceptance", [])))
-    _deliver(con, run, aid, affected, f"plan p{version} contract revision", version)
+    # Validate every revised scope BEFORE launching any newly affected worker.
+    # Otherwise a first relaunch can hold a lease against the second task from
+    # the same atomic contract revision (#660).
+    _sync_leases(con, run, changes.get("contract", []))
+    _deliver(con, run, aid, affected, f"plan p{version} contract revision", version,
+             hold=_amended_holds(con, run, affected))
     ripple = _ripple(con, run, prior_graph or {}, changes)
     _deliver(con, run, aid, ripple, f"plan p{version} contract revision (a task you build on changed its contract)",
              version, hold=ripple)
-    _sync_leases(con, run, changes.get("contract", []))
     for t in state.tasks(con, run["id"]):
         if t["status"] == "paused" and (t.get("pause_reason") or "").startswith("contract amendment"):
             from office import gates
@@ -612,6 +618,38 @@ def _audit(con, run: dict, amendment_id: str, before: dict, version: int, delta:
                    f"{amendment_id} changed the contract of {', '.join(changed)} (plan p{version})", audience="runtime",
                    payload={"amendment": amendment_id, **record})
     return changed
+
+
+def _amended_holds(con, run: dict, task_ids: list[str]) -> list[str]:
+    """Defer dependent or overlapping relaunches in one atomic contract edit.
+
+    All changed contracts and leases are validated as a unit; only then do we
+    launch compatible roots. Dependants (and overlapping peers) remain
+    changes_required for the orchestrator to rerun after the roots are accepted.
+    """
+    changed = {tid: state.get_task(con, run["id"], tid) for tid in task_ids}
+    changed = {tid: task for tid, task in changed.items() if task and task["status"] != "cancelled"}
+    # Topological order with task id as the deterministic tie-break. The plan
+    # parser has already rejected cycles.
+    remaining = set(changed)
+    order = []
+    while remaining:
+        ready = sorted(tid for tid in remaining if not set(changed[tid]["depends"]) & remaining)
+        if not ready:
+            ready = sorted(remaining)  # defensive: plans normally reject cycles
+        order.extend(ready)
+        remaining.difference_update(ready)
+    launching = []
+    hold = []
+    for tid in order:
+        task = changed[tid]
+        deps = task["depends"]
+        unaccepted = [dep for dep in deps if (state.get_task(con, run["id"], dep) or {}).get("status") != "accepted"]
+        if unaccepted or any(planfile.scopes_overlap(task["scope"], prev["scope"]) for prev in launching):
+            hold.append(tid)
+        elif task.get("current_dispatch_id"):
+            launching.append(task)
+    return hold
 
 
 def _sync_leases(con, run: dict, task_ids: list[str]) -> None:

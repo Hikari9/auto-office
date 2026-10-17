@@ -1933,6 +1933,38 @@ def fallback_review(con, run: dict, spec: str, report: Path, *, inspected: list[
                          + " (shown on the landing receipt)"], next="exceptions only; office status")
 
 
+def _coowner_accepted_fix(con, run: dict, rows: list[dict]) -> list[tuple[str, str]]:
+    """An accepted *later* revision by one listed co-owner proves a fix.
+
+    Cloned finding rows represent the same defect for multiple owners. Only
+    one owner needs to have fixed it; the other unchanged accepted revisions
+    are then recomposed and independently reviewed (#670).
+    """
+    proof = []
+    codes = sorted({r["code"] for r in rows})
+    for code in codes:
+        clones = [r for r in rows if r["code"] == code]
+        owners = set(json.loads(clones[0].get("owners") or "[]"))
+        if len(owners) < 2 or any(set(json.loads(r.get("owners") or "[]")) != owners for r in clones):
+            return []
+        recorded_at = max(r["created_at"] for r in clones)
+        candidate = None
+        for tid in sorted(owners, key=_tid_key):
+            task = state.get_task(con, run["id"], tid)
+            if not task or task["status"] != "accepted" or not task.get("accepted_revision_id"):
+                continue
+            revision = con.execute("SELECT created_at FROM revisions WHERE id=? AND run_id=? AND task_id=?",
+                                   (task["accepted_revision_id"], run["id"], tid)).fetchone()
+            if revision and revision["created_at"] > recorded_at:
+                candidate = (tid, task["accepted_revision_id"])
+                break
+        if not candidate:
+            return []
+        proof.append(candidate)
+    return sorted(set(proof))
+
+
+
 def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | None = None) -> Result:
     """Fix or disposition non-blocking findings (APPROVED cleanup, #337). `fix`
     routes the repair to the owning tasks; it is not re-reviewed. With the user's
@@ -1967,7 +1999,15 @@ def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | 
         if not rows:
             raise Usage("unknown-finding", f"no non-blocking finding {spec}", next_step="office inspect convergence")
         blocking = [r for r in rows if r["state"] == "open" and not owned]
-        if blocking and (how != "dismissed" or not quote):
+        coowner_fix = _coowner_accepted_fix(con, run, blocking) if blocking and how == "fixed" else []
+        if blocking and how == "fixed" and not coowner_fix:
+            raise Refused("fix-unverified", f"{spec} is blocking: no accepted later revision from a "
+                          "co-owner proves it fixed. A fix is not a dismissal; the independent lane "
+                          "recheck must still verify the correction", scope=scope_id,
+                          next_step="office rerun <owner> --resume|--fresh after its repair, or "
+                                    f'office disposition {spec} dismissed --quote "<user\'s words>" '
+                                    "only if the user chooses to waive it")
+        if blocking and how != "fixed" and (how != "dismissed" or not quote):
             names = ", ".join(sorted({r["code"] for r in blocking}))
             raise Usage("user-quote-required", f"{spec} names blocking finding(s) {names}: only the user may dismiss a "
                         "blocking finding (a reviewer defect, say), with their words in --quote",
@@ -1976,18 +2016,29 @@ def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | 
             raise Usage("note-required", "say what was done (the fix, why dismissed, or the follow-up issue)")
         if how == "fix" and any(r["gate_kind"] == "plan_review" for r in rows):
             raise Usage("plan-fix", "plan findings are fixed by the planner in the plan; record fixed once it is in")
-        by = "user" if blocking else "orchestrator"
+        by = "user" if blocking and not coowner_fix else "orchestrator"
         con.execute(f"UPDATE findings SET disposition=?, disposition_note=?, disposition_by=?, disposition_at=? "
                     f"WHERE id IN ({','.join('?' * len(rows))})",
                     (how, note or None, by, now_iso(), *[r["id"] for r in rows]))
         held = [r["id"] for r in rows if r["state"] == "open"]
         if held:
-            # The disposition, not a reviewer's resolution: the finding stops holding work and its
-            # blocking verdict stays recorded.
-            con.execute(f"UPDATE findings SET state='nonblocking', updated_at=? WHERE id IN ({','.join('?' * len(held))})",
-                        (now_iso(), *held))
+            # Co-owner fix is evidence of repair, not a waiver: resolve these
+            # routed rows, then recompose/review the new accepted revisions.
+            # Dismissal remains a user-authorized nonblocking disposition.
+            con.execute(f"UPDATE findings SET state=?, updated_at=? WHERE id IN ({','.join('?' * len(held))})",
+                        ("resolved" if coowner_fix else "nonblocking", now_iso(), *held))
             if owned and not plans.blocking_findings(con, run):
                 plans._unpause_plan_holds(con, run)
+            if coowner_fix:
+                for tid in sorted({r["task_id"] for r in blocking if r.get("task_id")}, key=_tid_key):
+                    task = state.get_task(con, run["id"], tid)
+                    if not task or task["status"] != "changes_required":
+                        continue
+                    if con.execute(f"SELECT 1 FROM findings WHERE run_id=? AND task_id=? AND {contract.TASK_WORK_FINDINGS}",
+                                   (run["id"], tid)).fetchone():
+                        continue
+                    if task.get("accepted_revision_id") == task.get("current_revision_id"):
+                        state.update_task(con, run["id"], tid, status="accepted", pause_reason=None)
         reopened = []
         if how == "fix":
             for tid in sorted({r["task_id"] for r in rows if r.get("task_id")}, key=_tid_key):
@@ -1997,7 +2048,14 @@ def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | 
                                       pause_reason=f"APPROVED cleanup: fix {', '.join(codes)} (no re-review)")
                     reopened.append(tid)
         settled = None
-        if blocking:
+        if coowner_fix:
+            state.emit(con, run, "finding.coowner_fixed",
+                       f"{spec}: repaired by accepted co-owner revision "
+                       + ", ".join(f"{tid} {rev}" for tid, rev in coowner_fix)
+                       + "; composition still requires independent RECHECK", audience="runtime")
+            for tid, _ in coowner_fix:
+                on_task_accepted(con, run, tid)  # recompose the lane; independent review still gates it
+        if blocking and not coowner_fix:
             dismissed = sorted({r["code"] for r in blocking})
             for code in dismissed:
                 con.execute("INSERT INTO authorizations(id, run_id, kind, target, requirements_version, authorized_by, "
@@ -2008,12 +2066,15 @@ def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | 
         state.emit(con, run, "finding.disposition", f"{scope_id}:{','.join(codes)} {how}"
                    + (f" by the user ({quote[:100]})" if blocking else (f" ({note[:100]})" if note else "")),
                    audience="runtime")
-    if settled:
+    if settled or coowner_fix:
         from office import jobs
         jobs.kick(con, run["id"])
     nxt = (" ; ".join(f"office rerun {t} --resume|--fresh" for t in reopened) if reopened
            else "exceptions only; office status")
-    return Result(lines=[f"{scope_id}:{','.join(codes)} {how}" + (f" on the user's authority ({quote[:80]})" if blocking else "")
+    return Result(lines=[f"{scope_id}:{','.join(codes)} {how}"
+                         + (f" on the user's authority ({quote[:80]})" if blocking and not coowner_fix else "")
+                         + (f"; accepted co-owner revision {', '.join(rev for _, rev in coowner_fix)}; recheck required"
+                            if coowner_fix else "")
                          + (f"; cleanup routed to {', '.join(reopened)}" if reopened else "")
                          + (f"; {settled}" if settled else "")], next=nxt)
 
