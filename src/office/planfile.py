@@ -39,11 +39,20 @@ from office import task_descriptors
 TASK_HEADING = re.compile(r"^###\s+(T\d+)\s*[:.\-–]\s*(.+?)\s*$")
 SECTION = re.compile(r"^##\s+(.+?)\s*$")
 KEYVAL = re.compile(r"^([A-Za-z_][A-Za-z_ ]*?)\s*:\s*(.*)$")
+# Run-level Requirements keys also accept hyphens (`non-goals:`); task fields do not.
+REQ_KEYVAL = re.compile(r"^([A-Za-z_][A-Za-z_ -]*?)\s*:\s*(.*)$")
 # Run-level Requirements fields; an indented `key:` line with one of these ends a wrapped list item.
 REQUIREMENT_KEYS = frozenset({
     "goal", "done", "non_goals", "actions", "checks", "blast_radius", "irreversible",
     "size_class", "lightweight", "end_state", "deploy_preview", "deploy_prod", "deploy_verify",
 })
+
+
+def requirement_key(raw: str) -> str:
+    """The one normalization for run-level Requirements keys: case, spaces and hyphens fold to `snake_case`."""
+    return raw.strip().lower().replace(" ", "_").replace("-", "_")
+
+
 BLAST = ("local", "repo", "production", "production-data")
 SIZES = ("S", "M", "L", "XL")
 # How far a run goes after its PRs (3.2): stop and ask, preview deploy only,
@@ -131,12 +140,13 @@ def parse(text: str) -> ParsedPlan:
             elif task is None and section == "requirements" and list_key:
                 req.setdefault(list_key, []).append(item)
             continue
-        m = KEYVAL.match(stripped)
+        in_req = section == "requirements" and task is None
+        m = (REQ_KEYVAL if in_req else KEYVAL).match(stripped)
         if (section == "requirements" and task is None and
                 list_key and indented and
                 isinstance(req.get(list_key), list) and req[list_key] and
                 (m is None or
-                 m.group(1).strip().lower().replace(" ", "_") not in REQUIREMENT_KEYS)):
+                 requirement_key(m.group(1)) not in REQUIREMENT_KEYS)):
             # Markdown soft-wrapped list item: preserve the full user requirement.
             req[list_key][-1] += " " + stripped
             continue
@@ -144,7 +154,8 @@ def parse(text: str) -> ParsedPlan:
             if task is not None:
                 task["notes"].append(stripped)
             continue
-        key, value = m.group(1).strip().lower().replace(" ", "_"), m.group(2).strip()
+        key = requirement_key(m.group(1)) if in_req else m.group(1).strip().lower().replace(" ", "_")
+        value = m.group(2).strip()
         if task is not None and in_visual and indented and key in VISUAL_KEYS:
             task["visual"][key] = value
             continue
@@ -258,7 +269,7 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
         "irreversible": req.get("irreversible"),
         "size_class": req.get("size_class"),
         "lightweight": ({"rationale": str(req["lightweight"]).strip()} if "lightweight" in req else None),
-        "non_goals": (req.get("non_goals") or req.get("non-goals") or []),
+        "non_goals": (req.get("non_goals") or []),
         "named_actions": actions,
         "end_state": req.get("end_state"),
         "deploy": {k: req[f"deploy_{k}"] for k in ("preview", "prod", "verify") if req.get(f"deploy_{k}")},
