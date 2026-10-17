@@ -127,6 +127,12 @@ def parse(text: str) -> ParsedPlan:
                 req.setdefault(list_key, []).append(item)
             continue
         m = KEYVAL.match(stripped)
+        if (m is None and section == "requirements" and task is None and
+                list_key and indented and
+                isinstance(req.get(list_key), list) and req[list_key]):
+            # Markdown soft-wrapped list item: preserve the full user requirement.
+            req[list_key][-1] += " " + stripped
+            continue
         if not m:
             if task is not None:
                 task["notes"].append(stripped)
