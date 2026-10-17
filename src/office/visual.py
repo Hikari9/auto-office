@@ -39,7 +39,7 @@ PRESENTATION = ("*.css", "*.scss", "*.sass", "*.less", "*.html", "*.htm", "*.jsx
                 "*.ttf", "*.otf", "*.liquid", "*.hbs", "*.ejs", "*.erb", "*.lava", "*.njk", "*.twig")
 UI_WORDS = re.compile(r"\b(ui|layout|responsive|mobile|desktop|viewport|on.?screen|visual(ly)?|prototype|pixel|css|"
                       r"styling|button|click|tap|menu|modal|navbar|navigation|hover|dark mode|breakpoint)\b", re.I)
-ALLOWED_VERBS = frozenset({"click", "hover", "type", "wait", "scroll", "navigate"})
+ALLOWED_VERBS = frozenset({"click", "hover", "type", "select", "wait", "scroll", "navigate"})
 
 
 # ------------------------------------------------------------------ applicability
@@ -71,22 +71,67 @@ def viewports(spec: dict) -> list[tuple[str, int, int]]:
     return out or [("desktop", 1440, 900), ("mobile", 390, 844)]
 
 
+def _state_steps(actions: str) -> list[str]:
+    """Split on ';;' or legacy comma-before-verb, never a comma inside CSS.
+
+    A selector list ('#one, #two') and :is(a, b) are one argument. Commas
+    separating old-style steps remain supported when the next token is a verb.
+    """
+    parts, start, depth, quote = [], 0, [], None
+    matching = {")": "(", "]": "[", "}": "{"}
+    for i, ch in enumerate(actions):
+        if quote:
+            if ch == quote and (i == 0 or actions[i - 1] != chr(92)):
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        elif ch in "([{":
+            depth.append(ch)
+        elif ch in ")]}" and depth and depth[-1] == matching[ch]:
+            depth.pop()
+        elif not depth and (actions.startswith(";;", i) or (
+                ch == "," and re.match(r"\s*(?:click|hover|type|select|wait|scroll|navigate)\s+", actions[i + 1:], re.I))):
+            step = actions[start:i].strip()
+            if step:
+                parts.append(step)
+            start = i + (2 if actions.startswith(";;", i) else 1)
+    last = actions[start:].strip()
+    if last:
+        parts.append(last)
+    return parts
+
+
 def states(spec: dict) -> list[dict]:
-    """'default; menu-open = click [data-test=menu] -> expect nav.open'"""
+    """States use ';'; steps use ';;' or legacy comma-before-verb.
+
+    E.g. 'default; selected = select #room label:Big Heroes ;; click #go'.
+    Plain values use 'select #room vip'; explicit 'label:' supports spaces.
+    """
     raw = spec.get("states") or "default"
     out = []
-    for item in [s.strip() for s in raw.split(";") if s.strip()]:
+    for item in [s.strip() for s in re.split(r"(?<!;);(?!;)", raw) if s.strip()]:
         name, _, actions = item.partition("=")
         steps, expect = [], None
         actions = actions.strip()
         if "->" in actions:
             actions, _, exp = actions.partition("->")
             expect = exp.strip().removeprefix("expect").strip()
-        for step in [a.strip() for a in actions.split(",") if a.strip()]:
+        for step in _state_steps(actions):
             verb, _, arg = step.partition(" ")
             steps.append({"verb": verb.lower(), "arg": arg.strip()})
         out.append({"name": name.strip() or "default", "steps": steps, "expect": expect})
     return out
+
+
+def _select_target(target: str) -> tuple[str, str, str]:
+    """Return (selector, value-or-label, match-kind) for native selects."""
+    explicit = re.search(r"\s+(label|value):", target, re.I)
+    if explicit:
+        selector, option = target[:explicit.start()].strip(), target[explicit.end():].strip()
+        return selector, option, explicit.group(1).lower()
+    selector, sep, option = target.strip().partition(" ")
+    return selector.strip() if sep else "", option.strip() if sep else "", "value"
 
 
 def reference_path(run: dict, task: dict, worktree: Path | None = None) -> Path | None:
@@ -191,6 +236,10 @@ def preflight(tasks: list[dict]) -> tuple[list[str], list[str]]:
                 verb = step.get("verb", "")
                 if verb and verb not in ALLOWED_VERBS:
                     errors.append(f"{t['id']}: visual state '{st['name']}' uses unknown verb '{verb}'")
+                elif verb == "select":
+                    sel, choice, _ = _select_target(step.get("arg", ""))
+                    if not sel or not choice:
+                        errors.append(f"{t['id']}: visual state '{st['name']}' select needs a selector and option")
                 elif verb == "navigate":
                     _, err = validate_navigate(url, step.get("arg", ""), allow_remote_preview=allow_remote)
                     if err:
@@ -702,8 +751,9 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
             if step["verb"] == "navigate":
                 continue
             target = step["arg"]
-            if step["verb"] in ("click", "hover", "type"):
-                sel = target.partition(" ")[0] if step["verb"] == "type" else target
+            if step["verb"] in ("click", "hover", "type", "select"):
+                sel = (_select_target(target)[0] if step["verb"] == "select" else
+                       target.partition(" ")[0] if step["verb"] == "type" else target)
                 try:
                     if page.query_selector(sel) is None:
                         return {"cause": "spec",
@@ -719,6 +769,16 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
                 elif step["verb"] == "type":
                     sel, _, text = target.partition(" ")
                     page.fill(sel, text, timeout=8000)
+                elif step["verb"] == "select":
+                    sel, option, kind = _select_target(target)
+                    if kind == "label":
+                        page.select_option(sel, label=option, timeout=8000)
+                    else:
+                        try:
+                            page.select_option(sel, value=option, timeout=2000)
+                        except PWError:
+                            # Bare options can name either a value or a visible label.
+                            page.select_option(sel, label=option, timeout=8000)
                 elif step["verb"] == "wait":
                     page.wait_for_selector(target, timeout=8000)
                 elif step["verb"] == "scroll":
