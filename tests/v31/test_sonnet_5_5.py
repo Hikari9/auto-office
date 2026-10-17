@@ -11,8 +11,12 @@ def _rows(model_id, effort="high"):
             if r.get("model_id") == model_id and r.get("effort") == effort]
 
 
+def _claude_row(model_id, effort="high"):
+    return next(r for r in _rows(model_id, effort) if r["invocation_harness"] == "claude")
+
+
 def test_sonnet_5_5_high_row_is_dispatchable_with_a_sourced_score():
-    [row] = _rows("claude-sonnet-5-5")
+    row = _claude_row("claude-sonnet-5-5")
     assert row["invocation_harness"] == "claude"
     assert row["invocation_model_id"] == "claude-sonnet-5-5"
     assert row.get("dispatchable") is not False
@@ -23,7 +27,7 @@ def test_sonnet_5_5_high_row_is_dispatchable_with_a_sourced_score():
 
 def test_sonnet_5_5_high_clears_the_executor_floor():
     floor = config.load_yaml(config.default_config_path())["roles"]["executor"]["floor"]
-    [row] = _rows("claude-sonnet-5-5")
+    row = _claude_row("claude-sonnet-5-5")
     ok, reason = scoring.evaluate_capability_floor(row, floor)
     assert ok, reason
 
