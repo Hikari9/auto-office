@@ -5,11 +5,19 @@ Tests outside tests/v31 exercise the retained Auto Office 3.0 helper surface
 scripts/office_runtime.py expects of a 3.0 run's own helper process.
 """
 import os
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
 from hypothesis import HealthCheck, settings
+
+# Subprocesses spawned by tests resolve `python3` through PATH. Put the interpreter running pytest first
+# so they get its dependencies (jsonschema, ...) even when the invoking shell has not activated the venv.
+_INTERPRETER_DIR = str(Path(sys.executable).parent)
+_path_entries = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+if _path_entries[:1] != [_INTERPRETER_DIR]:
+    os.environ["PATH"] = os.pathsep.join([_INTERPRETER_DIR, *_path_entries])
 
 # Property tests must be reproducible: `derandomize` fixes the example sequence per test, and no
 # example database means a laptop run and a hook run see the same inputs. A failure still prints
