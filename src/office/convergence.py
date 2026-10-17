@@ -1771,7 +1771,7 @@ def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:
                   f"{scope['id']}:{m.group(2).lower()} --report <file> reviews it yourself; a waiver needs landing authority)")
 
 
-FALLBACK_STATUSES = (contract.UNAVAILABLE, contract.INVALID_RESULT)
+FALLBACK_STATUSES = (contract.UNAVAILABLE, contract.INVALID_RESULT, contract.EVIDENCE_BLOCKED)
 SPEC_DEFECT = "SPEC_DEFECT"  # a visual gate's evidence state: the plan's visual block cannot be captured (#454)
 # Scope states in which the current composition's review is the one in play (not held, repairing or recomposing).
 FALLBACK_SCOPE_STATUSES = ("reviewing", "unavailable", "attention", "evidence_blocked")

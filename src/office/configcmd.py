@@ -464,6 +464,14 @@ def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
     changed = [b for b in blocks if policy.get(b) != live.get(b)]
     if policy.get(route_policy.PROVENANCE_KEY) != live[route_policy.PROVENANCE_KEY] and "routing" not in changed:
         changed.append("routing")
+    # Reconcile a raw roles-file drift even when it resolves to an equivalent
+    # effective policy: status must not keep warning after quoted apply (#663).
+    baseline = policy.get(cfg.FILE_BLOCKS_KEY)
+    if baseline is not None:
+        current = cfg.file_blocks(repo, files)
+        if any((baseline.get(t) or {}).get("roles") != (current.get(t) or {}).get("roles")
+               for t in ("user", "repo")) and "roles" not in changed:
+            changed.append("roles")
     short = run["id"][:8]
     if not changed:
         return Result(lines=[f"run {short} already routes from the current config files; nothing changed"])
