@@ -181,9 +181,8 @@ def doctor(fix: bool = False, probe_vision: bool = False, probe_route: str | Non
     for aid, a in sorted(all_adapters.items()):
         if a.get("office_profiles"):
             res.add(f"adapter {aid}: " + (f"installed {adapters.harness_version(a)}" if adapters.installed(a) else "not installed"))
-    visual_status, visual_problem = _visual_capture_status()
+    visual_status, _ = _visual_capture_status()
     res.add(visual_status)
-    problems += int(visual_problem)
     con = db.connect()
     try:
         proofs = con.execute("SELECT harness, model, effort, result, proved_at FROM capability_proofs WHERE capability='vision' "
