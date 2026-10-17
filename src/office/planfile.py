@@ -39,6 +39,20 @@ from office import task_descriptors
 TASK_HEADING = re.compile(r"^###\s+(T\d+)\s*[:.\-–]\s*(.+?)\s*$")
 SECTION = re.compile(r"^##\s+(.+?)\s*$")
 KEYVAL = re.compile(r"^([A-Za-z_][A-Za-z_ ]*?)\s*:\s*(.*)$")
+# Run-level Requirements keys also accept hyphens (`non-goals:`); task fields do not.
+REQ_KEYVAL = re.compile(r"^([A-Za-z_][A-Za-z_ -]*?)\s*:\s*(.*)$")
+# Run-level Requirements fields; an indented `key:` line with one of these ends a wrapped list item.
+REQUIREMENT_KEYS = frozenset({
+    "goal", "done", "non_goals", "actions", "checks", "blast_radius", "irreversible",
+    "size_class", "lightweight", "end_state", "deploy_preview", "deploy_prod", "deploy_verify",
+})
+
+
+def requirement_key(raw: str) -> str:
+    """The one normalization for run-level Requirements keys: case, spaces and hyphens fold to `snake_case`."""
+    return raw.strip().lower().replace(" ", "_").replace("-", "_")
+
+
 BLAST = ("local", "repo", "production", "production-data")
 SIZES = ("S", "M", "L", "XL")
 # How far a run goes after its PRs (3.2): stop and ask, preview deploy only,
@@ -126,12 +140,22 @@ def parse(text: str) -> ParsedPlan:
             elif task is None and section == "requirements" and list_key:
                 req.setdefault(list_key, []).append(item)
             continue
-        m = KEYVAL.match(stripped)
+        in_req = section == "requirements" and task is None
+        m = (REQ_KEYVAL if in_req else KEYVAL).match(stripped)
+        if (section == "requirements" and task is None and
+                list_key and indented and
+                isinstance(req.get(list_key), list) and req[list_key] and
+                (m is None or
+                 requirement_key(m.group(1)) not in REQUIREMENT_KEYS)):
+            # Markdown soft-wrapped list item: preserve the full user requirement.
+            req[list_key][-1] += " " + stripped
+            continue
         if not m:
             if task is not None:
                 task["notes"].append(stripped)
             continue
-        key, value = m.group(1).strip().lower().replace(" ", "_"), m.group(2).strip()
+        key = requirement_key(m.group(1)) if in_req else m.group(1).strip().lower().replace(" ", "_")
+        value = m.group(2).strip()
         if task is not None and in_visual and indented and key in VISUAL_KEYS:
             task["visual"][key] = value
             continue
@@ -245,7 +269,7 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
         "irreversible": req.get("irreversible"),
         "size_class": req.get("size_class"),
         "lightweight": ({"rationale": str(req["lightweight"]).strip()} if "lightweight" in req else None),
-        "non_goals": (req.get("non_goals") or req.get("non-goals") or []),
+        "non_goals": (req.get("non_goals") or []),
         "named_actions": actions,
         "end_state": req.get("end_state"),
         "deploy": {k: req[f"deploy_{k}"] for k in ("preview", "prod", "verify") if req.get(f"deploy_{k}")},
@@ -357,6 +381,136 @@ def _validate(plan: ParsedPlan) -> None:
         t.pop("entry_lines", None)  # only for messages; stored tasks keep their shape
 
 
+_PLACEHOLDER_SENTINELS = {"manual", "none", "n/a", "na", "skip", "skipped", "no deploy", "not applicable",
+                          "tbd", "tba", "todo", "pending", "later", "deferred", "nothing", "no", "-", "--"}
+# A deploy value that opens with one of these words is prose, never a program name.
+_PLACEHOLDER_LEADS = {"manual", "manually", "handoff", "hand", "human", "operator", "tbd", "tba", "todo", "n/a", "na",
+                      "none", "skip", "skipped", "pending", "deferred", "not", "no", "nothing", "n.a", "later"}
+_PROSE_KEYWORD = re.compile(r"\b(manual(ly)?|hand[- ]?off|hand[- ]?over|by hand|human|operator|tbd|todo|n/a|"
+                            r"not applicable|no deploy|ops|runbook|release manager|admin|someone|somebody|"
+                            r"approval|after merge|slack|ticket)\b", re.I)
+# Real program names whose first word is never ordinary English.
+_KNOWN_COMMANDS = frozenset("""
+npm pnpm yarn npx bun bunx uv uvx python python3 pip pip3 pipx poetry hatch tox nox pytest conda twine maturin
+ruby rake gem rails thor bundler cargo rustup docker podman nerdctl compose docker-compose podman-compose
+kubectl helm kustomize skaffold minikube k3d k3s oc argocd argo flux istioctl linkerd tkn
+terraform tofu terragrunt packer vagrant ansible ansible-playbook chef knife puppet salt pulumi cdk cdktf nomad vault
+git gh glab hub svn hg vercel flyctl heroku aws aws-vault gcloud gsutil bq az azd swa func firebase supabase prisma
+alembic sh bash zsh dash fish node deno office mvn mvnw gradle gradlew ant sbt lein dotnet php composer artisan
+wp drush serverless sls wrangler netlify surge amplify expo eas fastlane railway doctl kamal pm2 forever
+systemctl supervisorctl nginx apachectl caddy ssh scp sftp lftp rsync rclone s3cmd curl wget http httpie openssl
+tar zip unzip cp mv rm mkdir touch chmod chown ln cat tee sed awk grep jq yq xargs parallel nohup nice timeout
+sudo doas env tmux screen turbo nx lerna rush bazel cmake ninja capistrano fab invoke pyinfra gunicorn
+echo cd printf pwd export unset trap alias umask ulimit sleep true false
+""".split()) | {"[", "[[", ".", ":"}
+# Real programs (or builtins) that are also ordinary English words: prose can open with them
+# ("make sure ops deploys it", "just deploy manually"), so they need an argument shaped like a command.
+_AMBIGUOUS_COMMANDS = frozenset("""
+make just go task time test render fly cap bundle sam nix mage set wait read type kill command exit return
+source exec eval
+""".split())
+# Commands that run their (first non-flag) argument as another command.
+_WRAPPER_COMMANDS = frozenset("sudo doas env nohup nice timeout xargs time exec command".split())
+_STOPWORDS = frozenset("""
+a an the it this that these those sure sense way note ops later now then soon first next once when while
+if after before until and or but so to for of on in at by with without up out off over again also just only
+""".split())
+_SCRIPT_EXT = (".sh", ".bash", ".zsh", ".py", ".rb", ".js", ".mjs", ".cjs", ".ts", ".pl", ".ps1", ".bat", ".cmd",
+               ".php", ".exe", ".go", ".mk", ".yml", ".yaml", ".json", ".toml", ".env")
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_FLAG = re.compile(r"^--?[A-Za-z0-9]")
+_SLASH_PROSE = {"and/or", "n/a", "yes/no", "either/or", "he/she", "his/her", "w/o", "w/", "b/c", "i/o", "ci/cd"}
+_PATH = re.compile(r"^(?:\.{0,2}/|~/?)\S*$|^[\w.@+~-]+(?:/[\w.@+~${}-]*)+$")
+_TOOL_NAME = re.compile(r"^[a-z][a-z0-9_.+-]*$")
+
+
+def _is_path(token: str) -> bool:
+    if token.lower() in _SLASH_PROSE or token.endswith((":", ",", ")", ";")):
+        return False
+    if token.lower().endswith(_SCRIPT_EXT) and re.fullmatch(r"[\w.@+~/${}-]+", token):
+        return True
+    return bool(_PATH.match(token)) and token not in ("/", "~")
+
+
+def _evidence(rest: list[str], quotes: bool = False) -> bool:
+    """Strong, punctuation-independent signs that the remaining words are arguments to a program."""
+    for tok in rest:
+        if (_FLAG.match(tok) or _ENV_ASSIGN.match(tok) or _is_path(tok) or tok in ("&&", "||", "|", ">", ">>", "<")
+                or tok.startswith(("$", "`")) or (quotes and tok[:1] in ("'", '"'))):
+            return True
+    return False
+
+
+def _command_shaped(words: list[str]) -> bool:
+    """True only when the first word can be a program the shell would run (#662)."""
+    first = words[0]
+    while first[:1] in ("(", "{", "!") and len(first) > 1:
+        first = first[1:]  # `(cd app && make)`, `{make; }`
+    if first in ("(", "{", "!"):
+        return len(words) > 1 and _command_shaped(words[1:])
+    words = [first, *words[1:]]
+    low = first.lower()
+    rest = words[1:]
+    if low in _PLACEHOLDER_LEADS or low.rstrip(":,.;!-") in _PLACEHOLDER_LEADS:
+        return False
+    if _ENV_ASSIGN.match(first):
+        return True
+    if re.match(r"^\$(?:\(|\{|[A-Za-z_])", first):
+        return True
+    if _is_path(first):
+        return True
+    if first in _AMBIGUOUS_COMMANDS:
+        if first in _WRAPPER_COMMANDS:
+            inner = [t for t in rest if not (_FLAG.match(t) or _ENV_ASSIGN.match(t) or re.fullmatch(r"\d+[smhd]?", t))]
+            return not inner or (inner[0].lower() not in _STOPWORDS and _command_shaped(inner))
+        if not rest:
+            return first not in ("wait", "read", "type")
+        if _evidence(rest, quotes=first in ("source", "eval", "test", "set", "exec")):
+            return True
+        if first in ("test", "set", "wait", "read", "type", "kill", "command", "return", "exit", "source", "eval", "exec"):
+            return False  # builtins without a flag/path/quoted argument read as sentences
+        if rest[0].lower() in _STOPWORDS or not re.fullmatch(r"[\w.:@-]+", rest[0]):
+            return False
+        return len(rest) == 1 or not _PROSE_KEYWORD.search(" ".join(rest))
+    if first == "cd":  # `cd app && make` yes; `cd to the server and deploy` no
+        return len(rest) <= 1 or rest[1] in ("&&", "||", ";") or rest[0].endswith(";")
+    if first in ("export", "unset", "alias", "trap"):
+        return not rest or _evidence(rest)
+    if first in _KNOWN_COMMANDS:
+        return True
+    # An unfamiliar executable name counts only when it is plainly a tool: lowercase, no sentence
+    # punctuation, and followed by a flag, a path (hyphenated or digit names only), or nothing
+    # (hyphenated, underscored or digit names only).
+    if _TOOL_NAME.match(first) and not _PROSE_KEYWORD.search(first) and first not in _STOPWORDS:
+        decorated = "-" in first or "_" in first or any(c.isdigit() for c in first)
+        if rest and (_FLAG.match(rest[0]) or (decorated and _is_path(rest[0]))):
+            return True
+        if not rest and decorated:
+            return True
+    return False
+
+
+def manual_deploy_placeholder(command: object) -> bool:
+    """True when a deploy value is a manual handoff or other prose, never a shell command (#662).
+
+    deploy commands run with shell=True, so the value is classified structurally and
+    fails closed: it is a command only when its first word is command-shaped (a path,
+    an env assignment, a known program or builtin, or a plainly tool-named word followed
+    by a flag or path). Parentheses, quotes, colons and the like are never evidence of a
+    command, so no punctuation can turn prose into one. A real command that merely
+    contains the word manual or handoff (`make manual`, `./scripts/manual-deploy.sh`)
+    stays valid."""
+    if not isinstance(command, str):
+        return False
+    text = command.strip()
+    if not text:
+        return False
+    low = re.sub(r"\s+", " ", text.lower()).rstrip(".!")
+    if low in _PLACEHOLDER_SENTINELS:
+        return True
+    return not _command_shaped(text.split())
+
+
 def end_state_problems(end: str | None, deploy: dict, repo=None) -> tuple[list[str], list[str]]:
     """(errors, warnings) for an end state and its deploy commands, checked on
     the merged requirements (start flags plus the plan). `repo` (default: the
@@ -368,6 +522,13 @@ def end_state_problems(end: str | None, deploy: dict, repo=None) -> tuple[list[s
         errors.append("end_state e2e needs `deploy_prod: <command>`")
     if end in ("preview", "e2e") and not deploy.get("verify"):
         warnings.append("no `deploy_verify:` command; the deploy is recorded without verification")
+    # A plan may name its manual handoff as deploy_prod: or deploy_verify:.
+    # Reject that plan before approval; landing must never execute the prose.
+    fields = ("preview", "verify") if end == "preview" else ("prod", "verify") if end == "e2e" else ()
+    for key in fields:
+        if manual_deploy_placeholder(deploy.get(key)):
+            errors.append(f"end_state {end}: deploy_{key} is a manual handoff, not an executable command; "
+                          "use a real deploy command or choose a non-deploy end state and hand off")
     from pathlib import Path
     from office import land, paths
     if repo is None and (ident := paths.repo_identity()):

@@ -93,6 +93,8 @@ def main(argv: list[str]) -> int:
                 pr["base"] = opt(argv, "--base")
             if "--body-file" in argv:
                 pr["body"] = Path(opt(argv, "--body-file")).read_text()
+            if "--title" in argv:
+                pr["title"] = opt(argv, "--title")
         elif argv[1] == "comment":
             pr["comments"].append(opt(argv, "--body"))
         elif argv[1] == "ready":
@@ -111,7 +113,8 @@ def main(argv: list[str]) -> int:
                 git_merge(pr, method)
                 pr["state"], pr["merged_with"] = "merged", method
         elif argv[1] == "view":
-            out = json.dumps({"number": pr["number"], "body": pr["body"], "state": pr["state"].upper(), "isDraft": pr["draft"],
+            out = json.dumps({"number": pr["number"], "body": pr["body"], "title": pr["title"],
+                              "state": pr["state"].upper(), "isDraft": pr["draft"],
                               "baseRefName": pr["base"], "headRefOid": remote_head(pr), **mergeability(s, pr),
                               "statusCheckRollup": s.get("checks", [])})
         elif argv[1] == "checks":

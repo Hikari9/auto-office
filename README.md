@@ -129,6 +129,44 @@ office doctor
 | **Hermes** | No automatic hook installation; use explicit `office` commands. |
 | **Herdr** | When running inside Herdr, dispatches can open real agent panes and Office tracks/reclaims them. |
 
+### Minimal CLI runtime lookup (TSV)
+
+After installing Office, save a small, editable harness lookup index without touching
+hooks, permissions, or model preferences:
+
+```bash
+office harness sync            # save ~/.config/auto-office/cli-runtimes.tsv and derived model lists
+office harness manifest --json # see resolved paths and missing/stale/unconfigured entries
+office harness list            # existing adapter health + the same lookup index
+```
+
+The TSV has exactly three fields (tab-separated, one harness per row):
+
+```tsv
+key	skill_path	models_path
+claude	skills/claude-cli/SKILL.md	models/claude.json
+codex	skills/codex-cli/SKILL.md	models/codex.json
+agy	skills/agy-cli/SKILL.md	models/agy.json
+```
+
+The shipped template also includes `pi`, `hermes`, `kilo`, `opencode` and `gemini`.
+A `skills/...` path resolves against the packaged/source Office resources, while
+`models/...` resolves against the TSV's directory (normally `~/.config/auto-office`).
+Absolute and `~/...` paths are supported for user-managed files. `office harness
+sync` preserves edited rows and comments; it only generates the default
+`models/<key>.json` files, **never** custom paths. You can change the manifest
+location with `OFFICE_CLI_RUNTIMES` (for isolated testing or separate machines).
+
+These JSON files are **read-only projections** of Office's authoritative catalog
+(seed + user overlay + lineage resolution), not another list to maintain by hand.
+They contain model IDs, invocation slugs, effort, and technical availability,
+not user policy, quota, or adapter trust. After explicit `office model add|disable|enable`,
+Office refreshes the generated files; after external catalog changes, run `office
+harness sync` again (the manifest/doctor commands label stale lists). A missing skill,
+missing adapter, or stale models file is `unconfigured`, **not routable by decree**.
+The existing adapter profiles, user preferences, run pins, safety and capability
+checks remain authoritative. See `skills/auto-adapter/SKILL.md` for registration.
+
 `office doctor` verifies the installed runtime, hook state, pinned runtimes, visual prerequisites, and known harness defects. If it reports `install: STALE`, reinstall the checkout rather than trusting the version string alone. `office doctor --fix` repairs Office-managed integration drift while preserving and backing up unrelated configuration.
 
 `office update --check` checks PyPI and, for source installs, compares the checkout with its tracked upstream without installing updates. `office update` pulls a clean Auto Office source checkout and reinstalls it, or upgrades the `auto-office` tool when installed from PyPI, then refreshes the runtime registration and runs `office doctor`.
@@ -588,6 +626,14 @@ COMPARABLE | INVALID_COMPARISON | NOT_APPLICABLE | CAPTURE_BLOCKED
 ```
 
 A visual reviewer is eligible only after its exact harness/model/effort path passes an image-sensitive conformance probe. Code review and visual judgment are different dispatches. Under `convergence-v1` the visual review runs once per lane, on the same composed commit as the lane's convergence review.
+
+A `visual:` contract can use `states: default; chosen = select #room vip ;; click #continue -> expect main`.
+Within one state, `;;` separates interaction steps without splitting CSS selectors (including `:is(a, b)` or selector
+lists). Legacy commas before another action verb still work. Native `<select>` controls use
+`select <CSS-selector> <option-value>`; use `label:<visible label>` for a label containing spaces, for example
+`select #room label:Big Heroes`. A bare option tries matching the value first, then the visible label.
+The selector itself may contain spaces when you use an explicit `label:` or `value:` choice. These state-step selectors may use Playwright selectors; `visual.selectors:` for DOM measurements
+accepts plain CSS only.
 
 Install the visual extra when you expect browser/UI work:
 

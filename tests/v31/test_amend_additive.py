@@ -258,3 +258,21 @@ def test_reverify_52fb0a1_leaks_are_refused(text):
 def test_issue_543_578_569_descriptive_and_local_branch_changes_are_ordinary(text):
     from office.amend import AUTHORITY_TERMS
     assert AUTHORITY_TERMS.search(text) is None
+
+@pytest.mark.parametrize("criterion", [
+    "playwright.prod.config.ts passes PORT and BASE_URL to the server",
+    "An audit insert runs before a data write",
+    "The unapplied migration defines the audit_insert and write_timestamp columns",
+])
+def test_ordinary_acceptance_text_does_not_claim_new_authority(env, criterion):
+    """#578: descriptive acceptance is not deployment or database authorization."""
+    _running(env)
+    code, out = env.office("amend", "T1", "--add-accept", criterion, "--", "verify test detail", env=EXTERNAL)
+    assert code == 0 and "contract-level-change" not in out, out
+
+
+def test_an_actual_authority_refusal_names_its_trigger(env):
+    """#578: real authority changes remain guarded and give diagnostic evidence."""
+    _running(env)
+    code, out = env.office("amend", "T1", "--", "deploy the service", env=EXTERNAL)
+    assert code == 4 and "contract-level-change" in out and "'deploy'" in out, out

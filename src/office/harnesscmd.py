@@ -26,7 +26,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, paths, user_catalog
+from office import adapters, cli_runtimes, paths, user_catalog
 from office.result import Result
 from office.state import OfficeError
 from office.util import now_iso
@@ -688,9 +688,47 @@ def harness_list(con) -> Result:
                      f" sign-in {auth:<8} rows {len(mine):<3} trust {trust} | smoke {smoke_txt}")
         data.append({"harness": aid, "origin": origin, "path": str(where), "installed": installed, "version": version,
                      "auth": auth, "auth_detail": auth_detail, "rows": len(mine), "trust": trust, "last_smoke": last})
+    registry = manifest_list()
+    lines.extend(["", *registry.lines])
     return Result(lines=lines or ["no adapters declare a launch form"],
-                  next="office harness validate <id>, or office harness scaffold <id> --binary <path> for a new one",
-                  data={"harnesses": data, "user_adapters": str(adapters.user_adapter_dir())})
+                  next="office harness validate <id>, or office harness sync for the skill/model-list index",
+                  data={"harnesses": data, "user_adapters": str(adapters.user_adapter_dir()),
+                        "cli_runtimes": registry.data}, exit_code=registry.exit_code)
+
+
+def manifest_list() -> Result:
+    """Read-only per-CLI skill/model-list lookup. No model or hook execution."""
+    try:
+        entries, saved = cli_runtimes.statuses()
+    except (cli_runtimes.ManifestError, OSError) as exc:
+        return Result(lines=[f"CLI runtimes manifest invalid: {exc}"],
+                      next="repair the TSV before office harness sync", exit_code=1)
+    path = cli_runtimes.location()
+    configured = sum(e["configured"] for e in entries)
+    lines = [f"CLI runtimes: {path} ({'saved' if saved else 'bundled defaults; not saved'}, "
+             f"{configured}/{len(entries)} configured)"]
+    lines.extend(f"  {e['key']:<9} skill {e['skill']:<7} models {e['models']:<7} "
+                 f"adapter {e['adapter']:<10} rows {e['model_count']:<3} "
+                 f"| {e['skill_path']} | {e['models_path']}" for e in entries)
+    return Result(lines=lines,
+                  next=None if saved else "office harness sync saves the editable TSV and derived model lists",
+                  data={"path": str(path), "saved": saved, "runtimes": entries, "configured": configured})
+
+
+def manifest_sync() -> Result:
+    """Explicit local write; preserve user paths, never install a harness or trust it."""
+    try:
+        path, entries, changed, warnings = cli_runtimes.sync()
+    except (cli_runtimes.ManifestError, OSError) as exc:
+        return Result(lines=[f"CLI runtime sync refused: {exc}"],
+                      next="repair the manifest or its writable models directory", exit_code=1)
+    status = manifest_list()
+    return Result(lines=[f"CLI runtime mapping saved: {path}; {entries} harnesses, "
+                         f"{changed} derived model list(s) refreshed",
+                         *[f"warning: {w}" for w in warnings], *status.lines],
+                  next="office harness manifest shows resolved skill/model-list paths without executing models",
+                  data=status.data)
+
 
 
 # ------------------------------------------------------------------ model
@@ -757,9 +795,10 @@ def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | N
         overlay["models"].append(row)
         added.append(f"{harness}/{mid}@{e}")
     target = user_catalog.save(overlay)
+    note = cli_runtimes.refresh_if_saved()
     return Result(lines=[f"added {', '.join(added)} (slug {slug}) to {target}",
                          "benchmark scores: none yet; an opted-in run fills them through office benchmarks brief|submit",
-                         "trust: valid-unverified until a recorded trust act"],
+                         "trust: valid-unverified until a recorded trust act", *([note] if note else [])],
                   next=f"office harness smoke {harness} --model {mid}", data={"added": added, "path": str(target)})
 
 
@@ -813,8 +852,9 @@ def model_disable(ident: str | None, *, reason: str | None = None) -> Result:
     overlay = _overlay_for_write()
     overlay["disabled"].append({**entry, "reason": reason or "", "at": now_iso()})
     target = user_catalog.save(overlay)
+    note = cli_runtimes.refresh_if_saved()
     rows = ", ".join(f"{r.get('invocation_harness')}/{r.get('model_id')}@{r.get('effort')}" for r in live)
-    return Result(lines=[f"disabled {rows} (dispatchable: false) in {target}"],
+    return Result(lines=[f"disabled {rows} (dispatchable: false) in {target}", *([note] if note else [])],
                   next="routing skips it from the next candidate build; office model list shows it disabled",
                   data={"disabled": ident, "rows": len(live), "changed": True, "path": str(target)})
 
@@ -835,8 +875,9 @@ def model_enable(ident: str | None) -> Result:
         return Result(lines=[f"{ident} has no user-overlay disable to remove"], data={"changed": False})
     overlay["disabled"] = kept
     target = user_catalog.save(overlay)
+    note = cli_runtimes.refresh_if_saved()
     return Result(lines=[f"removed {removed} user-overlay disable(s) for {ident} from {target}",
-                         "technical catalog gates and explicit denied_models still apply"],
+                         "technical catalog gates and explicit denied_models still apply", *([note] if note else [])],
                   next="office model list", data={"changed": True, "removed": removed, "path": str(target)})
 
 

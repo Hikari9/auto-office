@@ -10,7 +10,31 @@ import re
 import shlex
 from pathlib import PurePosixPath
 
-_NEGATED = re.compile(r"^\s*(?:never|do\s+not|don't|must\s+not|avoid|forbid)\b", re.I)
+_NEGATED = re.compile(r"^\s*(?:never(?!\s+mind\b)|do\s+not|don't|must\s+not|avoid|forbid)\b", re.I)
+# A prose item that mentions a push is safe only when the whole item is one
+# prohibition: negation, neutral adverbs, prohibitive verb, then an object made
+# of push forms, remote-write command text, refs, flags, inline code, or
+# "or"/"nor" repetitions of it. Anything else is rejected; no list of positive
+# words decides safety.
+_PROHIBITION = re.compile(
+    r"^(?:never|do\s+not|don't|must\s+not|avoid|forbid)[ \t]+"
+    r"(?:(?:ever|manually|directly|actually|under\s+any\s+circumstances)[ \t]+)*"
+    r"(?:run|running|use|using|execute|executing|invoke|invoking|call|calling|perform|"
+    r"performing|issue|issuing|attempt|attempting|trigger|triggering|do|doing|force|"
+    r"forcing|push|pushing|git|publish|publishing|send|sending|make|making)(?=[ \t]|\Z)",
+    re.I,
+)
+_PUSH_MENTION = re.compile(r"push|publish", re.I)
+_OBJECT_WORD = re.compile(
+    r"git|push(?:es|ed|ing)?|force(?:-?push(?:es|ing)?)?|publish(?:es|ed|ing)?|"
+    r"to|on|onto|into|from|a|an|the|any|every|shared|protected|remotes?|upstream|"
+    r"branch(?:es)?|refs?|repos?|repository|directly|manually|"
+    r"main|master|origin|head|develop|trunk",
+    re.I,
+)
+_OBJECT_FLAG = re.compile(r"--?[A-Za-z][\w-]*(?:=[\w@~^+/.:-]*\w)?")
+# Ref-shaped: word characters joined by at least one of / : . @ ~ ^, ending in a word character.
+_OBJECT_REF = re.compile(r"[\w@~^+-]+(?:[/:.@~^][\w@~^+-]+)+")
 _GLOBAL_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--config-env", "--namespace",
                       "--exec-path", "--super-prefix"}
 
@@ -54,19 +78,54 @@ def unsafe_manual_push(command: str, *, prose: bool = False) -> bool:
     """Recognize prohibited manual push via POSIX shell quoting and wrappers."""
     if not isinstance(command, str) or not command.strip():
         return False
-    if prose and _NEGATED.match(command) and not re.search(r"[;&|\n]", command):
-        return False
+    if prose and _NEGATED.match(command):
+        return _negated_prose_unsafe(command)
     if prose:
         command = _INLINE_CODE.sub(lambda match: match.group(2), command)
-    return _scan(command, 0)
+    return _scan(command, 0, prose=prose)
 
 
-def _scan(command: str, depth: int) -> bool:
+def _is_prohibition(text: str) -> bool:
+    """True when the whole item is one prohibition of the push (see `_PROHIBITION`)."""
+    opener = _PROHIBITION.match(text)
+    if not opener:
+        return False
+    rest = re.sub(r"[.!]\Z", "", text[opener.end():])
+    rest = re.sub(r",[ \t]+(?=(?:or|nor)[ \t])", " ", rest, flags=re.I)
+    words = [w for w in re.split(r"[ \t]+", rest) if w]
+    joiner = True  # no object may start or end with a joiner, or repeat one
+    for word in words:
+        if word.lower() in ("or", "nor"):
+            if joiner:
+                return False
+            joiner = True
+        elif (_OBJECT_WORD.fullmatch(word) or _OBJECT_FLAG.fullmatch(word)
+              or _OBJECT_REF.fullmatch(word)):
+            joiner = False
+        else:
+            return False
+    return not words or not joiner
+
+
+def _negated_prose_unsafe(command: str) -> bool:
+    """Decide a prose item that opens with a negation, failing closed.
+
+    1. No push mentioned: the ordinary command-shaped scan decides.
+    2. A push is mentioned: safe only when the whole item is one prohibition.
+    3. Everything else is unsafe.
+    """
+    text = _INLINE_CODE.sub(lambda m: m.group(2), command.strip())
+    if not _PUSH_MENTION.search(text):
+        return _scan(re.sub(r"(?<=\w)'(?=\w)", "", text), 0, prose=True)
+    return not _is_prohibition(text)
+
+
+def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
     if depth > 5:
         return True
     # For executable shell fields, scan backtick substitution bodies before
     # shlex tokenizes them; a non-leading substitution can otherwise be missed.
-    if any(_scan(span.group(2), depth + 1) for span in _INLINE_CODE.finditer(command)):
+    if any(_scan(span.group(2), depth + 1, prose=prose) for span in _INLINE_CODE.finditer(command)):
         return True
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>")
@@ -74,14 +133,18 @@ def _scan(command: str, depth: int) -> bool:
         lexer.commenters = ""
         tokens = list(lexer)
     except ValueError:
+        if prose:
+            # Unbalanced quotes are common in descriptions. Only an explicit
+            # command signal can justify a fail-closed refusal in plan prose.
+            return bool(re.search(r"\b(?:git|eval|source|alias)\b", command, re.I))
         return bool(re.search(r"push|git|eval", command, re.I))
     if not tokens:
         return False
     for token in tokens:
         # Shell -c, eval and quoted substitutions carry a nested command string.
-        if any(ch.isspace() for ch in token) and _scan(token, depth + 1):
+        if any(ch.isspace() for ch in token) and _scan(token, depth + 1, prose=prose):
             return True
-    if _scan_wrappers(tokens, depth):
+    if _scan_wrappers(tokens, depth, prose=prose):
         return True
     for i, token in enumerate(tokens):
         if PurePosixPath(token).name != "git":
@@ -99,7 +162,7 @@ def _scan(command: str, depth: int) -> bool:
             return True
     # Dynamic executable construction must not bypass a detectable push token.
     if "push" in tokens and (
-        re.search(r"git", command, re.I)
+        re.search(r"\bgit\b", command, re.I)
         or "$" in command or "\x60" in command
         or any(t in tokens for t in ("eval", "source", "alias", "function"))
     ):
@@ -115,10 +178,10 @@ def _scan(command: str, depth: int) -> bool:
     return False
 
 
-def _scan_wrappers(tokens: list[str], depth: int) -> bool:
+def _scan_wrappers(tokens: list[str], depth: int, *, prose: bool = False) -> bool:
     """Resolve wrapper prefixes at each command start; fail closed on dynamic."""
     for start in _command_starts(tokens):
-        result = _resolve_at(tokens, start, depth)
+        result = _resolve_at(tokens, start, depth, prose=prose)
         if result:
             return True
     return False
@@ -134,13 +197,13 @@ def _command_starts(tokens: list[str]) -> list[int]:
     return starts
 
 
-def _resolve_at(tokens: list[str], pos: int, depth: int) -> bool:
+def _resolve_at(tokens: list[str], pos: int, depth: int, *, prose: bool = False) -> bool:
     """Return True if the command at pos is an unsafe (unverifiable/push) one."""
     seen_wrappers = 0
     while pos < len(tokens):
         name = PurePosixPath(tokens[pos]).name
         if name in _SHELLS:
-            if _shell_c_is_unsafe(tokens, pos, depth):
+            if _shell_c_is_unsafe(tokens, pos, depth, prose=prose):
                 return True
             # A shell without -c (e.g. `sh script.sh`) is opaque; only the
             # -c script case is resolvable here. Other shell forms fall
@@ -159,6 +222,11 @@ def _resolve_at(tokens: list[str], pos: int, depth: int) -> bool:
         return False
     head = tokens[pos]
     if _is_dynamic(head):
+        # A bare computed token in descriptive plan prose can be TypeScript
+        # syntax (room?, {year}, Map<T>), not a shell command. Still refuse
+        # dynamic execution through wrappers; strict shell fields are unchanged.
+        if prose and not seen_wrappers:
+            return False
         # Inner command itself is computed (e.g. `env $X git push`,
         # `timeout 5 $CMD`): cannot prove it is not `git push`.
         # Only fail closed when the surrounding context suggests a remote
@@ -188,7 +256,7 @@ def _git_is_push(tokens: list[str], pos: int) -> bool:
     return False
 
 
-def _shell_c_is_unsafe(tokens: list[str], pos: int, depth: int) -> bool:
+def _shell_c_is_unsafe(tokens: list[str], pos: int, depth: int, *, prose: bool = False) -> bool:
     for k in range(pos + 1, min(pos + 4, len(tokens))):
         t = tokens[k]
         if t == "--":
@@ -198,7 +266,7 @@ def _shell_c_is_unsafe(tokens: list[str], pos: int, depth: int) -> bool:
                 script = tokens[k + 1]
                 if _is_dynamic(script) and ("$" in script or "`" in script):
                     return True
-                if _scan(script, depth + 1):
+                if _scan(script, depth + 1, prose=prose):
                     return True
             return False
         if not t.startswith("-"):

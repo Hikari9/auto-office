@@ -1,6 +1,8 @@
 """Tasks with `scope: none` (a comment or issue edit): accepted on gates, no PR, skipped by land."""
 from __future__ import annotations
 
+import re
+
 from conftest import GOOD_ADD, PLAN_ONE, start_inline
 from test_task_prs import github, gh
 
@@ -46,7 +48,7 @@ def test_scope_none_task_is_accepted_without_a_pr_and_land_skips_it(env, monkeyp
     _run(env, monkeypatch)
     code, data = env.ojson("status")
     assert data["data"]["tasks"] == {"T1": "accepted", "T2": "accepted"}, data
-    assert [p["title"].split(":")[0] for p in gh(env)["prs"]] == ["T1"]
+    assert [re.search(r"(T\d+): ", p["title"]).group(1) for p in gh(env)["prs"]] == ["T1"]
     code, out = env.office("inspect", "events")
     assert "pr.error" not in out, out
     code, out = env.office("land", "--merge", "--quote", "merge it")
