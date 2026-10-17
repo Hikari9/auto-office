@@ -123,6 +123,33 @@ def test_early_interaction_failure_retains_http_status(monkeypatch, tmp_path):
     assert frame["http_status"] == 502 and frame["cause"] == "spec"
 
 
+def test_all_5xx_with_missing_auth_selector_blocks_capture_without_recapture(monkeypatch, tmp_path):
+    fake = ModuleType("playwright.sync_api")
+    fake.Error = type("PWError", (Exception,), {})
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", fake)
+    class Page:
+        url = "http://localhost/"
+        def on(self, *args): pass
+        def goto(self, *args, **kw): return SimpleNamespace(status=503)
+        def evaluate(self, *args): return True
+        def query_selector(self, selector): return None
+    class Context:
+        def new_page(self): return Page()
+        def close(self): pass
+    class Browser:
+        def new_context(self, **kw): return Context()
+    frames = []
+    for state_name in ("default", "other"):
+        frame = visual._capture_one(Browser(), "http://localhost/", 390, 844,
+                                    {"name": state_name, "steps": []}, [], tmp_path, state_name,
+                                    {"auth": "#signed-in"})
+        assert frame["http_status"] == 503 and "wrong authenticated state" in frame["invalid"]
+        frames.append({"viewport": "mobile", "state": state_name, **frame})
+    outcome = _capture(monkeypatch, tmp_path, frames)
+    assert outcome["evidence_status"] == "CAPTURE_BLOCKED", outcome
+    assert not outcome.get("recapture")
+
+
 def test_real_local_server_boot_sequence_is_retried():
     seen = []
     class Handler(BaseHTTPRequestHandler):

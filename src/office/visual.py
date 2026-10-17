@@ -765,11 +765,11 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
             pass
         bad = _invalid_probe_selector(page, selectors)
         if bad:
-            return {"cause": "spec", "invalid":
+            return {**out, "cause": "spec", "invalid":
                     f"visual selectors: accepts plain CSS only; selector {bad['selector']!r} is invalid: {bad['detail']}"}
         auth = (spec.get("auth") or "").strip()
         if auth and not reference and page.query_selector(auth) is None:
-            return {"invalid": f"wrong authenticated state: {auth} not present at {w}x{h}"}
+            return {**out, "invalid": f"wrong authenticated state: {auth} not present at {w}x{h}"}
         for step in st["steps"]:
             if step["verb"] == "navigate":
                 continue
@@ -808,7 +808,7 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
                     page.evaluate("y => window.scrollTo(0, Number(y) || 0)", target or 0)
             except PWError as exc:
                 if reference:
-                    return {"invalid": f"reference cannot reach state {st['name']}: {str(exc)[:100]}"}
+                    return {**out, "invalid": f"reference cannot reach state {st['name']}: {str(exc)[:100]}"}
                 lines = str(exc).splitlines()
                 err_line = lines[0][:120] if lines else str(exc)[:120]
                 return {**out, "failures": [{"location": f"{target} @ {w}x{h} state {st['name']}",
@@ -817,7 +817,7 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
             page.wait_for_timeout(400)
         if st.get("expect") and page.query_selector(st["expect"]) is None:
             if reference:
-                return {"invalid": f"reference is not in state {st['name']}"}
+                return {**out, "invalid": f"reference is not in state {st['name']}"}
             return {**out, "failures": [{"location": f"{st['expect']} @ {w}x{h}",
                                   "summary": f"state '{st['name']}' did not produce {st['expect']} after its interaction",
                                   "action": "fix the interaction so the intended state appears", "measurement": "method: dom"}]}
@@ -828,11 +828,11 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
         probe = page.evaluate(_PROBE_JS, selectors)
         out.update({"screenshot": str(shot), "probe": probe, "page_errors": errors})
         if probe["innerWidth"] != w:
-            return {"invalid": f"viewport mismatch: requested {w}, got {probe['innerWidth']}"}
+            return {**out, "invalid": f"viewport mismatch: requested {w}, got {probe['innerWidth']}"}
         if probe["failedFonts"]:
-            return {"invalid": f"font(s) failed to load at capture time: {', '.join(probe['failedFonts'][:3])}"}
+            return {**out, "invalid": f"font(s) failed to load at capture time: {', '.join(probe['failedFonts'][:3])}"}
         if shot.stat().st_size < 1200:
-            return {"invalid": "partial or blank capture"}
+            return {**out, "invalid": "partial or blank capture"}
         if not reference:
             fails = list(out.get("failures", []))
             if probe["scrollWidth"] > probe["innerWidth"] + 1:
