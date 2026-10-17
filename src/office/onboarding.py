@@ -199,6 +199,8 @@ def _kilo_signed_in() -> tuple[bool, str]:
     if count_lines:
         if len(count_lines) != 1:
             return False, "kilo auth list printed unparseable credential counts"
+        if len(lines) != 1:
+            return False, "kilo auth list printed no recognizable credential entry"
         count = int(count_lines[0][1])
         if count == 0:
             return False, "kilo auth list reported zero credentials"

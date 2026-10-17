@@ -157,6 +157,15 @@ def test_kilo_auth_list_zero_count_overrides_empty_auth_file(kilo_on_path, monke
     assert state == "missing" and "zero credentials" in reason
 
 
+def test_kilo_auth_list_positive_count_with_extra_junk_is_missing(kilo_on_path, monkeypatch):
+    monkeypatch.delenv("OFFICE_AUTH_FIXTURE", raising=False)
+    monkeypatch.setenv("FAKE_KILO_AUTH", "count")
+    monkeypatch.setenv("FAKE_KILO_AUTH_OUTPUT",
+                       "1 credentials in /home/test/auth.json\nKilo account status unknown")
+    state, reason = onboarding.credentials("kilo")
+    assert state == "missing" and "no recognizable credential entry" in reason
+
+
 def test_kilo_auth_list_recognizes_credential_entry(kilo_on_path, monkeypatch):
     monkeypatch.delenv("OFFICE_AUTH_FIXTURE", raising=False)
     monkeypatch.setenv("FAKE_KILO_AUTH", "entry")
