@@ -11,8 +11,29 @@ import shlex
 from pathlib import PurePosixPath
 
 _NEGATED = re.compile(r"^\s*(?:never(?!\s+mind\b)|do\s+not|don't|must\s+not|avoid|forbid)\b", re.I)
-_CLAUSE_SPLIT = re.compile(r",|\.\s|\s(?:but|and|then|also|however|instead)\s", re.I)
-_CONTINUES_NEGATION = re.compile(r"^\s*(?:or|nor)\b", re.I)
+_CONNECTORS = (
+    "but|and|then|also|however|instead|otherwise|except|unless|yet|so|if|when|while|"
+    "because|although|though|before|after|until|whereas|else|plus|rather|still|now|later|or|nor"
+)
+# Splits on punctuation, brackets, quotes, dashes, sentence ends and connectors.
+# The captured connector (if any) is used to decide whether a clause continues a
+# prohibition.
+_CLAUSE_SPLIT = re.compile(
+    r"[,()\[\]\"\u201c\u201d:]|[.!?]\s|\s[-\u2013\u2014]+\s|[\u2013\u2014]"
+    r"|\s(" + _CONNECTORS + r")\s",
+    re.I,
+)
+# A clause after "or"/"nor" continues a prohibition only when it is a bare
+# repetition of the prohibited command, with no subject, modal or verb.
+_BARE_PUSH = re.compile(
+    r"^\s*(?:to\s+)?(?:git\s+)?(?:(?:force|--force)[\s-]*)?push\b[\w\s\-./:@=+]*$", re.I
+)
+_POSITIVE_WORDS = re.compile(
+    r"\b(?:should|must|can|could|may|might|will|would|shall|please|run|execute|do|does|"
+    r"go|ahead|feel|free|try|need|needs|want|let|you|we|i|they|it|just|ok|okay|fine|use|"
+    r"perform|issue|invoke|make|start|is|are|be|allowed|permitted|required|then|now)\b",
+    re.I,
+)
 _GLOBAL_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--config-env", "--namespace",
                       "--exec-path", "--super-prefix"}
 
@@ -57,20 +78,43 @@ def unsafe_manual_push(command: str, *, prose: bool = False) -> bool:
     if not isinstance(command, str) or not command.strip():
         return False
     if prose and _NEGATED.match(command) and not re.search(r"[;&|\n]", command):
-        # Only the opening negated clause is exempt. Later clauses (after a
-        # comma, "but", "and", "then", "also", or a sentence break) may carry a
-        # positive instruction, so they are scanned. "or"/"nor" continue the
-        # negation and stay exempt.
-        clauses = _CLAUSE_SPLIT.split(command)[1:]
-        return any(
-            not _CONTINUES_NEGATION.match(clause)
-            and not _NEGATED.match(clause)
-            and unsafe_manual_push(clause, prose=True)
-            for clause in clauses
-        )
+        return _negated_prose_unsafe(command)
     if prose:
         command = _INLINE_CODE.sub(lambda match: match.group(2), command)
     return _scan(command, 0, prose=prose)
+
+
+def _bare_continuation(clause: str) -> bool:
+    return bool(_BARE_PUSH.match(clause)) and not _POSITIVE_WORDS.search(clause)
+
+
+def _negated_prose_unsafe(command: str) -> bool:
+    """Scan a prose line that opens with a negation, failing closed.
+
+    Only the opening clause is exempt. Every later clause is scanned as a
+    positive instruction unless it clearly continues the prohibition: a bare
+    "or"/"nor" repetition of the prohibited command while the prohibition is
+    still in force, or another negated clause.
+    """
+    pieces: list[tuple[str, str]] = []
+    connector, pos = "", 0
+    for match in _CLAUSE_SPLIT.finditer(command):
+        pieces.append((connector, command[pos:match.start()]))
+        connector, pos = (match.group(1) or "").lower(), match.end()
+    pieces.append((connector, command[pos:]))
+    prohibited = True  # the opening clause is negated
+    for connector, clause in pieces[1:]:
+        if not clause.strip():
+            continue
+        if _NEGATED.match(clause):
+            prohibited = True
+            continue
+        if prohibited and connector in ("or", "nor") and _bare_continuation(clause):
+            continue
+        prohibited = False
+        if unsafe_manual_push(clause, prose=True):
+            return True
+    return False
 
 
 def _scan(command: str, depth: int, *, prose: bool = False) -> bool:

@@ -33,6 +33,31 @@ def test_plain_prose_does_not_trigger_manual_push_guard(text):
     "Never run git push, but also run git push origin main",
     "Do not run git push. Then run git push origin main",
     "Never run git push and then git push origin main",
+    "Never run git push, or you should run git push origin main",
+    "Never run git push or you should run git push origin main",
+    "Never run git push, or run git push origin main",
+    "Never run git push, nor should you avoid git push origin main",
+    "Never run git push, or then git push origin main",
+    "Never run git push, or please git push origin main",
+    "Never run git push, or you must run git push origin main",
+    "Never run git push, or you can git push origin main",
+    "Do not run git push. You should run git push origin main",
+    "Do not run git push! Please run git push origin main",
+    "Never run git push (but you should run git push origin main)",
+    "Never run git push (run git push origin main)",
+    "Never run git push: run git push origin main",
+    "Never run git push - run git push origin main",
+    "Never run git push \u2014 do run git push origin main",
+    "Never run git push, otherwise run git push origin main",
+    "Never run git push unless asked, then run git push origin main",
+    "Never run git push; run git push origin main",
+    "Never run git push\nrun git push origin main",
+    "Avoid force pushes or run git push origin main",
+    "Never run git fetch, but run git status or git push origin main",
+    "Never run git push, or \"git push origin main\"",
+    "Do not run git push, and if needed git push origin main",
+    "Never run git push, or `git push` it",
+    "Never run git push, or then again, git push origin main",
 ])
 def test_actual_or_unverifiable_manual_push_still_denied(text):
     assert shell_safety.unsafe_manual_push(text, prose=True)
@@ -42,6 +67,9 @@ def test_actual_or_unverifiable_manual_push_still_denied(text):
     "Never run git push to a shared branch",
     "Do not run git push or git push --force",
     "Never run git push, but run git fetch instead",
+    "Never run git push, or git push --force",
+    "Never run git push or push to main",
+    "Do not run git push, nor force-push to main",
 ])
 def test_purely_negated_push_prose_allowed(text):
     assert not shell_safety.unsafe_manual_push(text, prose=True)
