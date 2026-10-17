@@ -1,6 +1,6 @@
 """#499: `office harness scaffold|validate|smoke|list` and `office model add|list|disable`.
 
-A fake `kilo` binary stands in for a new harness; no test here calls a real
+A fake `fakecli` binary stands in for a new harness; no test here calls a real
 harness or model. What these hold: registering a harness needs no Python edit,
 user adapters never shadow a seed unless asked, model rows go to the user
 overlay and never to the packaged seed, validate's semantic checks catch the
@@ -18,16 +18,16 @@ import yaml
 
 from office import adapters, candidates, config, configcmd, discovery, harnesscmd, paths, scoring, user_catalog
 
-FAKE_KILO = f"""#!{sys.executable}
+FAKE_FAKECLI = f"""#!{sys.executable}
 import json, os, sys
 args = sys.argv[1:]
 if args[:1] == ["--version"]:
-    print("kilo 2.4.1"); sys.exit(0)
+    print("fakecli 2.4.1"); sys.exit(0)
 if args[:1] == ["--help"]:
-    print("usage: kilo [--print] [--model M] [--effort E] [--yolo] [--auto-approve]"); sys.exit(0)
+    print("usage: fakecli [--print] [--model M] [--effort E] [--yolo] [--auto-approve]"); sys.exit(0)
 if args[:1] == ["models"]:
     print("acme/fast-1"); print("acme/deep-2"); sys.exit(0)
-log = os.environ.get("KILO_LOG")
+log = os.environ.get("FAKECLI_LOG")
 prompt = sys.stdin.read()
 if log:
     with open(log, "a") as f:
@@ -37,14 +37,14 @@ print("READY")
 """
 
 GOOD = {
-    "id": "kilo",
+    "id": "fakecli",
     "verified_state": "valid-unverified",
-    "version_fingerprint": {"command": ["kilo", "--version"], "parser": "first-line"},
-    "model_source": {"type": "cli", "command": ["kilo", "models"]},
-    "preflight": {"model_check": ["kilo", "models"]},
+    "version_fingerprint": {"command": ["fakecli", "--version"], "parser": "first-line"},
+    "model_source": {"type": "cli", "command": ["fakecli", "models"]},
+    "preflight": {"model_check": ["fakecli", "models"]},
     "effort_mapping": {"low": "low", "medium": "medium", "high": "high"},
     "benchmark_slug_mapping": {},
-    "invocation": {"executable": "kilo", "argv": ["--print", "--model", "{model}", "--effort", "{effort}"],
+    "invocation": {"executable": "fakecli", "argv": ["--print", "--model", "{model}", "--effort", "{effort}"],
                    "prompt_transport": "stdin", "cwd_transport": "process-cwd"},
     "safe_prompt_passing": {"shell": False, "supports_prompt_file": False, "notes": "stdin only"},
     "dispatch_forms": ["cli"],
@@ -54,7 +54,7 @@ GOOD = {
     "agentic_capability": {"default": "unknown"},
     "failure_signatures": [],
     "conformance": {"deterministic": "pending", "live": "pending"},
-    "source_notes": "kilo 2.4.1 fake",
+    "source_notes": "fakecli 2.4.1 fake",
     "session": {"id": "none"},
     "capabilities": ["builder"],
     "office_profiles": {"worker": {"argv": ["--print", "--model", "{model}", "--effort", "{effort}"],
@@ -64,11 +64,11 @@ GOOD = {
 
 @pytest.fixture
 def unit(tmp_path, monkeypatch):
-    """Unit-tier isolation: a temp user config dir and a fake kilo on PATH, no runs.db."""
+    """Unit-tier isolation: a temp user config dir and a fake fakecli on PATH, no runs.db."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    exe = bin_dir / "kilo"
-    exe.write_text(FAKE_KILO)
+    exe = bin_dir / "fakecli"
+    exe.write_text(FAKE_FAKECLI)
     exe.chmod(0o755)
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "user-config.yaml"))
     monkeypatch.setenv("OFFICE_DATA_HOME", str(tmp_path / "data"))
@@ -76,14 +76,14 @@ def unit(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _kilo(env) -> Path:
-    exe = env.bin / "kilo"
-    exe.write_text(FAKE_KILO)
+def _fakecli(env) -> Path:
+    exe = env.bin / "fakecli"
+    exe.write_text(FAKE_FAKECLI)
     exe.chmod(0o755)
     return exe
 
 
-def _write_adapter(data: dict, name: str = "kilo") -> Path:
+def _write_adapter(data: dict, name: str = "fakecli") -> Path:
     d = adapters.user_adapter_dir()
     d.mkdir(parents=True, exist_ok=True)
     p = d / f"{name}.yaml"
@@ -112,18 +112,18 @@ def _trust_acts(env) -> int:
 
 
 def test_scaffold_drafts_a_todo_adapter_and_stub_that_validate_refuses(env):
-    _kilo(env)
-    code, out = env.office("harness", "scaffold", "kilo", "--binary", "kilo")
+    _fakecli(env)
+    code, out = env.office("harness", "scaffold", "fakecli", "--binary", "fakecli")
     assert code == 0, out
-    draft = adapters.user_adapter_dir() / "kilo.yaml"
+    draft = adapters.user_adapter_dir() / "fakecli.yaml"
     text = draft.read_text()
     assert "TODO" in text and "verified_state: valid-unverified" in text
     assert "--yolo" in text  # the risky flag seen in --help is called out
-    assert (adapters.user_adapter_dir() / "tests" / "test_kilo_adapter.py").is_file()
-    code, out = env.office("harness", "validate", "kilo")
+    assert (adapters.user_adapter_dir() / "tests" / "test_fakecli_adapter.py").is_file()
+    code, out = env.office("harness", "validate", "fakecli")
     assert code == 1 and "unfilled TODO" in out and "trust: unchanged" in out
     # A second scaffold does not overwrite the user's edits.
-    assert env.office("harness", "scaffold", "kilo", "--binary", "kilo")[0] == 1
+    assert env.office("harness", "scaffold", "fakecli", "--binary", "fakecli")[0] == 1
 
 
 def test_scaffold_refuses_a_seed_id_unless_overriding(env):
@@ -133,40 +133,40 @@ def test_scaffold_refuses_a_seed_id_unless_overriding(env):
 
 
 def test_registering_a_harness_needs_no_python_edit(env):
-    _kilo(env)
+    _fakecli(env)
     _write_adapter(GOOD)
-    code, out = env.office("harness", "validate", "kilo")
+    code, out = env.office("harness", "validate", "fakecli")
     assert code == 0, out
-    assert "kilo" in discovery.harness_names()
-    assert "kilo" not in configcmd._installed()  # no catalog row routes to it yet
+    assert "fakecli" in discovery.harness_names()
+    assert "fakecli" not in configcmd._installed()  # no catalog row routes to it yet
 
     seed = paths.resources_root() / "catalog" / "seed.yaml"
     before = seed.read_bytes()
-    code, out = env.office("model", "add", "kilo/acme/fast-1", "--effort", "medium,high")
+    code, out = env.office("model", "add", "fakecli/acme/fast-1", "--effort", "medium,high")
     assert code == 0, out
     assert seed.read_bytes() == before  # the packaged seed is never written
     overlay = yaml.safe_load(user_catalog.path().read_text())
     assert [(r["model_id"], r["effort"]) for r in overlay["models"]] == [("fast-1", "medium"), ("fast-1", "high")]
-    rows = [r for r in candidates.catalog_rows() if r.get("invocation_harness") == "kilo"]
+    rows = [r for r in candidates.catalog_rows() if r.get("invocation_harness") == "fakecli"]
     assert {r["invocation_model_id"] for r in rows} == {"acme/fast-1"}
-    assert configcmd._installed()["kilo"] is True
+    assert configcmd._installed()["fakecli"] is True
 
-    code, out = env.office("model", "add", "kilo/acme/fast-1", "--effort", "medium")
+    code, out = env.office("model", "add", "fakecli/acme/fast-1", "--effort", "medium")
     assert code == 1 and "already a catalog row" in out
-    code, out = env.office("model", "add", "kilo/acme/fast-1", "--effort", "xhigh")
+    code, out = env.office("model", "add", "fakecli/acme/fast-1", "--effort", "xhigh")
     assert code == 1 and "effort_mapping" in out
 
-    code, out = env.office("model", "list", "kilo")
-    assert code == 0 and "kilo/fast-1@medium" in out and "user" in out
+    code, out = env.office("model", "list", "fakecli")
+    assert code == 0 and "fakecli/fast-1@medium" in out and "user" in out
 
-    code, out = env.office("model", "disable", "kilo/fast-1@high", "--reason", "flaky")
+    code, out = env.office("model", "disable", "fakecli/fast-1@high", "--reason", "flaky")
     assert code == 0, out
-    off = {r["effort"]: r.get("dispatchable") for r in candidates.catalog_rows() if r.get("invocation_harness") == "kilo"}
+    off = {r["effort"]: r.get("dispatchable") for r in candidates.catalog_rows() if r.get("invocation_harness") == "fakecli"}
     assert off == {"medium": True, "high": False}
-    assert "already disabled" in env.office("model", "disable", "kilo/fast-1@high")[1]
+    assert "already disabled" in env.office("model", "disable", "fakecli/fast-1@high")[1]
 
     code, out = env.office("harness", "list")
-    assert code == 0 and "kilo" in out and "user" in out and "valid-unverified" in out
+    assert code == 0 and "fakecli" in out and "user" in out and "valid-unverified" in out
 
 
 def test_model_disable_turns_off_a_seed_row_through_the_overlay(env):
@@ -183,10 +183,10 @@ def test_model_disable_turns_off_a_seed_row_through_the_overlay(env):
 def test_validate_catches_the_semantic_mistakes(unit):
     cases = {
         "permission/trust flag --yolo": _with(office_profiles__worker__argv=["--yolo", "--model", "{model}"]),
-        "no interactive.argv": _with(office_profiles__worker__herdr_kind="kilo"),
+        "no interactive.argv": _with(office_profiles__worker__herdr_kind="fakecli"),
         "not a safe transport": _with(office_profiles__worker__prompt="shell"),
         "is a shell": _with(invocation__executable="bash"),
-        "not resolvable": _with(preflight={"auth_check": ["kilo-auth-helper", "status"]}),
+        "not resolvable": _with(preflight={"auth_check": ["fakecli-auth-helper", "status"]}),
         "unknown placeholders": _with(office_profiles__worker__argv=["--model", "{model}", "--label", "{label}"]),
         "carries {prompt}": _with(office_profiles__worker__argv=["--model", "{model}", "{prompt}"]),
         "never declared in a file": _with(verified_state="proven"),
@@ -196,11 +196,11 @@ def test_validate_catches_the_semantic_mistakes(unit):
         assert any(needle in p for p in problems), (needle, problems)
     # A justified flag passes; the effort map must cover the catalog's efforts.
     justified = _with(office_profiles__worker__argv=["--yolo", "--model", "{model}"],
-                      trust_justifications={"--yolo": "headless kilo cannot answer approval prompts"})
+                      trust_justifications={"--yolo": "headless fakecli cannot answer approval prompts"})
     assert harnesscmd.check(justified, rows=[]) == []
-    row = {"invocation_harness": "kilo", "model_id": "fast-1", "effort": "xhigh"}
+    row = {"invocation_harness": "fakecli", "model_id": "fast-1", "effort": "xhigh"}
     assert any("'xhigh'" in p for p in harnesscmd.check(GOOD, rows=[row]))
-    interactive = _with(office_profiles__worker__herdr_kind="kilo",
+    interactive = _with(office_profiles__worker__herdr_kind="fakecli",
                         office_profiles__worker__interactive={"argv": ["--model", "{model}"]})
     assert harnesscmd.check(interactive, rows=[]) == []
 
@@ -218,7 +218,7 @@ def test_seed_wins_on_id_collision_unless_overridden(unit):
     assert adapters.load_all()["codex"]["invocation"]["executable"] == "codex"
     _write_adapter({**shadow, "override_seed": True}, "codex")
     assert adapters.load_sources()["codex"][1] == "user-override"
-    assert adapters.load_all()["codex"]["invocation"]["executable"] == "kilo"
+    assert adapters.load_all()["codex"]["invocation"]["executable"] == "fakecli"
 
 
 def test_editing_a_loaded_adapter_never_changes_the_next_load(unit):
@@ -239,13 +239,13 @@ def test_a_broken_user_adapter_never_breaks_the_seed_set(env):
 
 
 def test_smoke_records_launch_evidence_in_a_throwaway_repo_and_never_trust(env, tmp_path):
-    _kilo(env)
+    _fakecli(env)
     _write_adapter(GOOD)
-    assert env.office("model", "add", "kilo/acme/fast-1", "--effort", "medium")[0] == 0
+    assert env.office("model", "add", "fakecli/acme/fast-1", "--effort", "medium")[0] == 0
     acts = _trust_acts(env)
-    log = tmp_path / "kilo.log"
-    code, out = env.office("harness", "smoke", "kilo", "--model", "fast-1",
-                           env={"KILO_LOG": str(log), "OFFICE_RUN_ID": "deadbeef"})
+    log = tmp_path / "fakecli.log"
+    code, out = env.office("harness", "smoke", "fakecli", "--model", "fast-1",
+                           env={"FAKECLI_LOG": str(log), "OFFICE_RUN_ID": "deadbeef"})
     assert code == 0, out
     assert "launched" in out and "trust and conformance unchanged" in out
     call = json.loads(log.read_text().splitlines()[-1])
@@ -260,19 +260,19 @@ def test_smoke_records_launch_evidence_in_a_throwaway_repo_and_never_trust(env, 
     assert _trust_acts(env) == acts
     con = env.con()
     try:
-        assert scoring.evaluate_trust_state(con, "kilo@2/fast-1@medium")[1] == "valid-unverified"
+        assert scoring.evaluate_trust_state(con, "fakecli@2/fast-1@medium")[1] == "valid-unverified"
     finally:
         con.close()
     assert "smoke launched" in env.office("harness", "list")[1]
 
 
 def test_smoke_refuses_an_invalid_adapter_and_reports_a_failed_launch(env):
-    _kilo(env)
+    _fakecli(env)
     _write_adapter(_with(office_profiles__worker__argv=["--yolo", "--model", "{model}"]))
-    code, out = env.office("harness", "smoke", "kilo", "--model", "fast-1")
+    code, out = env.office("harness", "smoke", "fakecli", "--model", "fast-1")
     assert code == 1 and "does not validate" in out
-    _write_adapter(_with(preflight={"model_check": ["kilo", "models"]}))
-    code, out = env.office("harness", "smoke", "kilo", "--model", "acme/unknown")
+    _write_adapter(_with(preflight={"model_check": ["fakecli", "models"]}))
+    code, out = env.office("harness", "smoke", "fakecli", "--model", "acme/unknown")
     assert code == 1 and "preflight" in out
 
 
@@ -286,9 +286,9 @@ def test_run_pins_include_user_overlays_only_when_present(env):
 
 
 def test_a_missing_harness_binary_warns_but_a_malformed_command_fails(unit):
-    absent = _with(invocation__executable="kilo-absent", version_fingerprint={"command": ["kilo-absent", "--version"]},
-                   model_source={"type": "cli", "command": ["kilo-absent", "models"]},
-                   preflight={"model_check": ["kilo-absent", "models"]})
+    absent = _with(invocation__executable="fakecli-absent", version_fingerprint={"command": ["fakecli-absent", "--version"]},
+                   model_source={"type": "cli", "command": ["fakecli-absent", "models"]},
+                   preflight={"model_check": ["fakecli-absent", "models"]})
     problems, warnings = harnesscmd.check_full(absent, rows=[])
     assert problems == [] and len(warnings) == 3
     assert any("not resolvable" in p for p in harnesscmd.check(_with(preflight={"model_check": []}), rows=[]))
@@ -312,26 +312,26 @@ def test_an_overridden_seed_never_inherits_the_seeds_trust(env):
 
 
 def test_smoke_refuses_a_permission_flag_form_unless_allowed(env, tmp_path):
-    _kilo(env)
+    _fakecli(env)
     _write_adapter(_with(office_profiles__worker__argv=["--yolo", "--model", "{model}"],
-                         trust_justifications={"--yolo": "headless kilo cannot answer prompts"}))
-    code, out = env.office("harness", "smoke", "kilo", "--model", "acme/fast-1")
+                         trust_justifications={"--yolo": "headless fakecli cannot answer prompts"}))
+    code, out = env.office("harness", "smoke", "fakecli", "--model", "acme/fast-1")
     assert code == 1 and "--allow-unsafe-flags" in out
-    code, out = env.office("harness", "smoke", "kilo", "--model", "acme/fast-1", "--allow-unsafe-flags")
+    code, out = env.office("harness", "smoke", "fakecli", "--model", "acme/fast-1", "--allow-unsafe-flags")
     assert code == 0, out
     assert json.loads(harnesscmd.smoke_log().read_text().splitlines()[-1])["unsafe_flags"] == ["--yolo"]
 
 
 def test_smoke_timeout_kills_a_grandchild_holding_the_pipes(unit):
     import time
-    hang = unit / "bin" / "kilo"
+    hang = unit / "bin" / "fakecli"
     hang.write_text(f"#!{sys.executable}\nimport subprocess, sys, time\n"
-                    "if sys.argv[1:2] == ['--version']: print('kilo 2.4.1'); sys.exit(0)\n"
+                    "if sys.argv[1:2] == ['--version']: print('fakecli 2.4.1'); sys.exit(0)\n"
                     "if sys.argv[1:2] == ['models']: print('acme/fast-1'); sys.exit(0)\n"
                     "subprocess.Popen(['sleep', '60'])\ntime.sleep(60)\n")
     _write_adapter(GOOD)
     started = time.time()
-    res = harnesscmd.smoke("kilo", "acme/fast-1", timeout=1)
+    res = harnesscmd.smoke("fakecli", "acme/fast-1", timeout=1)
     assert res.exit_code == 1 and res.data["result"] == "timed_out"
     assert time.time() - started < 30
 
@@ -380,7 +380,7 @@ def test_a_corrupt_overlay_is_never_overwritten(unit):
     user_catalog.path().write_text("models: [unclosed\n")
     import pytest as _pytest
     from office.state import OfficeError
-    for call in (lambda: harnesscmd.model_add("kilo/acme/fast-1", ["medium"]),
+    for call in (lambda: harnesscmd.model_add("fakecli/acme/fast-1", ["medium"]),
                  lambda: harnesscmd.model_disable("codex/luna")):
         with _pytest.raises(OfficeError) as err:
             call()
@@ -390,10 +390,23 @@ def test_a_corrupt_overlay_is_never_overwritten(unit):
 
 def test_drafts_and_shadowed_files_do_not_change_the_adapter_hash(unit):
     base = config.snapshot_hashes()["adapter_hash"]
-    _write_adapter(_with(source_notes="TODO fill"), "kilo")
+    _write_adapter(_with(source_notes="TODO fill"), "fakecli")
     _write_adapter(dict(GOOD, id="codex"), "codex")  # a seed id without override_seed: ignored
     assert config.snapshot_hashes()["adapter_hash"] == base
-    assert "kilo" not in adapters.load_all()
-    assert harnesscmd.validate("kilo").exit_code == 1  # the draft is still validated directly
-    _write_adapter(GOOD, "kilo")
+    assert "fakecli" not in adapters.load_all()
+    assert harnesscmd.validate("fakecli").exit_code == 1  # the draft is still validated directly
+    _write_adapter(GOOD, "fakecli")
+    assert config.snapshot_hashes()["adapter_hash"] != base
+
+
+def test_a_user_file_named_for_the_kilo_seed_is_ignored_without_override_seed(unit):
+    if adapters.load_sources().get("kilo", (None, ""))[1] != "seed":
+        pytest.skip("the kilo seed adapter is not in this tree")
+    base = config.snapshot_hashes()["adapter_hash"]
+    _write_adapter(_with(id="kilo"), "kilo")  # a real seed id without override_seed: the seed wins
+    assert adapters.load_sources()["kilo"][1] == "seed"
+    assert adapters.load_all()["kilo"]["invocation"]["executable"] != "fakecli"
+    assert config.snapshot_hashes()["adapter_hash"] == base
+    _write_adapter(GOOD, "fakecli")  # a fresh user id still loads and changes the hash
+    assert adapters.load_sources()["fakecli"][1] == "user"
     assert config.snapshot_hashes()["adapter_hash"] != base

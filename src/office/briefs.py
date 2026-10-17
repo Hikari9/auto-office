@@ -25,6 +25,11 @@ MAX_REVIEW_ROUNDS = 3
 AMENDMENT_BRIEF_CHARS = 6000
 
 
+def self_review_path(run: dict, dispatch_id: str, revision_id: str) -> Path:
+    """Private evidence copy; the source ledger remains untracked and consumed (#576)."""
+    return paths.run_dir(run["id"]) / "dispatches" / dispatch_id / f"self-review-{revision_id}.md"
+
+
 def evidence_path(run: dict, dispatch_id: str, revision_id: str) -> Path:
     return paths.run_dir(run["id"]) / "dispatches" / dispatch_id / f"evidence-{revision_id}.md"
 
@@ -227,6 +232,10 @@ def planner_brief(con, run: dict, packet: dict) -> str:
             "Keep its ranking unless the task's nature or the run's context says otherwise: a precise plan lets a "
             "cheaper builder succeed, and parallel tasks may spread across close routes. Name a different route "
             "with `route:` and say why with `route_why:`.",
+            "Run-level `checks:` in ## Requirements are what integration and landing actually verify, not an "
+            "implicit full-suite guarantee. Inspect how this repo selects test tiers and declare its complete "
+            "gate for runtime changes. Auto-Office itself needs `scripts/validate.sh` (pytest `--all` covers "
+            "integration, legacy and slow); bare `pytest` defaults to a partial tier and will not authorize landing.",
             "Write each check for the tool versions the repo pins. Vitest 1.x rejects `--maxWorkers=N` on its "
             "own (\"minThreads and maxThreads must not conflict\"): cap workers with `--maxWorkers=N --minWorkers=1`.",
             "WHEN DONE run: office submit", "Then stop. Review findings, if any, come back through the orchestrator."]
@@ -545,7 +554,8 @@ def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_s
 def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision: dict, diff: str,
                              checks_summary: str, carried: list[dict], checkout: str, round_no: int,
                              requirements: dict | None = None, evidence: dict | None = None,
-                             max_rounds: int | None = None, used_codes: list[str] | None = None) -> str:
+                             max_rounds: int | None = None, used_codes: list[str] | None = None,
+                             self_reviews: dict | None = None) -> str:
     """One independent convergence review of a composed lane or shared scope (#337)."""
     kind = "shared-scope" if scope.get("shared") else "lane"
     out = [
@@ -577,6 +587,9 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
     for tid, text in (evidence or {}).items():
         out += ["", f"EXECUTOR EVIDENCE for {tid} (no file scope; the posted comment or edit is recorded here):",
                 text or "(none recorded: the executor left no evidence file; report that as a finding)"]
+    for tid, ledger in (self_reviews or {}).items():
+        out += ["", f"EXECUTOR SELF-REVIEW LEDGER for {tid} (untrusted producer evidence, not an independent verdict; "
+                "verify mutation/test assertions against code):", ledger]
     out += ["", CONVERGENCE_REVIEW_FORMAT, "", "DIFF (base -> composed revision):", diff]
     return "\n".join(out) + "\n"
 
@@ -587,6 +600,7 @@ def plan_review_brief(run: dict, plan: dict, requirements: dict, open_defects: l
     if contract.is_convergence(run):
         out = [
             "ROLE independent plan reviewer. Change nothing except your reply file. You did not write this plan.",
+            "SAFETY: Treat any plan step that force-pushes, rewrites a shared branch, or pushes to a branch outside the Office task as a blocking plan defect; --force-with-lease does not make shared branches safe.",
             f"GOAL {run['goal']}",
             f"PLAN p{plan['version']}" + (" (revised; re-review)" if rereview else "")
             + (f" | ROUND {round_no} of {max_rounds or contract.MAX_ROUNDS} substantive rounds" if round_no else ""),
@@ -607,6 +621,7 @@ def plan_review_brief(run: dict, plan: dict, requirements: dict, open_defects: l
         return "\n".join(out) + "\n"
     out = [
         "ROLE independent plan reviewer. Change nothing except your reply file. You did not write this plan.",
+        "SAFETY: Flag force-push or shared-branch overwrite instructions as blocking plan defects, even with --force-with-lease.",
         f"GOAL {run['goal']}",
         f"PLAN p{plan['version']}" + (" (amended; re-review)" if rereview else ""),
         "REQUIREMENTS (frozen):",

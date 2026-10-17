@@ -239,3 +239,15 @@ def test_covered_by_refuses_weak_or_misbound_reviews(env, sql):
 @pytest.mark.parametrize("status", ["waived", "escalated"])
 def test_covered_by_refuses_waived_scope(env, status):
     assert _covered_probe(env, mutate_state=lambda st: {"status": status}) is None
+
+
+def test_issue_575_convergence_inspect_exposes_full_finding_and_action(env):
+    long_description = "the composed review must preserve this detailed finding " + ("explanation " * 18)
+    _two(env, PLAN_TWO, recheck(finding("F1", "T1", what=long_description)))
+    code, out = env.office("inspect", "convergence")
+    assert code == 0, out
+    assert long_description in out
+    code, doc = env.ojson("inspect", "convergence")
+    assert code == 0
+    data = doc.get("data") or doc
+    assert any(long_description.strip() in f["summary"] and f["action"] for f in data["findings"]), repr(data["findings"])

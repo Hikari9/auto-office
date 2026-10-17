@@ -1038,3 +1038,24 @@ def test_a_staged_ledger_is_rejected_and_preserved(env):
     assert code == 4 and "committed or staged" in out, out
     assert not env.con().execute("SELECT 1 FROM revisions WHERE task_id='T1'").fetchone()
     assert path.exists() and briefs.LEDGER_FILE in _git(wt, "diff", "--cached", "--name-only")
+
+
+
+def test_issue_576_archive_rejects_preexisting_symlink(repo, tmp_path, monkeypatch):
+    from office import briefs, submit
+    from office.state import Refused
+    from office.util import sha256_bytes
+    wt = repo
+    (wt / briefs.LEDGER_FILE).write_text("trusted-ledger")
+    target = tmp_path / "unrelated.txt"
+    target.write_text("do not change")
+    dest = tmp_path / "dispatches" / "D1" / "self-review-R1.md"
+    dest.parent.mkdir(parents=True)
+    dest.symlink_to(target)
+    monkeypatch.setattr(briefs, "self_review_path", lambda *args: dest)
+    receipt = {"kind": "ledger", "sha256": sha256_bytes(b"trusted-ledger")}
+    staged = []
+    with pytest.raises(Refused, match="already exists"):
+        submit._stage_self_review({}, {"id": "D1"}, "R1", wt, receipt, staged)
+    assert not staged
+    assert dest.is_symlink() and target.read_text() == "do not change"

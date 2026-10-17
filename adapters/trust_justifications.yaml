@@ -26,3 +26,9 @@ gemini:
     --approval-mode yolo on the worker form only: headless gemini cannot answer
     approval prompts. Grants unprompted edits and commands in the Office
     worktree. Reviewer and vision forms use --approval-mode plan (read-only).
+kilo:
+  --auto: >-
+    Worker and pane forms only: Kilo requires --auto for autonomous use and
+    otherwise auto-rejects commands such as bash. Grants unprompted edits and
+    commands in the disposable Office worktree. Both forms also use --pure to
+    disable external plugins and decline project-scoped untrusted input.

@@ -310,6 +310,12 @@ def route(request: dict, discovery_input: dict | None = None) -> dict:
         policies = request.get("user_policies") or []
         size_class = request.get("size_class") or (request.get("context") or {}).get("size_class")
         pool = []  # discovery candidates: never in the eligible slate, whatever the role
+        # An explicit caller value wins; otherwise the user's consent decides, so a caller that
+        # omits the key cannot silently drop an opted-in user's free routes.
+        allow_free = request.get("allow_free_models")
+        if allow_free is None:
+            from office import onboarding
+            allow_free = onboarding.free_models_enabled()
         for c in request.get("candidates", []):
             cid = candidate_id(c)
             denied = next((why for pol in policies if (why := route_policy.is_denied(c, pol))), None)
@@ -317,6 +323,9 @@ def route(request: dict, discovery_input: dict | None = None) -> dict:
                 (why for pol in policies if (why := route_policy.is_overkill(c, role, size_class, pol))), None)
             if c.get("hard_excluded") or c.get("local_hard_excluded"):
                 rejected.append({"candidate": cid, "stage": 1, "reason": "hard exclusion"})
+            elif route_policy.is_free_model(c) and not allow_free:
+                rejected.append({"candidate": cid, "stage": 1, "reason": "free model opt-in is disabled",
+                                 "category": "free-model-opt-in"})
             elif denied:
                 rejected.append({"candidate": cid, "stage": 1, "reason": denied, "category": "denied"})
             elif overkill:

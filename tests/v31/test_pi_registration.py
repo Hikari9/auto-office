@@ -40,6 +40,13 @@ def _rows() -> list[dict]:
     return [r for r in candidates.catalog_rows() if r.get("invocation_harness") == "pi"]
 
 
+@pytest.fixture(autouse=True)
+def _isolate_user_catalog(tmp_path, monkeypatch):
+    """Keep operator-specific user config and catalog choices out of seed tests."""
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("OFFICE_USER_CATALOG", str(tmp_path / "catalog.yaml"))
+
+
 # ---------------------------------------------------------------- argv and trust flags
 
 def test_pi_worker_argv_never_grants_project_resource_trust():
