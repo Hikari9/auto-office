@@ -60,6 +60,7 @@ def change_route(con, run: dict, target: str | None, as_route: str | None, quote
             raise Refused("state-changed", f"{d['id']} changed while the route was being recorded; re-run", scope=tid,
                           next_step=USAGE)
         _record(con, cur, cand, change)
+        dispatch.abandon_trial(con, cur["id"], f"the user declared {after}: no longer a discovery trial")
         state.update_task(con, run["id"], tid, route_json=dumps(_declared_payload(cand, before, quote)))
         lines += _recheck_review(con, run, tid, cand)
         new = None
@@ -201,6 +202,7 @@ def _record(con, d: dict, cand: dict, change: dict) -> None:
              "selection_disclosure": {"triple": triple, "reason": reason, "override": True},
              "route_change": {k: change[k] for k in ("before", "after", "quote")}}
     route.pop("launch", None)  # a --cli argv names the old model
+    route.pop("discovery", None)  # a declared route is no trial and has no discovery fallback
     with_override = {**loads(d.get("override_json"), {}), "by": "user", "declared": True, "triple": triple,
                      "route_changed_from": change["before"], "route_changed_at": now_iso()}
     with_override.pop("cli", None)

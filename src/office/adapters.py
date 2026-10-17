@@ -12,6 +12,7 @@ path passes (office.conformance).
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -39,11 +40,128 @@ def adapter_dir() -> Path:
     return paths.resources_root() / "adapters" / "seed"
 
 
-def load_all() -> dict[str, dict]:
-    out = {}
+def user_adapter_dir() -> Path:
+    """User-level adapters (`office harness scaffold` writes here): a harness
+    registered without a release. OFFICE_USER_ADAPTERS overrides the location."""
+    raw = os.environ.get("OFFICE_USER_ADAPTERS")
+    return Path(raw).expanduser() if raw else paths.user_config_path().parent / "adapters"
+
+
+def user_adapter_files() -> list[Path]:
+    d = user_adapter_dir()
+    return sorted(d.glob("*.yaml")) if d.is_dir() else []
+
+
+def _read(p: Path) -> dict | None:
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _has_todo(node) -> bool:
+    if isinstance(node, str):
+        return "TODO" in node
+    if isinstance(node, dict):
+        return any(_has_todo(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_has_todo(v) for v in node)
+    return False
+
+
+def _file_stamp(paths_: list[Path]) -> tuple:
+    out = []
+    for p in paths_:
+        try:
+            st = p.stat()
+            out.append((str(p), st.st_mtime_ns, st.st_size))
+        except OSError:
+            out.append((str(p), None, None))
+    return tuple(out)
+
+
+def files_stamp() -> tuple:
+    """(path, mtime_ns, size) for every seed and user adapter file: a cheap
+    per-process cache key that changes whenever an adapter file does."""
+    return _file_stamp(sorted(adapter_dir().glob("*.yaml")) + user_adapter_files())
+
+
+_SOURCES_CACHE: dict[tuple, dict] = {}
+
+
+def load_sources() -> dict[str, tuple[dict, str, Path]]:
+    """id -> (adapter, origin, path). Origin is `seed`, `user`, or
+    `user-override`. A user adapter whose id names a seed adapter is ignored
+    unless it sets `override_seed: true`. An unreadable user file, or a draft
+    still holding a TODO, is skipped so it never reaches routing or stops a
+    dispatch (`office harness validate <id>` reads it directly). Cached per
+    process, keyed on the adapter files' mtimes and sizes; each caller gets its
+    own copy, so editing a returned adapter never changes what the next caller reads."""
+    key = files_stamp()
+    cached = _SOURCES_CACHE.get(key)
+    if cached is None:
+        cached = _load_sources_uncached()
+        _SOURCES_CACHE.clear()
+        _SOURCES_CACHE[key] = cached
+    return copy.deepcopy(cached)
+
+
+def _load_sources_uncached() -> dict[str, tuple[dict, str, Path]]:
+    out: dict[str, tuple[dict, str, Path]] = {}
     for p in sorted(adapter_dir().glob("*.yaml")):
         data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-        out[data.get("id", p.stem)] = data
+        out[data.get("id", p.stem)] = (data, "seed", p)
+    for p in user_adapter_files():
+        data = _read(p)
+        if data is None or _has_todo(data):
+            continue
+        aid = str(data.get("id") or p.stem)
+        if aid in out and out[aid][1] == "seed":
+            if data.get("override_seed") is not True:
+                continue
+            out[aid] = (data, "user-override", p)
+        else:
+            out[aid] = (data, "user", p)
+    return out
+
+
+def load_all() -> dict[str, dict]:
+    return {aid: entry[0] for aid, entry in load_sources().items()}
+
+
+def route_version(harness: str, adapter: dict, sources: dict | None = None) -> str:
+    """The harness version a route's identity and trust key on. A user adapter
+    that overrides a seed id is labelled `user-override-<hash>`: a non-numeric
+    label never inherits trust earned by the seed under the real major, so its
+    routes stay valid-unverified until a trust act names this label, and the
+    label shows the override in every route explanation. Pass `sources`
+    (load_sources()) when calling once per catalog row."""
+    entry = (load_sources() if sources is None else sources).get(harness)
+    if entry and entry[1] == "user-override":
+        return "user-override-" + adapter_hash(entry[0]).split(":")[-1][:12]
+    return harness_version(adapter) or "unknown"
+
+
+def harness_ids(*, routed: bool = False) -> list[str]:
+    """Adapters that can launch an Office role (they declare `office_profiles`),
+    sorted. With `routed`, only those the catalog has a row for."""
+    ids = sorted(aid for aid, a in load_all().items() if a.get("office_profiles"))
+    if not routed:
+        return ids
+    from office import candidates
+    used = {r.get("invocation_harness") for r in candidates.catalog_rows()}
+    return [aid for aid in ids if aid in used]
+
+
+def executables() -> set[str]:
+    """Every adapter id and executable name, for recognising a harness process."""
+    out = set()
+    for aid, a in load_all().items():
+        out.add(aid)
+        exe = executable(a)
+        if exe:
+            out.add(os.path.basename(exe))
     return out
 
 
@@ -179,6 +297,54 @@ def harness_version(adapter: dict) -> str | None:
 def effort_value(adapter: dict, effort: str) -> str | None:
     mapping = adapter.get("effort_mapping") or {}
     return mapping.get(effort, effort)
+
+
+PREFLIGHT_TIMEOUT_S = 20
+
+
+def preflight_checks(adapter: dict, model: str) -> list[tuple[str, list[str]]]:
+    """Named (check, argv) preflight commands for one launch of `model`, in
+    declaration order, with `{model}` expanded to the pinned invocation slug."""
+    spec = (adapter or {}).get("preflight") or {}
+    return [(name, [str(a).replace("{model}", str(model)) for a in raw])
+            for name, raw in spec.items() if isinstance(raw, (list, tuple)) and raw]
+
+
+def _model_listed(text: str, slug: str) -> bool:
+    """Whether a harness model listing offers `slug`. A `provider/id` slug must
+    match a listed provider and model (adjacent columns or the joined form); a
+    bare id must be a listed model. Unverifiable is not listed: a launch that
+    cannot name the model it will run fails clearly instead of routing silently."""
+    listed = [line.split() for line in (text or "").splitlines()]
+    if "/" not in slug:
+        return any(slug in tokens for tokens in listed)
+    provider, _, name = slug.partition("/")
+    return any((slug in tokens)
+               or (len(tokens) >= 2 and tokens[0] == provider and tokens[1] == name)
+               for tokens in listed)
+
+
+def run_preflight(adapter: dict, model: str) -> tuple[bool, str]:
+    """Run the adapter's preflight checks for one launch: (ok, detail). A
+    `model_check` additionally requires the pinned slug in the harness's model
+    list; every check must exit 0. This is the candidate's provider/model and
+    credential validation on the dispatching host — a local probe recorded at
+    registration time proves nothing about another host."""
+    for name, argv in preflight_checks(adapter, model):
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=PREFLIGHT_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            return False, f"preflight {name} timed out after {PREFLIGHT_TIMEOUT_S}s ({' '.join(argv)})"
+        except (OSError, subprocess.SubprocessError):
+            return False, f"preflight {name} could not run ({' '.join(argv)})"
+        if proc.returncode != 0:
+            detail = next((ln.strip() for ln in reversed((proc.stderr or proc.stdout or "").splitlines()) if ln.strip()), "")
+            return False, (f"preflight {name} exited {proc.returncode}: {detail}" if detail
+                           else f"preflight {name} exited {proc.returncode} ({' '.join(argv)})")
+        if name == "model_check" and not _model_listed(proc.stdout, model):
+            return False, (f"preflight model_check: {model} is not in the harness's model list on this host; "
+                           "pin a listed provider/model (provider/id) or install it here")
+    return True, ""
 
 
 def toml_path(path: Path) -> str:

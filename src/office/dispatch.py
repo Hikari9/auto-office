@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import threading
 import sys
@@ -22,22 +24,28 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 try:
     import termios
 except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
-from office import adapters, briefs, candidates, db, frontdoor, jobs, paths, planfile, planpath, read_scope, routing, scoring, state, version, worktree_setup
+from office import adapters, briefs, candidates, contract, db, frontdoor, jobs, pane_labels, paths, planfile, planpath, read_scope, route_policy, route_probe, routing, scoring, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
-from office.util import (atomic_write_json, claim_signalable, dumps, now_iso, parse_iso, pid_alive,
+from office.util import (DEAD, atomic_write_json, atomic_write_text, claim_signalable, dumps, now_iso, parse_iso,
+                         pid_alive, pid_state,
                          process_is, process_start, sha256_obj, short, loads)
 
 LEASE_TTL_SECONDS = 4 * 3600
 # A harness session id lands in a resume argv: plain id characters only, never a leading dash.
 _SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
-IDENTITY_ENV = ("OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE_ROLE", "OFFICE_STATE_DIR",
+# Only an agent carries this: the dispatch id it was launched for, which names every process it starts. Kept apart
+# from OFFICE_DISPATCH_ID, which authority checks read, so no job, supervisor or other command a worker runs
+# passes the tag on to a process that is not the worker's.
+_WORKER_TAG = "OFFICE_WORKER_TAG"
+IDENTITY_ENV = ("OFFICE_WORKER_TAG", "OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_DISPATCH_ID", "OFFICE_ROLE", "OFFICE_STATE_DIR",
                 "OFFICE_SESSION", "OFFICE_HARNESS", "OFFICE_VERSION", "OFFICE_FRONT_DOOR_HOPS")
 PLANNER_TASK = "P1"
 
@@ -57,12 +65,102 @@ _STARTUP_SCREEN_MARKERS = (
 )
 
 
+# A launch receipt must never turn adapter arguments or a prompt into a credential leak.
+_LAUNCH_SECRET = re.compile(r"(?i)(?:api[_-]?key|access[_-]?key|private[_-]?key|password|passwd|secret|token(?!s)"
+                            r"|credential|authorization|bearer|cookie|session[_-]?key|\bauth\b|\bpat\b|\bpass\b)")
+# Flags whose value is a secret or a prompt even though the flag name does not say so.
+_HIDE_VALUE_FLAGS = {"--auth", "--key", "--pat", "--pass", "-p", "--prompt"}
+_ENV_FLAGS = {"-e", "--env", "--set-env"}
+# Credential shapes caught wherever they appear, whatever the flag or key name says.
+_SECRET_VALUE = re.compile(r"(?:sk-[A-Za-z0-9_-]{8,}|gh[opsur]_[A-Za-z0-9]{8,}|github_pat_\w{8,}|xox[abpr]-[\w-]{8,}"
+                           r"|glpat-[\w-]{8,}|AKIA[0-9A-Z]{16}|eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]+|AIza[\w-]{30,})")
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@")
+_REDACTED = "[REDACTED]"
+
+
+def _redact_arg(arg: str) -> str:
+    named = _LAUNCH_SECRET.search(arg)
+    if named:
+        # Keep everything before the secret's own separator; whatever follows it is the value.
+        sep = re.search(r"[=:]", arg[named.end():])
+        if sep is None:
+            return _REDACTED
+        cut = named.end() + sep.end()
+        return arg[:cut] + (" " if arg[cut - 1] == ":" else "") + _REDACTED
+    arg = _URL_USERINFO.sub(lambda m: m.group(1) + _REDACTED + "@", arg)
+    return _SECRET_VALUE.sub(_REDACTED, arg)
+
+
+def _redact_launch_argv(argv: list[str]) -> list[str]:
+    """Redact an argv for evidence. A secret-named flag hides its next argument;
+    `name=value` and `Header: value` keep the name and hide the value; an env
+    flag's `NAME=value` keeps only the name."""
+    safe: list[str] = []
+    hide = None
+    for arg in argv:
+        if hide == "value":
+            safe.append(_REDACTED)
+        elif hide == "env":
+            safe.append(arg.split("=", 1)[0] + "=" + _REDACTED if "=" in arg else _REDACTED)
+        elif arg.startswith("-") and not re.search(r"[=:]", arg) and (arg in _HIDE_VALUE_FLAGS or _LAUNCH_SECRET.search(arg)):
+            safe.append(arg)
+            hide = "value"
+            continue
+        elif arg in _ENV_FLAGS:
+            safe.append(arg)
+            hide = "env"
+            continue
+        else:
+            safe.append(_redact_arg(arg))
+        hide = None
+    return safe
+
+
+def write_launch_spec(run: dict, dispatch_id: str, spec: dict) -> None:
+    """launch.json is private to the user: it carries argv evidence and paths (#500)."""
+    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch_id / "launch.json", spec, mode=0o600)
+
+
+def _record_launch_form(run: dict, dispatch: dict, spec: dict, form: str, argv: list[str],
+                        *, transport: str, **fields) -> None:
+    """Persist the actual rendered launch form, never the prompt or secret arguments (#500)."""
+    adapter = adapters.load_all().get(dispatch.get("adapter_id") or dispatch.get("harness") or "")
+    route = dispatch.get("route") or {}
+    cand = route.get("candidate") or {}
+    spec.setdefault("rendered_launches", {})[form] = {
+        "argv": _redact_launch_argv(argv),
+        "prompt_transport": transport,
+        "adapter_hash": adapters.adapter_hash(adapter) if adapter else None,
+        "harness_version": cand.get("harness_version") or dispatch.get("harness_version"),
+        **fields,
+    }
+    write_launch_spec(run, dispatch["id"], spec)
+
+
 # ------------------------------------------------------------------ planner task
 
 def create_planner_task(con, run: dict, *, contract_request: str | None = None, decision: dict | None = None) -> str:
     """Queue the dedicated planner. Caller holds the transaction."""
     now = now_iso()
     existing = state.get_task(con, run["id"], PLANNER_TASK)
+    from office import gates
+    live = gates.live_task_session(con, run["id"], PLANNER_TASK)
+    if live:
+        # A planner cannot be superseded while it is writing PLAN.md. The new
+        # amendment is already durable in amendments. A queued planner picks it
+        # up when its packet is built; a running one acknowledges only what its
+        # packet carried, so the request waits for the next revision (#506).
+        if contract_request:
+            d = state.get_dispatch(con, live)
+            if d and d.get("status") == "running":
+                state.enqueue(con, run, "notify_worker",
+                              {"dispatch_id": live, "task_id": PLANNER_TASK,
+                               "text": f"CONTRACT AMENDMENT QUEUED: {contract_request}. "
+                                       "It is not part of your brief; Office plans it in a follow-up "
+                                       "revision after you submit. Finish the current revision as briefed."},
+                              dedup_key=f"planner-amend:{live}:{contract_request.split(':', 1)[0]}",
+                              max_attempts=1)
+        return live
     if existing is None:
         con.execute(
             "INSERT INTO tasks(run_id, id, title, role, scope_json, depends_json, interfaces_json, accept_json, "
@@ -96,7 +194,8 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
         raise Usage("invalid-override", "--review-cli/--review-external need --review-as <harness>/<model>[@effort]")
     launch_prefs = {k: v for k, v in (("cli", cli), ("external", external)) if v}
     if review_as:
-        candidates.declared_decision(review_as, flag="--review-as")  # validates the route's shape
+        candidates.declared_decision(review_as, flag="--review-as", role="code_reviewer",
+                                    config=state.pinned_config(run))  # validates shape and role fit
     if state.is_terminal(run):
         raise Refused("run-terminal", f"run is {run['phase']}")
     from office import guide, plan_view, plans, prs, queuecmd
@@ -109,20 +208,29 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
     prs.settings(con, run)  # detected once, outside the transaction (it asks GitHub)
     # Route before the write transaction: routing reads evidence and probes quota.
     routes = {}
-    for tid in task_ids:
+    for index, tid in enumerate(task_ids):
         task = state.get_task(con, run["id"], tid)
         if task is None or task["role"] == "planner":
             raise Usage("unknown-task", f"{tid} is not a task in plan p{run['plan_version']}",
                         next_step="office status lists the ready tasks")
-        if not (as_model or route or cli or external):
-            from office import gates
-            block = gates.unavailable_review_block(con, run, task)
-            if block:
-                continue
+        from office import gates
+        block = gates.unavailable_review_block(con, run, task)
+        if block and (as_model or route or cli or external):
+            # The submitted revision is final and only its review is missing: an executor would not unblock it.
+            raise Refused("review-only-block", f"{tid} is blocked only on its code review of {block['revision_id']} "
+                          f"({block['verdict'] or block.get('review_status')}); an executor would not unblock it and "
+                          "its submission is kept", scope=tid, preserved="the submitted revision",
+                          next_step=f"office review {tid} [--as <harness>/<model>[@effort]] re-runs only the review; "
+                                    f"office review {tid} --report <file> reviews it as the orchestrator")
+        if block:
+            continue
         if as_model:
-            routes[tid] = candidates.declared_decision(as_model)
+            routes[tid] = candidates.declared_decision(as_model, role="executor",
+                                                       config=state.pinned_config(run))
         else:
             routes[tid] = planned_route(con, run, task, override=route, reroute=reroute)
+            if not (route or launch_prefs) and (parallel or index == 0):  # a stacked task launches later, not now
+                routes[tid] = preflight_discovery(con, run, task, routes[tid], reroute=reroute)
         if launch_prefs and routes[tid].get("status") == "selected":
             routes[tid]["launch"] = launch_prefs
     res = Result()
@@ -136,31 +244,34 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 # A submitted revision blocked only by an UNAVAILABLE code
                 # review needs its review re-run, not a fresh executor.
                 from office import gates
-                if review_as:
-                    state.update_task(con, run["id"], tid, review_override={
-                        "as": review_as, "cli": review_cli, "external": bool(review_external), "by": "user"})
-                gid = gates.rerun_unavailable_review(con, run, state.get_task(con, run["id"], tid))
+                gid = gates.rerun_unavailable_review(con, run, state.get_task(con, run["id"], tid),
+                                                     pin=gates.review_pin(review_as, review_cli, review_external))
                 if gid is None:
                     raise Refused("state-changed", f"{tid} is no longer blocked on its code review; re-run dispatch",
                                   scope=tid, next_step=f"office dispatch {tid}")
                 res.add(f"{tid} code review re-run on {task['current_revision_id']} (gate {gid}"
-                        + (f", reviewer {review_as}" if review_as else "") + "); the submission is kept, "
-                        "no executor launched")
+                        + (f", reviewer {review_as}" if review_as else "") + "); the submission is kept, no executor "
+                        f"launched (office review {tid} --as <harness>/<model>[@effort] names another reviewer)")
                 previous = tid
                 continue
             after = task.get("stack_after")
-            if (task["status"] == "queued" and after
-                    and (state.get_task(con, run["id"], after) or {}).get("status") == "accepted"):
-                # Stacked after a task that was accepted before the stack was
-                # recorded: start_stacked already fired, so launch it now.
+            released = stack_released(con, run, after) if task["status"] == "queued" and after else None
+            if released:
+                # Stacked after a task that was accepted, or that submitted and whose session
+                # ended, before this dispatch: nothing else starts it, so launch it now.
                 state.update_task(con, run["id"], tid, stack_after=None, pause_reason=None)
                 decision = routes.get(tid) if (routes.get(tid) or {}).get("status") == "selected" else None
                 if decision:
+                    decision = settle_discovery(con, run, task, decision, launching=True)
                     _record_routing(con, run, decision)
                     note_route(con, run, task, decision)
+                parts: list = []
                 did = request_launch(con, run, tid, role="executor", decision=decision,
-                                     base=_base_for(con, run, task, graph, after))
-                res.add(f"{tid} was stacked after {after}, which is already accepted -> {did} launching")
+                                     base=_base_for(con, run, task, graph, after, parents=parts),
+                                     extra={"base_parents": parts})
+                if decision:
+                    record_discovery(con, run, task, decision, did)
+                res.add(f"{tid} was stacked after {after}, which {released} -> {did} launching")
                 previous = tid
                 continue
             if task["status"] in ("running", "launching", "submitted", "changes_required", "queued"):
@@ -173,8 +284,12 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 continue
             plans.require_scope_clear(con, run, tid)
             stack_after = None if parallel or previous is None else previous
-            base = _base_for(con, run, task, graph, stack_after)
-            if stack_after and (state.get_task(con, run["id"], stack_after) or {}).get("status") == "accepted":
+            holder = (state.get_task(con, run["id"], stack_after) or {}) if stack_after else {}
+            holder_accepted = holder.get("status") == "accepted"
+            parts = []
+            base = _base_for(con, run, task, graph, stack_after, queued=bool(stack_after) and not holder_accepted,
+                             parents=parts)
+            if holder_accepted:
                 # Nothing would release a stack on an accepted task: launch now,
                 # based on its accepted revision (base above).
                 stack_after = None
@@ -182,10 +297,11 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             if decision.get("status") != "selected":
                 raise Refused("no-route", _route_failure(tid, decision), scope=tid,
                               preserved="plan and other dispatches", next_step=_route_next(decision, tid, run))
+            decision = settle_discovery(con, run, task, decision, launching=not stack_after)
             _record_routing(con, run, decision)
             if review_as:
-                state.update_task(con, run["id"], tid, review_override={
-                    "as": review_as, "cli": review_cli, "external": bool(review_external), "by": "user"})
+                from office import gates
+                state.update_task(con, run["id"], tid, review_override=gates.review_pin(review_as, review_cli, review_external))
             if stack_after:
                 state.update_task(con, run["id"], tid, status="queued", stack_after=stack_after,
                                   pause_reason=f"stacked after {stack_after}")
@@ -200,7 +316,9 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 if drift:
                     res.add(drift)
                 note_route(con, run, task, decision)
-                did = request_launch(con, run, tid, role="executor", decision=decision, base=base)
+                did = request_launch(con, run, tid, role="executor", decision=decision, base=base,
+                                     extra={"base_parents": parts})
+                record_discovery(con, run, task, decision, did)
                 verb = "prepared for you to start (external; nothing launched)" if external else "launching"
                 res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} {verb}"
                         + (" (user override)" if decision.get("override") else "")
@@ -226,7 +344,8 @@ def _planned_slate(con, run: dict, tid: str) -> dict | None:
         if plan and plan.get("primary") else None
 
 
-def planned_route(con, run: dict, task: dict, *, override: str | None = None, reroute: bool = False) -> dict:
+def planned_route(con, run: dict, task: dict, *, override: str | None = None, reroute: bool = False,
+                  exclude: set[str] | None = None, discovery_input: dict | None = None) -> dict:
     """Route an executor dispatch: the planner's primary, else its fallbacks in order.
 
     Live evidence (quota, availability, trust, learned eligibility) is refreshed
@@ -234,14 +353,26 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     order and the first one that still qualifies runs. A route is never swapped
     for an unplanned one: when every planned route fails, the result is
     `slate_exhausted` and the orchestrator reroutes (`--reroute`). Without a
-    planned slate (`--route`, `--reroute`, a pre-#300 plan) the fresh decision stands."""
+    planned slate (`--route`, `--reroute`, a pre-#300 plan) the fresh decision stands.
+
+    `discovery_input` is the preflight's recompute handle (#494): a decision that comes back
+    with `intent: "trial"` stands whole, because the trial route is the one route a planned
+    slate cannot name. `exclude` keeps routes out of the decision (the trial route, when the
+    known-working fallback is wanted)."""
     tid = task["id"]
     kind = "fix" if task.get("current_dispatch_id") else "fresh"
-    fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
-                                  dispatch_kind=kind)
     planned = None if (override or reroute) else _effective_slate(con, run, task)
+    # A declared route is a manual one: overkill rules never remove it. Denial, quarantine,
+    # capability, permission, archive and quota gates still apply to the fresh evidence.
+    declared = planned["primary"] if planned and planned.get("chooser") == "declared" else None
+    fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
+                                  dispatch_kind=kind, manual=bool(declared), declared=declared,
+                                  exclude=exclude, discovery_input=discovery_input)
     if reroute and fresh.get("status") == "selected":
         fresh["route_source"], fresh["route_note"] = "reroute", "rerouted from current evidence"
+    if discovery_input and fresh.get("status") == "selected" and (fresh.get("discovery") or {}).get("intent") == "trial":
+        fresh.setdefault("route_source", "router")
+        return fresh
     if not planned:
         fresh.setdefault("route_source", "override" if override else "router")
         return fresh
@@ -336,6 +467,13 @@ def _record_routing(con, run: dict, decision: dict) -> None:
                  "dispatch": {"source": source, "dispatched": decision.get("selected"),
                               "fallbacks_taken": decision.get("fallbacks_taken") or [],
                               "planned_audit_id": planned.get("audit_id")}}
+        link, record = decision.get("discovery_link"), decision.get("trial_record")
+        if link:
+            audit["dispatch"]["discovery"] = {
+                "attempt_id": link["attempt_id"], "probe_key": link["probe_key"], "policy_digest": link["policy_digest"],
+                "intent": "trial" if record else "none", "blocked": link.get("blocked"),
+                "trial_reason": record["reason"] if record else None,
+                "fallback_route": record["fallback_route"] if record else decision.get("selected")}
         explored = source != "plan" and (audit.get("exploration") or {}).get("picked") == decision.get("selected")
         decision["audit_id"] = plan_view.record_audit(con, run, audit, plan_version=run.get("plan_version"),
                                                       dispatched=decision.get("selected"), explored=explored)
@@ -354,6 +492,14 @@ def _route_payload(decision: dict) -> dict:
     if (decision.get("planned") or {}).get("chooser") == "declared" or decision.get("declared") \
             or decision.get("override"):
         out["declared"] = True  # a deliberate route survives the next dispatch of the task
+    link = decision.get("discovery_link")
+    if link:
+        record = decision.get("trial_record") or {}
+        out["discovery"] = {"attempt_id": link["attempt_id"], "intent": "trial" if record else "none",
+                            "blocked": link.get("blocked"), "probe_key": link["probe_key"],
+                            "candidate": link["candidate"], "policy_digest": link["policy_digest"],
+                            "reason": record.get("reason"), "fallback_route": record.get("fallback_route"),
+                            "fallback": record.get("fallback")}
     return out
 
 
@@ -375,6 +521,9 @@ def note_route(con, run: dict, task: dict, decision: dict) -> None:
         before = planned.get("primary")
         kind = "quota" if any("quota" in t["reason"] for t in taken) else "unavailable"
         change = (before, kind, f"fallback: {why}", "office")
+    elif decision.get("trial_record"):
+        before = decision["trial_record"]["fallback_route"]
+        change = (before, "trial", decision["trial_record"]["reason"], "office")
     elif source == "reroute":
         before = recorded or ((state.task_dispatches(con, run["id"], tid) or [{}])[-1].get("triple"))
         change = (before, "reroute", "rerouted from current evidence", "orchestrator")
@@ -387,6 +536,235 @@ def note_route(con, run: dict, task: dict, decision: dict) -> None:
     if change and before and norm(before) != norm(after):
         state.record_route_change(con, run, tid, before, after, kind=change[1], reason=change[2], actor=change[3])
     state.update_task(con, run["id"], tid, route_json=dumps(_route_payload(decision)))
+
+
+# ------------------------------------------------------------------ route discovery (#494)
+
+TRIAL_OPEN = ("reserved", "launched")
+PINNED_CHOOSERS = ("planner", "declared", "recorded")  # a route a person or an approved plan chose is never traded for a trial
+_TRIAL_EVENTS = {"launched": "trial-launched", "launch-failed": "trial-launch-failed", "fell-back": "trial-fell-back",
+                 "submitted": "trial-submitted", "abandoned": "trial-abandoned"}
+_TRIAL_FROM = {"launched": ("reserved",), "launch-failed": TRIAL_OPEN, "abandoned": TRIAL_OPEN,
+               "submitted": TRIAL_OPEN, "fell-back": ("launch-failed",)}
+
+
+def _policy_digest(config: dict) -> str:
+    return config.get(route_policy.DIGEST_KEY) or route_policy.policy_digest(config)
+
+
+def _annotated(decision: dict, link: dict, *, blocked: str | None = None) -> dict:
+    """`decision` with what discovery did to it: the audit's `discovery` block and the link the
+    dispatch transaction records. Never a trial: a decision that carries a link without a
+    `trial_record` dispatches its known-working route."""
+    out = {k: v for k, v in decision.items() if k not in ("trial", "trial_record")}
+    if link.get("attempt_id"):
+        out["discovery_link"] = {**link, "intent": "none", "blocked": blocked}
+    audit = out.get("routing")
+    if audit:
+        block = {**(audit.get("discovery") or {}), "intent": "none", "blocked": blocked}
+        if link.get("attempt_id"):
+            block.update(attempt_id=link["attempt_id"], candidate=link["candidate"], probe_key=link["probe_key"])
+        out["routing"] = {**audit, "discovery": block}
+    return out
+
+
+def preflight_discovery(con, run: dict, task: dict, decision: dict, *, reroute: bool = False) -> dict:
+    """D5 (#494): turn a `probe` intent into a trial or a known-working dispatch, before any lease,
+    worktree claim or session exists. The attempt id is minted first, so the probe's events exist before
+    a dispatch row does. `route_probe.ensure` reserves atomically and then probes (outside any
+    transaction). The route is then decided again with the attempt's handle, and only that recomputed
+    decision is used: a probe that failed or was refused, or a quota, permission or fingerprint that
+    changed since, comes back as a route without a trial, and that route is dispatched."""
+    disc = decision.get("discovery") or {}
+    if decision.get("status") != "selected" or disc.get("intent") != "probe":
+        return decision
+    candidate = next((c for c in (decision.get("request") or {}).get("candidates") or []
+                      if routing.candidate_id(c) == disc.get("candidate")), None)
+    if (decision.get("planned") or {}).get("chooser") in PINNED_CHOOSERS or candidate is None:
+        return _annotated(decision, {}, blocked="pinned-route" if candidate else "candidate-gone")
+    config = state.pinned_config(run)
+    link = {"attempt_id": route_policy.new_attempt_id(), "candidate": disc["candidate"],
+            "probe_key": disc.get("probe_key"), "policy_digest": _policy_digest(config), "primary": decision["selected"]}
+    context = {"origin": "preflight", "role": "executor", "task_id": task["id"],
+               "reason": f"discovery: untried route {link['candidate']} drawn for an exact probe; "
+                         f"{decision['selected']} stays the known-working fallback",
+               "primary_route": decision["selected"], "fallback_route": decision["selected"]}
+    try:
+        outcome = route_probe.ensure(con, run, candidate, attempt_id=link["attempt_id"], context=context)
+        if isinstance(outcome, route_probe.Refused):
+            return _annotated(decision, link, blocked=outcome.reason)
+        handle = {"candidate": link["candidate"], "probe_key": link["probe_key"], "reservation_id": link["attempt_id"],
+                  "attempt_id": link["attempt_id"]}
+        fresh = planned_route(con, run, task, reroute=reroute, discovery_input=handle)
+        block = fresh.get("discovery") or {}
+        if fresh.get("status") != "selected" or block.get("intent") != "trial":
+            return _annotated(fresh, link, blocked=block.get("blocked") or "no-trial")
+        fallback = planned_route(con, run, task, reroute=reroute, exclude={link["candidate"]})
+    except Refused as refused:
+        if refused.category == "policy-unreadable":  # nothing is offered while a denial cannot be ruled out
+            raise
+        return _annotated(decision, link, blocked=f"probe-error: {type(refused).__name__}")
+    except Exception as exc:  # discovery never costs the dispatch: the known-working decision stands
+        return _annotated(decision, link, blocked=f"probe-error: {type(exc).__name__}")
+    if fallback.get("status") != "selected":
+        return _annotated(fallback, link, blocked="no-fallback")
+    reason = (f"discovery trial: a fresh exact conformance probe passed for {link['candidate']} (attempt "
+              f"{link['attempt_id']}); falls back to known-working {fallback['selected']}")
+    return {**fresh, "discovery_link": {**link, "intent": "trial", "blocked": None},
+            "trial": {"fallback": fallback, "reason": reason}}
+
+
+def settle_discovery(con, run: dict, task: dict, decision: dict, *, launching: bool) -> dict:
+    """The dispatch transaction's last word on a trial. Re-reads the caps, task risk, quota reserve, probe
+    record and fallback under the write lock; any failure dispatches the known-working fallback instead
+    and writes no `route_trials` row. Caller holds the transaction."""
+    trial = decision.get("trial")
+    if not trial:
+        return decision
+    fallback, link = trial["fallback"], decision["discovery_link"]
+    blocked = None if launching else "not-launching"
+    blocked = blocked or _trial_blocked(con, run, decision, fallback)
+    if blocked:
+        return _annotated(fallback, link, blocked=blocked)
+    record = {"id": link["attempt_id"], "route": link["candidate"], "probe_key": link["probe_key"],
+              "fallback_route": fallback["selected"], "policy_digest": link["policy_digest"],
+              "reason": trial["reason"], "fallback": _route_payload(fallback)}
+    return {**{k: v for k, v in decision.items() if k != "trial"}, "trial_record": record}
+
+
+def _known_working(con, cand: dict) -> bool:
+    """The routing's own definition (`candidates.discovery_inputs`): an available route that is proven, or
+    learned eligible, and not quarantined."""
+    from office import route_learning
+    _, trust = scoring.evaluate_trust_state(con, routing.candidate_id(cand))
+    if trust == "quarantined" or cand.get("route_status", "available") != "available":
+        return False
+    if trust == "proven":
+        return True
+    learned = route_learning.current_eligibility(con, "executor")
+    return (learned.get(route_learning.candidate_key(cand)) or {}).get("state") == "learned-eligible"
+
+
+def _trial_blocked(con, run: dict, decision: dict, fallback: dict) -> str | None:
+    """Why no trial may be reserved now (a routing `blocked` token), or None."""
+    config = state.pinned_config(run)
+    settings = route_policy.discovery_settings(config)
+    cand, link = decision["candidate"], decision["discovery_link"]
+    risk = run.get("risk") or {}
+    if not (settings["enabled"] and "executor" in settings["roles"]):
+        return "discovery-disabled"
+    if (risk.get("size_class") not in settings["trial_size_classes"]
+            or risk.get("blast_radius") not in settings["trial_blast_radius"] or risk.get("irreversible")):
+        return "risk"
+    alloc = route_probe.allocation(con, run["id"], settings)
+    if alloc["trials"]["used"] >= alloc["trials"]["max"]:
+        return "trial-cap"
+    if alloc["rolling"]["used"] >= alloc["rolling"]["max"]:
+        return "rolling-cap"
+    if route_probe._quota_refusal(cand, config):
+        return "quota-reserve"
+    probe = route_probe.status(con, cand)
+    if not probe or probe.get("result") != "pass" or cand.get("probe_key") != link["probe_key"]:
+        return "probe-stale"
+    if scoring.evaluate_trust_state(con, link["candidate"])[1] == "quarantined":
+        return "quarantined"
+    # No trial without a known-working fallback on record, whoever launched this dispatch.
+    if (fallback.get("status") != "selected" or not fallback.get("candidate")
+            or routing.candidate_id(fallback["candidate"]) == link["candidate"]
+            or not _known_working(con, fallback["candidate"])):
+        return "no-fallback"
+    return None
+
+
+def _discovery_event(con, kind: str, attempt_id: str, *, origin: str, run_id: str, task_id: str | None,
+                     dispatch_id: str | None, reason: str, outcome: str | None = None, detail: str | None = None,
+                     primary: str | None = None, fallback: str | None = None) -> None:
+    """Append one immutable event to an attempt, in the caller's transaction. Identity (fingerprint,
+    candidate, probe key, policy digest) is read off the attempt's own earlier events; no event is updated."""
+    base = con.execute("SELECT * FROM route_discovery_events WHERE attempt_id=? ORDER BY seq DESC LIMIT 1",
+                       (attempt_id,)).fetchone()
+    if base is None:
+        return
+    run = state.get_run(con, run_id)
+    settings = route_policy.discovery_settings(state.pinned_config(run))
+    route_policy.record_event(
+        con, kind=kind, attempt_id=attempt_id, origin=origin, policy_digest=base["policy_digest"],
+        probe_key=base["probe_key"], reason=reason, run_id=run_id, plan_version=run.get("plan_version"),
+        task_id=task_id, dispatch_id=dispatch_id, role="executor", fingerprint_json=base["fingerprint_json"],
+        candidate_route=base["candidate_route"], primary_route=primary or base["primary_route"],
+        fallback_route=fallback or base["fallback_route"], probe_freshness=base["probe_freshness"],
+        allocation_json=route_probe.allocation(con, run_id, settings), outcome=outcome, detail=detail)
+
+
+def record_discovery(con, run: dict, task: dict, decision: dict, dispatch_id: str) -> None:
+    """In the dispatch transaction, right after the dispatch row: `dispatch-linked` names the dispatch an
+    attempt ended in (the fallback's, after a failed or refused probe), and a trial adds its `route_trials`
+    row and `trial-reserved`. Earlier events are never touched. Caller holds the transaction."""
+    link = decision.get("discovery_link")
+    if not link:
+        return
+    record = decision.get("trial_record")
+    tid = task["id"]
+    now = now_iso()
+    if record:
+        con.execute("INSERT INTO route_trials(id, run_id, task_id, dispatch_id, role, route, probe_key, fallback_route, "
+                    "policy_digest, reason, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (record["id"], run["id"], tid, dispatch_id, "executor", record["route"], record["probe_key"],
+                     record["fallback_route"], record["policy_digest"], record["reason"], "reserved", now, now))
+    dispatched = decision.get("selected")
+    detail = (record["reason"] if record else
+              f"no trial: {link.get('blocked') or 'none'}; dispatched known-working {dispatched}")
+    _discovery_event(con, "dispatch-linked", link["attempt_id"], origin="dispatch", run_id=run["id"], task_id=tid,
+                     dispatch_id=dispatch_id, reason=f"attempt linked to dispatch {dispatch_id}",
+                     outcome="trial" if record else "fallback", detail=detail, primary=link.get("primary"),
+                     fallback=record["fallback_route"] if record else dispatched)
+    if record:
+        _discovery_event(con, "trial-reserved", link["attempt_id"], origin="dispatch", run_id=run["id"], task_id=tid,
+                         dispatch_id=dispatch_id, reason=record["reason"], outcome="reserved", detail=record["reason"],
+                         primary=link.get("primary"), fallback=record["fallback_route"])
+
+
+def open_trial(con, dispatch_id: str | None) -> dict | None:
+    """The live trial this dispatch is, or None (an ordinary dispatch, or a trial already settled)."""
+    row = con.execute(f"SELECT * FROM route_trials WHERE dispatch_id=? AND status IN ({','.join('?' * len(TRIAL_OPEN))})",
+                      (dispatch_id, *TRIAL_OPEN)).fetchone() if dispatch_id else None
+    return dict(row) if row else None
+
+
+def set_trial_status(con, trial: dict, status: str, *, origin: str = "dispatch", detail: str = "",
+                     outcome: dict | None = None, dispatch_id: str | None = None) -> bool:
+    """Move a trial to `status` and append its `trial-*` event in the same transaction. A trial that is not
+    in a state this move is allowed from is left alone (False): every status change happens once."""
+    cur = con.execute(f"UPDATE route_trials SET status=?, outcome=COALESCE(?, outcome), updated_at=? WHERE id=? "
+                      f"AND status IN ({','.join('?' * len(_TRIAL_FROM[status]))})",
+                      (status, dumps(outcome) if outcome is not None else None, now_iso(), trial["id"],
+                       *_TRIAL_FROM[status]))
+    if cur.rowcount != 1:
+        return False
+    _discovery_event(con, _TRIAL_EVENTS[status], trial["id"], origin=origin, run_id=trial["run_id"],
+                     task_id=trial["task_id"], dispatch_id=dispatch_id or trial["dispatch_id"],
+                     reason=detail or f"trial {status}", outcome=status, detail=detail or None,
+                     fallback=trial["fallback_route"])
+    return True
+
+
+def trial_submitted(con, dispatch_id: str) -> bool:
+    """A trial dispatch's revision exists. Caller holds the transaction."""
+    trial = open_trial(con, dispatch_id)
+    return bool(trial) and set_trial_status(con, trial, "submitted", detail="a revision was submitted")
+
+
+def abandon_trial(con, dispatch_id: str, why: str) -> bool:
+    """A trial that ends without a revision and without a recovery (revoked, re-routed by the user, ended
+    on a question). Caller holds the transaction."""
+    trial = open_trial(con, dispatch_id)
+    return bool(trial) and set_trial_status(con, trial, "abandoned", detail=why)
+
+
+def _trial_launched(con, dispatch_id: str) -> None:
+    trial = con.execute("SELECT * FROM route_trials WHERE dispatch_id=? AND status='reserved'", (dispatch_id,)).fetchone()
+    if trial:
+        set_trial_status(con, dict(trial), "launched", detail="the dispatch's agent was launched")
 
 
 def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> list[str]:
@@ -402,10 +780,24 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
         kind, args = Path(argv[0]).name, argv[1:]
     else:
         adapter = adapters.load_all().get(d.get("adapter_id") or "")
-        inter = adapters.interactive_argv(adapter, "worker" if output is None else "reviewer", model=d.get("model") or "",
+        kind_name = "worker" if output is None else "reviewer"
+        inter = adapters.interactive_argv(adapter, kind_name, model=d.get("model") or "",
                                           effort=d.get("effort") or "none", cwd=Path(wt),
                                           output=Path(output) if output else None,
                                           session_id=_assigned_session(d)) if adapter and d.get("model") else None
+        if inter is None and adapter and d.get("model") and adapters.profile(adapter, kind_name):
+            # No pane-hosted form: show the recorded headless invocation instead
+            # of a bare executable, which would run on the harness's default
+            # model with none of the pinned trust flags.
+            try:
+                headless, _ = adapters.build_argv(adapter, kind_name, model=d.get("model") or "",
+                                                  effort=d.get("effort") or "none", cwd=Path(wt),
+                                                  output=Path(output) if output else None,
+                                                  session_id=_assigned_session(d))
+            except adapters.AdapterError:
+                headless = None
+            if headless:
+                inter = (headless[1:], d.get("harness") or "<kind>")
         kind, args = (inter[1], inter[0]) if inter else (d.get("harness") or "<kind>", [])
     if output is None:
         pointer = (f"Read and carry out the brief at {ddir / 'brief.md'} exactly. "
@@ -425,21 +817,57 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
             f"       herdr agent prompt {name} {shlex.quote(pointer)}"]
 
 
-def _base_for(con, run: dict, task: dict, graph: dict, stack_after: str | None) -> str:
-    """Base commit: run base, or the dependency revision this task builds on."""
-    deps = list(task["depends"]) + ([stack_after] if stack_after else [])
-    base = run["base_sha"]
-    for dep in deps:
-        d = state.get_task(con, run["id"], dep)
-        rev_id = (d or {}).get("accepted_revision_id") or (d or {}).get("current_revision_id")
+def _base_for(con, run: dict, task: dict, graph: dict, stack_after: str | None, *, queued: bool = False,
+              parents: list | None = None) -> str | None:
+    """Base commit: the run base, or one commit combining every dependency revision this task builds on.
+
+    Each dependency contributes its accepted revision. One with none is not used silently: only the
+    `stack_after` holder released while submitted (#398) and a v3.1 run (a dependant may start on a
+    submitted revision, Q16) build on its current one, and the brief names that revision unaccepted.
+    A dependency with no revision at all refuses. Heads that are ancestors of another drop out and the
+    rest combine; heads that conflict refuse naming both tasks and the paths (#489). `queued` is a task
+    that only waits for its holder: its base is computed when it starts, so only the existence check runs.
+    `parents` receives {"task", "revision", "commit", "accepted"} for each dependency used."""
+    from office import integration
+    heads = []
+    for dep in dict.fromkeys([*task["depends"], *([stack_after] if stack_after else [])]):
+        d = state.get_task(con, run["id"], dep) or {}
+        rev_id = d.get("accepted_revision_id")
+        accepted = bool(rev_id)
+        if not accepted and (queued or dep == stack_after or contract.of(run) == contract.LEGACY):
+            rev_id = d.get("current_revision_id")
         if not rev_id:
             if dep == stack_after:
                 continue
+            if d.get("current_revision_id"):
+                raise Refused("dependency-not-ready", f"{task['id']} depends on {dep}, which is {d['status']} on "
+                              f"{d['current_revision_id']} and not accepted; a base must not carry unreviewed work",
+                              scope=task["id"], next_step=f"wait for {dep} to be accepted, or office dispatch {dep} "
+                                                          f"{task['id']} (stacked)")
             raise Refused("dependency-not-ready", f"{task['id']} depends on {dep}, which has no submitted revision",
                           scope=task["id"], next_step=f"dispatch {dep} first, or office dispatch {dep} {task['id']} (stacked)")
-        rev = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (rev_id,)).fetchone()
-        base = rev["commit_sha"]
-    return base
+        sha = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (rev_id,)).fetchone()["commit_sha"]
+        heads.append({"task": dep, "revision": rev_id, "commit": sha, "accepted": accepted})
+    if queued:
+        return None
+    if parents is not None:
+        parents.extend(heads)
+    # A run whose integration moved onto a newer default branch must not
+    # spawn new executor work from its original, now-stale base (#580).
+    onto = integration.compose_base(run)
+    if not heads:
+        return onto
+    parents_for_base = [(h["task"], h["commit"]) for h in heads]
+    if onto != run["base_sha"]:
+        parents_for_base.insert(0, ("rebased default branch", onto))
+    try:
+        return integration.combine(run, parents_for_base)
+    except integration.CombineConflict as exc:
+        raise Refused("dependency-conflict", f"{task['id']} cannot build on both {exc.left} and {exc.right}: their "
+                      f"accepted revisions conflict on {', '.join(exc.paths[:6])}", scope=task["id"],
+                      preserved="both tasks' revisions",
+                      next_step=f"amend the plan so {exc.left} and {exc.right} do not edit the same lines, or "
+                                f"depend {task['id']} on one of them") from exc
 
 
 # ------------------------------------------------------------------ launch request
@@ -453,12 +881,13 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
     rounds route here from pinned state because they have no orchestrator turn.
     """
     task = state.get_task(con, run["id"], task_id)
-    if role == "executor":
+    if role in ("executor", "planner"):
         from office import gates
         live = gates.live_task_session(con, run["id"], task_id, exclude=replaces)
         if live:
             # One session per worktree: amend, rerun and relaunch all come through here.
-            raise Refused("worker-live", f"{task_id} still has a live worker ({live})", scope=task_id,
+            raise Refused("planner-live" if role == "planner" else "worker-live",
+                          f"{task_id} still has a live {role} ({live})", scope=task_id,
                           next_step=f'office prompt {task_id} -- "<message>" to reach it, or office revoke {task_id} '
                                     "to end it first")
     prior = None
@@ -475,18 +904,27 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
     cand = decision["candidate"]
     dispatch_id = "D" + uuid.uuid4().hex[:8]
     lease = acquire_lease(con, run, task, dispatch_id, role)
+    executor = role == "executor"
+    # Evidence links: the executor this one replaces (same run and task only), and the task's
+    # first executor, recorded once and left NULL on a task whose earlier executors predate it.
+    predecessor = prior["id"] if (executor and prior and prior["run_id"] == run["id"] and prior["task_id"] == task_id
+                                  and prior["role"] == "executor") else None
+    first = executor and not con.execute(
+        "SELECT 1 FROM dispatches WHERE run_id=? AND task_id=? AND role='executor'", (run["id"], task_id)).fetchone()
     worktree = prior["worktree"] if prior and prior.get("worktree") else str(paths.worktrees_dir() / run["id"][:8] / task_id)
     branch = prior["branch"] if prior and prior.get("branch") else f"office/{run['id'][:8]}/{task_id}"
     applied = task["contract_version"] if role != "planner" else run["plan_version"]
     con.execute(
         "INSERT INTO dispatches(id, run_id, role, holder_id, triple, invocation_model_id, selection_reason, task_shape, "
         "started_at, task_id, kind, office_version, status, worktree, branch, base_commit, lease_id, harness, model, effort, "
-        "adapter_id, applied_plan_version, route_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "adapter_id, applied_plan_version, route_json, size_class, predecessor_dispatch_id) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (dispatch_id, run["id"], role, dispatch_id, routing.candidate_id(cand), cand.get("invocation_model_id"),
          (decision.get("selection_disclosure") or {}).get("reason"), run.get("playbook"), now_iso(), task_id, role,
          version.current(), "launching", worktree, branch, base or (prior or {}).get("base_commit") or run["base_sha"],
          lease["id"], cand["harness"], cand.get("invocation_model_id"), cand.get("effort"), cand.get("adapter_id"),
-         applied, dumps(_route_payload(decision))))
+         applied, dumps(_route_payload(decision)),
+         (task.get("descriptor") or {}).get("task_size") if executor else None, predecessor))
     if task.get("descriptor"):
         con.execute("UPDATE dispatches SET descriptor_json=? WHERE id=?",
                     (dumps(task["descriptor"]), dispatch_id))
@@ -508,30 +946,56 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
                 "AND status IN ('queued','delivered') AND dispatch_id IS NOT ?",
                 (dispatch_id, run["id"], task_id, dispatch_id))
     state.update_task(con, run["id"], task_id, status="launching", current_dispatch_id=dispatch_id,
-                      pause_reason=None, stack_after=None)
+                      pause_reason=None, stack_after=None,
+                      **({"first_executor_dispatch_id": dispatch_id} if first else {}))
     payload = {"dispatch_id": dispatch_id, "task_id": task_id, "role": role, "fix_of": fix_of,
                **(decision.get("launch") or {}), **(extra or {})}
     state.enqueue(con, run, "launch_agent", payload, dedup_key=f"launch:{dispatch_id}", max_attempts=2)
     return dispatch_id
 
 
-def acquire_lease(con, run: dict, task: dict, holder: str, role: str) -> dict:
-    """One fenced lease per task scope. Overlapping live scopes are refused."""
-    now = datetime.now(timezone.utc)
-    rows = con.execute("SELECT * FROM leases WHERE run_id=? AND released_at IS NULL AND revoked_at IS NULL",
-                       (run["id"],)).fetchall()
-    for row in rows:
-        if row["task_id"] == task["id"]:
-            # Handing the task's lease to a new holder (fix round, relaunch):
-            # revoke the old one so a late submit from it is fenced out.
-            con.execute("UPDATE leases SET revoked_at=?, revoke_reason='superseded' WHERE id=?", (now.isoformat(), row["id"]))
-            continue
+def lease_dormant(con, run_id: str, row) -> bool:
+    """A task lease that holds no scope: its task has no live or launching session (the
+    worker submitted and ended, an ack-only session ended, an accepted task was reopened
+    and its session is gone). Nothing edits the task's files, so an overlapping task may
+    run (#398, #307). The lease row stays: a relaunch of the task supersedes it, and that
+    relaunch is refused while the overlapping task's session is live. A planner lease, a
+    lease with no task, and a task Office still shows running or launching keep holding."""
+    if row["role"] == "planner" or not row["task_id"]:
+        return False
+    task = state.get_task(con, run_id, row["task_id"])
+    if task is None or task["role"] == "planner" or task["status"] in ("running", "launching"):
+        return False
+    from office import gates
+    return gates.live_task_session(con, run_id, row["task_id"]) is None
+
+
+def scope_holder(con, run: dict, task: dict) -> str | None:
+    """The task whose live session holds a scope overlapping `task`'s, or None. Read-only."""
+    for row in con.execute("SELECT * FROM leases WHERE run_id=? AND released_at IS NULL AND revoked_at IS NULL "
+                           "AND task_id IS NOT ?", (run["id"], task["id"])).fetchall():
         other = state.get_task(con, run["id"], row["task_id"]) if row["task_id"] else None
         other_scope = other["scope"] if other else json.loads(row["scope"] or "[]")
-        if planfile.scopes_overlap(task["scope"], other_scope):
-            raise Refused("scope-held", f"{task['id']} scope overlaps {row['task_id']}, which holds a live lease",
-                          scope=task["id"], preserved="both tasks' work",
-                          next_step=f"wait for {row['task_id']} to be accepted, or office dispatch {row['task_id']} {task['id']} (stacked)")
+        if planfile.scopes_overlap(task["scope"], other_scope) and not lease_dormant(con, run["id"], row):
+            return row["task_id"] or row["holder_id"]
+    return None
+
+
+def acquire_lease(con, run: dict, task: dict, holder: str, role: str) -> dict:
+    """One fenced lease per task scope. Overlapping live scopes are refused; a dormant
+    lease (no live session of its task) does not hold its scope."""
+    now = datetime.now(timezone.utc)
+    other = scope_holder(con, run, task)
+    if other:
+        raise Refused("scope-held", f"{task['id']} scope overlaps {other}, which holds a live lease",
+                      scope=task["id"], preserved="both tasks' work",
+                      next_step=f"wait for {other}'s session to end (submit, accept, or office revoke {other}), "
+                                f"or office dispatch {other} {task['id']} (stacked)")
+    for row in con.execute("SELECT id FROM leases WHERE run_id=? AND task_id=? AND released_at IS NULL "
+                           "AND revoked_at IS NULL", (run["id"], task["id"])).fetchall():
+        # Handing the task's lease to a new holder (fix round, relaunch):
+        # revoke the old one so a late submit from it is fenced out.
+        con.execute("UPDATE leases SET revoked_at=?, revoke_reason='superseded' WHERE id=?", (now.isoformat(), row["id"]))
     fencing = (con.execute("SELECT COALESCE(MAX(fencing),0) FROM leases WHERE run_id=?", (run["id"],)).fetchone()[0] or 0) + 1
     lease_id = "L" + uuid.uuid4().hex[:8]
     con.execute("INSERT INTO leases(id, run_id, role, scope, holder_id, acquired_at, expires_at, task_id, fencing, dispatch_id, renewed_at) "
@@ -550,9 +1014,14 @@ def live_lease(con, run_id: str, lease_id: str) -> dict | None:
 
 
 def renew_lease(con, lease_id: str) -> None:
+    """Extend a lease. Submit calls this in the transaction that captures a revision, so it is also where a
+    trial dispatch's first revision settles its trial as `submitted`."""
     now = datetime.now(timezone.utc)
     con.execute("UPDATE leases SET expires_at=?, renewed_at=? WHERE id=?",
                 ((now + timedelta(seconds=LEASE_TTL_SECONDS)).isoformat(), now.isoformat(), lease_id))
+    holder = con.execute("SELECT dispatch_id FROM leases WHERE id=?", (lease_id,)).fetchone()
+    if holder and holder[0] and con.execute("SELECT 1 FROM revisions WHERE dispatch_id=?", (holder[0],)).fetchone():
+        trial_submitted(con, holder[0])
 
 
 def revoke(con, run: dict, target: str, reason: str) -> Result:
@@ -571,17 +1040,81 @@ def revoke(con, run: dict, target: str, reason: str) -> Result:
     return _revoke_task(con, run, task_id, reason)
 
 
+# Pause reasons of a task reopened without a new revision for work that is still owed: a convergence RECHECK or
+# APPROVED-cleanup fix (also open findings), a restack onto a re-accepted dependency, a hold on an amended one.
+_REOPENED_FOR_WORK = ("RECHECK", "APPROVED cleanup", "restack:", "waiting for the amended")
+
+
+def _demoted_by_amendment(con, run_id: str, task: dict, pending: list) -> bool:
+    """True when `task` is accepted, or left accepted work only by an amendment delivery and the relaunch or
+    refused submit that followed: `pending` (its deliveries past the accepted revision) is the evidence, so a task
+    blocked for another reason has none, and it has no open task findings and no `_REOPENED_FOR_WORK` pause reason."""
+    if task["status"] == "accepted":
+        return True
+    if not pending:
+        return False
+    if con.execute(f"SELECT 1 FROM findings WHERE run_id=? AND task_id=? AND {contract.TASK_WORK_FINDINGS}",
+                   (run_id, task["id"])).fetchone():
+        return False
+    reason = task.get("pause_reason") or ""
+    return not any(marker in reason for marker in _REOPENED_FOR_WORK)
+
+
+def _revoke_standing(con, run_id: str, task: dict) -> tuple[str | None, str | None, list[str], list[str]]:
+    """How a revoke leaves a task: (status to set or None to keep it, pause_reason, unapplied ordinary
+    amendment ids, contract-class amendment ids that block keeping it accepted).
+
+    A task whose current revision is its accepted revision stays accepted: revoking a worker that only held the
+    lease (an amendment relaunch whose submit was refused, an ack-only session) does not undo accepted work.
+    Revision identity decides, not status, because `amend._deliver` already demoted the task and a refused submit
+    already blocked it. A `contract_version` bump from an ordinary amendment does not demote: its check and
+    acceptance edits are enforced by the gate rerun the amendment triggered, and its delta is listed as unapplied.
+    An unapplied amendment that is not ordinary (scope, interfaces, ownership) is changes_required naming it.
+    A task that is not accepted now is restored only when an amendment delivery alone demoted it (`_demoted_by_amendment`):
+    a task with no such delivery was blocked or paused for something else, open blocking findings (a convergence
+    RECHECK, an APPROVED-cleanup fix), a restack or a hold reopened it without a new revision, and that work is still
+    owed. A cancelled task keeps its status."""
+    if task["status"] == "cancelled":
+        return None, None, [], []
+    rev_id = task.get("accepted_revision_id")
+    rev = con.execute("SELECT applied_version FROM revisions WHERE id=?", (rev_id,)).fetchone() if rev_id else None
+    if rev is None or rev_id != task.get("current_revision_id"):
+        return "paused", None, [], []
+    pending = con.execute("SELECT d.amendment_id, COALESCE(a.class, 'contract') AS class FROM deliveries d "
+                          "LEFT JOIN amendments a ON a.run_id=d.run_id AND a.id=substr(d.run_id, 1, 8) || ':' || d.amendment_id "
+                          "WHERE d.run_id=? AND d.task_id=? AND d.target_version>? ORDER BY d.target_version",
+                          (run_id, task["id"], rev["applied_version"] or 0)).fetchall()
+    if not _demoted_by_amendment(con, run_id, task, pending):
+        return "paused", None, [], []
+    contract = list(dict.fromkeys(r["amendment_id"] for r in pending if r["class"] != "ordinary"))
+    ordinary = [i for i in dict.fromkeys(r["amendment_id"] for r in pending) if i not in contract]
+    if contract:
+        return "changes_required", f"amended by {', '.join(contract)}", ordinary, contract
+    return "accepted", None, ordinary, []
+
+
 def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = None) -> Result:
     """Revoke the task's lease and stop its live dispatches; `only` (a revoked
-    dispatch id) stops that one and leaves any other live session alone."""
+    dispatch id) stops that one and leaves any other live session alone. An accepted task whose accepted
+    revision is still current stays accepted and its lease is released instead (`_revoke_standing`)."""
     with db.transaction(con):
         task = state.get_task(con, run["id"], task_id)
         if task is None:
             raise Usage("unknown-task", f"no task {task_id}")
-        con.execute("UPDATE leases SET revoked_at=?, revoke_reason=? WHERE run_id=? AND task_id=? AND released_at IS NULL "
-                    "AND revoked_at IS NULL", (now_iso(), reason, run["id"], task_id))
-        state.update_task(con, run["id"], task_id, status="paused", pause_reason=f"lease revoked: {reason}")
-        state.emit(con, run, "lease.revoked", f"{task_id} lease revoked", task_id=task_id)
+        status, pause_reason, unapplied, contract_ids = _revoke_standing(con, run["id"], task)
+        kept = status == "accepted"
+        now = now_iso()
+        if kept:
+            con.execute("UPDATE leases SET released_at=? WHERE run_id=? AND task_id=? AND released_at IS NULL "
+                        "AND revoked_at IS NULL", (now, run["id"], task_id))
+        else:
+            con.execute("UPDATE leases SET revoked_at=?, revoke_reason=? WHERE run_id=? AND task_id=? "
+                        "AND released_at IS NULL AND revoked_at IS NULL", (now, reason, run["id"], task_id))
+        if status:
+            state.update_task(con, run["id"], task_id, status=status,
+                              pause_reason=pause_reason or (f"lease revoked: {reason}" if status == "paused" else None))
+        state.emit(con, run, "lease.released" if kept else "lease.revoked",
+                   f"{task_id} lease {'released' if kept else 'revoked'}", task_id=task_id)
     live = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE run_id=? AND task_id=? AND ended_at IS NULL "
                                          "AND status IN ('launching', 'running')", (run["id"], task_id)).fetchall()]
     notes: list[str] = []
@@ -592,7 +1125,13 @@ def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = N
     fresh = [state.get_dispatch(con, d["id"]) for d in targets if d["id"] not in cancelled]
     stopped = [d["id"] for d in fresh if stop_dispatch(run, d, notes=notes)]
     starting = [d["id"] for d in fresh if d["id"] not in stopped and d["status"] == "launching" and not d.get("launcher")]
-    lines = [f"{task_id} lease revoked | later submits from its holder are rejected"]
+    if kept:
+        lines = [f"{task_id} stays accepted on {task['accepted_revision_id']} | lease released; later submits from its "
+                 "holder are rejected"]
+        if unapplied:
+            lines.append(f"unapplied amendments: {', '.join(unapplied)}")
+    else:
+        lines = [f"{task_id} lease revoked | later submits from its holder are rejected"]
     if stopped:
         lines.append(f"stopped {', '.join(stopped)} (SIGTERM)")
     if cancelled:
@@ -604,7 +1143,16 @@ def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = N
         lines.append(f"left running: {', '.join(others)} (not the dispatch named; its lease is revoked too, so its "
                      f"submits are rejected; office revoke {task_id} ends it, and office rerun refuses until it ends)")
     lines += notes
-    return Result(lines=lines, next=f"office dispatch {task_id} to relaunch")
+    if kept:
+        nxt = (f"no relaunch is needed to stay accepted; office rerun {task_id} --resume to apply {', '.join(unapplied)}"
+               if unapplied else f"no relaunch is needed: {task_id} is accepted; office status")
+    elif status == "changes_required":
+        nxt = f"office rerun {task_id} --resume to apply {', '.join(contract_ids)}"
+    elif status is None:
+        nxt = "office status"
+    else:
+        nxt = f"office dispatch {task_id} to relaunch"
+    return Result(lines=lines, next=nxt)
 
 
 def _cancel_pending_launch(con, run: dict, d: dict, reason: str) -> bool:
@@ -629,6 +1177,7 @@ def _cancel_pending_launch(con, run: dict, d: dict, reason: str) -> bool:
         con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, max_attempts=attempts "
                     "WHERE run_id=? AND kind='launch_agent' AND dedup_key=? AND status='queued'",
                     (f"revoked: {reason}"[:200], now_iso(), *key))
+        abandon_trial(con, d["id"], f"revoked before its agent started: {reason}"[:200])
         if ended:
             state.emit(con, run, "dispatch.ended", f"{d.get('task_id') or d['role']} {d['role']} ended: revoked before "
                        "its agent started", audience="runtime", task_id=d.get("task_id"), dispatch_id=d["id"],
@@ -796,8 +1345,61 @@ def _agent_pgid_file(run: dict, dispatch_id: str) -> Path:
     return paths.run_dir(run["id"]) / "dispatches" / dispatch_id / "agent.pgid"
 
 
+def _pane_group_wait() -> float:
+    """How long a pane launch polls for the agent's foreground group (#507)."""
+    try:
+        return max(0.0, float(os.environ.get("OFFICE_PANE_GROUP_WAIT", "3.0")))
+    except ValueError:
+        return 3.0
+
+
+def _record_pane_agent_group(run: dict, dispatch_id: str, pane: str) -> int | None:
+    """Record the pane agent's process group and its leader's start time, as a
+    headless launch does (`agent.pgid`, `agent.identity`), so a server it leaves
+    behind can later be proven Office's (#507). The agent is the pane's
+    foreground job, so it leads that group. Nothing is recorded when the group
+    is unknown, is the shell's own, or its leader's start cannot be read."""
+    deadline = time.time() + _pane_group_wait()
+    while True:
+        # Right after start the shell may still own the terminal, or a short-lived
+        # wrapper may: poll briefly until another group holds the foreground.
+        info = _herdr_json(["pane", "process-info", "--pane", pane]).get("process_info") or {}
+        pgid = info.get("foreground_process_group_id")
+        if (isinstance(pgid, int) and pgid != info.get("shell_pid")
+                and process_start(pgid)) or time.time() >= deadline:
+            break
+        time.sleep(0.2)
+    if not isinstance(pgid, int) or pgid <= 1 or pgid == info.get("shell_pid") \
+            or pgid in (os.getpid(), os.getpgrp()) or not process_start(pgid):
+        return None
+    try:
+        if os.getpgid(pgid) != pgid:
+            return None  # not a group leader: not the agent's own job
+    except OSError:
+        return None
+    path = _agent_pgid_file(run, dispatch_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(pgid))
+    _record_identity(run["id"], dispatch_id, "agent", pgid)
+    return pgid
+
+
 def _identity_file(run_id: str, dispatch_id: str, which: str) -> Path:
     return paths.run_dir(run_id) / "dispatches" / dispatch_id / f"{which}.identity"
+
+
+def _c_start(pid: int | None) -> str | None:
+    """The process's start time as `ps` prints it in the C locale, whitespace-normalized, or None. Unlike
+    `process_start` it reads the same in any locale, so an identity recorded under one locale still matches
+    when it is checked under another."""
+    if not pid or pid <= 0:
+        return None
+    try:
+        out = subprocess.run([_system_tool("ps", "/bin/ps", "/usr/bin/ps"), "-o", "lstart=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=10, env={**os.environ, "LC_ALL": "C", "LANG": "C"}).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return " ".join(out.split()) or None
 
 
 def _record_identity(run_id: str, dispatch_id: str, which: str, pid: int) -> None:
@@ -805,7 +1407,7 @@ def _record_identity(run_id: str, dispatch_id: str, which: str, pid: int) -> Non
     later stop never signals another process that reused the pid."""
     path = _identity_file(run_id, dispatch_id, which)
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(path, {"pid": pid, "start": process_start(pid)})
+    atomic_write_json(path, {"pid": pid, "start": process_start(pid), "c_start": _c_start(pid)})
 
 
 def _verified(run: dict, dispatch_id: str, which: str, pid: int | None) -> bool:
@@ -815,7 +1417,7 @@ def _verified(run: dict, dispatch_id: str, which: str, pid: int | None) -> bool:
         rec = json.loads(_identity_file(run["id"], dispatch_id, which).read_text())
     except (OSError, ValueError):
         return False
-    return rec.get("pid") == pid and process_is(pid, rec.get("start"))
+    return rec.get("pid") == pid and (_c_start(pid) == rec["c_start"] if rec.get("c_start") else process_is(pid, rec.get("start")))
 
 
 def _killpg(pid, sig=signal.SIGTERM) -> bool:
@@ -842,7 +1444,9 @@ def stop_dispatch(run: dict, d: dict, *, wait: float = 5.0, notes: list[str] | N
     sup = d.get("pid") if pid_alive(d.get("pid")) else None
     pgid_file = _agent_pgid_file(run, d["id"])
     agent = None
-    if pgid_file.is_file():
+    # A pane agent is stopped by snapshot plus close (reclaim_pane below); its
+    # recorded group serves only leftover-port reclaim (#507).
+    if pgid_file.is_file() and d.get("launcher") != "herdr":
         try:
             agent = int(pgid_file.read_text().strip())
         except ValueError:
@@ -891,6 +1495,15 @@ def ensure_worktree(run: dict, dispatch: dict) -> Path:
     wt.parent.mkdir(parents=True, exist_ok=True)
     branches = paths.git(repo, "branch", "--list", dispatch["branch"])
     if branches.strip():
+        from office import integration
+        head = paths.git(repo, "rev-parse", f"refs/heads/{dispatch['branch']}")
+        if not integration.contains(run, head, dispatch["base_commit"]):
+            # An existing branch is reused as it is: it must hold the base this dispatch recorded.
+            raise Refused("base-mismatch", f"branch {dispatch['branch']} ({head[:12]}) does not contain the base "
+                          f"{dispatch['base_commit'][:12]} dispatch {dispatch['id']} recorded", scope=dispatch.get("task_id"),
+                          preserved="the branch and its commits",
+                          next_step=f"merge {dispatch['base_commit'][:12]} into {dispatch['branch']}, or remove the branch "
+                                    f"and office rerun {dispatch.get('task_id')} --fresh")
         paths.git(repo, "worktree", "add", str(wt), dispatch["branch"])
     else:
         paths.git(repo, "worktree", "add", "-b", dispatch["branch"], str(wt), dispatch["base_commit"])
@@ -909,6 +1522,14 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
     task = state.get_task(con, run["id"], dispatch["task_id"])
     plan = state.current_plan(con, run["id"])
     req = state.current_requirements(con, run["id"])
+    # Gather contract requests when the launch job constructs the packet, not
+    # when the first amendment queued it: later requests may arrive before the
+    # planner starts and must be included in its first brief (#506).
+    requests = con.execute("SELECT seq, delta FROM amendments WHERE run_id=? AND class='contract' "
+                           "AND to_plan_version IS NULL ORDER BY seq", (run["id"],)).fetchall() if role == "planner" else []
+    contract_request = ("\n".join(f"A{r['seq']}: {r['delta']}" for r in requests)
+                        if requests else extra.get("contract_request"))
+    contract_request_max_seq = max((r["seq"] for r in requests), default=None)
     body = {
         "role": role,
         "dispatch_id": dispatch["id"],
@@ -930,8 +1551,10 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
         "pr": _pr_packet(con, run, task, dispatch) if role == "executor" else None,
         "requirements": req["frozen"],
         "fix_of": extra.get("fix_of"),
-        "contract_request": extra.get("contract_request"),
+        "contract_request": contract_request,
+        "contract_request_max_seq": contract_request_max_seq,
         "restack": extra.get("restack"),
+        "base_parents": extra.get("base_parents"),
     }
     return state.packet_envelope(run, f"{role}-dispatch", body)
 
@@ -942,7 +1565,7 @@ def _pr_packet(con, run: dict, task: dict, dispatch: dict) -> dict | None:
     if not prs.enabled(run) or not prs.has_pr(task):
         return None
     ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch["id"]
-    ddir.mkdir(parents=True, exist_ok=True)
+    ddir.mkdir(parents=True, exist_ok=True, mode=0o700)
     body_path = ddir / "pr-body.md"
     body_path.write_text(prs.body(con, run, task, dispatch), encoding="utf-8")
     return {"push": f"git push -u origin HEAD:refs/heads/{dispatch['branch']}",
@@ -978,7 +1601,7 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     wt = ensure_worktree(run, dispatch)
     role = payload["role"]
     ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch["id"]
-    ddir.mkdir(parents=True, exist_ok=True)
+    ddir.mkdir(parents=True, exist_ok=True, mode=0o700)
     setup = None
     if role == "executor":
         _set_aside_evidence(con, run, dispatch, wt, ddir)
@@ -1002,8 +1625,24 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
                     (packet["packet_hash"], str(ddir / "packet.json"), str(ddir / "output.log"), dispatch["id"]))
     current = state.get_dispatch(con, dispatch["id"])
     if current["status"] != "launching":
-        # Revoked while its worktree was being set up (review F2): start nothing.
         return {"skipped": current["status"]}
+    lease = con.execute("SELECT revoked_at FROM leases WHERE id=?", (current.get("lease_id"),)).fetchone() \
+        if current.get("lease_id") else None
+    if lease and lease["revoked_at"]:
+        # Revoked while its worktree was being set up: this job owns the claim, so it ends the
+        # dispatch itself instead of starting an agent whose submits are fenced (R3-4).
+        with db.transaction(con):
+            con.execute("UPDATE dispatches SET status='cancelled', terminal_classification='revoked', ended_at=? "
+                        "WHERE id=? AND ended_at IS NULL AND status='launching'", (now_iso(), dispatch["id"]))
+            state.emit(con, run, "dispatch.ended", f"{dispatch.get('task_id')} {role} ended: revoked before its agent "
+                       "started", audience="runtime", task_id=dispatch.get("task_id"), dispatch_id=dispatch["id"],
+                       payload={"exit_code": None, "signal": None, "classification": "revoked"})
+        return {"skipped": "revoked"}
+    if role == "executor" and open_trial(con, dispatch["id"]):
+        # What the launch leaves in the worktree, so a failed trial can be told from one that did work.
+        snapshot = _worktree_snapshot(wt)
+        if snapshot is not None:
+            atomic_write_json(ddir / "worktree-baseline.json", snapshot)
     launcher = launch(run, dispatch, "worker", ddir, cwd=wt, cli=payload.get("cli"),
                       external=bool(payload.get("external")), resume=payload.get("resume"))
     return {"dispatch_id": dispatch["id"], **launcher}
@@ -1019,6 +1658,7 @@ def worker_env(run: dict, dispatch: dict, role: str) -> dict:
         "OFFICE_RUN_ID": run["id"],
         "OFFICE_TASK_ID": dispatch["task_id"] or "",
         "OFFICE_DISPATCH_ID": dispatch["id"],
+        _WORKER_TAG: dispatch["id"],
         "OFFICE_ROLE": role,
         "OFFICE_VERSION": version.current(),
     })
@@ -1046,7 +1686,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
             "images": [str(i) for i in images or []], "include_dirs": [str(d) for d in include_dirs or []],
             "prompt_file": str(prompt_file or ddir / "brief.md"), "log_path": str(ddir / "output.log")}
     # The supervisor always finds its spec here, whatever directory holds the brief.
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     con = db.connect()
     try:
         with db.transaction(con):
@@ -1060,6 +1700,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
     env = dict(os.environ)
     env.update(extra)
     env.pop(frontdoor.HOP_ENV, None)
+    env.pop(_WORKER_TAG, None)  # only the agent carries a dispatch's id (worker_env): it names the processes to stop
     launcher = os.environ.get("OFFICE_LAUNCHER", "auto")
     use_herdr = herdr_usable()
     if cli and not use_herdr:
@@ -1080,6 +1721,8 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         # user or a test drives). A worker is live until it submits; a reviewer
         # ends when its output file is written.
         return _launch_external(run, dispatch, kind, spec, ddir, sup, env, cwd, wait=wait, announce=external)
+    # The brief tells the agent to source agent.env whichever way it starts (the Herdr path rewrites it identically).
+    write_agent_env(run, dispatch, ddir, worker=kind == "worker")
     if launcher == "sync":
         # Deterministic mode for tests and fixtures: supervise in the foreground.
         _record_launch(run, dispatch["id"], launcher="sync", pid=os.getpid())
@@ -1097,11 +1740,15 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         else:
             inter = _interactive(dispatch, kind, cwd, include_dirs, output=output)
         label = pane_label(run, dispatch, kind)
-        pane = _herdr_pane(run, cwd, label=label, dispatch_id=dispatch["id"]) if inter else None
+        no_pane = "no herdr pane could be opened"
+        try:
+            pane = _herdr_pane(run, cwd, label=label, dispatch_id=dispatch["id"]) if inter else None
+        except ValueError as exc:
+            pane, no_pane = None, f"{no_pane}: {exc}"
         if inter and not pane:
-            spec["fallback_reason"] = "no herdr pane could be opened"
-            atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
-            _launch_notice(run, dispatch, "no herdr pane could be opened; running headless instead")
+            spec["fallback_reason"] = no_pane
+            write_launch_spec(run, dispatch["id"], spec)
+            _launch_notice(run, dispatch, f"{no_pane}; running headless instead")
             if resume:
                 _headless_resume(run, dispatch, kind, spec, resume)
         if pane:
@@ -1121,7 +1768,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
                 _headless_resume(run, dispatch, kind, spec, resume)
     log = open(ddir / "supervisor.log", "ab")
     try:
-        proc = subprocess.Popen(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
+        proc = subprocess.Popen(sup, cwd=str(paths.run_dir(run["id"])), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
                                 start_new_session=True, close_fds=True)
     finally:
         log.close()
@@ -1152,7 +1799,7 @@ def _headless_resume(run: dict, dispatch: dict, kind: str, spec: dict, resume: d
         why = "no session id was recorded" if not session else "its adapter declares no headless resume form"
         _launch_notice(run, dispatch, f"the resume could not run in a pane and {why}: started a FRESH session, not "
                                       "a continuation of the parent's; the brief and the preserved worktree carry the task")
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
 
 
 def _supervise_in_process(dispatch_id: str, cwd: Path, extra: dict) -> None:
@@ -1183,10 +1830,10 @@ def _launch_external(run: dict, dispatch: dict, kind: str, spec: dict, ddir: Pat
         return {"launcher": "external"}
     # A reviewer: a detached watcher ends the dispatch once the output file is written.
     spec["external"] = True
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     log = open(ddir / "supervisor.log", "ab")
     try:
-        watcher = subprocess.Popen(sup, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
+        watcher = subprocess.Popen(sup, cwd=str(paths.run_dir(run["id"])), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
                                    start_new_session=True, close_fds=True)
     finally:
         log.close()
@@ -1306,24 +1953,26 @@ def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pa
     tail = ddir / "pane-tail.txt"
     screen = _startup_screen(view)
     if view:
-        tail.write_text(view + "\n", encoding="utf-8")
+        atomic_write_text(tail, view + "\n", mode=0o600)  # an unredacted screen: private (#500)
     spec["failed_herdr_pane"] = pane
     spec["failed_herdr_snapshot"] = str(tail) if view else None
     spec["failed_herdr_screen"] = screen
     closed = bool(view) and _close_abandoned_pane(run, dispatch, pane)
     spec["failed_herdr_pane_closed"] = closed
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     observed = (f"; pane {pane} was waiting on {screen}" if screen
                 else f"; pane {pane} snapshot saved to {tail}" if view
                 else f"; pane {pane} could not be read")
     if closed:
         observed += f"; the abandoned pane is closed (its last screen is in {tail})"
+    if not closed and not _pane_identity_mismatch(run, dispatch, pane, ddir, check_cwd=False):
+        _herdr_rename(pane, pane_labels.shell_label(run, dispatch))
     inspect = f"read {tail}" if closed else f"inspect it with `herdr pane read {pane}`"
     recovery = (f"orchestrator recovery: {inspect}; do not auto-approve trust, "
                 "credentials, or user-authority prompts; resolve a safe runtime blocker or choose another route, "
                 "then follow `office status` / `office resume` instead of abandoning the run")
     spec["fallback_reason"] = f"{failure} ({why}){observed}"
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     _launch_notice(run, dispatch, f"{failure} ({why}){observed}; running headless instead. {recovery}")
 
 
@@ -1349,7 +1998,11 @@ def _close_abandoned_pane(run: dict, dispatch: dict, pane: str) -> bool:
                                                  (run["id"], dispatch["id"])).fetchall()}
     finally:
         con.close()
-    if held or pane in _reserved_panes(run, open_ids):
+    try:
+        reserved = _reserved_panes(run, open_ids)
+    except ValueError:
+        return False  # an unreadable ledger cannot show the pane is free to close
+    if held or pane in reserved:
         return False
     _herdr_quiet("pane", "close", pane)
     if _pane_exists(pane):
@@ -1367,6 +2020,189 @@ def _close_abandoned_pane(run: dict, dispatch: dict, pane: str) -> bool:
     return True
 
 
+def _identity_line(value: object) -> str:
+    """Printable and bounded evidence from a pane or a reservation."""
+    return " ".join("".join(c if c.isprintable() else " " for c in str(value)).split())[:200]
+
+
+def _read_reservations(run: dict) -> dict[str, str]:
+    """Pane -> holding dispatch from the run's reservation ledger.
+
+    Runs created before reservation support have no ledger: that is empty. A
+    ledger that exists but cannot be read, or is malformed, never authorizes a
+    pane, so every reader and writer refuses on the ValueError.
+    """
+    path = paths.run_dir(run["id"]) / "herdr-reservations.json"
+    if not path.exists():
+        return {}
+    try:
+        held = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise ValueError("pane reservation evidence is unreadable") from exc
+    if not isinstance(held, dict) or any(not isinstance(k, str) or not k.strip() or not isinstance(v, str) or not v.strip()
+                                          for k, v in held.items()):
+        raise ValueError("pane reservation evidence is malformed")
+    return held
+
+
+def _reserved_by(run: dict, pane: str) -> str | None:
+    return _read_reservations(run).get(pane)
+
+
+def _reported_sessions(info: dict, record: dict) -> set[str]:
+    """Every session id Herdr reports for a pane and its agent record."""
+    running = info.get("agent")
+    found = set()
+    for node in (running if isinstance(running, dict) else {}, info, record):
+        shown = node.get("agent_session")
+        found.update(str(v) for v in (node.get("session_id"), node.get("agent_session_id"),
+                                      shown.get("value") if isinstance(shown, dict) else None) if v)
+    return found
+
+
+def reported_identity(info: dict, record: dict | None = None) -> dict:
+    """The cwd, agent and session Herdr reports for a pane (`pane get`) and, once
+    known, its agent record (`agent get`); None when it reports none."""
+    running = info.get("agent")
+    record = record or {}
+    shown = running.get("name") if isinstance(running, dict) else running
+    return {"cwd": info.get("foreground_cwd") or info.get("cwd"), "agent": record.get("name") or shown,
+            "session": min(_reported_sessions(info, record), default=None)}
+
+
+def pane_snapshot(pane: str, agent: str | None = None) -> tuple[dict, dict]:
+    """What Herdr reports for the pane and, when `agent` is named, for that agent."""
+    info = _herdr_json(["pane", "get", pane]).get("pane")
+    record = _herdr_json(["agent", "get", agent]).get("agent") if agent else None
+    return (info if isinstance(info, dict) else {}), (record if isinstance(record, dict) else {})
+
+
+def _pane_identity_mismatch(run: dict, dispatch: dict, pane: str, cwd: Path, *,
+                            check_cwd: bool = True, agent: str | None = None, kind: str | None = None,
+                            snapshot: tuple[dict, dict] | None = None) -> str | None:
+    """Refuse a contradictory or unverifiable Herdr identity before crossing into a pane.
+
+    A pane Herdr cannot describe is refused. With `agent` (delivery into a started
+    agent) the pane must also prove it holds this dispatch's agent: Herdr's
+    `pane get` reports the agent kind, so the name comes from the `agent get`
+    record, which must be this agent's, in this pane, of this kind and session.
+    cwd and session are checked when Herdr reports them, as not every version
+    does and the dispatch-specific `_shell_run` marker confirms the setup ran.
+    """
+    try:
+        holder = _reserved_by(run, pane)
+    except ValueError as exc:
+        return f"pane {pane} cannot be trusted: {exc}"
+    if holder and holder != dispatch["id"]:
+        return f"pane {_identity_line(pane)} belongs to dispatch {_identity_line(holder)}, not {dispatch['id']} ({dispatch.get('task_id')})"
+    info, record = snapshot or pane_snapshot(pane, agent)
+    if not info:
+        return f"pane {_identity_line(pane)} cannot be inspected: Herdr reported no identity for it"
+    actual = info.get("foreground_cwd") or info.get("cwd")
+    if check_cwd and actual:
+        expected = os.path.realpath(str(cwd))
+        observed = os.path.realpath(str(actual))
+        if observed != expected and not observed.startswith(expected.rstrip(os.sep) + os.sep):
+            # A pane can report another task's path, never echo terminal control
+            # sequences from an untrusted shell path into the operator output.
+            return (f"pane {_identity_line(pane)} cwd {_identity_line(actual)} does not belong to {dispatch['id']} "
+                    f"({dispatch.get('task_id')}); expected {_identity_line(cwd)}")
+    running = info.get("agent")
+    token = running.get("name") or running.get("kind") if isinstance(running, dict) else running
+    if isinstance(running, dict) and not token:
+        return f"pane {_identity_line(pane)} has an agent without a verifiable identity"
+    if agent is None:
+        return f"pane {pane} already runs an agent; shell setup is unsafe for {dispatch['id']}" if token else None
+    if not token:
+        return f"pane {_identity_line(pane)} reports no agent, so {agent} for dispatch {dispatch['id']} is unverified"
+    if token not in (agent, kind or record.get("agent")):
+        return (f"pane {_identity_line(pane)} runs {_identity_line(token)}, "
+                f"not {_identity_line(agent)} for dispatch {dispatch['id']}")
+    recorded_session = dispatch.get("session_id")
+    if recorded_session and _reported_sessions(info, record) - {recorded_session}:
+        return f"pane {pane} session does not match dispatch {dispatch['id']}"
+    named = token == agent  # the pane itself names this agent; a bare kind needs the agent record to tie it
+    if record.get("name") not in ((agent, None) if named else (agent,)):
+        return (f"herdr does not report agent {_identity_line(agent)} for dispatch {dispatch['id']} "
+                f"(pane {_identity_line(pane)})")
+    listed_pane = record.get("pane_id")
+    if listed_pane != pane and (listed_pane or not named):
+        return (f"agent {_identity_line(agent)} is in pane {_identity_line(listed_pane or 'none')}, "
+                f"not {_identity_line(pane)} for dispatch {dispatch['id']}")
+    if kind and record.get("agent") not in (None, kind):
+        return f"agent {_identity_line(agent)} is a {_identity_line(record['agent'])}, not {_identity_line(kind)}"
+    return None
+
+
+def _herdr_kind(run: dict, dispatch: dict) -> str | None:
+    """The Herdr agent kind this dispatch was started with: recorded in its launch spec, else its harness."""
+    try:
+        spec = json.loads((paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json").read_text())
+        kind = ((spec.get("rendered_launches") or {}).get("herdr") or {}).get("herdr_kind")
+    except (OSError, ValueError, AttributeError):
+        kind = None
+    return kind or dispatch.get("harness")
+
+
+class PaneMismatch(Exception):
+    """Herdr reports a pane identity that contradicts the dispatch about to be sent to."""
+
+
+class FencedPane(str):
+    """A pane id shown to be the dispatch's own. `guard` is the context manager every send into it passes through
+    (`_send_guard`); `submit_prompt(..., pane=<FencedPane>)` uses it."""
+    guard: Callable[[], contextlib.AbstractContextManager]
+
+
+def _send_guard(run: dict, dispatch: dict, pane: str) -> Callable[[], contextlib.AbstractContextManager]:
+    """A context manager for one send into `pane`. It holds the run's pane lock only for that
+    send (one bounded herdr command) and re-checks the reservation inside it: a pane freed and
+    reassigned to another dispatch while a delivery waited is never typed into. Delivery waits
+    (agent UI, landing probes, Enter retries) run outside the lock, so they cannot starve
+    other launches' pane picks."""
+    @contextlib.contextmanager
+    def guard():
+        with _pane_lock(run):
+            try:
+                holder = _reserved_by(run, pane)
+            except ValueError as exc:
+                raise PaneMismatch(f"pane {_identity_line(pane)} cannot be trusted: {exc}") from None
+            if holder and holder != dispatch["id"]:
+                raise PaneMismatch(f"pane {_identity_line(pane)} was reassigned to dispatch {_identity_line(holder)}, "
+                                   f"not {dispatch['id']} ({dispatch.get('task_id')})")
+            yield
+    return guard
+
+
+def _guarded_herdr(guard):
+    """`_herdr_quiet`, each call made inside `guard` (a send guard) when there is one."""
+    if guard is None:
+        return lambda *args: _herdr_quiet(*args)
+
+    def send(*args: str) -> None:
+        with guard():
+            _herdr_quiet(*args)
+    return send
+
+
+@contextlib.contextmanager
+def fenced_pane(run: dict, dispatch: dict):
+    """Yield the dispatch's recorded pane (a `FencedPane`) once its reported cwd, agent kind and name, and session are
+    shown to be this dispatch's own; else raise PaneMismatch. The pane lock is held for the check only: send a
+    prompt into the pane with `submit_prompt(..., pane=pane)`, which passes each send through `pane.guard` to
+    re-check the reservation inside the lock immediately before it."""
+    pane = dispatch["pane_id"]
+    worktree = dispatch.get("worktree")
+    with _pane_lock(run):
+        mismatch = _pane_identity_mismatch(run, dispatch, pane, Path(worktree or ""), check_cwd=bool(worktree),
+                                           agent=herdr_agent_name(dispatch["id"]), kind=_herdr_kind(run, dispatch))
+    if mismatch:
+        raise PaneMismatch(mismatch)
+    fenced = FencedPane(pane)
+    fenced.guard = _send_guard(run, dispatch, pane)
+    yield fenced
+
+
 def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: tuple[list[str], str], pane: str,
                        cwd: Path, ddir: Path, *, retried: bool = False, label: str | None = None) -> dict | None:
     """Start the real harness in the pane with `herdr agent start`, hand it a
@@ -1375,6 +2211,13 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     args, herdr_kind = inter
     name = herdr_agent_name(dispatch["id"])
     worker = spec["kind"] == "worker"
+    mismatch = _pane_identity_mismatch(run, dispatch, pane, cwd, check_cwd=False)
+    if mismatch:
+        spec["fallback_reason"] = f"pane-mismatch: {mismatch}"
+        spec["prompt_landed"] = False
+        write_launch_spec(run, dispatch["id"], spec)
+        _launch_notice(run, dispatch, f"pane-mismatch: {mismatch}; no shell command or brief sent")
+        return None
     # The pane's shell does not inherit this process's environment: source the
     # dispatch identity into it first, so the agent's own `office submit` works.
     env_file = write_agent_env(run, dispatch, ddir, worker=worker)
@@ -1383,9 +2226,22 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, f"the shell in pane {pane} never ran Office's setup "
                                "line (env and cd)", f"within {_shell_timeout():g}s")
         return None
+    mismatch = _pane_identity_mismatch(run, dispatch, pane, cwd)
+    if mismatch:
+        spec["fallback_reason"] = f"pane-mismatch: {mismatch}"
+        spec["prompt_landed"] = False
+        write_launch_spec(run, dispatch["id"], spec)
+        _launch_notice(run, dispatch, f"pane-mismatch: {mismatch}; agent and brief were not started")
+        return None
+    _record_launch_form(run, dispatch, spec, "herdr",
+                        ["herdr", "agent", "start", name, "--kind", herdr_kind, "--pane", pane, "--", *args],
+                        transport="herdr agent prompt pointer", herdr_kind=herdr_kind,
+                        brief_delivery="herdr agent prompt (brief pointer)")
     try:
         proc = subprocess.run(["herdr", "agent", "start", name, "--kind", herdr_kind, "--pane", pane, "--", *args],
                               capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        proc = subprocess.CompletedProcess(exc.cmd, 1, "", f"timeout: {exc}")
     except (OSError, subprocess.SubprocessError) as exc:
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, "herdr agent start failed", str(exc))
         return None
@@ -1394,19 +2250,39 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         # The harness opened Office's own worktree on its folder-trust dialog and Herdr
         # stopped waiting; the dialog is answered and the agent is up (330605a8).
         proc = subprocess.CompletedProcess(proc.args, 0, "", "")
+    if proc.returncode != 0 and re.search(r"agent_not_ready|\btimeout\b", (proc.stdout or "") + (proc.stderr or "")):
+        # Held on an interactive startup screen: keep the pane and let the
+        # orchestrator answer it before falling back to headless (#510).
+        from office import startup
+        held = startup.hold(run, dispatch, spec, pane, name, herdr_kind, ddir)
+        write_launch_spec(run, dispatch["id"], spec)
+        if held == "ready":
+            proc = subprocess.CompletedProcess(proc.args, 0, "", "")
+        elif held == "cancelled":
+            _close_abandoned_pane(run, dispatch, pane)
+            return {"launcher": "herdr", "agent": name, "pane": pane, "cancelled": True}
+        elif held == "fallback":
+            sp = spec["startup_prompt"]
+            _herdr_fallback_notice(run, dispatch, spec, ddir, pane, f"startup prompt {sp['id']} ({sp['screen']}) "
+                                   f"held herdr agent {name}", sp.get("resolution") or "not answered")
+            return None
     if proc.returncode != 0:
         why = (proc.stdout or proc.stderr or "").strip()[:200]
         if "agent_pane_busy" in why and not retried:
             # The pane still holds an agent (a finished session herdr keeps):
             # split a fresh one and try once more before going headless (#200 B7).
-            fresh = _herdr_fresh_pane(run, cwd, pane, dispatch_id=dispatch["id"])
+            try:
+                fresh = _herdr_fresh_pane(run, cwd, pane, dispatch_id=dispatch["id"], label=label)
+            except ValueError:
+                fresh = None  # the ledger cannot vouch for a new pane: fall back below
             if fresh:
                 return _herdr_agent_start(run, dispatch, spec, env, inter, fresh, cwd, ddir, retried=True, label=label)
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, "herdr agent start failed", why)
         return None
     spec.update({"herdr_agent": name, "pane": pane})
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     _record_launch(run, dispatch["id"], launcher="herdr", pane_id=pane)
+    _record_pane_agent_group(run, dispatch["id"], pane)
     # A PR recorded between the first label and the pane id landing is missed by relabel_task_panes.
     fresh_label = pane_label(run, dispatch, dispatch.get("kind") or "")
     if fresh_label != label or retried:
@@ -1441,32 +2317,51 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     from office import transcripts
     sent_at = time.time()
 
-    def seen() -> bool:
+    def seen_cb() -> bool:
         try:
             return transcripts.prompt_seen(dispatch.get("harness") or herdr_kind, marker=spec["prompt_file"],
                                            cwd=_session_cwd(spec, dispatch.get("harness") or herdr_kind, cwd), since=sent_at)
         except Exception:  # a landing probe must never abort the launch
             return False
 
-    landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen)
-    if not landed:
-        # The agent is up in a pane the user can see; a second headless copy
-        # would race it. Say so and leave the pane for a manual re-prompt.
+    # The lock is held for the identity check only. Delivery waits (agent UI, landing
+    # probes) run unlocked; each send re-checks the reservation inside the pane lock.
+    with _pane_lock(run):
+        snapshot = pane_snapshot(pane, name)
+        mismatch = _pane_identity_mismatch(run, dispatch, pane, cwd, agent=name, kind=herdr_kind, snapshot=snapshot)
+    reported = reported_identity(*snapshot)
+    spec["pane_evidence"] = {"pane": pane, "dispatch": dispatch["id"],
+                            "task": dispatch.get("task_id"), "expected_worktree": str(cwd),
+                            "reported_cwd": reported["cwd"], "reported_agent": reported["agent"],
+                            "reported_session": reported["session"], "mismatch": mismatch}
+    landed = False
+    if not mismatch:
+        try:
+            landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen_cb,
+                                     guard=_send_guard(run, dispatch, pane))
+        except PaneMismatch as exc:
+            mismatch = str(exc)
+            spec["pane_evidence"]["mismatch"] = mismatch
+    if mismatch:
+        # Once an agent starts, never launch a racing headless copy.
+        spec["identity_failure"] = mismatch
+        _launch_notice(run, dispatch, f"pane-mismatch: {mismatch}; brief NOT sent; "
+                       f"inspect pane {pane} and use office revoke {dispatch.get('task_id') or dispatch['id']}")
+    if not landed and not mismatch:
+        # A pi-harness pane can keep the already-submitted brief in scrollback.
+        # Never promote a stale composer match into an actionable "send Enter"
+        # notice while Herdr says the agent is doing work (#583).
+        sample = _herdr_agent_sample(name)
+        working = bool(sample and (sample.get("status") == "working" or sample.get("busy") is True))
         view = _pane_view(name)
-        if _composer_holds(view, pointer):
-            # Prompting again would submit the pointer twice.
-            _launch_notice(run, dispatch, f"brief pointer is typed but unsubmitted in herdr agent {name} (pane "
-                                          f"{pane}); submit it: herdr pane send-keys {pane} Enter")
+        if working and _composer_holds(view, pointer):
+            # The pointer also occurs in a working agent's recent scrollback.
+            # A matching substring cannot prove its composer is waiting.
+            spec["landing_unconfirmed_working"] = True
         else:
-            screen = _startup_screen(view)
-            title = ("folder-trust dialog" if screen == TRUST_SCREEN else screen if screen == EXTERNAL_IMPORTS_SCREEN
-                     else f"{screen} screen")
-            why = (f" the {title} holds the composer; review or skip it in the pane and"
-                   if screen else "")
-            _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
-                                          f"re-prompt it: office prompt {dispatch['id']} -- {shlex.quote(pointer)}")
+            _describe_unconfirmed_prompt(run, dispatch, name, pane, pointer, view)
     spec["prompt_landed"] = landed
-    atomic_write_json(paths.run_dir(run["id"]) / "dispatches" / dispatch["id"] / "launch.json", spec)
+    write_launch_spec(run, dispatch["id"], spec)
     if not session and landed and not dispatch.get("resumed_from"):
         # The session's own transcript now records the prompt naming this brief.
         session = _transcript_session(run, dispatch, spec, herdr_kind, cwd, since=sent_at)
@@ -1483,12 +2378,29 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
             con.close()
     log = open(ddir / "supervisor.log", "ab")
     try:
-        watcher = subprocess.Popen(frontdoor.current_argv()[0] + ["_supervise", dispatch["id"]], cwd=str(cwd),
-                                   stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
+        watcher = subprocess.Popen(frontdoor.current_argv()[0] + ["_supervise", dispatch["id"]],
+                                   cwd=str(paths.run_dir(run["id"])), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
                                    start_new_session=True, close_fds=True)
     finally:
         log.close()
     return {"launcher": "herdr", "pane": pane, "agent": name, "watcher_pid": watcher.pid, "prompt_landed": landed}
+
+
+def _describe_unconfirmed_prompt(run: dict, dispatch: dict, name: str, pane: str, pointer: str,
+                                 view: str | None) -> None:
+    """Emit action only after liveness proved the agent is not working (#583)."""
+    if _composer_holds(view, pointer):
+        # Prompting again would submit the pointer twice.
+        _launch_notice(run, dispatch, f"brief pointer is typed but unsubmitted in herdr agent {name} (pane "
+                                      f"{pane}); submit it: herdr pane send-keys {pane} Enter")
+    else:
+        screen = _startup_screen(view)
+        title = ("folder-trust dialog" if screen == TRUST_SCREEN else screen if screen == EXTERNAL_IMPORTS_SCREEN
+                 else f"{screen} screen")
+        why = (f" the {title} holds the composer; review or skip it in the pane and"
+               if screen else "")
+        _launch_notice(run, dispatch, f"brief pointer did not land in herdr agent {name} (pane {pane});{why} "
+                                      f"re-prompt it: office prompt {dispatch['id']} -- {shlex.quote(pointer)}")
 
 
 def _herdr_agent_sample(name: str) -> dict | None:
@@ -1760,6 +2672,9 @@ def _confirm_trust(pane: str, read, herdr, text: str | None = None) -> bool:
     Current Claude Code preselects "No, exit", so a bare Enter would quit the
     agent; Enter is pressed only once the selected option is the trust one.
     `text` is a screen the caller already read."""
+    if text is None or _selected_option(text) is None or not _trust_dialog(text):
+        # The first frame may be blank, unreadable or half-drawn too (R3-11).
+        text = _settled(read, None)
     for key in ("down", "down", "up", "up", "up", None):
         text = read() if text is None else text
         if not _trust_dialog(text):
@@ -1995,28 +2910,31 @@ def _submit_held(name: str, pane: str | None, prompt: str, timeout: float, *, ba
     return "held" if _composer_holds(view, prompt) else "landed"
 
 
-def submit_prompt(name: str, text: str, *, pane: str | None = None) -> str:
+def submit_prompt(name: str, text: str, *, pane: str | None = None, guard=None) -> str:
     """Send `text` to a live herdr agent with `agent prompt` and confirm it was
     submitted, pressing Enter for it when it is left in the composer. Returns
     'landed', 'held' (still unsubmitted after the bounded Enters) or '' (no
-    landed signal, nothing left in the composer). Never sends the text twice."""
+    landed signal, nothing left in the composer). Never sends the text twice.
+    `guard` (a fenced pane's `.guard`, taken from `pane` when it is one) wraps each send; it may raise PaneMismatch."""
     timeout = _land_timeout()
+    herdr = _guarded_herdr(guard or getattr(pane, "guard", None))
     baseline = _ctx_k(_pane_view(name))
-    _herdr_quiet("agent", "prompt", name, text)
+    herdr("agent", "prompt", name, text)
     if _prompt_landed(name, timeout, baseline_ctx=baseline) == "landed":
         return "landed"
-    got = _submit_held(name, pane, text, timeout, baseline_ctx=baseline)
+    got = _submit_held(name, pane, text, timeout, baseline_ctx=baseline, herdr=herdr)
     return "" if got in ("absent", "unknown") else got
 
 
-def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = False, seen=None) -> bool:
+def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = False, seen=None, guard=None) -> bool:
     """Wait for the agent UI, send the one-line pointer and confirm it landed.
     A pointer left in the composer is submitted with Enter; a lost one is typed
     into the pane once and submitted (agy can drop a prompt sent right after
     `agent start` returns). Nothing is typed into a pane where herdr sees no
-    agent: that text would go to the shell."""
+    agent: that text would go to the shell. `guard` (a send guard) wraps every
+    send and may raise PaneMismatch."""
     timeout = _land_timeout()
-    herdr = _herdr_quiet
+    herdr = _guarded_herdr(guard)
     ui = _await_agent_ui(name, pane, timeout, answer_trust=answer_trust, herdr=herdr)
     if ui == "trust":
         return False
@@ -2216,8 +3134,12 @@ def _herdr_pane(run: dict, cwd: Path, label: str | None = None, dispatch_id: str
     `dispatch_id`. Launch jobs run in parallel, and a dispatch records its pane
     only once its agent has started: without the lock and the reservation two
     launches took the same idle pane, and one's setup line never ran because the
-    other's agent already held the pane (run f00446ac)."""
+    other's agent already held the pane (run f00446ac).
+
+    Raises ValueError when the reservation ledger is unreadable, before any pane
+    is picked or split."""
     with _pane_lock(run):
+        _read_reservations(run)
         pane = _herdr_pick_pane(run, cwd)
         if pane and dispatch_id:
             _reserve_pane(run, pane, dispatch_id)
@@ -2240,25 +3162,32 @@ def _pane_lock(run: dict):
 
 
 def _reserve_pane(run: dict, pane: str, dispatch_id: str) -> None:
-    f = paths.run_dir(run["id"]) / "herdr-reservations.json"
-    try:
-        held = json.loads(f.read_text()) if f.is_file() else {}
-    except (OSError, ValueError):
-        held = {}
+    """Reserve `pane` for `dispatch_id`. Caller holds the pane lock. An unreadable
+    ledger raises ValueError rather than being rewritten from empty, which would
+    drop other dispatches' reservations."""
+    held = _read_reservations(run)
     held[pane] = dispatch_id
-    atomic_write_json(f, held)
+    atomic_write_json(paths.run_dir(run["id"]) / "herdr-reservations.json", held)
 
 
 def _unreserve_pane(run: dict, pane: str) -> None:
     """Drop a closed pane's reservation. Caller holds the pane lock."""
-    f = paths.run_dir(run["id"]) / "herdr-reservations.json"
     try:
-        held = json.loads(f.read_text()) if f.is_file() else {}
-    except (OSError, ValueError):
-        return
+        held = _read_reservations(run)
+    except ValueError:
+        return  # nothing is released from a ledger that cannot be trusted
     if pane in held:
         held.pop(pane)
-        atomic_write_json(f, held)
+        atomic_write_json(paths.run_dir(run["id"]) / "herdr-reservations.json", held)
+
+
+def _tab_exists(tab_id: str) -> bool:
+    """False only when herdr says the tab is gone; an unreachable herdr counts as present."""
+    try:
+        proc = subprocess.run(["herdr", "tab", "get", tab_id], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return proc.returncode == 0 or "not_found" not in (proc.stdout or "") + (proc.stderr or "")
 
 
 def _live_panes(panes: list) -> list:
@@ -2267,13 +3196,9 @@ def _live_panes(panes: list) -> list:
 
 
 def _reserved_panes(run: dict, open_ids: set) -> set:
-    """Panes reserved for a dispatch that has not ended."""
-    f = paths.run_dir(run["id"]) / "herdr-reservations.json"
-    try:
-        held = json.loads(f.read_text()) if f.is_file() else {}
-    except (OSError, ValueError):
-        return set()
-    return {pane for pane, did in held.items() if did in open_ids}
+    """Panes reserved for a dispatch that has not ended. Raises ValueError on an
+    unreadable ledger: an empty answer would offer every pane as free."""
+    return {pane for pane, did in _read_reservations(run).items() if did in open_ids}
 
 
 def _herdr_pick_pane(run: dict, cwd: Path) -> str | None:
@@ -2303,19 +3228,20 @@ def _herdr_rename(pane: str, label: str) -> None:
 
 
 def pane_label(run: dict, dispatch: dict, kind: str = "") -> str:
-    """What a human sees on a pane tab: `<task> <role> [PR#n] <short id>`, e.g.
-    `T3 executor PR#261 D4f2`. Integration and plan dispatches carry no task, so
-    they lead with `integration` or `plan` (plus the integration PR when known)."""
-    role = dispatch.get("role") or kind
-    short = str(dispatch["id"])[:5]
-    pr = None
+    """Repo-first, task-aware Herdr tab name; cosmetic and safe on DB failure."""
     scope = dispatch.get("task_id")
+    title = dispatch.get("task_title")
+    pr = None
+    role = dispatch.get("role") or kind
     try:
         con = db.connect()
         try:
             if scope:
                 task = state.get_task(con, run["id"], scope)
-                pr = ((task or {}).get("pr") or {}).get("number")
+                if task:
+                    title = task.get("title") or title
+                    pr = ((task.get("pr") or {}).get("number"))
+
             else:
                 gate = con.execute("SELECT subject FROM gates WHERE id=?", (dispatch.get("gate_id"),)).fetchone() \
                     if dispatch.get("gate_id") else None
@@ -2325,9 +3251,12 @@ def pane_label(run: dict, dispatch: dict, kind: str = "") -> str:
                     pr = pr.get("number") if isinstance(pr, dict) else pr
         finally:
             con.close()
-    except Exception:  # a label is cosmetic; fall back to the fields known without the DB
-        pr = None
-    return " ".join(p for p in (scope, role, f"PR#{pr}" if pr else "", short) if p)
+
+    except Exception:
+        pass  # A label must not prevent or interrupt a launch.
+    scope = scope or ("integration" if role == "integration_reviewer" else "plan")
+    return pane_labels.format_label(run, {**dispatch, "role": role}, scope, title, pr)
+
 
 
 def relabel_task_panes(run: dict, task_id: str) -> None:
@@ -2347,6 +3276,23 @@ def relabel_task_panes(run: dict, task_id: str) -> None:
         pass
 
 
+def _agent_occupied_panes() -> set[str]:
+    """Read Herdr's agent registry in addition to pane/dispatch records (#579).
+
+    A live reviewer can outlast its dispatch row or Herdr's `pane get` agent
+    field may omit a pi-harness agent. The registry's pane ids are direct
+    occupation evidence, even when a previous dispatch record looks ended.
+    Missing/unavailable list data adds no speculative entries; the existing
+    dispatch reservations and pane identity checks still apply.
+    """
+    from office import questions
+    agents = questions._herdr_agents()
+    if not agents:
+        return set()
+    return {a["pane_id"] for a in agents if isinstance(a, dict)
+            and isinstance(a.get("pane_id"), str) and a["pane_id"].strip()}
+
+
 def _busy_panes(run: dict) -> set:
     con = db.connect()
     try:
@@ -2357,6 +3303,7 @@ def _busy_panes(run: dict) -> set:
     finally:
         con.close()
     busy |= _reserved_panes(run, open_ids)
+    busy |= _agent_occupied_panes()
     # A failed startup can leave the harness TUI alive in a pane even though
     # Herdr never registered an agent. Each dispatch records that pane in its
     # own launch.json; derive reservations from those per-dispatch records so
@@ -2414,16 +3361,16 @@ def _herdr_split_pane(run: dict, cwd: Path, tab_file: Path, layout: dict | None,
 
 def _herdr_own_tab_pane(run: dict, cwd: Path, tab_file: Path, tab: dict | None) -> str | None:
     """No caller pane to split (or a run begun before split mode): a tab owned by the run."""
-    orphans: list = []
-    if tab and not _herdr_json(["tab", "get", tab["tab_id"]]):
-        tab = None  # the user closed it
+    orphans: list = list((tab or {}).get("orphan_tabs") or [])  # carried whenever the record is replaced
+    if tab and not _tab_exists(tab["tab_id"]):
+        tab = None  # the user closed it (an unreachable herdr keeps it)
     if tab is not None:
         # Panes closed since (by the user or as abandoned) are never split from (review F1).
         tab["panes"] = _live_panes(tab.get("panes") or [])
         if not tab["panes"]:
             # The tab outlived its recorded panes: open a new one, and keep the old id so
             # close_herdr_tab still closes it.
-            orphans = [*(tab.get("orphan_tabs") or []), tab["tab_id"]]
+            orphans.append(tab["tab_id"])
             tab = None
     if tab is None:
         workspace = (os.environ.get("HERDR_WORKSPACE_ID") or os.environ.get("HERDR_PANE_ID") or "").split(":")[0]
@@ -2528,7 +3475,7 @@ def _pane_ledger(run: dict, dispatch: dict, pane: str, *, agent: str | None = No
 # A harness's startup header block opens and closes with a rule line: dashes
 # (`codex exec`'s stream) or a box edge (codex's interactive banner, whose
 # lines sit between box sides). Session ids are read only inside one (#406).
-_ANSI_SEQ = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_ANSI_SEQ = _CSI  # one stripper (OSC included)
 _HEADER_RULE = re.compile(r"-{8,}|[╭┌][─━].*[─━][╮┐]|[╰└][─━].*[─━][╯┘]")
 
 
@@ -2720,7 +3667,7 @@ class _SessionSniffer:
     HEADER_BYTES = 16384
     BANNER_LINES = 3  # lines allowed before the opening rule
     ATTEMPTS = 2
-    _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+    _ANSI = _CSI
 
     def __init__(self, run: dict, dispatch: dict, adapter: dict | None, log_path=None):
         self.run, self.dispatch, self.log_path = run, dispatch, log_path
@@ -2793,10 +3740,14 @@ def _set_dispatch(dispatch_id: str, **cols) -> None:
         con.close()
 
 
-def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str, dispatch_id: str | None = None) -> str | None:
+def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str, dispatch_id: str | None = None,
+                      label: str | None = None) -> str | None:
     """A new pane split from one herdr refused as busy, recorded in the run's layout
-    and reserved for the dispatch, under the pane lock (review F2)."""
+    and reserved for the dispatch, under the pane lock (review F2). Raises
+    ValueError, before splitting, when the reservation ledger is unreadable."""
     with _pane_lock(run):
+        if dispatch_id:
+            _read_reservations(run)
         res = _herdr_json(["pane", "split", "--pane", busy_pane, "--direction", "down", "--cwd", str(cwd), "--no-focus"])
         pane = (res.get("pane") or {}).get("pane_id")
         if not pane:
@@ -2811,6 +3762,8 @@ def _herdr_fresh_pane(run: dict, cwd: Path, busy_pane: str, dispatch_id: str | N
             atomic_write_json(tab_file, layout)
         if dispatch_id:
             _reserve_pane(run, pane, dispatch_id)
+    if label:
+        _herdr_rename(pane, label)  # cosmetic, outside the lock
     return pane
 
 
@@ -2893,7 +3846,7 @@ def reclaim_pane(run: dict, dispatch_id: str, *, explicit: bool = False) -> str:
         _ledger_event(run, d, closed_at=now_iso(), note="pane already gone")
         return "closed"
     ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch_id
-    ddir.mkdir(parents=True, exist_ok=True)
+    ddir.mkdir(parents=True, exist_ok=True, mode=0o700)
     snap = ddir / "pane-final.txt"
     text = _pane_snapshot(herdr_agent_name(dispatch_id), pane)
     if text:
@@ -2932,6 +3885,7 @@ def _record_launch(run: dict, dispatch_id: str, *, launcher: str, pid: int | Non
                         (launcher, pid, pane_id, now_iso(), dispatch_id))
             if pid:
                 _record_identity(run["id"], dispatch_id, "supervisor", pid)
+            _trial_launched(con, dispatch_id)
             if os.environ.get("OFFICE_KEEP_PANES") == "1":
                 # R10: this dispatch's pane stays open after it ends (snapshot still written).
                 con.execute("UPDATE dispatches SET keep_pane=1 WHERE id=?", (dispatch_id,))
@@ -3030,6 +3984,16 @@ def supervise(dispatch_id: str) -> int:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         adapter = adapters.load_all()[d["adapter_id"]]
         output = Path(spec["output"]) if spec.get("output") else None
+        if os.environ.get("OFFICE_PREFLIGHT") != "off":
+            # The candidate's provider/model and credentials, validated on this
+            # host before anything launches: an unlisted slug or missing auth
+            # fails here with the reason recorded, never a silent wrong-model run.
+            ok, why = adapters.run_preflight(adapter, d.get("model") or "")
+            if not ok:
+                _note(log_path, f"launch stopped before the harness started: {why}")
+                _launch_notice(run, d, why)
+                classification, code = "preflight_failed", 127
+                return 1
         argv, prof = adapters.build_argv(adapter, spec["kind"], model=d["model"], effort=d["effort"] or "none",
                                          cwd=Path(spec["cwd"]), output=output,
                                          images=[Path(i) for i in spec.get("images") or []],
@@ -3050,10 +4014,16 @@ def supervise(dispatch_id: str) -> int:
         with log_path.open("ab") as log:
             os.chmod(log_path, 0o600)
             stdin = subprocess.PIPE if prof.get("prompt") == "stdin" else subprocess.DEVNULL
+            # The prompt itself is never persisted: evidence carries a placeholder in
+            # the prompt's slot, built before the prompt is appended (#500).
+            evidence_argv = list(argv)
             if prof.get("prompt") == "argv":
-                argv = argv + [prompt]
+                argv, evidence_argv = argv + [prompt], evidence_argv + ["[PROMPT REDACTED]"]
             elif prof.get("prompt") == "argv-bound":
-                argv = argv + [prof.get("prompt_flag", "--prompt=") + prompt]
+                flag = prof.get("prompt_flag", "--prompt=")
+                argv, evidence_argv = argv + [flag + prompt], evidence_argv + [flag + "[PROMPT REDACTED]"]
+            _record_launch_form(run, d, spec, "headless", evidence_argv,
+                                transport=prof.get("prompt") or "file", output=spec.get("output"))
             child = _spawn_agent(argv, spec["cwd"], env, stdin)
             _mark(dispatch_id, pid_child=child.pid)
             _agent_pgid_file(run, dispatch_id).write_text(str(child.pid))
@@ -3078,7 +4048,9 @@ def supervise(dispatch_id: str) -> int:
                 except BrokenPipeError:
                     pass
             sniffer = None if d.get("resumed_from") and not spec.get("headless_fresh") else _SessionSniffer(run, d, adapter, log_path)
+            wrote = 0
             for chunk in iter(lambda: child.stdout.read1(65536), b""):
+                wrote += len(chunk)
                 log.write(chunk)
                 log.flush()
                 if sniffer:
@@ -3096,6 +4068,10 @@ def supervise(dispatch_id: str) -> int:
             sig, classification = state_box["signal"], "signal"
         else:
             classification = "success" if code == 0 else "nonzero"
+        if classification == "success" and not wrote and not output:
+            # A worker with no reply file ended cleanly but said nothing: the
+            # prompt may never have been consumed (adapter failure_signatures).
+            _note(log_path, "the harness exited 0 with no output; the prompt may not have been consumed")
     except _Stopped as stop:
         sig, classification = stop.signum, "signal"
     except FileNotFoundError as exc:
@@ -3138,6 +4114,7 @@ def _mark(dispatch_id: str, pid_child: int) -> None:
         with db.transaction(con):
             con.execute("UPDATE dispatches SET pid=?, status=CASE WHEN status='launching' THEN 'running' ELSE status END, "
                         "last_seen_at=? WHERE id=?", (os.getpid(), now_iso(), dispatch_id))
+            _trial_launched(con, dispatch_id)
             run_id = state.get_dispatch(con, dispatch_id)["run_id"]
     finally:
         con.close()
@@ -3160,6 +4137,23 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> No
                        payload={"exit_code": code, "signal": sig, "classification": classification})
             if d["kind"] in ("planner", "executor"):
                 after_worker_exit(con, run, dispatch_id)
+            if d["kind"] == "planner" and _submitted(con, d):
+                # If a request arrived after this planner already submitted,
+                # let its session end before starting the next revision.
+                pending = con.execute("SELECT 1 FROM amendments WHERE run_id=? AND class='contract' "
+                                      "AND to_plan_version IS NULL LIMIT 1", (run["id"],)).fetchone()
+                if pending and not state.is_terminal(state.get_run(con, run["id"])):
+                    try:
+                        create_planner_task(con, run)
+                    except Refused as err:
+                        # Never roll back the recorded end: block the planner with the reason.
+                        state.update_task(con, run["id"], PLANNER_TASK, status="blocked",
+                                          pause_reason=f"follow-up planner refused: {err.message}")
+                        state.emit(con, run, "task.blocked", f"{PLANNER_TASK} follow-up revision not launched: "
+                                   f"{err.message}; {err.next_step or ''}".strip(), task_id=PLANNER_TASK)
+            if d["kind"] == "executor" and d.get("task_id") and _submitted(con, d):
+                # The session that submitted is gone: tasks stacked after it may start (#398).
+                start_stacked(con, run, d["task_id"])
             accepted = (d["kind"] in ("planner", "executor") and classification == "success"
                         and _submitted(con, d))
     finally:
@@ -3179,7 +4173,14 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> No
 
 
 def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
-    """A worker that exits without submitting leaves a blocker, not a pass."""
+    """A worker that exits without submitting leaves a blocker, not a pass. A trial's worker that ends
+    with no submission, no refusal and no question goes to the trial recovery instead of a relaunch on the
+    route that just failed; any other end settles the trial (`submitted`, or `abandoned`)."""
+    _after_worker_exit(con, run, dispatch_id)
+    _close_trial(con, run, dispatch_id)
+
+
+def _after_worker_exit(con, run: dict, dispatch_id: str) -> None:
     d = state.get_dispatch(con, dispatch_id)
     task = state.get_task(con, run["id"], d["task_id"]) if d.get("task_id") else None
     if task is None or task["current_dispatch_id"] != dispatch_id:
@@ -3206,6 +4207,8 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
                        task_id=task["id"])
             return
         wall = _quota_wall(run, d)
+        if wall and _queue_trial_recovery(con, run, d, f"harness quota wall: {wall}"):
+            return  # a trial that hit a quota wall before any work falls back; one that worked blocks
         if wall:
             # Relaunching on the same route lands in the same exhausted quota
             # (issue #267 A3): block at once and say so, never retry.
@@ -3227,19 +4230,557 @@ def after_worker_exit(con, run: dict, dispatch_id: str) -> None:
             state.emit(con, run, "task.blocked", f"{task['id']} worker ended on a question; answer it: "
                        f"{questions.answer_command(d, asked)}; work is preserved in its worktree", task_id=task["id"])
             return
+        acked = [r[0] for r in con.execute("SELECT amendment_id FROM deliveries WHERE run_id=? AND dispatch_id=? "
+                                           "AND status='applied' ORDER BY applied_at", (run["id"], dispatch_id))]
+        if acked and task.get("current_revision_id"):
+            # An amendment relaunch whose session acknowledged it and ended without
+            # submitting (D24): a blind relaunch repeats the same brief with nothing left
+            # to ack. The task keeps its revision and waits for the orchestrator, whose
+            # next: line names the rerun; it is not shown live.
+            which = ", ".join(dict.fromkeys(acked))
+            state.update_task(con, run["id"], task["id"], status="changes_required",
+                              pause_reason=f"{which} applied; the session ended without submitting")
+            state.emit(con, run, "task.findings_queued", f"{task['id']} applied {which} and its session ended without "
+                       f"submitting: office rerun {task['id']} --resume (resubmits on the amended contract) | --fresh",
+                       task_id=task["id"])
+            return
+        if _queue_trial_recovery(con, run, d, f"worker ended ({d['terminal_classification']}) without submitting"):
+            return
+        # A dispatch that raised stopped on purpose (an answer, not a retry, resolves it): it is no failed attempt.
         retries = con.execute("SELECT COUNT(*) FROM dispatches d WHERE d.run_id=? AND d.task_id=? AND d.terminal_classification "
-                              "IS NOT NULL AND NOT EXISTS (SELECT 1 FROM revisions r WHERE r.dispatch_id=d.id)",
-                              (run["id"], task["id"])).fetchone()[0]
+                              "IS NOT NULL AND NOT EXISTS (SELECT 1 FROM revisions r WHERE r.dispatch_id=d.id) "
+                              "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.run_id=d.run_id AND e.dispatch_id=d.id "
+                              "AND e.kind='task.raised')", (run["id"], task["id"])).fetchone()[0]
         limit = (state.pinned_config(run).get("verification") or {}).get("environment_retry_max", 2)
         if retries <= limit:
             state.emit(con, run, "task.relaunch", f"{task['id']} worker ended ({d['terminal_classification']}) "
                        f"without submitting; relaunching {retries}/{limit}", audience="runtime", task_id=task["id"])
-            request_launch(con, run, task["id"], role=d["role"])
+            _launch_or_block(con, run, task["id"], role=d["role"])
             return
         state.update_task(con, run["id"], task["id"], status="blocked",
                           pause_reason=f"worker ended ({d['terminal_classification']}) without submitting")
         state.emit(con, run, "task.blocked", f"{task['id']} worker ended without submitting "
                    f"({d['terminal_classification']}); work is preserved in its worktree", task_id=task["id"])
+
+
+# ------------------------------------------------------------------ trial launch-failure recovery (#494)
+
+
+
+def trial_launch_failed(con, run: dict, dispatch_id: str | None, why: str) -> bool:
+    """A trial dispatch whose launch job failed for good: queue its recovery instead of a bare blocker.
+    False when the dispatch is not a live trial. Caller holds the transaction."""
+    return _queue_trial_recovery(con, run, state.get_dispatch(con, dispatch_id) if dispatch_id else None, why)
+
+
+def _queue_trial_recovery(con, run: dict, d: dict | None, why: str) -> bool:
+    trial = open_trial(con, (d or {}).get("id"))
+    if not trial:
+        return False
+    # The mark keeps `_close_trial` from abandoning a trial whose recovery is on its way.
+    con.execute("UPDATE route_trials SET outcome=?, updated_at=? WHERE id=?",
+                (dumps({"recovery": "queued", "why": why[:300]}), now_iso(), trial["id"]))
+    state.enqueue(con, run, "trial_recovery", {"dispatch_id": d["id"], "task_id": d["task_id"], "why": why[:300]},
+                  dedup_key=f"trial-recovery:{d['id']}", max_attempts=2)
+    state.emit(con, run, "trial.recovering", f"{d['task_id']} trial route {trial['route']} did not run to a submission "
+               f"({why[:120]}); confirming its worker is gone, then falling back to {trial['fallback_route']} if no "
+               "work started", audience="runtime", task_id=d["task_id"], dispatch_id=d["id"])
+    return True
+
+
+def _close_trial(con, run: dict, dispatch_id: str) -> None:
+    """The end of a trial dispatch the recovery did not take: a revision makes it `submitted`, anything
+    else `abandoned` (revoked, signalled, ended on a question or a refused submit)."""
+    trial = open_trial(con, dispatch_id)
+    if not trial or "recovery" in (loads(trial.get("outcome"), None) or {}):
+        return
+    if con.execute("SELECT 1 FROM revisions WHERE dispatch_id=?", (dispatch_id,)).fetchone():
+        trial_submitted(con, dispatch_id)
+    else:
+        abandon_trial(con, dispatch_id, "the worker ended without a submission and without a recovery")
+
+
+def _system_tool(name: str, *system: str) -> str:
+    """A system tool by absolute path, so a restricted PATH (a sandbox, a test) cannot hide it."""
+    return next((p for p in system if os.access(p, os.X_OK)), shutil.which(name) or name)
+
+
+_PS_ROW = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d+\s+[\d:]{8}\s+\d{4})\s+(.*)$")
+
+
+def _process_table() -> list[tuple[int, int, int, str, str, str]] | None:
+    """(pid, ppid, pgid, state, start, command-and-environment) for every process, or None when the table cannot be
+    trusted. `ps` runs in the C locale, so the start time parses (and matches a recorded identity) whatever the
+    user's locale is; a table that does not contain this very process was misread, and says nothing."""
+    try:
+        listing = subprocess.run([_system_tool("ps", "/bin/ps", "/usr/bin/ps"), "-axeww", "-o", "pid=,ppid=,pgid=,stat=,lstart=,command="],
+                                 capture_output=True,
+                                 text=True, timeout=10, check=True, env={**os.environ, "LC_ALL": "C", "LANG": "C"}).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    rows = [(int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4), " ".join(m.group(5).split()), m.group(6))
+            for m in map(_PS_ROW.match, listing.splitlines()) if m]
+    return rows if any(r[0] == os.getpid() for r in rows) else None
+
+
+def _terminate_worker(pgid: int, tree: "_WorkerTree", *, term_wait: float = 3.0, kill_wait: float = 3.0) -> bool:
+    """SIGTERM, then SIGKILL, the verified agent group (`pgid`, 0 for none) and every process the tree
+    attributes to the worker; True once a scan finds none. A zombie is not a process that can write, and the
+    scan does not count it."""
+    for sig, wait in ((signal.SIGTERM, term_wait), (signal.SIGKILL, kill_wait)):
+        pids = tree.scan()
+        if pids is None:
+            return False
+        if not pids:
+            return True
+        if pgid > 1:
+            with contextlib.suppress(OSError):
+                os.killpg(pgid, sig)
+        for pid in pids:
+            with contextlib.suppress(OSError):
+                os.kill(pid, sig)
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            time.sleep(0.1)
+            pids = tree.scan()
+            if pids is None:
+                return False
+            if not pids:
+                return True
+    pids = tree.scan()
+    return pids is not None and not pids
+
+
+class _WorkerTree:
+    """The processes of one dispatch's worker: a recorded root that is still the process it was recorded as
+    (pid and start time), anything that carries the dispatch's id in its environment, and everything
+    descended from either. A process that left the group (setsid) is still found by its environment.
+    This process and its ancestors are never the worker, whatever they carry."""
+
+    def __init__(self, dispatch_id: str, roots: dict[int, str], pgid: int = 0) -> None:
+        self.tag = re.compile(rf"(?:^|\s){_WORKER_TAG}={re.escape(dispatch_id)}(?:\s|$)")
+        self.roots = roots
+        self.pgid = pgid  # the verified agent's process group: every live member of it is the worker's
+        self.seen: dict[int, str] = {}
+
+    def scan(self, _root=None) -> set[int] | None:
+        table = _process_table()
+        if table is None:
+            return None
+        children: dict[int, list[int]] = {}
+        started, parent, tagged, grouped = {}, {}, set(), set()
+        for pid, ppid, pgid, state_, start, command in table:
+            if state_.startswith("Z"):
+                continue  # exited and waiting to be reaped: it cannot write
+            children.setdefault(ppid, []).append(pid)
+            started[pid], parent[pid] = start, ppid
+            if self.tag.search(command):
+                tagged.add(pid)
+            if self.pgid > 1 and pgid == self.pgid:
+                grouped.add(pid)
+        mine, pid = set(), os.getpid()
+        while pid in parent and pid not in mine:
+            mine.add(pid)
+            pid = parent[pid]
+
+        def started_by_me(pid: int) -> bool:
+            seen = set()
+            while pid in parent and pid not in seen:
+                if pid == os.getpid():
+                    return True
+                seen.add(pid)
+                pid = parent[pid]
+            return False
+
+        def with_descendants(seed) -> set[int]:
+            out, queue = set(mine), list(seed)  # this process and its ancestors are never walked into
+            while queue:
+                pid = queue.pop()
+                if pid not in out:
+                    out.add(pid)
+                    queue.extend(children.get(pid, []))
+            return out - mine
+
+        named = {p for p, st in {**self.seen, **self.roots}.items() if started.get(p) == st}
+        # A tag alone is not proof: the `ps`, `lsof` or `git` this process runs inherits the tag it carries. A
+        # recorded identity or the agent's group stays the worker's whoever started it.
+        found = with_descendants(named | grouped) | with_descendants(p for p in tagged if p not in mine and not started_by_me(p))
+        found = {p for p in found if p in started and p > 1}
+        self.seen.update({p: started[p] for p in found})
+        return found
+
+
+def _recorded_identity(run: dict, dispatch_id: str, which: str) -> dict | None:
+    try:
+        rec = json.loads(_identity_file(run["id"], dispatch_id, which).read_text())
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec.get("pid"), int) else None
+
+
+def stop_worker_tree(run: dict, d: dict) -> tuple[bool, str]:
+    """Terminate the failed dispatch's worker process tree and confirm it is gone: (confirmed, detail).
+
+    Roots come from the identities recorded at launch (supervisor and agent, each a pid and start time)
+    and the pane Herdr hosts. Closing a pane or ending a binding is not proof of exit, so after the
+    signals the tree is scanned again and must be empty. A recorded process whose identity cannot be
+    read (alive but no readable start time, or a live pid with no record), or a process table that cannot
+    be read, is not confirmed: the caller blocks rather than starting a second writer."""
+    notes: list[str] = []
+    if d.get("launcher") == "herdr" and d.get("pane_id") and shutil.which("herdr"):
+        try:
+            notes.append(f"pane {reclaim_pane(run, d['id'], explicit=True)}")
+        except Exception as exc:  # the process scan below still decides
+            notes.append(f"pane close failed: {exc}")
+    roots: dict[int, str] = {}
+    agent_pgid = 0
+    for which in ("supervisor", "agent"):
+        rec = _recorded_identity(run, d["id"], which)
+        if rec is None:
+            continue
+        pid = rec["pid"]
+        if pid_state(pid) == DEAD:
+            continue
+        # A record made by this version carries the C-locale start; an older one only the user-locale start.
+        recorded, now = ((rec["c_start"], _c_start(pid)) if rec.get("c_start") else (rec.get("start"), process_start(pid)))
+        if not recorded or now is None:
+            return False, f"recorded {which} pid {pid} is alive and its identity cannot be proven (start time unreadable)"
+        if now == recorded:
+            roots[pid] = _c_start(pid) or now
+            agent_pgid = pid if which == "agent" else agent_pgid
+    if not agent_pgid:
+        # The leader may be gone while a member of its group is not. A group id cannot be reused while the group has
+        # members, so the recorded one is the worker's unless a live process now has that pid (a new group may have it).
+        try:
+            recorded = int(_agent_pgid_file(run, d["id"]).read_text().strip())
+        except (OSError, ValueError):
+            recorded = 0
+        if recorded > 1 and pid_state(recorded) == DEAD:
+            agent_pgid = recorded
+    pid = d.get("pid")
+    if pid and pid != os.getpid() and not _recorded_identity(run, d["id"], "supervisor") and pid_alive(pid):
+        return False, f"supervisor pid {pid} is alive and has no recorded identity to prove which process it is"
+    tree = _WorkerTree(d["id"], roots, agent_pgid)
+    gone = _terminate_worker(agent_pgid, tree)
+    left = tree.scan()
+    if not gone or left is None or left:
+        return False, ("worker processes remain: " + (", ".join(map(str, sorted(left))) if left else
+                                                      "the process table cannot be read, so exit is unconfirmed"))
+    # A helper that cleared its environment and left the group carries nothing that names the dispatch. If
+    # one still has the worktree as its working directory it may be writing there: not confirmed.
+    if d.get("worktree") and Path(d["worktree"]).is_dir():
+        for attempt in range(3):  # a closing pane's shell takes a moment to go
+            holders = _cwd_holders(Path(d["worktree"]))
+            table = _process_table()
+            if holders is None or table is None:
+                return False, "the processes working in the worktree cannot be listed, so exit is unconfirmed"
+            holders = _foreign(holders, table)
+            if not holders:
+                break
+            time.sleep(0.5)
+        else:
+            names = {row[0]: row[5].split(None, 1)[0] for row in table if row[0] in holders}
+            return False, ("processes with an unattributed working directory in the worktree remain: "
+                           + ", ".join(f"{pid} ({names.get(pid, '?')})" for pid in sorted(holders)))
+    return True, "; ".join([*notes, f"confirmed no process of {d['id']} remains"
+                            + (f" (terminated {len(roots)} recorded)" if roots else "")])
+
+
+def _file_stamp(path: Path) -> str:
+    """What changes when a file does: link text for a symlink (never followed), else size and mtime."""
+    try:
+        st = path.lstat()
+    except OSError:
+        return "gone"
+    return "link:" + os.readlink(path) if stat.S_ISLNK(st.st_mode) else f"{st.st_size}:{st.st_mtime_ns}"
+
+
+def _worktree_snapshot(wt: Path) -> dict | None:
+    """HEAD, the index, and a stamp for every tracked and every non-ignored untracked path. Taken until two
+    consecutive reads agree, so it describes a worktree nothing is writing. None when it never settles or git
+    cannot say. The worktree is the failed agent's, so this reads names and stamps only: `git status` would
+    hash content through whatever filter drivers the agent configured, and run them here."""
+    def git_z(*args: str) -> list[str]:
+        raw = subprocess.run(["git", "-C", str(wt), "-c", "core.fsmonitor=false", *args], capture_output=True, timeout=120)
+        if raw.returncode != 0:
+            raise OSError(raw.stderr.decode("utf-8", "replace"))
+        return [x for x in raw.stdout.decode("utf-8", "surrogateescape").split("\0") if x]
+
+    def once() -> dict | None:
+        try:
+            head = paths.git(wt, "rev-parse", "HEAD")
+            index = hashlib.sha256("\0".join(git_z("ls-files", "-s", "-z")).encode("utf-8", "surrogateescape")).hexdigest()
+            names = sorted({*git_z("ls-files", "-z"), *git_z("ls-files", "-o", "-z", "--exclude-standard")})
+        except (OSError, subprocess.SubprocessError, paths.GitError):
+            return None
+        return {"head": head, "index": index, "files": {name: _file_stamp(wt / name) for name in names}}
+
+    previous = once()
+    for _ in range(4):
+        time.sleep(0.2)
+        current = once()
+        if current is not None and current == previous:
+            return current
+        previous = current
+    return None
+
+
+def _foreign(pids: set[int], table: list[tuple]) -> set[int]:
+    """`pids` that are neither this process, its ancestors, nor something this process started (the `lsof`
+    that listed them, a `git` it ran: a supervisor that works from the worktree gives them that directory), and
+    that still exist in `table`."""
+    parent = {row[0]: row[1] for row in table}
+    me, mine = os.getpid(), set()
+    pid = me
+    while pid in parent and pid not in mine:
+        mine.add(pid)
+        pid = parent[pid]
+
+    def ours(pid: int) -> bool:
+        seen = set()
+        while pid in parent and pid not in seen:
+            seen.add(pid)
+            pid = parent[pid]
+            if pid == me:
+                return True
+        return False
+
+    return {p for p in pids if p in parent and p not in mine and not ours(p)}
+
+
+def _cwd_holders(wt: Path) -> set[int] | None:
+    """Processes whose working directory is inside `wt`, or None when they cannot be listed. Linux reads
+    /proc; elsewhere `lsof`, whose failure (nonzero beyond its "nothing found", or no listing at all) is not
+    an empty answer."""
+    root = str(wt.resolve())
+    inside = lambda path: path == root or path.startswith(root + os.sep)
+    if Path("/proc/self/cwd").exists():
+        holders = set()
+        for entry in Path("/proc").iterdir():
+            if entry.name.isdigit():
+                try:
+                    if inside(os.readlink(entry / "cwd")):
+                        holders.add(int(entry.name))
+                except (FileNotFoundError, ProcessLookupError):
+                    continue  # gone since the listing
+                except OSError:
+                    return None  # a process whose directory cannot be read may be the one writing
+        return holders
+    try:
+        proc = subprocess.run([_system_tool("lsof", "/usr/sbin/lsof", "/usr/bin/lsof"), "-nP", "-a", "-d", "cwd", "-F", "pn"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode not in (0, 1) or not proc.stdout.strip():
+        return None
+    holders, pid = set(), None
+    for line in proc.stdout.splitlines():
+        if line[:1] == "p" and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line[:1] == "n" and pid and inside(line[1:]):
+            holders.add(pid)
+    return holders
+
+
+def work_started(con, d: dict, ddir: Path) -> tuple[bool, str]:
+    """Whether the failed worker did meaningful work, once its process tree is confirmed gone: a submitted
+    revision, a commit past the dispatch's base, or a worktree that now differs from the one the launch left
+    (any tracked change or non-ignored untracked file). Ambiguity counts as work: an unreadable snapshot, or
+    a worktree that was launched on with no baseline recorded, blocks the fallback."""
+    if con.execute("SELECT 1 FROM revisions WHERE dispatch_id=?", (d["id"],)).fetchone():
+        return True, "a revision was submitted"
+    if not d.get("worktree") or not (Path(d["worktree"]) / ".git").exists():
+        return False, "the dispatch never got a worktree"
+    wt = Path(d["worktree"])
+    after = _worktree_snapshot(wt)
+    if after is None:
+        return True, "the worktree could not be snapshotted, so work cannot be ruled out"
+    try:
+        before = json.loads((ddir / "worktree-baseline.json").read_text())
+    except (OSError, ValueError):
+        started = [n for n in ("launch.json", "agent.identity", "supervisor.identity", "agent.pgid") if (ddir / n).exists()]
+        if d.get("launcher") or d.get("pid") or started:
+            return True, "the worktree has no launch baseline to compare against, so work cannot be ruled out"
+        return False, "no agent was ever launched in this dispatch"
+    if after["head"] != before["head"]:
+        return True, f"the branch moved from {str(before['head'])[:8]} to {after['head'][:8]}"
+    changed = sorted(p for p in {*after["files"], *before["files"]} if after["files"].get(p) != before["files"].get(p))
+    if after["index"] != before.get("index", after["index"]):
+        changed.insert(0, "the index")
+    if changed:
+        return True, "the worktree changed after launch: " + ", ".join(changed[:5]) + (" ..." if len(changed) > 5 else "")
+    return False, "no revision, no commit and no worktree change since the launch"
+
+
+def _recovery_blocked(con, run: dict, d: dict, trial: dict, status: str, reason: str, next_step: str, *,
+                      exited: bool = False) -> dict:
+    """Stop here: the worktree and the lease stay as they are, the trial is settled and the task blocks with
+    a next step. Nothing is launched and no lease moves. A dispatch whose worker is confirmed gone is ended,
+    so it does not stay a live session for the next dispatch to refuse on; one whose exit is not confirmed is
+    left as it is."""
+    with db.transaction(con):
+        task = state.get_task(con, run["id"], d["task_id"])
+        if exited:
+            _end_failed_dispatch(con, run, d["id"], "launch_failed")
+        set_trial_status(con, trial, status, origin="recovery", detail=reason, outcome={"recovery": "blocked", "why": reason})
+        if task and task["current_dispatch_id"] == d["id"] and task["status"] in ("running", "launching"):
+            state.update_task(con, run["id"], task["id"], status="blocked", pause_reason=f"trial {trial['route']}: {reason}"[:300])
+            state.emit(con, run, "task.blocked", f"{d['task_id']} trial route {trial['route']} failed: {reason}; no fallback "
+                       f"was started. {next_step}", task_id=d["task_id"], dispatch_id=d["id"])
+    return {"recovery": "blocked", "reason": reason}
+
+
+def _end_failed_dispatch(con, run: dict, dispatch_id: str, classification: str) -> None:
+    """Record the end of a dispatch whose worker is confirmed gone and never reported one. Caller holds the tx."""
+    ended = con.execute("UPDATE dispatches SET status=CASE WHEN status='cancelled' THEN status ELSE 'failed' END, "
+                        "terminal_classification=COALESCE(terminal_classification, ?), ended_at=? "
+                        "WHERE id=? AND ended_at IS NULL", (classification, now_iso(), dispatch_id)).rowcount
+    if ended:
+        d = state.get_dispatch(con, dispatch_id)
+        state.emit(con, run, "dispatch.ended", f"{d.get('task_id') or d['role']} {d['role']} ended: {classification}",
+                   audience="runtime", task_id=d.get("task_id"), dispatch_id=dispatch_id,
+                   payload={"exit_code": None, "signal": None, "classification": classification})
+
+
+def _recovery_fallback(con, run: dict, task: dict, d: dict, trial: dict) -> tuple[dict | None, str]:
+    """The recorded fallback route, decided again from live evidence (quota, trust, permission, floors)."""
+    recorded = (d.get("route") or {}).get("discovery") or {}
+    route = trial["fallback_route"]
+    if not recorded.get("fallback"):
+        return None, f"the dispatch recorded no fallback payload for {route}"
+    try:
+        fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=task["id"], exact=route,
+                                      dispatch_kind="fix" if task.get("current_dispatch_id") else "fresh")
+    except Refused as refused:  # e.g. policy-unreadable: the fallback cannot be shown to be permitted
+        return None, f"the recorded fallback {route} cannot be confirmed ({refused.message})"
+    if fresh.get("status") != "selected" or fresh.get("selected") != route:
+        why = "; ".join(f"{r['candidate']}: {r['reason']}" for r in (fresh.get("rejected") or [])[:2]) or fresh.get("status")
+        return None, f"the recorded fallback {route} no longer qualifies ({why})"
+    fresh["route_source"] = "router"
+    return fresh, ""
+
+
+def job_trial_recovery(con, run: dict, job: dict) -> dict:
+    """A failure inside the recovery blocks the task with its reason: a dead worker and a trial left open
+    would otherwise wait for nobody."""
+    progress = {"exited": False}
+    try:
+        return _trial_recovery(con, run, job, progress)
+    except db.StaleAttempt:
+        raise
+    except Exception as exc:
+        return _recovery_crashed(con, run, job["payload"]["dispatch_id"], f"{type(exc).__name__}: {exc}",
+                                 exited=progress["exited"]) or _reraise(exc)
+
+
+def _reraise(exc: BaseException):
+    raise exc
+
+
+def _recovery_crashed(con, run: dict, dispatch_id: str, err: str, *, exited: bool = False) -> dict | None:
+    """The recovery failed (an exception in it, or its job failed for good): block the task and settle the
+    trial, so neither waits for a recovery that is not coming. None when there is no open trial."""
+    d = state.get_dispatch(con, dispatch_id)
+    trial = open_trial(con, dispatch_id) if d else None
+    if not trial:
+        return None
+    return _recovery_blocked(con, run, d, trial, "abandoned", f"the recovery itself failed ({err[:200]})",
+                             f"The worktree is preserved; office rerun {d['task_id']} --fresh, or office dispatch "
+                             f"{d['task_id']} --reroute", exited=exited)
+
+
+def trial_recovery_failed(con, run: dict, job: dict, err: str) -> None:
+    """A trial_recovery job that failed for good (killed twice, a version mismatch): the same block. Caller holds
+    the transaction."""
+    _recovery_crashed(con, run, job["payload"].get("dispatch_id"), err)
+
+
+def _trial_recovery(con, run: dict, job: dict, progress: dict) -> dict:
+    """The outbox job behind a trial's launch failure (#494). In order: end the failed worker's process
+    tree and confirm it is gone; decide from the revisions, commits and a stable worktree snapshot whether
+    work started; and only for a confirmed pre-work failure release the trial's lease, end its binding, mark
+    `launch-failed` and dispatch the recorded fallback, after re-checking the gates a dispatch checks. Any
+    other outcome blocks with a next step and leaves the worktree and lease alone."""
+    d = state.get_dispatch(con, job["payload"]["dispatch_id"])
+    trial = open_trial(con, d["id"]) if d else None
+    if not trial:
+        return {"skipped": "not an open trial"}
+    task = state.get_task(con, run["id"], d["task_id"])
+    if task is None or task["current_dispatch_id"] != d["id"] or task["status"] not in ("running", "launching"):
+        with db.transaction(con):
+            abandon_trial(con, d["id"], "the task no longer belongs to this dispatch")
+        return {"skipped": "superseded"}
+    tid = task["id"]
+    rerun_hint = f"office rerun {tid} --fresh (after reading the worktree), or office dispatch {tid} --reroute"
+    exited, detail = stop_worker_tree(run, state.get_dispatch(con, d["id"]))
+    if not exited:
+        return _recovery_blocked(con, run, d, trial, "abandoned", f"its worker process could not be confirmed gone ({detail})",
+                                 f"Stop the process by hand and confirm it with ps, then {rerun_hint}. The worktree and "
+                                 f"lease {d.get('lease_id')} are preserved")
+    progress["exited"] = True
+    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    meaningful, evidence = work_started(con, state.get_dispatch(con, d["id"]), ddir)
+    if meaningful:
+        return _recovery_blocked(con, run, d, trial, "abandoned", f"work had started ({evidence})",
+                                 f"The worktree {d.get('worktree')} is preserved; {rerun_hint}", exited=True)
+    fallback, why = _recovery_fallback(con, run, task, d, trial)
+    if fallback is None:
+        return _recovery_blocked(con, run, d, trial, "launch-failed", why,
+                                 f"The worker is gone and no work started; route it again: office dispatch {tid} --reroute",
+                                 exited=True)
+    from office import plans, queuecmd
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        task = state.get_task(con, run["id"], tid)
+        cur = state.get_dispatch(con, d["id"])
+        try:
+            if task["current_dispatch_id"] != d["id"] or task["status"] not in ("running", "launching") or not open_trial(con, d["id"]):
+                raise Refused("state-changed", f"{tid} changed during the recovery")
+            if state.is_terminal(run):
+                raise Refused("run-terminal", f"run is {run['phase']}")
+            plans.require_dispatchable(con, run)
+            plans.require_scope_clear(con, run, tid)
+            held = queuecmd.paused_block(con, run["id"], tid)
+            if held:
+                raise Refused("scheduler-paused", f"{held['id']} is paused by the operator")
+            fresh_lease = live_lease(con, run["id"], cur["lease_id"]) if cur.get("lease_id") else None
+            if cur.get("lease_id") and not fresh_lease:
+                raise Refused("lease-lost", f"{cur['lease_id']} is no longer this dispatch's live lease")
+        except Refused as refused:
+            reason = f"a gate no longer allows the fallback ({refused.message})"
+        else:
+            reason = None
+            now = now_iso()
+            _end_failed_dispatch(con, run, d["id"], "launch_failed")
+            if cur.get("lease_id"):
+                con.execute("UPDATE leases SET released_at=?, revoke_reason='trial launch failed before any work' "
+                            "WHERE id=? AND released_at IS NULL AND revoked_at IS NULL", (now, cur["lease_id"]))
+                con.execute("INSERT INTO ownership_events(id, run_id, role, scope, prior_holder, new_holder, event, created_at) "
+                            "VALUES(?,?,?,?,?,?,?,?)", (uuid.uuid4().hex, run["id"], "executor", tid, d["id"], None,
+                                                        "release", now))
+            if cur.get("session_id") and cur.get("harness"):
+                con.execute("UPDATE session_bindings SET ended_at=? WHERE harness=? AND session_id=? AND run_id=? "
+                            "AND ended_at IS NULL", (now, cur["harness"], cur["session_id"], run["id"]))
+            set_trial_status(con, trial, "launch-failed", origin="recovery", detail=f"pre-work launch failure: {evidence}")
+            _record_routing(con, run, fallback)
+            note_route(con, run, task, fallback)
+            new = request_launch(con, run, tid, role="executor", decision=fallback, base=cur.get("base_commit"))
+            state.record_route_change(con, run, tid, trial["route"], fallback["selected"], kind="trial-fallback",
+                                      actor="office", dispatch_id=new,
+                                      reason=f"trial launch failed before any work ({job['payload'].get('why')})")
+            set_trial_status(con, trial, "fell-back", origin="recovery", dispatch_id=new,
+                             detail=f"dispatched known-working {fallback['selected']} as {new}",
+                             outcome={"recovery": "fell-back", "fallback_dispatch": new})
+            state.emit(con, run, "trial.fell_back", f"{tid} trial route {trial['route']} failed before any work; "
+                       f"dispatched {fallback['selected']} as {new}", task_id=tid, dispatch_id=new)
+    if reason:
+        return _recovery_blocked(con, run, d, trial, "launch-failed", reason,
+                                 f"The worker is gone and no work started; resolve that, then office dispatch {tid} --reroute",
+                                 exited=True)
+    if cur.get("launcher") == "herdr" and cur.get("pane_id"):
+        with _pane_lock(run):
+            _unreserve_pane(run, cur["pane_id"])
+    return {"recovery": "fell-back", "fallback_dispatch": new}
 
 
 def _may_end_on_question(d: dict) -> bool:
@@ -3295,10 +4836,20 @@ def job_notify_worker(con, run: dict, job: dict) -> dict:
             _amendment_undelivered(con, run, payload, d)
         return {"sent": False}
     text = payload.get("text", "office status has an update for you.")
-    landed = submit_prompt(d["pane_id"], text, pane=d["pane_id"])
+    try:
+        with fenced_pane(run, d) as pane:
+            landed = submit_prompt(pane, text, pane=pane)
+    except PaneMismatch as exc:
+        with db.transaction(con):
+            state.emit(con, run, "prompt", f"{d.get('task_id') or d['id']} {d['id']}: native nudge refused, pane "
+                       f"{d['pane_id']} is not this dispatch's: {exc}", audience="runtime",
+                       task_id=d.get("task_id"), dispatch_id=d["id"])
+        if unblock:
+            _amendment_undelivered(con, run, payload, d)
+        return {"sent": False, "refused": str(exc)}
     if unblock:
         if landed == "landed":
-            from office import db, submit
+            from office import submit
             with db.transaction(con):
                 task = state.get_task(con, run["id"], payload["task_id"])
                 # Still this dispatch's own block (a revoke or newer owner since keeps its blocker).
@@ -3338,13 +4889,63 @@ def _amendment_undelivered(con, run: dict, payload: dict, d: dict) -> None:
                    f"to {d['id']}; its blocker stays: office revoke {tid}, then office rerun {tid} --resume|--fresh", task_id=tid, dispatch_id=d["id"])
 
 
-def start_stacked(con, run: dict, accepted_task: str) -> list[str]:
-    """Launch tasks the orchestrator stacked after `accepted_task`. Caller holds tx."""
+def _launch_or_block(con, run: dict, task_id: str, **kw) -> str | None:
+    """An internal relaunch (auto-relaunch, stacked start): a refusal blocks the task with
+    its reason instead of rolling back the transition that asked for it."""
+    try:
+        return request_launch(con, run, task_id, **kw)
+    except Refused as err:
+        state.update_task(con, run["id"], task_id, status="blocked", pause_reason=f"relaunch refused: {err.message}")
+        state.emit(con, run, "task.blocked", f"{task_id} not relaunched: {err.message}; {err.next_step or ''}".strip(),
+                   task_id=task_id)
+        return None
+
+
+def stack_released(con, run: dict, holder_id: str) -> str | None:
+    """Why a task stacked after `holder_id` may start now (a phrase), or None. The holder was
+    accepted, or it submitted and no session of it is live: in a convergence RECHECK a submitted
+    task can wait on its lane for a long time, and its ended session edits nothing (#398)."""
+    holder = state.get_task(con, run["id"], holder_id) or {}
+    if holder.get("status") == "accepted":
+        return "is already accepted"
+    if (holder.get("current_revision_id") and holder.get("status") not in ("running", "launching")
+            and _live_session(con, run["id"], holder_id) is None):
+        return f"submitted {holder['current_revision_id']} and has no live session"
+    return None
+
+
+def _live_session(con, run_id: str, task_id: str) -> str | None:
+    from office import gates
+    return gates.live_task_session(con, run_id, task_id)
+
+
+def start_stacked(con, run: dict, holder_task: str) -> list[str]:
+    """Revisit eligible queued stacks whenever a holder's lease is released.
+
+    Also retry stacks whose original holder released earlier, but whose own
+    scopes were still held by an unrelated active dispatch (#539). A stacked
+    task whose scope remains live stays queued. Caller holds tx."""
     started = []
+    if not stack_released(con, run, holder_task):
+        return started
+    # A queued task may still be stacked behind an older, already-accepted
+    # holder: when a different task's lease clears, retry all eligible stacks
+    # instead of only those whose original holder just ended (#539).
     for t in state.tasks(con, run["id"]):
-        if t["status"] == "queued" and t.get("stack_after") == accepted_task:
+        after = t.get("stack_after")
+        if t["status"] == "queued" and after and stack_released(con, run, after):
+            if scope_holder(con, run, t):
+                continue
             graph = {x["id"]: x["depends"] for x in state.tasks(con, run["id"])}
-            base = _base_for(con, run, t, graph, accepted_task)
-            request_launch(con, run, t["id"], role="executor", base=base)
-            started.append(t["id"])
+            parts: list = []
+            try:
+                base = _base_for(con, run, t, graph, after, parents=parts)
+            except Refused as err:
+                # Acceptance must not raise out of its own transition: pause the dependent with the reason.
+                state.update_task(con, run["id"], t["id"], status="paused", pause_reason=err.message)
+                state.emit(con, run, "task.paused", f"PAUSED {t['id']}: {err.message}; {err.next_step or ''}".strip(),
+                           task_id=t["id"], payload={"reason": err.message})
+                continue
+            if _launch_or_block(con, run, t["id"], role="executor", base=base, extra={"base_parents": parts}):
+                started.append(t["id"])
     return started

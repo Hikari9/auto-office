@@ -39,13 +39,16 @@ export PATH="$PWD/.venv/bin:$PATH"
 
 # scripts/ is the retained 3.0 helper surface; its own tests run as that pinned helper.
 export OFFICE_PINNED_LEGACY=1
+# Inherited pytest configuration can silently filter collection even with
+# --all (notably PYTEST_ADDOPTS='-m unit'). The gate owns its selection.
+unset PYTEST_ADDOPTS PYTEST_PLUGINS
 
 echo "== Ecosystem check"
 python3 scripts/check_ecosystem.py
 
-echo "== Unit tests (3.0 helpers + 3.1 runtime; visual tests skip without Playwright)"
+echo "== Full test suite (unit, integration, legacy, slow; visual tests skip without Playwright)"
 # Two workers: the local resource budget caps test parallelism at 2 on this class of machine.
-python3 -m pytest tests/ -q -n "${VALIDATE_WORKERS:-2}"
+python3 -m pytest tests/ -q -n "${VALIDATE_WORKERS:-2}" --all
 
 echo "== Adapter validation"
 for f in adapters/seed/*.yaml; do
@@ -58,6 +61,7 @@ if [ "${VALIDATE_BUILD:-0}" = "1" ]; then
   python3 -m build --wheel
   python3 -m zipfile -l dist/*.whl | grep -q office/_resources/config/config.default.yaml
   python3 -m zipfile -l dist/*.whl | grep -q office/_resources/docs/orchestrator-reference.md
+  python3 -m zipfile -l dist/*.whl | grep -q office/_resources/docs/onboarding.md
 fi
 
 echo "== Validation passed"

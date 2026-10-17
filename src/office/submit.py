@@ -28,17 +28,19 @@ def _draft(con, root: Path, run: dict) -> Path:
 # A task blocked by its own worker's refused or scope-requesting submit. The
 # worker may still resubmit (revert, or after the amendment), so these do not
 # refuse a submit the way an orchestrator pause does.
-SELF_BLOCK = ("submit refused", "scope requested")
+SELF_BLOCK = ("submit refused", "scope requested", "raised")
 
 
 def self_blocked(task: dict) -> bool:
     return task["status"] == "blocked" and (task.get("pause_reason") or "").startswith(SELF_BLOCK)
 
 
-def _record_block(con, run: dict, task: dict, d: dict, reason: str, state_key: str, state_val: dict) -> None:
+def _record_block(con, run: dict, task: dict, d: dict, reason: str, state_key: str, state_val: dict,
+                  keep_id: bool = False) -> None:
     """Durable: the task is a blocker the orchestrator sees at once, and the
     dispatch keeps what it was blocked on. Caller holds the transaction. Ownership is
-    re-read here: a revoke or takeover since the caller looked refuses and changes nothing."""
+    re-read here: a revoke or takeover since the caller looked refuses and changes nothing.
+    `keep_id` joins a block this task is already in (a second raise) instead of replacing its id."""
     import json
     task = state.get_task(con, run["id"], task["id"])
     if task["current_dispatch_id"] != d["id"]:
@@ -53,7 +55,8 @@ def _record_block(con, run: dict, task: dict, d: dict, reason: str, state_key: s
     row = con.execute("SELECT override_json FROM dispatches WHERE id=?", (d["id"],)).fetchone()
     data = json.loads((row["override_json"] if row else None) or "{}")
     data[state_key] = state_val
-    data["block_id"] = uuid.uuid4().hex[:12]  # names this block: a stale notice cannot lift a newer one
+    if not (keep_id and self_blocked(task) and data.get("block_id")):
+        data["block_id"] = uuid.uuid4().hex[:12]  # names this block: a stale notice cannot lift a newer one
     # Never replace another blocker (revoke, orchestrator pause) with this one. A
     # `submitted` task is blocked too: its revision and gates stay as they are (acceptance
     # waits while the task is blocked) and the status it had is kept to restore on unblock.
@@ -183,30 +186,33 @@ def _scope_hunk(wt: Path, files: list[str], base: str = "HEAD", limit: int = 600
     return text + "\n... (truncated)" if cut else text
 
 
-def request_scope_change(con, run: dict, *, cwd: Path, files: list[str], reason: str) -> Result:
-    """Executor: ask the orchestrator to widen this task's scope. Blocks the
-    task and wakes `office wait`/`status` with the files, reason and diff hunk."""
+def executor_dispatch(con, run: dict, cwd: Path, flag: str) -> dict:
+    """The executor dispatch a command run inside a task worktree acts for (from OFFICE_DISPATCH_ID, else the
+    worktree). `flag` names the command in the refusal."""
     dispatch_id = os.environ.get("OFFICE_DISPATCH_ID")
     d = state.get_dispatch(con, dispatch_id) if dispatch_id else None
     if d is None:
         d = _worktree_dispatch(con, run, cwd)
     if d is None or d["role"] != "executor" or not d.get("task_id"):
-        raise Refused("not-an-executor", "--request-scope is for an executor inside its task worktree",
-                      next_step="office submit")
-    if not reason.strip():
-        raise Usage("scope-reason", "say why the scope must grow",
-                    next_step='office submit --request-scope <path> -- "<reason>"')
-    reason = reason.strip()[:2000]
-    task = state.get_task(con, run["id"], d["task_id"])
+        raise Refused("not-an-executor", f"{flag} is for an executor inside its task worktree", next_step="office submit")
+    return d
+
+
+def task_worktree(task: dict, d: dict, cwd: Path, retry: str) -> Path:
+    """The dispatch's worktree, refused unless `cwd` is inside it. `retry` is the command to run from there."""
     wt = Path(d["worktree"]).resolve()
     ident = paths.repo_identity(cwd)
     if ident is None or ident[0] != wt:
         raise Refused("wrong-worktree", f"run this from the task worktree ({task['id']}), not {cwd}",
-                      scope=task["id"], next_step=f'cd {shlex.quote(str(wt))} && office submit --request-scope '
-                                                  f'{shlex.quote(files[0] if files else "<path>")} -- "<reason>"')
-    files = clean_request_paths(wt, files)
+                      scope=task["id"], next_step=f"cd {shlex.quote(str(wt))} && {retry}")
+    return wt
+
+
+def check_holder(con, run: dict, task: dict, d: dict, what: str) -> None:
+    """Refuse unless `d` still holds `task`: not superseded, lease live, and the task not stopped by the
+    orchestrator. `what` names the rejected act ("request", "raise")."""
     if task["current_dispatch_id"] != d["id"]:
-        raise Refused("superseded-dispatch", f"{task['id']} now belongs to a newer dispatch; this session's request is rejected",
+        raise Refused("superseded-dispatch", f"{task['id']} now belongs to a newer dispatch; this session's {what} is rejected",
                       scope=task["id"], preserved="your worktree", next_step="stop; the current holder continues the task")
     if dispatch_mod.live_lease(con, run["id"], d["lease_id"]) is None:
         raise Refused("lease-lost", f"{task['id']} lease is no longer held by this session (revoked or taken over)",
@@ -214,6 +220,21 @@ def request_scope_change(con, run: dict, *, cwd: Path, files: list[str], reason:
     if task["status"] in ("paused", "blocked", "cancelled") and not self_blocked(task):
         raise Refused("task-paused", f"{task['id']} is {task['status']}: {task.get('pause_reason') or ''}",
                       scope=task["id"], preserved="your worktree", next_step="stop and wait; the orchestrator is resolving it")
+
+
+def request_scope_change(con, run: dict, *, cwd: Path, files: list[str], reason: str) -> Result:
+    """Executor: ask the orchestrator to widen this task's scope. Blocks the
+    task and wakes `office wait`/`status` with the files, reason and diff hunk."""
+    d = executor_dispatch(con, run, cwd, "--request-scope")
+    if not reason.strip():
+        raise Usage("scope-reason", "say why the scope must grow",
+                    next_step='office submit --request-scope <path> -- "<reason>"')
+    reason = reason.strip()[:2000]
+    task = state.get_task(con, run["id"], d["task_id"])
+    wt = task_worktree(task, d, cwd, "office submit --request-scope " + shlex.quote(files[0] if files else "<path>")
+                       + ' -- "<reason>"')
+    files = clean_request_paths(wt, files)
+    check_holder(con, run, task, d, "request")
     hunk = _scope_hunk(wt, files, d.get("base_commit") or "HEAD")
     # Executor-controlled text reaches a command the orchestrator copies: one quoted argument.
     amend_cmd = ("office amend " + shlex.quote(task["id"]) + " --contract -- "
@@ -312,6 +333,40 @@ def _dependency_bases(con, run: dict, task: dict, commit: str) -> list[str]:
         if row and gates._is_ancestor(run, row["commit_sha"], commit):
             out.append(row["commit_sha"])
     return out
+
+
+def inherited_base(con, run: dict, task: dict, d: dict, head: str, dep_commits: list[str] | None = None) -> str | None:
+    """M: the commit holding everything this task inherited, or None when it cannot be composed.
+
+    M merges the dispatch's recorded base with every other task's accepted revision that `head`
+    contains, declared dependency or not, and the newest revision of each declared dependency
+    (_dependency_bases). What differs between M and HEAD is the task's own work, whatever its
+    parents edited in common (#490). `dep_commits` is _dependency_bases when the caller has it."""
+    from office import integration
+    if dep_commits is None:
+        dep_commits = _dependency_bases(con, run, task, head)
+    heads = [("base", d["base_commit"]), *(("dependency", c) for c in dep_commits)]
+    for other in state.tasks(con, run["id"]):
+        if other["id"] == task["id"] or other["id"] in task["depends"] or not other.get("accepted_revision_id"):
+            continue
+        row = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (other["accepted_revision_id"],)).fetchone()
+        if row and gates._is_ancestor(run, row["commit_sha"], head):
+            heads.append((other["id"], row["commit_sha"]))
+    try:
+        return integration.combine(run, heads)
+    except (integration.CombineConflict, paths.GitError):
+        return None
+
+
+def attribution(con, run: dict, task: dict, d: dict, head: str) -> tuple[str, list[str]]:
+    """(base, dep_bases) the task's own files are measured against: M and no dependency bases, or,
+    when M cannot be composed, the recorded base narrowed by every dependency base it contains."""
+    dep_commits = _dependency_bases(con, run, task, head)
+    merged = inherited_base(con, run, task, d, head, dep_commits)
+    if merged:
+        return merged, []
+    base = d["base_commit"]
+    return base, [b for b in dep_commits if b != base]
 
 
 def capture_tree(worktree: Path, scratch: Path, leave_out: list[str] | None = None,
@@ -497,8 +552,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
     # A duplicate submission is returned above before this check. For a new revision,
     # use the same ledger gate as preflight against committed and pending work.
     from office import preflight
-    base = d["base_commit"]
-    dep_bases = [b for b in _dependency_bases(con, run, task, head) if b != base]
+    base, dep_bases = attribution(con, run, task, d, head)  # `commit` below is HEAD plus the worktree: same ancestry
     tier = briefs.self_review_tier(run.get("gear"), run.get("risk_json"))
     enforced = contract.of(run) != contract.LEGACY  # runs pinned to v3.1 keep ledger-less submissions (#421)
     has_ledger = _read_untracked_text(wt, briefs.LEDGER_FILE, briefs.LEDGER_MAX_CHARS) is not None
@@ -528,9 +582,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
     commit = make_commit(wt, tree, head, f"office: {task['id']} submission\n\nrun {run['id'][:8]} task {task['id']}\n\n"
                          f"{paths.office_trailer(run['id'])}")
     from office import planfile, prs
-    base = d["base_commit"]
     touched = paths.git(wt, "diff", "--no-renames", "--name-only", base, commit).split()
-    dep_bases = [b for b in _dependency_bases(con, run, task, commit) if b != base]
     for b in dep_bases:
         # A file counts only if it differs from every base the task builds on,
         # so a dependency's own later files are not this task's changes.
@@ -600,11 +652,17 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
                      base, run["requirements_version"], run["plan_version"], applied, env_fp, op_id, status,
                      prev, dumps(changed), now_iso(), dumps(receipt) if receipt else None))
         paths.git(wt, "update-ref", f"refs/office/{run['id'][:8]}/{task['id']}/{rev_id}", commit)
+        if base != d["base_commit"]:
+            paths.git(wt, "update-ref", f"refs/office/{run['id'][:8]}/{task['id']}/{rev_id}.base", base)  # M is no one's ancestor
         if evidence:
             dest = _stage_evidence(run, d, rev_id, evidence, staged)
             # The digest is the duplicate guard for every later submit of this task.
             state.record_evidence(con, run["id"], EVIDENCE_KIND, dest, task_id=task["id"], revision_id=rev_id,
                                   digest=evidence[2])
+        ledger_copy = _stage_self_review(run, d, rev_id, wt, receipt, staged)
+        if ledger_copy:
+            state.record_evidence(con, run["id"], "self_review_ledger", ledger_copy, task_id=task["id"],
+                                  revision_id=rev_id, digest=receipt["sha256"])
         if prs.enabled(run):
             prs.advance_branch(run, d, commit)
             prs.queue(con, run, task["id"], "revision", rev_id)
@@ -693,6 +751,31 @@ def _self_review_receipt(wt: Path, task: dict, run: dict, head: str, tree: str, 
     if not substantive:
         return {"kind": "exempt", "type": "empty", "tree": tree, "tier": tier}
     return {"kind": "exempt", "type": exempt, "reason": reason.strip(), "tree": tree, "tier": tier}
+
+
+def _stage_self_review(run: dict, d: dict, rev_id: str, wt: Path, receipt: dict | None,
+                       staged: list) -> Path | None:
+    """Archive the exact self-review ledger bound to this revision, privately (#576)."""
+    if not receipt or receipt.get("kind") != "ledger":
+        return None
+    raw = _read_untracked_text(wt, briefs.LEDGER_FILE, briefs.LEDGER_MAX_CHARS)
+    if raw is None or sha256_bytes(raw.encode("utf-8")) != receipt["sha256"]:
+        raise Refused("self-review-stale", "self-review ledger changed before recording this revision")
+    source = wt / briefs.LEDGER_FILE
+    dest = briefs.self_review_path(run, d["id"], rev_id)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(dest, flags, 0o600)
+    except FileExistsError as exc:
+        raise Refused("self-review-collision",
+                      "self-review evidence already exists; cannot overwrite another revision") from exc
+    except OSError as exc:
+        raise Refused("self-review-archive-unavailable", "cannot securely archive self-review evidence") from exc
+    staged.append((source, dest))
+    with os.fdopen(fd, "w", encoding="utf-8") as file:
+        file.write(raw)
+    return dest
 
 
 def _executor_ledger(wt: Path) -> Path | None:

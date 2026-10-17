@@ -228,3 +228,48 @@ def test_status_survives_herdr_list_failing(env, monkeypatch):
     _, run, d, con = _herdr_worker(env, monkeypatch, reads=[WIDGET], agent="blocked")
     monkeypatch.setattr(questions, "_herdr_agents", lambda: None)
     assert not any("no question recorded" in ln for ln in guide.status(con, run, probe_panes=True).lines)
+
+
+def test_applying_an_answer_is_not_asking_but_waiting_on_one_is():
+    # R3-5.
+    for done in ("apply the answer to Q1, then submit", "implement Q1 decision (use UTC) and submit",
+                 "no decision needed on Q2, implement b.ts"):
+        assert questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={done}\n") is None, done
+    for ask in ("waiting on Q1", "blocked until Q1 is resolved"):
+        assert questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={ask}\n"), ask
+
+
+@pytest.mark.parametrize("nxt,asks", [
+    ("please answer Q1 so I can continue", True), ("orchestrator to answer Q1", True),
+    ("Q1 needs an answer", True), ("get approval for Q3", True),
+    ("no longer waiting on Q1, implement and submit", False),
+])
+def test_ask_forms_tied_to_a_question_id_and_negated_waits(nxt, asks):
+    # R4-3.
+    q = questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={nxt}\n")
+    assert bool(q) is asks, (nxt, q)
+
+
+@pytest.mark.parametrize("nxt,asks", [
+    # PR #492 review item 3: ask forms main caught
+    ("can you answer Q1", True), ("the orchestrator should answer Q1", True), ("Q1: please answer", True),
+    ("requesting approval for Q1", True), ("Q1 is awaiting a decision", True),
+    # item 4: negated needs and waits report progress
+    ("Q1 doesn't need an answer anymore, continue", False), ("nothing pending on Q1", False),
+    ("need nothing on Q1, submit", False),
+])
+def test_review_492_ask_and_negation_probes(nxt, asks):
+    q = questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={nxt}\n")
+    assert bool(q) is asks, (nxt, q)
+
+
+@pytest.mark.parametrize("nxt,asks", [
+    # a071c74 re-verify item 5: a worker's own plan is not an ask
+    ("will confirm Q1 fix with tests, then submit", False),
+    # item 6
+    ("Q1 does not require approval", False), ("Q1 awaits your decision", True),
+    ("not only waiting on Q1 but also Q2", True),
+])
+def test_reverify_ask_probes(nxt, asks):
+    q = questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={nxt}\n")
+    assert bool(q) is asks, (nxt, q)

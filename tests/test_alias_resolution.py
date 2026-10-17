@@ -32,14 +32,24 @@ def test_alias_is_offered_at_every_effort_of_the_newest_member():
     assert luna["high"]["effort"] == "high"
 
 
-def test_alias_follows_a_newer_family_member_automatically():
+def test_alias_refuses_an_unclassified_higher_number_without_release_provenance():
     rows = [_alias(), _concrete("gpt-6-luna", "high", 32), _concrete("gpt-7-luna", "high", 40),
             _concrete("gpt-7-luna", "medium", 33)]
     luna = _by_effort(candidates.resolve_aliases(rows))
-    assert set(luna) == {"xhigh", "high", "medium"}
-    assert luna["high"]["invocation_model_id"] == "gpt-7-luna" and luna["high"]["benchmark_indexes"] == {INDEX: 40}
-    # An effort the newest member lacks keeps the alias's own static row.
+    assert set(luna) == {"xhigh", "high"}
+    assert luna["high"]["invocation_model_id"] == "gpt-6-luna"
+    assert "medium" not in luna  # unknown higher generation cannot displace stable
     assert luna["xhigh"]["invocation_model_id"] == "gpt-6-luna" and "alias_resolved_to" not in luna["xhigh"]
+
+
+def test_alias_moves_only_after_explicit_stable_release_classification():
+    rows = [_alias(), _concrete("gpt-6-luna", "high", 32), _concrete("gpt-7-luna", "high", 40)]
+    from office import model_lineages
+    manifest = {**model_lineages.load(),
+                "gpt-7-luna": {"lineage_key": "openai/gpt-luna", "generation_version": "7",
+                                "release_status": "released", "provenance": "fixture-reviewed"}}
+    luna = _by_effort(candidates.resolve_aliases(rows, manifest=manifest))
+    assert luna["high"]["invocation_model_id"] == "gpt-7-luna"
 
 
 def test_concrete_rows_and_unmatched_aliases_pass_through():

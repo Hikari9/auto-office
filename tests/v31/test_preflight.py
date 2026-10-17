@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from hypothesis import example, given, strategies as st
 
 from conftest import GOOD_ADD, approved_run, task_row
 from test_self_review_ledger import write_ledger
@@ -348,68 +349,106 @@ def _risk(blast, irreversible=False, size=None, high=False):
     return json.dumps({"blast_radius": blast, "size_class": size, "irreversible": irreversible, "high": high})
 
 
-def _expected_tier(gear, blast):
-    if gear == "full" or blast in ("production", "production-data"):
-        return "deep"
-    if gear in LOW_GEARS and blast in ("local", "repo"):
-        return "inline"
-    return "single"
+_GEARS = st.one_of(st.sampled_from(GEARS), st.sampled_from([None, "", "turbo", "Direct", 7]), st.text(max_size=8))
+_BLASTS = st.one_of(st.sampled_from(["local", "repo", "production", "production-data", None, "", "LOCAL"]),
+                    st.text(max_size=8), st.integers(), st.lists(st.sampled_from(["local", "repo"]), max_size=1))
+_SIZES = st.one_of(st.none(), st.sampled_from(["XS", "S", "M", "L", "XL"]), st.text(max_size=3))
+# A risk record that cannot be trusted: absent, undecodable, not JSON, or JSON that is not an object.
+_UNUSABLE_RISK = st.one_of(
+    st.none(), st.just(""), st.just(b"\xff"), st.text(alphabet="abc[(<", min_size=1),
+    st.builds(json.dumps, st.one_of(st.none(), st.booleans(), st.integers(), st.text(), st.lists(st.integers()))))
+_CLEAN_SIZES = st.sampled_from([None, "XS", "S", "M"])
 
 
-@pytest.mark.parametrize("gear", GEARS)
-@pytest.mark.parametrize("blast", ["local", "repo", "production", "production-data", None])
-def test_tier_table_by_gear_and_blast_radius(gear, blast):
+def _blast_is_high(blast):
+    return isinstance(blast, str) and blast in ("production", "production-data")
+
+
+@given(gear=_GEARS, blast=_BLASTS, size=_SIZES, irreversible=st.booleans(), high=st.booleans())
+def test_inline_self_review_needs_a_known_low_gear_and_every_risk_signal_clear(gear, blast, size, irreversible, high):
+    """Every doubt resolves to more review: whatever is unknown, unset or mistyped is never inline."""
+    from office import briefs
+    if briefs.self_review_tier(gear, _risk(blast, irreversible, size, high)) == "inline":
+        assert gear in LOW_GEARS and blast in ("local", "repo")
+        assert not (irreversible or high or size in ("L", "XL"))
+
+
+@given(gear=st.sampled_from(LOW_GEARS), blast=st.sampled_from(["local", "repo"]), size=_CLEAN_SIZES)
+def test_a_low_gear_with_a_contained_clean_risk_is_inline(gear, blast, size):
+    from office import briefs
+    assert briefs.self_review_tier(gear, _risk(blast, size=size)) == "inline"
+
+
+@example(gear="direct", blast="production", size=None, irreversible=False, high=False)  # each signal alone is enough
+@example(gear="direct", blast="production-data", size=None, irreversible=False, high=False)
+@example(gear="direct", blast="local", size="L", irreversible=False, high=False)
+@example(gear="light", blast="repo", size="XL", irreversible=False, high=False)
+@example(gear="direct", blast="local", size=None, irreversible=True, high=False)
+@example(gear="direct", blast="local", size=None, irreversible=False, high=True)
+@given(gear=_GEARS, blast=_BLASTS, size=_SIZES, irreversible=st.booleans(), high=st.booleans())
+def test_any_high_risk_signal_is_deep_review_in_every_gear(gear, blast, size, irreversible, high):
+    from office import briefs
+    if irreversible or high or size in ("L", "XL") or _blast_is_high(blast):
+        assert briefs.self_review_tier(gear, _risk(blast, irreversible, size, high)) == "deep"
+
+
+@given(risk=st.one_of(_UNUSABLE_RISK, st.builds(_risk, _BLASTS, st.booleans(), _SIZES, st.booleans())))
+def test_gear_full_is_deep_even_without_a_usable_risk_record(risk):
+    from office import briefs
+    assert briefs.self_review_tier("full", risk) == "deep"
+
+
+@given(gear=_GEARS.filter(lambda g: g != "full"), risk=_UNUSABLE_RISK)
+def test_an_unusable_risk_record_is_single_never_inline(gear, risk):
+    from office import briefs
+    assert briefs.self_review_tier(gear, risk) == "single"
+    assert briefs.self_review_tier(gear, {}) == "single"  # an empty record says nothing either
+
+
+@given(gear=_GEARS, blast=st.sampled_from(["local", "repo", "production", "production-data", None]),
+       size=_SIZES, irreversible=st.booleans())
+def test_the_risk_a_run_resolves_drives_the_tier(gear, blast, size, irreversible):
+    """The planner's own risk record, not a hand-built one, reaches the same verdicts."""
     from office import briefs
     from office.config import resolve_risk
-    risk = json.dumps(resolve_risk({}, blast, None, False))
-    tier = briefs.self_review_tier(gear, risk)
-    assert tier == _expected_tier(gear, blast), (gear, blast, tier)
-    if blast is None:
-        assert tier != "inline"
+    tier = briefs.self_review_tier(gear, json.dumps(resolve_risk({}, blast, size, irreversible)))
+    if irreversible or size in ("L", "XL") or _blast_is_high(blast):
+        assert tier == "deep"
+    elif gear in LOW_GEARS and blast in ("local", "repo"):
+        assert tier == "inline"
+    else:
+        assert tier != "inline"  # no blast radius is unknown, not low
 
 
-@pytest.mark.parametrize("gear", GEARS)
-@pytest.mark.parametrize("blast", ["local", "repo", None])
-def test_irreversible_size_l_and_high_are_deep_in_every_gear(gear, blast):
+@example(blast="LOCAL")
+@example(blast="Repo")
+@example(blast=["local"])
+@example(blast=3)
+@example(blast="")
+@given(blast=st.one_of(st.text(max_size=8), st.integers(), st.lists(st.text(max_size=5), max_size=2)).filter(
+    lambda b: b not in ("local", "repo", "production", "production-data")))
+def test_a_blast_radius_that_is_not_exactly_a_known_value_is_single_never_inline(blast):
     from office import briefs
-    assert briefs.self_review_tier(gear, _risk(blast, irreversible=True)) == "deep"
-    assert briefs.self_review_tier(gear, _risk(blast, size="L")) == "deep"
-    assert briefs.self_review_tier(gear, _risk(blast, size="XL")) == "deep"
-    assert briefs.self_review_tier(gear, _risk(blast, high=True)) == "deep"
+    assert briefs.self_review_tier("direct", _risk(blast)) == "single"
 
 
-@pytest.mark.parametrize("blast", ["local", "repo", "production", None])
-def test_gear_full_is_deep_even_without_a_usable_risk_record(blast):
+@pytest.mark.parametrize("gear, blast, tier", [("direct", "local", "inline"), ("light", "repo", "inline"),
+                                               ("quick", "local", "single"), ("express", "repo", "single"),
+                                               ("full", "production", "deep")])
+def test_initial_and_fix_round_briefs_print_the_tier_the_gear_and_blast_radius_call_for(gear, blast, tier):
     from office import briefs
-    assert briefs.self_review_tier("full", _risk(blast)) == "deep"
-    assert briefs.self_review_tier("full", None) == "deep"
-    assert briefs.self_review_tier("full", "{not json") == "deep"
-
-
-@pytest.mark.parametrize("risk_json", [None, "", "{not json", "null", "[]", "42", '"local"', b"\xff", {}])
-@pytest.mark.parametrize("gear", [*GEARS, None, "", "turbo"])
-def test_missing_or_unparsable_risk_never_yields_inline(gear, risk_json):
-    from office import briefs
-    tier = briefs.self_review_tier(gear, risk_json)
-    assert tier == ("deep" if gear == "full" else "single"), (gear, risk_json, tier)
+    packet = {"task_id": "T1", "title": "x", "scope": ["a.py"], "plan_version": 1, "requirements_version": 1,
+              "base_commit": "abc123"}
+    run = {"id": "r", "gear": gear, "risk_json": _risk(blast)}
+    initial = briefs.executor_brief(_NoFindings(), run, {**packet, "fix_of": None})
+    fix = briefs.executor_brief(_NoFindings(), run, {**packet, "fix_of": "R1"})
+    assert _tier_of(initial) == _tier_of(fix) == tier
 
 
 def test_pathologically_nested_risk_record_fails_toward_review():
     from office import briefs
     assert briefs.self_review_tier("direct", "[" * 500_000) == "single"
     assert briefs.self_review_tier("full", "[" * 500_000) == "deep"
-
-
-@pytest.mark.parametrize("gear", [None, "", "turbo", "Direct", 7])
-def test_unknown_gear_is_never_inline_even_for_a_local_risk(gear):
-    from office import briefs
-    assert briefs.self_review_tier(gear, _risk("local")) == "single"
-
-
-@pytest.mark.parametrize("blast", ["", "LOCAL", "weird", ["local"], 3])
-def test_unrecognized_blast_radius_is_not_inline(blast):
-    from office import briefs
-    assert briefs.self_review_tier("direct", _risk(blast)) == "single"
 
 
 def _self_review_block(brief: str) -> str:
@@ -490,26 +529,29 @@ def _tier_of(brief: str) -> str:
     return re.search(r"SELF-REVIEW before submitting \(tier: (\w+)\)", brief).group(1)
 
 
-@pytest.mark.integration
-@pytest.mark.approved
-@pytest.mark.parametrize("gear, blast, tier", [("direct", "local", "inline"), ("direct", "repo", "inline"),
-                                               ("quick", "local", "single"), ("express", "repo", "single"),
-                                               ("full", "production", "deep")])
-def test_fix_round_brief_prints_the_same_tier_as_the_initial_brief(env, gear, blast, tier):
-    _, _, d = _dispatched(env)
-    from office import briefs, paths
-    con = env.con()
-    con.execute("UPDATE runs SET gear=?, risk_json=? WHERE id=?", (gear, _risk(blast), d["run_id"]))
-    con.execute("INSERT INTO findings (id, run_id, task_id, code, severity, location, summary, state, created_at) "
-                "VALUES ('f1', ?, 'T1', 'F1', 'medium', 'calc.py:1', 'add() drops negatives', 'open', '2026-01-01')",
-                (d["run_id"],))
-    con.commit()
-    data = json.loads((paths.run_dir(d["run_id"]) / "dispatches" / d["id"] / "packet.json").read_text())
-    run = dict(con.execute("SELECT * FROM runs WHERE id=?", (d["run_id"],)).fetchone())
-    initial = briefs.executor_brief(con, run, {**data, "fix_of": None})
-    fix = briefs.executor_brief(con, run, {**data, "fix_of": "R1"})
+class _NoFindings:
+    """A connection whose every query returns no rows: a fix round's findings are not what this checks."""
+
+    def execute(self, *a, **k):
+        class _Rows:
+            def fetchall(self):
+                return []
+
+            def fetchone(self):
+                return None
+        return _Rows()
+
+
+@given(gear=_GEARS, blast=_BLASTS, size=_SIZES, irreversible=st.booleans(), high=st.booleans())
+def test_fix_round_brief_prints_the_same_tier_as_the_initial_brief(gear, blast, size, irreversible, high):
+    from office import briefs
+    packet = {"task_id": "T1", "title": "x", "scope": ["a.py"], "plan_version": 1, "requirements_version": 1,
+              "base_commit": "abc123"}
+    run = {"id": "r", "gear": gear, "risk_json": _risk(blast, irreversible, size, high)}
+    initial = briefs.executor_brief(_NoFindings(), run, {**packet, "fix_of": None})
+    fix = briefs.executor_brief(_NoFindings(), run, {**packet, "fix_of": "R1"})
     assert "FIX ROUND for revision R1" in fix and "FIX ROUND" not in initial
-    assert _tier_of(initial) == _tier_of(fix) == tier
+    assert _tier_of(initial) == _tier_of(fix) == briefs.self_review_tier(gear, run["risk_json"])
 
 
 def test_office_submit_skill_simplifies_before_self_review():

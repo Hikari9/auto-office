@@ -206,12 +206,35 @@ def advance_branch(run: dict, dispatch: dict, commit: str) -> None:
         paths.git(wt, "reset", "-q", commit)
 
 
-def push(run: dict, dispatch: dict, *, commit: str = "HEAD", force: bool = False) -> tuple[bool, str]:
-    """Push `commit` (the reviewed revision, not whatever the worker made since) to the task branch."""
-    args = ["git", "-C", dispatch["worktree"], "push", "origin", f"{commit}:refs/heads/{dispatch['branch']}"]
+def push(run: dict, dispatch: dict, *, commit: str = "HEAD", force: bool = False,
+         expected: str | None = None) -> tuple[bool, str]:
+    """Push `commit` (the reviewed revision, not whatever the worker made since) to the task branch.
+
+    A forced push is leased to `expected`, the remote head the caller read: a
+    bare `--force-with-lease` trusts a remote-tracking ref that a fetch may
+    have refreshed, so a forced push without an explicit sha is refused."""
+    if force and not expected:
+        raise ValueError("a forced push needs the expected remote sha")
+    branch = dispatch["branch"]
+    run_id = run.get("id")
+    if run_id:
+        task_id = dispatch.get("task_id")
+        # Land recovery can pass a synthesized dispatch without task_id.
+        # Its exact run-prefixed Tn ref remains Office-owned, and a forced
+        # update additionally requires a remote SHA lease.
+        owned = (branch == f"office/{run_id[:8]}/{task_id}" if task_id
+                 else bool(re.fullmatch(rf"office/{re.escape(run_id[:8])}/T[0-9]+", branch)))
+        if not owned:
+            return False, "refusing remote write to a branch not owned by this Office task"
+        if force and not re.fullmatch(r"[0-9a-f]{40}", expected or ""):
+            return False, "forced push must be pinned to a complete recorded remote SHA"
+    args = ["git", "-C", dispatch["worktree"], "push", "origin", f"{commit}:refs/heads/{branch}"]
     if force:
-        args.insert(4, "--force-with-lease")
-    proc = subprocess.run(args, capture_output=True, text=True, timeout=120)
+        args.insert(4, f"--force-with-lease=refs/heads/{branch}:{expected}")
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return False, "push timed out after 120s"
     return proc.returncode == 0, (proc.stderr or proc.stdout).strip()
 
 
@@ -294,11 +317,49 @@ def job_pr_sync(con, run: dict, job: dict) -> dict:
         return {"error": str(exc)[:300]}
 
 
+def _safe_restack_push(con, run: dict, task: dict, dispatch: dict, rev: dict,
+                       failure: str) -> tuple[bool, str]:
+    """Recover an accepted task's non-fast-forward PR sync without touching shared branches (#538).
+
+    This is only allowed for an Office-owned branch whose *current* remote tip
+    is a revision already recorded for this same run/task. A literal remote SHA
+    pins the lease, so a concurrent user update aborts the push rather than
+    rewriting their work. Other failure types remain ordinary notices.
+    """
+    if not re.search(r"non-fast-forward|fetch first|rejected.*non.fast.forward", failure, re.I):
+        return False, failure
+    run_id, task_id = run.get("id") or "", task.get("id") or ""
+    branch = dispatch.get("branch") or ""
+    if not run_id or not task_id or branch != f"office/{run_id[:8]}/{task_id}":
+        return False, "non-fast-forward: refusing to rewrite an unowned or shared branch"
+    if task.get("current_revision_id") != rev["id"]:
+        return False, "non-fast-forward: current revision moved; refusing stale PR update"
+    known = {r[0] for r in con.execute(
+        "SELECT commit_sha FROM revisions WHERE run_id=? AND task_id=? AND id!=?",
+        (run_id, task_id, rev["id"])).fetchall()}
+    if not known:
+        return False, "non-fast-forward: no earlier task revision proves ownership of remote head"
+    ref = f"refs/heads/{branch}"
+    try:
+        got = subprocess.run(["git", "-C", dispatch["worktree"], "ls-remote", "--heads", "origin", ref],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False, "non-fast-forward: could not verify remote task branch"
+    if got.returncode != 0:
+        return False, "non-fast-forward: could not verify remote task branch"
+    sha = got.stdout.split()[0] if got.stdout.strip() else ""
+    if not re.fullmatch(r"[0-9a-f]{40}", sha) or sha not in known:
+        return False, "non-fast-forward: remote tip is not a recorded previous task revision; refusing overwrite"
+    return push(run, dispatch, commit=rev["commit_sha"], force=True, expected=sha)
+
+
 def _publish(con, run: dict, task: dict, rev_id: str) -> tuple[dict, dict]:
     """Push the revision to its task branch and find or open the PR for it."""
     rev = con.execute("SELECT * FROM revisions WHERE id=?", (rev_id,)).fetchone()
     dispatch = state.get_dispatch(con, rev["dispatch_id"])
     ok, err = push(run, dispatch, commit=rev["commit_sha"])
+    if not ok:
+        ok, err = _safe_restack_push(con, run, task, dispatch, rev, err)
     if not ok:
         raise RuntimeError(f"push of {dispatch['branch']} failed: {err}"[:300])
     return rev, ensure_pr(con, run, task, dispatch)

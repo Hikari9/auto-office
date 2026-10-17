@@ -238,13 +238,20 @@ def consume_events(con: sqlite3.Connection, run_id: str, events: list[dict]) -> 
 
 
 def unread_events(con: sqlite3.Connection, run_id: str, consumer: str, audiences: tuple[str, ...],
-                  limit: int = 20) -> list[dict]:
+                  limit: int | None = 20) -> list[dict]:
     row = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer=?", (run_id, consumer)).fetchone()
     last = row[0] if row else 0
     marks = ",".join("?" * len(audiences))
-    rows = con.execute(
-        f"SELECT * FROM events WHERE run_id=? AND seq>? AND audience IN ({marks}) ORDER BY seq LIMIT ?",
-        (run_id, last, *audiences, limit)).fetchall()
+    # `limit=None` scans every unread event (no LIMIT clause). Passing NULL into
+    # `LIMIT ?` raises "datatype mismatch" on SQLite >=3.53, so the branch is
+    # selected here rather than bound. Callers that cap a display window pass an int.
+    if limit is None:
+        query = f"SELECT * FROM events WHERE run_id=? AND seq>? AND audience IN ({marks}) ORDER BY seq"
+        params: tuple = (run_id, last, *audiences)
+    else:
+        query = f"SELECT * FROM events WHERE run_id=? AND seq>? AND audience IN ({marks}) ORDER BY seq LIMIT ?"
+        params = (run_id, last, *audiences, limit)
+    rows = con.execute(query, params).fetchall()
     return [dict(r) for r in rows]
 
 

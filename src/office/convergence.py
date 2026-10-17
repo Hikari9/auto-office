@@ -36,7 +36,8 @@ round. With every specialist route exhausted, the orchestrator may review a
 convergence gate as a recorded degraded, non-independent fallback (visual only
 when it inspected every screenshot). A required gate is a hard landing gate
 unless an actor with landing authority waives it for the scope's current
-composed commit; the waiver never rewrites the verdict.
+composed tree; the waiver never rewrites the verdict. A recomposition to the same
+tree (a byte-identical resubmit) starts no new review and keeps the waiver.
 """
 from __future__ import annotations
 
@@ -44,10 +45,11 @@ import json
 import os
 import re
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
-from office import briefs, contract, db, gates, paths, planfile, review_parse, state
+from office import briefs, candidates, contract, db, gates, jobs, paths, planfile, review_parse, state
 from office import risk as risk_mod
 from office.result import Result
 from office.state import Refused, Usage
@@ -55,6 +57,7 @@ from office.util import dumps, now_iso, sha256_obj, short
 
 CONVERGED = ("approved", "waived", "not_required")
 REVIEW_KINDS = ("convergence_review", "visual")
+DECISIONS = (*contract.ESCALATION_CHOICES, "review")
 KIND_ALIASES = {"convergence": "convergence_review", "code": "convergence_review", "code_review": "convergence_review",
                 "convergence_review": "convergence_review", "visual": "visual", "ui": "visual"}
 
@@ -122,12 +125,14 @@ def group_planned_tasks(tasks: list[dict]) -> list[dict]:
 
 
 def _changed(con, run: dict, task: dict) -> set[str]:
-    rev = con.execute("SELECT changed_json, commit_sha FROM revisions WHERE id=?",
+    rev = con.execute("SELECT changed_json, commit_sha, base_commit FROM revisions WHERE id=?",
                       (task.get("accepted_revision_id"),)).fetchone()
     if rev is None:
         return set()
     files = set(json.loads(rev["changed_json"] or "[]"))
-    files |= set(paths.git(Path(run["repo_root"]), "diff", "--name-only", run["base_sha"], rev["commit_sha"],
+    # Task ownership is relative to *its* recorded base, not the run's old
+    # default base or the newer base used for composed review (#580).
+    files |= set(paths.git(Path(run["repo_root"]), "diff", "--name-only", rev["base_commit"] or run["base_sha"], rev["commit_sha"],
                            check=False).split())
     return files
 
@@ -322,9 +327,12 @@ def visual_tasks(con, run: dict, scope: dict) -> list[tuple[dict, dict]]:
 
 def on_task_accepted(con, run: dict, task_id: str) -> None:
     """A task passed its own gate. Queue its lane once every lane task is
-    accepted, or record APPROVED cleanup. Caller holds the tx."""
+    accepted, or record APPROVED cleanup. A lane holding a task that is stale
+    against a dependency is not reviewed: that composition is about to be
+    restacked. Caller holds the tx."""
     for lane in lanes(con, run):
-        if task_id in lane["tasks"]:
+        if task_id in lane["tasks"] and not any(
+                gates.stale_dependency(con, run, state.get_task(con, run["id"], tid)) for tid in lane["tasks"]):
             _consider(con, run, lane)
     progress(con, state.get_run(con, run["id"]))
 
@@ -352,7 +360,11 @@ def _consider(con, run: dict, scope: dict) -> None:
         # Held for the operator: no fourth round, and no review of a new
         # composition, starts until office decide (#337).
         return
-    _set_scope(con, run, scope["id"], status="pending", key=key, detail="composition queued")
+    # A settled or in-flight review may carry over to an identical composed tree (see _carry_over).
+    carry = st.get("status") if st.get("status") in (*CONVERGED, "reviewing") else (
+        st.get("carry_from") if st.get("status") == "pending" else None)
+    _set_scope(con, run, scope["id"], status="pending", key=key, detail="composition queued", carry_from=carry,
+               fallback_available=False, fallback_kind=None)
     state.enqueue(con, run, "converge", {"scope": scope["id"], "key": key},
                   # The cycle is part of the key: an operator decision may review the same composition again.
                   dedup_key=f"converge:{run['id']}:{scope['id']}:{key}:c{int(st.get('cycle') or 1)}", max_attempts=2)
@@ -478,19 +490,27 @@ def _compose(con, run: dict, scope: dict) -> dict:
     from office import integration
     tasks = integration._topo([state.get_task(con, run["id"], tid) for tid in scope["tasks"]])
     try:
+        previous = []
         for t in tasks:
             commit = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (t["accepted_revision_id"],)).fetchone()[0]
             if subprocess.run(["git", "-C", str(wt), "merge-base", "--is-ancestor", commit, "HEAD"],
                               capture_output=True).returncode == 0:
+                previous.append(t)
                 continue
             proc = subprocess.run(["git", "-C", str(wt), "merge", "--no-ff", "--no-edit", "-m",
                                    f"office: converge {scope['id']} {t['id']}\n\n{paths.office_trailer(run['id'])}", commit],
                                   capture_output=True, text=True, env=genv)
-            if proc.returncode != 0:
+            if proc.returncode != 0 and not integration.finish_shared_append_merge(wt, t, previous, env=genv):
                 conflicted = paths.git(wt, "diff", "--name-only", "--diff-filter=U", check=False)
                 subprocess.run(["git", "-C", str(wt), "merge", "--abort"], capture_output=True)
                 return {"status": "conflict", "detail": f"{t['id']} conflicts with the rest of {scope['id']} on "
                                                        f"{conflicted.replace(chr(10), ', ') or 'files'}"}
+            try:
+                integration.preserve_shared_append_multiplicity(wt, t, previous, env=genv)
+            except integration.SharedAppendUnsafe as exc:
+                return {"status": "conflict", "detail":
+                        f"{t['id']}: shared append integrity unverified: {exc}; serialize tasks or repair the append-only history, then office resume"}
+            previous.append(t)
         commit = paths.git(wt, "rev-parse", "HEAD")
         tree = paths.git(wt, "rev-parse", "HEAD^{tree}")
     finally:
@@ -529,12 +549,14 @@ def job_converge(con, run: dict, job: dict) -> dict:
                 _converge_scope(con, run, scope, basis=f"already covered by {covering}'s independent review of the "
                                                        f"exact composed tree {composed['tree'][:10]}")
                 return {"status": "not_required", "covered_by": covering}
+        if _carry_over(con, run, scope, st, composed):
+            return {"status": "carried", "tree": composed["tree"]}
         cycle = int(st.get("cycle") or 1)
         round_no = int(st.get("round") or 1)
         rev = _rev(scope["id"], composed["commit"])
         _set_scope(con, run, scope["id"], status="reviewing", commit=composed["commit"], tree=composed["tree"],
                    branch=composed["branch"], cycle=cycle, round=round_no, detail=f"round {round_no} review queued",
-                   hold_key=None)
+                   hold_key=None, carry_from=None, fallback_available=False, fallback_kind=None)
         made = []
         if review_required(run):
             made.append(_new_gate(con, run, scope, rev, "convergence_review", round_no, cycle))
@@ -552,13 +574,55 @@ def job_converge(con, run: dict, job: dict) -> dict:
     return {"status": "reviewing", "gates": [g for g, _ in made]}
 
 
+def _carry_over(con, run: dict, scope: dict, st: dict, composed: dict) -> bool:
+    """A recomposition whose tree equals the scope's previous composed tree starts no
+    new review (#452, #360): the settled (or in-flight) gates, verdicts, waivers and
+    finding dispositions stay in force for the new commit. Only a scope that was
+    settled or reviewing carries: an operator `decide` restarts the review on purpose,
+    and a waiver recorded before trees were stored (legacy) still binds its commit only.
+    Caller holds tx."""
+    prior, old = st.get("carry_from"), st.get("commit")
+    if not prior or not old or st.get("tree") != composed["tree"]:
+        return False
+    new = composed["commit"]
+    latest = _latest(con, run, scope["id"], old)
+    if prior in CONVERGED and not all(_satisfied(con, run, scope["id"], g, new, tree=composed["tree"])
+                                      for g in latest.values()):
+        return False
+    if prior == "reviewing" and not latest:
+        return False
+    if old != new:
+        con.execute("UPDATE gates SET input_key=? WHERE run_id=? AND subject='lane' AND scope=? AND input_key=? "
+                    "AND status IN ('queued','running','done')",
+                    (f"{scope['id']}:{new}", run["id"], scope["id"], f"{scope['id']}:{old}"))
+    carried = list(st.get("carried_commits") or []) + ([old] if old != new else [])
+    _set_scope(con, run, scope["id"], commit=new, branch=composed["branch"], carried_commits=carried, carry_from=None,
+               status="reviewing" if prior == "reviewing" else prior,
+               detail=f"composition {new[:10]} has the same tree as {old[:10]}: earlier review stands")
+    state.emit(con, run, "convergence.carried", f"{scope['id']} recomposed to {new[:10]} with the same tree "
+               f"{composed['tree'][:10]} as {old[:10]}: no new review; the earlier gates, verdicts, waivers and finding "
+               "dispositions stay in force", audience="runtime")
+    if prior in CONVERGED:
+        _converge_scope(con, state.get_run(con, run["id"]), scope, basis=st.get("basis") or prior)
+    return True
+
+
 def _new_gate(con, run: dict, scope: dict, rev: dict, kind: str, round_no: int, cycle: int) -> tuple[str, str]:
     gid = "G" + uuid.uuid4().hex[:8]
     con.execute("INSERT INTO gates(id, run_id, subject, revision_id, plan_version, kind, input_key, status, round, created_at, "
-                "contract, scope, cycle) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "contract, scope, cycle, members_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (gid, run["id"], "lane", rev["id"], run["plan_version"], kind, f"{scope['id']}:{rev['commit_sha']}",
-                 "queued", round_no, now_iso(), contract.CONVERGENCE, scope["id"], cycle))
+                 "queued", round_no, now_iso(), contract.CONVERGENCE, scope["id"], cycle,
+                 dumps(sorted(scope["tasks"], key=_tid_key))))
     return gid, kind
+
+
+def gate_members(gate: dict) -> list[str] | None:
+    """The member task ids frozen onto a lane or shared-scope gate when it was created.
+    None is unknown: a gate that predates the column is never backfilled. This insert is
+    the only writer, so a populated membership never changes."""
+    raw = gate.get("members_json")
+    return json.loads(raw) if raw else None
 
 
 def scope_gates(con, run: dict, scope_id: str, *, commit: str | None = None) -> list[dict]:
@@ -624,6 +688,20 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
                             "ORDER BY created_at DESC LIMIT 1", (t["accepted_revision_id"],)).fetchone()
             checks.append(f"{t['id']} {g['verdict'] if g else 'none declared'}")
         evidence = {}
+        self_reviews = {}
+        for t in tasks:
+            rev = con.execute("SELECT dispatch_id, self_review_json FROM revisions WHERE id=?",
+                              (t["accepted_revision_id"],)).fetchone()
+            receipt = json.loads(rev["self_review_json"] or "null") if rev else None
+            if receipt and receipt.get("kind") == "ledger":
+                ledger = briefs.self_review_path(run, rev["dispatch_id"], t["accepted_revision_id"])
+                # The receipt digest binds this exact record to the accepted
+                # producer revision; never trust a stale or changed file.
+                raw = ledger.read_text(encoding="utf-8", errors="replace") if ledger.is_file() and not ledger.is_symlink() else None
+                from office.util import sha256_bytes
+                self_reviews[t["id"]] = (raw if raw is not None and sha256_bytes(raw.encode("utf-8")) == receipt["sha256"]
+                                          else "Ledger detail unavailable for this revision; the receipt alone cannot prove "
+                                               "mutation/test assertions. Verify against in-tree tests.")
         for t in tasks:
             if not t.get("scope"):
                 # A task with no file scope (a comment or issue edit): its executor's evidence file.
@@ -634,14 +712,18 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
             run, scope, tasks, _rev(scope["id"], commit), diff, "; ".join(checks), _carried(con, run, scope["id"],
                                                                                          "convergence_review"),
             str(checkout), int(gate["round"] or 1), state.current_requirements(con, run["id"])["frozen"],
-            evidence=evidence, max_rounds=contract.round_cap(run))
+            evidence=evidence, self_reviews=self_reviews, max_rounds=contract.round_cap(run),
+            used_codes=gates.finding_codes(con, "run_id=? AND scope=?", (run["id"], scope["id"])))
         exclude = list(st.get("exclude_routes") or [])
         resume = _same_reviewer(con, run, scope["id"], "convergence_review", int(gate.get("cycle") or 1))
         # A user-pinned reviewer (office dispatch --review-as) on any lane task reviews the lane.
         pinned = next((t["review_override"] for t in tasks if t.get("review_override")), None)
+        away = job["payload"].get("exclude_routes")
+        # A review-only re-run starts a new reviewer, never the earlier session.
         outcome = gates.run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
-                                     exclude=exclude or None, resume_from=resume if not exclude else None,
-                                     review_override=pinned)
+                                     exclude=exclude or None,
+                                     resume_from=resume if not (exclude or job["payload"].get("review_only")) else None,
+                                     review_override=pinned, prefer_not=away)
     finally:
         gates.remove_checkout(run, checkout)
     with db.transaction(con):
@@ -696,6 +778,19 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
             g = {**gate, "task_id": task["id"]}
             cap = visual.capture_all(con, run, task, rev, g, checkout)
             status = cap["evidence_status"]
+            # A problem that is not the producer's work blocks the evidence, never the producer (#454): a capture
+            # that cannot show the state is a capture problem, a state the plan cannot reach is the plan's defect.
+            problems = _non_producer_problems(cap)
+            capture = [f for f in problems if f["cause"] == "capture"]
+            if capture:
+                return _visual_blocked(con, run, gate, "CAPTURE_BLOCKED",
+                                       f"{task['id']}: {'; '.join(_failure_text(f) for f in capture)}")
+            spec = [f for f in problems if f["cause"] == "spec"]
+            if spec:
+                return _visual_blocked(con, run, gate, SPEC_DEFECT,
+                                       f"{task['id']} visual spec defect, not a product failure: "
+                                       f"{'; '.join(_failure_text(f) for f in spec)}; the planner corrects the visual: "
+                                       "block (amend the plan), or the gate is waived", status=contract.UNAVAILABLE)
             if status == "INVALID_COMPARISON":
                 if int(gate["recaptures"] or 0) < int((run.get("gates") or {}).get("recapture_max", 1)):
                     with db.transaction(con):
@@ -752,13 +847,17 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
         "IMAGES:", *lines,
         "DOM MEASUREMENTS (measured, css-px):" if measurements else "DOM MEASUREMENTS: none",
         *[json.dumps(m, sort_keys=True) for m in measurements[:60]],
+        *briefs.used_codes_line(gates.finding_codes(con, "run_id=? AND scope=?", (run["id"], scope["id"]))),
         "", VISUAL_FORMAT]) + "\n"
     evdir = lane_receipt.parent
     resume = _same_reviewer(con, run, scope["id"], "visual", int(gate.get("cycle") or 1))
     exclude = list(st.get("exclude_routes") or [])
+    away = job["payload"].get("exclude_routes")
     outcome = gates.run_reviewer(con, run, gate, "visual_reviewer", brief, cwd=evdir, visual=True, images=images,
                                  include_dirs=[evdir] + sorted({i.parent for i in images}), kind="vision",
-                                 exclude=exclude or None, resume_from=resume if not exclude else None)
+                                 exclude=exclude or None,
+                                 resume_from=resume if not (exclude or job["payload"].get("review_only")) else None,
+                                 prefer_not=away)
     parsed = outcome.get("parsed")
     if parsed is not None:
         outcome["evidence_status"] = parsed.evidence_status
@@ -770,8 +869,27 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
     return {"status": outcome.get("status"), "verdict": outcome.get("verdict")}
 
 
-def _visual_blocked(con, run: dict, gate: dict, evidence_status: str, cause: str) -> dict:
-    outcome = {"status": contract.EVIDENCE_BLOCKED, "verdict": None, "evidence_status": evidence_status, "summary": cause}
+def _non_producer_problems(cap: dict) -> list[dict]:
+    """What a capture reports that the producer did not cause: a failure or an invalid frame
+    whose `cause` is `spec` (the plan's visual block) or `capture` (the capture itself)."""
+    kinds = ("spec", "capture")
+    out = [f for f in cap.get("product_failures") or [] if f.get("cause") in kinds]
+    path = cap.get("receipt_path")
+    if cap["evidence_status"] == "INVALID_COMPARISON" and path and Path(path).is_file():
+        for fr in json.loads(Path(path).read_text()).get("frames") or []:
+            if fr.get("invalid") and fr.get("cause") in kinds:
+                out.append({"cause": fr["cause"], "location": f"{fr.get('viewport')} state {fr.get('state')}",
+                            "summary": fr["invalid"]})
+    return out
+
+
+def _failure_text(f: dict) -> str:
+    return f"{f.get('location') or 'page'}: {f.get('summary') or 'failed'}"
+
+
+def _visual_blocked(con, run: dict, gate: dict, evidence_status: str, cause: str, *,
+                    status: str = contract.EVIDENCE_BLOCKED) -> dict:
+    outcome = {"status": status, "verdict": None, "evidence_status": evidence_status, "summary": cause}
     with db.transaction(con):
         ingest(con, state.get_run(con, run["id"]), gate["id"], outcome)
     return outcome
@@ -796,26 +914,59 @@ def _owners(con, run: dict, scope: dict, f: dict) -> list[str]:
     return list(scope["tasks"])  # nobody can tell: every producer in the scope repairs it
 
 
-def _record_finding(con, run: dict, scope: dict, gate: dict, f: dict, reviewer: str | None) -> None:
+UNASSIGNED = "unassigned"
+
+
+def _attribution(con, run: dict, members: list[str] | None, f: dict, owned: dict) -> tuple[str, str | None]:
+    """(attribution_basis, task) for one finding, from evidence only; it never feeds repair routing.
+    `reviewer-declared`: the reviewer named an owner that is a member task owning the finding's path
+    (its scope or accepted revision). `unique-path`: exactly one member owns that path. Anything
+    else, including a gate with no frozen membership, is `unassigned`."""
+    path = (f.get("location") or "").split(":")[0].strip()
+    if not path or not members:
+        return UNASSIGNED, None
+    for tid in members:
+        if tid not in owned:
+            task = state.get_task(con, run["id"], tid) or {}
+            owned[tid] = (task.get("scope") or [], _changed(con, run, task) if task else set())
+    owning = [tid for tid in members if planfile.path_in_scope(path, owned[tid][0]) or path in owned[tid][1]]
+    declared = [o for o in dict.fromkeys(f.get("owners") or []) if o in owning]
+    if len(declared) == 1:
+        return "reviewer-declared", declared[0]
+    if len(owning) == 1:
+        return "unique-path", owning[0]
+    return UNASSIGNED, None
+
+
+def _record_finding(con, run: dict, scope: dict, gate: dict, f: dict, reviewer: str | None, owned: dict) -> None:
     owners = _owners(con, run, scope, f)
+    basis, attributed = _attribution(con, run, gate_members(gate), f, owned)
     state_ = "open" if f.get("blocking") else "nonblocking"
     con.execute("UPDATE findings SET state='superseded', updated_at=? WHERE run_id=? AND scope=? AND gate_kind=? AND code=? "
                 "AND state IN ('open','nonblocking') AND disposition IS NULL",
                 (now_iso(), run["id"], scope["id"], gate["kind"], f["code"]))
+    fp = gates._fingerprint(f)
+    first = None
     for tid in owners:
         t = state.get_task(con, run["id"], tid) or {}
         producer = con.execute("SELECT dispatch_id FROM revisions WHERE id=?", (t.get("accepted_revision_id"),)).fetchone()
+        fid = "F" + uuid.uuid4().hex[:10]
         con.execute("INSERT INTO findings(id, dispatch_id, reviewer_dispatch_id, status, severity, summary, evidence_hash, "
                     "created_at, run_id, task_id, gate_id, revision_id, gate_kind, code, fingerprint, location, category, "
                     "action, measurement_json, state, origin_gate_id, updated_at, level, contract, scope, blocking, seam, "
-                    "root_cause, owners) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    ("F" + uuid.uuid4().hex[:10], producer["dispatch_id"] if producer else None, reviewer,
+                    "root_cause, owners, attribution_basis, attributed_task, clone_of) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (fid, producer["dispatch_id"] if producer else None, reviewer,
                      "blocking" if f.get("blocking") else "non-blocking", f.get("severity"), f["summary"],
                      sha256_obj(f), now_iso(), run["id"], tid, gate["id"], gate["revision_id"], gate["kind"], f["code"],
-                     gates._fingerprint(f), f.get("location"), "convergence", f.get("action"),
+                     fp, f.get("location"), "convergence", f.get("action"),
                      dumps(f.get("measurement")) if f.get("measurement") else None, state_, gate["id"], now_iso(),
                      f.get("level") or f.get("severity"), contract.CONVERGENCE, scope["id"], int(bool(f.get("blocking"))),
-                     f.get("seam"), f.get("root_cause"), dumps(owners)))
+                     f.get("seam"), f.get("root_cause"), dumps(owners), basis, attributed, first))
+        if not f.get("blocking"):
+            gates.carry_disposition(con, "run_id=? AND scope=? AND gate_kind=?", (run["id"], scope["id"], gate["kind"]),
+                                    fid, fp)
+        first = first or fid  # the other repair-owner rows are clones of this one: a report counts it once
 
 
 def ingest(con, run: dict, gate_id: str, outcome: dict, *, independence: str = contract.INDEPENDENT) -> None:
@@ -830,8 +981,8 @@ def ingest(con, run: dict, gate_id: str, outcome: dict, *, independence: str = c
     st = scope_state(run, gate["scope"])
     current = gate["input_key"] == f"{gate['scope']}:{st.get('commit')}" and gate["status"] != "cancelled"
     con.execute("UPDATE gates SET status=?, verdict=?, review_status=?, evidence_status=COALESCE(?, evidence_status), "
-                "summary=?, finished_at=?, route=COALESCE(?, route), reviewer_dispatch_id=?, independence=?, next_action=?, "
-                "stale_reason=? WHERE id=?",
+                "summary=?, finished_at=?, route=COALESCE(?, route), reviewer_dispatch_id=COALESCE(?, reviewer_dispatch_id), "
+                "independence=?, next_action=?, stale_reason=? WHERE id=?",
                 ("done" if current else "stale", verdict, status, outcome.get("evidence_status"), outcome.get("summary"),
                  now_iso(), outcome.get("route"), outcome.get("dispatch_id"), independence,
                  parsed.next_action if parsed else None, None if current else "scope recomposed", gate_id))
@@ -841,20 +992,18 @@ def ingest(con, run: dict, gate_id: str, outcome: dict, *, independence: str = c
     if scope is None:
         return
     if status == contract.COMPLETED and parsed is not None:
-        for code in parsed.resolved:
-            con.execute("UPDATE findings SET state='resolved', updated_at=? WHERE run_id=? AND scope=? AND gate_kind=? "
-                        "AND code=? AND state='open'", (now_iso(), run["id"], scope["id"], gate["kind"], code))
-        for r in parsed.retracted:
-            con.execute("UPDATE findings SET state='retracted', updated_at=? WHERE run_id=? AND scope=? AND gate_kind=? "
-                        "AND code=? AND state IN ('open','nonblocking')", (now_iso(), run["id"], scope["id"], gate["kind"],
-                                                                          r["code"]))
+        where, params = "run_id=? AND scope=? AND gate_kind=?", (run["id"], scope["id"], gate["kind"])
+        parsed.findings[:] = gates.stable_codes(con, run, where, params, parsed.findings)
+        gates.mark_current(con, where, params, parsed.resolved, ("open",), "resolved")
+        gates.mark_current(con, where, params, [r["code"] for r in parsed.retracted], ("open", "nonblocking"), "retracted")
         restated = {f["code"] for f in parsed.findings}
         con.execute("UPDATE findings SET state='resolved', updated_at=? WHERE run_id=? AND scope=? AND gate_kind=? "
                     "AND state='open' AND code NOT IN (%s)" % ",".join("?" * len(restated)) if restated else
                     "UPDATE findings SET state='resolved', updated_at=? WHERE run_id=? AND scope=? AND gate_kind=? "
                     "AND state='open'", (now_iso(), run["id"], scope["id"], gate["kind"], *sorted(restated)))
+        owned: dict = {}
         for f in parsed.findings:
-            _record_finding(con, run, scope, gate, f, outcome.get("dispatch_id"))
+            _record_finding(con, run, scope, gate, f, outcome.get("dispatch_id"), owned)
     label = "visual" if gate["kind"] == "visual" else "convergence"
     if status != contract.COMPLETED:
         state.emit(con, run, "convergence.unavailable", f"{scope['id']} {label} review {status} (runtime/evidence status, "
@@ -871,11 +1020,11 @@ def ingest(con, run: dict, gate_id: str, outcome: dict, *, independence: str = c
     settle(con, run, scope)
 
 
-def _satisfied(con, run: dict, scope_id: str, g: dict, commit: str) -> str | None:
+def _satisfied(con, run: dict, scope_id: str, g: dict, commit: str, *, tree: str | None = None) -> str | None:
     """'approved' or 'waived' when a gate no longer blocks, else None."""
     if g["status"] == "done" and g.get("review_status") == contract.COMPLETED and g["verdict"] == "APPROVED":
         return "approved"
-    if waiver_for(con, run, scope_id, g["kind"], commit):
+    if waiver_for(con, run, scope_id, g["kind"], commit, tree=tree):
         return "waived"
     return None
 
@@ -901,7 +1050,7 @@ def settle(con, run: dict, scope: dict) -> None:
         g = gaps[0]
         parsed_gap = _gap_from_gate(con, g)
         _set_scope(con, run, scope["id"], status="intake_gap", hold_key=st.get("key"), intake_gap=parsed_gap,
-                   detail=f"the user must decide: {parsed_gap.get('decision')}")
+                   detail=f"the user must decide: {parsed_gap.get('decision')}", fallback_available=False)
         state.emit(con, run, "convergence.intake_gap", f"{scope['id']} INTAKE_GAP: the user must decide: "
                    f"{parsed_gap.get('decision')} (affects {parsed_gap.get('affects')}; {parsed_gap.get('why')})",
                    payload=parsed_gap)
@@ -924,7 +1073,7 @@ def settle(con, run: dict, scope: dict) -> None:
     if round_no >= cap:
         esc = _escalation(con, run, scope, blocking, latest)
         _set_scope(con, run, scope["id"], status="escalated", hold_key=st.get("key"), escalation=esc,
-                   detail=f"RECHECK after {round_no} substantive rounds: "
+                   fallback_available=False, detail=f"RECHECK after {round_no} substantive rounds: "
                           + ("waive with a recorded reason, or escalate to the user" if contract.has_cap_waiver(run)
                              else "the operator decides"))
         state.emit(con, run, "convergence.escalation", f"{scope['id']} RECHECK after {round_no} substantive rounds: "
@@ -935,13 +1084,13 @@ def settle(con, run: dict, scope: dict) -> None:
                    + f"; recommendation: {esc['recommendation']}", payload=esc)
         return
     owners = route_repairs(con, run, scope, blocking)
-    _set_scope(con, run, scope["id"], status="recheck", round=round_no + 1,
+    _set_scope(con, run, scope["id"], status="recheck", round=round_no + 1, fallback_available=False,
                detail=f"round {round_no} RECHECK: repairs routed to {', '.join(owners)}")
     who = "; ".join(dict.fromkeys(gates.recheck_continuity(con, run, g.get("reviewer_dispatch_id"),
                                                           "vision" if g["kind"] == "visual" else "reviewer")
                                   for g in rechecks))
     state.emit(con, run, "convergence.recheck", f"{scope['id']} RECHECK (round {round_no}/{cap}): "
-               f"{len(blocking)} blocking finding(s) routed to {', '.join(owners)}; repair them in parallel "
+               f"{len(blocking)} blocking finding(s) routed to {', '.join(owners)}; repair each when its scope is free "
                f"(office rerun <task> --resume|--fresh), then the scope recomposes; next round: {who}",
                payload={"scope": scope["id"], "owners": owners, "findings": [f["code"] for f in blocking]})
 
@@ -998,7 +1147,9 @@ def _escalation(con, run: dict, scope: dict, blocking: list[dict], latest: dict)
         "recommendation": nexts[0] if nexts else ("continue: one more bounded repair cycle with the same reviewer"
                                                   if len(by_code) <= 2 else
                                                   "escalate: a different reviewer or a stronger producer route"),
-        "choices": contract.round_cap_choices(scope["id"]),
+        "choices": contract.round_cap_choices(scope["id"]) + [
+            f"office decide {scope['id']} review --quote \"<user's words>\"   (another independent review of the composed "
+            "lane; no accepted task is reopened)"],
     }
 
 
@@ -1019,6 +1170,25 @@ def _converge_scope(con, run: dict, scope: dict, *, basis: str) -> None:
 
 # ------------------------------------------------------------------ status, blockers
 
+def _historical_waiver_stale(con, run: dict, scope: dict, st: dict) -> bool:
+    key = _key(con, run, scope)
+    return st.get("status") in ("waived", "stale_waiver") and key is not None and st.get("key") != key
+
+
+def _reconcile_historical_waivers(con, run: dict) -> list[str]:
+    """Preserve historic waiver records and require fresh user-authorized review."""
+    found = []
+    for scope in all_scopes(con, run):
+        st = scope_state(run, scope["id"])
+        if st.get("status") == "waived" and _historical_waiver_stale(con, run, scope, st):
+            _set_scope(con, run, scope["id"], status="stale_waiver",
+                       detail="historical waiver covers earlier accepted set; fresh review required")
+            state.emit(con, run, "convergence.stale_waiver",
+                       f"{scope['id']}: prior waiver preserved, new acceptance needs independent review")
+            found.append(scope["id"])
+    return found
+
+
 def summary(con, run: dict) -> list[dict]:
     run = state.get_run(con, run["id"])
     out = []
@@ -1026,7 +1196,9 @@ def summary(con, run: dict) -> list[dict]:
         st = scope_state(run, s["id"])
         key = _key(con, run, s)
         status = st.get("status") or "waiting"
-        held = status in ("recheck", "escalated", "stopped", "intake_gap")
+        if _historical_waiver_stale(con, run, s, st):
+            status = "stale_waiver"
+        held = status in ("recheck", "escalated", "stopped", "intake_gap", "stale_waiver")
         if key is None and not held:
             status = "waiting"
         elif key is not None and st.get("key") != key and status in CONVERGED:
@@ -1035,7 +1207,7 @@ def summary(con, run: dict) -> list[dict]:
                     "triggers": s.get("triggers") or [], "covered_by": st.get("covered_by"),
                     "status": status, "round": st.get("round") or 1, "cycle": st.get("cycle") or 1,
                     "detail": st.get("detail"), "commit": st.get("commit"), "escalation": st.get("escalation"),
-                    "intake_gap": st.get("intake_gap"), "fallback_available": st.get("fallback_available")})
+                    "intake_gap": st.get("intake_gap"), "fallback_available": fallback_gate(con, run, s["id"]) is not None})
     return out
 
 
@@ -1067,12 +1239,27 @@ def close_blockers(con, run: dict) -> list[str]:
     return out
 
 
+def _rerun_modes(con, run: dict, tid: str) -> str:
+    """Do not suggest resume for a dispatch lacking a stored harness session (#581).
+
+    A stored session alone is not sufficient to guarantee resumption, but its
+    absence is enough to rule resume out. Backfilling remains rerun's job.
+    """
+    from office import rerun
+    parent = rerun._last_ended_executor(con, run, tid)
+    return "--resume|--fresh" if parent and parent.get("session_id") else "--fresh"
+
+
 def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
     """The orchestrator's next move for convergence, or None when nothing waits
     on it. `dispositions` adds the reminder for APPROVED findings, which never
     outranks dispatching ready work."""
+    held_rechecks = []
     for s in summary(con, run):
         sid = s["id"]
+        if s["status"] == "stale_waiver":
+            return (f"{sid} historical waiver is stale and cannot authorize the latest accepted revision; "
+                    f"record a new review decision: office decide {sid} review --quote \"<user words>\"")
         if s["status"] == "escalated":
             esc = s.get("escalation") or {}
             if contract.has_cap_waiver(run):
@@ -1081,35 +1268,71 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
                         f"RECHECK; landing still needs the user): office waive {sid} --reason \"<why the open "
                         f"findings are acceptable>\"; or escalate: ask the user (native question tool), showing "
                         f"office inspect convergence {sid}, then office decide {sid} "
-                        "escalate|continue|waive|stop --quote \"<user's words>\"")
+                        "escalate|continue|waive|stop|review --quote \"<user's words>\"")
             return (f"{sid} spent {contract.MAX_ROUNDS} RECHECK rounds: ask the user now (native question tool), "
                     f"showing office inspect convergence {sid} (remaining findings, attempts, risk) and your "
                     f"recommendation ({(esc.get('recommendation') or '')[:100]}); then office decide {sid} "
-                    "escalate|continue|waive|stop --quote \"<user's words>\"")
+                    "escalate|continue|waive|stop|review --quote \"<user's words>\"")
         if s["status"] == "intake_gap":
             gap = s.get("intake_gap") or {}
             return (f"{sid} INTAKE_GAP: ask the user (native question tool): {gap.get('decision')}; record the answer "
                     f"(office amend requirements|plan ...), then office decide {sid} continue --quote \"<user's words>\"")
         if s["status"] == "recheck":
-            waiting = [t for t in s["tasks"] if (state.get_task(con, run["id"], t) or {}).get("status") == "changes_required"
-                       and not gates.worker_live(con, (state.get_task(con, run["id"], t) or {}).get("current_dispatch_id"))]
-            if waiting:
-                return (f"{sid} RECHECK repairs wait for you, run them in parallel: "
-                        + " ; ".join(f"office rerun {t} --resume|--fresh" for t in waiting))
-        if s["status"] in ("unavailable", "attention"):
-            st = scope_state(state.get_run(con, run["id"]), sid)
-            if st.get("fallback_available"):
-                kind = "visual" if st.get("fallback_kind") == "visual" else "convergence"
-                inspect = " --inspected <every screenshot>, only if you can view them" if kind == "visual" else ""
-                return (f"{sid}: no specialist reviewer returned a verdict (runtime status, not a verdict). As the "
-                        f"orchestrator you are authorized to review on the reviewer's behalf (independent only if you did not "
-                        f"produce the work; else it is refused or recorded as degraded): office review {sid}:{kind} --report <file>{inspect}; or office "
-                        f"resume retries the chain; or waive with landing authority")
-            if s["status"] == "unavailable":
-                return f"{sid}: a review is unavailable ({s['detail']}); office resume retries it, or waive it"
-        if s["status"] in ("evidence_blocked", "attention", "conflict", "blocked"):
+            # A rerun can be refused by the same live scope lease that dispatch enforces.
+            # Never offer a stacked dependent while its parent is still repairing (#561).
+            from office import dispatch
+            waiting = [state.get_task(con, run["id"], tid) for tid in s["tasks"]]
+            waiting = [t for t in waiting if t and t["status"] == "changes_required"
+                       and not gates.worker_live(con, t.get("current_dispatch_id"))]
+            ready, held = [], []
+            for t in waiting:
+                owner = dispatch.scope_holder(con, run, t)
+                if not owner:
+                    # Two overlapping fixes are individually legal now, but become
+                    # mutually exclusive once either starts. Name only the first.
+                    owner = next((a["id"] for a in ready if planfile.scopes_overlap(a["scope"], t["scope"])), None)
+                if owner:
+                    held.append(f"{t['id']} waits for {owner}'s repair session to end")
+                else:
+                    ready.append(t)
+            if ready:
+                what = " in parallel" if len(ready) > 1 else ""
+                note = f"; {'; '.join(held)}" if held else ""
+                return (f"{sid} RECHECK repairs ready{what}: "
+                        + " ; ".join(f"office rerun {t['id']} {_rerun_modes(con, run, t['id'])}" for t in ready) + note)
+            if held:
+                held_rechecks.append(f"{sid} RECHECK: {'; '.join(held)}")
+
+        spec_gate = spec_defect_gate(con, run, sid)
+        if spec_gate:
+            return (f"{sid}: amend the plan visual: block (office amend <task> -- \"<fix the visual: block>\"), then office "
+                    f"resume re-runs the capture; the capture reported: {(spec_gate.get('summary') or '')[:300]}; or waive "
+                    "with landing authority (the degraded fallback review does not apply to a plan defect)")
+        fb = fallback_gate(con, run, sid)  # the predicate `office review --report` applies
+        if fb:
+            kind = "visual" if fb["kind"] == "visual" else "convergence"
+            inspect = " --inspected <every screenshot>, only if you can view them" if kind == "visual" else ""
+            return (f"{sid}: no specialist reviewer returned a verdict (runtime status, not a verdict, no round spent). Re-run "
+                    f"only the review on a fallback reviewer: office review {sid}:{kind} [--as <harness>/<model>[@effort]]; or, "
+                    f"as the orchestrator you are authorized to review on the reviewer's behalf (independent only if you did "
+                    f"not produce the work; else it is refused or recorded as degraded): office review {sid}:{kind} --report "
+                    f"<file>{inspect}; or office resume retries the chain; a waiver needs landing authority")
+        if s["status"] == "unavailable":
+            return (f"{sid}: a review is unavailable ({s['detail']}); re-run only the review on a fallback reviewer: office "
+                    f"review {sid} [--as <route>]; or office resume retries it; a waiver is the last resort")
+        if s["status"] == "evidence_blocked":
+            # No valid visual evidence means a review fallback cannot inspect
+            # the required screenshots. Retrying the same deterministic capture
+            # will loop; the orchestrator must correct the visual contract (#573).
+            return (f"{sid} evidence_blocked: {s['detail']}; correct the visual: capture contract "
+                    f"(for example its start: command or missing assets) via office amend <task> --contract -- "
+                    f"\"<capture setup correction>\", then office resume re-captures. "
+                    f"The degraded fallback is not available without inspectable evidence; a waiver needs landing authority")
+        if s["status"] in ("attention", "conflict", "blocked"):
             return (f"{sid} {s['status']}: {s['detail']}; fix the cause, then office resume (a waiver needs landing "
                     f"authority: office approve waive {sid}:<convergence|visual> ...)")
+    if held_rechecks:
+        return "no action; " + "; ".join(held_rechecks) + "; office wait until the holding session ends"
     nb = undispositioned(con, run) if dispositions else []
     if nb:
         r = nb[0]
@@ -1122,6 +1345,8 @@ def retry_blocked(con, run: dict) -> list[str]:
     """`office resume`: re-run unavailable, attention, or evidence-blocked scope
     reviews on the same composed revision. No round is spent. Caller holds tx."""
     out = []
+    run = state.get_run(con, run["id"])
+    out.extend(_reconcile_historical_waivers(con, run))
     run = state.get_run(con, run["id"])
     for s in all_scopes(con, run):
         st = scope_state(run, s["id"])
@@ -1171,12 +1396,21 @@ def landing_authority(con, run: dict, actor: str) -> tuple[bool, str]:
                    f"{frozen.get('end_state') or 'ask'} and no merge authorization is recorded)")
 
 
-def waiver_for(con, run: dict, scope_id: str, kind: str, commit: str) -> dict | None:
-    """A waiver binds to the scope, the gate kind and the composed commit. A
-    recomposition (a materially relevant change) leaves it behind."""
-    row = con.execute("SELECT * FROM authorizations WHERE run_id=? AND kind='waiver' AND target=? AND revoked_at IS NULL "
-                      "ORDER BY created_at DESC LIMIT 1", (run["id"], f"{scope_id}:{kind}@{commit}")).fetchone()
-    return dict(row) if row else None
+def waiver_for(con, run: dict, scope_id: str, kind: str, commit: str, *, tree: str | None = None) -> dict | None:
+    """A waiver binds to the scope, the gate kind and the composed tree (#452): a
+    recomposition with the same tree keeps it, a different tree leaves it behind.
+    `tree` defaults to the scope's composed tree when `commit` is its current commit.
+    A waiver recorded without a tree (before trees were stored) binds its commit only."""
+    if tree is None:
+        st = scope_state(run, scope_id)
+        tree = st.get("tree") if st.get("commit") == commit else None
+    prefix = f"{scope_id}:{kind}@"
+    for row in con.execute("SELECT * FROM authorizations WHERE run_id=? AND kind='waiver' AND substr(target, 1, ?)=? "
+                           "AND revoked_at IS NULL ORDER BY created_at DESC", (run["id"], len(prefix), prefix)):
+        bound = json.loads(row["envelope_json"] or "{}").get("tree") if (row["envelope_json"] or "").startswith("{") else None
+        if (bound and bound == tree) or (not bound and row["target"] == prefix + commit):
+            return dict(row)
+    return None
 
 
 def orchestrator_session() -> dict:
@@ -1193,12 +1427,14 @@ def _record_waiver(con, run: dict, scope: dict, kind: str, g: dict, commit: str,
     The gate's verdict is left as the reviewer gave it. Caller holds tx."""
     session = orchestrator_session() if actor != "user" else None
     target = f"{scope['id']}:{kind}@{commit}"
+    st = scope_state(run, scope["id"])
+    tree = st.get("tree") if st.get("commit") == commit else None
     con.execute("INSERT INTO authorizations(id, run_id, kind, target, requirements_version, envelope_json, "
                 "authorized_by, quote, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 ("Z" + uuid.uuid4().hex[:8], run["id"], "waiver", target, run["requirements_version"],
                  dumps({"actor": actor, "basis": basis, "reason": why, "underlying": underlying,
                         "evidence_status": g.get("evidence_status"), "gate": g["id"], "scope": scope["id"],
-                        "commit": commit, "session": session, **(extra or {})}),
+                        "commit": commit, "tree": tree, "session": session, **(extra or {})}),
                  actor if actor == "user" else f"orchestrator ({basis})", (quote or why).strip(), now_iso()))
 
 
@@ -1206,9 +1442,47 @@ def waive(con, run: dict, spec: str, *, actor: str, quote: str | None, reason: s
     m = re.fullmatch(r"([LS]-[\w+.-]+):(\w+)", spec.strip())
     if not m:
         raise Usage("bad-waiver", f"cannot waive {spec!r}", next_step="office approve waive L-T1:convergence --quote ...")
-    scope_id, kind = m.group(1), KIND_ALIASES.get(m.group(2).lower())
+    kind = KIND_ALIASES.get(m.group(2).lower())
     if kind is None:
         raise Usage("bad-waiver", f"{m.group(2)!r} is not a gate (convergence or visual)")
+    return waive_kinds(con, run, m.group(1), [kind], actor=actor, quote=quote, reason=reason)
+
+
+def _close_reviewerless(con, run: dict, latest: dict[str, dict]) -> bool:
+    """Close, unavailable, each open gate whose reviewers have all ended and that no job can
+    finish, so a revoked or reaped review is never reported busy (#453). Caller holds tx."""
+    from office import dispatch
+    closed = False
+    for g in latest.values():
+        if g["status"] == "running" and con.execute(
+                "SELECT EXISTS(SELECT 1 FROM dispatches WHERE gate_id=:g) "
+                "AND NOT EXISTS(SELECT 1 FROM dispatches WHERE gate_id=:g AND ended_at IS NULL)", {"g": g["id"]}).fetchone()[0]:
+            dispatch._close_orphaned_gate(con, run, g["id"], "its reviewer ended and no job is left to finish it")
+            closed = True
+    return closed
+
+
+def _require_current_waiver_target(con, run: dict, scope: dict, st: dict) -> None:
+    """Never bind a waiver to a previous accepted-set composition (#530).
+
+    A producer may have been re-accepted after RECHECK while a compose job is
+    still queued. That changes the acceptance key before the composed commit;
+    a waiver of the old commit cannot authorize the new tree or permit landing.
+    """
+    key = _key(con, run, scope)
+    if key is None or st.get("key") != key or not st.get("commit"):
+        raise Refused("stale-composition", f"{scope['id']} acceptance changed since its reviewed composition; "
+                      "a waiver for the older commit would not cover the new accepted revision",
+                      scope=scope["id"], preserved="waiver authority unchanged; no stale waiver recorded",
+                      next_step=f'office decide {scope["id"]} review --quote "<user words>" to authorize a fresh '
+                                'composition/review cycle, then office status')
+
+
+def waive_kinds(con, run: dict, scope_id: str, kinds: list[str] | None, *, actor: str, quote: str | None,
+                reason: str | None) -> Result:
+    """Waive the named gate kinds of a scope, or every unmet one (`kinds` None), in one
+    transaction: every kind is checked before any is waived."""
+    spec = f"{scope_id}:{kinds[0] if kinds else '<convergence|visual>'}"
     ok, basis = landing_authority(con, run, actor)
     if not ok:
         raise Refused("no-landing-authority", f"cannot waive {spec}: {basis}", scope=scope_id,
@@ -1224,27 +1498,38 @@ def waive(con, run: dict, spec: str, *, actor: str, quote: str | None, reason: s
         if scope is None:
             raise Usage("unknown-scope", f"no lane or shared scope {scope_id}", next_step="office inspect convergence")
         st = scope_state(run, scope["id"])
+        _require_current_waiver_target(con, run, scope, st)
         commit = st.get("commit")
         latest = _latest(con, run, scope["id"], commit) if commit else {}
-        g = latest.get(kind)
-        if g is None:
-            raise Refused("nothing-to-waive", f"{scope['id']} has no {kind.replace('_', ' ')} gate on its current "
-                          "composition", scope=scope["id"], next_step="office inspect convergence")
-        if g["status"] != "done":
-            raise Refused("gate-busy", f"{scope['id']} {kind} is {g['status']}", next_step="office wait, then retry")
-        underlying = g["verdict"] or g.get("review_status")
-        _record_waiver(con, run, scope, kind, g, commit, actor=actor, basis=basis, why=why, quote=quote,
-                       underlying=underlying)
-        state.emit(con, run, "authority.waiver", f"{actor} waived {scope['id']} {kind} on {commit[:10]} "
-                   f"(underlying {underlying} stands; reason: {why[:120]})", audience="runtime")
+        if _close_reviewerless(con, run, latest):
+            latest = _latest(con, state.get_run(con, run["id"]), scope["id"], commit)
+        if kinds is None:
+            kinds = [k for k, g in latest.items() if not _satisfied(con, run, scope["id"], g, commit)]
+            if not kinds:
+                return Result(lines=[f"{scope['id']} has no unmet gate"], next="office status")
+        for kind in kinds:
+            g = latest.get(kind)
+            if g is None:
+                raise Refused("nothing-to-waive", f"{scope['id']} has no {kind.replace('_', ' ')} gate on its current "
+                              "composition", scope=scope["id"], next_step="office inspect convergence")
+            if g["status"] != "done":
+                raise Refused("gate-busy", f"{scope['id']} {kind} is {g['status']}", next_step="office wait, then retry")
+        lines = []
+        for kind in kinds:
+            g = latest[kind]
+            underlying = g["verdict"] or g.get("review_status")
+            _record_waiver(con, run, scope, kind, g, commit, actor=actor, basis=basis, why=why, quote=quote,
+                           underlying=underlying)
+            state.emit(con, run, "authority.waiver", f"{actor} waived {scope['id']} {kind} on {commit[:10]} "
+                       f"(underlying {underlying} stands; reason: {why[:120]})", audience="runtime")
+            lines.append(f"{scope['id']} {kind} waived on {commit[:10]} by {actor} ({basis}); the {underlying} "
+                         "verdict/status is kept and shown on the landing receipt")
         if st.get("status") in ("escalated",):
             _set_scope(con, run, scope["id"], status="reviewing")
         settle(con, state.get_run(con, run["id"]), scope)
     from office import jobs
     jobs.kick(con, run["id"])
-    return Result(lines=[f"{scope['id']} {kind} waived on {commit[:10]} by {actor} ({basis}); the {underlying} "
-                         "verdict/status is kept and shown on the landing receipt"],
-                  next="exceptions only; office status")
+    return Result(lines=lines, next="exceptions only; office status")
 
 
 def cap_waive(con, run: dict, scope_id: str, *, reason: str | None) -> Result:
@@ -1273,6 +1558,7 @@ def cap_waive(con, run: dict, scope_id: str, *, reason: str | None) -> Result:
             raise Refused("round-cap-not-reached", f"{scope['id']} is {st.get('status') or 'waiting'}: the orchestrator "
                           f"waives only a review that spent its {contract.round_cap(run)} substantive rounds still on "
                           "RECHECK", scope=scope["id"], next_step="office status")
+        _require_current_waiver_target(con, run, scope, st)
         commit = st.get("commit") or ""
         unmet = {k: g for k, g in _latest(con, run, scope["id"], commit).items() if not _satisfied(con, run, scope["id"], g, commit)}
         if not unmet:
@@ -1333,8 +1619,9 @@ def independence_of_orchestrator(con, run: dict, scope: dict) -> str:
 
 
 def decide(con, run: dict, scope_id: str, choice: str, *, quote: str | None, reason: str | None = None) -> Result:
-    """The operator's choice at a lane's round cap (#337): escalate | continue | waive | stop. Plan review has
-    none: at its cap the orchestrator owns the findings (#418)."""
+    """The operator's choice at a lane's round cap (#337): escalate | continue | waive | stop, and
+    review (another review round of the composed lane that reopens no accepted producer, #455).
+    Plan review has none: at its cap the orchestrator owns the findings (#418)."""
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-decide", "a worker cannot decide an escalation")
     if scope_id.lower() == "plan":
@@ -1343,28 +1630,26 @@ def decide(con, run: dict, scope_id: str, choice: str, *, quote: str | None, rea
                       next_step='office disposition plan:<code> fixed|dismissed|follow-up -- "<rationale>"; for '
                                 'another independent review the user asks: office review plan --quote "<words>"')
     choice = choice.lower()
-    if choice not in contract.ESCALATION_CHOICES:
-        raise Usage("bad-choice", f"choose one of {', '.join(contract.ESCALATION_CHOICES)}")
+    if choice not in DECISIONS:
+        raise Usage("bad-choice", f"choose one of {', '.join(DECISIONS)}")
     if not quote or len(re.sub(r"\s+", "", quote)) < 2:
         raise Usage("user-quote-required", "the round-cap decision is the user's; record their words",
                     next_step=f'office decide {scope_id} {choice} --quote "<user\'s words>"')
     if choice == "waive":
-        res = Result()
-        scope = find_scope(con, run, scope_id)
-        if scope is None:
-            raise Usage("unknown-scope", f"no lane or shared scope {scope_id}")
-        st = scope_state(run, scope["id"])
-        for kind, g in _latest(con, run, scope["id"], st.get("commit") or "").items():
-            if not _satisfied(con, run, scope["id"], g, st.get("commit") or ""):
-                res.lines += waive(con, run, f"{scope['id']}:{kind}", actor="user", quote=quote, reason=reason).lines
-        return res if res.lines else Result(lines=[f"{scope['id']} has no unmet gate"], next="office status")
+        return waive_kinds(con, run, scope_id, None, actor="user", quote=quote, reason=reason)
     with db.transaction(con):
         run = state.get_run(con, run["id"])
         scope = find_scope(con, run, scope_id)
         if scope is None:
             raise Usage("unknown-scope", f"no lane or shared scope {scope_id}", next_step="office inspect convergence")
         st = scope_state(run, scope["id"])
-        if st.get("status") not in ("escalated", "stopped", "intake_gap"):
+        if _historical_waiver_stale(con, run, scope, st):
+            _reconcile_historical_waivers(con, run)
+            st = scope_state(state.get_run(con, run["id"]), scope["id"])
+        if st.get("status") == "stale_waiver" and choice != "review":
+            raise Refused("stale-waiver-decision", f"{scope['id']} needs a new independent review",
+                          next_step=f'office decide {scope["id"]} review --quote "<user words>"')
+        if st.get("status") not in ("escalated", "stopped", "intake_gap", "stale_waiver"):
             raise Refused("no-decision-pending", f"{scope['id']} is {st.get('status') or 'waiting'}; nothing waits on "
                           "an operator decision", next_step="office status")
         con.execute("INSERT INTO authorizations(id, run_id, kind, target, requirements_version, authorized_by, quote, "
@@ -1382,6 +1667,8 @@ def decide(con, run: dict, scope_id: str, choice: str, *, quote: str | None, rea
                           next="office status")
         blocking = [dict(r) for r in con.execute("SELECT * FROM findings WHERE run_id=? AND scope=? AND state='open'",
                                                  (run["id"], scope["id"])).fetchall()]
+        # `review` judges the composition again and reopens no producer: the open findings go to the reviewer.
+        repair = bool(blocking) and choice != "review"
         exclude = list(st.get("exclude_routes") or [])
         if choice == "escalate":
             routes = [g.get("route") for g in scope_gates(con, run, scope["id"]) if g.get("route")
@@ -1393,32 +1680,193 @@ def decide(con, run: dict, scope_id: str, choice: str, *, quote: str | None, rea
                 t = state.get_task(con, run["id"], tid)
                 if t and t["status"] == "paused" and (t.get("pause_reason") or "").endswith("stopped by the operator"):
                     state.update_task(con, run["id"], tid, status=gates.derive_status(con, run, t), pause_reason=None)
-        _set_scope(con, run, scope["id"], status="recheck" if blocking else "pending", cycle=cycle, round=1,
-                   exclude_routes=exclude, escalation=None, intake_gap=None, decision=choice,
-                   detail=f"operator chose {choice}: cycle {cycle}")
-        owners = route_repairs(con, run, scope, blocking) if blocking else []
-        if not blocking:
+        _set_scope(con, run, scope["id"], status="recheck" if repair else "pending", cycle=cycle, round=1,
+                   exclude_routes=exclude, escalation=None, intake_gap=None, decision=choice, carry_from=None,
+                   fallback_available=False, fallback_kind=None, detail=f"operator chose {choice}: cycle {cycle}")
+        owners = route_repairs(con, run, scope, blocking) if repair else []
+        reopened = [tid for tid in owners if (state.get_task(con, run["id"], tid) or {}).get("status") == "changes_required"]
+        if not repair:
             _consider(con, state.get_run(con, run["id"]), scope)
         state.emit(con, run, "convergence.decided", f"{scope['id']}: operator chose {choice}; cycle {cycle} of up to "
-                   f"{contract.round_cap(run)} rounds" + (f"; repairs routed to {', '.join(owners)}" if owners else "")
+                   f"{contract.round_cap(run)} rounds" + (f"; reopens {', '.join(reopened)} for repair" if reopened else "")
                    + ("; the next review excludes the earlier reviewer routes" if choice == "escalate" else ""))
     from office import jobs
     jobs.kick(con, run["id"])
-    hint = (f"; for a stronger producer: office rerun <task> --fresh --reroute" if choice == "escalate" else "")
-    return Result(lines=[f"{scope['id']}: {choice} recorded (cycle {cycle})" + hint],
-                  next="exceptions only; office status")
+    line = f"{scope['id']}: {choice} recorded (cycle {cycle})"
+    if reopened:
+        codes = sorted({f["code"] for f in blocking})
+        line += (f"; reopens {', '.join(reopened)} (accepted, now changes_required) to repair {', '.join(codes)}. To "
+                 f"review again without reopening them: office decide {scope['id']} review --quote \"<words>\"; to "
+                 f"dismiss a reviewer defect: office disposition {scope['id']}:<code> dismissed --quote \"<words>\"")
+    elif choice == "review":
+        line += "; a new review round of the composed lane starts, and no accepted task is reopened"
+    else:
+        line += "; reopens no task"
+    if choice == "escalate":
+        line += "; for a stronger producer: office rerun <task> --fresh --reroute"
+    return Result(lines=[line], next="exceptions only; office status")
+
+
+LANE_REVOKE_JOBS = ("convergence_review", "lane_visual")
+
+
+def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:
+    """`office revoke <scope>:<kind>`: cancel a running lane review (#453). Its queued or claimed
+    review job is failed and stopped, its reviewer dispatches end, and the gate closes UNAVAILABLE
+    with the scope settled, so waive and the fallback review see an ordinary unavailable gate."""
+    # Environment markers are advisory (a worker could unset them), as for waive and decide.
+    if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
+        raise Refused("worker-cannot-revoke", "a producer, planner or reviewer cannot revoke a lane review; the orchestrator does")
+    from office import dispatch
+    from office.util import claim_signalable
+    m = re.fullmatch(r"([LS]-[\w+.-]+):(\w+)", spec.strip())
+    kind = KIND_ALIASES.get(m.group(2).lower()) if m else None
+    if not m or kind is None:
+        raise Usage("bad-revoke-target", f"cannot revoke {spec!r}",
+                    next_step="office revoke <L-T1|S-name>:convergence|visual")
+    run = state.get_run(con, run["id"])
+    scope = find_scope(con, run, m.group(1))
+    if scope is None:
+        raise Usage("unknown-scope", f"no lane or shared scope {m.group(1)}", next_step="office inspect convergence")
+    commit = scope_state(run, scope["id"]).get("commit") or ""
+    g = _latest(con, run, scope["id"], commit).get(kind) if commit else None
+    if g is None:
+        raise Refused("nothing-to-revoke", f"{scope['id']} has no {kind.replace('_', ' ')} gate on its current composition",
+                      scope=scope["id"], next_step="office inspect convergence")
+    if g["status"] not in ("queued", "running"):
+        return Result(lines=[f"{scope['id']} {kind} is {g['status']}"
+                             + (f" ({g.get('review_status') or g['verdict']})" if g["status"] == "done" else "")
+                             + "; nothing to revoke"], next="office status")
+    why = f"revoked: {reason}"[:200]
+    with db.transaction(con):
+        jobs_ = [j for j in gates.owning_jobs(con, run, g) if j["kind"] in LANE_REVOKE_JOBS]
+        for j in jobs_:
+            con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL, max_attempts=attempts "
+                        "WHERE id=?", (why, now_iso(), j["id"]))
+    unstopped = []
+    for j in jobs_:
+        if j["status"] != "claimed" or not jobs.claim_live(j):
+            continue
+        if not claim_signalable(j["claimed_pid"], j["claimed_by"]):
+            unstopped.append(f"{j['id']} (pid {j['claimed_pid']})")  # no start time: the pid may be reused
+            continue
+        dispatch._killpg(j["claimed_pid"])
+        deadline = time.time() + 5
+        while jobs.claim_live(j) and time.time() < deadline:
+            time.sleep(0.05)
+    notes: list[str] = []
+    live = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE gate_id=? AND ended_at IS NULL "
+                                         "AND status IN ('launching','running')", (g["id"],)).fetchall()]
+    ended = [d["id"] for d in live if dispatch._end_dispatch(con, run, d, "revoked", f"{scope['id']} {kind} revoked: {reason}",
+                                                            notes=notes)]
+    with db.transaction(con):  # the gate has no reviewer left; closing it settles the scope
+        gates.mark_unavailable(con, run, g["id"], f"{scope['id']} {kind} revoked: {reason}")
+        state.emit(con, run, "convergence.revoked", f"{scope['id']} {kind} review revoked: {reason}")
+    lines = [f"{scope['id']} {kind} revoked | ended {', '.join(ended) if ended else 'no live reviewer'}"
+             + (f" | cancelled job {', '.join(j['id'] for j in jobs_)}" if jobs_ else "") + " | gate UNAVAILABLE"]
+    if unstopped:
+        lines.append(f"not signalled (claimed by an older Office, so the pid may belong to another process now): "
+                     f"{', '.join(unstopped)}; stop it by hand if it is still the review job")
+    return Result(lines=[*lines, *notes], next="office status (office resume retries it; office review "
+                  f"{scope['id']}:{m.group(2).lower()} --report <file> reviews it yourself; a waiver needs landing authority)")
 
 
 FALLBACK_STATUSES = (contract.UNAVAILABLE, contract.INVALID_RESULT)
+SPEC_DEFECT = "SPEC_DEFECT"  # a visual gate's evidence state: the plan's visual block cannot be captured (#454)
+# Scope states in which the current composition's review is the one in play (not held, repairing or recomposing).
+FALLBACK_SCOPE_STATUSES = ("reviewing", "unavailable", "attention", "evidence_blocked")
+
+
+def _unreviewed_gates(con, run: dict, scope_id: str) -> list[dict]:
+    """This cycle's done gates of the scope's current composition that no specialist reviewer
+    returned a verdict for and that no waiver covers."""
+    run = state.get_run(con, run["id"])
+    st = scope_state(run, scope_id)
+    commit = st.get("commit")
+    if not commit or st.get("status") not in FALLBACK_SCOPE_STATUSES:
+        return []
+    cycle = int(st.get("cycle") or 1)
+    return [g for g in _latest(con, run, scope_id, commit).values()
+            if g["status"] == "done" and g.get("review_status") in FALLBACK_STATUSES
+            and int(g.get("cycle") or 1) == cycle and not _satisfied(con, run, scope_id, g, commit)]
+
+
+def fallback_gate(con, run: dict, scope_id: str, kind: str | None = None) -> dict | None:
+    """The gate the orchestrator may review in a specialist's place: this cycle's gate of
+    the scope's current composition that no specialist reviewer returned a verdict for
+    (every route failed, or the last reply was unparseable) and that no waiver covers. A
+    visual gate closed on a spec defect is the plan's to fix, never a fallback.
+    The `next:` hint and `office review --report` both ask this (#453)."""
+    return next((g for g in _unreviewed_gates(con, run, scope_id)
+                 if (kind is None or g["kind"] == kind) and g.get("evidence_status") != SPEC_DEFECT), None)
+
+
+def spec_defect_gate(con, run: dict, scope_id: str) -> dict | None:
+    return next((g for g in _unreviewed_gates(con, run, scope_id) if g.get("evidence_status") == SPEC_DEFECT), None)
+
+
+def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[str]:
+    """`office review <scope>[:convergence|visual] [--as <route>]`: re-dispatch only the review of the
+    scope's current composition for each gate that returned no verdict, on the named route or the next
+    fallback one. No executor starts and no round is spent. A pinned reviewer is kept unless `pin`
+    re-pins it. Returns the result lines. Caller holds the tx."""
+    m = re.fullmatch(r"([LS]-[\w+.-]+)(?::(\w+))?", spec.strip(), re.I)
+    kind = KIND_ALIASES.get(m.group(2).lower()) if m and m.group(2) else None
+    if not m or (m.group(2) and kind is None):
+        raise Usage("bad-review-target", f"cannot review {spec!r}", next_step="office review L-T1[:convergence|visual] --as <route>")
+    run = state.get_run(con, run["id"])
+    if state.is_terminal(run):
+        raise Refused("run-terminal", f"{run['id'][:8]} is {run['phase']}; nothing to review")
+    scope = find_scope(con, run, m.group(1))
+    if scope is None:
+        raise Usage("unknown-scope", f"no lane or shared scope {m.group(1)}", next_step="office inspect convergence")
+    blocked = [g for g in _unreviewed_gates(con, run, scope["id"])
+               if (kind is None or g["kind"] == kind) and g.get("evidence_status") != SPEC_DEFECT]
+    if not blocked:
+        raise Refused("nothing-to-review", f"{scope['id']} has no review that returned no verdict on its current composition; "
+                      "there is no review-only recovery to run", scope=scope["id"], next_step="office status")
+    if pin:
+        if all(g["kind"] == "visual" for g in blocked):
+            raise Refused("no-visual-override", f"{scope['id']}: a visual review has no user-chosen reviewer route (no harness "
+                          "declares the vision capability); it re-runs on the next fallback route", scope=scope["id"],
+                          next_step=f"office review {scope['id']}:visual")
+        candidates.declared_decision(pin["as"], flag="--as", role="code_reviewer", config=state.pinned_config(run))
+        for tid in scope["tasks"]:  # a visual gate of the same call takes the next fallback route
+            state.update_task(con, run["id"], tid, review_override=pin)
+    st = scope_state(run, scope["id"])
+    pinned = pin or next((t["review_override"] for t in (state.get_task(con, run["id"], tid) for tid in scope["tasks"])
+                          if t and t.get("review_override")), None)
+    lines = []
+    for g in blocked:
+        visual = g["kind"] == "visual"
+        payload: dict = {"scope": scope["id"], "review_only": True}
+        if visual or not pinned:
+            tried = gates.tried_reviewer_routes(con, "g.run_id=? AND g.scope=? AND g.kind=? AND g.input_key=?",
+                                                (run["id"], scope["id"], g["kind"], g["input_key"]))
+            if tried:
+                payload["exclude_routes"] = tried
+        gid, _ = _new_gate(con, run, scope, _rev(scope["id"], st["commit"]), g["kind"], int(g["round"] or 1),
+                           int(g.get("cycle") or 1))
+        state.enqueue(con, run, "lane_visual" if visual else "convergence_review", {"gate_id": gid, **payload},
+                      dedup_key=f"{g['kind']}:{gid}", max_attempts=2)
+        who = None if visual else (pin or pinned or {}).get("as")
+        how = (f"reviewer {who}" + ("" if pin else ", pinned by the user and kept; --as names another")) if who \
+            else "next fallback reviewer route"
+        lines.append(f"{scope['id']} {'visual' if visual else 'convergence'} review re-run on {st['commit'][:10]} "
+                     f"(gate {gid}, {how}); no executor launched, no round spent")
+    _set_scope(con, run, scope["id"], status="reviewing", detail="re-running the review on another reviewer route")
+    state.emit(con, run, "convergence.review_only", f"{scope['id']}: review-only re-run of "
+               f"{', '.join(g['kind'] for g in blocked)}" + (f" on {pin['as']}" if pin else ""))
+    return lines
 
 
 def fallback_review(con, run: dict, spec: str, report: Path, *, inspected: list[str]) -> Result:
     """The orchestrator reviews a convergence gate itself once every specialist
     route failed: recorded as degraded and non-independent (#337). For visual,
     only when it inspected every screenshot of the capture."""
-    if os.environ.get("OFFICE_DISPATCH_ID"):
+    if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
         raise Refused("worker-cannot-review", "a producer or worker may not review; the fallback is the orchestrator's")
-    m = re.fullmatch(r"([LS]-[\w+.-]+):(\w+)", spec.strip())
+    m = re.fullmatch(r"([LS]-[\w+.-]+):(\w+)", spec.strip(), re.I)
     if not m or KIND_ALIASES.get(m.group(2).lower()) is None:
         raise Usage("bad-review-target", f"cannot review {spec!r}", next_step="office review L-T1:convergence --report <file>")
     scope_id, kind = m.group(1), KIND_ALIASES[m.group(2).lower()]
@@ -1431,18 +1879,23 @@ def fallback_review(con, run: dict, spec: str, report: Path, *, inspected: list[
                       next_step="rewrite it in the review format, then retry")
     with db.transaction(con):
         run = state.get_run(con, run["id"])
+        if state.is_terminal(run):
+            raise Refused("run-terminal", f"{run['id'][:8]} is {run['phase']}; nothing to review")
         scope = find_scope(con, run, scope_id)
         if scope is None:
             raise Usage("unknown-scope", f"no lane or shared scope {scope_id}")
         st = scope_state(run, scope["id"])
-        g = _latest(con, run, scope["id"], st.get("commit") or "").get(kind)
         # The orchestrator may review on behalf of any reviewer that did not
         # return a verdict: every route failed (UNAVAILABLE) or the last one
         # never produced a parseable reply (INVALID_RESULT).
-        if g is None or g["status"] != "done" or g.get("review_status") not in FALLBACK_STATUSES:
+        g = fallback_gate(con, run, scope["id"], kind)
+        if g is None:
             raise Refused("fallback-not-allowed", f"{scope['id']} {kind}: the degraded fallback is only for a review "
                           "no specialist reviewer returned a verdict for", scope=scope["id"],
-                          next_step="office resume retries the reviewer chain")
+                          next_step=("correct the visual: capture contract with office amend <task> --contract -- "
+                                     "\"<capture setup correction>\", then office resume recaptures"
+                                     if kind == "visual" and st.get("status") == "evidence_blocked"
+                                     else "office resume retries the reviewer chain"))
         if kind == "visual":
             row = con.execute("SELECT path FROM evidence WHERE gate_id=? AND kind='capture_receipt' ORDER BY created_at "
                               "DESC LIMIT 1", (g["id"],)).fetchone()
@@ -1480,9 +1933,10 @@ def fallback_review(con, run: dict, spec: str, report: Path, *, inspected: list[
                          + " (shown on the landing receipt)"], next="exceptions only; office status")
 
 
-def disposition(con, run: dict, spec: str, how: str, note: str) -> Result:
+def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | None = None) -> Result:
     """Fix or disposition non-blocking findings (APPROVED cleanup, #337). `fix`
-    routes the repair to the owning tasks; it is not re-reviewed."""
+    routes the repair to the owning tasks; it is not re-reviewed. With the user's
+    `quote`, `dismissed` also settles an open blocking lane finding (#455)."""
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-disposition", "a worker cannot disposition review findings")
     how = how.lower()
@@ -1493,33 +1947,46 @@ def disposition(con, run: dict, spec: str, how: str, note: str) -> Result:
         raise Usage("bad-finding", f"name findings as <scope>:<code>[,<code>] (got {spec!r})",
                     next_step="office disposition L-T1:F1 fixed -- \"<note>\"")
     scope_id, codes = m.group(1), [review_parse.finding_code(c) for c in m.group(2).split(",") if c]
-    if how != "fix" and len(re.sub(r"\s+", "", note or "")) < 2:
-        raise Usage("note-required", "say what was done (the fix, why dismissed, or the follow-up issue)")
+    quote = (quote or "").strip()
+    if quote and len(re.sub(r"\s+", "", quote)) < 2:
+        raise Usage("user-quote-required", "--quote records the user's own words", next_step=f'office disposition {spec} '
+                    f'dismissed --quote "<user\'s words>"')
+    note = (note or "").strip() or (quote if how == "dismissed" else "")
     with db.transaction(con):
         run = state.get_run(con, run["id"])
         from office import plans
+        is_plan = scope_id.lower() == "plan"
         # A plan review closed at its round cap leaves its blocking findings to the orchestrator (#418).
-        owned = scope_id.lower() == "plan" and plans.owns_outstanding(run)
-        states = ("nonblocking", "open") if owned else ("nonblocking",)
+        owned = is_plan and plans.owns_outstanding(run)
+        states = ("nonblocking", "open") if owned or not is_plan else ("nonblocking",)
+        # Only the current finding for a code: an older row that shares the code is a different generation of it.
+        ids = gates.current_ids(con, "run_id=? AND contract=? AND (scope=? OR (? = 'plan' AND gate_kind='plan_review'))",
+                                (run["id"], contract.CONVERGENCE, scope_id, scope_id.lower()), codes, states)
         rows = [dict(r) for r in con.execute(
-            f"SELECT * FROM findings WHERE run_id=? AND contract=? AND state IN ({','.join('?' * len(states))}) AND "
-            "(scope=? OR (? = 'plan' AND gate_kind='plan_review')) "
-            f"AND code IN ({','.join('?' * len(codes))})",
-            (run["id"], contract.CONVERGENCE, *states, scope_id, scope_id.lower(), *codes)).fetchall()]
+            f"SELECT * FROM findings WHERE id IN ({','.join('?' * len(ids))})", ids).fetchall()]
         if not rows:
             raise Usage("unknown-finding", f"no non-blocking finding {spec}", next_step="office inspect convergence")
+        blocking = [r for r in rows if r["state"] == "open" and not owned]
+        if blocking and (how != "dismissed" or not quote):
+            names = ", ".join(sorted({r["code"] for r in blocking}))
+            raise Usage("user-quote-required", f"{spec} names blocking finding(s) {names}: only the user may dismiss a "
+                        "blocking finding (a reviewer defect, say), with their words in --quote",
+                        next_step=f'office disposition {spec} dismissed --quote "<user\'s words>"')
+        if how != "fix" and len(re.sub(r"\s+", "", note)) < 2:
+            raise Usage("note-required", "say what was done (the fix, why dismissed, or the follow-up issue)")
         if how == "fix" and any(r["gate_kind"] == "plan_review" for r in rows):
             raise Usage("plan-fix", "plan findings are fixed by the planner in the plan; record fixed once it is in")
+        by = "user" if blocking else "orchestrator"
         con.execute(f"UPDATE findings SET disposition=?, disposition_note=?, disposition_by=?, disposition_at=? "
                     f"WHERE id IN ({','.join('?' * len(rows))})",
-                    (how, (note or "").strip() or None, "orchestrator", now_iso(), *[r["id"] for r in rows]))
+                    (how, note or None, by, now_iso(), *[r["id"] for r in rows]))
         held = [r["id"] for r in rows if r["state"] == "open"]
         if held:
-            # The orchestrator's disposition, not a reviewer's resolution: the
-            # finding stops holding work and its blocking verdict stays recorded.
+            # The disposition, not a reviewer's resolution: the finding stops holding work and its
+            # blocking verdict stays recorded.
             con.execute(f"UPDATE findings SET state='nonblocking', updated_at=? WHERE id IN ({','.join('?' * len(held))})",
                         (now_iso(), *held))
-            if not plans.blocking_findings(con, run):
+            if owned and not plans.blocking_findings(con, run):
                 plans._unpause_plan_holds(con, run)
         reopened = []
         if how == "fix":
@@ -1529,12 +1996,59 @@ def disposition(con, run: dict, spec: str, how: str, note: str) -> Result:
                     state.update_task(con, run["id"], tid, status="changes_required",
                                       pause_reason=f"APPROVED cleanup: fix {', '.join(codes)} (no re-review)")
                     reopened.append(tid)
+        settled = None
+        if blocking:
+            dismissed = sorted({r["code"] for r in blocking})
+            for code in dismissed:
+                con.execute("INSERT INTO authorizations(id, run_id, kind, target, requirements_version, authorized_by, "
+                            "quote, created_at) VALUES(?,?,?,?,?,?,?,?)", ("Z" + uuid.uuid4().hex[:8], run["id"], "dismissal",
+                                                                         f"{scope_id}:{code}", run["requirements_version"],
+                                                                         "user", quote, now_iso()))
+            settled = _settle_dismissed(con, run, scope_id, dismissed, note=note, quote=quote)
         state.emit(con, run, "finding.disposition", f"{scope_id}:{','.join(codes)} {how}"
-                   + (f" ({note.strip()[:100]})" if note else ""), audience="runtime")
+                   + (f" by the user ({quote[:100]})" if blocking else (f" ({note[:100]})" if note else "")),
+                   audience="runtime")
+    if settled:
+        from office import jobs
+        jobs.kick(con, run["id"])
     nxt = (" ; ".join(f"office rerun {t} --resume|--fresh" for t in reopened) if reopened
            else "exceptions only; office status")
-    return Result(lines=[f"{scope_id}:{','.join(codes)} {how}" + (f"; cleanup routed to {', '.join(reopened)}" if reopened
-                                                                    else "")], next=nxt)
+    return Result(lines=[f"{scope_id}:{','.join(codes)} {how}" + (f" on the user's authority ({quote[:80]})" if blocking else "")
+                         + (f"; cleanup routed to {', '.join(reopened)}" if reopened else "")
+                         + (f"; {settled}" if settled else "")], next=nxt)
+
+
+def _settle_dismissed(con, run: dict, scope_id: str, codes: list[str], *, note: str, quote: str) -> str | None:
+    """After the user dismissed blocking findings of a lane or shared scope: every unmet gate left with no
+    open finding of its kind is waived on the user's authority (its RECHECK verdict stands), the repairs
+    the dismissed findings had routed are released, and the scope settles once nothing unmet remains. A
+    scope that still has an unmet gate keeps waiting. Returns what happened, or None. Caller holds tx."""
+    scope = find_scope(con, run, scope_id)
+    st = scope_state(run, scope_id)
+    commit = st.get("commit")
+    if scope is None or not commit:
+        return None
+    for tid in scope["tasks"]:
+        t = state.get_task(con, run["id"], tid)
+        if (t and t["status"] == "changes_required" and (t.get("pause_reason") or "").startswith(f"{scope_id} RECHECK")
+                and not con.execute(f"SELECT 1 FROM findings WHERE run_id=? AND task_id=? AND {contract.TASK_WORK_FINDINGS}",
+                                    (run["id"], tid)).fetchone()):
+            state.update_task(con, run["id"], tid, status=gates.derive_status(con, run, t), pause_reason=None)
+    latest = _latest(con, run, scope_id, commit)
+    waived = []
+    for kind, g in latest.items():
+        if (g["status"] == "done" and g.get("review_status") == contract.COMPLETED and g["verdict"] == "RECHECK"
+                and not _satisfied(con, run, scope_id, g, commit)
+                and not con.execute("SELECT 1 FROM findings WHERE run_id=? AND scope=? AND gate_kind=? AND state='open'",
+                                    (run["id"], scope_id, kind)).fetchone()):
+            _record_waiver(con, run, scope, kind, g, commit, actor="user", basis="blocking finding dismissed by the user",
+                           why=note or quote, quote=quote, underlying="RECHECK", extra={"dismissed": codes})
+            waived.append(kind)
+    run = state.get_run(con, run["id"])
+    if not waived or not all(_satisfied(con, run, scope_id, g, commit) for g in latest.values()):
+        return None
+    settle(con, run, scope)
+    return f"{scope_id} settled ({', '.join(waived)} waived on the user's authority; the RECHECK verdict stands)"
 
 
 def receipt(con, run: dict) -> dict:
@@ -1559,8 +2073,15 @@ def receipt(con, run: dict) -> dict:
                         "unresolved_findings": meta.get("unresolved_findings") or [],
                         "landing_authority": False if meta.get("cap_waiver") else None})
     dispositions = [dict(r) for r in con.execute(
-        "SELECT scope, code, gate_kind, level, disposition, disposition_note FROM findings WHERE run_id=? AND contract=? "
-        "AND disposition IS NOT NULL GROUP BY scope, code ORDER BY MIN(created_at)", (run["id"], contract.CONVERGENCE))]
+        "SELECT scope, code, gate_kind, level, disposition, disposition_note, disposition_by, MAX(blocking) AS blocking "
+        "FROM findings WHERE run_id=? AND contract=? AND disposition IS NOT NULL GROUP BY scope, code "
+        "ORDER BY MIN(created_at)", (run["id"], contract.CONVERGENCE))]
+    quotes = {r["target"]: r["quote"] for r in con.execute(
+        "SELECT target, quote FROM authorizations WHERE run_id=? AND kind='dismissal' AND revoked_at IS NULL "
+        "ORDER BY created_at", (run["id"],))}
+    for d in dispositions:
+        d["blocking"] = bool(d["blocking"])
+        d["authority_quote"] = quotes.get(f"{d['scope']}:{d['code']}") if d["disposition_by"] == "user" else None
     return {"review_contract": contract.of(run), "risk": risk_mod.summary(run), "scopes": scopes, "waivers": waivers,
             "dispositions": dispositions, "integrated_review": integrated_review(con, run),
             "degraded": [f"{s['id']}:{r['kind']}" for s in scopes for r in s["reviews"]
@@ -1601,11 +2122,12 @@ def inspect_lines(con, run: dict, scope_id: str | None = None) -> list[str]:
             lines.append(f"  {g['id']} {g['kind']} r{g['round']} {g['status']} {g['verdict'] or '-'} "
                          f"status={g.get('review_status') or '-'} {g.get('independence') or ''} {g.get('route') or ''}")
         for f in con.execute("SELECT code, MIN(level) AS level, MIN(blocking) AS blocking, MIN(state) AS state, "
-                             "GROUP_CONCAT(task_id) AS owners, MIN(summary) AS summary, MIN(disposition) AS disposition "
+                             "GROUP_CONCAT(task_id) AS owners, MIN(summary) AS summary, MIN(action) AS action, MIN(disposition) AS disposition "
                              "FROM findings WHERE run_id=? AND scope=? AND state IN ('open','nonblocking') GROUP BY code",
                              (run["id"], s["id"])).fetchall():
             lines.append(f"  {f['code']} [{f['level']}, {'blocking' if f['blocking'] else 'non-blocking'}] owners "
-                         f"{f['owners']} {f['summary'][:100]}" + (f" ({f['disposition']})" if f["disposition"] else ""))
+                         f"{f['owners']} {f['summary']}" + (f" | required fix: {f['action']}" if f["action"] else "")
+                         + (f" ({f['disposition']})" if f["disposition"] else ""))
         esc = s.get("escalation")
         if esc:
             lines.append(f"  ESCALATION: {esc['materiality']}; risk: {esc['risk']}")

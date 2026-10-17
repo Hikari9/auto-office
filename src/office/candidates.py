@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, paths, routing, state
+from office import adapters, model_lineages, paths, route_policy, routing, state
 
 KIND_FOR_ROLE = {
     "planner": "worker",
@@ -38,69 +38,205 @@ _QUOTA_TTL = 60.0
 
 def catalog_rows() -> list[dict]:
     data = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8")) or {}
-    return resolve_aliases(list(data.get("models") or []))
+    from office import user_catalog
+    return model_lineages.annotate(resolve_aliases(user_catalog.apply(list(data.get("models") or []))))
 
 
-_ALIAS_FIELDS = ("benchmark_indexes", "task_benchmarks", "price_fields", "speed_fields", "release_date")
+_ALIAS_FIELDS = ("benchmark_indexes", "task_benchmarks", "price_fields", "speed_fields", "release_date", "free_model")
 
 
 def _version_key(version: str) -> tuple[int, ...]:
     return tuple(int(p) for p in re.findall(r"\d+", version))
 
 
-def resolve_aliases(rows: list[dict]) -> list[dict]:
-    """A row with `alias_family` (a regex with a `version` group over model_id) follows the
-    highest-version matching row at the same harness, so `opus` and `luna` track each new
-    model as the catalog adds it. The alias is offered at every effort that newest model
-    offers, taking its invocation and scores; an effort the alias row declares but the
-    newest model lacks keeps its own static fields. With no match, the alias keeps its own
-    static fields. A target without a proven invocation_source inherits the alias's."""
-    # Disabled concrete rows may identify the newest model and supply benchmark
-    # fields, but they must not make dynamic family aliases dispatchable.
+def _legacy_custom_alias(row: dict, own: dict, concrete: list[dict]) -> list[dict]:
+    """Compatibility for explicit user/test regex aliases absent from shipped lineage map.
+
+    This does not classify or retire *canonical* named model generations. A later
+    catalog migration can require their identity/provenance before publication.
+    """
+    pattern = row.get("alias_family")
+    best = None
+    for route in concrete:
+        match = re.match(pattern, route.get("model_id") or "")
+        if not match or route.get("invocation_harness") != row.get("invocation_harness"):
+            continue
+        key = _version_key(match.group("version"))
+        if best is None or key > best[0]:
+            best = (key, route["model_id"])
+    by_effort = {r.get("effort"): r for r in concrete
+                 if best and r.get("model_id") == best[1] and
+                    r.get("invocation_harness") == row.get("invocation_harness")}
+    out = []
+    for effort in dict.fromkeys([*own, *by_effort]):
+        base = own.get(effort) or {**row, "effort": effort, "effort_confidence": "mapped"}
+        target = by_effort.get(effort)
+        if target is None:
+            out.append(base)
+            continue
+        resolved = dict(base)
+        if target.get("dispatchable") is False or base.get("dispatchable") is False:
+            resolved["dispatchable"] = False
+            if base.get("dispatchable") is not False:
+                for field in ("discovery", "discovery_reason"):
+                    if target.get(field):
+                        resolved[field] = target[field]
+            else:
+                resolved.pop("discovery", None)
+            resolved["status_reason"] = route_policy.alias_status(resolved, target)["reason"]
+        resolved["invocation_model_id"] = target.get("invocation_model_id") or target["model_id"]
+        source = str(target.get("invocation_source") or "")
+        if source.startswith(("local-evidence:", "documented:")):
+            resolved["invocation_source"] = source
+        for field in _ALIAS_FIELDS:
+            if target.get(field):
+                resolved[field] = target[field]
+        resolved["source_effort"] = target.get("source_effort") or resolved.get("source_effort")
+        resolved["alias_resolved_to"] = target["model_id"]
+        out.append(resolved)
+    return out
+
+
+def resolve_aliases(rows: list[dict], *, manifest: dict[str, dict] | None = None,
+                    aliases: dict[str, str] | None = None) -> list[dict]:
+    """Bind known aliases to concrete *explicitly released* lineage generations.
+
+    Existing alias regex is retained as seed metadata, not as authority to infer
+    an unverified vendor release. Aliases never resurrect an archived third
+    generation or leap to an ambiguous preview. Per-effort technical gates and
+    invocation provenance are copied from the exact concrete route.
+    """
+    manifest = model_lineages.load() if manifest is None else manifest
+    aliases = model_lineages.alias_lineages() if aliases is None else aliases
     concrete = [r for r in rows if not r.get("alias_family")]
     out = []
     expanded: set[tuple] = set()
+    # Keep exactly the newest two released identities per named lineage.
+    window = model_lineages.partition(concrete, manifest=manifest)["active"]
     for row in rows:
-        pattern = row.get("alias_family")
-        if not pattern:
+        if not row.get("alias_family"):
             out.append(row)
             continue
-        group = (row.get("model_id"), row.get("invocation_harness"), pattern)
+        lineage = aliases.get(row.get("model_id"))
+        group = (row.get("model_id"), row.get("invocation_harness"), row.get("alias_family"))
         if group in expanded:
             continue
         expanded.add(group)
         own = {r.get("effort"): r for r in rows
                if (r.get("model_id"), r.get("invocation_harness"), r.get("alias_family")) == group}
-        best = None
-        for r in concrete:
-            m = re.match(pattern, r.get("model_id") or "")
-            if not m or r.get("invocation_harness") != row.get("invocation_harness"):
-                continue
-            key = _version_key(m.group("version"))
-            if best is None or key > best[0]:
-                best = (key, r["model_id"])
-        by_effort = {r.get("effort"): r for r in concrete
-                     if best and r.get("model_id") == best[1] and r.get("invocation_harness") == row.get("invocation_harness")}
-        for effort in dict.fromkeys([*own, *by_effort]):
-            base = own.get(effort) or {**row, "effort": effort, "effort_confidence": "mapped"}
-            target = by_effort.get(effort)
+        if not lineage:
+            out.extend(_legacy_custom_alias(row, own, concrete))
+            continue
+        eligible = [r for r in window if r.get("lineage_key") == lineage and
+                    r.get("invocation_harness") == row.get("invocation_harness")]
+        if not eligible:
+            out.extend(own.values())
+            continue
+        latest = max(model_lineages.version_parts(r["generation_version"]) for r in eligible)
+        current = {r.get("effort"): r for r in eligible
+                   if model_lineages.version_parts(r["generation_version"]) == latest}
+        for effort in dict.fromkeys([*own, *current]):
+            original = own.get(effort) or row
+            target = current.get(effort)
             if target is None:
-                out.append(base)
+                # Preserve a previously declared effort as-is; never fabricate
+                # a newer model's missing effort or bypass its conformance gate.
+                if effort in own:
+                    out.append(original)
                 continue
-            resolved = dict(base)
-            if target.get("dispatchable") is False:
+            resolved = dict(original)
+            for key in _ALIAS_FIELDS + ("invocation_model_id", "invocation_source", "source_identifier",
+                                         "dispatchable", "discovery", "discovery_reason", "status_reason"):
+                if key in target:
+                    resolved[key] = target[key]
+                else:
+                    resolved.pop(key, None)
+            # A user-disabled alias or a technically gated target must remain
+            # gated. The alias cannot launder either denial into availability.
+            if original.get("dispatchable") is False:
                 resolved["dispatchable"] = False
-            resolved["invocation_model_id"] = target.get("invocation_model_id") or target["model_id"]
+                resolved.pop("discovery", None)
+                resolved.pop("discovery_reason", None)
+            elif target.get("dispatchable") is False:
+                resolved["dispatchable"] = False
+            if target.get("dispatchable") is False:
+                resolved["status_reason"] = route_policy.alias_status(resolved, target)["reason"]
             source = str(target.get("invocation_source") or "")
-            if source.startswith(("local-evidence:", "documented:")):
-                resolved["invocation_source"] = source
-            for field in _ALIAS_FIELDS:
-                if target.get(field):
-                    resolved[field] = target[field]
+            if not source.startswith(("local-evidence:", "documented:")):
+                resolved["invocation_source"] = original.get("invocation_source")
             resolved["source_effort"] = target.get("source_effort") or resolved.get("source_effort")
+            resolved["effort"] = effort
             resolved["alias_resolved_to"] = target["model_id"]
             out.append(resolved)
     return out
+
+
+_POLICY_CACHE: dict = {}
+
+
+_REPO_ROOTS: dict[str, Path] = {}
+
+
+def _repo_root_here() -> Path | None:
+    """The repository holding the cwd, remembered per directory so routing does not fork git each call."""
+    try:
+        here = os.getcwd()
+    except OSError:
+        return None
+    if here not in _REPO_ROOTS:
+        ident = paths.repo_identity(here)
+        if ident is None:
+            return None  # not remembered: a repository may be created here later
+        _REPO_ROOTS[here] = ident[0]
+    return _REPO_ROOTS[here]
+
+
+def live_user_policies(repo_root=None) -> list[dict]:
+    """The user's denied/overkill policy as the user and repo config files say now.
+
+    A denial applies the moment the user writes it, even to a run pinned earlier, so
+    it can never be bypassed by a stale pin. `repo_root` defaults to the cwd's
+    repository. Returns [] when nothing is set (the shipped default). Raises
+    OSError, ValueError or yaml.YAMLError when the config cannot be read, so a
+    caller that must fail closed (the probe) can tell that from "no denials"."""
+    from office import config as cfg
+    repo_root = repo_root if repo_root is not None else _repo_root_here()
+    # Read here, not through `cfg.read_files`: this feeds only the denial lookup and must not
+    # add a second read to the snapshot `office start` pins and baselines its drift check on.
+    files = {tier: (path.read_text(encoding="utf-8") if path.is_file() else None)
+             for tier, path in cfg.config_paths(repo_root).items()}
+    cache_key = (str(repo_root), tuple(sorted(files.items(), key=lambda kv: kv[0])))
+    policy = _POLICY_CACHE.get(cache_key)
+    if policy is None:  # held in a local: concurrent probes share this cache and may clear it
+        effective, warnings = cfg.resolve(repo_root, files=files)
+        ignored = [w for w in warnings if w["reason"] == "type-mismatch-ignored"
+                   and (w["key"] in ("routing", "routing.user_policy") or w["key"].startswith("routing.user_policy."))]
+        if ignored:  # a malformed routing value is dropped by the merge: it may have been a denial
+            raise ValueError(f"{ignored[0]['tier']} config {ignored[0]['key']} has the wrong type "
+                             f"(expected {ignored[0]['expected']}, got {ignored[0]['got']})")
+        policy = route_policy.user_policy(effective)
+        _POLICY_CACHE.clear()
+        _POLICY_CACHE[cache_key] = policy
+    return [policy] if policy["denied"] or policy["overkill"] or policy["ceilings"] else []
+
+
+def required_user_policies(repo_root=None) -> list[dict]:
+    """`live_user_policies`, refusing when the config cannot be read: a route the
+    unreadable policy might deny is never offered, declared or discovered."""
+    try:
+        return live_user_policies(repo_root)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise state.Refused("policy-unreadable", f"the user or repo routing policy cannot be read ({exc})",
+                            next_step="fix the config (office config --user / --repo) and retry") from exc
+
+
+def current_user_policies(repo_root=None) -> list[dict]:
+    """`live_user_policies`, or [] when the config cannot be read: an unreadable
+    config already stops `office` elsewhere."""
+    try:
+        return live_user_policies(repo_root)
+    except (OSError, ValueError, yaml.YAMLError):
+        return []
 
 
 def role_policy(config: dict, role: str) -> dict:
@@ -294,35 +430,75 @@ def below_family_floor(model_id: str | None, floors: dict | None) -> str | None:
     return None
 
 
+def _probe_view(rec: dict | None) -> dict | None:
+    if not rec:
+        return None
+    return {"result": rec.get("result"), "reason_class": rec.get("reason_class"), "detail": rec.get("detail"),
+            "probed_at": rec.get("probed_at"), "fresh": True, "attempt_id": rec.get("attempt_id")}
+
+
 def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
                      family_floors: dict | None = None,
-                     quota_snapshot: dict[str, dict] | None = None) -> tuple[list[dict], list[dict]]:
-    """Return (candidates, skipped). `skipped` explains unavailable harnesses
-    and rows under a model_family_floors entry."""
+                     quota_snapshot: dict[str, dict] | None = None,
+                     discovery: dict | None = None,
+                     user_policies: list[dict] | None = None) -> tuple[list[dict], list[dict]]:
+    """Return (candidates, skipped). Every active catalog row lands in exactly one of
+    them: `skipped` names each row that is not a candidate, with a `category`
+    (denied, not-eligible, untried, floor, not-installed, no-profile) and a reason.
+
+    `discovery` is the run's pinned `routing.discovery` settings when discovery
+    applies to this call (#494). Rows that are not dispatchable but are explicitly
+    discovery-eligible then become candidates carrying `route_status` and, when
+    `con` has one, the fresh exact probe record. They are never available routes;
+    routing keeps them out of the eligible slate. `user_policies` (default: the
+    user's current policy) removes denied routes; routing passes [] and rejects
+    denied routes itself, with the policy source, at stage 1.
+    """
+    from office import onboarding, route_probe
     kind = KIND_FOR_ROLE.get(role, "worker")
-    all_adapters = adapters.load_all()
-    candidates, skipped = [], []
+    sources = adapters.load_sources()
+    all_adapters = {aid: entry[0] for aid, entry in sources.items()}
+    policies = current_user_policies() if user_policies is None else user_policies
+    candidates, skipped, not_routable = [], [], []
+    free_models_allowed = onboarding.free_models_enabled()
     for row in catalog_rows():
         harness = row.get("invocation_harness")
         adapter = all_adapters.get(harness)
         label = f"{harness}/{row.get('model_id')}@{row.get('effort')}"
-        if row.get("dispatchable") is False:
+        state = route_policy.row_status(row)
+        is_free_model = route_policy.is_free_model(row)
+        if is_free_model and not free_models_allowed:
+            skipped.append({"candidate": label, "category": "free-model-opt-in",
+                            "reason": "free model excluded because user opt-in is disabled"})
+            continue
+        if row.get("status_reason"):
+            state = {**state, "reason": row["status_reason"]}
+        if row.get("dispatchable") is False and not (discovery and state["discovery_eligible"]):
+            if state["discovery_eligible"]:
+                not_routable.append({"candidate": label, "category": "untried",
+                                     "reason": "discovery-eligible but discovery is off for this role or run: "
+                                               + state["reason"]})
+            else:
+                not_routable.append({"candidate": label, "category": "not-eligible",
+                                     "reason": f"not a candidate: {state['reason']}"})
             continue
         floor = below_family_floor(row.get("model_id"), family_floors)
         if floor:
-            skipped.append({"candidate": label, "reason": f"below model family floor {floor}"})
+            skipped.append({"candidate": label, "category": "floor", "reason": f"below model family floor {floor}"})
             continue
         if not adapter or not adapters.profile(adapter, kind):
-            skipped.append({"candidate": label, "reason": f"no {kind} launch profile"})
+            skipped.append({"candidate": label, "category": "no-profile", "reason": f"no {kind} launch profile"})
             continue
         if not adapters.installed(adapter):
-            skipped.append({"candidate": label, "reason": f"{harness} not installed"})
+            skipped.append({"candidate": label, "category": "not-installed", "reason": f"{harness} not installed"})
             continue
-        version = adapters.harness_version(adapter) or "unknown"
+        version = adapters.route_version(harness, adapter, sources)
         cand = {
             "harness": harness,
             "harness_version": version,
             "model_id": row.get("model_id"),
+            "lineage_key": row.get("lineage_key"),
+            "generation_version": row.get("generation_version"),
             "invocation_model_id": row.get("invocation_model_id") or row.get("model_id"),
             "invocation_source": row.get("invocation_source"),
             "effort": row.get("effort"),
@@ -334,11 +510,28 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
             "cost": _cost(row),
             "price_fields": row.get("price_fields") or {},
             "speed_fields": row.get("speed_fields") or {},
+            "route_status": state["status"], "status_reason": state["reason"],
+            "free_model": is_free_model,
+            "discovery": state["discovery_eligible"], "probe_key": None,
         }
+        if row.get("alias_resolved_to"):
+            cand["alias_resolved_to"] = row["alias_resolved_to"]
+        denied = next((why for pol in policies if (why := route_policy.is_denied(cand, pol))), None)
+        if denied:
+            skipped.append({"candidate": label, "category": "denied", "reason": denied})
+            continue
+        if state["discovery_eligible"]:
+            cand["probe_key"] = route_probe.key(cand, adapter)
+            fresh = route_probe.status(con, cand, adapter=adapter, ttl_days=discovery["probe_ttl_days"],
+                                       timeout_s=discovery["probe_timeout_s"]) if con is not None else None
+            cand["probe"] = _probe_view(fresh)
+            refined = route_policy.row_status(row, fresh)
+            cand["route_status"], cand["status_reason"] = refined["status"], refined["reason"]
         if kind == "vision" and vision_proven(con, cand, adapter):
             cand["capabilities"] = sorted(set(cand["capabilities"]) | {"vision"})
         cand["quota"] = {"status": "unknown", "tightest_remaining_percent": None}
         candidates.append(cand)
+    skipped.extend(not_routable)
     if quota_snapshot is not None:
         for c in candidates:
             c["quota"] = quota_snapshot.get(c["adapter_id"], c["quota"])
@@ -399,7 +592,8 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
     registry, trust, and floors, but still resolves through the catalog when a
     row matches, so `agy/gemini-3.8-flash@medium` invokes the combined slug
     `gemini-3.8-flash-medium` the harness actually accepts."""
-    from office.state import Usage
+    from office import onboarding
+    from office.state import Refused, Usage
     adapter = adapters.load_all().get(harness)
     if adapter is None:
         raise Usage("unknown-harness", f"--as names harness {harness!r}, which has no adapter",
@@ -411,9 +605,34 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
     # A row named exactly what the user typed beats an alias that invokes it.
     rows.sort(key=lambda r: r.get("model_id") != model)
     row = rows[0] if len(rows) == 1 or (rows and effort) else None
+    # Only a route the catalog does not know at all can be judged by its slug; any catalog
+    # match, even an ambiguous one, keeps the catalog's answer.
+    named_free = not rows and route_policy.is_explicit_free_slug(harness, model)
+    # An ambiguous match (several rows, no effort) is free if any matching row is, so an
+    # omitted effort cannot step around the opt-in.
+    free_model = (route_policy.is_free_model(row) if row is not None
+                  else any(route_policy.is_free_model(r) for r in rows)) or named_free
+    if free_model and not onboarding.free_models_enabled():
+        why = "names itself free" if named_free else "is marked free"
+        raise Refused("free-model-opt-in", f"{harness}/{model} {why} and requires explicit opt-in",
+                      next_step="office onboard --enable-free-models")
+    # A user-denied route is not selectable by any manual route either (--as, --review-as,
+    # amend route). Overkill is automatic-only and never blocks a declared route (#494).
+    named = {"harness": harness, "model_id": (row or {}).get("model_id") or model,
+             "invocation_model_id": (row or {}).get("invocation_model_id") or model,
+             "alias_resolved_to": (row or {}).get("alias_resolved_to"),
+             "effort": effort or (row or {}).get("effort") or "none",
+             "lineage_key": (row or {}).get("lineage_key"),
+             "generation_version": (row or {}).get("generation_version")}
+    for policy in required_user_policies():
+        denied = route_policy.is_denied(named, policy)
+        if denied:
+            raise state.Refused("route-denied", denied, next_step=(
+                f"it stays denied until you change the policy: office config routing.user_policy.denied_models "
+                f"--user (or --repo) to remove {harness}/{model}"))
     return {
         "harness": harness,
-        "harness_version": adapters.harness_version(adapter) or "unknown",
+        "harness_version": adapters.route_version(harness, adapter),
         "model_id": (row or {}).get("model_id") or model,
         "invocation_model_id": (row or {}).get("invocation_model_id") or model,
         "invocation_source": "user-override",
@@ -426,18 +645,36 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
         "cost": _cost(row or {}),
         "price_fields": (row or {}).get("price_fields") or {},
         "speed_fields": (row or {}).get("speed_fields") or {},
+        "free_model": free_model,
         "quota": {"status": "unknown", "tightest_remaining_percent": None},
         "override": True,
     }
 
 
-def declared_decision(text: str, *, flag: str = "--as") -> dict:
-    """A routing decision for a user-declared `harness/model[@effort]`."""
-    from office.state import Usage
+def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
+                      config: dict | None = None) -> dict:
+    """A routing decision for a user-declared `harness/model[@effort]`.
+
+    A user override bypasses the registry, trust and floors, but not what the
+    harness can do: with `role`, the declared route must satisfy that role's
+    `required_capabilities` (the same gate routed candidates clear at selection),
+    so a builder-only harness is never dispatched as a planner or reviewer."""
+    from office.state import Refused, Usage
     want = parse_route_override(text)
     if not want["harness"] or not want["model_id"]:
         raise Usage("invalid-override", f"{flag} {text!r}: expected <harness>/<model>[@effort]")
     cand = declared_candidate(want["harness"], want["model_id"], want["effort"])
+    if role:
+        required = set(role_policy(config or {}, role).get("required_capabilities") or [])
+        missing = sorted(required - set(cand.get("capabilities") or []))
+        if missing:
+            raise Refused(
+                "capability-missing",
+                f"{flag} {text!r}: {want['harness']} declares capabilities {cand.get('capabilities') or []}, "
+                f"which lacks {missing} that role {role} requires",
+                scope=role,
+                next_step=f"use a route whose harness declares {', '.join(missing)} for {role}",
+            )
     triple = routing.candidate_id(cand)
     return {"status": "selected", "selected": triple, "candidate": cand, "override": True,
             "selection_disclosure": {"triple": triple, "reason": f"user override ({flag} {text})", "override": True},
@@ -486,6 +723,12 @@ def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str,
     from office.util import sha256_obj
     s = config.get("routing") or {}
     adaptive_cfg = s.get("adaptive") or {}
+    ceiling = None
+    if route_policy.PROVENANCE_KEY in config:
+        # A #494-era run: only a user-set ceiling is hard, and its source is disclosed. A run
+        # pinned before provenance existed keeps its own ceiling (or the old default) untouched.
+        ceiling = route_policy.budget_ceiling(config)
+        adaptive_cfg = {**adaptive_cfg, "budget_ceiling_usd": ceiling["usd"]}
     context = {"role": role, "playbook": run.get("playbook"), "size_class": (run.get("risk") or {}).get("size_class"),
                "gear": run.get("gear"), "dispatch_kind": dispatch_kind}
     task = state.get_task(con, run["id"], task_id) if task_id and run.get("id") else None
@@ -500,6 +743,7 @@ def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str,
     explored = con.execute("SELECT COUNT(*) FROM route_audit WHERE run_id=? AND role=? AND explored=1",
                            (run.get("id"), role)).fetchone()[0]
     return {
+        **({"budget_ceiling": ceiling} if ceiling else {}),
         "context": context, "evidence": evidence, "adaptive_config": adaptive_cfg,
         "learned_eligibility": route_learning.current_eligibility(con, role),
         "exploration_history": route_learning.recent_exploration(con, role),
@@ -509,21 +753,57 @@ def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str,
     }
 
 
+def discovery_inputs(con: sqlite3.Connection, run: dict, role: str, candidates: list[dict], settings: dict) -> dict:
+    """The recorded, replayable inputs the discovery allocation reads (#494): caps by
+    read-only count, task risk, and which routes are known-working (proven or
+    learned-eligible) or quarantined. `routing.route` stays offline."""
+    from office import route_learning, route_probe, scoring
+    scoring.ensure_trust_schema(con)
+    learned = route_learning.current_eligibility(con, role)
+    known, quarantined = [], []
+    for c in candidates:
+        cid = routing.candidate_id(c)
+        _, trust = scoring.evaluate_trust_state(con, cid)
+        if trust == "quarantined":
+            quarantined.append(cid)
+        elif c.get("route_status", "available") == "available" and (
+                trust == "proven" or (learned.get(route_learning.candidate_key(c)) or {}).get("state") == "learned-eligible"):
+            known.append(cid)
+    risk = run.get("risk") or {}
+    return {"settings": settings, "allocation": route_probe.allocation(con, run.get("id"), settings),
+            "known_working": sorted(known), "quarantined": sorted(quarantined),
+            "risk": {"size_class": risk.get("size_class"), "blast_radius": risk.get("blast_radius"),
+                     "irreversible": bool(risk.get("irreversible"))}}
+
+
 def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                task_id: str | None = None, override: str | None = None,
                exclude: set[str] | None = None, probe: bool = True, exact: str | None = None,
                dispatch_kind: str = "fresh", wave_load: dict | None = None, pending_explorations: int = 0,
                quota_snapshot: dict[str, dict] | None = None,
-               quota_event_seen: set[str] | None = None) -> dict:
+               quota_event_seen: set[str] | None = None, discovery_input: dict | None = None,
+               manual: bool = False, declared: str | None = None) -> dict:
     """Build the request and route. Returns the routing result plus request.
+    `declared` is a user-declared route identity that passes unverified adapter trust.
+    `discovery_input` is the dispatch preflight's recompute handle (#494); a manual
+    `override` or a non-builder role never discovers. `manual` marks a recorded
+    declared route being re-qualified: like `override` it is exempt from overkill
+    rules, but it keeps the ordinary candidate set, floors and discovery inputs.
     `exact` keeps only the candidate with that route identity (harness@major/model@effort).
     Executor and worker requests carry the adaptive inputs (#300); `wave_load`
     counts routes already planned for other tasks of the same wave."""
+    from office import onboarding
+
+    live = required_user_policies(run.get("repo_root"))
     policy_cfg = role_policy(config, role)
     # An explicit --route names its model, so it is not held to the family floor.
     floors = None if override else config.get("model_family_floors")
+    settings = route_policy.discovery_settings(config)
+    discovering = bool(settings["enabled"] and role in settings["roles"] and role in routing.ADAPTIVE_ROLES
+                       and not override)
     candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors,
-                                           quota_snapshot=quota_snapshot)
+                                           quota_snapshot=quota_snapshot,
+                                           discovery=settings if discovering else None, user_policies=[])
     seed = None if override else _preferred_seed(policy_cfg, run)
     for entry in seed or []:
         if not any(routing.preferred_rank(c, [entry]) is not None for c in candidates):
@@ -580,6 +860,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "policy": policy,
         "preferred_seed": seed,
         "cost_policy": cost_policy,
+        "allow_free_models": onboarding.free_models_enabled(),
         "allow_advisory_undercut": bool(gear.get("allow_advisory_undercut", True)),
         "runs_db": str(paths.runs_db()),
         "run_id": run.get("id"),
@@ -588,10 +869,25 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "benchmark_snapshot": snapshot,
         "candidates": candidates,
     }
+    if declared:
+        request["declared_route"] = declared
+    if exact:
+        request["exact_route"] = exact
     if role in routing.ADAPTIVE_ROLES:
         request.update(adaptive_inputs(con, config, run, role, candidates, task_id=task_id,
                                        dispatch_kind=dispatch_kind, plan_version=run.get("plan_version"),
                                        wave_load=wave_load, pending_explorations=pending_explorations))
+    if discovering:
+        request["discovery"] = discovery_inputs(con, run, role, candidates, settings)
+        if discovery_input:
+            request["discovery_input"] = discovery_input
+    policies = [pol for pol in (route_policy.user_policy(config), *live)
+                if pol["denied"] or pol["overkill"] or pol["ceilings"]]
+    if policies:
+        request["user_policies"] = policies
+        request["size_class"] = (run.get("risk") or {}).get("size_class")
+        if override or manual:
+            request["manual_route"] = True
     result = routing.route(request)
     result["benchmark_snapshot"] = snapshot
     result["skipped"] = skipped

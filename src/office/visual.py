@@ -20,9 +20,11 @@ import os
 import re
 import shlex
 import signal
+import socket
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -37,6 +39,7 @@ PRESENTATION = ("*.css", "*.scss", "*.sass", "*.less", "*.html", "*.htm", "*.jsx
                 "*.ttf", "*.otf", "*.liquid", "*.hbs", "*.ejs", "*.erb", "*.lava", "*.njk", "*.twig")
 UI_WORDS = re.compile(r"\b(ui|layout|responsive|mobile|desktop|viewport|on.?screen|visual(ly)?|prototype|pixel|css|"
                       r"styling|button|click|tap|menu|modal|navbar|navigation|hover|dark mode|breakpoint)\b", re.I)
+ALLOWED_VERBS = frozenset({"click", "hover", "type", "wait", "scroll", "navigate"})
 
 
 # ------------------------------------------------------------------ applicability
@@ -148,6 +151,23 @@ def capture_backend_missing() -> str | None:
     return None
 
 
+def validate_navigate(base_url: str, arg: str, allow_remote_preview: bool = False, reference: bool = False) -> tuple[str | None, str | None]:
+    target = urllib.parse.urljoin(base_url, arg)
+    parsed = urllib.parse.urlsplit(target)
+    if reference:
+        base_parsed = urllib.parse.urlsplit(base_url)
+        if parsed.scheme != base_parsed.scheme or parsed.netloc != base_parsed.netloc:
+            return None, f"navigate leaves reference origin: {target}"
+        return target, None
+    if parsed.scheme.lower() in ("file", "data", "javascript"):
+        return None, f"navigate target {target} scheme {parsed.scheme}: is forbidden"
+    if parsed.scheme.lower() not in ("http", "https"):
+        return None, f"navigate target {target} is not an http(s) url"
+    if not LOCAL_ORIGIN.match(target) and not allow_remote_preview:
+        return None, f"navigate target {target} is not a local/test origin"
+    return target, None
+
+
 def preflight(tasks: list[dict]) -> tuple[list[str], list[str]]:
     """(errors, warnings) for visual blocks the capture step could never
     satisfy. Found at plan submit, not after an executor has done the work (#211)."""
@@ -157,7 +177,8 @@ def preflight(tasks: list[dict]) -> tuple[list[str], list[str]]:
         url = spec.get("url")
         if spec.get("none") or not url:
             continue
-        if not LOCAL_ORIGIN.match(url) and not spec.get("allow_remote_preview"):
+        allow_remote = bool(spec.get("allow_remote_preview"))
+        if not LOCAL_ORIGIN.match(url) and not allow_remote:
             errors.append(f"{t['id']}: visual url {url} is not a local/test origin; capture only runs against local "
                           "servers (serve it locally with `start:`, or set `allow_remote_preview: yes` for a preview)")
         elif not spec.get("start"):
@@ -165,6 +186,15 @@ def preflight(tasks: list[dict]) -> tuple[list[str], list[str]]:
             if problem and problem.startswith("not reachable"):
                 errors.append(f"{t['id']}: visual url {url} is {problem} and the block has no `start:`; add "
                               "`start: <command that serves the app from the worktree>`, or start the server first")
+        for st in states(spec):
+            for step in st.get("steps") or []:
+                verb = step.get("verb", "")
+                if verb and verb not in ALLOWED_VERBS:
+                    errors.append(f"{t['id']}: visual state '{st['name']}' uses unknown verb '{verb}'")
+                elif verb == "navigate":
+                    _, err = validate_navigate(url, step.get("arg", ""), allow_remote_preview=allow_remote)
+                    if err:
+                        errors.append(f"{t['id']}: visual state '{st['name']}' invalid navigate: {err}")
     if any(not (t.get("visual") or {}).get("none") and (t.get("visual") or {}).get("url") for t in tasks):
         missing = capture_backend_missing()
         if missing:
@@ -245,6 +275,179 @@ def _wait_url(url: str, timeout: float) -> str | None:
     return f"not reachable: {last}"
 
 
+def _capture_port_conflict(url: str, con, run: dict, worktree: Path) -> str | None:
+    """Diagnose a bound local capture port before launching a second server (#507).
+
+    Never kill based solely on a matching cwd or port: unrelated local services
+    may share a worktree. A human can verify and stop the named process.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+        return None
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        with socket.create_connection((parsed.hostname, port), timeout=0.3):
+            pass
+    except (OSError, ValueError):
+        return None
+    pids: list[int] = []
+    try:
+        probe = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"],
+                               capture_output=True, text=True, timeout=3)
+        if probe.returncode == 0:
+            pids = sorted({int(line[1:]) for line in probe.stdout.splitlines()
+                           if line.startswith("p") and line[1:].isdigit()})
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if len(pids) != 1:
+        return (f"port {port} is already bound before visual capture; "
+                f"inspect its owner: lsof -nP -iTCP:{port} -sTCP:LISTEN; "
+                "stop the prior dev server before re-running capture")
+    pid = pids[0]
+    command = "unknown"
+    cwd = None
+    try:
+        ps = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                            capture_output=True, text=True, timeout=3)
+        if ps.returncode == 0:
+            command = Path((ps.stdout or "unknown").strip().splitlines()[0]).name[:100]
+        info = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                              capture_output=True, text=True, timeout=3)
+        if info.returncode == 0:
+            cwd = next((line[1:] for line in info.stdout.splitlines() if line.startswith("n")), None)
+    except (OSError, subprocess.SubprocessError, IndexError):
+        pass
+    owner = _office_leftover(con, run, pid)
+    if owner and owner.get("dispatch_id") and not owner.get("blocked"):
+        freed = _reclaim_leftover(owner, parsed.hostname, port)
+        _record_reclaim(con, run, owner, pid, command, port, freed)
+        if freed:
+            return None
+        return (f"port {port} is bound by PID {pid} ({command}), a leftover of ended executor dispatch "
+                f"{owner['dispatch_id']} (its agent process group {owner['pgid']}); Office signalled that group but "
+                f"the port is still bound; stop it by hand: kill -TERM -{owner['pgid']}; then retry visual capture")
+    if owner and owner.get("blocked"):
+        return (f"port {port} is bound by PID {pid} ({command}), a leftover of ended executor dispatch "
+                f"{owner['dispatch_id']}; not stopped because {owner['blocked']}; stop it when safe: "
+                f"kill -TERM -{owner['pgid']}; then retry visual capture")
+    possible = False
+    if cwd and Path(cwd).resolve() == worktree.resolve():
+        prior = con.execute("SELECT 1 FROM dispatches WHERE run_id=? AND worktree=? "
+                            "AND role='executor' AND ended_at IS NOT NULL LIMIT 1",
+                            (run["id"], str(worktree))).fetchone()
+        possible = bool(prior)
+    origin = ("possibly from an ended Office executor dispatch in this worktree"
+              if possible else "ownership by an Office dispatch is not proven")
+    return (f"port {port} is already bound by PID {pid} ({command}); {origin}; "
+            f"after confirming the process is safe to stop, run: kill {pid}; then retry visual capture")
+
+
+def _epoch(stamp: str | None) -> float | None:
+    """A `ps -o lstart` or ISO timestamp as epoch seconds, or None."""
+    if not stamp:
+        return None
+    for fmt in ("%a %b %d %H:%M:%S %Y", "%a %d %b %H:%M:%S %Y"):  # ps orders day and month by locale
+        try:
+            return time.mktime(time.strptime(stamp, fmt))
+        except ValueError:
+            pass
+    try:
+        from office.util import parse_iso
+        return parse_iso(stamp).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _office_leftover(con, run: dict, pid: int) -> dict | None:
+    """The ended executor dispatch whose agent left `pid` behind, or None (#507).
+
+    Proof, not a guess: the listener's process group is the agent group Office
+    recorded for that dispatch (`agent.pgid`, headless or Herdr pane), and the
+    listener started while that dispatch ran. A process group id is not reused
+    while any member lives, so a listener in group G that started while the
+    agent led G is that agent's descendant. When the group's leader still runs,
+    its start time must equal the one recorded at launch (`agent.identity`). A
+    pane dispatch without that record is never matched, nor one whose pane is
+    still open while its leader runs. A leftover is not
+    stopped while a live executor works in the same worktree.
+    """
+    from office.util import process_start
+    try:
+        pgid = os.getpgid(pid)
+    except OSError:
+        return None
+    started = _epoch(process_start(pid))
+    if started is None or pgid <= 1 or pgid in (os.getpgrp(), os.getpid()):
+        return None
+    for d in con.execute("SELECT id, worktree, started_at, ended_at, launcher, pane_closed_at FROM dispatches "
+                         "WHERE run_id=? AND role='executor' AND ended_at IS NOT NULL ORDER BY started_at DESC",
+                         (run["id"],)).fetchall():
+        ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+        try:
+            recorded = int((ddir / "agent.pgid").read_text().strip())
+        except (OSError, ValueError):
+            continue
+        if recorded != pgid:
+            continue
+        try:
+            ident = json.loads((ddir / "agent.identity").read_text())
+        except (OSError, ValueError):
+            ident = None
+        herdr = d["launcher"] == "herdr"
+        if herdr and not (ident and ident.get("pid") == recorded and ident.get("start")):
+            continue
+        leader_start = process_start(recorded) if ident and ident.get("pid") == recorded else None
+        if leader_start not in (None, ident and ident.get("start")):
+            continue  # the leader runs but is another process than the one Office launched
+        if herdr and leader_start is not None and d["pane_closed_at"] is None:
+            continue  # the harness still runs in a pane the orchestrator can read
+        lo, hi = _epoch(d["started_at"]), _epoch(d["ended_at"])
+        if lo is None or hi is None or not (lo - 1 <= started <= hi + 1):
+            continue
+        owner = {"dispatch_id": d["id"], "pgid": pgid, "worktree": d["worktree"]}
+        live = con.execute("SELECT id FROM dispatches WHERE run_id=? AND role='executor' AND worktree=? "
+                           "AND ended_at IS NULL AND status IN ('launching','running') LIMIT 1",
+                           (run["id"], d["worktree"])).fetchone()
+        if live:
+            owner["blocked"] = f"executor dispatch {live['id']} is live in the same worktree"
+        return owner
+    return None
+
+
+def _port_bound(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
+def _reclaim_leftover(owner: dict, host: str, port: int, wait: float = 5.0) -> bool:
+    """Stop a proven leftover agent process group; True once the port is free."""
+    pgid = owner["pgid"]
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except OSError:
+            break  # the group is gone
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            if not _port_bound(host, port):
+                return True
+            time.sleep(0.1)
+    return not _port_bound(host, port)
+
+
+def _record_reclaim(con, run: dict, owner: dict, pid: int, command: str, port: int, freed: bool) -> None:
+    from office import db, state
+    with db.transaction(con):
+        state.emit(con, run, "visual.reclaimed", f"stopped leftover {command} (PID {pid}, process group {owner['pgid']}) "
+                   f"holding port {port}: started by ended executor dispatch {owner['dispatch_id']}"
+                   + ("" if freed else "; the port is still bound"), audience="runtime",
+                   dispatch_id=owner["dispatch_id"],
+                   payload={"pid": pid, "pgid": owner["pgid"], "port": port, "command": command, "freed": freed})
+
+
 def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Path) -> dict:
     from office.submit import matches_revision, restore_tracked_paths
     spec = task["visual"]
@@ -259,6 +462,15 @@ def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Pat
         return {"evidence_status": "CAPTURE_BLOCKED",
                 "cause": f"{url} is not a local/test origin; capture is limited to authorized local and preview environments",
                 "product_failures": []}
+    if spec.get("start"):
+        from office import shell_safety
+        if shell_safety.unsafe_manual_push(spec["start"]):
+            return {"evidence_status": "CAPTURE_BLOCKED",
+                    "cause": "visual.start contains an unowned manual Git push; use Office-owned task PR sync",
+                    "product_failures": []}
+        conflict = _capture_port_conflict(url, con, run, worktree)
+        if conflict:
+            return {"evidence_status": "CAPTURE_BLOCKED", "cause": conflict, "product_failures": []}
     server = None
     server_log = None
     server_started = False
@@ -410,9 +622,17 @@ def _capture_frames(browser, url: str, spec: dict, evdir: Path, ref: Path | None
     frames = []
     env = {"browser": browser.version, "engine": "chromium"}
     for vname, w, h in viewports(spec):
+        default_shot_hash = None
         for st in states(spec):
             frame = {"viewport": f"{vname} {w}x{h}", "state": st["name"], "failures": []}
             frame.update(_capture_one(browser, url, w, h, st, selectors, evdir, f"{vname}-{st['name']}", spec))
+            shot_path = frame.get("screenshot")
+            shot_hash = sha256_file(Path(shot_path)) if shot_path and Path(shot_path).is_file() else None
+            if st["name"] == "default":
+                default_shot_hash = shot_hash
+            elif default_shot_hash and shot_hash == default_shot_hash and not frame.get("invalid"):
+                frame["cause"] = "capture"
+                frame["invalid"] = f"state '{st['name']}' screenshot identical to default"
             if ref is not None and not frame.get("invalid"):
                 if ref.suffix.lower() in (".html", ".htm"):
                     r = _capture_one(browser, ref.as_uri(), w, h, st, selectors, evdir, f"ref-{vname}-{st['name']}", spec,
@@ -427,6 +647,19 @@ def _capture_frames(browser, url: str, spec: dict, evdir: Path, ref: Path | None
     return {"frames": frames, "environment": env}
 
 
+def _invalid_probe_selector(page, selectors: list[str]) -> dict | None:
+    """Check selectors with the DOM's plain-CSS parser, not Playwright's selector engine (#574)."""
+    if not selectors:
+        return None
+    return page.evaluate("""(selectors) => {
+      for (const selector of selectors) {
+        try { document.querySelector(selector); }
+        catch (error) { return {selector, detail: String(error.message || error).slice(0, 160)}; }
+      }
+      return null;
+    }""", selectors)
+
+
 def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference=False) -> dict:
     from playwright.sync_api import Error as PWError
     ctx = browser.new_context(viewport={"width": w, "height": h}, device_scale_factor=1)
@@ -435,22 +668,49 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
     page.on("pageerror", lambda e: errors.append(str(e)[:200]))
     out: dict = {}
     try:
+        target_url = url
+        for step in st["steps"]:
+            if step["verb"] == "navigate":
+                target_url, nav_err = validate_navigate(
+                    url, step["arg"],
+                    allow_remote_preview=bool(spec.get("allow_remote_preview")),
+                    reference=reference,
+                )
+                if nav_err:
+                    return {"cause": "spec", "invalid": f"state '{st['name']}' invalid navigate: {nav_err}"}
+                break
         try:
-            resp = page.goto(url, wait_until="networkidle", timeout=45000)
+            resp = page.goto(target_url, wait_until="networkidle", timeout=45000)
         except PWError as exc:
             return {"invalid": f"page did not settle at {w}x{h}: {str(exc)[:120]}"}
+        out["url"] = page.url or target_url
         if resp is not None and resp.status >= 400 and not reference:
-            out["failures"] = [{"location": f"{url} @ {w}x{h}", "summary": f"page returned HTTP {resp.status}",
+            out["failures"] = [{"location": f"{target_url} @ {w}x{h}", "summary": f"page returned HTTP {resp.status}",
                                 "action": "the route must load", "measurement": "method: http"}]
         try:
             page.evaluate("document.fonts ? document.fonts.ready.then(() => true) : true")
         except PWError:
             pass
+        bad = _invalid_probe_selector(page, selectors)
+        if bad:
+            return {"cause": "spec", "invalid":
+                    f"visual selectors: accepts plain CSS only; selector {bad['selector']!r} is invalid: {bad['detail']}"}
         auth = (spec.get("auth") or "").strip()
         if auth and not reference and page.query_selector(auth) is None:
             return {"invalid": f"wrong authenticated state: {auth} not present at {w}x{h}"}
         for step in st["steps"]:
+            if step["verb"] == "navigate":
+                continue
             target = step["arg"]
+            if step["verb"] in ("click", "hover", "type"):
+                sel = target.partition(" ")[0] if step["verb"] == "type" else target
+                try:
+                    if page.query_selector(sel) is None:
+                        return {"cause": "spec",
+                                "invalid": f"selector '{sel}' absent from page in state '{st['name']}'"}
+                except PWError as exc:
+                    return {"cause": "spec",
+                            "invalid": f"selector '{sel}' query failed in state '{st['name']}': {str(exc)[:120]}"}
             try:
                 if step["verb"] == "click":
                     page.click(target, timeout=8000)
@@ -466,8 +726,10 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
             except PWError as exc:
                 if reference:
                     return {"invalid": f"reference cannot reach state {st['name']}: {str(exc)[:100]}"}
+                lines = str(exc).splitlines()
+                err_line = lines[0][:120] if lines else str(exc)[:120]
                 return {"failures": [{"location": f"{target} @ {w}x{h} state {st['name']}",
-                                      "summary": f"interaction '{step['verb']} {target}' failed: {str(exc).splitlines()[0][:120]}",
+                                      "summary": f"interaction '{step['verb']} {target}' failed: {err_line}",
                                       "action": "the intended interaction must work", "measurement": "method: dom"}]}
             page.wait_for_timeout(400)
         if st.get("expect") and page.query_selector(st["expect"]) is None:

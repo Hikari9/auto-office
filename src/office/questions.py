@@ -12,6 +12,9 @@ A question is one of:
   but the pane text did not parse as a list;
 - `text`: the agent ended its turn on a plain-text question (its last message ends in `?`).
 
+An executor can also stop on purpose with `office raise` (raising.py); its open raises are listed and
+answered through the same `wait`/`status`/`answer` surface.
+
 Protocol: the orchestrator answers on its own judgement (planning, scope, ordering, test
 detail) and takes a question to the user only when it hints at a user decision
 (requirements, authority, an irreversible or external action).
@@ -37,7 +40,7 @@ TAIL_LINES = 60
 PROTOCOL = ("answer it yourself (planning, scope, ordering, test detail); ask the user only if it is a "
             "user decision (requirements, authority, irreversible or external action)")
 
-_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[@-_]")
+_ANSI = dispatch._CSI  # the one ANSI stripper (CSI, OSC, two-byte escapes)
 # Footer lines a selection widget shows while it waits for a choice. Claude:
 # "Enter to select · Tab/Arrow keys to navigate · Esc to cancel"; codex: "Press enter
 # to confirm or esc to cancel"; agy: "Waiting for user confirmation".
@@ -185,10 +188,34 @@ _NEXT = re.compile(r"\bNEXT=(.+)$")
 # decide...) or names a question id together with an answer/approval/decision ("await
 # orchestrator answer to Q1", "need approval on Q1"). A bare id ("Q1 was resolved") does not.
 _ASK_WORD = r"(?:answer|approv(?:e|al)|authori[sz](?:e|ation)|confirm(?:ation)?|decid(?:e|ing)|decision|choose|choice|tell me|reply)"
-_ASKS = re.compile(r"^\W*" + _ASK_WORD + r"\b|\b" + _ASK_WORD + r"\b[^;]*\bQ\d+\b|\bQ\d+\b[^;]*\b" + _ASK_WORD + r"\b",
-                   re.I)
+# Waiting on a question id asks too; applying an answer or decision already given does not.
+_WAITING = r"(?:await(?:ing|s)?|wait(?:ing|s)?\s+(?:on|for)|needs?|blocked\s+(?:on|until|by)|pending)"
+_QID = r"\bQ\d+\b"
+_NEEDED = r"(?:(?:an?|your|the|a\s+final)\s+)?(?:answer|approval|decision|confirmation|reply|choice)"
+_ASKS = re.compile("|".join([
+    r"^\W*" + _ASK_WORD + r"\b",                                                   # "Answer Q1 ..."
+    r"\bplease\s+" + _ASK_WORD + r"\b[^;]*" + _QID,                                # "please answer Q1"
+    _QID + r"[^;]*\bplease\s+" + _ASK_WORD + r"\b",                                # "Q1: please answer"
+    # second person or the orchestrator as subject; a worker's own plan ("will confirm Q1 fix") is not an ask
+    r"\b(?:can|could|would|will)\s+you\s+" + _ASK_WORD + r"\b[^;]*" + _QID,  # "can you answer Q1"
+    r"\b(?:you|orchestrator|office|user)\s+(?:should|can|could|must|will|would)\s+" + _ASK_WORD + r"\b[^;]*" + _QID,
+    r"\b(?:to|get|need|needs|request(?:ing|s|ed)?|requires?)\s+" + _NEEDED + r"\b[^;]*" + _QID,  # "get approval for Q3"
+    r"\b(?:orchestrator|office|you|user)\s+to\s+" + _ASK_WORD + r"\b[^;]*" + _QID,  # "orchestrator to answer Q1"
+    _QID + r"[^;]*\b(?:needs?|requires?|" + _WAITING + r"|awaiting)\s+" + _NEEDED + r"\b",  # "Q1 is awaiting a decision"
+    r"\b" + _WAITING + r"\b[^;]*" + _QID,                                           # "waiting on Q1"
+]), re.I)
+# A negated need or wait reports progress ("no longer waiting on Q1", "Q1 doesn't need an answer",
+# "nothing pending on Q1", "need nothing on Q1"); it is removed before matching.
+_NEGATED = re.compile(r"\b(?:no\s+longer|not(?!\s+only\b)|no|nothing|doesn'?t|does\s+not|don'?t|do\s+not|isn'?t"
+                      r"|is\s+not)\s+(?:\w+\s+)?(?:" + _WAITING + r"|need|needs|requires?)\b|\b(?:needs?|" + _WAITING + r")\s+nothing\b",
+                      re.I)
 _QUESTION_LINE = re.compile(r"\bQ\d+\b|\bquestion\b", re.I)
 ENDED_PREFIX = "worker ended on a question: "
+
+
+def _asks(nxt: str | None) -> bool:
+    """Whether a closing NEXT asks the orchestrator something; a negated wait is removed first."""
+    return bool(nxt) and bool(_ASKS.search(_NEGATED.sub(" ", nxt)))
 
 
 def final_question(text: str | None) -> dict | None:
@@ -199,7 +226,7 @@ def final_question(text: str | None) -> dict | None:
     if not lines:
         return None
     nxt = next((m.group(1).strip() for ln in reversed(lines[-6:]) if (m := _NEXT.search(ln))), None)
-    if not ((nxt and _ASKS.search(nxt)) or lines[-1].endswith("?")):
+    if not (_asks(nxt) or lines[-1].endswith("?")):
         return None
     # The latest question wins: a log can echo the prompt or an earlier, answered turn.
     asked = next((ln for ln in reversed(lines) if "?" in ln and _QUESTION_LINE.search(ln)), None) \
@@ -249,10 +276,11 @@ def _who(d: dict) -> str:
 def answer_command(d: dict, q: dict) -> str:
     target = d["id"]
     if q.get("ended"):
-        # The session has ended: the answer travels as an amendment into the next session.
+        # The session has ended: the answer is recorded for the next session's brief, or travels as an amendment.
         t = d.get("task_id") or target
-        return (f'office amend {t} --contract -- "<delta>" if the answer changes scope or acceptance, else '
-                f'office amend {t} --no-review --reason "answer" -- "<answer>"; then office rerun {t} --resume|--fresh')
+        return (f'office answer {t} -- "<answer>"; if the answer changes scope or acceptance: '
+                f'office amend {t} --contract -- "<delta>" instead (else office amend {t} --no-review --reason "answer" '
+                f'-- "<answer>"); then office rerun {t} --resume|--fresh')
     if q["kind"] == "select" and q["options"]:
         return f'office answer {target} <1-{len(q["options"])}> (or office answer {target} -- "<text>")'
     return f'office answer {target} -- "<text>"'
@@ -319,19 +347,24 @@ def scan(con, run: dict) -> tuple[list[str], list[str], dict]:
         every.append(text)
         if _record(con, run, d, q, {"text": None}):
             new.append(text)
-    return new, every, acts
+    from office import raising, startup
+    fresh, open_ = raising.report(con, run)
+    s_fresh, s_open = startup.report(con, run)
+    return new + fresh + s_fresh, every + open_ + s_open, acts
 
 
 def recorded(con, run: dict) -> list[str]:
     """`question:` lines for questions `office wait` saw and nothing has answered or cleared,
-    on dispatches still live. Reads no pane, so `office status` stays cheap."""
+    on dispatches still live, plus every open raise and every worker that ended on a question (pane or
+    headless). Reads no pane, so `office status` stays cheap."""
     out = []
     for d in _live_pane_dispatches(con, run):
         last = _last(con, run["id"], d["id"])
         if last and last["kind"] == EVENT:
             out.append(line(d, json.loads(last["payload_json"] or "{}")))
     out += [line(d, q) for d, q in _ended_question_dispatches(con, run)]
-    return out
+    from office import raising, startup
+    return out + [raising.line(r) for r in raising.open_raises(con, run)] + startup.recorded(con, run)
 
 
 def _herdr_agents() -> list[dict] | None:
@@ -392,17 +425,62 @@ def _answer_timeout() -> float:
         return 10.0
 
 
-def answer(con, run: dict, target: str | None, text: str) -> Result:
+def _answer_ended(con, run: dict, d: dict, who: str, text: str) -> Result | None:
+    """Answer a worker that ended on a question (pane or headless): nothing is listening, so the answer is
+    recorded, the task stays blocked for `office rerun`, and the next session's brief carries it. None when
+    `d` did not end on a question."""
+    tid = d.get("task_id")
+    task = state.get_task(con, run["id"], tid) if tid else None
+    f = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "question.json"
+    if not (task and task["current_dispatch_id"] == d["id"] and task["status"] == "blocked"
+            and (task.get("pause_reason") or "").startswith(ENDED_PREFIX) and f.is_file()):
+        return None
+    try:
+        q = json.loads(f.read_text())
+    except ValueError:
+        return None
+    with db.transaction(con):
+        state.emit(con, run, ANSWERED, f"{who} {d['id']}: question answered (recorded for the rerun)", audience="runtime",
+                   task_id=tid, dispatch_id=d["id"],
+                   payload={"fingerprint": q.get("fingerprint"), "question": q.get("question"), "answer": text[:500],
+                            "taken": True, "delivery": "pending-rerun"})
+        state.update_task(con, run["id"], tid, pause_reason=f"question answered but {d['id']} ended: "
+                          f"office rerun {tid} --resume|--fresh")
+    return Result(lines=[f"{tid} {d['id']}: answer recorded; the worker has ended, so nothing was delivered"],
+                  next=f"office rerun {tid} --resume|--fresh (the new session's brief carries the answer); "
+                       f'a scope or acceptance change needs office amend {tid} --contract -- "<delta>"')
+
+
+def answer(con, run: dict, target: str | None, text: str, *, keys: str | None = None, choice: int | None = None,
+           expect: str | None = None) -> Result:
     """Answer the question a live pane agent is waiting on. A number answers a selection widget
     with that keypress (`office prompt` types text, which a widget ignores or misreads). Any other
     answer to a widget dismisses it with Esc, then is sent as a prompt. A plain-text question is
     answered with `office prompt`."""
-    from office import prompting
-    if not target or not text.strip():
+    from office import prompting, raising
+    raising.refuse_worker()
+    startup_answer = keys is not None or choice is not None or expect is not None
+    if not target or not (text.strip() or startup_answer):
         raise Usage("answer-usage", "name the task or dispatch and the answer",
                     next_step='office answer <task|dispatch> <option> | office answer <task|dispatch> -- "<text>"')
     d = prompting._resolve(con, run, target)
     who = d.get("task_id") or d["id"]
+    from office import startup
+    if choice is None and keys is None and text.strip().isdigit():
+        choice = int(text.strip())
+    if startup.open_prompt(con, d["id"]) is not None or startup_answer:
+        res = startup.answer(con, run, d, keys=keys, choice=choice, expect=expect)
+        if res is not None:
+            return res
+        raise Refused("no-startup-prompt", f"{d['id']} ({who}) has no open startup prompt; --keys, --choice and "
+                      "--expect answer startup prompts only", scope=who,
+                      next_step='office status; office answer <task|dispatch> <option> | -- "<text>"')
+    from office import raising
+    res = raising.answer(con, run, d, text.strip())
+    if res is None:
+        res = _answer_ended(con, run, d, who, text.strip())
+    if res is not None:
+        return res
     if d.get("launcher") != "herdr" or not d.get("pane_id"):
         raise Refused("no-pane", f"{d['id']} ({who}) has no Herdr pane to answer in", scope=who)
     q = _current(d)

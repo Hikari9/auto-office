@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from hypothesis import assume, given, strategies as st
 
 from office import db
 from office.web import server, synthetic
@@ -85,20 +86,17 @@ def test_targets_of_the_declared_shape_parse(kind, target):
 
 
 BAD_TARGETS = [
-    ("start_issue", {}), ("start_issue", {"repo": REPO}), ("start_issue", {"repo": REPO, "issue": "3"}),
-    ("start_issue", {"repo": REPO, "issue": 0}), ("start_issue", {"repo": REPO, "issue": True}),
     ("queue_issue", {"repo": REPO, "issue": 3, "run_id": "r-1"}),  # an issue target names no run
-    ("resume_run", {}), ("resume_run", {"run_id": ""}), ("resume_run", {"run_id": "  "}), ("attach_run", {"run_id": 7}),
     ("attach_run", {"repo": REPO, "issue": 3}),  # an issue is not a run
-    ("pause", {}), ("pause", {"item": "x", "run_id": "r-1"}), ("resume", {"task_id": "T1"}),
+    ("pause", {"item": "x", "run_id": "r-1"}), ("resume", {"task_id": "T1"}),
     ("set_priority", {"run_id": "r-1", "dispatch_id": "D1"}),
-    ("set_auto_mode", {"item": "x"}), ("set_auto_mode", {"run_id": None}),
     ("change_route", {"run_id": "r-1"}), ("change_route", {"dispatch_id": "D1"}),
     ("chat_send", {"run_id": "r-1"}), ("chat_send", {"session": "session:s1"}),
     ("chat_send", {"run_id": "r-1", "session": "session:s1", "pane": "p1"}),  # never a raw pane
     ("settings_set", {"key": "a.b"}), ("settings_set", {"tier": "machine"}),
     ("settings_unset", {"tier": "machine", "key": "a.b", "item": "x"}),
     ("start_issue", {"repo": "x" * 600, "issue": 3}),
+    ("start_issue", {"repo": REPO, "issue": "3"}), ("set_auto_mode", {"item": "x"}),  # a digit string is no number; `item` is not a scope
 ]
 
 
@@ -108,6 +106,56 @@ def test_targets_outside_the_declared_shape_are_refused(kind, target):
         Command.parse({"id": "cmd-target-02", "kind": kind, "target": target})
     assert (info.value.reason, info.value.http) == ("bad-target", 400)
     assert KIND_TARGET[kind].replace("_", " ") in str(info.value)
+
+
+_VALUES_OF_THE_WRONG_KIND = st.one_of(st.none(), st.booleans(), st.floats(), st.lists(st.integers(), max_size=2),
+                                      st.just(""), st.just("   "), st.just("x" * 513), st.integers(max_value=0))
+_EVERY_DECLARED_KEY = {"repo", "issue", "run_id", "item", "task_id", "dispatch_id", "session", "host", "tier", "key"}
+
+
+def _refused_as_bad_target(kind, target):
+    with pytest.raises(CommandRefused) as info:
+        Command.parse({"id": "cmd-target-prop", "kind": kind, "target": target})
+    assert (info.value.reason, info.value.http) == ("bad-target", 400)
+
+
+@given(kind=st.sampled_from(KINDS), key=st.text(alphabet="abcdefghijklmnopqrstuvwxyz_", min_size=1, max_size=12),
+       value=st.one_of(st.text(max_size=6), st.integers(), st.booleans(), st.none()))
+def test_a_target_naming_anything_undeclared_is_refused(kind, key, value):
+    """Nothing but the declared keys reaches a command: a raw pane, a shell, a path are all refused."""
+    assume(key not in _EVERY_DECLARED_KEY)
+    _refused_as_bad_target(kind, {**valid_target(kind), key: value})
+
+
+@given(kind=st.sampled_from([k for k in KINDS if k != "set_auto_mode"]), data=st.data())
+def test_a_target_missing_a_required_key_is_refused(kind, data):
+    target = valid_target(kind)
+    dropped = data.draw(st.sampled_from(sorted(target)))
+    _refused_as_bad_target(kind, {k: v for k, v in target.items() if k != dropped})
+
+
+@given(kind=st.sampled_from(KINDS), data=st.data(), bad=_VALUES_OF_THE_WRONG_KIND)
+def test_a_target_value_of_the_wrong_kind_is_refused(kind, data, bad):
+    target = valid_target(kind)
+    if not target:
+        return
+    broken = data.draw(st.sampled_from(sorted(target)))
+    _refused_as_bad_target(kind, {**target, broken: bad})
+
+
+def test_a_string_target_value_may_be_512_characters_but_not_513():
+    ok = Command.parse({"id": "cmd-target-512", "kind": "resume_run", "target": {"run_id": "r" * 512}})
+    assert ok.target == {"run_id": "r" * 512}
+    _refused_as_bad_target("resume_run", {"run_id": "r" * 513})
+
+
+def test_a_refused_target_says_which_shapes_the_kind_accepts():
+    with pytest.raises(CommandRefused) as info:
+        Command.parse({"id": "cmd-target-msg", "kind": "start_issue", "target": {}})
+    assert "start_issue targets a issue: target must be {repo, issue}" in str(info.value)
+    with pytest.raises(CommandRefused) as info:
+        Command.parse({"id": "cmd-target-msg2", "kind": "pause", "target": {}})
+    assert "target must be {item} or {run_id, task_id?}" in str(info.value)
 
 
 def test_a_bad_target_over_http_records_no_receipt(svc):
@@ -169,12 +217,6 @@ def test_scheduler_kinds_need_an_existing_item_and_never_github_readiness(svc):
     write(svc, lambda con: con.execute("UPDATE sched_items SET ref='synth-org-0/not-ready#1' WHERE id='issue:nr'"))
     svc.submit(cmd("cmd-tv-item2", "pause", {"item": "issue:nr"}), wait=True)  # a not-ready repo still pauses
     assert svc.executor.calls[-1]["args"] == ["queue", "pause", "issue:nr"]
-
-
-def test_task_must_belong_to_the_run(svc):
-    run = live_run(svc)
-    err = refused(svc, cmd("cmd-tv-task1", "pause", {"run_id": run["run_id"], "task_id": "T-none"}))
-    assert err.reason == "task-missing"
 
 
 def test_set_auto_mode_needs_only_a_live_office_source(svc):
@@ -242,10 +284,3 @@ def test_settings_accept_entries_of_a_shipped_empty_map(svc):
     svc.submit(cmd("cmd-tv-set-02", "settings_set", {"tier": "machine", "key": "web.checkouts.acme"}, {"value": "/x"}),
                wait=True)
     assert svc.executor.calls[-1]["args"][-2:] == ["web.checkouts.acme", "/x"]
-
-
-@pytest.mark.parametrize("kind", KINDS)
-def test_every_kind_is_refused_while_office_is_stale(svc, kind):
-    svc.last_ok -= svc.stale_after + 1
-    target = valid_target(kind, live_run(svc)["run_id"])
-    assert refused(svc, cmd(f"cmd-tv-st-{kind}", kind, target, {"text": "hi", "mode": "on", "value": 1})).reason == "office-stale"

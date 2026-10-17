@@ -45,6 +45,17 @@ The frozen JSON representation also holds `descriptor_version`, `provenance` by 
 
 At `office submit`, validate values, attach to **each task** in the versioned plan and `tasks.descriptor_json`, and include the snapshot in the plan preview's `route_audit`. Dispatch re-routes against fresh quota/trust/cost evidence using that frozen task descriptor, then snapshots the applied descriptor on **each dispatch** for learning. An ordinary plan amendment may edit descriptors for *future* routing; a running/ended episode keeps its original dispatch snapshot. A task with no fields keeps legacy behavior exactly.
 
+### Evidence-only tags
+
+Four optional tags let the planner record what a task was, so later replay can compare outcomes by task kind. They are **evidence-only**: validated and persisted exactly like the fields above (PLAN.md → `tasks.descriptor_json` → plan amendment → per-dispatch `descriptor_json` snapshot), but `dimensions()`, `benchmark_fit()`, `price_tier()` and the `domain` field never read them, so they add no benchmark dimension, price tier or benchmark score adjustment. Known limit: `route_learning.comparability` treats any non-empty descriptor as "present", so a task whose descriptor holds only these tags discounts history without a descriptor by `descriptor_unknown_weight`; no tag value changes a weight. Omitted is unknown and stays absent. An invalid value is refused at plan submit with the allowed list.
+
+| Tag | Values | Meaning |
+| --- | --- | --- |
+| `evidence_domain` | `frontend`, `backend`, `infra`, `docs`, `tests` | The area of the codebase the task changes. Separate from `domain`, which selects benchmark dimensions. |
+| `intent` | `feature`, `fix`, `refactor`, `test-pruning`, `migration` | What the change is for. |
+| `difficulty_estimate` | `low`, `medium`, `high`, `very-high`, `unknown` | The planner's estimate of difficulty, recorded so it can be compared with actual outcomes. |
+| `brief_shape` | `deliverables-enumerated`, `checks-only`, `unknown` | Whether the brief lists the deliverables or only states checks to satisfy. |
+
 ## Benchmark-to-task weighting — evidence before coefficients
 
 1. Translate a descriptor into **dimensions**, not favored model names: UI + taste → appearance/human-eval; browser → visually grounded action; backend → repository repair; architecture → independent structured architecture evaluation (where actually available); mixed → calibrated mixture.

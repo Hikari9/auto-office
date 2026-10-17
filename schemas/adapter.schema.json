@@ -38,6 +38,19 @@
     "model_source": {
       "type": "object"
     },
+    "preflight": {
+      "type": "object",
+      "properties": {
+        "model_check": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "auth_check": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
     "effort_mapping": {
       "type": "object"
     },
@@ -73,6 +86,18 @@
     },
     "source_notes": {
       "type": "string"
+    },
+    "trust_justifications": {
+      "type": "object",
+      "description": "Permission or trust flag in a launch argv -> why this harness needs it and what it grants. `office harness validate` refuses an unsafe flag without one.",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "override_seed": {
+      "type": "boolean",
+      "description": "A user-level adapter whose id names a seed adapter replaces it only when this is true."
     },
     "session": {
       "type": "object",

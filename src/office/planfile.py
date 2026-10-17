@@ -138,6 +138,9 @@ def parse(text: str) -> ParsedPlan:
         in_visual = False
         if task is not None:
             list_key = key if (not value and key in LIST_KEYS) else None
+            if key in ("scope", "shared"):
+                for e in _split_list(value):
+                    task.setdefault("entry_lines", {})[(SHARED + e.lstrip(SHARED)) if key == "shared" else e] = lineno
             if key == "scope":
                 task["scope"] = _split_list(value) + [s for s in task["scope"] if is_shared(s)]
                 task["scope_none"] = _is_no_check(value)  # `none`: no file scope (a comment or issue edit)
@@ -249,6 +252,44 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
     }
 
 
+def _unsafe_force_push_instruction(instruction: str) -> bool:
+    """Reject manual pushes; Office-owned PR sync manages task refs."""
+    from office import shell_safety
+    return shell_safety.unsafe_manual_push(instruction, prose=True)
+
+
+def _unsafe_force_push_in_plan(task: dict) -> str | None:
+    from office import shell_safety
+    for instruction in [*(task.get("notes") or []), *(task.get("accept") or []),
+                        *(task.get("interfaces") or [])]:
+        if _unsafe_force_push_instruction(instruction):
+            return instruction
+    # These fields run as shell commands, not prose. Keep command-substitution
+    # detection strict even when a command happens to contain backticks.
+    for command in (task.get("checks") or []):
+        if shell_safety.unsafe_manual_push(command):
+            return command
+    visual = task.get("visual") or {}
+    if visual.get("start") and shell_safety.unsafe_manual_push(visual["start"]):
+        return visual["start"]
+    return None
+
+
+def _unsafe_force_push_requirement(plan: ParsedPlan) -> str | None:
+    req = plan.requirements
+    from office import shell_safety
+    entries = [*(req.get("done_criteria") or [])]
+    # non_goals is a prohibition, never a command authorization.
+    entries += [f"{entry.get('action') or ''} {' '.join(entry.get('preconditions') or [])}"
+                for entry in req.get("named_actions") or []]
+    unsafe = next((e for e in entries if _unsafe_force_push_instruction(e)), None)
+    if unsafe:
+        return unsafe
+    commands = [*plan.run_checks, *(v for v in (req.get("deploy") or {}).values()
+                                    if isinstance(v, str))]
+    return next((cmd for cmd in commands if shell_safety.unsafe_manual_push(cmd)), None)
+
+
 def _validate(plan: ParsedPlan) -> None:
     ids = [t["id"] for t in plan.tasks]
     if not plan.tasks:
@@ -257,6 +298,9 @@ def _validate(plan: ParsedPlan) -> None:
     for d in sorted(dup):
         plan.errors.append(f"{d}: duplicate task id")
     known = set(ids)
+    if _unsafe_force_push_requirement(plan):
+        plan.errors.append("run-level Requirements: unsafe manual git push with unverified remote ownership; "
+                           "use the Office-owned task PR workflow")
     for t in plan.tasks:
         if not t["scope"] and not t.get("scope_none"):
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `scope:` (paths this task may write)")
@@ -264,9 +308,14 @@ def _validate(plan: ParsedPlan) -> None:
             problem = _entry_problem(entry)
             if problem:
                 # Each entry is matched as one path or glob: a note after it never matches (#416).
-                err = f"{t['id']} (line {t['line']}): {ENTRY_ERROR} {entry!r} {problem}"
+                line = (t.get("entry_lines") or {}).get(entry, t["line"])  # the scope:/shared: line itself
+                err = f"{t['id']} (line {line}): {ENTRY_ERROR} {entry!r} {problem}"
                 plan.errors.append(err)
                 plan.entry_problems.append((t["id"], entry, err))
+        forbidden_push = _unsafe_force_push_in_plan(t)
+        if forbidden_push:
+            plan.errors.append(f"{t['id']}: unsafe manual git push with unverified remote ownership; "
+                               "remove it and use the Office-owned task PR workflow")
         if not t["accept"]:
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `accept:` criteria")
         if t["checks"] is None:
@@ -304,11 +353,14 @@ def _validate(plan: ParsedPlan) -> None:
         plan.pair_problems.append((a, b, entry, err))
     for a, b in _parallel_overlaps(plan.tasks):
         plan.warnings.append(f"{a} and {b} may run in parallel but their scopes overlap; leases will serialize them")
+    for t in plan.tasks:
+        t.pop("entry_lines", None)  # only for messages; stored tasks keep their shape
 
 
-def end_state_problems(end: str | None, deploy: dict) -> tuple[list[str], list[str]]:
+def end_state_problems(end: str | None, deploy: dict, repo=None) -> tuple[list[str], list[str]]:
     """(errors, warnings) for an end state and its deploy commands, checked on
-    the merged requirements (start flags plus the plan)."""
+    the merged requirements (start flags plus the plan). `repo` (default: the
+    repository of the working directory) is where a command's paths are looked up."""
     errors, warnings = [], []
     if end == "preview" and not deploy.get("preview"):
         errors.append("end_state preview needs `deploy_preview: <command>`")
@@ -316,6 +368,14 @@ def end_state_problems(end: str | None, deploy: dict) -> tuple[list[str], list[s
         errors.append("end_state e2e needs `deploy_prod: <command>`")
     if end in ("preview", "e2e") and not deploy.get("verify"):
         warnings.append("no `deploy_verify:` command; the deploy is recorded without verification")
+    from pathlib import Path
+    from office import land, paths
+    if repo is None and (ident := paths.repo_identity()):
+        repo = ident[0]
+    if repo is not None and deploy:
+        repo = Path(repo)
+        warnings.extend(land.deploy_path_warnings(repo, {f"deploy_{k}": v for k, v in deploy.items()},
+                                                  land.env_files(land.config_for(repo))))
     return errors, warnings
 
 
@@ -374,23 +434,65 @@ def _entry_problem(entry: str) -> str | None:
     """Why a scope or shared entry is not one path or glob, or None."""
     bare = entry.lstrip(SHARED)
     if not bare or _NOT_PATH.search(bare) or bare.count("(") != bare.count(")") or bare.count("[") != bare.count("]") \
-            or re.search(r"[^/][(\[]", bare):
-        # Brackets are path characters only as whole segments (`(group)/`, `[slug]/`);
-        # `x.csv(A3)` is a note glued to a path.
+            or re.search(r"[^/\[()][(\[]", bare):
+        # Brackets are path characters when they open a segment or follow another bracket
+        # (`(group)/`, `[slug]/`, `[[...slug]]`, `(..)(..)photo`); `x.csv(A3)` is a note.
         return ("is not a path or glob; list bare paths or globs (no notes) and put limits "
                 "(e.g. 'only the importer entry') in `accept:`")
     return None
+
+
+# Suffixless names that are conventionally files wherever they sit.
+_BUILD_FILES = {"makefile", "gnumakefile", "dockerfile", "containerfile", "procfile", "jenkinsfile", "gemfile",
+                "rakefile", "brewfile", "vagrantfile", "justfile", "podfile", "fastfile", "appfile", "caddyfile",
+                "pipfile", "snakefile", "earthfile", "tiltfile", "taskfile"}
+# Root-level suffixless names that are conventionally files, any case (README, Readme, LICENSE, ...).
+_ROOT_DOC_FILES = {"readme", "license", "licence", "copying", "authors", "changelog", "notice", "codeowners",
+                   "owners", "contributors", "version", "history"}
+# Suffixless names that are files at any depth (`docs/CODEOWNERS`, `.github/CODEOWNERS`).
+_ANYWHERE_FILES = {"codeowners"}
+# Extensionless dot-names that are files; any other extensionless dot-name (`.vercel`, `.terraform`,
+# `src/.generated`) is a directory, the safe side. Names ending in `rc` or `ignore` are files too.
+_DOT_FILES = {".gitignore", ".gitattributes", ".gitmodules", ".gitkeep", ".keep", ".npmignore", ".npmrc", ".yarnrc",
+              ".nvmrc", ".node-version", ".python-version", ".ruby-version", ".tool-versions", ".editorconfig",
+              ".prettierrc", ".prettierignore", ".eslintrc", ".eslintignore", ".eslintcache", ".stylelintrc", ".babelrc",
+              ".browserslistrc", ".dockerignore", ".env", ".envrc", ".mailmap", ".htaccess", ".markdownlint",
+              ".mocharc", ".swcrc", ".vercelignore", ".coveragerc", ".flake8", ".pylintrc", ".nojekyll", ".bashrc",
+              ".zshrc", ".profile", ".clang-format", ".clang-tidy", ".gcloudignore", ".slugignore", ".helmignore",
+              ".yamllint", ".hadolint", ".shellcheckrc", ".pre-commit-config", ".lintstagedrc", ".huskyrc",
+              ".commitlintrc", ".releaserc", ".czrc", ".npmrc", ".pnpmfile", ".watchmanconfig", ".flowconfig",
+              ".buckconfig", ".bazelrc", ".bazelversion", ".terraform-version", ".sdkmanrc", ".jshintrc", ".jscsrc"}
+
+
+def entry_is_dir(bare: str) -> bool:
+    """Whether a scope or shared entry (without `+`) names a directory. Without the
+    filesystem this is a naming rule: a trailing `/` or `**`, a `*.d` name, an extensionless
+    dot-name that is not a known dotfile (`.github`, `.vercel`), and any suffixless name except known
+    build files (`Makefile`, `src/Makefile`), `CODEOWNERS`, and root-level docs in any case
+    (`README`, `Readme`, `LICENSE`). Known dotfiles (`.npmignore`, `.flake8`), `*.json`
+    globs and suffixed names are files. `docs/README` is a directory."""
+    if bare.endswith("/") or "**" in bare:
+        return True
+    last = bare.rsplit("/", 1)[-1]
+    low = last.lower()
+    if last.endswith(".d"):
+        return True
+    if last.startswith("."):
+        if "." in last[1:]:
+            return False  # .env.local, .eslintrc.json
+        return not (low in _DOT_FILES or low.endswith("rc") or low.endswith("ignore"))
+    if "." in last:
+        return False
+    if low in _BUILD_FILES or low in _ANYWHERE_FILES:
+        return False
+    return not ("/" not in bare and low in _ROOT_DOC_FILES)
 
 
 def shared_tree(entry: str) -> bool:
     """A `shared:` entry naming a directory rather than registry files: a trailing `/`, a
     `**`, or a last segment with no file suffix (`src/reg`, `src/*`). A file glob such as
     `locales/*.json` names append-only files and stays parallel-safe."""
-    bare = entry.lstrip(SHARED)
-    last = bare.rstrip("/").rsplit("/", 1)[-1]
-    # A root-level suffixless name (`Makefile`, `Dockerfile`) is a file, not a directory.
-    return is_shared(entry) and (bare.endswith("/") or "**" in bare
-                                 or ("." not in last and "/" in bare.rstrip("/")))
+    return is_shared(entry) and entry_is_dir(entry.lstrip(SHARED))
 
 
 def _unordered_shared_trees(tasks: list[dict]):
@@ -403,11 +505,12 @@ def _unordered_shared_trees(tasks: list[dict]):
         for b in tasks[i + 1:]:
             if a["id"] in ancestors(graph, b["id"]) or b["id"] in ancestors(graph, a["id"]):
                 continue
+            seen = set()
             for x, y in ((a, b), (b, a)):
-                hit = next((e for e in x["scope"] if shared_tree(e) and scopes_overlap([e], y["scope"])), None)
-                if hit:
-                    yield a["id"], b["id"], hit
-                    break
+                for e in x["scope"]:
+                    if e not in seen and shared_tree(e) and scopes_overlap([e], y["scope"]):
+                        seen.add(e)
+                        yield a["id"], b["id"], e
 
 
 def grandfather_entries(parsed: "ParsedPlan", prev_tasks: list[dict] | None) -> None:
@@ -417,11 +520,11 @@ def grandfather_entries(parsed: "ParsedPlan", prev_tasks: list[dict] | None) -> 
     prev = {t["id"]: set(t.get("scope") or []) for t in prev_tasks or []}
     old = {err for tid, entry, err in parsed.entry_problems if entry in prev.get(tid, ())}
     try:
-        before = {frozenset((a, b)) for a, b, _ in _unordered_shared_trees(
+        before = {(frozenset((a, b)), e) for a, b, e in _unordered_shared_trees(
             [{"id": t["id"], "depends": t.get("depends") or [], "scope": t.get("scope") or []} for t in prev_tasks or []])}
     except (KeyError, TypeError):
         before = set()
-    old |= {err for a, b, _, err in parsed.pair_problems if frozenset((a, b)) in before}
+    old |= {err for a, b, e, err in parsed.pair_problems if (frozenset((a, b)), e) in before}
     for err in [e for e in parsed.errors if e in old]:
         parsed.warnings.append(err + " (kept: the accepted plan already had it)")
     parsed.errors[:] = [e for e in parsed.errors if e not in old]
@@ -432,11 +535,29 @@ def literal_prefix(pattern: str) -> str:
     return pattern[: m.start()] if m else pattern
 
 
+def _incompatible_glob_suffixes(a: str, b: str) -> bool:
+    """Conservatively prove two file globs cannot name the same path (#540).
+
+    Only reject overlap when *both* globs have nonempty fixed trailing text
+    after the last wildcard. A shared filename must end with both suffixes;
+    incompatible suffixes make that impossible. Unknown patterns still overlap.
+    """
+    if not any(c in a for c in "*?") or not any(c in b for c in "*?"):
+        return False
+    end_a = max(a.rfind("*"), a.rfind("?"))
+    end_b = max(b.rfind("*"), b.rfind("?"))
+    suffix_a, suffix_b = a[end_a + 1:], b[end_b + 1:]
+    return bool(suffix_a and suffix_b and
+                not (suffix_a.endswith(suffix_b) or suffix_b.endswith(suffix_a)))
+
+
 def scopes_overlap(a: list[str], b: list[str]) -> bool:
     for pa in a:
         for pb in b:
             if is_shared(pa) and is_shared(pb) and not (shared_tree(pa) or shared_tree(pb)):
                 continue  # both append to a shared registry file; compose resolves it
+            if _incompatible_glob_suffixes(pa.lstrip(SHARED), pb.lstrip(SHARED)):
+                continue
             la, lb = literal_prefix(pa.lstrip(SHARED)), literal_prefix(pb.lstrip(SHARED))
             if la.startswith(lb) or lb.startswith(la):
                 return True
@@ -467,7 +588,7 @@ def path_in_scope(path: str, scope: list[str]) -> bool:
         # compared literally so brackets are path characters, not a glob class (#334). A shared
         # directory is valid only for tasks ordered by `depends` (plan validation), and it
         # counts in the overlap check, so its tasks never hold leases together.
-        if pattern and not re.search(r"[*?]", pattern) \
+        if pattern and not re.search(r"[*?]", pattern) and (not is_shared(raw) or shared_tree(raw)) \
                 and path.startswith(pattern.rstrip("/") + "/"):
             return True
     return False

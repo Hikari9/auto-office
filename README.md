@@ -16,6 +16,19 @@ Auto Office is deliberately not a generic multi-agent chat framework. It has a l
 
 **Start here:** [Manifesto](MANIFESTO.md) · [Install](#install) · [Opinionated SDLC](#the-opinionated-sdlc) · [Routing](#routing-different-roles-can-use-different-agents) · [Benchmarks](#benchmarks-intelligence-floors-without-online-routing) · [State & resume](#state-durability-and-resume) · [Development](#development)
 
+## Auto Self Improve (issue-only)
+
+When an outcome looks like an Office defect, the runtime prints one non-blocking `bug?:` line (a refusal of the
+command `next:` names, a failed job or gate, a lost dispatch, an uncaught internal error). It is a hint: the
+runtime starts no investigator, makes no model or network call and files nothing.
+
+The orchestrator decides whether the hint is an Office defect, dedupes against open and closed issues,
+sanitizes the report and files it with `gh issue create --repo Hikari9/auto-office`, directly or through a cheap
+read-only subagent. Only Auto-Office-owned defects are candidates; target-application bugs and routine gate
+refusals are not. `office self-improve` is a read-only pointer: it prints these steps and the run's current
+`bug?:` signals. Issues only: nothing here fixes a bug or opens a PR, and filing never blocks landing. The
+workflow is in `skills/auto-self-improve/SKILL.md`.
+
 ## The lifecycle at a glance
 
 ```mermaid
@@ -105,7 +118,7 @@ office install
 office doctor
 ```
 
-`office install` is idempotent. It registers the current runtime and installs the harness integrations that Auto Office can verify safely. Existing config is backed up before Office-managed entries are changed.
+`office install` is idempotent. It registers the current runtime and installs the harness integrations that Auto Office can verify safely. Existing config is backed up before Office-managed entries are changed. `office install --only <harness>` limits it to one harness, `--item <id>` (repeatable: `session.start`, `prompt.submit`, `tool.pre`, `read-rules`) to the integration items you accept, and `--no-hooks` registers the runtime without writing any harness config. The `/auto-office` skill installs with `--no-hooks` and offers the current harness's integration during first-run onboarding.
 
 | Agent / harness | After `office install` |
 |---|---|
@@ -151,12 +164,12 @@ uv venv && uv pip install -e '.[visual,test]'
 To put a checkout on your PATH as the installed runtime:
 
 ```bash
-uv tool install --force --reinstall --no-cache "auto-office[visual] @ <checkout>"
+uv tool install --force --reinstall-package auto-office "auto-office[visual] @ <checkout>"
 office install
 office doctor
 ```
 
-Why `--reinstall --no-cache`? `uv` can otherwise reuse a cached wheel from an older commit with the same release number. `office doctor` should report that the install matches its source checkout and commit.
+Why `--reinstall-package auto-office`? `uv` can otherwise reuse a cached wheel from an older commit with the same release number. This rebuilds only the Auto Office package and keeps dependencies such as playwright cached. `--reinstall` or `--no-cache` would re-download every dependency. `office doctor` should report that the install matches its source checkout and commit.
 
 > **Cross-release note:** runs are pinned to their Auto Office MAJOR.MINOR line. A PATCH upgrade is served by the newest registered patch on that line. Crossing a MAJOR/MINOR is explicit with `office upgrade`; do not overwrite the runtime environment for active runs on an older line without pinning that runtime first.
 
@@ -428,6 +441,24 @@ prompt / CLI > repo config > user config > plugin defaults
 
 The repo layer lives at `.auto-office/config.yaml`; user defaults live at `~/.config/auto-office/config.yaml`.
 
+### First-run onboarding: `office onboard`
+
+The first `/auto-office` invocation offers a short, skippable onboarding before intake, then continues the original request. The invoking agent asks through its own question tool; `office onboard` owns detection, validation and persistence:
+
+```bash
+office onboard --harness claude [--json]     # due or current, eligible routes, current-harness integration (never prompts)
+office onboard --planner office --executor keep --reviewer codex/gpt-6-luna@high
+office onboard --skip                         # keep every preference; mark onboarding complete
+```
+
+- Three questions, in order: default external planner, preferred executor, preferred reviewer. Each offers **Let Office decide** (recommended: clears your user-level preference so the shipped defaults apply), the eligible shipped seed routes, your current preference, or a custom `harness/model@effort`. No orchestrator question: the invoking agent is the orchestrator.
+- Only routes that are eligible here are accepted: the harness is installed and signed in, the catalog has the model and effort, and the role's capabilities, intelligence floor and derived trust allow it. A refused answer writes nothing.
+- Answers become ordinary `roles.<role>.preferred_seed` values in the user file (reviewer writes `plan_reviewer` and `code_reviewer`; visual review keeps its own routes). They keep the existing routing semantics: Office favors this route according to its routing policy, but may choose another model or effort when availability, quota, task fit, capability, evidence, or policy calls for it. Repo overrides and `--as` stay higher.
+- Completion is user-level state (`onboarding.schema_version`). Onboarding comes back only when its schema version changes, never on an ordinary release, and then prefills your current preferences. `office config onboarding.schema_version 0` shows it again.
+- Hook setup covers the current harness only: **Install recommended** (`office install --only <harness>`), **Review individually** (`--item`), or **Skip**. Codex, agy, Hermes and other harnesses without a verified hook mapping are reported, not installed.
+
+Details: [`docs/onboarding.md`](docs/onboarding.md).
+
 ### Setting preferences: `office config` and `office setup`
 
 `office config` edits those files like `git config`; `office setup` is the interactive version.
@@ -609,8 +640,10 @@ office wait                           wait until the run has something actionabl
 office dispatch <task>... [--parallel]
 office answer <task|dispatch> <n> | -- "<text>"   answer the question a pane agent is waiting on (wait exits 5)
 office prompt <task|dispatch> -- "<message>"
+office raise [--kind question|blocker|scope-request] [--path P] -- "<text>"   executor: stop for a decision without submitting
 office submit                         planner/executor: submit a plan or work
-office rerun <task> --resume|--fresh  run a routed repair (RECHECK or disposition fix)
+office revoke <task|dispatch|integration|<scope>:convergence|visual>   end a task's session, or cancel a running lane review
+office rerun <task> --resume|--fresh [--as <harness>/<model>[@effort]] [--review-as <route>]   run a routed repair on a named route
 office amend <scope> -- "<delta>"     ordinary, --contract, or requirements amendment
 office amend <T> --add-check|--add-accept|--set ...   edit the task contract (enforced, audited)
 office ack <amendment-id>             worker: confirm delivered amendment is applied
@@ -619,9 +652,10 @@ office close                          finish after acceptance + landing/handoff
 
 office inspect run|plan|task|gate|evidence|events|route|convergence [id]
 office approve plan|merge|trust|waive|visual ... --quote "<user words>"
-office decide <scope> escalate|continue|waive|stop --quote "<user words>"
+office decide <scope> escalate|continue|waive|stop|review --quote "<user words>"
 office review plan --quote "<user words>" [--rounds N]   the user's request for another plan review
-office disposition <scope>:<code> fix|fixed|dismissed|follow-up -- "<note>"
+office disposition <scope>:<code> fix|fixed|dismissed|follow-up -- "<note>"   dismissed of a blocking finding: --quote "<user words>"
+office config --run <id> --apply-routing --quote "<user words>"   re-pin a run's roles and routing from config
 office review <scope>:convergence|visual --report <file>   degraded fallback review
 office benchmarks brief|submit ...
 office list
@@ -672,7 +706,7 @@ Tests use isolated homes and scripted fake harness binaries; they do not touch a
 When changing Auto Office itself, reinstall the checkout before dogfooding it:
 
 ```bash
-uv tool install --force --reinstall --no-cache "auto-office[visual] @ <checkout>"
+uv tool install --force --reinstall-package auto-office "auto-office[visual] @ <checkout>"
 office install
 office doctor
 ```

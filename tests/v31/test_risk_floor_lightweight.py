@@ -4,13 +4,13 @@ from __future__ import annotations
 import json
 
 import pytest
+from hypothesis import given, strategies as st
 from conftest import GOOD_ADD, PLAN_ONE, start_inline
 
 from office import config as cfg
 from office import planfile, risk
 
 CONFIG = cfg.load_yaml(cfg.default_config_path())
-GEARS = ("direct", "direct+review", "light", "quick", "express", "full")
 
 
 def _plan(blast: str | None = "repo", extra: str = "") -> str:
@@ -40,18 +40,19 @@ def test_explicit_low_is_distinct_from_unknown():
     assert cfg.resolve_risk(CONFIG, "local", None, True)["classification"] == "elevated"
 
 
-@pytest.mark.parametrize("gear", GEARS)
-def test_unknown_risk_keeps_independent_review_under_every_preset(gear):
-    gates = cfg.resolve_gates(gear, cfg.resolve_risk(CONFIG, None, None, False), CONFIG)
-    assert gates["code_review"] is True, gates
-    assert gates["risk_classification"] == "unknown"
-    assert "independent code review required" in gates["review_basis"]
-
-
-@pytest.mark.parametrize("gear", GEARS)
-def test_elevated_risk_keeps_independent_review_under_every_preset(gear):
-    gates = cfg.resolve_gates(gear, cfg.resolve_risk(CONFIG, "production", None, False), CONFIG)
-    assert gates["code_review"] is True and gates["risk_classification"] == "elevated"
+@given(gear=st.sampled_from(sorted(CONFIG["gear_presets"])),
+       blast=st.sampled_from([None, "local", "repo", "production", "production-data"]),
+       size=st.sampled_from([None, "S", "M", "L", "XL"]), irreversible=st.booleans())
+def test_only_an_explicit_low_risk_can_fund_no_independent_review_under_any_preset(gear, blast, size, irreversible):
+    """#420: an unknown or elevated risk keeps independent code review whatever the gear preset says."""
+    risk = cfg.resolve_risk(CONFIG, blast, size, irreversible)
+    elevated = irreversible or blast in ("production", "production-data") or size in ("L", "XL")
+    assert risk["classification"] == ("elevated" if elevated else "unknown" if blast is None else "low")
+    gates = cfg.resolve_gates(gear, risk, CONFIG)
+    if risk["classification"] != "low":
+        assert gates["code_review"] is True and gates["risk_classification"] == risk["classification"], gates
+    if risk["classification"] == "unknown":
+        assert "independent code review required" in gates["review_basis"]
 
 
 def test_explicit_low_on_direct_funds_no_review_and_says_why():

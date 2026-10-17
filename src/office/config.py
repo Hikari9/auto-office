@@ -12,10 +12,11 @@ from typing import Any
 
 import yaml
 
-from office import paths
+from office import paths, route_policy
 from office.util import sha256_file, sha256_obj
 
-NON_CONFIGURABLE_KEYS = {"schema_version", "config_precedence", "hard_invariants"}
+NON_CONFIGURABLE_KEYS = {"schema_version", "config_precedence", "hard_invariants",
+                         route_policy.PROVENANCE_KEY, route_policy.DIGEST_KEY}
 GEARS = ("direct", "direct+review", "light", "quick", "express", "full")
 PLAYBOOKS = ("Change", "Restructure", "Investigate", "Prototype", "Visual")
 BLAST_RADIUS = ("local", "repo", "production", "production-data")
@@ -70,6 +71,15 @@ def config_paths(repo_root: Path | None) -> dict[str, Path]:
     return files
 
 
+def _policy_leaves(data: Any, path: str = "") -> dict[str, Any]:
+    if isinstance(data, dict):
+        return {key: value for k, v in data.items()
+                for key, value in _policy_leaves(v, f"{path}.{k}" if path else k).items()}
+    if path == route_policy.CEILING_KEY or path.startswith(("routing.discovery.", "routing.user_policy.")):
+        return {path: data}
+    return {}
+
+
 def resolve(repo_root: Path | None, sets: list[str] | None = None,
             files: dict[str, str | None] | None = None) -> tuple[dict, list]:
     """Return (effective config, warnings). `files` is a read_files() snapshot;
@@ -97,7 +107,10 @@ def resolve(repo_root: Path | None, sets: list[str] | None = None,
         layers.append(("prompt_cli", cli))
     warnings: list = []
     effective = default
+    provenance = {key: "shipped" for key in _policy_leaves(default)}
     for tier, data in layers:
+        if not isinstance(data, dict):
+            raise ValueError(f"{tier} config must be a mapping")
         kept = {}
         for k, v in (data or {}).items():
             if k == "schema_version":
@@ -107,17 +120,28 @@ def resolve(repo_root: Path | None, sets: list[str] | None = None,
                 warnings.append({"tier": tier, "key": k, "reason": "not-configurable-ignored"})
             elif k not in allowed:
                 warnings.append({"tier": tier, "key": k, "reason": "unknown-key-ignored"})
+            elif tier == "repo" and k == "onboarding":
+                # Onboarding completion is the user's, not a repository's (#484).
+                warnings.append({"tier": tier, "key": k, "reason": "user-level-key-not-repo-configurable"})
             elif tier == "repo" and k == "paths" and isinstance(v, dict) and "runs_db" in v:
                 # The authority is machine-level; a repo may not move it.
                 warnings.append({"tier": tier, "key": "paths.runs_db", "reason": "authority-path-not-repo-configurable"})
                 kept[k] = {pk: pv for pk, pv in v.items() if pk != "runs_db"}
             else:
                 kept[k] = v
+        before_warnings = len(warnings)
         effective = deep_merge(effective, kept, tier, warnings)
+        ignored = [w["key"] for w in warnings[before_warnings:] if w["reason"] == "type-mismatch-ignored"]
+        for key in _policy_leaves(kept):
+            if not any(key == k or key.startswith(k + ".") for k in ignored):
+                provenance[key] = "run" if tier == "prompt_cli" else tier
+    effective[route_policy.PROVENANCE_KEY] = {k: provenance.get(k, "shipped") for k in _policy_leaves(effective)}
     from office import adaptive
-    problems = adaptive.validate(effective)
+    problems = (adaptive.validate(effective) + route_policy.validate_discovery(effective)
+                + route_policy.validate_user_policy(effective) + route_policy.validate_ceiling(effective))
     if problems:
         raise ValueError("; ".join(problems))
+    effective[route_policy.DIGEST_KEY] = route_policy.policy_digest(effective)
     return effective, warnings
 
 
@@ -209,14 +233,56 @@ def config_drift(run: dict) -> str | None:
             f"not applied to this run ({_describe(diffs)})")
 
 
+def routing_inputs_drift(run: dict, hashes: dict | None = None) -> str | None:
+    """A warning when the catalog (seed plus user overlay) or the adapter set
+    (seed plus user adapters) no longer hashes to what `run` pinned at start.
+    Warn-only, like config_drift: candidate building reads the live files."""
+    if not run.get("catalog_hash") and not run.get("adapter_hash"):
+        return None
+    try:
+        now = hashes or snapshot_hashes()
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+    changed = [name for name, key in (("catalog", "catalog_hash"), ("adapters", "adapter_hash"))
+               if run.get(key) and run.get(key) != now.get(key)]
+    if not changed:
+        return None
+    return (f"routing {' and '.join(changed)} changed since run {str(run.get('id', ''))[:8]} started "
+            "(office model/harness edits or an upgrade); later dispatches route from the current files")
+
+
+_HASHES_CACHE: dict[tuple, dict] = {}
+
+
 def snapshot_hashes() -> dict:
+    """policy/catalog/adapter hashes a run pins. Never raises on a user file:
+    only user adapters that load (adapters.load_sources) are hashed, and an
+    unparseable catalog overlay is hashed by its bytes. With no user files the
+    hashes are the seed-only values earlier runs recorded. Cached per process,
+    keyed on the input files' mtimes and sizes."""
     root = paths.resources_root()
+    from office import adapters as adapter_mod, user_catalog
+    key = (adapter_mod.files_stamp(),
+           adapter_mod._file_stamp([root / "catalog" / "seed.yaml", root / "catalog" / "lineages.yaml",
+                                    user_catalog.path(), default_config_path()]))
+    cached = _HASHES_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
     adapters = {p.name: load_yaml(p) for p in sorted((root / "adapters" / "seed").glob("*.yaml"))}
-    return {
+    for aid, (data, origin, p) in sorted(adapter_mod.load_sources().items()):
+        if origin != "seed" and data.get("office_profiles"):
+            adapters["user/" + p.name] = data
+    catalog = load_yaml(root / "catalog" / "seed.yaml")
+    lineages = load_yaml(root / "catalog" / "lineages.yaml")
+    overlay = user_catalog.raw()
+    out = {
         "policy_hash": sha256_file(default_config_path()),
-        "catalog_hash": sha256_obj(load_yaml(root / "catalog" / "seed.yaml")),
+        "catalog_hash": sha256_obj({"seed": catalog, "lineages": lineages, "user": overlay}),
         "adapter_hash": sha256_obj(adapters),
     }
+    _HASHES_CACHE.clear()
+    _HASHES_CACHE[key] = out
+    return dict(out)
 
 
 def resolve_risk(config: dict, blast_radius: str | None, size_class: str | None,

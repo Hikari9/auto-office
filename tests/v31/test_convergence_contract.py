@@ -262,9 +262,104 @@ def test_consolidated_recheck_routes_to_every_owner_then_same_reviewer(env):
     assert not _q(env, "SELECT 1 FROM findings WHERE scope='L-core' AND state='open'")
 
 
+def test_recheck_guidance_obeys_the_same_scope_lease_as_rerun(env, monkeypatch):
+    """#561: an idle dependent must not be advertised while its parent owns the scope."""
+    from office import convergence, dispatch, gates, guide, state
+
+    _start(env, plan=PLAN_LANE,
+           executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": GOOD_MUL}},
+                      "submit": True}],
+           convergence_reviewer=[{"reply": recheck(finding("F1", "T1"),
+                                                   finding("F2", "T2", where="mul.py:1"))}])
+    env.office("dispatch", "T1", "T2", "--parallel", check=0)
+    con = env.con()
+    try:
+        run = state.get_run(con, _run_row(env)["id"])
+        # T2's *real* launch gate is the common lease checker. Simulate an
+        # overlapping scope while the parent repair session is running.
+        owner = {"T1": None, "T2": "T1"}
+        monkeypatch.setattr(dispatch, "scope_holder", lambda c, r, t: owner[t["id"]])
+        initial = convergence.next_action(con, run)
+        assert "office rerun T1" in initial and "office rerun T2" not in initial, initial
+        assert "T2 waits for T1" in initial, initial
+
+        t1 = state.get_task(con, run["id"], "T1")
+        real_live = gates.worker_live
+        monkeypatch.setattr(gates, "worker_live", lambda c, did: bool(did == t1["current_dispatch_id"])
+                            or real_live(c, did))
+        waiting = guide.next_action(con, run)
+        assert waiting.startswith("no action;"), waiting
+        assert "T2 waits for T1" in waiting and "office rerun T2" not in waiting, waiting
+        assert not guide._needs_orchestrator(con, run), waiting
+
+        # When T1's lease really releases, T2 becomes the one legal repair.
+        owner["T2"] = None
+        released = guide.next_action(con, run)
+        assert "office rerun T2" in released and "office rerun T1" not in released, released
+        assert guide._needs_orchestrator(con, run)
+    finally:
+        con.close()
+
+
+def test_recheck_real_scope_lease_holds_dependent_until_parent_session_ends(env):
+    """#561: query the actual leases table and resume readiness after release."""
+    from office import convergence, db, dispatch, guide, state
+
+    _start(env, plan=PLAN_LANE,
+           executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": GOOD_MUL}},
+                      "submit": True}],
+           convergence_reviewer=[{"reply": recheck(finding("F1", "T1"),
+                                                   finding("F2", "T2", where="mul.py:1"))}])
+    env.office("dispatch", "T1", "T2", "--parallel", check=0)
+    con = env.con()
+    try:
+        run = state.get_run(con, _run_row(env)["id"])
+        t1, t2 = [state.get_task(con, run["id"], tid) for tid in ("T1", "T2")]
+        with db.transaction(con):
+            # Reproduce overlapping dependency envelopes: scope-holder uses
+            # the real DB lease and its live/dormant semantics, not a fake.
+            state.update_task(con, run["id"], "T2", scope=t1["scope"])
+            state.update_task(con, run["id"], "T1", status="running")
+            lease = dispatch.acquire_lease(con, run, t1, "Dparentrepair", "executor")
+        held = convergence.next_action(con, run)
+        assert "T2 waits for T1" in held and "office rerun T2" not in held, held
+        assert guide.next_action(con, run).startswith("no action;"), held
+        assert not guide._needs_orchestrator(con, run)
+        with db.transaction(con):
+            con.execute("UPDATE leases SET released_at='2026-10-11T00:00:00Z' WHERE id=?", (lease["id"],))
+        assert dispatch.scope_holder(con, run, state.get_task(con, run["id"], "T2")) is None
+        ready = guide.next_action(con, run)
+        assert "office rerun T2" in ready, ready
+        assert guide._needs_orchestrator(con, run)
+    finally:
+        con.close()
+
+
+def test_wait_rechecks_action_readiness_without_a_task_snapshot_change(env, monkeypatch):
+    """The lease transition can wake wait without a change to tasks/status."""
+    from office import guide, state
+
+    _start(env)
+    con = env.con()
+    try:
+        run = state.get_run(con, _run_row(env)["id"])
+        monkeypatch.setattr(guide, "_snapshot", lambda *_: ("unchanged",))
+        monkeypatch.setattr(guide, "worker_signals", lambda *_: ([], 0))
+        monkeypatch.setattr(guide, "stalls", lambda *_, **__: [])
+        monkeypatch.setattr(state, "unread_events", lambda *_, **__: [])
+        from office import questions
+        monkeypatch.setattr(questions, "scan", lambda *_: ([], None, {}))
+        states = iter((False, True))
+        monkeypatch.setattr(guide, "_needs_orchestrator", lambda *_: next(states))
+        result = guide.wait(con, run, timeout=1.0, poll=0.001)
+        assert result.exit_code == 0, result.lines
+    finally:
+        con.close()
+
+
 def test_convergence_round_cap_escalates_to_the_operator(env):
     """5, 15, 40-43: three RECHECK rounds stop; the operator gets the remaining findings,
-    attempts, risk, the recommendation and four choices. No fourth review, no INTAKE_GAP."""
+    attempts, risk, the recommendation and the choices. No fourth review, no INTAKE_GAP."""
     adds = [GOOD_ADD + f"# r{i}\n" for i in range(5)]
     _start(env, executor=[{"write": {"calc.py": a}, "submit": True} for a in adds],
            convergence_reviewer=[{"reply": recheck(finding("F1"), nxt="continue with a stronger producer")}])
@@ -277,7 +372,7 @@ def test_convergence_round_cap_escalates_to_the_operator(env):
     assert [a["round"] for a in esc["attempts"]] == [1, 2, 3]
     assert esc["remaining"][0]["code"] == "F1" and "high or medium" in esc["materiality"] and esc["risk"]
     assert esc["recommendation"] == "continue with a stronger producer"
-    assert [c.split()[3] for c in esc["choices"]] == ["escalate", "continue", "waive", "stop"]
+    assert [c.split()[3] for c in esc["choices"]] == ["escalate", "continue", "waive", "stop", "review"]
     assert len(_events(env, "convergence.escalation")) == 1 and not _events(env, "convergence.intake_gap")
     assert "office decide L-T1" in _status(env)["next"]
     code, out = env.office("rerun", "T1", "--fresh")
@@ -467,6 +562,21 @@ def test_reviewer_failures_walk_the_fallback_chain_without_spending_a_round(env)
     assert _scope(env, "L-T1")["status"] == "approved"
 
 
+def test_unavailable_lane_review_spends_no_round(env):
+    """An UNAVAILABLE attempt is runtime status: the scope stays at round 1, `office resume` retries
+    it, and the retry is round 1 again; only the completed RECHECK moves the lane to round 2."""
+    _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"exit": 1}])
+    env.office("dispatch", "T1", check=0)
+    first = _gates(env, "convergence_review")[0]
+    assert first["review_status"] == "UNAVAILABLE" and first["verdict"] is None and first["round"] == 1
+    assert int(_scope(env, "L-T1").get("round") or 1) == 1
+    env.script(convergence_reviewer=[{"reply": recheck(finding("F1"))}])
+    env.office("resume", check=0)
+    gates = _gates(env, "convergence_review")
+    assert [(g["round"], g["review_status"]) for g in gates] == [(1, "UNAVAILABLE"), (1, "COMPLETED")], gates
+    assert gates[1]["verdict"] == "RECHECK" and int(_scope(env, "L-T1")["round"]) == 2
+
+
 def test_exhausted_specialists_allow_a_degraded_orchestrator_review(env, tmp_path):
     """12, 13, 33, 34: every route failing is UNAVAILABLE status (not a verdict); the
     orchestrator may then review, recorded as degraded when its identity or a producer's is unknown
@@ -523,23 +633,154 @@ def test_waiver_needs_landing_authority_and_keeps_the_verdict(env):
     assert w["underlying"] == "RECHECK" and w["reason"] == "deadline"
 
 
-def test_delegated_orchestrator_may_waive_and_recomposition_voids_it(env):
-    """35, 36, 39: delegated landing authority lets the orchestrator waive; a new
-    composition leaves the waiver behind."""
+def _delegated_waiver(env):
     _escalate(env, extra=("--end-state", "merge"))
     env.office("approve", "waive", "L-T1:convergence", "--as", "orchestrator", "--reason", "user delegated landing",
                check=0)
     assert _scope(env, "L-T1")["status"] == "waived"
-    w = _q(env, "SELECT * FROM authorizations WHERE kind='waiver'")[0]
-    assert w["authorized_by"].startswith("orchestrator (landing delegated at intake")
-    env.script(executor=[{"write": {"calc.py": GOOD_ADD + "# new\n"}, "submit": True}],
+
+
+def _resubmit(env, content):
+    """The executor resubmits `content` for the accepted T1 (reopened by hand: nothing routes a waived lane)."""
+    env.script(executor=[{"write": {"calc.py": content}, "submit": True}],
                convergence_reviewer=[{"reply": recheck(finding("F1"))}])
-    env.office("disposition", "L-T1:F1", "fix", check=None)  # not a non-blocking finding: refused
     con = env.con()
     con.execute("UPDATE tasks SET status='changes_required' WHERE id='T1'")
     con.commit()
     env.office("rerun", "T1", "--fresh", check=0)
-    assert _scope(env, "L-T1")["status"] != "waived", "the waiver bound the earlier composition only"
+
+
+def test_delegated_orchestrator_may_waive(env):
+    """35, 36: delegated landing authority lets the orchestrator waive; the waiver stores the composed tree."""
+    _delegated_waiver(env)
+    w = _q(env, "SELECT * FROM authorizations WHERE kind='waiver'")[0]
+    assert w["authorized_by"].startswith("orchestrator (landing delegated at intake")
+    assert json.loads(w["envelope_json"])["tree"] == _scope(env, "L-T1")["tree"]
+
+
+def test_a_different_composed_tree_voids_the_waiver(env):
+    """39: a recomposition with a different tree leaves the waiver behind and is reviewed again."""
+    _delegated_waiver(env)
+    _resubmit(env, GOOD_ADD + "# new\n")
+    assert _scope(env, "L-T1")["status"] != "waived", "the waiver bound the earlier composed tree only"
+    assert len(_gates(env, "convergence_review")) == 4, "a new tree is reviewed"
+    from office import convergence
+    st = _scope(env, "L-T1")
+    assert convergence.waiver_for(env.con(), _run_row(env), "L-T1", "convergence_review", st["commit"]) is None
+
+
+def test_an_identical_tree_recomposition_keeps_the_waiver_and_starts_no_review(env):
+    """#452, #360: a byte-identical resubmit recomposes to a new commit with the same tree: the waiver, the
+    done gates and the verdict stay in force, and no new convergence cycle starts."""
+    _delegated_waiver(env)
+    before = _scope(env, "L-T1")
+    gates_before = [g["id"] for g in _gates(env, "convergence_review")]
+    _resubmit(env, GOOD_ADD + "# r2\n")
+    after = _scope(env, "L-T1")
+    assert after["tree"] == before["tree"] and after["commit"] != before["commit"], "same tree, new composed commit"
+    assert after["status"] == "waived" and after["carried_commits"] == [before["commit"]]
+    assert [g["id"] for g in _gates(env, "convergence_review")] == gates_before, "no new review gate"
+    assert _gates(env, "convergence_review")[-1]["input_key"] == f"L-T1:{after['commit']}"
+    assert not _gates(env, "visual") and len(_events(env, "convergence.carried")) == 1
+    from office import convergence
+    assert convergence.waiver_for(env.con(), _run_row(env), "L-T1", "convergence_review", after["commit"])
+    assert _run_row(env)["landing"]["integration"]["status"] == "accepted"
+
+
+def test_a_waiver_without_a_tree_binds_its_commit_only(env):
+    """Legacy rows (recorded before trees were stored) match the commit, never a recomposed one."""
+    _delegated_waiver(env)
+    con = env.con()
+    row = con.execute("SELECT id, envelope_json FROM authorizations WHERE kind='waiver'").fetchone()
+    meta = {k: v for k, v in json.loads(row["envelope_json"]).items() if k != "tree"}
+    con.execute("UPDATE authorizations SET envelope_json=? WHERE id=?", (json.dumps(meta), row["id"]))
+    con.commit()
+    from office import convergence
+    st = _scope(env, "L-T1")
+    assert convergence.waiver_for(con, _run_row(env), "L-T1", "convergence_review", st["commit"])
+    assert convergence.waiver_for(con, _run_row(env), "L-T1", "convergence_review", "0" * 40, tree=st["tree"]) is None
+    _resubmit(env, GOOD_ADD + "# r2\n")
+    assert len(_gates(env, "convergence_review")) == 4, "a legacy waiver does not carry: the tree is reviewed again"
+
+
+# ------------------------------------------------------------------ blocking dismissal, decide (#455)
+
+def test_a_blocking_finding_is_dismissed_only_with_the_users_quote(env):
+    """#455: `office disposition <scope>:<code> dismissed --quote` settles an open blocking finding on the
+    user's authority; without --quote it is refused and names --quote."""
+    _escalate(env)
+    for how in ("dismissed", "fixed", "follow-up"):
+        code, out = env.office("disposition", "L-T1:F1", how, "--", "not a bug")
+        assert code == 2 and "--quote" in out, (how, out)
+    code, out = env.office("disposition", "L-T1:F1", "fixed", "--quote", "it is fixed")
+    assert code == 2 and "--quote" in out, "only dismissal takes the user's words"
+    code, out = env.office("disposition", "L-T1:F1", "dismissed", "--quote", "x", env={"OFFICE_DISPATCH_ID": "D1"})
+    assert code == 4 and "worker-cannot-disposition" in out, out
+    assert _scope(env, "L-T1")["status"] == "escalated"
+    env.office("disposition", "L-T1:F1", "dismissed", "--quote", "the reviewer tool is wrong here", check=0)
+    row = _q(env, "SELECT * FROM findings WHERE scope='L-T1'")[-1]
+    assert (row["disposition"], row["disposition_by"], row["state"], row["blocking"]) == ("dismissed", "user", "nonblocking", 1)
+    assert row["disposition_note"] == "the reviewer tool is wrong here"
+    assert _scope(env, "L-T1")["status"] == "waived" and _scope(env, "L-T1")["escalation"] is None
+    assert _run_row(env)["landing"]["integration"]["status"] == "accepted"
+    auth = _q(env, "SELECT * FROM authorizations WHERE kind='dismissal'")
+    assert [(a["target"], a["authorized_by"], a["quote"]) for a in auth] == [
+        ("L-T1:F1", "user", "the reviewer tool is wrong here")]
+    from office import convergence
+    rec = convergence.receipt(env.con(), _run_row(env))
+    d = rec["dispositions"][0]
+    assert (d["scope"], d["code"], d["disposition"], d["blocking"], d["disposition_by"]) == ("L-T1", "F1", "dismissed", True, "user")
+    assert d["authority_quote"] == "the reviewer tool is wrong here"
+    assert rec["waivers"][0]["underlying"] == "RECHECK" and rec["waivers"][0]["by"] == "user"
+    assert _gates(env, "convergence_review")[-1]["verdict"] == "RECHECK", "the verdict stays recorded"
+
+
+def test_dismissal_releases_the_task_that_continue_reopened(env):
+    """#455: `decide continue` names the tasks it reopens; dismissing the finding afterwards returns the accepted
+    producer to accepted and settles the lane."""
+    _escalate(env)
+    code, out = env.office("decide", "L-T1", "continue", "--quote", "one more try")
+    assert code == 0 and "reopens T1" in out and "decide L-T1 review" in out and "dismissed --quote" in out, out
+    assert task_row(env)["status"] == "changes_required"
+    env.office("disposition", "L-T1:F1", "dismissed", "--quote", "reviewer defect, not a code defect", check=0)
+    assert task_row(env)["status"] == "accepted" and task_row(env)["pause_reason"] is None
+    assert _scope(env, "L-T1")["status"] == "waived"
+
+
+def test_decide_review_starts_another_round_without_reopening_producers(env):
+    """#455: `decide review` judges the composition again; the accepted producer stays accepted."""
+    adds = [GOOD_ADD + f"# r{i}\n" for i in range(3)]
+    _start(env, executor=[{"write": {"calc.py": a}, "submit": True} for a in adds],
+           convergence_reviewer=[{"reply": recheck(finding("F1"))}] * 3 + [{"reply": APPROVED}])
+    env.office("dispatch", "T1", check=0)
+    env.office("rerun", "T1", "--fresh", check=0)
+    env.office("rerun", "T1", "--fresh", check=0)
+    tree = _scope(env, "L-T1")["tree"]
+    assert _scope(env, "L-T1")["status"] == "escalated"
+    code, out = env.office("decide", "L-T1", "review")
+    assert code == 2 and "quote" in out
+    code, out = env.office("decide", "L-T1", "review", "--quote", "have the orchestrator look once more")
+    assert code == 0 and "no accepted task is reopened" in out and "reopens T1" not in out, out
+    assert task_row(env)["status"] == "accepted"
+    gates = _gates(env, "convergence_review")
+    assert len(gates) == 4 and (gates[-1]["cycle"], gates[-1]["round"]) == (2, 1), "a new round of review ran"
+    assert _scope(env, "L-T1")["tree"] == tree, "the same tree, judged again"
+    assert _scope(env, "L-T1")["status"] == "approved"
+
+
+def test_decide_waive_checks_every_kind_before_waiving_any(env):
+    """#455: a gate that cannot be waived stops `decide waive` before any other kind is waived."""
+    _escalate(env)
+    st = _scope(env, "L-T1")
+    con = env.con()
+    con.execute("INSERT INTO gates(id, run_id, subject, kind, input_key, status, round, created_at, contract, scope, cycle) "
+                "VALUES('Gbusy', ?, 'lane', 'visual', ?, 'running', 1, '2999-01-01T00:00:00+00:00', 'convergence-v1', "
+                "'L-T1', 1)", (_run_row(env)["id"], f"L-T1:{st['commit']}"))
+    con.commit()
+    code, out = env.office("decide", "L-T1", "waive", "--quote", "land it", "--reason", "deadline")
+    assert code == 4 and "gate-busy" in out, out
+    assert not _q(env, "SELECT 1 FROM authorizations WHERE kind='waiver'"), "nothing was waived"
+    assert _scope(env, "L-T1")["status"] == "escalated"
 
 
 # ------------------------------------------------------------------ visual (10, 11, 15, 26-30)
@@ -734,3 +975,49 @@ def test_intake_gap_answer_reviews_the_same_composition_again(env):
     gates = _gates(env, "convergence_review")
     assert len(gates) == 2 and gates[-1]["verdict"] == "APPROVED" and gates[-1]["cycle"] == 2, gates
     assert _scope(env, "L-T1")["status"] == "approved"
+
+
+@pytest.mark.parametrize("session,expected", [(None, "--fresh"), ("session-123", "--resume|--fresh")])
+def test_issue_581_rerun_hint_depends_on_stored_session(monkeypatch, session, expected):
+    from office import convergence, rerun
+    monkeypatch.setattr(rerun, "_last_ended_executor", lambda con, run, tid: {"session_id": session})
+    assert convergence._rerun_modes(None, {}, "T4") == expected
+
+def test_issue_542_plan_reviewer_persists_model_and_effort(env):
+    # Guard plan review route evidence, which is essential for #526-#528.
+    _start(env, gear="express", approve=False, plan_reviewer=[{"reply": APPROVED}])
+    rows = _q(env, "SELECT role, triple, model, effort FROM dispatches WHERE role='plan_reviewer'")
+    assert rows, "a plan review must record a reviewer dispatch"
+    assert all(r["model"] and r["effort"] for r in rows), rows
+
+
+
+@pytest.mark.parametrize("gear", ["express", "full"])
+def test_issue_542_alternate_plan_review_routes_persist_model_effort(env, gear):
+    _start(env, gear=gear, approve=False, plan_reviewer=[{"reply": APPROVED}])
+    rows = _q(env, "SELECT triple, model, effort, route_json FROM dispatches WHERE role='plan_reviewer'")
+    assert rows
+    for row in rows:
+        route = json.loads(row["route_json"])["candidate"]
+        assert row["model"] == route["invocation_model_id"]
+        assert row["effort"] == route["effort"]
+
+
+def test_issue_542_historical_backfill_uses_only_durable_route_evidence(tmp_path):
+    from office import db
+    con = db.connect(tmp_path / "routes.db")
+    try:
+        pairs = [
+            ("known", json.dumps({"candidate": {"invocation_model_id": "original-model", "effort": "high"}})),
+            ("unknown", json.dumps({"candidate": {"model_id": "unproven"}})),
+        ]
+        for did, route in pairs:
+            con.execute("INSERT INTO dispatches(id, role, route_json) VALUES (?, 'plan_reviewer', ?)", (did, route))
+        with db.transaction(con):
+            assert db._repair_historical_plan_review_routes(con) == (1, 1)
+        rows = {r["id"]: (r["model"], r["effort"]) for r in con.execute(
+            "SELECT id, model, effort FROM dispatches")}
+        assert rows["known"] == ("original-model", "high")
+        assert rows["unknown"] == (None, None)
+    finally:
+        con.close()

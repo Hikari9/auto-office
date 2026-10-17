@@ -123,3 +123,20 @@ def test_plan_review_status_names_its_reviewer(env):
     con.commit()
     code, out = env.office("status")
     assert "plan review running (p1 reviewer Drev pane w1:p2)" in out, out
+
+
+def test_a_conflicting_rerun_carries_every_unmerged_dependency_to_the_worker(env):
+    # R3-1: rerun dropped `unmerged`, so preflight only ever required the conflicting one.
+    import json
+    t1_r1, t1_acc, w2, wt2 = _t2_on_superseded_t1(env)
+    _commit(env, wt2, {"calc.py": GOOD_ADD + "# t2 edit\n"}, "t2 conflicting")
+    con = env.con()
+    con.execute("UPDATE dispatches SET ended_at='2026-01-01T00:00:00+00:00', status='exited' WHERE id=?",
+                (w2["OFFICE_DISPATCH_ID"],))
+    con.commit()
+    code, out = env.office("rerun", "T2", "--fresh", env=EXTERNAL)
+    assert code == 0 and "conflicts" in out, out
+    w2b, _ = _worker(env, "T2")
+    pkt = next((env.state / "runs").glob(f"*/dispatches/{w2b['OFFICE_DISPATCH_ID']}/packet.json"))
+    restack = json.loads(pkt.read_text())["restack"]
+    assert [u["commit"] for u in restack.get("unmerged") or []] == [_rev_commit(env, t1_acc)], restack

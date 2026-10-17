@@ -6,9 +6,11 @@ Claude takes the Enter written in the same chunk as part of the paste
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from test_herdr_agent_launch import BUSY, EMPTY, _calls, _fake, _live_dispatch
+from test_herdr_agent_launch import BUSY, EMPTY, _calls, _fake, _live_dispatch, real_herdr_json
 
 TEXT = "AMENDMENT A2: run office status, apply it, then office ack A2."
 
@@ -22,6 +24,11 @@ def _herdr_worker(env, monkeypatch, *, reads, status="running", agent="working")
     con = env.con()
     con.execute("UPDATE dispatches SET launcher='herdr', pane_id='w1:p7', status=? WHERE id=?", (status, d["id"]))
     con.commit()
+    # Herdr sees this dispatch's own agent in the pane, as it does once the agent has started.
+    from office import dispatch
+    held = json.loads(state_file.read_text())
+    held["pane_agents"], held["pane_kinds"] = {"w1:p7": dispatch.herdr_agent_name(d["id"])}, {"w1:p7": d["harness"]}
+    state_file.write_text(json.dumps(held))
     return state_file, run, d, con
 
 
@@ -83,3 +90,78 @@ def test_prompt_reaches_a_reviewer_recorded_exited_whose_agent_still_waits(env, 
     res = prompting.prompt(con, run, d["id"], "Write your complete review to the reply file.")
     assert "landed" in res.lines[0]
     assert len(_sent(_calls(state_file))[0]) == 1
+
+
+@pytest.mark.approved
+def test_prompt_reports_the_cwd_and_agent_herdr_reports_not_only_the_recorded_worktree(env, monkeypatch):
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY, BUSY])
+    from office import dispatch, prompting
+    con.execute("UPDATE dispatches SET worktree=? WHERE id=?", (str(env.repo), d["id"]))
+    con.commit()
+    agent = dispatch.herdr_agent_name(d["id"])
+    monkeypatch.setattr(dispatch, "_herdr_json", real_herdr_json("w1:p7", name=agent, kind=d["harness"],
+                                                                 foreground_cwd=str(env.repo / "src")))
+    res = prompting.prompt(con, run, "T1", TEXT)
+    line = res.lines[0]
+    assert "landed" in line, line  # a correctly launched dispatch passes the fence in herdr's real JSON
+    assert f"herdr reports cwd {env.repo / 'src'}" in line and f"agent {agent}" in line, line
+    assert f"recorded worktree {env.repo}" in line, line
+    assert _sent(_calls(state_file))[0] == [["agent", "prompt", "w1:p7", TEXT]]
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("pane,why", [
+    (dict(name="office-dsomebodyelse"), "does not report agent"),
+    (dict(name=None), "does not report agent"),
+    (dict(kind="codex"), "runs codex"),
+    (dict(session="someone-elses-session"), "session does not match"),
+], ids=["other-agent", "unnamed-agent", "other-kind", "other-session"])
+def test_prompt_refuses_a_pane_whose_real_herdr_identity_is_not_this_dispatchs(env, monkeypatch, pane, why):
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY, BUSY])
+    from office import dispatch, prompting
+    con.execute("UPDATE dispatches SET worktree=?, session_id='session-A' WHERE id=?", (str(env.repo), d["id"]))
+    con.commit()
+    reported = dict(name=dispatch.herdr_agent_name(d["id"]), kind=d["harness"], session="session-A",
+                    foreground_cwd=str(env.repo))
+    monkeypatch.setattr(dispatch, "_herdr_json", real_herdr_json("w1:p7", **{**reported, **pane}))
+    with pytest.raises(prompting.Refused) as err:
+        prompting.prompt(con, run, "T1", TEXT)
+    assert err.value.category == "pane-mismatch" and why in err.value.message, err.value.message
+    assert not _sent(_calls(state_file))[0]
+
+
+@pytest.mark.approved
+def test_prompt_says_so_when_herdr_reports_no_cwd(env, monkeypatch):
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY, BUSY])
+    from office import dispatch, prompting
+    agent = dispatch.herdr_agent_name(d["id"])
+    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: {"pane": {"agent": agent}})
+    res = prompting.prompt(con, run, "T1", TEXT)
+    assert f"herdr reports cwd none, agent {agent}" in res.lines[0], res.lines
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("reported", [{}, {"pane": {}}, {"pane": {"cwd": "/x"}}, {"pane": {"agent": {}}}],
+                         ids=["nothing", "empty-pane", "no-agent", "empty-agent"])
+def test_prompt_refuses_a_pane_herdr_cannot_describe(env, monkeypatch, reported):
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY, BUSY])
+    from office import dispatch, prompting
+    monkeypatch.setattr(dispatch, "_herdr_json", lambda args: reported)
+    with pytest.raises(prompting.Refused) as err:
+        prompting.prompt(con, run, "T1", TEXT)
+    assert err.value.category == "pane-mismatch"
+    assert not _sent(_calls(state_file))[0]
+
+
+@pytest.mark.approved
+def test_prompt_never_echoes_control_sequences_a_pane_reports(env, monkeypatch):
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY, BUSY])
+    from office import dispatch, prompting
+    escape = chr(27) + "[31m"
+    agent = dispatch.herdr_agent_name(d["id"])
+    con.execute("UPDATE dispatches SET worktree=? WHERE id=?", (str(env.repo), d["id"]))
+    con.commit()
+    monkeypatch.setattr(dispatch, "_herdr_json", real_herdr_json("w1:p7", name=agent, kind=d["harness"],
+                                                                 cwd=f"{env.repo}/sub{escape}"))
+    line = prompting.prompt(con, run, "T1", TEXT).lines[0]
+    assert escape not in line and f"herdr reports cwd {env.repo}/sub " in line, line

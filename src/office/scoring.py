@@ -311,11 +311,18 @@ def get_current_trust_state(db_path, triple: str) -> str:
 # §7.2 -- per-role capability floor.
 # ---------------------------------------------------------------------------
 
-def evaluate_capability_floor(candidate: dict, floor: dict | None) -> tuple[bool, str | None]:
+def evaluate_capability_floor(candidate: dict, floor: dict | None, *,
+                              unbenchmarked_ok: bool = False) -> tuple[bool, str | None]:
     """Evaluates `candidate` against a `roles.<role>.floor` block (§7.2). Returns
     (passed, reason). A required catalog field the floor needs that is missing, null, or
     undefined on `candidate` FAILS CLOSED and names the missing field -- it is never
-    treated as passing (§7.2.2 rule 4)."""
+    treated as passing (§7.2.2 rule 4).
+
+    `unbenchmarked_ok` is for a discovery trial candidate (#494) and relaxes exactly one
+    case: no score at all for the floor's benchmark index. Unknown is then neither a
+    pass on merit nor a failure; the adaptive scorer gives such a route a neutral,
+    uncertain prior. A score below the floor, a low effort or a disallowed invocation
+    source still rejects."""
     if not floor:
         return True, None
 
@@ -342,6 +349,8 @@ def evaluate_capability_floor(candidate: dict, floor: dict | None) -> tuple[bool
         benchmarks = candidate.get("benchmark_indexes")
         score = benchmarks.get(index_name) if isinstance(benchmarks, dict) else None
         if score is None:
+            if unbenchmarked_ok:
+                return True, None
             return False, f"missing required catalog field 'benchmark_indexes.{index_name}'"
         if float(score) < float(min_score):
             return False, (

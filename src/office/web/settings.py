@@ -20,6 +20,7 @@ EDITABLE = {"machine": "--user", "repository": "--repo"}
 APPLY = {
     "scheduler": "immediate",           # `office queue` and the web queue loop read it on every pass
     "intake": "immediate",              # read when the queue loop admits an item
+    "economics": "immediate",           # read by each `office economics ingest`
     "quota": "before-dispatch",         # re-read and drift-checked at each dispatch (config.config_drift)
     "roles": "before-dispatch",
     "paths": "restart",                 # runs.db and homes are resolved once per process
@@ -79,7 +80,10 @@ def entries(*, repo_root: Path | None = None, pinned: dict | None = None) -> lis
 
 
 def view(*, scope: str, repo_root: Path | None = None, pinned: dict | None = None, **ids) -> dict:
-    return {"scope": scope, **ids, "tiers": list(TIERS), "entries": entries(repo_root=repo_root, pinned=pinned)}
+    from office.web import model_registry
+    return {"scope": scope, **ids, "tiers": list(TIERS),
+            "entries": entries(repo_root=repo_root, pinned=pinned),
+            "model_registry": model_registry.view()}
 
 
 def config_args(kind: str, tier: str, key: str, value: Any = None) -> list[str]:

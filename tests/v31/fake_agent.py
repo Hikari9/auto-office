@@ -10,7 +10,9 @@ performs the next scripted action for that role from $FAKE_SCENARIO (JSON):
    "plan_reviewer": [...], "planner": [{"plan": "...", "submit": true}],
    "visual_reviewer": [...], "probe": [{"reply": "auto"}]}
 
-Actions may also set "exit", "signal", "sleep", "stderr", "ack", "raw".
+Actions may also set "exit", "signal", "sleep", "stderr", "ack", "raw", and "office": a list of argv lists,
+each run as `office <argv>` before the submit ("office_after": after it), their output echoed. That is how
+a scripted executor raises, or sends any other command a real one would.
 The last action repeats when the list is exhausted.
 
 Two ways to run it. As a script (the harness binaries wrap it) it is a real
@@ -210,6 +212,12 @@ def _act(argv, prompt, env, cwd, in_process, out, err):
         out.write(r.stdout + "\n")
     if role == "executor" and writes and not action.get("no_ledger") and any(w.endswith(".py") for w in writes):
         _comply_with_self_review(cwd, env, writes, err, prompt)
+    def run_office(key):
+        for argv_ in action.get(key) or []:
+            r = office(*argv_)
+            out.write(f"$ office {' '.join(argv_)}\n{r.stdout}{r.stderr}\n")
+
+    run_office("office")
     if action.get("submit"):
         r = office("submit")
         out.write(r.stdout + r.stderr + "\n")
@@ -218,6 +226,7 @@ def _act(argv, prompt, env, cwd, in_process, out, err):
             if m:
                 out.write(office("ack", m.group(1)).stdout + "\n")
                 out.write(office("submit").stdout + "\n")
+    run_office("office_after")
     if action.get("raw"):
         out.write(action["raw"] + "\n")
     if reply is not None:

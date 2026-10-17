@@ -64,14 +64,11 @@ is your HEAD, records it, and consumes it; inline tier only: `office submit --se
 
 ## 3. Checks
 
-Run the brief's `CHECKS` lines. Check `uptime` first. When the load average is above twice the CPU count, use long timeouts (900s or
-more), never 270-290s caps. Record pass/fail counts.
+Run the brief's `CHECKS` lines. Check `uptime` first. When the load average is above twice the CPU count, use long timeouts (900s or more), never 270-290s caps. Record pass/fail counts.
 
 ## 4. Commit and push
 
-Commit in-scope files only. When the brief has a `GIT` line, push to that branch, and never force-push. Never touch files another tool
-stamped outside SCOPE (`git checkout <base> -- <file>` restores them). Write or update the step 2 ledger after the final commit: its
-`COMMIT` must be HEAD, and each round needs a fresh file.
+Commit in-scope files only. When the brief has a `GIT` line, push to that branch, and never force-push. Never touch files another tool stamped outside SCOPE (`git checkout <base> -- <file>` restores them). Write or update the step 2 ledger after the final commit: its `COMMIT` must be HEAD, and each round needs a fresh file.
 
 ## 5. Preflight
 
@@ -85,15 +82,15 @@ To wait, start this with `Bash` `run_in_background` (or the Monitor tool) and ke
 for i in $(seq 30); do office preflight >/dev/null; rc=$?; [ "$rc" -ne 75 ] && break; sleep 60; done; echo "rc=$rc"
 ```
 
-It polls task state, not event numbers. On exit 0, submit once. On exit 4 or after 30 minutes, report and stop. If an `AMENDMENT <id>`
-arrives while you wait, apply it, run `office ack <id>`, and go back to step 1. Preflight never reacquires a lost lease; only the
-orchestrator moves a task to a new holder.
+It polls task state, not event numbers. On exit 0, submit once. On exit 4 or after 30 minutes, report and stop. If an `AMENDMENT <id>` arrives while you wait, apply it, run `office ack <id>`, and go back to step 1. Preflight never reacquires a lost lease; only the orchestrator moves a task to a new holder.
 
-## 6. Submit
+## 6. Submit (or raise)
 
 Use the exact line from `next:`, sourcing `agent.env` and running `office submit` in the same `Bash` call (shell env does not persist).
 `lease-lost`, `superseded-dispatch` or `task-paused` is terminal: do not retry or investigate. For `outside-scope`, revert the file or run
-`office submit --request-scope <file> -- "<reason>"`.
+`office raise --kind scope-request --path <file> -- "<reason>"`.
+
+**Raise, do not submit, when you cannot finish** (a decision, a blocker, a file outside SCOPE): `office raise [--kind question|blocker|scope-request] [--path <file>] -- "<text>"`, no commit needed. It blocks your task and wakes the orchestrator, and the same text again records nothing. Stop and wait: the answer arrives as a message (or in the next session's brief if you ended). It never changes your contract; a scope-request needs a contract amendment, which unblocks you. Then continue and resubmit.
 
 ## 7. Report
 

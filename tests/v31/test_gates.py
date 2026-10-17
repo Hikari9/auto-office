@@ -522,3 +522,36 @@ def test_waiver_cancels_an_in_flight_review_so_it_cannot_reopen_the_task(env):
     gates.ingest_task_gate(con, run, gid, {"verdict": "UNAVAILABLE", "summary": "no qualifying route"})
     con.commit()
     assert task_row(env, "T1")["status"] == "accepted"
+
+
+def test_waiving_failed_checks_still_requires_independent_review(env):
+    # A failed checks gate cancels the waiting code review. Waiving checks lifts
+    # that reason, so the review runs: the task is never accepted with no review.
+    from conftest import BAD_ADD
+    approved_run(env, executor=[{"write": {"calc.py": BAD_ADD}, "submit": True}],
+                 code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    con = env.con()
+    assert con.execute("SELECT verdict FROM gates WHERE kind='checks'").fetchone()[0] == "CHANGES_REQUIRED"
+    assert con.execute("SELECT status FROM gates WHERE kind='code_review'").fetchone()[0] == "cancelled"
+    assert [c["role"] for c in env.calls()].count("code_reviewer") == 0
+    code, out = env.office("approve", "waive", "T1:checks", "--quote", "the check is wrong, review the code")
+    assert code == 0, out
+    env.office("status", check=0)
+    con = env.con()
+    reviews = con.execute("SELECT status, verdict FROM gates WHERE kind='code_review'").fetchall()
+    assert [(r["status"], r["verdict"]) for r in reviews] == [("done", "PASS")]
+    assert [c["role"] for c in env.calls()].count("code_reviewer") == 1
+    assert task_row(env)["status"] == "accepted"
+    assert con.execute("SELECT 1 FROM events WHERE kind='gate.rerun' AND summary LIKE '%still required%'").fetchone()
+
+
+def test_waiving_failed_checks_never_accepts_before_the_review_verdict(env):
+    from conftest import BAD_ADD
+    approved_run(env, executor=[{"write": {"calc.py": BAD_ADD}, "submit": True}],
+                 code_reviewer=[{"reply": "VERDICT: CHANGES_REQUIRED\nFINDING F1 | material | calc.py:2 | add subtracts | fix"}])
+    env.office("dispatch", "T1", check=0)
+    env.office("approve", "waive", "T1:checks", "--quote", "the check is wrong, review the code", check=0)
+    env.office("status", check=0)
+    assert [c["role"] for c in env.calls()].count("code_reviewer") >= 1
+    assert task_row(env)["status"] != "accepted"

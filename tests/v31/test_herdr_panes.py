@@ -25,6 +25,14 @@ elif args[:2] == ["pane", "get"] and args[2] in data["closed"]:
     sys.exit(1)
 elif args[:2] == ["pane", "get"]:
     result = {{"pane": {{"pane_id": args[2]}}}}
+elif args[:2] == ["tab", "get"] and os.environ.get("FAKE_HERDR_TAB_DOWN"):
+    json.dump(data, open(state, "w"))
+    sys.stderr.write("server unavailable")
+    sys.exit(1)
+elif args[:2] == ["tab", "get"] and args[2] in data.get("tabs_gone", []):
+    json.dump(data, open(state, "w"))
+    print(json.dumps({{"error": {{"code": "tab_not_found"}}}}))
+    sys.exit(1)
 elif args[:2] == ["tab", "get"]:
     result = {{"tab": {{"tab_id": args[2]}}}}
 elif args[:2] == ["tab", "close"]:
@@ -127,9 +135,9 @@ def test_label_task_role_pr_and_short_id(env):
     from office import dispatch
     run = {"id": "r1"}
     d = {"id": "D4f2a91c0", "role": "executor", "task_id": None}
-    assert dispatch.pane_label(run, d) == "plan executor D4f2a"
+    assert dispatch.pane_label(run, d) == "plan"
     d["gate_id"] = None
-    assert dispatch.pane_label(run, {"id": "D9c1bffff", "role": "plan_reviewer"}) == "plan plan_reviewer D9c1b"
+    assert dispatch.pane_label(run, {"id": "D9c1bffff", "role": "plan_reviewer"}) == "plan review"
 
 
 def test_label_with_task_pr_and_integration(env, monkeypatch):
@@ -137,10 +145,10 @@ def test_label_with_task_pr_and_integration(env, monkeypatch):
     task = {"pr": {"number": 261}}
     monkeypatch.setattr(state, "get_task", lambda con, rid, tid: task if tid == "T3" else None)
     run = {"id": "r1"}
-    assert dispatch.pane_label(run, {"id": "D4f2a0000", "role": "executor", "task_id": "T3"}) == "T3 executor PR#261 D4f2a"
-    assert dispatch.pane_label(run, {"id": "D9c1b0000", "role": "code_reviewer", "task_id": "T3"}) == "T3 code_reviewer PR#261 D9c1b"
+    assert dispatch.pane_label(run, {"id": "D4f2a0000", "role": "executor", "task_id": "T3"}) == "T3 PR#261"
+    assert dispatch.pane_label(run, {"id": "D9c1b0000", "role": "code_reviewer", "task_id": "T3"}) == "T3 PR#261 review"
     task["pr"] = {}
-    assert dispatch.pane_label(run, {"id": "D4f2a0000", "role": "executor", "task_id": "T3"}) == "T3 executor D4f2a"
+    assert dispatch.pane_label(run, {"id": "D4f2a0000", "role": "executor", "task_id": "T3"}) == "T3"
 
 
 def test_integration_label_and_pr(env, monkeypatch):
@@ -154,9 +162,9 @@ def test_integration_label_and_pr(env, monkeypatch):
     monkeypatch.setattr(dispatch.db, "connect", lambda: Con())
     monkeypatch.setattr(state, "get_run", lambda con, rid: {"landing": {"integration": {"pr": 270}}})
     d = {"id": "D7e0c1234", "role": "code_reviewer", "task_id": None, "gate_id": "G1"}
-    assert dispatch.pane_label({"id": "r1"}, d) == "integration code_reviewer PR#270 D7e0c"
+    assert dispatch.pane_label({"id": "r1"}, d) == "integration PR#270 review"
     monkeypatch.setattr(state, "get_run", lambda con, rid: {"landing": {}})
-    assert dispatch.pane_label({"id": "r1"}, d) == "integration code_reviewer D7e0c"
+    assert dispatch.pane_label({"id": "r1"}, d) == "integration review"
 
 
 def test_reused_pane_gets_the_new_dispatch_label(env, monkeypatch):
@@ -253,8 +261,8 @@ def test_pane_label_survives_db_connect_failure_during_launch(env, monkeypatch):
         raise RuntimeError("db locked")
     monkeypatch.setattr(dispatch.db, "connect", boom)
     d = {"id": "D4f2a0000", "role": "executor", "task_id": "T3"}
-    assert dispatch.pane_label({"id": "r1"}, d) == "T3 executor D4f2a"
-    assert dispatch.pane_label({"id": "r1"}, {"id": "D9c1b0000", "role": "code_reviewer"}) == "code_reviewer D9c1b"
+    assert dispatch.pane_label({"id": "r1"}, d) == "T3"
+    assert dispatch.pane_label({"id": "r1"}, {"id": "D9c1b0000", "role": "code_reviewer"}) == "plan review"
     dispatch.relabel_task_panes({"id": "r1"}, "T3")  # must not raise either
 
 
@@ -279,6 +287,7 @@ def test_label_refreshed_when_pr_lands_before_pane_id_is_recorded(env, monkeypat
     monkeypatch.setattr(dispatch, "write_agent_env", lambda *a, **k: Path("/dev/null"))
     monkeypatch.setattr(dispatch, "_shell_run", lambda *a, **k: True)
     monkeypatch.setattr(dispatch, "_record_launch", lambda *a, **k: None)
+    monkeypatch.setattr(dispatch, "_pane_identity_mismatch", lambda *a, **k: None)  # this test is about the label
     monkeypatch.setattr(dispatch, "_started_session", lambda out: "sess")
     monkeypatch.setattr(dispatch, "_set_dispatch", lambda *a, **k: None)
     monkeypatch.setattr(dispatch, "atomic_write_json", lambda *a, **k: None)
@@ -424,3 +433,143 @@ def test_reusing_a_pane_runs_no_herdr_command_under_the_lock(env, monkeypatch):
     first = dispatch._herdr_pane(run, env.repo)
     assert dispatch._herdr_pane(run, env.repo) == first
     assert not any(c[:2] == ["pane", "run"] for c in _calls(state))
+
+
+def test_orphan_tabs_survive_when_the_current_tab_is_gone(env, monkeypatch):
+    # R3-12.
+    state = _fake(env, monkeypatch)
+    state.write_text(json.dumps({"calls": [], "n": 0, "closed": [], "tabs_gone": ["w1:tB"]}))
+    from office import dispatch, paths
+    run = _run(env)
+    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
+    tab_file.write_text(json.dumps({"mode": "tab", "tab_id": "w1:tB", "panes": ["w1:p50"], "orphan_tabs": ["w1:tA"]}))
+    assert dispatch._herdr_pane(run, env.repo) == "w1:p900"
+    assert "w1:tA" in json.loads(tab_file.read_text()).get("orphan_tabs", [])
+
+
+def test_an_unreachable_herdr_never_drops_the_own_tab(env, monkeypatch):
+    # R3-13: a transient `tab get` failure is not "the user closed it".
+    state = _fake(env, monkeypatch)
+    monkeypatch.setenv("FAKE_HERDR_TAB_DOWN", "1")
+    from office import dispatch, paths
+    run = _run(env)
+    tab_file = paths.run_dir(run["id"]) / "herdr-tab.json"
+    tab_file.write_text(json.dumps({"mode": "tab", "tab_id": "w1:tD", "panes": ["w1:p18"]}))
+    assert dispatch._herdr_pane(run, env.repo) == "w1:p18"
+    assert not any(c[:2] == ["tab", "create"] for c in _calls(state))
+    assert json.loads(tab_file.read_text())["tab_id"] == "w1:tD"
+
+
+def test_label_appends_model_and_effort(env):
+    from office import dispatch
+    base = {"id": "D6bb5ffff", "role": "executor"}
+    assert dispatch.pane_label({"id": "r1"}, {**base, "harness": "claude", "model": "claude-opus-5-5", "effort": "high"}) \
+        == "plan [opus high]"
+    assert dispatch.pane_label({"id": "r1"}, {**base, "harness": "agy", "model": "gemini-3.8-flash", "effort": "medium"}) \
+        == "plan [gemini-flash med]"
+    assert dispatch.pane_label({"id": "r1"}, {**base, "harness": "codex", "model": "gpt-6-astra", "effort": "none"}) \
+        == "plan [astra]"
+
+def test_repo_first_label_includes_issue_title_and_short_route(env, monkeypatch):
+    from office import dispatch, state
+    task = {"title": "device grants for iPads now", "pr": {"number": 17}}
+    monkeypatch.setattr(state, "get_task", lambda *a: task)
+    run = {"id": "r1", "repo_root": "/code/connect.favor.church",
+           "landing": {"issue": "https://github.com/favorchurch/connect.favor.church/issues/101"}}
+    d = {"id": "D1234567", "role": "executor", "task_id": "T2",
+         "harness": "codex", "model": "gpt-6.1-sol", "effort": "medium"}
+    assert dispatch.pane_label(run, d) == "connect T2 #101 device grants for [sol 6.1 med]"
+
+
+def test_task_issue_overrides_run_issue_and_repo_override(env, monkeypatch):
+    from office import dispatch, state
+    monkeypatch.setattr(state, "get_task", lambda *a: {"title": "#102 device grants changes forever", "pr": {}})
+    run = {"id": "r1", "repo_root": "/code/unrelated.favor.church",
+           "policy": {"herdr": {"repo_short": "app-a"}}, "landing": {"issue": "#101"}}
+    d = {"id": "D1234", "role": "executor", "task_id": "T2",
+         "model": "sgp/mimo-v2.6-pro", "effort": "medium"}
+    assert dispatch.pane_label(run, d) == "app-a T2 #102 device grants changes [mimo-pro med]"
+
+
+def test_short_review_and_verify_labels_keep_role(env, monkeypatch):
+    from office import dispatch, state
+    monkeypatch.setattr(state, "get_task", lambda *a: {"title": "fix header spacing today", "pr": {}})
+    run = {"id": "r1", "repo_root": "/code/rsvp.favor.church", "landing": {"issue": 525}}
+    d = {"id": "D123", "task_id": "T1", "role": "code_reviewer",
+         "model": "gpt-5.6-luna", "effort": "high"}
+    assert dispatch.pane_label(run, d) == "rsvp T1 #525 fix header spacing review [luna high]"
+    d["role"] = "closeout_verifier"
+    assert dispatch.pane_label(run, d) == "rsvp T1 #525 fix header spacing verify [luna high]"
+
+
+def test_repo_short_from_other_domain_and_pinned_override():
+    from office import pane_labels
+    assert pane_labels.repo_short({"repo_root": "/repo/api.example.com"}) == "api"
+    assert pane_labels.repo_short({"repo_root": "/repo/auto-office.git"}) == "auto-office"
+    assert pane_labels.repo_short({"repo_root": "/repo/api.example.com",
+                                   "policy": {"herdr": {"repo_short": "local-test"}}}) == "local-test"
+    assert pane_labels.shell_label({"repo_root": "/repo/api.example.com"},
+                                    {"task_id": "T3"}) == "api T3 shell"
+
+
+def test_busy_pane_retry_is_renamed_before_agent_start(env, monkeypatch):
+    state_file = _fake(env, monkeypatch)
+    from office import dispatch
+    run = _run(env)
+    pane = dispatch._herdr_fresh_pane(run, env.repo, "w1:p5", dispatch_id="Dabc",
+                                     label="connect T2 #101 fix pane [sol 6.1 med]")
+    calls = _calls(state_file)
+    assert ["pane", "rename", pane, "connect T2 #101 fix pane [sol 6.1 med]"] in calls
+    assert calls.index(["pane", "split", "--pane", "w1:p5", "--direction", "down", "--cwd",
+                        str(env.repo), "--no-focus"]) < next(i for i, c in enumerate(calls) if c[:2] == ["pane", "rename"])
+
+
+def test_retained_office_pane_is_labeled_shell_after_fallback(env, monkeypatch):
+    from office import dispatch
+    run = {"id": "r1", "repo_root": "/code/web.favor.church"}
+    renamed = []
+    monkeypatch.setattr(dispatch, "_pane_read", lambda *a: "")
+    monkeypatch.setattr(dispatch, "_pane_identity_mismatch", lambda *a, **kw: None)
+    monkeypatch.setattr(dispatch, "_herdr_rename", lambda *a: renamed.append(a))
+    monkeypatch.setattr(dispatch, "write_launch_spec", lambda *a: None)
+    monkeypatch.setattr(dispatch, "_launch_notice", lambda *a: None)
+    dispatch._herdr_fallback_notice(run, {"id": "D123", "task_id": "T3"},
+                                    {}, env.tmp, "w1:p101", "agent failed", "reason")
+    assert renamed == [("w1:p101", "web T3 shell")]
+    renamed.clear()
+    monkeypatch.setattr(dispatch, "_pane_identity_mismatch", lambda *a, **kw: "other owner")
+    dispatch._herdr_fallback_notice(run, {"id": "D123", "task_id": "T3"},
+                                    {}, env.tmp, "w1:p101", "agent failed", "reason")
+    assert renamed == []  # never relabel a pane that another launch may own
+
+
+def test_herdr_repo_short_override_uses_normal_config_resolution(env):
+    from office import config
+    effective, warnings = config.resolve(env.repo, sets=["herdr.repo_short=my-app"])
+    assert effective["herdr"]["repo_short"] == "my-app"
+    assert not [w for w in warnings if w.get("key") == "herdr.repo_short"]
+
+
+def test_issue_579_live_herdr_registry_blocks_pane_even_when_pane_get_omits_agent(env, monkeypatch):
+    # Stale DB state and pane-get status are not permission to reassign a
+    # reviewer still in Herdr's separate agent registry.
+    _fake(env, monkeypatch)
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
+    from office import dispatch, questions
+    run = _run(env)
+    first = dispatch._herdr_pane(run, env.repo)
+    monkeypatch.setattr(questions, "_herdr_agents", lambda: [
+        {"name": "review-older", "pane_id": first, "agent_status": "working"}])
+    assert first in dispatch._busy_panes(run)
+    second = dispatch._herdr_pane(run, env.repo)
+    assert second != first
+
+
+def test_issue_579_empty_agent_registry_keeps_existing_pane_fencing(monkeypatch):
+    from office import dispatch, questions
+    monkeypatch.setattr(questions, "_herdr_agents", lambda: None)
+    assert dispatch._agent_occupied_panes() == set()
+    monkeypatch.setattr(questions, "_herdr_agents", lambda: [{"pane_id": "x"},
+                                                              {"pane_id": ""},
+                                                              {"pane_id": "w1:p1"}])
+    assert dispatch._agent_occupied_panes() == {"x", "w1:p1"}

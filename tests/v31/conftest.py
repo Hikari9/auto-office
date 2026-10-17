@@ -188,6 +188,10 @@ class Env:
         monkeypatch.setenv("OFFICE_JOBS", "inline")
         monkeypatch.setenv("OFFICE_LAUNCHER", "sync")
         monkeypatch.setenv("OFFICE_QUOTA_PROBE", "off")
+        # A held startup prompt waits for an answer no test gives unless it asks to (#510).
+        monkeypatch.setenv("OFFICE_STARTUP_PROMPT_WAIT", "0")
+        # A pane launch polls for the agent's process group; fake herdr reports none (#507).
+        monkeypatch.setenv("OFFICE_PANE_GROUP_WAIT", "0")
         monkeypatch.setenv("FAKE_SCENARIO", str(self.scenario))
         # Harness session transcripts (the reviewer-reply fallback) are read from
         # these homes; never from the real ones.
@@ -216,6 +220,11 @@ class Env:
             self._init_repo()
         sys.path.insert(0, str(SRC))
         from office import dispatch
+        from office.util import claim_identity
+        # A disposable state home: reporters working it are reclaimed when this
+        # owner process ends, even if the directory survives an interrupted
+        # teardown (#501).
+        monkeypatch.setenv("OFFICE_STATE_HOME_OWNER", claim_identity(os.getpid()))
         spawn_process = dispatch._spawn_agent
         monkeypatch.setattr(dispatch, "_spawn_agent", lambda argv, cwd, env, stdin: self._spawn_agent(
             spawn_process, argv, cwd, env, stdin))
@@ -436,7 +445,11 @@ def env(request, tmp_path, monkeypatch):
     else:
         e = Env(tmp_path, monkeypatch, contract=_contract(request))
         e.trust_snapshots = request.getfixturevalue("_trust_snapshots")
-    return _activate(e, monkeypatch)
+    try:
+        yield _activate(e, monkeypatch)
+    finally:
+        # Release the disposable home explicitly; its reporter leaves with it (#501).
+        shutil.rmtree(e.state, ignore_errors=True)
 
 
 def start_inline(env, plan=PLAN_ONE, gear="direct+review", extra=()):

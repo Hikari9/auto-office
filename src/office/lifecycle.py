@@ -179,6 +179,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                 planner_note = "planner P1 queued"
         _ensure_local_exclude(common)
         state.write_projection(con, run_id)
+        # Inline planners must be able to write the plan path advertised by next.
+        # Keep PLAN.md absent until the orchestrator actually authors it.
+        if planner_mode == "inline":
+            planpath.draft(top, run).parent.mkdir(parents=True, exist_ok=True)
         if source and source.get("plan"):
             draft = planpath.draft(top, run)
             draft.parent.mkdir(parents=True, exist_ok=True)
@@ -204,6 +208,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         moved = planpath.relocate_legacy(con, top)
         if moved:
             res.notices.append(moved)
+        if deploy:
+            from office import land
+            res.notices += [f"warning: {w}" for w in land.deploy_path_warnings(
+                top, {f"deploy_{k}": v for k, v in deploy.items()}, land.env_files(config))]
         if risk["classification"] == "unknown":
             res.notices.append("risk is unclassified: independent code review is required until the plan declares "
                                "`blast_radius` (or `office start --blast-radius ...`); unknown risk is never low")
@@ -244,7 +252,10 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
         if not worker:
             # Only `office resume <run>` is an explicit choice that wins across repositories;
             # a bare resume binds by cwd and yields like an `office start` binding.
-            discovery.bind(con, run, keys, "resume" if target.source == "flag" else "resume-cwd")
+            # A bare resume that resolved through an explicit binding keeps it explicit (R3-9).
+            bound, how = discovery._binding(con, keys)
+            kept = target.source == "session" and bound is not None and bound["id"] == run["id"] and how == "resume"
+            discovery.bind(con, run, keys, "resume" if target.source == "flag" or kept else "resume-cwd")
         reconcile(con, run)
         if not worker:
             # An explicit resume is the retry for an integration that failed on
@@ -254,6 +265,8 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
             from office import gates
             for t in state.tasks(con, run["id"]):
                 gates.rerun_unavailable_checks(con, state.get_run(con, run["id"]), t)
+                # An UNAVAILABLE or ATTENTION task review retries on the same revision: no round, no executor, pin kept.
+                gates.rerun_unavailable_review(con, state.get_run(con, run["id"]), state.get_task(con, run["id"], t["id"]))
             from office import contract
             if contract.is_convergence(run):
                 # Runtime/evidence failures retry on the same revision; no round is spent.
@@ -327,6 +340,7 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
     planpath.remove(Path(run["repo_root"]), run)
     res = Result(lines=[f"{short(run['id'])} closed | archive receipt {receipt['digest'][7:15]}"],
                  data={"archive_digest": receipt["digest"]})
+    _append_verification_disclosure(res, receipt)
     _closeout(con, run, landing, res, handoff=handoff)
     return res
 
@@ -447,6 +461,7 @@ def close_landed_externally(con, run: dict, ref: str, quote: str | None = None) 
         lines.append(f"not in the merge commit, closed on the user's word: {', '.join(unproven)}")
     res = Result(lines=lines + [f"archive receipt {receipt['digest'][7:15]}"], data={"archive_digest": receipt["digest"],
                                                                                    "landing": landing})
+    _append_verification_disclosure(res, receipt)
     _closeout(con, run, landing, res, pr=f"PR #{pr['number']}" if pr.get("number") else pr["url"])
     return res
 
@@ -506,6 +521,26 @@ def _end_bindings(con, run_id: str) -> None:
     con.execute("UPDATE session_bindings SET ended_at=? WHERE run_id=? AND ended_at IS NULL", (now_iso(), run_id))
 
 
+def _verified_test_tiers(con, run: dict) -> dict | None:
+    """Record the integration-check scope in closeout, not only in status (#563)."""
+    from office import integration, verification_coverage
+    commit = integration.final_commit(con, run)
+    if not commit:
+        return None
+    commands = list((run.get("landing") or {}).get("run_checks") or [])
+    result = verification_coverage.audit(
+        Path(run["repo_root"]), commit, commands,
+        verified_commands=verification_coverage.attested_checks(con, run, commit))
+    return {"commit": commit, "status": result[0], "detail": result[1]} if result else None
+
+
+def _append_verification_disclosure(res: Result, receipt: dict) -> None:
+    verified = receipt["body"].get("verification") or {}
+    if verified.get("status") == "partial":
+        res.notices.append("FULL SUITE NOT VERIFIED: " + verified["detail"])
+        res.data["verification"] = verified
+
+
 def _archive_receipt(con, run: dict, landing: dict, handoff: str | None) -> dict:
     tasks = [{"id": t["id"], "status": t["status"], "accepted_revision": t["accepted_revision_id"]}
              for t in state.tasks(con, run["id"])]
@@ -516,6 +551,9 @@ def _archive_receipt(con, run: dict, landing: dict, handoff: str | None) -> dict
             "policy_hash": run["policy_hash"], "config_hash": run["config_hash"], "tasks": tasks,
             "accepted_commits": {t["id"]: revs.get(t["accepted_revision"]) for t in tasks},
             "landing": landing, "handoff": handoff}
+    verification = _verified_test_tiers(con, run)
+    if verification:
+        body["verification"] = verification
     from office import contract
     body["review_contract"] = contract.of(run)
     from office import risk as risk_mod

@@ -20,10 +20,10 @@ from typing import Any, Callable
 
 import yaml
 
-from office import candidates, paths
+from office import adapters, candidates, db, paths, route_policy, state
 from office import config as cfg
 from office.result import Result
-from office.state import OfficeError
+from office.state import OfficeError, Refused
 
 SEED_KEY = re.compile(r"^roles\.([^.]+)\.preferred_seed$")
 ROUTE_SPEC = re.compile(r"^(?:(?P<harness>[A-Za-z0-9_.-]+)/)?(?P<model>[A-Za-z0-9_.-]+)(?:@(?P<effort>[a-z]+))?$")
@@ -35,7 +35,6 @@ SETUP_ROLES = (
     ("code_reviewer", "Code reviewer"),
     ("visual_reviewer", "Visual reviewer"),
 )
-HARNESSES = ("claude", "codex", "agy")
 
 
 def _usage(message: str, next_step: str | None = None) -> OfficeError:
@@ -71,10 +70,29 @@ def _simple_seed(value: Any) -> bool:
                                            and set(e) <= {"model_id", "harness", "effort"} for e in value)
 
 
-def validate_seed(entries: list[dict]) -> list[str]:
-    """Problems with seed entries against the shipped catalog (empty when valid)."""
+def _role_requires(config: dict | None, role: str | None) -> set[str]:
+    """The capabilities a route must declare to serve `role` (config roles.<role>.required_capabilities).
+    `vision` is left out: routing adds it only once proven for the candidate, never from the adapter."""
+    if not role:
+        return set()
+    return set(candidates.role_policy(config or {}, role).get("required_capabilities") or []) - {"vision"}
+
+
+def _row_serves(row: dict, required: set[str]) -> bool:
+    """Whether the harness behind a catalog row declares every capability the role needs."""
+    if not required:
+        return True
+    adapter = adapters.load_all().get(row.get("invocation_harness") or "")
+    return required <= set((adapter or {}).get("capabilities") or [])
+
+
+def validate_seed(entries: list[dict], *, role: str | None = None, config: dict | None = None) -> list[str]:
+    """Problems with seed entries against the shipped catalog (empty when valid).
+    With a role, an entry must also be a route that role can actually use: a
+    builder-only harness is not a planner or reviewer preference."""
     rows = candidates.catalog_rows()
     models = sorted({r["model_id"] for r in rows})
+    required = _role_requires(config, role)
     problems = []
     for e in entries:
         if not isinstance(e, dict) or not e.get("model_id"):
@@ -90,13 +108,22 @@ def validate_seed(entries: list[dict]) -> list[str]:
             have = sorted({r.get("invocation_harness") for r in same_model if r.get("invocation_harness")})
             problems.append(f"{label}: {e['model_id']} runs on {', '.join(have)}, not {e['harness']}")
             continue
-        if not e.get("effort"):
-            continue
         # An alias (opus, sonnet) follows the newest concrete model, so any effort that harness offers is valid.
         pool = same_model
         if any(r.get("alias_family") for r in same_model):
             pool = [r for r in rows if r.get("invocation_harness") in {x.get("invocation_harness") for x in same_model}]
-        if not any(r.get("effort") == e["effort"] and e.get("harness") in (None, r.get("invocation_harness")) for r in pool):
+        pool = [r for r in pool if e.get("harness") in (None, r.get("invocation_harness"))]
+        if not any(r.get("dispatchable") is not False for r in pool):
+            problems.append(f"{label}: {e['model_id']} is not dispatchable (its catalog row is disabled or superseded)")
+            continue
+        if required and not any(_row_serves(r, required) for r in pool):
+            have = sorted({r.get("invocation_harness") for r in pool})
+            problems.append(f"{label}: {', '.join(have)} cannot serve role {role} "
+                            f"(needs capabilities {sorted(required)})")
+            continue
+        if not e.get("effort"):
+            continue
+        if not any(r.get("effort") == e["effort"] for r in pool):
             have = sorted({r.get("effort") for r in pool if r.get("effort")})
             problems.append(f"{label}: no {e['effort']} effort for {e['model_id']} (known: {', '.join(have)})")
     return problems
@@ -205,6 +232,8 @@ def _check_key(key: str, tier: str, force: bool) -> None:
                      next_step="office config --list --all")
     if tier == "repo" and key == "paths.runs_db":
         raise _usage("paths.runs_db is machine-level; a repo may not move it", next_step="office config --user paths.runs_db <path>")
+    if tier == "repo" and parts[0] == "onboarding":
+        raise _usage("onboarding state is user-level; a repo may not set it", next_step="office onboard")
     if force:
         return
     node: Any = default
@@ -241,7 +270,8 @@ def _validate(new: dict, tier: str, cwd: Path | None) -> list[str]:
         raise _usage(f"cost_policy.default must be one of {', '.join(policy.get('available') or [])}")
     # Only what this file sets: a shipped default is not the edit's to reject.
     for role, conf in (new.get("roles") or {}).items():
-        problems = validate_seed((conf or {}).get("preferred_seed") or []) if isinstance(conf, dict) else []
+        problems = (validate_seed((conf or {}).get("preferred_seed") or [], role=role, config=effective)
+                    if isinstance(conf, dict) else [])
         if problems:
             raise _usage(f"roles.{role}.preferred_seed: " + "; ".join(problems),
                          next_step="office setup lists the known routes (type ? at a prompt)")
@@ -400,17 +430,82 @@ def _applies_next() -> str:
     return "new runs pick this up; a running run keeps the policy it pinned (office start)"
 
 
+# ------------------------------------------------------------------ a run's routing (#308)
+
+def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
+    """Re-pin a run's `roles` and `routing` from the current config files: the one
+    opt-in that moves a running run off the values it pinned at start. Later
+    dispatches route from the re-pinned policy; the drift notice then has nothing
+    left to report for those blocks. `quote` is the user's words authorizing it."""
+    if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
+        raise Refused("worker-cannot-apply-routing", "a worker cannot re-pin a run's routing; the orchestrator does, on the user's words")
+    if not run_arg:
+        raise _usage("--apply-routing needs --run <id>", next_step="office list shows run ids")
+    run = state.find_run(con, run_arg)
+    if run is None:
+        raise _usage(f"no run {run_arg!r}", next_step="office list shows run ids")
+    if not (quote or "").strip():
+        raise _usage('--apply-routing records the user\'s words (--quote "<words>")',
+                     next_step=f"office config --run {run['id'][:8]} --apply-routing --quote \"<words>\"")
+    if state.is_terminal(run):
+        raise Refused("run-terminal", f"run is {run['phase']}; its routing is no longer used")
+    root = Path(run["repo_root"]) if run.get("repo_root") else None
+    if root is None or not root.is_dir():
+        raise OfficeError("repo-missing", f"run {run['id'][:8]}'s repository ({root or 'unrecorded'}) is gone; its repo config cannot be read",
+                          next_step="restore the repository, then retry")
+    repo = root
+    files = cfg.read_files(repo)
+    try:
+        live, _ = cfg.resolve(repo, files=files)
+    except ValueError as exc:
+        raise OfficeError("bad-config", f"config is invalid: {exc}", next_step="fix the config files, then retry")
+    policy = dict(run.get("policy") or {})
+    blocks = ("roles", "routing")
+    changed = [b for b in blocks if policy.get(b) != live.get(b)]
+    if policy.get(route_policy.PROVENANCE_KEY) != live[route_policy.PROVENANCE_KEY] and "routing" not in changed:
+        changed.append("routing")
+    short = run["id"][:8]
+    if not changed:
+        return Result(lines=[f"run {short} already routes from the current config files; nothing changed"])
+    policy.update({b: live.get(b) for b in blocks})
+    policy[route_policy.PROVENANCE_KEY] = live[route_policy.PROVENANCE_KEY]
+    policy[route_policy.DIGEST_KEY] = route_policy.policy_digest(policy)
+    recorded = policy.get(cfg.FILE_BLOCKS_KEY)
+    if recorded is not None:
+        # The drift baseline for roles follows the re-pin, so a later edit still reads as drift.
+        now = cfg.file_blocks(repo, files)
+        for tier in ("user", "repo"):
+            base = {k: v for k, v in (recorded.get(tier) or {}).items() if k != "roles"}
+            if "roles" in now.get(tier, {}):
+                base["roles"] = now[tier]["roles"]
+            recorded[tier] = base
+    with db.transaction(con):
+        state.update_run(con, run["id"], policy=policy)
+        state.emit(con, run, "run.routing_applied",
+                   f"run {short} re-pinned {' and '.join(changed)} from the config files",
+                   payload={"quote": quote.strip(), "changed": changed})
+    return Result(lines=[f"run {short} re-pinned {' and '.join(changed)} from the config files (\"{quote.strip()}\")"],
+                  next="later dispatches of this run route from the re-pinned policy",
+                  data={"run": run["id"], "changed": changed})
+
+
 # ------------------------------------------------------------------ office setup
 
 def _installed() -> dict[str, bool]:
-    return {h: shutil.which(h) is not None for h in HARNESSES}
+    # Derived from the adapters the catalog routes to, not a hand-kept list (#499).
+    all_adapters = adapters.load_all()
+    return {h: adapters.installed(all_adapters[h]) for h in adapters.harness_ids(routed=True)}
 
 
-def known_routes() -> list[str]:
-    """One line per harness/model with its efforts, for the `?` prompt."""
+def known_routes(role: str | None = None, *, config: dict | None = None) -> list[str]:
+    """One line per harness/model with its efforts, for the `?` prompt. With a
+    role, only routes that role can use: a builder-only harness is never offered
+    as a planner or reviewer preference, and a disabled row is never offered."""
+    required = _role_requires(config, role)
     by: dict[tuple[str, str], set[str]] = {}
     for r in candidates.catalog_rows():
-        if r.get("invocation_harness") and r.get("effort"):
+        if r.get("invocation_harness") and r.get("effort") and r.get("dispatchable") is not False \
+                and _row_serves(r, required):
             by.setdefault((r["invocation_harness"], r["model_id"]), set()).add(r["effort"])
     order = ["none", "low", "medium", "high", "xhigh", "max"]
     return [f"{h}/{m}@{{{','.join(sorted(e, key=lambda x: order.index(x) if x in order else 99))}}}"
@@ -453,7 +548,7 @@ def setup(*, tier: str, yes: bool = False, cwd: Path | None = None,
         while True:
             answer = ask("  routes> ")
             if answer == "?":
-                out("\n".join(f"    {r}" for r in known_routes()))
+                out("\n".join(f"    {r}" for r in known_routes(role, config=effective)))
                 continue
             if not answer:
                 break
@@ -463,7 +558,7 @@ def setup(*, tier: str, yes: bool = False, cwd: Path | None = None,
                 break
             try:
                 seed = parse_seed(answer)
-                problems = validate_seed(seed)
+                problems = validate_seed(seed, role=role, config=effective)
             except OfficeError as exc:
                 seed, problems = [], [exc.message]
             if problems or not seed:
@@ -495,7 +590,14 @@ def setup(*, tier: str, yes: bool = False, cwd: Path | None = None,
         out(f"  {key} = {'(reset to default)' if value is None else _show(key, value)}")
     if not yes and ask(f"Write to {target}? [Y/n] ").lower() not in ("", "y", "yes"):
         return Result(lines=["nothing written"], data={"changed": []})
+    return apply_changes(tier, changes, cwd)
 
+
+def apply_changes(tier: str, changes: list[tuple[str, Any]], cwd: Path | None = None) -> Result:
+    """Write (key, value) pairs to one tier's file in a single validated, atomic
+    write; a None value unsets its key. Nothing is written when validation fails."""
+    target = _tier_path(tier, cwd)
+    data = _load(target)
     for key, value in changes:
         if value is None:
             _unset_path(data, key.split("."))
@@ -508,3 +610,23 @@ def setup(*, tier: str, yes: bool = False, cwd: Path | None = None,
     if backup:
         res.notices.append(f"note: comments in {target} are not kept; the original is at {backup}")
     return res
+
+
+def role_preferences(roles: list[str], cwd: Path | None = None) -> dict[str, dict]:
+    """Each role's effective preferred_seed and where it comes from: what the
+    user and repo files set (None when unset) and the shipped default."""
+    root = _repo_root(cwd)
+    files = cfg.read_files(root)
+    effective, _ = cfg.resolve(root, files=files)
+    default = cfg.load_yaml(cfg.default_config_path()) or {}
+    tiers = {t: (yaml.safe_load(files[t]) or {}) if files.get(t) is not None else {} for t in ("user", "repo")}
+    out = {}
+    for role in roles:
+        parts = ["roles", role, "preferred_seed"]
+        row = {"effective": _get_path(effective, parts)[1] or [], "default": _get_path(default, parts)[1] or []}
+        for t, data in tiers.items():
+            ok, value = _get_path(data, parts) if isinstance(data, dict) else (False, None)
+            row[t] = value if ok else None
+        row["origin"] = "repo" if row["repo"] is not None else "user" if row["user"] is not None else "default"
+        out[role] = row
+    return out

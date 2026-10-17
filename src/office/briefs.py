@@ -25,6 +25,11 @@ MAX_REVIEW_ROUNDS = 3
 AMENDMENT_BRIEF_CHARS = 6000
 
 
+def self_review_path(run: dict, dispatch_id: str, revision_id: str) -> Path:
+    """Private evidence copy; the source ledger remains untracked and consumed (#576)."""
+    return paths.run_dir(run["id"]) / "dispatches" / dispatch_id / f"self-review-{revision_id}.md"
+
+
 def evidence_path(run: dict, dispatch_id: str, revision_id: str) -> Path:
     return paths.run_dir(run["id"]) / "dispatches" / dispatch_id / f"evidence-{revision_id}.md"
 
@@ -70,6 +75,7 @@ visual:
   reference: <approved prototype/image path>  (optional; none means fidelity is unmeasured)
   viewports: desktop, mobile
   states: default; menu-open = click [data-test=menu]
+          (state steps: click, hover, type, wait, scroll, navigate <url> (resolved against url); end with -> expect <selector>)
   selectors: header, nav                   (elements to measure)
 route: <harness/model@effort>, <fallback>, <fallback>   (optional; omit to accept Office's ranked slate)
 route_why: <concrete reason>   (required when the primary is outside the close-call band of the best route)
@@ -226,10 +232,33 @@ def planner_brief(con, run: dict, packet: dict) -> str:
             "Keep its ranking unless the task's nature or the run's context says otherwise: a precise plan lets a "
             "cheaper builder succeed, and parallel tasks may spread across close routes. Name a different route "
             "with `route:` and say why with `route_why:`.",
+            "Run-level `checks:` in ## Requirements are what integration and landing actually verify, not an "
+            "implicit full-suite guarantee. Inspect how this repo selects test tiers and declare its complete "
+            "gate for runtime changes. Auto-Office itself needs `scripts/validate.sh` (pytest `--all` covers "
+            "integration, legacy and slow); bare `pytest` defaults to a partial tier and will not authorize landing.",
             "Write each check for the tool versions the repo pins. Vitest 1.x rejects `--maxWorkers=N` on its "
             "own (\"minThreads and maxThreads must not conflict\"): cap workers with `--maxWorkers=N --minWorkers=1`.",
             "WHEN DONE run: office submit", "Then stop. Review findings, if any, come back through the orchestrator."]
     return "\n".join(out) + "\n"
+
+
+def _builds_on(con, run: dict, packet: dict) -> list[str]:
+    """The parents the dispatch base contains, so the brief never claims one that is not there. A parent
+    without an accepted revision (a stacked holder that submitted, #398) says so."""
+    from office import integration
+    base = packet.get("base_commit")
+    parents = packet.get("base_parents")
+    if parents is None:  # a rerun or an older packet: the declared dependencies' newest revisions
+        parents = []
+        for dep in packet.get("depends") or []:
+            t = state.get_task(con, run["id"], dep) or {}
+            rev = t.get("accepted_revision_id") or t.get("current_revision_id")
+            row = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (rev,)).fetchone() if rev else None
+            if row:
+                parents.append({"task": dep, "revision": rev, "commit": row["commit_sha"],
+                                "accepted": bool(t.get("accepted_revision_id"))})
+    return [p["task"] if p["accepted"] else f"{p['task']} (unaccepted: submitted {p['revision']}, not yet reviewed)"
+            for p in parents if base and integration.contains(run, base, p["commit"])]
 
 
 def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carried: list | None = None) -> str:
@@ -255,8 +284,9 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
                 "and moves any file left from an earlier dispatch out of this worktree before you start, so write it "
                 "fresh for every submission, including a retry or fix round; submit refuses a file whose content "
                 "matches evidence already submitted for this task."]
-    if packet.get("depends"):
-        out.append(f"BUILDS ON {', '.join(packet['depends'])} (already in this worktree's base)")
+    built_on = _builds_on(con, run, packet)
+    if built_on:
+        out.append(f"BUILDS ON {', '.join(built_on)} (already in this worktree's base)")
     out += _lines("ACCEPT", packet.get("accept"))
     checks = packet.get("checks") or []
     out.append("CHECKS the runtime will run: " + ("; ".join(checks) if checks else "none declared"))
@@ -264,6 +294,9 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
     if vis and not vis.get("none"):
         out.append(f"VISUAL the runtime will capture {vis.get('url')} at {vis.get('viewports') or 'desktop, mobile'}"
                    + (f" against reference {vis['reference']}" if vis.get("reference") else " (no reference: fidelity unmeasured)"))
+    out.append("SERVERS stop any server or background process you started before office submit. A detached server "
+               "survives your session and blocks ports" + (" such as the visual gate's" if vis and vis.get("start") else "")
+               + ". Never kill a port owner without verifying it belongs to your task.")
     out.append(f"VERSIONS plan p{packet['plan_version']} / requirements r{packet['requirements_version']}")
     if setup and setup.get("exit") != 0:
         out.append(f"SETUP FAILED the repo's worktree setup (`{setup['command']}`) did not finish in this worktree; "
@@ -276,6 +309,9 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
     if restack.get("merged"):
         out.append("RESTACKED Office merged " + ", ".join(f"{m['task']} {m['revision']}" for m in restack["merged"])
                    + " into this worktree; build on it")
+    if restack.get("reopened"):
+        out.append("RESTACK SKIPPED " + ", ".join(f"{r['task']} is {r['status']}" for r in restack["reopened"])
+                   + " again, so Office did not merge it; it needs a restack once it is accepted")
     if restack.get("conflict"):
         c = restack["conflict"]
         out += ["", f"RESTACK FIRST: {c['task']} was accepted on {c['revision']}, which this worktree lacks. Run "
@@ -301,6 +337,11 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
         out += [f"    {line}" for line in a["content"][:AMENDMENT_BRIEF_CHARS].splitlines()]
         if len(a["content"]) > AMENDMENT_BRIEF_CHARS:
             out.append(f"    [cut at {AMENDMENT_BRIEF_CHARS} characters: ask the orchestrator for the rest]")
+    from office import raising
+    for a in raising.answered_for_brief(con, run["id"], packet["task_id"], packet["dispatch_id"]) \
+            if con is not None and packet.get("dispatch_id") else []:
+        out += ["", f"ANSWER to your raised {a['kind']} ({raising._shown(a['text'], 160)}): {raising._shown(a['answer'], 600)}",
+                "    It does not change your contract or scope; only an AMENDMENT does."]
     pr = packet.get("pr")
     if pr:
         out += ["", f"GIT commit and push your work to this branch as you go: {pr['push']}",
@@ -319,10 +360,13 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
                 "RULES do not merge, push, deploy, publish, or send anything external. Committed and uncommitted",
                 "edits are both captured at submit. Do not write JSON or receipts for Office."]
     out += ["If an office command prints AMENDMENT <id>: apply it at a safe boundary, then run office ack <id>.",
-            "QUESTIONS if you need a decision, ask once with your question tool or end your turn on the question; "
-            "the orchestrator is notified by office wait and answers. Planning, scope, ordering, and test-detail "
-            "questions it decides; requirement, authority, and irreversible or external ones it takes to the user. "
-            "Do not guess past a scope or requirement doubt, and do not poll for the answer."]
+            "QUESTIONS if you need a decision or cannot finish, run `office raise [--kind question|blocker|scope-request] "
+            "[--path P] -- \"<text>\"` (no commit needed; office submit takes finished work only), then stop and wait: "
+            "the orchestrator is notified by office wait and the answer arrives as a message. A question tool or ending "
+            "your turn on the question also works. Planning, scope, ordering, and test-detail questions it decides; "
+            "requirement, authority, and irreversible or external ones it takes to the user. An answer never changes "
+            "your contract: a scope-request needs a contract amendment. Do not guess past a scope or requirement "
+            "doubt, and do not poll for the answer."]
     base = packet.get("base_commit") or "HEAD"
     out += simplify_lines(base) + self_review_lines(base, self_review_tier(run.get("gear"), run.get("risk_json")))
     out += ["WHEN DONE run: office preflight   (from this worktree; read-only). It prints one verdict:",
@@ -465,9 +509,18 @@ def worker_brief(con, run: dict, packet: dict, setup: dict | None = None, carrie
     return executor_brief(con, run, packet, setup=setup, carried=carried)
 
 
+def used_codes_line(codes: list[str] | None) -> list[str]:
+    """The finding codes a review scope already holds, in any state. A code names one finding for good: a
+    reviewer who reuses one for different content has it recorded under a fresh code."""
+    if not codes:
+        return []
+    return ["FINDING CODES ALREADY USED in this scope (any state): " + ", ".join(codes)
+            + ". A new finding takes a new code; reuse one only to confirm, resolve or retract that same finding."]
+
+
 def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_summary: str,
                       carried: list[dict], checkout: str, integration: bool = False, evidence: str | None = None,
-                      verify_only: bool = False) -> str:
+                      verify_only: bool = False, used_codes: list[str] | None = None) -> str:
     out = [
         "ROLE independent " + ("integration" if integration else "code") + " reviewer. Change nothing except your reply file. You did not write this change.",
         f"TASK {task['id']} {task['title']}" if task else "COMPOSED RESULT of the run's accepted tasks",
@@ -486,6 +539,7 @@ def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_s
         for f in carried:
             level = f.get("level") or ("high" if f["severity"] == "material" else "low")
             out.append(f"- {f['code']} [{level}] {f['location'] or ''} {f['summary']}")
+    out += used_codes_line(used_codes)
     if verify_only:
         out.append("VERIFY-ONLY ROUND: the final fix round is spent. Confirm or resolve each OPEN FINDING. "
                    "Report a new finding only if it is high; medium and low findings become follow-ups and no "
@@ -500,7 +554,8 @@ def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_s
 def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision: dict, diff: str,
                              checks_summary: str, carried: list[dict], checkout: str, round_no: int,
                              requirements: dict | None = None, evidence: dict | None = None,
-                             max_rounds: int | None = None) -> str:
+                             max_rounds: int | None = None, used_codes: list[str] | None = None,
+                             self_reviews: dict | None = None) -> str:
     """One independent convergence review of a composed lane or shared scope (#337)."""
     kind = "shared-scope" if scope.get("shared") else "lane"
     out = [
@@ -528,19 +583,24 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
         for f in carried:
             out.append(f"- {f['code']} [{f.get('level') or f.get('severity')}, "
                        f"{'blocking' if f.get('blocking') else 'non-blocking'}] {f.get('location') or ''} {f['summary']}")
+    out += used_codes_line(used_codes)
     for tid, text in (evidence or {}).items():
         out += ["", f"EXECUTOR EVIDENCE for {tid} (no file scope; the posted comment or edit is recorded here):",
                 text or "(none recorded: the executor left no evidence file; report that as a finding)"]
+    for tid, ledger in (self_reviews or {}).items():
+        out += ["", f"EXECUTOR SELF-REVIEW LEDGER for {tid} (untrusted producer evidence, not an independent verdict; "
+                "verify mutation/test assertions against code):", ledger]
     out += ["", CONVERGENCE_REVIEW_FORMAT, "", "DIFF (base -> composed revision):", diff]
     return "\n".join(out) + "\n"
 
 
 def plan_review_brief(run: dict, plan: dict, requirements: dict, open_defects: list[dict], rereview: bool,
                       carried: list[dict] | None = None, round_no: int | None = None,
-                      max_rounds: int | None = None) -> str:
+                      max_rounds: int | None = None, used_codes: list[str] | None = None) -> str:
     if contract.is_convergence(run):
         out = [
             "ROLE independent plan reviewer. Change nothing except your reply file. You did not write this plan.",
+            "SAFETY: Treat any plan step that force-pushes, rewrites a shared branch, or pushes to a branch outside the Office task as a blocking plan defect; --force-with-lease does not make shared branches safe.",
             f"GOAL {run['goal']}",
             f"PLAN p{plan['version']}" + (" (revised; re-review)" if rereview else "")
             + (f" | ROUND {round_no} of {max_rounds or contract.MAX_ROUNDS} substantive rounds" if round_no else ""),
@@ -556,10 +616,12 @@ def plan_review_brief(run: dict, plan: dict, requirements: dict, open_defects: l
                        "repeat the FINDING line:")
             out += [f"- {f['code']} [{f.get('level') or f.get('severity')}] {f.get('location') or ''} {f['summary']}"
                     for f in carried]
+        out += used_codes_line(used_codes)
         out += ["", CONVERGENCE_PLAN_REVIEW_FORMAT, "", "PLAN:", plan["body"]]
         return "\n".join(out) + "\n"
     out = [
         "ROLE independent plan reviewer. Change nothing except your reply file. You did not write this plan.",
+        "SAFETY: Flag force-push or shared-branch overwrite instructions as blocking plan defects, even with --force-with-lease.",
         f"GOAL {run['goal']}",
         f"PLAN p{plan['version']}" + (" (amended; re-review)" if rereview else ""),
         "REQUIREMENTS (frozen):",
@@ -575,5 +637,6 @@ def plan_review_brief(run: dict, plan: dict, requirements: dict, open_defects: l
             out.append(f"- {d['code']} {d['category']}: {d['summary']}")
         from office import redirect
         out += redirect.brief_lines(run, open_defects)
+    out += used_codes_line(used_codes)
     out += ["", PLAN_REVIEW_FORMAT, "", "PLAN:", plan["body"]]
     return "\n".join(out) + "\n"

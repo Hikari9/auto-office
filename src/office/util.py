@@ -61,8 +61,8 @@ def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
     os.replace(tmp, path)
 
 
-def atomic_write_json(path: Path, obj: Any) -> None:
-    atomic_write_text(path, json.dumps(obj, indent=2, sort_keys=True, default=str) + "\n")
+def atomic_write_json(path: Path, obj: Any, mode: int | None = None) -> None:
+    atomic_write_text(path, json.dumps(obj, indent=2, sort_keys=True, default=str) + "\n", mode=mode)
 
 
 # Process liveness is tri-state. "Could not tell" is never "dead": a claim is

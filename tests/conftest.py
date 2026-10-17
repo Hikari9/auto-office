@@ -9,8 +9,28 @@ from pathlib import Path
 
 import pytest
 import yaml
+from hypothesis import HealthCheck, settings
+
+# Property tests must be reproducible: `derandomize` fixes the example sequence per test, and no
+# example database means a laptop run and a hook run see the same inputs. A failure still prints
+# `@reproduce_failure` (print_blob), and a shrunk counterexample worth keeping belongs in an
+# `@example(...)` next to the property. `HYPOTHESIS_PROFILE=explore` randomises and widens the
+# search for a one-off hunt; the gate never uses it.
+_PROPERTY_SETTINGS = dict(deadline=None, print_blob=True, database=None,
+                          suppress_health_check=[HealthCheck.function_scoped_fixture])
+settings.register_profile("office", max_examples=100, derandomize=True, **_PROPERTY_SETTINGS)
+settings.register_profile("explore", max_examples=1000, derandomize=False, **_PROPERTY_SETTINGS)
+settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "office"))
 
 _SCRUBBED_PREFIXES = ("OFFICE_", "HERDR_", "AUTO_OFFICE_")
+
+
+@pytest.fixture(scope="session")
+def _empty_office_user_config(tmp_path_factory):
+    """Keep the invoking user's routing preferences out of test configuration."""
+    path = tmp_path_factory.mktemp("office-user-config") / "config.yaml"
+    path.write_text("", encoding="utf-8")
+    return path
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -33,14 +53,16 @@ def _libyaml_safe_load():
 
 
 @pytest.fixture(autouse=True)
-def _clean_office_identity(request, monkeypatch):
+def _clean_office_identity(request, monkeypatch, _empty_office_user_config):
     """Start every test with no Office/herdr identity from the launching shell.
 
     A test run started by an Office worker inherits OFFICE_RUN_ID and friends,
     which make hooks and helpers resolve that run instead of the test's own.
+    User configuration is isolated too; individual tests can still override it.
     """
     for key in [k for k in os.environ if k.startswith(_SCRUBBED_PREFIXES)]:
         monkeypatch.delenv(key)
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(_empty_office_user_config))
     if "v31" not in Path(str(request.fspath)).parts:
         monkeypatch.setenv("OFFICE_PINNED_LEGACY", "1")
     yield

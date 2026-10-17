@@ -1,3 +1,5 @@
+> Historical v3 proposal workflow; superseded by issue-only auto-self-improve. Do not invoke for active runs.
+
 # V3 self-improvement evidence — one complete cycle
 
 One end-to-end pass through `skills/auto-self-improve`, executed against this run's own private

@@ -33,6 +33,8 @@ import uuid
 from pathlib import Path
 
 from office import briefs, candidates, contract, db, jobs, paths, planfile, review_parse, routing, state, version, worktree_setup
+from office.result import Result
+from office.state import Refused, Usage
 from office.util import dumps, now_iso, pid_alive, sha256_bytes, sha256_obj
 
 TASK_GATES = ("checks", "code_review", "visual")
@@ -147,38 +149,169 @@ def start_waiting(con, run: dict, task_id: str, rev_id: str) -> list[str]:
     return started
 
 
+def review_unavailable(gate: dict) -> bool:
+    """A finished review that returned no verdict: no reviewer could answer (UNAVAILABLE), the one that
+    answered left no readable reply (ATTENTION, v3.1; INVALID_RESULT, convergence-v1), or every route hit a
+    quota or auth wall. None of these is a verdict, and none spends a substantive round."""
+    return gate["verdict"] in ("UNAVAILABLE", "ATTENTION") \
+        or gate.get("review_status") in (contract.UNAVAILABLE, contract.INVALID_RESULT)
+
+
 def unavailable_review_block(con, run: dict, task: dict) -> dict | None:
-    """The UNAVAILABLE code-review gate that alone blocks the task's current
+    """The unavailable or invalid code-review gate that alone blocks the task's current
     (submitted) revision, or None when the task is blocked for another reason."""
     rev_id = task.get("current_revision_id")
     if task["status"] != "blocked" or not rev_id:
         return None
     latest = {g["kind"]: g for g in required_gates(con, run, task, rev_id)}
     code = latest.get("code_review")
-    if not code or code["status"] != "done" or code["verdict"] != "UNAVAILABLE":
+    if not code or code["status"] != "done" or not review_unavailable(code):
         return None
     if any(g["status"] == "done" and g["verdict"] != "PASS" for k, g in latest.items() if k != "code_review"):
         return None  # another gate failed too; a re-review alone would not unblock it
     return code
 
 
-def rerun_unavailable_review(con, run: dict, task: dict) -> str | None:
+def review_pin(review_as: str | None, cli: str | None = None, external: bool = False) -> dict | None:
+    """The user's pin of a reviewer route (`--review-as` / `office review --as`), or None."""
+    return {"as": review_as, "cli": cli, "external": bool(external), "by": "user"} if review_as else None
+
+
+def tried_reviewer_routes(con, where: str, params: tuple) -> list[str]:
+    """Every route a reviewer dispatch already ran on the gates `where` selects (columns of `g`), so
+    the next review of the same revision starts on another route."""
+    return [r[0] for r in con.execute("SELECT DISTINCT d.triple FROM dispatches d JOIN gates g ON g.id=d.gate_id "
+                                      f"WHERE d.triple IS NOT NULL AND {where} ORDER BY d.started_at", params)]
+
+
+def rerun_unavailable_review(con, run: dict, task: dict, *, pin: dict | None = None, next_route: bool = False) -> str | None:
     """Queue a fresh code review of the task's current revision when that
-    revision is blocked only because its code review was UNAVAILABLE (no
-    reviewer could answer). The submission is kept and no executor is
-    launched. Returns the new gate id, or None when that is not the block.
-    Caller holds the tx."""
+    revision is blocked only because its code review returned no verdict
+    (UNAVAILABLE or ATTENTION). The submission is kept, no executor is
+    launched and no round is spent. `pin` re-pins the reviewer (only the
+    explicit review-only commands pass it); `next_route` starts on a route
+    this revision's earlier attempts did not use, unless a reviewer is pinned.
+    Returns the new gate id, or None when that is not the block. Caller holds the tx."""
     code = unavailable_review_block(con, run, task)
     if code is None:
         return None
     rev_id = code["revision_id"]
+    if pin:
+        state.update_task(con, run["id"], task["id"], review_override=pin)
+    payload = {"task_id": task["id"]}
+    if next_route and not (pin or task.get("review_override")):
+        tried = tried_reviewer_routes(con, "g.run_id=? AND g.task_id=? AND g.revision_id=? AND g.kind='code_review'",
+                                      (run["id"], task["id"], rev_id))
+        if tried:
+            payload["exclude_routes"] = tried
     gid = _new_gate(con, run, task, rev_id, "code_review", f"{code['input_key']}:rerun:{uuid.uuid4().hex[:6]}",
                     "queued", round_no=code["round"], escalated=code["escalated"])
-    state.enqueue(con, run, "review", {"gate_id": gid, "task_id": task["id"]}, dedup_key=f"review:{gid}", max_attempts=2)
+    state.enqueue(con, run, "review", {"gate_id": gid, **payload}, dedup_key=f"review:{gid}", max_attempts=2)
     state.update_task(con, run["id"], task["id"], status="submitted", pause_reason=None)
-    state.emit(con, run, "gate.rerun", f"{task['id']} code review re-run on {rev_id} (was UNAVAILABLE)",
-               task_id=task["id"])
+    was = code["verdict"] or code.get("review_status")
+    state.emit(con, run, "gate.rerun", f"{task['id']} code review re-run on {rev_id} (was {was})", task_id=task["id"])
     return gid
+
+
+def orchestrator_task_review(con, run: dict, tid: str, report: Path) -> Result:
+    """The orchestrator reviews a v3.1 task revision itself once no reviewer answered it (#326):
+    recorded as a degraded, non-independent review with who, route and revision, never as a waiver.
+    The session that produced the revision cannot review it."""
+    from office import convergence
+    if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
+        raise Refused("worker-cannot-review", "a producer or worker may not review; the fallback is the orchestrator's")
+    if state.is_terminal(run):
+        raise Refused("run-terminal", f"{run['id'][:8]} is {run['phase']}; nothing to review")
+    if contract.is_convergence(run):
+        raise Usage("bad-review-target", f"{tid} has no task code review under {contract.CONVERGENCE}: its lane "
+                          "is reviewed", next_step=f"office review L-{tid}:convergence --report <file>")
+    if not report.is_file():
+        raise Usage("no-report", f"no review file at {report}")
+    parsed = review_parse.parse(_last_block(report.read_text(encoding="utf-8", errors="replace")), contract=contract.of(run))
+    if not parsed.valid or not parsed.verdict:
+        raise Refused("report-invalid", "the report is not a valid review: " + "; ".join(parsed.errors[:3] or ["no verdict"]),
+                            next_step="rewrite it in the review format, then retry")
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        if state.is_terminal(run):
+            raise Refused("run-terminal", f"{run['id'][:8]} is {run['phase']}; nothing to review")
+        task = state.get_task(con, run["id"], tid)
+        code = unavailable_review_block(con, run, task) if task else None
+        if code is None:
+            raise Refused("fallback-not-allowed", f"{tid}: the orchestrator reviews only a task blocked solely on a code "
+                                "review no reviewer answered", scope=tid, next_step="office status")
+        rev_id = code["revision_id"]
+        me = convergence.orchestrator_session()
+        if {k["id"] for k in me["keys"] if k["harness"] not in ("herdr", "proc")} \
+                & convergence.producer_sessions(con, run, {"tasks": [tid]})[0]:
+            raise Refused("self-review-prohibited", f"{tid}: this session produced {rev_id}, so it cannot review it",
+                                scope=tid, next_step=f"office review {tid} --as <harness>/<model>[@effort] (another reviewer), "
+                                                     "or a different orchestrator session may review it")
+        who = me["primary"] or "orchestrator (session not identified)"
+        route = "orchestrator (degraded, non-independent)"
+        gid = _new_gate(con, run, task, rev_id, "code_review", f"{code['input_key']}:orchestrator:{uuid.uuid4().hex[:6]}",
+                        "queued", round_no=code["round"], escalated=code["escalated"])
+        con.execute("UPDATE gates SET independence=? WHERE id=?", (contract.DEGRADED, gid))
+        state.record_evidence(con, run["id"], "review_output", report, task_id=tid, revision_id=rev_id, gate_id=gid,
+                              meta={"route": "orchestrator", "independence": contract.DEGRADED, "by": who,
+                                    "revision": rev_id, "replaces_gate": code["id"]})
+        state.update_task(con, run["id"], tid, status="submitted", pause_reason=None)
+        ingest_task_gate(con, run, gid, {"verdict": parsed.verdict, "parsed": parsed, "route": route,
+                                         "summary": f"{parsed.verdict} by {who}: degraded, non-independent orchestrator review "
+                                                    f"of {rev_id} after no reviewer answered"})
+        state.emit(con, run, "review.degraded_fallback", f"{tid} code review of {rev_id} by {who} ({route}): {parsed.verdict}",
+                   task_id=tid)
+    jobs.kick(con, run["id"])
+    return Result(lines=[f"{tid} code review {parsed.verdict} recorded on {rev_id} as a degraded, non-independent "
+                               f"orchestrator review by {who} (not a waiver)"], next="exceptions only; office status")
+
+
+def review_only(con, run: dict, target: str, *, review_as: str | None = None, review_cli: str | None = None,
+                review_external: bool = False) -> Result:
+    """`office review <task|lane> [--as <route>]`: re-dispatch only the review of the same immutable
+    revision on the named route, or the next fallback one. It never launches an executor and keeps a
+    pinned reviewer unless `--as` re-pins it. v3.1 task reviews and convergence-v1 lane reviews."""
+    if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
+        raise Refused("worker-cannot-review", "a producer, planner or reviewer cannot start a review; the orchestrator does")
+    if (review_cli or review_external) and not review_as:
+        raise Usage("invalid-override", "--cli/--external need --as <harness>/<model>[@effort]")
+    if review_cli and review_external:
+        raise Usage("invalid-override", "a CLI review and an external review are mutually exclusive")
+    if state.is_terminal(run):
+        raise Refused("run-terminal", f"{run['id'][:8]} is {run['phase']}; nothing to review")
+    if review_as:  # the route's shape and capability, before any pin is written
+        candidates.declared_decision(review_as, flag="--as", role="code_reviewer", config=state.pinned_config(run))
+    pin = review_pin(review_as, review_cli, review_external)
+    if ":" in target and not re.match(r"[LS]-", target, re.I):
+        raise Usage("bad-review-target", f"{target!r} is not a task, lane or shared scope",
+                    next_step="office review T1 | office review L-T1[:convergence|visual]")
+    if re.match(r"[LS]-", target, re.I):
+        from office import convergence
+        with db.transaction(con):
+            lines = convergence.review_only(con, state.get_run(con, run["id"]), target, pin=pin)
+    else:
+        tid = target.upper()
+        if contract.is_convergence(run):
+            raise Usage("bad-review-target", f"under {contract.CONVERGENCE} a task has no review of its own: its lane is reviewed",
+                        next_step="office review L-<task>[:convergence|visual] --as <route> (office inspect convergence lists the scopes)")
+        with db.transaction(con):
+            run = state.get_run(con, run["id"])
+            if state.is_terminal(run):
+                raise Refused("run-terminal", f"{run['id'][:8]} is {run['phase']}; nothing to review")
+            task = state.get_task(con, run["id"], tid)
+            if task is None:
+                raise Usage("bad-review-target", f"{target!r} is not a task, lane or shared scope",
+                                  next_step="office review T1 --as <route> | office review L-T1[:convergence|visual] --as <route>")
+            gid = rerun_unavailable_review(con, run, task, pin=pin, next_route=True)
+            if gid is None:
+                raise Refused("nothing-to-review", f"{tid} is not blocked solely on a code review that returned no "
+                                    "verdict; there is no review-only recovery to run", scope=tid, next_step="office status")
+            kept = (state.get_task(con, run["id"], tid).get("review_override") or {}).get("as")
+            lines = [f"{tid} code review re-run on {task['current_revision_id']} (gate {gid}, "
+                     + (f"reviewer {kept}" + ("" if pin else ", pinned by the user and kept; --as names another")
+                        if kept else "next fallback reviewer route") + "); the submission is kept, no executor launched"]
+    jobs.kick(con, run["id"])
+    return Result(lines=lines, next="exceptions only; office status")
 
 
 def rerun_unavailable_checks(con, run: dict, task: dict) -> bool:
@@ -213,6 +346,13 @@ def mark_unavailable(con, run: dict, gate_id: str, reason: str) -> None:
     g = con.execute("SELECT * FROM gates WHERE id=?", (gate_id,)).fetchone()
     if g is None or g["status"] in ("done", "stale", "cancelled"):
         return
+    if g["subject"] == "lane":
+        # A lane gate closes as every other unavailable lane review does (status, no verdict, the scope
+        # settled), so waive and the fallback see the same gate (#453).
+        from office import convergence
+        convergence.ingest(con, state.get_run(con, run["id"]), gate_id,
+                           {"status": contract.UNAVAILABLE, "summary": reason[:500]})
+        return
     con.execute("UPDATE gates SET status='done', verdict='UNAVAILABLE', summary=?, finished_at=? WHERE id=?",
                 (reason[:500], now_iso(), gate_id))
     if g["task_id"] and g["subject"] == "task":
@@ -237,9 +377,87 @@ def job_run_checks(con, run: dict, job: dict) -> dict:
         if cur.rowcount == 0:
             return {"skipped": "gate already decided"}
     outcome = run_commands(con, run, task["checks"], Path(d["worktree"]), rev, gate)
+    if outcome["verdict"] == "CHANGES_REQUIRED":
+        try:
+            outcome["preexisting"] = preexisting_failures(con, run, rev, gate, outcome)
+        except Exception:  # a failure to classify must not lose the checks result: it counts against the task
+            outcome["preexisting"] = []
     with db.transaction(con):
         ingest_task_gate(con, state.get_run(con, run["id"]), gate["id"], outcome)
     return {"verdict": outcome["verdict"]}
+
+
+# ------------------------------------------------------------------ pre-existing failures
+
+_FAILURE_LINE = re.compile(r"\b(?:FAILED|FAIL|ERRORS?|FAILURES?)\b|✕|✖|×|--- FAIL|^not ok\b", re.I)
+_VOLATILE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|seconds)\b|0x[0-9a-f]+", re.I)
+
+
+def failure_signature(out: str, roots: tuple[str, ...]) -> frozenset[str]:
+    """The failures a check printed, with checkout paths and timings removed so
+    the same failure on two checkouts compares equal: every line carrying a
+    failure marker (any case). Output with none is compared whole, never by its
+    tail: a failure the task added higher up must not look pre-existing."""
+    def norm(line: str) -> str:
+        for root in roots:
+            line = line.replace(root, "<root>")
+        return " ".join(_VOLATILE.sub("<n>", line).split())
+    lines = [norm(line) for line in out.splitlines() if line.strip()]
+    return frozenset(line for line in lines if _FAILURE_LINE.search(line)) or frozenset(lines)
+
+
+def _roots(path: Path) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((str(path.resolve()), str(path))))
+
+
+def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict) -> list[dict]:
+    """Which failing checks of this revision fail the same way on its base
+    commit. A check is pre-existing only when the base run has the same nonzero
+    exit status and the same failures, neither run timed out, and the task's
+    output names no file the task changed. Base output is kept as evidence on
+    the gate. A revision that changes no file is never pre-existing: it did
+    nothing to the failing check. Anything not proven pre-existing counts
+    against the task."""
+    base = rev.get("base_commit")
+    failing = [(f"C{i}", r) for i, r in enumerate(outcome.get("results") or [], start=1) if r["exit"] != 0]
+    if not base or not failing:
+        return []
+    repo = Path(run["repo_root"])
+    changed = [p for p in paths.git(repo, "diff", "--name-only", "--no-renames", "-z", base, rev["commit_sha"],
+                                    check=False).split("\0") if p]
+    if not changed:
+        return []
+    cfgv = state.pinned_config(run).get("verification") or {}
+    timeout = int(cfgv.get("check_timeout_seconds", 1800))
+    evdir = paths.run_dir(run["id"]) / "evidence" / (gate.get("task_id") or "integration") / rev["id"]
+    found = []
+    with check_slot(check_concurrency(cfgv)):
+        try:
+            checkout = detached_checkout(run, base, f"preexisting-{gate['id']}", purpose="check")
+        except Exception:  # no base checkout, no proof: the failure counts against the task
+            return []
+        try:
+            for code_id, r in failing:
+                head = Path(r["log"]).read_text(encoding="utf-8", errors="replace")
+                if r["exit"] == 124 or runner_timeout(head) or any(p in head for p in changed):
+                    continue
+                code, out = _run_check(r["command"], checkout, timeout, _check_env(run))
+                log = evdir / (Path(r["log"]).stem + ".base.log")
+                log.write_text(out, encoding="utf-8")
+                os.chmod(log, 0o600)
+                same = (code == r["exit"] and not runner_timeout(out)
+                        and failure_signature(out, _roots(checkout)) == failure_signature(head, _roots(Path(r["cwd"]))))
+                with db.transaction(con):
+                    state.record_evidence(con, run["id"], "preexisting_check_output", log, task_id=gate.get("task_id"),
+                                          revision_id=rev["id"], gate_id=gate["id"],
+                                          meta={"command": r["command"], "exit": code, "base_commit": base,
+                                                "preexisting": same})
+                if same:
+                    found.append({"code": code_id, "command": r["command"], "exit": code, "base_commit": base,
+                                  "log": str(log)})
+        finally:
+            remove_checkout(run, checkout)
+    return found
 
 
 def run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate: dict, *, check_tree: bool = True) -> dict:
@@ -291,7 +509,20 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
             return {"verdict": "STALE", "summary": "worktree changed after submit; checks cannot bind to the revision"}
         log = evdir / f"check-{i}.log"
         started = time.time()
-        code, out = _run_check(command, cwd, timeout, _check_env(run))
+        environment = _check_env(run)
+        from office import verification_coverage
+        if verification_coverage._complete_pytest_command(command):
+            environment.pop("PYTEST_ADDOPTS", None)
+            environment.pop("PYTEST_PLUGINS", None)
+        from office import shell_safety
+        if shell_safety.unsafe_manual_push(command):
+            detail = "refusing unowned manual Git push in check command; use Office-owned task PR sync"
+            return {"verdict": "CHANGES_REQUIRED",
+                    "parsed": review_parse.Parsed(verdict="CHANGES_REQUIRED", findings=[{
+                        "code": f"C{i}", "severity": "material", "location": command,
+                        "summary": detail, "action": "remove the unsafe manual remote write"}]),
+                    "route": "deterministic", "summary": detail, "results": results}
+        code, out = _run_check(command, cwd, timeout, environment)
         # Office's own timeout (124) or a test runner's per-test timeout (exit 1)
         # under host load is the environment, not the code (issue #267 A2).
         loaded = host_overloaded() if code == 124 or (code != 0 and runner_timeout(out)) else None
@@ -300,7 +531,8 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
         log.write_text(out, encoding="utf-8")
         os.chmod(log, 0o600)
         passed = code == 0
-        results.append({"command": command, "exit": code, "seconds": round(time.time() - started, 2), "log": str(log)})
+        results.append({"command": command, "exit": code, "seconds": round(time.time() - started, 2), "log": str(log),
+                        "cwd": str(cwd)})
         with db.transaction(con):
             state.record_evidence(con, run["id"], "check_output", log, task_id=gate.get("task_id"),
                                   revision_id=rev["id"], gate_id=gate["id"], meta={"command": command, "exit": code})
@@ -391,19 +623,22 @@ def _check_env(run: dict) -> dict:
 def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path, plan_review: bool = False,
                  visual: bool = False, images: list[Path] | None = None, include_dirs: list[Path] | None = None,
                  exclude: list[str] | None = None, kind: str | None = None, resume_from: str | None = None,
-                 review_override: dict | None = None) -> dict:
+                 review_override: dict | None = None, prefer_not: list[str] | None = None) -> dict:
     """Route, launch, and parse one independent review, substituting routes on
     environment/adapter/schema failure up to the configured bound.
 
     `resume_from` names an earlier reviewer dispatch to continue (a plan-defect
     redirect with --reviewer same): its session is resumed when the harness can,
-    else a fresh session runs on the same route."""
+    else a fresh session runs on the same route. `prefer_not` lists routes a
+    review-only re-run starts away from: they are used again only when no other
+    route qualifies."""
     convergence = contract.is_convergence(run)
     # v3.1 bounds route substitution; the convergence contract walks the whole
     # eligible fallback chain before reporting the reviewer unavailable (#337),
     # and none of those attempts spends a substantive round.
     limit = int((run.get("gates") or {}).get("environment_retry_max", 2)) if not convergence else 12
     excluded = set(exclude or [])
+    soft = set(prefer_not or [])
     rc = contract.of(run)
     producer = _producer_route(con, gate)
     failures = []
@@ -415,6 +650,10 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     profile_kind = kind or ("vision" if visual else "reviewer")
     resume, same_route = (_reviewer_resume(con, run, resume_from, profile_kind, cwd, gate_id=gate["id"]) if resume_from
                           else (None, None))
+    if pinned and same_route and routing.candidate_id(
+            candidates.declared_decision(pinned["as"], flag="--review-as", role=role,
+                                         config=state.pinned_config(run))["candidate"]) != same_route:
+        resume, same_route = None, None  # the pin names another reviewer than the one that would be resumed
     for attempt in range(limit + 1):
         if attempt == 0 and same_route:
             decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
@@ -428,11 +667,16 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                 decision = candidates.route_role(con, state.pinned_config(run), run, role,
                                                  task_id=gate.get("task_id"), exclude=excluded)
         elif pinned:
-            decision = candidates.declared_decision(pinned["as"], flag="--review-as")
+            decision = candidates.declared_decision(pinned["as"], flag="--review-as", role=role,
+                                                    config=state.pinned_config(run))
             decision["launch"] = {k: pinned[k] for k in ("cli", "external") if pinned.get(k)}
         else:
             decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
-                                             exclude=excluded)
+                                             exclude=excluded | soft)
+            if decision.get("status") != "selected" and soft:
+                soft = set()  # nothing else qualifies: the routes tried before may have recovered
+                decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
+                                                 exclude=excluded)
         if decision.get("status") != "selected":
             failures.append(f"no qualifying {role} route ({decision.get('status')})"
                             + (f"; {candidates.protected_quota_remedy(run, role, gate.get('task_id'))}"
@@ -621,14 +865,23 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
                               f"({d['launcher']}). Inspect {log}, {output}, {output.with_name('last-message.txt')} "
                               f"and {ddir / 'reply.invalid-*.txt'}; rerun the review or waive the gate")
     for n in range(1, limit + 1):
-        if d.get("launcher") != "herdr" or not _agent_alive(name):
-            break  # no live session to ask: the orchestrator decides (never a substitute)
+        if d.get("launcher") != "herdr" or not d.get("pane_id") or not _agent_alive(name):
+            break  # no live session or recorded pane to ask: the orchestrator decides (never a substitute)
         if output.is_file():
             output.replace(output.with_name(f"reply.invalid-{n}.txt"))
         prompt = (f"Office could not read your review ({'; '.join(errors[:4])}). Write your complete review again, "
                   f"in the format the brief requires (a VERDICT line first), to {output}. {REPLY_FILE_RULE}")
-        # Left unsubmitted in the composer, it gets Enter, never a second copy.
-        got = dispatch_mod.submit_prompt(name, prompt, pane=d.get("pane_id"))
+        # Left unsubmitted in the composer, it gets Enter, never a second copy. The pane's reported
+        # identity must be this reviewer's before anything is typed into it.
+        try:
+            with dispatch_mod.fenced_pane(run, d) as pane:
+                got = dispatch_mod.submit_prompt(name, prompt, pane=pane)
+        except dispatch_mod.PaneMismatch as exc:
+            with db.transaction(con):
+                state.emit(con, run, "review.reprompt", f"{d.get('task_id') or 'plan'} {d['role']} {d['id']}: re-prompt "
+                           f"refused, {exc}", audience="runtime", task_id=d.get("task_id"), dispatch_id=d["id"])
+            return text, parsed, (f"reviewer {d['id']} ({d.get('triple')}): {exc}; Office did not re-prompt it. Inspect the pane, "
+                                  f"then re-run only the review on another reviewer route: {_review_only_hint(con, d)}")
         sent += 1
         unsent = " (typed but unsubmitted)" if got == "held" else ""
         with db.transaction(con):
@@ -639,7 +892,7 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
             # No reply can come from a prompt the reviewer never received.
             return text, parsed, (f"reviewer {d['id']} ({d.get('triple')}): Office's re-prompt is typed but "
                                   f"unsubmitted in herdr agent {name}; submit it (herdr agent send-keys {name} "
-                                  "Enter) or waive the gate")
+                                  f"Enter) or re-run only the review: {_review_only_hint(con, d)}")
         text = _await_file(output, wait_s, poll)
         parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=contract.of(run))
         if parsed.valid:
@@ -659,8 +912,20 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
     else:
         reason = (f"reviewer {d['id']} ({d.get('triple')}) left no valid reply file after re-prompting: "
                   f"{'; '.join(errors[:3])}; its pane is kept. Re-prompt it (office prompt {d['id']} -- \"<message>\") "
-                  "or waive the gate")
+                  f"or re-run only the review: {_review_only_hint(con, d)}")
     return text, parsed, reason
+
+
+def _review_only_hint(con, d: dict) -> str:
+    """The review-only command that re-runs this reviewer's review on another route."""
+    g = con.execute("SELECT kind, task_id, scope FROM gates WHERE id=?", (d.get("gate_id"),)).fetchone() if d.get("gate_id") else None
+    if g and g["scope"]:
+        target = f"{g['scope']}:{'visual' if g['kind'] == 'visual' else 'convergence'}"
+    elif g and g["kind"] == "code_review" and g["task_id"]:
+        target = g["task_id"]
+    else:
+        return "office resume"
+    return f"office review {target} --as <harness>/<model>[@effort]"
 
 
 def _agent_alive(name: str) -> bool:
@@ -838,10 +1103,12 @@ def job_review(con, run: dict, job: dict) -> dict:
             evidence = ev.read_text(encoding="utf-8", errors="replace") if ev.is_file() else None
         brief = briefs.code_review_brief(run, task, rev, diff, checks["summary"] if checks else "none declared",
                                          carried, str(checkout), evidence=evidence,
-                                         verify_only=_verify_only(con, run, gate))
+                                         verify_only=_verify_only(con, run, gate),
+                                         used_codes=finding_codes(con, "run_id=? AND task_id=? AND gate_kind='code_review'",
+                                                                  (run["id"], task["id"])))
         exclude = [job["payload"]["exclude_route"]] if job["payload"].get("exclude_route") else None
         outcome = run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
-                               exclude=exclude)
+                               exclude=exclude, prefer_not=job["payload"].get("exclude_routes"))
     finally:
         remove_checkout(run, checkout)
     with db.transaction(con):
@@ -880,24 +1147,150 @@ def remove_checkout(run: dict, path: Path) -> None:
 
 def _fingerprint(f: dict) -> str:
     words = re.findall(r"[a-z0-9_./]+", ((f.get("location") or "") + " " + (f.get("summary") or "")).lower())
-    return sha256_obj(sorted(set(w for w in words if len(w) > 2))[:40])
+    # Bare numbers (line numbers, counts) are noise: a finding that only moved is the same finding.
+    return sha256_obj(sorted(set(w for w in words if len(w) > 2 and not w.isdigit()))[:40])
+
+
+# A finding is identified by its scope, its code and its fingerprint: the code names it and the
+# fingerprint says what it is. A reviewer who reuses a code for different content gets a fresh code, so
+# a disposition (which is keyed by code) can never land on a finding it was not given for. `where` and
+# `params` select one scope's rows of the findings table.
+
+CARRIED_DISPOSITIONS = ("fixed", "dismissed", "follow-up")
+_FRESH_EXEMPT_KINDS = ("checks",)  # the runtime names these (C1, C2, ...); the code is the check, not a reviewer's id
+
+
+def _split_code(code: str) -> tuple[str, str]:
+    prefix = code.rstrip("0123456789")
+    return prefix, code[len(prefix):]
+
+
+def _code_key(code: str) -> tuple[str, int, str]:
+    """Natural order without int() on the digits: a reviewer chooses the code, and a huge digit run must not raise."""
+    prefix, digits = _split_code(code)
+    digits = digits.lstrip("0")
+    return prefix, len(digits), digits
+
+
+def finding_codes(con, where: str, params: tuple) -> list[str]:
+    """Every code a scope has used, in any state: a reviewer must not reuse one for a different finding."""
+    codes = {r[0] for r in con.execute(f"SELECT DISTINCT code FROM findings WHERE {where} AND code IS NOT NULL", params)}
+    return sorted(codes, key=_code_key)
+
+
+def _fresh_code(code: str, taken: set[str]) -> str:
+    prefix = _split_code(code)[0]
+    top = max((int(n) for p, n in map(_split_code, taken) if p == prefix and n and len(n) <= 15), default=1)
+    n = top + 1
+    while f"{prefix}{n}" in taken:
+        n += 1
+    return f"{prefix}{n}"
+
+
+def stable_codes(con, run: dict, where: str, params: tuple, findings: list[dict], reserved=()) -> list[dict]:
+    """One review reply's findings under codes that still name what they named. A code the scope already
+    holds for a finding with a different fingerprint is recorded under a fresh code; a code reused for the
+    same finding keeps it. Findings recorded before fingerprints existed carry none and keep their code.
+    `reserved` are codes the same reply uses elsewhere, which a fresh code must not take."""
+    taken = set(finding_codes(con, where, params)) | {f["code"] for f in findings} | set(reserved)
+    seen: dict[str, str] = {}
+    renamed: dict[tuple[str, str], str] = {}  # (code, fingerprint) -> the fresh code this reply already gave it
+    out = []
+    for f in findings:
+        fp = _fingerprint(f)
+        known = seen.get(f["code"])
+        if known is None:
+            row = con.execute(f"SELECT fingerprint FROM findings WHERE {where} AND code=? AND fingerprint IS NOT NULL "
+                              "ORDER BY rowid DESC LIMIT 1", (*params, f["code"])).fetchone()
+            known = row[0] if row else None
+        if known is not None and known != fp and (f["code"], fp) in renamed:
+            f = {**f, "code": renamed[(f["code"], fp)]}
+        elif known is not None and known != fp:
+            fresh = renamed[(f["code"], fp)] = _fresh_code(f["code"], taken)
+            taken.add(fresh)
+            state.emit(con, run, "finding.recoded", f"{f['code']} was already used for a different finding in this scope; "
+                       f"the new finding ({(f.get('location') or '').strip()} {f['summary'][:80]}) is recorded as {fresh}",
+                       audience="runtime")
+            f = {**f, "code": fresh}
+        seen.setdefault(f["code"], fp)
+        out.append(f)
+    return out
+
+
+def carry_disposition(con, where: str, params: tuple, finding_id: str, fp: str) -> None:
+    """A re-raised finding with the fingerprint of one already dispositioned keeps that disposition."""
+    row = con.execute(f"SELECT disposition, disposition_note, disposition_by, disposition_at FROM findings WHERE {where} "
+                      f"AND fingerprint=? AND disposition IN ({','.join('?' * len(CARRIED_DISPOSITIONS))}) "
+                      "ORDER BY rowid DESC LIMIT 1", (*params, fp, *CARRIED_DISPOSITIONS)).fetchone()
+    if row:
+        con.execute("UPDATE findings SET disposition=?, disposition_note=?, disposition_by=?, disposition_at=? WHERE id=?",
+                    (*row, finding_id))
+
+
+def current_ids(con, where: str, params: tuple, codes, states: tuple[str, ...]) -> list[str]:
+    """Ids of the rows that are the current finding for each code (every row the newest gate wrote for it),
+    narrowed to `states`. An older row that shares the code is a different generation of it and is never
+    rewritten by a disposition, a resolution or a retraction."""
+    codes = list(codes)
+    if not codes:
+        return []
+    rows = con.execute(f"SELECT id, code, gate_id, state FROM findings WHERE {where} AND code IN ({','.join('?' * len(codes))}) "
+                       "ORDER BY rowid", (*params, *codes)).fetchall()
+    newest = {r["code"]: r["gate_id"] for r in rows}
+    return [r["id"] for r in rows if r["gate_id"] == newest[r["code"]] and r["state"] in states]
+
+
+def mark_current(con, where: str, params: tuple, codes, states: tuple[str, ...], new_state: str) -> None:
+    ids = current_ids(con, where, params, codes, states)
+    if ids:
+        con.execute(f"UPDATE findings SET state=?, updated_at=? WHERE id IN ({','.join('?' * len(ids))})",
+                    (new_state, now_iso(), *ids))
+
+
+def preexisting_codes(outcome: dict) -> set[str]:
+    return {p["code"] for p in outcome.get("preexisting") or []}
+
+
+def _preexisting_summary(outcome: dict, old: list[dict]) -> str:
+    base = (outcome.get("preexisting") or [{}])[0].get("base_commit") or ""
+    return (f"{outcome.get('summary', '')}; {len(old)} failing check(s) also fail the same way on base {base[:7]} "
+            f"({', '.join(f['code'] for f in old)}): pre-existing, not caused by this task")
 
 
 def checks_outcome(outcome: dict) -> dict:
     """A run_commands result in convergence-contract terms: all checks passed is
     APPROVED, a failing check is RECHECK (a blocking finding), and a check that
-    could not run is UNAVAILABLE status with no verdict. STALE stays STALE."""
+    could not run is UNAVAILABLE status with no verdict. STALE stays STALE. A
+    failure that is pre-existing on the base commit is a nonblocking note, not a
+    blocking finding."""
     v = outcome.get("verdict")
     if v == "STALE":
         return outcome
     if v == "UNAVAILABLE":
         return {**outcome, "status": contract.UNAVAILABLE, "verdict": None}
     parsed = outcome.get("parsed")
-    findings = [{**f, "severity": "high", "level": "high", "blocking": True} for f in (parsed.findings if parsed else [])]
-    verdict = "RECHECK" if findings else "APPROVED"
-    return {**outcome, "status": contract.COMPLETED, "verdict": verdict,
+    old_codes = preexisting_codes(outcome)
+    findings = [{**f, "severity": "high", "level": "high", "blocking": f["code"] not in old_codes,
+                 "summary": ("pre-existing on base: " if f["code"] in old_codes else "") + f["summary"]}
+                for f in (parsed.findings if parsed else [])]
+    old = [f for f in findings if not f["blocking"]]
+    verdict = "RECHECK" if len(old) < len(findings) else "APPROVED"
+    summary = _preexisting_summary(outcome, old) if old else outcome.get("summary")
+    return {**outcome, "status": contract.COMPLETED, "verdict": verdict, "summary": summary,
             "parsed": review_parse.Parsed(verdict=verdict, findings=findings, contract=contract.CONVERGENCE,
-                                          next_action="make the failing check pass" if findings else "proceed")}
+                                          next_action="make the failing check pass" if verdict == "RECHECK" else "proceed")}
+
+
+def _note_preexisting(con, run: dict, task: dict, gate: dict, outcome: dict, old: list[dict]) -> None:
+    """Record that failing checks of the current revision also fail on its base
+    commit. The base output is already evidence on the gate. Caller holds tx."""
+    if not old:
+        return
+    first = outcome["preexisting"][0]
+    state.emit(con, run, "gate.preexisting",
+               f"{task['id']} checks {', '.join(f['code'] for f in old)} fail the same way on base "
+               f"{first['base_commit'][:7]}: pre-existing, not caused by this task", task_id=task["id"],
+               payload={"gate": gate["id"], "revision": gate["revision_id"], "preexisting": outcome["preexisting"]})
 
 
 TERMINAL_GATE = ("done", "stale")
@@ -948,9 +1341,13 @@ def _ingest_checks_convergence(con, run: dict, gate: dict, task: dict, outcome: 
                           pause_reason=f"checks gate unavailable: {outcome.get('summary', '')[:400]}")
         return
     parsed = outcome["parsed"]
+    old = [f for f in parsed.findings if not f["blocking"]]
+    _note_preexisting(con, run, task, gate, outcome, old)
     if verdict == "APPROVED":
         con.execute("UPDATE findings SET state='resolved', updated_at=? WHERE run_id=? AND task_id=? AND gate_kind='checks' "
-                    "AND state='open'", (now_iso(), run["id"], task["id"]))
+                    "AND state IN ('open','minor')", (now_iso(), run["id"], task["id"]))
+        for f in old:
+            _upsert_finding(con, run, task, gate, f, outcome)
         state.emit(con, run, "gate.approved", f"{task['id']} checks APPROVED on {gate['revision_id']}", audience="runtime",
                    task_id=task["id"])
         evaluate_acceptance(con, run, task["id"])
@@ -989,10 +1386,20 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
                     "WHERE id=?", (verdict, f"revision {gate['revision_id']} is no longer current", now_iso(),
                                    outcome.get("route"), gate_id))
         if parsed:
-            for f in parsed.findings:
+            for f in _stable_task_findings(con, run, task, gate["kind"], parsed.findings):
                 if f["severity"] == "material":
                     _upsert_finding(con, run, task, gate, f, outcome, carried=True)
         return
+    if gate["kind"] == "checks" and verdict == "CHANGES_REQUIRED" and outcome.get("preexisting"):
+        # Failures that also occur on the base commit are not this task's to fix:
+        # with nothing else failing the checks gate passes and review still runs.
+        old_codes = preexisting_codes(outcome)
+        old = [f for f in parsed.findings if f["code"] in old_codes]
+        new = [f for f in parsed.findings if f["code"] not in old_codes]
+        _note_preexisting(con, run, task, gate, outcome, old)
+        outcome = {**outcome, "summary": _preexisting_summary(outcome, old)}
+        parsed = review_parse.Parsed(verdict="CHANGES_REQUIRED" if new else "PASS", findings=new)
+        verdict = parsed.verdict
     evidence_status = outcome.get("evidence_status")
     con.execute("UPDATE gates SET status='done', verdict=?, evidence_status=COALESCE(?, evidence_status), summary=?, "
                 "finished_at=?, route=COALESCE(?, route) WHERE id=?",
@@ -1006,6 +1413,7 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
             _set_state(con, run, task, gate["kind"], code, "resolved")
         for r in parsed.retracted:
             _set_state(con, run, task, gate["kind"], r["code"], "retracted")
+        parsed.findings[:] = _stable_task_findings(con, run, task, gate["kind"], parsed.findings)
         seen = set()
         for f in parsed.findings:
             seen.add(f["code"])
@@ -1052,6 +1460,12 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
         _converge(con, run, task, gate, outcome)
         return
     evaluate_acceptance(con, run, task["id"])
+
+
+def _stable_task_findings(con, run: dict, task: dict, kind: str, findings: list[dict]) -> list[dict]:
+    if kind in _FRESH_EXEMPT_KINDS:
+        return findings
+    return stable_codes(con, run, "run_id=? AND task_id=? AND gate_kind=?", (run["id"], task["id"], kind), findings)
 
 
 def _upsert_finding(con, run, task, gate, f, outcome, carried: bool = False) -> None:
@@ -1271,6 +1685,22 @@ def required_gates(con, run: dict, task: dict, rev_id: str) -> list[dict]:
     return list(latest.values())
 
 
+def _requeue_reviews_cancelled_by_checks(con, run: dict, task_id: str, rev_id: str) -> bool:
+    """A failed or unavailable checks gate cancels the waiting reviews of its
+    revision. Waiving checks lifts that reason, so those reviews run now: a
+    waiver of checks never accepts a task with no independent review. Caller
+    holds the tx."""
+    cur = con.execute("UPDATE gates SET status='waiting', stale_reason=NULL WHERE run_id=? AND task_id=? AND revision_id=? "
+                      "AND kind IN ('code_review','visual') AND status='cancelled' "
+                      "AND stale_reason IN ('checks failed','checks unavailable')", (run["id"], task_id, rev_id))
+    if cur.rowcount == 0:
+        return False
+    start_waiting(con, run, task_id, rev_id)
+    state.emit(con, run, "gate.rerun", f"{task_id} review queued on {rev_id}: checks were waived, review is still required",
+               task_id=task_id)
+    return True
+
+
 def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
     """The one acceptance evaluator. Caller holds the tx."""
     from office import dispatch as dispatch_mod, plans
@@ -1284,6 +1714,8 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
     from office import authority
     convergence = contract.is_convergence(run)
     waived = authority.waived(con, run["id"], task_id) if not convergence else set()
+    if "checks" in waived and _requeue_reviews_cancelled_by_checks(con, run, task_id, rev_id):
+        return False
     gates_now = [g for g in required_gates(con, run, task, rev_id) if g["kind"] not in waived]
     basis = "all required gates PASS"
     if convergence:
@@ -1329,7 +1761,8 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
                            "AND summary LIKE ?", (run["id"], task_id, f"{task_id} {rev_id} %")).fetchone():
             state.emit(con, run, "task.restack_needed", f"{task_id} {rev_id} {stale}", task_id=task_id)
         return False
-    state.update_task(con, run["id"], task_id, status="accepted", accepted_revision_id=rev_id, pause_reason=None)
+    state.update_task(con, run["id"], task_id, status="accepted", accepted_revision_id=rev_id,
+                      accepted_producer_dispatch_id=rev["dispatch_id"], pause_reason=None)
     con.execute("UPDATE leases SET released_at=? WHERE run_id=? AND task_id=? AND released_at IS NULL AND revoked_at IS NULL",
                 (now_iso(), run["id"], task_id))
     con.execute("UPDATE dispatches SET outcome='pending' WHERE id=? AND outcome IS NULL", (rev["dispatch_id"],))
@@ -1339,6 +1772,7 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
                payload={"basis": basis, "waived": sorted(waived)})
     from office import prs
     prs.queue(con, run, task_id, "accepted", rev_id)
+    reopen_stale_dependents(con, run, task_id, rev)
     dispatch_mod.start_stacked(con, run, task_id)
     for other in state.tasks(con, run["id"]):
         if task_id in other["depends"] and other["status"] == "submitted":
@@ -1350,6 +1784,33 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
     from office import integration
     integration.maybe_queue(con, run)
     return True
+
+
+def reopen_stale_dependents(con, run: dict, task_id: str, rev) -> None:
+    """`task_id` was just accepted on `rev`. Every transitive dependent that is
+    accepted on a revision without it was built on the superseded one and can
+    no longer land: reopen it to changes_required, naming the restack. Its
+    accepted revision stays recorded (#294), and `office rerun <T> --resume`
+    merges the new revision into its worktree. Caller holds the tx."""
+    tasks = state.tasks(con, run["id"])
+    downstream = {task_id}
+    grew = True
+    while grew:
+        grew = False
+        for t in tasks:
+            if t["id"] not in downstream and downstream.intersection(t["depends"]):
+                downstream.add(t["id"])
+                grew = True
+    reason = f"restack: {task_id} re-accepted on {rev['id']}"
+    for t in tasks:
+        if t["id"] == task_id or t["id"] not in downstream or t["status"] != "accepted" or not t.get("accepted_revision_id"):
+            continue
+        built = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (t["accepted_revision_id"],)).fetchone()
+        if built is None or _is_ancestor(run, rev["commit_sha"], built["commit_sha"]):
+            continue
+        state.update_task(con, run["id"], t["id"], status="changes_required", pause_reason=reason)
+        state.emit(con, run, "task.restack_needed", f"{t['id']} {t['accepted_revision_id']} {reason}; reopened: "
+                   f"office rerun {t['id']} --resume merges it into the worktree first", task_id=t["id"])
 
 
 def reevaluate_submitted(con, run: dict) -> list[str]:

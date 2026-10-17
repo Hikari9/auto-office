@@ -33,9 +33,14 @@ def _notify(env, monkeypatch, *, alive: bool, landed: str, first: bool = False):
     """Run the queued notify_worker job as a herdr-hosted worker whose agent is `alive`
     or not and whose prompt delivery reports `landed`."""
     from office import dispatch, gates, state
+    from test_herdr_agent_launch import real_herdr_json
     con = env.con()
     con.execute("UPDATE dispatches SET launcher='herdr', pane_id='p1', status='running' WHERE role='executor'")
     con.commit()
+    # Herdr reports the pane as this worker's own, so the fail-closed fence lets the nudge through to the stubbed delivery.
+    d = dict(con.execute("SELECT * FROM dispatches WHERE role='executor'").fetchone())
+    monkeypatch.setattr(dispatch, "_herdr_json", real_herdr_json(
+        "p1", name=dispatch.herdr_agent_name(d["id"]), kind=dispatch._herdr_kind({"id": d["run_id"]}, d), cwd=d["worktree"]))
     monkeypatch.setattr(gates, "_agent_alive", lambda name: alive)
     monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **kw: landed)
     row = con.execute("SELECT id FROM outbox WHERE kind='notify_worker' ORDER BY created_at " + ("ASC" if first else "DESC")).fetchone()
@@ -325,7 +330,7 @@ def test_amend_command_quotes_hostile_paths_and_reason(env):
 
 
 @pytest.mark.approved
-@pytest.mark.parametrize("bad", ["", "  ", "/etc/passwd", "../outside", "a/../../b", ":(top)x", "."])
+@pytest.mark.parametrize("bad", ["/etc/passwd", "../outside"])  # the path policy itself: test_request_scope_paths.py
 def test_request_scope_rejects_empty_absolute_and_outside_paths(env, bad):
     wenv, wt = _live_refused(env)
     code, out = env.office("submit", "--request-scope", bad, "--", "why", cwd=wt, env=wenv)

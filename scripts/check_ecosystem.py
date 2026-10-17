@@ -18,13 +18,16 @@ INIT_MARKERS=('TODO:', 'example_asset.txt', 'scripts/example.py', 'references/ap
 # 3.2.x run a9afacbf lessons (#267/#268 throughput lanes, #270 auto-takeover pointer): 168 -> 176.
 # #427 manifesto alignment moved detail out of the hub into docs/orchestrator-reference.md (264 -> 183), so 190 stands.
 # Executor self-review, office preflight and the worker status line: 177 -> 182 lines, ~5% headroom.
-HUB_LINE_BUDGET = 190
+# The issue-only bug-report workflow adds a short pointer section to the hub.
+# #484 first-run onboarding gate (office onboard) between the install check and Start: 197 -> 209.
+HUB_LINE_BUDGET = 210
 # 3.1: each 3.0 spoke carries a three-line banner pointing 3.1 runs at the office CLI;
 # the per-spoke budgets below grew by exactly those lines.
 SKILL_LINE_BUDGETS = {
     'skills/auto-office-lean/SKILL.md': 60,
     'skills/agy-cli/SKILL.md': 46,
-    'skills/auto-adapter/SKILL.md': 21,
+    # #499: the 3.1+ office harness/model checklist, trust posture and Herdr form requirement.
+    'skills/auto-adapter/SKILL.md': 53,
     'skills/auto-closeout/SKILL.md': 67,
     'skills/auto-execution/SKILL.md': 23,
     'skills/auto-intake/SKILL.md': 51,
@@ -33,7 +36,7 @@ SKILL_LINE_BUDGETS = {
     'skills/auto-planning/SKILL.md': 24,
     'skills/auto-review/SKILL.md': 36,
     'skills/auto-routing/SKILL.md': 54,
-    'skills/auto-self-improve/SKILL.md': 29,
+    'skills/auto-self-improve/SKILL.md': 52,
     # #270: when-entry-strategy-invariants-exit plus the worker and review brief templates.
     'skills/auto-takeover/SKILL.md': 72,
     'skills/auto-update-benchmarks/SKILL.md': 24,
@@ -68,7 +71,7 @@ def frontmatter(path):
 def discovered_skills(root):
     return sorted(
         path for path in root.rglob('SKILL.md')
-        if not any(part.startswith('.') for part in path.relative_to(root).parts)
+        if not any(part.startswith('.') or part == 'mutants' for part in path.relative_to(root).parts)  # mutants/: mutmut's copy
     )
 
 def check_skill_budgets(root=ROOT):

@@ -29,6 +29,8 @@ Auto Office {ver}
                                     launch tasks (routing, worktrees, leases are automatic)
   office preflight                  executor: read-only checks before submit (ready|fix|wait|stop)
   office submit                     planner/executor: submit your plan or your work
+  office raise [--kind question|blocker|scope-request] [--path P ...] -- "<text>"
+                                    executor: stop for a decision or a blocker without submitting (office raise --help)
   office amend <scope> -- "<delta>" change the plan (scope: plan, T2, or T2,T3)
   office amend <task> --add-check "<cmd>" | --add-accept "<text>" | --set depends=T1  change the task's enforced contract
   office amend <scope> --no-review --reason "<why>" -- "<delta>"   ordinary amendment, no plan review
@@ -37,20 +39,30 @@ Auto Office {ver}
                                     declare a pending task's route, or re-record a live dispatch's model
                                     (same harness); --restart relaunches it
   office ack <amendment-id>         worker: record that you applied a delivered amendment
-  office rerun <task> --resume|--fresh [--reroute]
+  office rerun <task> --resume|--fresh [--reroute | --as <harness>/<model>[@effort] [--cli ARGV | --external]]
+                                    [--review-as <harness>/<model>[@effort] [--review-cli ARGV | --review-external]]
                                     after a worker ends: continue its session, or start a new one with the findings
   office prompt <task|dispatch> -- "<message>"
                                     message a live pane agent and confirm it was submitted (never herdr pane run)
-  office answer <task|dispatch> <n> | -- "<text>"
+  office answer <task|dispatch> <n> | -- "<text>" | --choice <n>|--keys <keys> [--expect <fp>]
                                     answer the question a pane agent is waiting on (a number presses that option)
+                                    or a worker's `office raise`; a headless worker is queued the answer
   office dismiss <task|dispatch|--all>
                                     close the kept panes of ended dispatches (final text is saved first)
+  office self-improve               print the manual bug-filing workflow and the run's bug? signals
   office close                      finish the run after acceptance and landing
                                     (--landed-externally <pr>: its work merged through another PR)
   office benchmarks brief|submit <f> opted-in runs: one background refresh of missing benchmark scores
+  office harness scaffold|validate|smoke|list
+                                    register a harness: draft a user adapter, check it, one throwaway-repo launch
+  office model add|list|disable|enable|registry|policy|ceiling|unceil
+                                    catalog, global user policy and lineage retention
 
   office list                       runs in this repository (--all for every run)
-  office inspect [run|task|gate|evidence|events|route|learner|trust|convergence] [id]
+  office inspect [run|task|gate|evidence|events|route|learner|trust|convergence|economics] [id]
+  office context [--since SEQ]       bounded root snapshot from runs.db (goal, plan, tasks, gates, next, stale refs)
+  office economics ingest [--file F [--from-harness H] [--from-session S] [--role R]]
+                                    opt-in (economics.collect): record measured token/cache usage
   office decide <lane> escalate|continue|waive|stop --quote "<user's words>"
                                     the user's choice once a lane review spent its 3 RECHECK rounds
   office waive <lane> --reason "<why the open findings are acceptable>"
@@ -59,14 +71,28 @@ Auto Office {ver}
   office disposition <scope>:<F-id> fix|fixed|dismissed|follow-up -- "<note>"
                                     close a non-blocking (APPROVED) finding, or a plan finding the orchestrator
                                     owns after plan review's round cap; fix routes it, no re-review
+  office review <T1|L-T1[:convergence|visual]> [--as <harness>/<model>[@effort] [--cli ARGV | --external]]
+                                    re-run only the review of the same revision when no reviewer answered it
+                                    (UNAVAILABLE, ATTENTION, INVALID_RESULT): on --as, else the next fallback route;
+                                    never an executor, no round spent, a pinned reviewer kept unless --as re-pins it
+  office review <T1|L-T1:convergence|visual> --report <file>
+                                    the orchestrator reviews it itself: recorded degraded, non-independent, never a
+                                    waiver; refused for the session that produced the work
   office review plan --quote "<user's words>" [--rounds N]
                                     the user's explicit request for another plan review (a new bounded cycle)
   office config [<key> [<value>]]   read or set preferences like git config (--list, --unset, --edit, --repo)
+  office config --run <id> --apply-routing --quote "<user's words>"
+                                    re-pin one run's roles and routing from the current config files
   office queue list|add|pause|resume|priority|demote|auto
                                     the machine-level scheduler queue (--run <id> [--task T] for a run)
   office web start|stop|status|serve [--port N] [--fixture small|large]
                                     the local Office web UI (loopback only)
   office setup                      interactive: choose preferred agents, models, and cost policy
+  office onboard [--harness H]      first-run onboarding: status, eligible routes, current-harness integration
+  office onboard --planner|--executor|--reviewer <office|keep|harness/model@effort> | --skip
+                                    record onboarding answers as user-level preferences (or keep them all)
+  office onboard [--enable-free-models | --disable-free-models]
+                                    opt in to catalog models marked free (default off)
   office doctor                     check the installation, hooks, and runtimes
   office update [--check]           update Auto Office itself; --check looks for release/source updates
   office upgrade [run] [--to X.Y]   move a run to a newer release line (dry run; --apply)
@@ -74,6 +100,24 @@ Auto Office {ver}
 
 Global flags: --run <id>, --json, --verbose. Every command ends with `next:`.
 Principles: MANIFESTO.md. Operating contract: SKILL.md and docs/review-convergence.md.
+"""
+
+RAISE_HELP = """\
+office raise [--kind question|blocker|scope-request] [--path P ...] -- "<text>"
+
+Executor (inside your task worktree): stop on something only the orchestrator resolves, without submitting.
+It needs no commit and records a durable event for this run, task, dispatch and session. Your task is
+blocked (not live) until the orchestrator answers; `office wait` wakes it once and `office status` keeps it
+listed. Use it instead of `office submit` when you cannot finish: submit takes finished work only.
+
+  question       you need a decision (ambiguous spec, a choice between approaches)
+  blocker        something outside your control stops you (a missing prerequisite, a broken environment)
+  scope-request  finishing needs a file outside your SCOPE: add --path <repo-relative path> for each
+
+The same text from this session again records nothing new. The answer arrives as a message in this session
+(a prompt in a pane, your next office command if headless); if the session had ended it is in the next
+session's brief. An answer never changes your contract: a scope-request is granted only by a contract
+amendment, which also unblocks you. Then continue and run `office submit` when the work is done.
 """
 
 SUBMIT_HELP = """\
@@ -221,7 +265,8 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--review-external", action="store_true",
                    help="with --review-as: you start the reviewer; Office reads its review file")
     sp.add_parser("preflight", parents=[common])
-    s = sp.add_parser("submit", parents=[common], add_help=False)
+    s = sp.add_parser("submit", parents=[common], add_help=False,
+                      description="Visual selectors: must be plain CSS (document.querySelector), not Playwright-only selectors; state steps may use Playwright selectors.")
     s.add_argument("-h", "--help", action="store_true")
     s.add_argument("--plan", help=argparse.SUPPRESS)
     s.add_argument("--quote", help="the user's words (a defect redirect)")
@@ -232,6 +277,13 @@ def _parser() -> argparse.ArgumentParser:
                         "(low-risk tasks only; reason after --)")
     s.add_argument("reason", nargs="*", help=argparse.SUPPRESS)
     _redirect_args(s)
+    s = sp.add_parser("raise", parents=[common], add_help=False)
+    s.add_argument("-h", "--help", action="store_true")
+    s.add_argument("--kind", default="question", metavar="KIND",
+                   help="question (default), blocker or scope-request")
+    s.add_argument("--path", action="append", default=[], metavar="P",
+                   help="a repo-relative path the raise is about (required for scope-request)")
+    s.add_argument("text", nargs="*", help=argparse.SUPPRESS)
     s = sp.add_parser("amend", parents=[common])
     s.add_argument("scope")
     s.add_argument("delta", nargs="*")
@@ -271,6 +323,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--redeploy", action="store_true", help="with --e2e: deploy prod again from the merged tree")
     s.add_argument("--mark-deployed", action="store_true",
                    help="with --e2e: the operator confirms the merged tree is already live in prod")
+    sp.add_parser("self-improve", parents=[common])
     s = sp.add_parser("close", parents=[common])
     s.add_argument("--handoff", help="PR URL or branch handed to the user for merge")
     s.add_argument("--abandon", metavar="REASON", help="end the run without landing")
@@ -281,6 +334,34 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("benchmarks", parents=[common])
     s.add_argument("action", choices=["brief", "submit"])
     s.add_argument("file", nargs="?")
+    s = sp.add_parser("context", parents=[common])
+    s.add_argument("--since", type=int, metavar="SEQ", help="also list run events after this event cursor (bounded)")
+    s = sp.add_parser("economics", parents=[common])
+    s.add_argument("action", choices=["ingest"])
+    s.add_argument("--file", help="a transcript or normalized usage JSONL to ingest instead of the run's sessions")
+    s.add_argument("--from-harness", dest="usage_harness", choices=["claude", "codex"],
+                   help="parse --file as this harness's transcript (default: normalized usage JSONL)")
+    s.add_argument("--from-session", dest="usage_session", help="session id for --file")
+    s.add_argument("--role", dest="usage_role", help="role for --file rows (root, executor, reviewer, planner)")
+    s = sp.add_parser("harness", parents=[common])
+    s.add_argument("action", choices=["scaffold", "validate", "smoke", "list"])
+    s.add_argument("ident", nargs="?", help="harness (adapter) id")
+    s.add_argument("--binary", help="scaffold: the harness executable to probe")
+    s.add_argument("--force", action="store_true", help="scaffold: redraft an existing user adapter")
+    s.add_argument("--override-seed", action="store_true", help="scaffold: a user adapter replacing a seed id")
+    s.add_argument("--file", help="validate: an adapter file instead of an installed id")
+    s.add_argument("--model", help="smoke: the model (catalog id or harness slug) to launch")
+    s.add_argument("--effort", help="smoke: the effort (default: the catalog row's, else medium)")
+    s.add_argument("--timeout", type=int, help="smoke: seconds before the launch is stopped (default 300)")
+    s.add_argument("--allow-unsafe-flags", action="store_true",
+                   help="smoke: launch a form carrying a permission/trust flag when no safer form exists")
+    s = sp.add_parser("model", parents=[common])
+    s.add_argument("action", choices=["add", "list", "disable", "enable", "registry", "policy", "ceiling", "unceil"])
+    s.add_argument("ident", nargs="?", help="add: harness/slug; disable/enable: harness/model[@effort]; ceiling: provider/lineage")
+    s.add_argument("--effort", action="append", help="add: an effort (repeat or comma-separate)")
+    s.add_argument("--model-id", help="add: the catalog model id (default: the slug's last segment)")
+    s.add_argument("--reason", help="disable: why the row is off")
+    s.add_argument("--through", help="ceiling: inclusive generation (e.g. 5.6)")
     s = sp.add_parser("inspect", parents=[common])
     s.add_argument("what", nargs="?")
     s.add_argument("ident", nargs="?")
@@ -296,6 +377,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--path", action="store_true", help="print the config file path(s)")
     s.add_argument("--show-origin", dest="origin", action="store_true")
     s.add_argument("--force", action="store_true", help="set a key the shipped config does not define")
+    s.add_argument("--apply-routing", action="store_true",
+                   help="with --run: re-pin roles and routing from the current config files into that run")
+    s.add_argument("--quote", help="with --apply-routing: the user's words authorizing the re-pin")
     s = sp.add_parser("queue", parents=[common])
     s.add_argument("action", choices=["list", "add", "pause", "resume", "priority", "demote", "auto"])
     s.add_argument("target", nargs="?", help="queue item id, issue ref (add), priority (priority) or on|off|status (auto)")
@@ -315,9 +399,22 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--user", dest="tier", action="store_const", const="user")
     s.add_argument("--repo", dest="tier", action="store_const", const="repo")
     s.add_argument("-y", "--yes", action="store_true", help="write without the final confirmation")
+    s = sp.add_parser("onboard", parents=[common])
+    s.add_argument("--planner", help="office | keep | harness/model@effort")
+    s.add_argument("--executor", help="office | keep | harness/model@effort")
+    s.add_argument("--reviewer", help="office | keep | harness/model@effort (plan and code review)")
+    s.add_argument("--skip", action="store_true", help="keep every preference and mark onboarding complete")
+    free_models = s.add_mutually_exclusive_group()
+    free_models.add_argument("--enable-free-models", dest="enable_free_models", action="store_const", const=True,
+                             help="explicitly allow catalog models marked free; default is off")
+    free_models.add_argument("--disable-free-models", dest="enable_free_models", action="store_const", const=False,
+                             help="disable free-model routes")
+    s.set_defaults(enable_free_models=None)
     s = sp.add_parser("doctor", parents=[common])
     s.add_argument("--fix", action="store_true")
     s.add_argument("--probe-vision", action="store_true", help="run image-capability probes on visual routes (uses quota)")
+    s.add_argument("--probe-route", metavar="HARNESS/MODEL@EFFORT",
+                   help="run one exact-route conformance probe (uses quota; counts against --run's probe cap)")
     s = sp.add_parser("update", parents=[common])
     s.add_argument("--check", action="store_true", help="check PyPI and a source checkout's upstream without installing updates")
     s = sp.add_parser("upgrade", parents=[common])
@@ -333,6 +430,10 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--shell-guard", dest="shell_guard", action="store_true", default=None,
                    help="Claude: add a Bash hook that rewrites `sed -i` to `sed -i ''` on macOS")
     s.add_argument("--no-shell-guard", dest="shell_guard", action="store_false", help="remove that hook")
+    s.add_argument("--item", dest="items", action="append",
+                   help="apply only this integration item (session.start, prompt.submit, tool.pre, read-rules); repeatable")
+    s.add_argument("--no-hooks", dest="hooks", action="store_false",
+                   help="register the runtime only; write no harness config")
     s = sp.add_parser("uninstall", parents=[common])
     s.add_argument("--purge", action="store_true")
     # Authority and compatibility: discoverable, never in role briefs.
@@ -350,7 +451,7 @@ def _parser() -> argparse.ArgumentParser:
     # dispositions, and the orchestrator's degraded fallback review.
     s = sp.add_parser("decide", parents=[common])
     s.add_argument("scope", help="a lane (L-T1) or shared scope (S-T1+T3)")
-    s.add_argument("choice", choices=("escalate", "continue", "waive", "stop"))
+    s.add_argument("choice", choices=("escalate", "continue", "waive", "stop", "review"))
     s.add_argument("--quote", help="the user's own words")
     s.add_argument("--reason", help="waive: why the unmet gate is accepted")
     s = sp.add_parser("waive", parents=[common])
@@ -360,14 +461,21 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("finding", help="<scope>:<code>[,<code>] (e.g. L-T1:F2 or plan:P1)")
     s.add_argument("how", choices=("fix", "fixed", "dismissed", "follow-up"))
     s.add_argument("note", nargs="*")
+    s.add_argument("--quote", help="dismissed: the user's own words, which dismiss an open blocking lane finding")
     s = sp.add_parser("review", parents=[common])
-    s.add_argument("target", help="<scope>:convergence|visual, or plan (the user's request for another plan review)")
+    s.add_argument("target", help="a task (T1) or lane (L-T1[:convergence|visual]) to re-review, or plan (the user's request "
+                                  "for another plan review)")
     s.add_argument("--report", help="<scope>:<kind>: your review, in the reviewer reply format")
     s.add_argument("--quote", help="plan: the user's own words asking for another plan review")
     s.add_argument("--rounds", type=int, help="plan: at most this many substantive rounds (default 3)")
     s.add_argument("--inspected", nargs="*", default=[], help="visual: every screenshot you inspected")
+    s.add_argument("--as", dest="review_as", metavar="HARNESS/MODEL[@EFFORT]",
+                   help="<task|lane>: re-run only its review on this reviewer route (re-pins the reviewer)")
+    s.add_argument("--cli", dest="review_cli", metavar="ARGV", help="with --as: start exactly this reviewer argv in herdr")
+    s.add_argument("--external", dest="review_external", action="store_true",
+                   help="with --as: you start the reviewer; Office reads its review file")
     s = sp.add_parser("revoke", parents=[common])
-    s.add_argument("task", help="a task id, a dispatch id, or `integration` (its reviews)")
+    s.add_argument("task", help="a task id, a dispatch id, `integration` (its reviews), or <scope>:convergence|visual (a lane review)")
     s.add_argument("--reason", default="orchestrator revoke")
     s = sp.add_parser("rerun", parents=[common])
     s.add_argument("task")
@@ -375,12 +483,25 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--fresh", action="store_true", help="start a new session with the open findings in its brief")
     s.add_argument("--reroute", action="store_true",
                    help="with --fresh: route from current evidence instead of keeping the original route")
+    s.add_argument("--as", dest="as_model", metavar="HARNESS/MODEL[@EFFORT]",
+                   help="run on this route (a user override, as dispatch --as); --resume needs the same harness, model and effort")
+    s.add_argument("--cli", metavar="ARGV", help="with --as: start exactly this agent argv in a herdr pane")
+    s.add_argument("--external", action="store_true",
+                   help="prepare the rerun and print how to start it; launch nothing")
+    s.add_argument("--review-as", metavar="HARNESS/MODEL[@EFFORT]",
+                   help="pin the code reviewer for this task (as dispatch --review-as)")
+    s.add_argument("--review-cli", metavar="ARGV", help="with --review-as: start exactly this reviewer argv in herdr")
+    s.add_argument("--review-external", action="store_true",
+                   help="with --review-as: you start the reviewer; Office reads its review file")
     s = sp.add_parser("prompt", parents=[common])
     s.add_argument("target", nargs="?")
     s.add_argument("message", nargs="*")
     s = sp.add_parser("answer", parents=[common])
     s.add_argument("target", nargs="?")
     s.add_argument("message", nargs="*")
+    s.add_argument("--keys", help="startup prompt: keys to press, e.g. esc or 'down enter' (#510)")
+    s.add_argument("--choice", type=int, help="startup prompt: the option number to press (#510)")
+    s.add_argument("--expect", help="startup prompt: the fingerprint `office status` printed; a stale one is refused")
     s = sp.add_parser("dismiss", parents=[common])
     s.add_argument("target", nargs="?")
     s.add_argument("--all", dest="dismiss_all", action="store_true")
@@ -400,9 +521,25 @@ def _parser() -> argparse.ArgumentParser:
 
 # ------------------------------------------------------------------ output
 
+SELF_IMPROVE_STEPS = """\
+Bug filing is issue-only and orchestrator-driven. Nothing runs in the background and Office records nothing.
+1. Trigger: a `bug?:` line, or any Auto Office defect you notice (runtime, CLI, skills, routing, adapters, hooks).
+2. Decide it is an Office defect. Skip target-application bugs, normal gate refusals and third-party outages.
+3. Gather the evidence yourself, or hand it to a cheap read-only subagent (model: haiku). Keep raw evidence private.
+4. Dedupe: gh issue list --repo Hikari9/auto-office --state all --search "<keywords>"; reuse a match.
+5. Sanitize: expected vs actual behavior, impact, safe reproduction steps.
+   Leave out person, repository, path, account, credential and customer identifiers.
+6. File: gh issue create --repo Hikari9/auto-office. Issues only: never fix the bug, edit source, commit, open a PR or close an issue.
+Landing and closeout never wait on this."""
+
+
 def emit(res: Result, args, ok: bool = True) -> int:
+    # `bug?:` hints ride in res.data["bug_hints"]: printed after the notices, a top-level `bug_hints` list in --json.
+    hints = res.data.get("bug_hints")
     if getattr(args, "json", False):
-        print(json.dumps({"ok": ok, "lines": res.lines, "notices": res.notices, "next": res.next, "data": res.data,
+        data = {k: v for k, v in res.data.items() if k != "bug_hints"}
+        print(json.dumps({"ok": ok, "lines": res.lines, "notices": res.notices, "next": res.next, "data": data,
+                          **({"bug_hints": hints} if hints is not None else {}),
                           **({"final": res.final} if res.final else {})},
                          indent=2, sort_keys=True, default=str))
         return res.exit_code
@@ -410,6 +547,7 @@ def emit(res: Result, args, ok: bool = True) -> int:
     if getattr(args, "verbose", False):
         out += res.verbose
     out += res.notices
+    out += hints or []
     if res.next:
         out.append(f"next: {res.next}")
     if res.final:
@@ -419,10 +557,12 @@ def emit(res: Result, args, ok: bool = True) -> int:
     return res.exit_code
 
 
-def emit_error(err: OfficeError, args) -> int:
+def emit_error(err: OfficeError, args, bug_hints: list[str] | None = None) -> int:
+    """`bug_hints` is None when no hint was looked for (no run resolved), else the `bug?:` lines to show."""
     if getattr(args, "json", False):
         print(json.dumps({"ok": False, "error": {"category": err.category, "message": err.message, "scope": err.scope,
-                                                 "preserved": err.preserved, "next": err.next_step, **err.data}},
+                                                 "preserved": err.preserved, "next": err.next_step, **err.data},
+                          **({"bug_hints": bug_hints} if bug_hints is not None else {})},
                          indent=2, sort_keys=True, default=str))
         return err.exit_code
     lines = [f"blocked: {err.category}: {err.message}"]
@@ -432,6 +572,7 @@ def emit_error(err: OfficeError, args) -> int:
         lines.append(f"scope: {err.scope}")
     if err.preserved:
         lines.append(f"preserved: {err.preserved}")
+    lines += bug_hints or []
     if err.next_step:
         lines.append(f"next: {err.next_step}")
     if err.data.get("final"):
@@ -476,9 +617,66 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "close":  # every office close path ends with its report line
             from office import closeout
             err.data.setdefault("final", closeout.done(f"stopped early ({err.category}); nothing closed or cleaned up"))
-        return emit_error(err, args)
+        return emit_error(err, args, _refusal_hints(err, args, argv))
+    except Exception as err:
+        from office import bughint  # the traceback and exit code stay as they were; the hint precedes them on stderr
+        print(bughint.line(bughint.internal_error_signal(err).text), file=sys.stderr)
+        raise
     except KeyboardInterrupt:
         return 130
+
+
+def _refusal_hints(err, args, argv: list[str]) -> list[str] | None:
+    """The `bug?:` line for a refusal of the command the run's `next:` names; None when no run was resolved."""
+    run_id = getattr(args, "_run_id", None)
+    if not run_id:
+        return None
+    from office import bughint, guide, state
+    if err.category in bughint.ROUTINE_REFUSALS:
+        return []
+    try:
+        con = _con()
+        try:
+            next_line = guide.next_action(con, state.get_run(con, run_id))
+        finally:
+            con.close()
+    except Exception:  # a hint must never replace the refusal it rides on
+        return None
+    signal = bughint.refusal_signal(err.category, args.cmd, argv, next_line)
+    return [bughint.line(signal.text)] if signal else []
+
+
+def _quiet_run_id(args) -> str | None:
+    """The run `office self-improve` reads, found without starting a process: --run, OFFICE_RUN_ID, else the one
+    run in this checkout's `.office/active` index (the stat-only projection the hooks read)."""
+    run_id = getattr(args, "run_arg", None) or os.environ.get("OFFICE_RUN_ID")
+    if run_id:
+        return run_id
+    from office import hooks
+    primary = hooks._primary_checkout(Path.cwd())
+    active = hooks._active_runs(primary) if primary else []
+    return active[0][0] if len(active) == 1 else None
+
+
+def _self_improve(args) -> Result:
+    """The workflow plus the run's current `bug?:` signals. Opens runs.db only when it exists and writes nothing."""
+    from office import bughint, paths, state
+    res = Result(lines=SELF_IMPROVE_STEPS.splitlines(),
+                 next="file each qualifying defect by hand as a sanitized GitHub issue")
+    run_id = _quiet_run_id(args)
+    if not run_id or not paths.runs_db().exists():
+        return res
+    try:
+        con = _con()
+        try:
+            run = state.find_run(con, run_id)
+            if run is not None:
+                res.data["bug_hints"] = bughint.lines(bughint.collect(con, run["id"]))
+        finally:
+            con.close()
+    except Exception:  # a hint never fails the command it rides on
+        pass
+    return res
 
 
 def _con():
@@ -508,9 +706,15 @@ def _legacy_result(target) -> Result:
     return res
 
 
+# Commands that never read runs.db, so they never sweep it either.
+_NO_SWEEP = ("config", "setup", "onboard", "update", "install", "uninstall", "web")
+
+
 def _run(args, unknown) -> int:
     cmd = args.cmd
     cwd = Path.cwd()
+    if cmd == "self-improve":
+        return emit(_self_improve(args), args)
     if cmd == "_job":
         from office import jobs
         return jobs.main_job(args.job_id, args.job_attempt)
@@ -518,6 +722,10 @@ def _run(args, unknown) -> int:
         from office import dispatch
         return dispatch.supervise(args.dispatch_id)
     from office.state import OfficeError
+    if cmd not in _NO_SWEEP:
+        # Expire probe reservations whose owner died (the outbox dead-claim pattern). Never fails a command.
+        from office import route_probe
+        route_probe.sweep()
     if cmd == "start":
         from office import lifecycle, runtime_default
         if not args.goal and not args.from_run:
@@ -561,11 +769,51 @@ def _run(args, unknown) -> int:
             return emit(prune.force(con, only) if args.force else prune.dry_run(con, only), args)
         finally:
             con.close()
+    if cmd == "config" and args.apply_routing:
+        from office import configcmd
+        if args.key or args.value or args.unset or args.list_ or args.edit or args.path:
+            raise OfficeError("usage", "--apply-routing re-pins a run; it takes only --run and --quote", exit_code=2)
+        con = _con()
+        try:
+            return emit(configcmd.apply_run_routing(con, getattr(args, "run_arg", None), args.quote), args)
+        finally:
+            con.close()
     if cmd == "config":
         from office import configcmd
         return emit(configcmd.config(key=args.key, value=args.value, tier=args.tier, unset=args.unset, list_=args.list_,
                                      all_=args.all_, edit=args.edit, path=args.path, origin=args.origin,
                                      force=args.force, cwd=cwd), args)
+    if cmd == "harness":
+        from office import harnesscmd
+        if args.action == "scaffold":
+            return emit(harnesscmd._with_affected(harnesscmd.scaffold(args.ident, args.binary, force=args.force,
+                                            override_seed=args.override_seed)), args)
+        if args.action == "validate":
+            return emit(harnesscmd.validate(args.ident, file=args.file), args)
+        if args.action == "smoke":
+            return emit(harnesscmd.smoke(args.ident, args.model, effort=args.effort, timeout=args.timeout,
+                                         allow_unsafe_flags=args.allow_unsafe_flags), args)
+        con = _con()
+        try:
+            return emit(harnesscmd.harness_list(con), args)
+        finally:
+            con.close()
+    if cmd == "model":
+        from office import harnesscmd
+        if args.action == "add":
+            return emit(harnesscmd._with_affected(harnesscmd.model_add(args.ident, args.effort, model_id=args.model_id)), args)
+        if args.action == "disable":
+            return emit(harnesscmd._with_affected(harnesscmd.model_disable(args.ident, reason=args.reason)), args)
+        if args.action == "enable":
+            return emit(harnesscmd._with_affected(harnesscmd.model_enable(args.ident)), args)
+        if args.action in ("ceiling", "unceil"):
+            return emit(harnesscmd._with_affected(harnesscmd.model_ceiling(
+                args.ident, through=args.through if args.action == "ceiling" else None)), args)
+        if args.action == "registry":
+            return emit(harnesscmd.model_registry(), args)
+        if args.action == "policy":
+            return emit(harnesscmd.model_policy(), args)
+        return emit(harnesscmd.model_list(args.ident or getattr(args, "harness", None)), args)
     if cmd == "queue":
         from office import queuecmd
         con = _con()
@@ -580,16 +828,34 @@ def _run(args, unknown) -> int:
     if cmd == "setup":
         from office import configcmd
         return emit(configcmd.setup(tier=args.tier or "user", yes=args.yes, cwd=cwd), args)
+    if cmd == "onboard":
+        from office import onboarding
+        answers = {"planner": args.planner, "executor": args.executor, "reviewer": args.reviewer}
+        if args.skip or any(answers.values()) or args.enable_free_models is not None:
+            return emit(onboarding.apply(answers, skip=args.skip, enable_free_models=args.enable_free_models, cwd=cwd), args)
+        return emit(onboarding.status(harness=args.harness, cwd=cwd), args)
     if cmd == "doctor":
         from office import doctor
-        return emit(doctor.doctor(fix=args.fix, probe_vision=args.probe_vision), args)
+        run = None
+        named = getattr(args, "run_arg", None) or os.environ.get("OFFICE_RUN_ID")
+        if args.probe_route and named:
+            # Only an explicitly named run is bound, so a casual doctor call never spends a run's probe cap.
+            from office import state
+            con = _con()
+            try:
+                run = state.find_run(con, named)
+            finally:
+                con.close()
+            if run is None or not run.get("office_version"):
+                raise OfficeError("no-such-run", f"--probe-route: {named!r} is not a 3.1+ Office run", next_step="office list")
+        return emit(doctor.doctor(fix=args.fix, probe_vision=args.probe_vision, probe_route=args.probe_route, run=run), args)
     if cmd == "update":
         from office import self_update
         return emit(self_update.check() if args.check else self_update.update(), args)
     if cmd == "install":
         from office import install
         return emit(install.install(only=args.only, dry_run=args.dry_run, migrate_legacy=args.migrate_legacy_hooks,
-                                    shell_guard=args.shell_guard), args)
+                                    shell_guard=args.shell_guard, items=args.items, hooks=args.hooks), args)
     if cmd == "uninstall":
         from office import install
         return emit(install.uninstall(purge=args.purge), args)
@@ -601,6 +867,9 @@ def _run(args, unknown) -> int:
         from office import briefs
         print(SUBMIT_HELP.format(fmt=briefs.PLAN_FORMAT))
         return 0
+    if cmd == "raise" and args.help:
+        print(RAISE_HELP.rstrip())
+        return 0
     con = _con()
     try:
         target = _target(con, args)
@@ -610,10 +879,11 @@ def _run(args, unknown) -> int:
                 res.notices.append(target.note)
             return emit(res, args)
         run = target.run
+        args._run_id = run["id"]
         res = _dispatch_command(con, run, args, unknown, cwd, target)
         if target.note:
             res.notices.append(target.note)
-        if cmd not in ("status", "resume", "preflight"):
+        if cmd not in ("status", "resume", "preflight", "context"):
             from office import guide, state
             guide.piggyback(con, state.get_run(con, run["id"]), res)
         return emit(res, args)
@@ -634,7 +904,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
             with db.transaction(con):
                 lifecycle.reconcile(con, run)
             jobs.kick(con, run["id"])
-        return guide.status(con, run, verbose=args.verbose, probe_panes=True)
+        return guide.add_bug_hints(con, run, guide.status(con, run, verbose=args.verbose, probe_panes=True))
     if cmd == "wait":
         from office import guide
         return guide.wait(con, run, timeout=args.timeout, poll=args.poll)
@@ -647,6 +917,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "preflight":
         from office import preflight
         return preflight.preflight(con, run, cwd)
+    if cmd == "raise":
+        from office import raising
+        return raising.raise_issue(con, run, cwd=cwd, kind=args.kind, text=" ".join(args.text or []), files=args.path)
     if cmd == "submit":
         from office import submit
         return submit.submit(con, run, cwd=cwd, plan_path=args.plan, redirect=_redirect(args),
@@ -693,6 +966,13 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         if not args.file:
             raise OfficeError("usage", "name the delta file", next_step=benchmarks.SUBMIT_FORM, exit_code=2)
         return benchmarks.submit(con, run, args.file)
+    if cmd == "context":
+        from office import context_snapshot
+        return context_snapshot.context(con, run, since=args.since)
+    if cmd == "economics":
+        from office import economics
+        return economics.ingest(con, run, file=args.file, harness=args.usage_harness,
+                                session=args.usage_session, role=args.usage_role)
     if cmd == "inspect":
         from office import inspect_cmd
         return inspect_cmd.inspect(con, run, args.what, args.ident)
@@ -709,24 +989,34 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "disposition":
         from office import convergence
         note = " ".join([*(args.note or []), *[u for u in unknown if u != "--"]]).strip()
-        return convergence.disposition(con, run, args.finding, args.how, note)
+        return convergence.disposition(con, run, args.finding, args.how, note, quote=args.quote)
     if cmd == "review" and args.target.lower() == "plan":
         from office import plans
         return plans.request_review(con, run, args.quote, args.rounds)
     if cmd == "review":
-        from office import convergence
-        if not args.report:
-            from office.state import Usage
-            raise Usage("missing-report", "a fallback review needs --report",
-                        next_step="office review <scope>:convergence|visual --report <file>")
+        from office import convergence, gates
+        from office.state import Usage
+        if not args.report:  # no report: re-run only the review on another reviewer route
+            return gates.review_only(con, run, args.target, review_as=args.review_as, review_cli=args.review_cli,
+                                     review_external=args.review_external)
+        if args.review_as or args.review_cli or args.review_external:
+            raise Usage("invalid-override", "--as/--cli/--external name a reviewer route; --report is your own review",
+                        next_step="office review <task|lane> --as <route>   or   office review <task|lane> --report <file>")
+        if not re.match(r"[LS]-", args.target, re.I):
+            return gates.orchestrator_task_review(con, run, args.target.upper(), Path(args.report).expanduser())
         return convergence.fallback_review(con, run, args.target, Path(args.report).expanduser(),
                                            inspected=args.inspected)
     if cmd == "revoke":
+        if re.fullmatch(r"[LS]-[\w+.-]+:\w+", args.task):  # a lane gate: <scope>:<convergence|visual>
+            from office import convergence
+            return convergence.revoke_lane_gate(con, run, args.task, args.reason)
         from office import dispatch
         return dispatch.revoke(con, run, args.task, args.reason)
     if cmd == "rerun":
         from office import rerun
-        return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh, reroute=args.reroute)
+        return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh, reroute=args.reroute,
+                           as_model=args.as_model, cli=args.cli, external=args.external, review_as=args.review_as,
+                           review_cli=args.review_cli, review_external=args.review_external)
     if cmd == "dismiss":
         from office import rerun
         return rerun.dismiss(con, run, args.target, all_=args.dismiss_all)
@@ -737,7 +1027,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "answer":
         from office import questions
         text = " ".join([*(args.message or []), *[u for u in unknown if u != "--"]]).strip()
-        return questions.answer(con, run, args.target, text)
+        return questions.answer(con, run, args.target, text, keys=args.keys, choice=args.choice, expect=args.expect)
     from office.state import OfficeError
     raise OfficeError("usage", f"unknown command {cmd}", exit_code=2)
 

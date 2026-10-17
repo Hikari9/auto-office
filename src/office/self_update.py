@@ -141,8 +141,10 @@ def update() -> Result:
         if source_checkout:
             extra = "[visual]" if importlib.util.find_spec("playwright") is not None else ""
             spec = f"auto-office{extra} @ {source.as_uri()}"
+            # Refresh only auto-office: --reinstall implies a full cache refresh and --no-cache
+            # re-downloads every dependency (playwright included), so neither is used here.
             install_command = ([executable, "install", "--force", spec] if manager == "pipx" else
-                               [executable, "tool", "install", "--force", "--reinstall", "--no-cache", spec])
+                               [executable, "tool", "install", "--force", "--reinstall-package", "auto-office", spec])
             _run(install_command)
         elif manager == "pipx":
             _run([executable, "upgrade", "auto-office"])

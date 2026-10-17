@@ -10,6 +10,9 @@ paths:
   local_data: ~/.local/share/auto-office
   runs_db: ~/.local/share/auto-office/runs.db
   catalog_dir: ~/.local/share/auto-office/catalog
+herdr:
+  # Optional repository prefix on dispatched pane labels; empty uses the repo directory.
+  repo_short: ""
 worktree:
   # A repo-declared command Office runs once in each new worktree (#255), e.g.
   # "pnpm install --offline --frozen-lockfile || pnpm install --frozen-lockfile".
@@ -21,23 +24,49 @@ worktree:
   setup_inputs: []
   setup_timeout_s: 600
   applies_to: [task, integration, check]
+deploy:
+  # Repo-relative gitignored files a deploy needs (e.g. ".env", "myaccount/.env"). A deploy runs in
+  # a fresh checkout that lacks them, so Office copies each one from the repo into that checkout
+  # before the deploy command runs, mode preserved and never committed. Empty copies nothing.
+  env_files: []
 quota:
   # Ratified v3.1 charter (12A): protect 5% of provider quota.
   reserve_percent: 5
 cost_policy:
   default: balanced
   # Legacy: planner and reviewer routing only. Executor and worker routing (#300)
-  # never applies a money band; its cost safety valve is
-  # routing.adaptive.budget_ceiling_usd.
+  # never applies a money band. Cost is a ranking factor; only an explicitly
+  # user-set routing.adaptive.budget_ceiling_usd is a hard ceiling.
   balanced_money_band_percent: 20
   available: [money_saver, quota_saver, balanced]
 # Adaptive executor/worker routing (#300). Values are calibration defaults,
 # replayable and inspectable (office inspect route / learner); omit a key to
 # keep its default. Preference is weighted evidence, capped at 0.25.
 routing:
+  discovery:
+    # On for executor and worker only (#494). A route the catalog marks `discovery: eligible` is proven by one
+    # exact conformance probe and then tried once, bounded, with a known-working fallback. A run pins this at
+    # start, so a run started earlier keeps its own setting. Evidence: docs/benchmarks/issue-494-evidence.md.
+    enabled: true
+    roles: [executor, worker]
+    max_probes_per_run: 2
+    max_trials_per_run: 1
+    max_trial_percent_rolling_20: 15
+    trial_size_classes: [S, M]
+    trial_blast_radius: [local, repo]
+    require_known_fallback: true
+    probe_ttl_days: 7
+    probe_timeout_s: 120
+  user_policy:
+    denied_models: []
+    # Inclusive generation ceiling per explicitly named provider/lineage.
+    # e.g. openai/gpt-sol: "5.6" denies Sol 5.6 and older, not Sol 6.1.
+    version_ceilings: {}
+    overkill_rules: []
   adaptive:
     competitive_band: 0.05
-    budget_ceiling_usd: 25
+    # Cost ranks routes. Only a user ceiling is hard; the scale is ranking only.
+    budget_ceiling_usd: null
     cost_scale_usd: 25
     spread_penalty: 0.03
     weights:
@@ -77,6 +106,12 @@ model_family_floors:
 adapter_trust:
   proven_min_successful_dispatches: 5
   proven_min_task_shapes: 2
+# First-run /auto-office onboarding (#484). User-level state only: `office onboard`
+# records the onboarding schema the user completed or skipped, and /auto-office
+# offers onboarding again only when office.onboarding.SCHEMA_VERSION is newer.
+# 0 means never onboarded. A repo file may not set it.
+onboarding:
+  schema_version: 0
 roles:
   orchestrator:
     router_selects: false
@@ -298,3 +333,12 @@ intake:
 # for repositories no run has used yet.
 web:
   checkouts: {}
+# Orchestrator economics ledger (`office economics ingest`, `office inspect
+# economics`). Opt-in: while false nothing reads harness session logs or writes
+# usage rows. When true, `office economics ingest` reads the token/cache usage
+# the harness recorded in its own transcripts for this run's dispatches and the
+# bound root session (root turns outside the run window are kept apart) into
+# runs.db `usage_events`. No prices are assumed: transcript cost is "unknown".
+# Disable with `office config economics.collect false`.
+economics:
+  collect: false

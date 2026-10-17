@@ -221,9 +221,14 @@ def _reviewer_reprompt(env, monkeypatch, reads):
     monkeypatch.setenv("OFFICE_HERDR_KEY_DELAY", "0")
     monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_WAIT", "0")
     monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_POLL", "0")
-    from office import gates, review_parse
+    from office import dispatch, gates, review_parse
     d = {**d, "launcher": "herdr", "pane_id": "w1:p7", "role": "code_reviewer"}
     run = {**run, "gates": {"review_reprompt_max": 1}}
+    # Herdr holds this reviewer in its pane: the fail-closed fence types only into a pane it shows to be the dispatch's own.
+    data = json.loads(state_file.read_text())
+    data["pane_agents"] = {d["pane_id"]: dispatch.herdr_agent_name(d["id"])}
+    data["pane_kinds"] = {d["pane_id"]: dispatch._herdr_kind(run, d)}
+    state_file.write_text(json.dumps(data))
     con = env.con()
     try:
         got = gates._reprompt_until_valid(con, run, d, env.tmp, env.tmp / "reply.txt", review_parse.parse(""),
@@ -249,3 +254,18 @@ def test_reviewer_reprompt_that_never_submits_stops_with_an_enter_hint(env, monk
     prompts, enters, typed = _sends(_calls(state_file))
     assert len(prompts) == 1 and len(enters) == 2 and typed == []
     assert "typed but unsubmitted" in reason and "send-keys" in reason
+
+
+def test_issue_583_working_pi_agent_does_not_emit_unsubmitted_pointer_notice(env, monkeypatch):
+    # A running pi harness leaves the submitted brief in pane scrollback.
+    # That must not cause an actionable "send Enter" / office wait wake-up.
+    from office import dispatch
+    monkeypatch.setattr(dispatch, "_herdr_agent_sample",
+                        lambda name: {"status": "working", "busy": True, "content_hash": None})
+    def reads(brief):
+        return [EMPTY, EMPTY, _claude_box(f"Read and carry out the review brief at {brief} exactly.")]
+    state_file, run, d, ddir, res = _launch(env, monkeypatch, adapter="claude", reads=reads)
+    assert res["prompt_landed"] is False
+    assert _launch_events(env, run) == []
+    spec = json.loads((ddir / "launch.json").read_text())
+    assert spec.get("landing_unconfirmed_working") is True

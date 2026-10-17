@@ -37,7 +37,8 @@ POLICY_VERSION = "adaptive-2-task"
 
 # Calibration defaults. Coefficients are provisional and replayable; config
 # (`routing.adaptive`) overrides them. None of them is a hard gate except the
-# budget ceiling, which only removes routes many times the cheapest cost.
+# budget ceiling, which only removes routes many times the cheapest cost. A new run
+# applies a ceiling only when the user set one (#494); a run pinned before that keeps its own.
 DEFAULTS = {
     "weights": {
         "balanced": {"effectiveness": 0.40, "cost": 0.25, "speed": 0.15, "quota": 0.10, "preference": 0.10},
@@ -45,7 +46,8 @@ DEFAULTS = {
         "quota_saver": {"effectiveness": 0.30, "cost": 0.15, "speed": 0.15, "quota": 0.30, "preference": 0.10},
     },
     "competitive_band": 0.05,          # relative utility gap that counts as a close call
-    "budget_ceiling_usd": 25.0,        # drop a route whose expected cost to success exceeds this (null: off)
+    "budget_ceiling_usd": 25.0,        # drop a route whose expected cost to success exceeds this (null: off); a
+                                       # pinned config that omits it keeps this old value, a #494-era run sets it null
     "cost_scale_usd": 25.0,            # cost score falls linearly from 1 at $0 to 0 at this expected cost
     "spread_penalty": 0.03,            # per same-wave task already planned on the route (max 2)
     "exploration": {"rate": 0.08, "margin": 0.10, "min_samples_mature": 6.0, "max_percent_rolling_20": 10.0,
@@ -333,12 +335,53 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
         "context": (request.get("evidence") or {}).get("context") or request.get("context") or {},
         "evidence_as_of": (request.get("evidence") or {}).get("as_of"),
         "evidence_digest": sha256_obj((request.get("evidence") or {}).get("routes") or {}),
+        **({"budget_ceiling_source": (request.get("budget_ceiling") or {}).get("source")}
+           if request.get("budget_ceiling") else {}),
         "numeric_order": numeric_order, "clincher": clincher, "exploration": exploration,
         "spread": {"wave_load": load, "applied": any(r["contributions"]["spread"] for r in rows)},
         "preferred_seed": request.get("preferred_seed"), "aliases": aliases,
         "candidates": rows, "slate": slate,
     }
     return {"rows": rows, "rejected": rejected, "slate": slate, "audit": audit, "by_id": by_id}
+
+
+def trial_rows(pool: list[dict], rec: dict, request: dict, config: dict | None = None) -> dict[str, dict]:
+    """Score discovery candidates against the decision's primary (#494).
+
+    A candidate here has not qualified for the slate and never enters it. Its utility
+    is computed with the same formula and weights the slate used, in the slate's own
+    frame (its speed score is relative to the slate's times), so the exploration margin
+    and cost bounds mean the same thing for a trial. An unbenchmarked candidate keeps
+    the neutral, uncertain prior `score` gives it. Returns route -> {row, utility,
+    within_margin, within_cost, within_ceiling, reason}.
+    """
+    from office.routing import candidate_id
+    s = settings(config or {"routing": {"adaptive": request.get("adaptive_config") or {}}})
+    policy = request.get("cost_policy") or (request.get("policy") or {}).get("cost_policy") or "balanced"
+    weights = s["weights"].get(policy) or s["weights"]["balanced"]
+    kept, _ = _dedupe(pool)
+    scored = score(kept, request, s)
+    main = rec.get("rows") or []
+    primary = next((r for r in main if r["route"] == rec["slate"][0]["route"]), None) if rec.get("slate") else None
+    ex, scale, ceiling = s["exploration"], float(s["cost_scale_usd"]), s.get("budget_ceiling_usd")
+    out = {}
+    for c, r in zip(kept, scored):
+        speed = _relative([x["time_to_success_seconds"] for x in main] + [r["time_to_success_seconds"]], 8.0)[-1]
+        cost = 0.5 if r["cost_to_success"] is None else max(0.0, 1.0 - r["cost_to_success"] / scale)
+        comps = {"effectiveness": r["p_success"], "cost": round(cost, 4), "speed": round(speed, 4),
+                 "quota": r["quota"]["score"], "preference": r["preference"]["score"]}
+        utility = round(sum(round(weights.get(k, 0.0) * v, 4) for k, v in comps.items()), 4)
+        margin_ok = primary is None or utility >= primary["utility"] - float(ex["margin"])
+        cost_ok = (primary is None or r["cost_to_success"] is None or primary["cost_to_success"] is None
+                   or r["cost_to_success"] <= primary["cost_to_success"] * float(ex["max_cost_vs_primary_percent"]) / 100)
+        ceiling_ok = not (ceiling and r["cost_to_success"] and r["cost_to_success"] > float(ceiling))
+        reason = ("utility more than the exploration margin behind the primary" if not margin_ok
+                  else "expected cost over the exploration cost bound" if not cost_ok
+                  else f"expected cost over the ${float(ceiling):g} budget ceiling" if not ceiling_ok else None)
+        out[candidate_id(c)] = {"row": {**r, "components": comps, "utility": utility}, "utility": utility,
+                                "within_margin": margin_ok, "within_cost": cost_ok, "within_ceiling": ceiling_ok,
+                                "reason": reason}
+    return out
 
 
 def _task_descriptor(request: dict) -> dict:

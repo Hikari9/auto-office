@@ -18,6 +18,14 @@ must be up to date is updated once. After the last merge the default branch's
 tree is compared with the reviewed integration tree; if main moved meanwhile
 the run checks re-run on it before any prod deploy.
 
+A PR GitHub reports conflicting (`gh pr view --json mergeable,mergeStateStatus` says CONFLICTING or
+DIRTY; not "not up to date", a draft or an unknown state) gets one recovery attempt (`_recover_conflicting`):
+if the remote branch is still the recorded head, the PR merges with the default
+branch without conflicts, and folding every open task onto it reproduces the
+reviewed integration tree, one merge commit of the default branch is pushed to
+the task branch (leased to the head just read) and the merge is retried once.
+Anything else refuses with the reason and pushes nothing.
+
 `office land --rebase` moves a run onto a default branch that moved after
 `office start`: when every accepted revision still merges cleanly onto the
 new head, integration re-composes there and re-runs the run checks plus an
@@ -29,10 +37,12 @@ import contextlib
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
-from office import closeout, db, gates, integration, paths, prs, state
+from office import closeout, db, gates, integration, paths, prs, state, verification_coverage
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import now_iso, short
@@ -187,6 +197,10 @@ def _land_merge(con, run: dict, mode: str, snap: dict, deploy: dict, *, redeploy
     if mode == "e2e" and not (redeploy or mark_deployed):
         # Before any merge: a prod state Office cannot read refuses here, with nothing changed.
         _require_deploy_proof(con, run, _tree(repo, done) if current else _tree(repo, commit))
+    # Integration PASS alone proves only the checks the plan requested. In a
+    # repository that expressly deselects pytest tiers without --all, do not
+    # merge any task PR based on a partial selection (#563).
+    _require_run_coverage(run, commit, con=con)
     before = _merge_all(con, run, res)
     before = landing.get("rollback") or before  # a rerun's `before` already holds the merges
     _record(con, run, rollback=before)
@@ -327,9 +341,11 @@ def _record_deployed(con, run: dict, target: str, commit: str, tree: str, by: st
 
 # ------------------------------------------------------------------ rebase
 
-COMPOSE_BY_HAND = ("compose by hand: a scratch worktree from origin/{base}, cherry-pick each accepted task's commits, "
-                   "resolve the conflicts, run the full suite, have an independent reviewer check the resolution, open "
-                   "one PR, close the task PRs as superseded, then office close --abandon \"landed as #<N>\"")
+COMPOSE_BY_HAND = ("compose by hand: start a scratch worktree from origin/{base}; merge the accepted task "
+                   "revisions in dependency order (they may be merge commits, so do not blindly cherry-pick); "
+                   "repair conflicts or duplicates, compare the final tree to the reviewed integration and "
+                   "have an independent review of any changed resolution; run the complete test suite, open one PR, close "
+                   "the task PRs as superseded, then office close --abandon \"landed as #<N>\"")
 
 
 def rebase(con, run: dict) -> Result:
@@ -403,7 +419,8 @@ def _rebase_locked(con, run: dict, tasks: list[dict]) -> Result:
     base = prs.settings(con, run).get("base_branch") or "main"
     if any((t.get("pr") or {}).get("merged") for t in tasks):
         raise Refused("already-merging", "some task PRs are merged; office land restacks the rest itself",
-                      next_step="office land")
+                      next_step="office land (merges the rest; a PR GitHub reports conflicting is recovered when it "
+                                "provably composes to the reviewed tree, else it refuses with by-hand steps)")
     repo = Path(run["repo_root"])
     if _git(repo, "fetch", "-q", "origin", base).returncode != 0:
         raise Refused("fetch-failed", f"could not fetch origin/{base}")
@@ -455,6 +472,13 @@ def _waivers(con, run: dict) -> list[str]:
 
 def _ask(con, run: dict) -> Result:
     lines = _waivers(con, run) + ["integration verified; the task PRs are ready:"]
+    commit = integration.final_commit(con, run)
+    coverage = verification_coverage.audit(
+        Path(run["repo_root"]), commit,
+        list((run.get("landing") or {}).get("run_checks") or []),
+        verified_commands=verification_coverage.attested_checks(con, run, commit)) if commit else None
+    if coverage and coverage[0] == verification_coverage.PARTIAL:
+        lines.append(f"FULL SUITE NOT VERIFIED: {coverage[1]}. Office will refuse merge until full-tier integration checks pass.")
     for t in integration._topo(integration.accepted_set(con, run) or []):
         if not prs.has_pr(t):
             continue
@@ -487,8 +511,46 @@ def _gh(run: dict, *args: str, timeout: int = 120) -> subprocess.CompletedProces
     return subprocess.run(["gh", *args], cwd=run["repo_root"], capture_output=True, text=True, timeout=timeout)
 
 
-def _git(cwd, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+def _git(cwd, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, env=env)
+
+
+def _accepted_commit(con, task: dict) -> str:
+    row = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (task["accepted_revision_id"],)).fetchone()
+    if row is None:
+        raise Refused("no-accepted-revision", f"{task['id']} has no accepted revision to land", next_step="office status")
+    return row[0]
+
+
+# A branch-policy refusal also says "not mergeable", but no conflict is behind it: rewriting the branch cannot help.
+NOT_MERGEABLE = re.compile(r"cannot be cleanly created|not mergeable(?!: the base branch policy)", re.I)
+
+
+def _github_conflicting(run: dict, number: int) -> bool:
+    """GitHub itself reports the PR has a merge conflict (`mergeable` CONFLICTING or `mergeStateStatus` DIRTY).
+    Not "not up to date" (BEHIND), a draft, an unknown or still-computing state, or a policy block: no conflict is
+    behind those, so rewriting the branch cannot help. An unreadable answer is not a conflict."""
+    try:
+        proc = _gh(run, "pr", "view", str(number), "--json", "mergeable,mergeStateStatus")
+        info = json.loads(proc.stdout or "{}") if proc.returncode == 0 else {}
+    except (subprocess.SubprocessError, ValueError):
+        return False
+    return isinstance(info, dict) and (info.get("mergeable") == "CONFLICTING" or info.get("mergeStateStatus") == "DIRTY")
+
+
+def _require_run_coverage(run: dict, commit: str, *, con=None) -> None:
+    checks = list((run.get("landing") or {}).get("run_checks") or [])
+    coverage = verification_coverage.audit(Path(run["repo_root"]), commit, checks,
+                                            verified_commands=verification_coverage.attested_checks(con, run, commit)
+                                            if con is not None else None)
+    if coverage and coverage[0] == verification_coverage.PARTIAL:
+        raise Refused("integration-coverage-incomplete",
+                      f"integration checks are insufficient for landing: {coverage[1]}; "
+                      f"declared run-level checks: {checks or ['none']}",
+                      preserved="no additional task PRs were merged by this attempt",
+                      next_step="amend the plan's run-level checks: to scripts/validate.sh "
+                                "(or pytest tests/ --all), re-run integration verification "
+                                "against the same composed commit, then office land")
 
 
 def _merge_all(con, run: dict, res: Result) -> str:
@@ -516,16 +578,30 @@ def _merge_all(con, run: dict, res: Result) -> str:
             continue
         up = prs.parent(con, run, t)
         if up is not None and pr.get("base") != base:
-            if method != "merge":
-                _restack(con, run, t, up, base)
+            if method != "merge" and (pr.get("restacked") or {}).get("base") != base:
+                pr = _restack(con, run, t, up, base)
             if _gh(run, "pr", "edit", str(pr["number"]), "--base", base).returncode != 0:
                 raise Refused("retarget-failed", f"could not retarget #{pr['number']} to {base}")
+            # Recorded at once: a retry after a failed merge must not restack the restacked branch again.
+            pr = {**pr, "base": base}
+            with db.transaction(con):
+                state.update_task(con, run["id"], t["id"], pr=pr)
         _wait_checks(run, pr["number"])
         proc = _gh(run, "pr", "merge", str(pr["number"]), prs.MERGE_FLAGS[method])
         if proc.returncode != 0 and re.search(r"not up to date|behind|out of date", proc.stderr + proc.stdout, re.I):
             _gh(run, "pr", "update-branch", str(pr["number"]))
             _wait_checks(run, pr["number"])
             proc = _gh(run, "pr", "merge", str(pr["number"]), prs.MERGE_FLAGS[method])
+        if (proc.returncode != 0 and method != "rebase" and NOT_MERGEABLE.search(proc.stderr + proc.stdout)
+                and _github_conflicting(run, pr["number"])):
+            # GitHub's rebase merge replays the branch's own commits, so a merge commit pushed to it would change nothing.
+            pr = _recover_conflicting(con, run, t, pr, base, res,
+                                      f"merged so far: {', '.join(merged) or 'none'}; {base} was {before[:12]}")
+            new_head = pr["recovered"]["commit"]
+            _await_head(run, pr["number"], new_head)
+            _wait_checks(run, pr["number"])
+            # Pinned: a push to the branch after the proof must not be merged on its strength.
+            proc = _gh(run, "pr", "merge", str(pr["number"]), prs.MERGE_FLAGS[method], "--match-head-commit", new_head)
         if proc.returncode != 0:
             raise Refused("merge-failed", f"#{pr['number']} ({t['id']}) did not merge: "
                           f"{(proc.stderr or proc.stdout).strip()[:200]}", preserved=f"merged so far: "
@@ -540,21 +616,171 @@ def _merge_all(con, run: dict, res: Result) -> str:
     return before
 
 
-def _restack(con, run: dict, task: dict, up: dict, base: str) -> None:
+def _restack(con, run: dict, task: dict, up: dict, base: str) -> dict:
     """Squash/rebase merges rewrite the parent, so rebase the child's own
-    commits onto the new base and force-push with lease."""
+    commits onto the new base and force-push with lease. Returns the task's PR
+    record, which now names the pushed head and the base it was restacked onto:
+    a retry must not rebase the rebased branch again, and a recovery must
+    recognise the head this push left on the remote."""
     d = state.get_dispatch(con, task["current_dispatch_id"])
     wt = Path(d["worktree"])
-    old_parent = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (up["accepted_revision_id"],)).fetchone()[0]
+    old_parent = _accepted_commit(con, up)
     _git(wt, "fetch", "-q", "origin", base)
     proc = _git(wt, "rebase", "--onto", f"origin/{base}", old_parent)
     if proc.returncode != 0:
         _git(wt, "rebase", "--abort")
         raise Refused("restack-conflict", f"{task['id']} does not rebase cleanly onto {base} after {up['id']} merged",
                       preserved=f"{task['id']} branch unchanged", next_step="resolve the rebase by hand, push, then office land")
-    ok, err = prs.push(run, d, force=True)
+    ok, err = prs.push(run, d, force=True, expected=_accepted_commit(con, task))
     if not ok:
         raise Refused("restack-push-failed", f"force-push of {d['branch']} failed: {err[:160]}")
+    pr = {**(task.get("pr") or {}), "restacked": {"commit": paths.git(wt, "rev-parse", "HEAD"), "base": base}}
+    with db.transaction(con):
+        state.update_task(con, run["id"], task["id"], pr=pr)
+    return pr
+
+
+def _merge_tree(repo: Path, ours: str, theirs: str) -> tuple[str, list[str] | None]:
+    """`git merge-tree --write-tree`: the merged tree and None, or the conflicted files."""
+    proc = _git(repo, "merge-tree", "--write-tree", "--name-only", ours, theirs)
+    lines = proc.stdout.splitlines()
+    if proc.returncode == 0 and lines:
+        return lines[0], None
+    if proc.returncode == 1 and lines:
+        return lines[0], lines[1:lines.index("")] if "" in lines else lines[1:]
+    raise Refused("recovery-failed", f"git merge-tree {ours[:12]} {theirs[:12]} failed (it needs git >= 2.38): "
+                  f"{(proc.stderr or proc.stdout).strip()[:160]}", next_step=COMPOSE_BY_HAND.format(base="the default branch"))
+
+
+def _merge_bases(repo: Path, default: str, head: str) -> list[str]:
+    """Every best common ancestor: multiple bases identify criss-cross ancestry (#562).
+
+    `merge-base` (without `--all`) hides this history and can make a GitHub
+    CONFLICTING verdict look inexplicable beside a locally clean merge-tree.
+    """
+    proc = _git(repo, "merge-base", "--all", default, head)
+    if proc.returncode != 0:
+        raise Refused("merge-base-failed", f"cannot establish the common ancestry of {default[:12]} "
+                      f"and {head[:12]}: {(proc.stderr or proc.stdout).strip()[:160]}",
+                      next_step="inspect both branches by hand; do not rewrite or land them")
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _recover_conflicting(con, run: dict, task: dict, pr: dict, base: str, res: Result, merged_so_far: str) -> dict:
+    """GitHub says the PR cannot be merged, though the reviewed work may still
+    compose cleanly (a squash or rebase of the parent leaves the child's
+    ancestry conflicting). Prove it before touching the branch: the remote head
+    is the recorded one, the PR merges with `base` without conflicts, and
+    folding every remaining open task onto `base` reproduces the reviewed
+    integration tree. Then push one merge commit of `base` into the branch,
+    leased to the head just read, and return the updated PR record."""
+    repo, tid, number = Path(run["repo_root"]), task["id"], pr["number"]
+    branch = pr.get("branch") or state.get_dispatch(con, task["current_dispatch_id"])["branch"]
+    by_hand = COMPOSE_BY_HAND.format(base=base)
+    untouched = f"recovery pushed nothing; {merged_so_far}"
+    ns = f"refs/office/land/{short(run['id'])}"
+    base_ref = f"{ns}/_base"  # a task id is never "_base"
+    if _git(repo, "fetch", "-q", "origin", f"+refs/heads/{base}:{base_ref}",
+            f"+refs/heads/{branch}:{ns}/{tid}").returncode != 0:
+        raise Refused("fetch-failed", f"could not fetch origin/{base} and {branch}", preserved=untouched,
+                      next_step="office land again")
+    default, head = paths.git(repo, "rev-parse", base_ref), paths.git(repo, "rev-parse", f"{ns}/{tid}")
+    bases = _merge_bases(repo, default, head)
+    ancestry = (f"criss-cross ancestry: {len(bases)} merge bases "
+                f"({', '.join(b[:12] for b in bases[:4])})" if len(bases) > 1 else "")
+    if ancestry:
+        # The same reviewed-tree proof below applies, regardless of how many
+        # ancestors Git finds. Never substitute a clean merge-tree for that proof.
+        res.add(f"{tid} #{number} is CONFLICTING on GitHub; {ancestry}; verifying the merge result against the reviewed integration")
+    accepted = _accepted_commit(con, task)
+    ours = {accepted} | {(pr.get(k) or {}).get("commit") for k in ("restacked", "recovering", "recovered")}
+    if head not in ours:
+        raise Refused("branch-moved", f"{branch} on origin is {head[:12]}, not a head Office reviewed or pushed "
+                      f"({accepted[:12]})", preserved=untouched,
+                      next_step=f"find out who pushed to {branch}; then office land again, or " + by_hand)
+    pushed = {(pr.get(k) or {}).get("commit") for k in ("recovering", "recovered")}
+    if head in pushed and _git(repo, "merge-base", "--is-ancestor", default, head).returncode == 0:
+        # A second recovery would only stack another empty merge on the first.
+        raise Refused("not-mergeable", f"#{number} ({tid}) already contains {base} {default[:12]} from an earlier "
+                      "recovery, yet GitHub reports it unmergeable", preserved=untouched,
+                      next_step="wait for GitHub to recompute the PR, then office land again; if it stays, " + by_hand)
+    open_ids = [u["id"] for u in integration._topo(integration.accepted_set(con, run) or [])
+                if u["id"] != tid and prs.has_pr(u)
+                and not (state.get_task(con, run["id"], u["id"]).get("pr") or {}).get("merged")]
+    heads = [(tid, head)] + [(uid, _accepted_commit(con, state.get_task(con, run["id"], uid))) for uid in open_ids]
+    genv = dict(os.environ, **paths.commit_identity_env(repo))
+
+    def commit_tree(tree: str, parents: tuple[str, str], message: str) -> str:
+        proc = _git(repo, "-c", "commit.gpgsign=false", "commit-tree", tree, "-p", parents[0], "-p", parents[1], "-m", message, env=genv)
+        if proc.returncode != 0:
+            raise Refused("recovery-failed", f"git commit-tree failed: {proc.stderr.strip()[:160]}", preserved=untouched)
+        return proc.stdout.strip()
+
+    cur, trees = default, []
+    for uid, commit in heads:
+        tree, files = _merge_tree(repo, cur, commit)
+        if files is not None:
+            reason = f"; {ancestry}" if ancestry else ""
+            raise Refused("merge-conflict", f"{uid} conflicts with {base} {default[:12]} on {', '.join(files) or 'files'}{reason}",
+                          preserved=untouched, next_step=by_hand)
+        cur = commit_tree(tree, (cur, commit), f"office land: fold {uid} onto {base}")  # scratch: never pushed
+        trees.append(tree)
+    integrated = integration.final_commit(con, run)
+    if not integrated:
+        raise Refused("recovery-failed", "there is no accepted integration to compare the merge against",
+                      preserved=untouched, next_step="office status")
+    reviewed = _tree(repo, integrated)
+    if trees[-1] != reviewed:
+        # A criss-cross merge may appear clean while re-introducing code that
+        # was not in the reviewed tree. List concrete differing paths before
+        # refusing; do not write the merge result to the remote branch.
+        diff = _git(repo, "diff", "--name-only", reviewed, trees[-1])
+        paths_differ = (diff.stdout.splitlines() if diff.returncode == 0 else [])
+        files = f"; changed files: {', '.join(paths_differ[:6])}" if paths_differ else ""
+        reason = (f" ({ancestry}; a clean merge may duplicate changes)" if ancestry else "")
+        raise Refused("recovery-tree-mismatch", f"merging the open PRs onto {base} {default[:12]} gives tree {trees[-1][:12]}, "
+                      f"not the reviewed integration tree {reviewed[:12]}{reason}{files}", preserved=untouched,
+                      next_step=(f"inspect the mismatching files and remove unreviewed duplicates; " + by_hand)
+                      if ancestry else by_hand)
+    new = commit_tree(trees[0], (head, default), f"Merge {base} into {branch}\n\nOffice land recovery: GitHub reported "
+                      f"#{number} not mergeable.\n\n{paths.office_trailer(run['id'])}")
+    with db.transaction(con):  # before the push: a land killed after it still knows the head is Office's
+        state.update_task(con, run["id"], tid, pr={**pr, "recovering": {"from": head, "commit": new}})
+    wt = Path((state.get_dispatch(con, task["current_dispatch_id"]) or {}).get("worktree") or repo)
+    ok, err = prs.push(run, {"worktree": str(wt if wt.is_dir() else repo), "branch": branch}, commit=new, force=True,
+                       expected=head)
+    if not ok:
+        if err.startswith("push timed out"):
+            # The push may have reached origin before the timeout: never claim it pushed nothing.
+            raise Refused("recovery-push-failed", f"push of {branch} failed: {err[:160]}",
+                          preserved=f"the push timed out, so origin may already hold the recovery merge {new[:12]} on {branch} "
+                                    f"(recorded as recovering, was {head[:12]}); {merged_so_far}",
+                          next_step=f"check {branch} on origin, then office land again (Office recognises its own recovery "
+                                    "head), or " + by_hand)
+        raise Refused("recovery-push-failed", f"push of {branch} failed: {err[:160]}", preserved=untouched,
+                      next_step="office land again, or " + by_hand)
+    pr = {**{k: v for k, v in pr.items() if k != "recovering"},
+          "recovered": {"from": head, "commit": new, "tree": trees[0], "at": now_iso()}}
+    with db.transaction(con):
+        state.update_task(con, run["id"], tid, pr=pr)
+        state.emit(con, run, "pr.recovered", f"{tid} #{number} recovered: {base} {default[:12]} merged into {branch} "
+                   f"({head[:12]} -> {new[:12]})", task_id=tid, payload={**pr["recovered"], "base": default})
+    res.add(f"{tid} #{number} was not mergeable; merged {base} {default[:12]} into {branch} ({new[:12]}), tree matches the reviewed integration"
+            + (f" despite {len(bases)} merge bases" if ancestry else ""))
+    return pr
+
+
+def _await_head(run: dict, number: int, sha: str, tries: int = 30) -> None:
+    """Wait for GitHub to show the pushed head: checks read before that belong to the old head."""
+    import time
+    for attempt in range(tries):
+        proc = _gh(run, "pr", "view", str(number), "--json", "headRefOid")
+        if proc.returncode == 0 and (json.loads(proc.stdout or "{}").get("headRefOid") == sha):
+            return
+        if attempt + 1 < tries:
+            time.sleep(2.0)
+    raise Refused("head-not-synced", f"GitHub still shows another head on #{number}, not the recovered {sha[:12]}",
+                  next_step="office land again once the PR shows the new head")
 
 
 def _wait_checks(run: dict, number: int) -> None:
@@ -584,6 +810,11 @@ def _verify_main(con, run: dict, integrated: str, res: Result) -> str:
         checkout = gates.detached_checkout(run, main, "land-verify", purpose="check")
         try:
             for cmd in checks:
+                from office import shell_safety
+                if shell_safety.unsafe_manual_push(cmd):
+                    raise Refused("unsafe-check-command", "unowned manual Git push in main verification",
+                                  preserved="no verification command was executed",
+                                  next_step="amend the plan and run integration checks again")
                 proc = subprocess.run(cmd, shell=True, cwd=checkout, capture_output=True, text=True, timeout=1800)
                 if proc.returncode != 0:
                     raise Refused("main-checks-failed", f"`{cmd}` fails on merged {s['base_branch']} {main[:12]}",
@@ -598,33 +829,133 @@ def _verify_main(con, run: dict, integrated: str, res: Result) -> str:
 
 def _deploy(con, run: dict, target: str, deploy: dict, cwd: Path, res: Result, rollback: str | None = None, *,
             commit: str, tree: str) -> None:
-    """Every event names the commit and tree checked out. `land.deploy.start`
+    """Every event names the commit, tree and cwd checked out. `land.deploy.start`
     goes first, so a land killed mid-deploy leaves a start with no result,
     which `_require_deploy_proof` treats as unknown rather than not deployed."""
     link = Path(run["repo_root"]) / ".vercel"
     if link.is_dir() and not (cwd / ".vercel").exists():
-        import shutil
         shutil.copytree(link, cwd / ".vercel")  # the local project link is untracked
+    copied = copy_env_files(Path(run["repo_root"]), cwd, env_files(state.pinned_config(run)))
+    if copied:
+        res.add(f"{target} deploy checkout {cwd}: copied deploy.env_files {', '.join(copied)} (never committed)")
     log_dir = paths.run_dir(run["id"]) / "deploys"
     log_dir.mkdir(parents=True, exist_ok=True)
-    ident = {"target": target, "commit": commit, "tree": tree}
+    ident = {"target": target, "commit": commit, "tree": tree, "cwd": str(cwd)}
     for step, cmd in (("deploy", deploy.get(target)), ("verify", deploy.get("verify"))):
         if not cmd:
             continue
         if step == "deploy":
             with db.transaction(con):
-                state.emit(con, run, "land.deploy.start", f"{target} deploy of {commit[:12]} started", payload=ident,
-                           audience="runtime")
+                state.emit(con, run, "land.deploy.start", f"{target} deploy of {commit[:12]} started in {cwd}",
+                           payload=ident, audience="runtime")
+        from office import shell_safety
+        if shell_safety.unsafe_manual_push(cmd):
+            raise Refused("unsafe-deploy-command", "unowned manual Git push in deploy command",
+                          preserved="no deploy/verify command was executed",
+                          next_step="amend the plan to use an authorized deploy command")
         proc = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=3600)
-        (log_dir / f"{target}-{step}.log").write_text(proc.stdout + proc.stderr, encoding="utf-8")
+        header = f"# office land {target} {step}\n# cwd: {cwd}\n# commit: {commit}\n# command: {cmd}\n\n"
+        (log_dir / f"{target}-{step}.log").write_text(header + proc.stdout + proc.stderr, encoding="utf-8")
         with db.transaction(con):
             state.emit(con, run, f"land.{step}", f"{target} {step} `{cmd}` exit {proc.returncode}",
                        payload={**ident, "exit": proc.returncode})
         if proc.returncode != 0:
-            raise Refused(f"{step}-failed", f"{target} {step} failed (exit {proc.returncode}): `{cmd}`",
+            raise Refused(f"{step}-failed", f"{target} {step} failed (exit {proc.returncode}) in {cwd}: `{cmd}`",
                           preserved=(f"merges are done; rollback target {rollback[:12]}" if rollback else "the PRs"),
                           next_step=f"see {log_dir / f'{target}-{step}.log'}; fix or roll back, then office land again")
-        res.add(f"{target} {step} ok: `{cmd}`")
+        res.add(f"{target} {step} ok: `{cmd}` (cwd {cwd})")
+
+
+# ------------------------------------------------- deploy environment files
+
+def env_files(config: dict) -> list[str]:
+    """The `deploy.env_files` entries of a config: repo-relative paths of ignored files a deploy needs."""
+    listed = (config.get("deploy") or {}).get("env_files") or []
+    return [str(e) for e in (listed if isinstance(listed, list) else [listed])]
+
+
+def copy_env_files(repo: Path, checkout: Path, entries: list[str]) -> list[str]:
+    """Copy each listed file from the repo into the deploy checkout, mode preserved. The
+    checkout is a throwaway worktree: nothing is staged or committed, and a tracked file
+    the checkout already holds is left alone. Returns the entries copied."""
+    root, dest_root = repo.resolve(), checkout.resolve()
+
+    def refuse(entry: str, why: str) -> Refused:
+        return Refused("deploy-env-file-invalid", f"deploy.env_files entry {entry!r} {why}", preserved="nothing was deployed",
+                       next_step="fix deploy.env_files in the config, then office land again")
+
+    copied = []
+    for entry in entries:
+        rel = Path(entry)
+        if not entry.strip() or rel.is_absolute() or ".." in rel.parts:
+            raise refuse(entry, "must be a path inside the repo")
+        src, dest = root / rel, dest_root / rel
+        if not src.is_file():
+            continue
+        if not src.resolve().is_relative_to(root):
+            raise refuse(entry, "is a link to a file outside the repo")
+        if dest.exists() or dest.is_symlink():
+            continue  # tracked: the checkout already holds the committed file
+        anchor = dest.parent
+        while not anchor.exists():
+            anchor = anchor.parent
+        if not anchor.resolve().is_relative_to(dest_root):
+            raise refuse(entry, "resolves outside the deploy checkout")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # private until the mode is applied
+        with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
+            shutil.copyfileobj(inp, out)
+        shutil.copymode(src, dest)
+        copied.append(entry)
+    return copied
+
+
+def _command_paths(cmd: str) -> list[str]:
+    """Path-like words of a shell command: arguments, `--flag=value` values and `VAR=value`
+    values, with operators dropped. Variable expansions, globs and URLs are not paths."""
+    lexer = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        words = list(lexer)
+    except ValueError:
+        words = cmd.split()
+    found = []
+    for word in words:
+        if re.search(r"\s", word):  # a quoted script, as in `sh -c '. ./.env && deploy'`
+            found += _command_paths(word)
+            continue
+        value = word.partition("=")[2] if word.startswith("-") else word.partition("=")[2] or word
+        if not value or value.startswith("-") or re.search(r"[$*?`;&|<>()~]|://", value):
+            continue
+        found.append(value)
+    return found
+
+
+def deploy_path_warnings(repo: Path, commands: dict[str, str], listed: list[str] | None = None) -> list[str]:
+    """Warnings for deploy commands that name an existing repo path a fresh checkout lacks
+    (gitignored or untracked, e.g. `.env`, or `myaccount/.env` passed to a sourced script).
+    Paths listed in `deploy.env_files` are copied in, so they are not reported. `commands`
+    maps a label (deploy_prod, deploy_verify, ...) to its shell command."""
+    root = repo.resolve()
+    covered = {Path(e).as_posix() for e in listed or []}
+    warnings: list[str] = []
+    for label, cmd in commands.items():
+        seen: set[str] = set()
+        for word in _command_paths(cmd or ""):
+            try:
+                rel = (root / word).resolve().relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if rel in seen or rel in covered or rel == "." or rel.split("/")[0] in (".git", ".vercel") \
+                    or not (root / rel).exists():
+                continue
+            seen.add(rel)
+            if _git(root, "ls-files", "--", rel).stdout.strip():
+                continue
+            kind = "gitignored" if _git(root, "check-ignore", "-q", "--", rel).returncode == 0 else "untracked"
+            warnings.append(f"{label} references {rel}, which is {kind} and absent from the fresh checkout the deploy "
+                            f"runs in; list it under deploy.env_files in the config to copy it in")
+    return warnings
 
 
 def _close_issue(con, run: dict, main: str, res: Result) -> None:
@@ -655,15 +986,17 @@ def detect_deploy(repo: Path) -> Result:
         proposals = {"deploy_preview": "vercel deploy", "deploy_prod": "vercel deploy --prod"}
         lines.append("vercel project: preview and prod deploys through the vercel CLI")
     pkg = repo / "package.json"
+    scripts, deploy_scripts = {}, []
     if pkg.exists():
         scripts = (json.loads(pkg.read_text() or "{}").get("scripts") or {})
+        deploy_scripts = [n for n in scripts if n.startswith("deploy")]
         for name in scripts:
             if name in ("deploy:preview", "deploy-preview"):
                 proposals["deploy_preview"] = f"pnpm run {name}"
             elif name in ("deploy", "deploy:prod", "deploy-prod"):
                 proposals.setdefault("deploy_prod", f"pnpm run {name}")
-        if any(n.startswith("deploy") for n in scripts):
-            lines.append("package.json deploy scripts: " + ", ".join(n for n in scripts if n.startswith("deploy")))
+        if deploy_scripts:
+            lines.append("package.json deploy scripts: " + ", ".join(deploy_scripts))
     wf = repo / ".github" / "workflows"
     ci = sorted(p.name for p in wf.glob("*.y*ml") if re.search(r"deploy|release|publish", p.read_text(errors="ignore"), re.I)) \
         if wf.is_dir() else []
@@ -678,4 +1011,17 @@ def detect_deploy(repo: Path) -> Result:
     if proposals:
         lines += ["", "proposed PLAN.md requirements (confirm with the user first):",
                   *[f"{k}: {v}" for k, v in proposals.items()], "deploy_verify: <command that exits 0 when healthy>"]
-    return Result(lines=lines, data={"proposals": proposals, "ci": ci, "skills": skills})
+    listed = env_files(config_for(repo))
+    warnings = deploy_path_warnings(repo, {**proposals, **{f"package.json script {n}": scripts[n] for n in deploy_scripts}},
+                                    listed)
+    lines += [f"warning: {w}" for w in warnings]
+    return Result(lines=lines, data={"proposals": proposals, "ci": ci, "skills": skills, "warnings": warnings})
+
+
+def config_for(repo: Path) -> dict:
+    """The effective config for `repo` (shipped defaults, user and repo files), {} when it is invalid."""
+    from office import config as cfg
+    try:
+        return cfg.resolve(repo)[0]
+    except ValueError:
+        return {}

@@ -36,6 +36,7 @@ elif args[:2] == ["agent", "start"] and os.environ.get("FAKE_HERDR_TRUST_DIALOG"
     code = 1
     result = {{"error": {{"code": "agent_not_ready", "message": "agent is blocked during startup"}}}}
     data.setdefault("pane_agents", {{}})[args[args.index("--pane") + 1]] = args[2]
+    data.setdefault("pane_kinds", {{}})[args[args.index("--pane") + 1]] = args[args.index("--kind") + 1]
     data["dialog"], data["cursor"] = True, 0
 elif args[:2] == ["pane", "read"] and data.get("dialog"):
     rows = ["No, exit", "Yes, I trust this folder"]
@@ -61,6 +62,7 @@ elif args[:2] == ["agent", "start"] and os.environ.get("FAKE_HERDR_START_FAIL"):
 elif args[:2] == ["agent", "start"] and not os.environ.get("FAKE_HERDR_NO_AGENT"):
     # herdr sees the agent in its pane once it has started.
     data.setdefault("pane_agents", {{}})[args[args.index("--pane") + 1]] = args[2]
+    data.setdefault("pane_kinds", {{}})[args[args.index("--pane") + 1]] = args[args.index("--kind") + 1]
 elif args[:2] == ["pane", "close"]:
     data.setdefault("closed", []).append(args[2])
 elif args[:2] == ["pane", "get"] and args[2] in data.get("closed", []):
@@ -68,18 +70,35 @@ elif args[:2] == ["pane", "get"] and args[2] in data.get("closed", []):
     print(json.dumps({{"error": {{"code": "pane_not_found"}}}}))
     sys.exit(1)
 elif args[:2] == ["pane", "get"]:
-    result = {{"pane": {{"pane_id": args[2], "agent": data.get("pane_agents", {{}}).get(args[2])}}}}
+    # Real `herdr pane get`: the agent KIND ("claude"), never the Office agent name, and agent_session.value.
+    kind = data.get("pane_kinds", {{}}).get(args[2])
+    result = {{"pane": {{"pane_id": args[2], "agent": kind}}}}
+    if kind and data.get("session"):
+        result["pane"]["agent_session"] = {{"agent": kind, "kind": "id", "source": "herdr:" + kind, "value": data["session"]}}
+elif args[:2] == ["agent", "list"]:
+    # Real `herdr agent list`: one entry per agent with its Office name, kind and pane.
+    result = {{"agents": [{{"name": name, "agent": data.get("pane_kinds", {{}}).get(pane), "pane_id": pane}}
+                         for pane, name in data.get("pane_agents", {{}}).items()]}}
 elif args[:2] == ["pane", "read"] and ("FAKE_HERDR_PANE_READ" in os.environ or "content" in data):
     print(os.environ.get("FAKE_HERDR_PANE_READ", data.get("content", "")))
     json.dump(data, open(state, "w"))
     sys.exit(0)
 elif args[:2] == ["agent", "get"]:
     seq = data["get"]
-    status = seq.pop(0) if len(seq) > 1 else (seq[0] if seq else "gone")
+    # An agent the fake started is up (idle) unless the test scripted its statuses.
+    status = seq.pop(0) if len(seq) > 1 else (seq[0] if seq else ("idle" if args[2] in data.get("pane_agents", {{}}).values() else "gone"))
     if status == "gone":
         code = 1
     else:
         result = {{"agent": {{"name": args[2], "status": status}}}}
+        # Real `herdr agent get <name>`: the same entry `agent list` gives, with its pane, kind and session.
+        for pane, name in data.get("pane_agents", {{}}).items():
+            kind = data.get("pane_kinds", {{}}).get(pane)
+            if name == args[2]:
+                result["agent"].update({{"pane_id": pane, "agent": kind}})
+                if kind and data.get("session"):
+                    result["agent"]["agent_session"] = {{"agent": kind, "kind": "id", "source": "herdr:" + kind,
+                                                        "value": data["session"]}}
 elif args[:2] == ["pane", "read"]:
     # The pane's screen: what was there before (FAKE_HERDR_PRELUDE), the shell lines
     # Office ran, then what the agent drew at startup (FAKE_HERDR_BANNER).
@@ -99,6 +118,35 @@ json.dump(data, open(state, "w"))
 print(json.dumps({{"result": result}}))
 sys.exit(code)
 '''
+
+
+def real_herdr_json(pane, *, name=None, kind="claude", cwd=None, foreground_cwd=None, session=None):
+    """A stand-in for `dispatch._herdr_json` that answers in the shape herdr 0.9.3 really prints.
+
+    `pane get` carries the agent KIND ("claude"), `agent_session.value`, the cwds and pane_id, and no agent name;
+    `agent list` / `agent get <name>` entries carry the Office agent name as top-level "name" beside their "pane_id".
+    A pane with no `kind` is a plain shell. Every other command answers nothing."""
+    info = {"pane_id": pane, "agent_status": "idle" if kind else None, "focused": False, "tab_id": "w1:t1"}
+    if cwd or foreground_cwd:
+        info["cwd"], info["foreground_cwd"] = cwd or foreground_cwd, foreground_cwd or cwd
+    entry = {"pane_id": pane, "agent_status": "idle"}
+    if kind:
+        info["agent"] = entry["agent"] = kind
+        if session:
+            info["agent_session"] = entry["agent_session"] = {"agent": kind, "kind": "id", "source": f"herdr:{kind}",
+                                                                "value": session}
+        if name:
+            entry["name"] = name
+
+    def answer(args):
+        if args[:3] == ["pane", "get", pane]:
+            return {"pane": dict(info)}
+        if args[:2] == ["agent", "list"]:
+            return {"agents": [dict(entry)] if kind else []}
+        if args[:2] == ["agent", "get"] and kind and name and args[2] in (name, pane):
+            return {"agent": dict(entry)}
+        return {}
+    return answer
 
 
 BUSY = "Working (1s \u2022 esc to interrupt)"
@@ -464,7 +512,7 @@ def test_unreadable_pane_never_settles_stable_output_or_idle(env, monkeypatch):
 def test_pane_still_holding_a_finished_agent_is_not_reused(env, monkeypatch):
     state_file = _fake(env, monkeypatch)
     data = json.loads(state_file.read_text())
-    data["pane_agents"] = {"w1:p50": "codex"}  # ended dispatch, session still in the pane
+    data["pane_agents"], data["pane_kinds"] = {"w1:p50": "office-dold"}, {"w1:p50": "codex"}  # ended dispatch, session still in the pane
     state_file.write_text(json.dumps(data))
     run, d = _live_dispatch(env, monkeypatch)
     from office import dispatch
@@ -474,7 +522,7 @@ def test_pane_still_holding_a_finished_agent_is_not_reused(env, monkeypatch):
     assert pane != "w1:p50" and pane.startswith("w1:p1")
     assert any(c[:2] == ["pane", "split"] for c in _calls(state_file))
     # A plain shell pane is still reused.
-    data = json.loads(state_file.read_text()); data["pane_agents"] = {}; state_file.write_text(json.dumps(data))
+    data = json.loads(state_file.read_text()); data["pane_agents"], data["pane_kinds"] = {}, {}; state_file.write_text(json.dumps(data))
     assert dispatch._herdr_split_pane(run, env.repo, tab_file, {"mode": "split", "anchor": "w1:pQ",
                                                                 "panes": ["w1:p50"]}, "w1:pQ") == "w1:p50"
 
@@ -786,3 +834,23 @@ def test_closing_an_abandoned_pane_drops_its_reservation(env, monkeypatch):
     f = paths.run_dir(run["id"]) / "herdr-reservations.json"
     held = json.loads(f.read_text()) if f.is_file() else {}
     assert pane not in held, held
+
+
+def test_a_blank_first_frame_does_not_end_confirmation(monkeypatch):
+    # R3-11: _answer_startup_trust passes no frame; the first read may be blank or half-drawn.
+    from office import dispatch
+    monkeypatch.setenv("OFFICE_HERDR_KEY_SETTLE", "1")
+    dialog = "Quick safety check: Is this a project you created or one you trust?\n{}\n Enter to confirm"
+    no = dialog.format("❯ No, exit\n  Yes, I trust this folder")
+    yes = dialog.format("  No, exit\n❯ Yes, I trust this folder")
+    frames = iter(["", "Quick safety check: Is this a project you created or one you trust?", no, yes, yes])
+    sent = []
+    assert dispatch._confirm_trust("w1:p1", lambda: next(frames, yes), lambda *a: sent.append(a[-1]))
+    assert sent == ["down", "Enter"], sent
+
+
+def test_an_osc_link_before_the_cursor_glyph_is_stripped():
+    # R3-14: fails with a CSI-only stripper (the cursor line no longer matches).
+    from office import dispatch
+    assert dispatch._selected_option("Trust this folder?\n\x1b]8;;u\x07❯ Yes, I trust this folder") == \
+        "Yes, I trust this folder"

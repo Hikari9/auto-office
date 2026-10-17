@@ -11,6 +11,8 @@ the same file without schema errors.
 """
 from __future__ import annotations
 
+import json
+import random
 import re
 import sqlite3
 import time
@@ -23,7 +25,7 @@ from office import paths
 # Bump when SHARED_COLUMNS or the DDL changes. The version is a record, not the
 # gate: every open also runs the additive column pass (see `migrate`), so a
 # column added without a bump still reaches existing databases.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 13
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -70,9 +72,15 @@ SHARED_COLUMNS = {
         # #253: a Claude usage-limit stop: kind, when it resets (UTC), the pane's
         # own reset text, and a hash of the screen above the limit line.
         "stall_kind TEXT", "resets_at TEXT", "limit_label TEXT", "limit_fingerprint TEXT",
+        # v12: the executor dispatch this one replaced (same run, same task).
+        "predecessor_dispatch_id TEXT",
     ],
     # v2 (#185): user-declared model overrides.
-    "tasks": ["review_override_json TEXT", "pr_json TEXT", "descriptor_json TEXT"],
+    "tasks": [
+        "review_override_json TEXT", "pr_json TEXT", "descriptor_json TEXT",
+        # v12: the task's first executor dispatch, and the dispatch that produced the accepted revision.
+        "first_executor_dispatch_id TEXT", "accepted_producer_dispatch_id TEXT",
+    ],
     # v3 (3.2): the route preview shown in the plan diagram; a task's GitHub PR.
     "plans": ["preview_json TEXT"],
     "findings": [
@@ -87,6 +95,9 @@ SHARED_COLUMNS = {
         # dismissed | follow-up | fix while its repair runs).
         "contract TEXT", "scope TEXT", "blocking INTEGER", "seam TEXT", "root_cause TEXT", "owners TEXT",
         "disposition TEXT", "disposition_note TEXT", "disposition_by TEXT", "disposition_at TEXT",
+        # v12: evidence-only attribution (never read by repair routing): how the finding maps to a
+        # member task, that task, and the first row of a finding recorded once per repair owner.
+        "attribution_basis TEXT", "attributed_task TEXT", "clone_of TEXT",
     ],
     # v5 (#337): the contract a gate row was judged under, the lane or shared
     # scope it reviews, its runtime/evidence status (separate from the verdict),
@@ -95,6 +106,9 @@ SHARED_COLUMNS = {
     "gates": [
         "contract TEXT", "scope TEXT", "review_status TEXT", "independence TEXT", "reviewer_dispatch_id TEXT",
         "next_action TEXT", "cycle INTEGER",
+        # v12: the sorted member task ids of a convergence lane or shared scope, frozen when the gate
+        # is created. NULL on a gate that predates it: unknown, never backfilled.
+        "members_json TEXT",
     ],
     "leases": [
         "task_id TEXT", "fencing INTEGER", "pid INTEGER", "dispatch_id TEXT", "renewed_at TEXT",
@@ -121,6 +135,13 @@ CREATE INDEX IF NOT EXISTS events_run ON events(run_id, audience, seq);
 CREATE TABLE IF NOT EXISTS cursors(run_id TEXT NOT NULL, consumer TEXT NOT NULL, last_seq INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(run_id, consumer));
 CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, kind TEXT NOT NULL, dedup_key TEXT NOT NULL UNIQUE, payload_json TEXT NOT NULL, office_version TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL DEFAULT 3, not_before TEXT, claimed_by TEXT, claimed_pid INTEGER, claimed_at TEXT, kicked_at TEXT, finished_at TEXT, result_json TEXT, error TEXT, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS outbox_run ON outbox(run_id, status);
+-- The self_improve_* tables are inert: nothing reads or writes them any more. They stay
+-- unchanged so older runtimes sharing this runs.db keep working.
+CREATE TABLE IF NOT EXISTS self_improve_runs(run_id TEXT PRIMARY KEY, armed INTEGER NOT NULL DEFAULT 0, cursor INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS self_improve_incidents(fingerprint TEXT PRIMARY KEY, run_id TEXT NOT NULL, kind TEXT NOT NULL, summary TEXT NOT NULL, origin TEXT NOT NULL, occurrences INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL, report_json TEXT, issue_url TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS self_improve_incidents_pending ON self_improve_incidents(status,next_retry_at);
+CREATE TABLE IF NOT EXISTS self_improve_seen_sources(run_id TEXT NOT NULL, origin TEXT NOT NULL, PRIMARY KEY(run_id,origin));
+CREATE TABLE IF NOT EXISTS self_improve_attempts(id TEXT PRIMARY KEY, run_id TEXT, command TEXT NOT NULL, outcome TEXT NOT NULL, detail TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS evidence(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT, revision_id TEXT, gate_id TEXT, kind TEXT NOT NULL, path TEXT, sha256 TEXT, bytes INTEGER, meta_json TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS session_bindings(harness TEXT NOT NULL, session_id TEXT NOT NULL, run_id TEXT NOT NULL, bound_at TEXT NOT NULL, bound_by TEXT NOT NULL, ended_at TEXT, PRIMARY KEY(harness, session_id));
 CREATE TABLE IF NOT EXISTS capability_proofs(key TEXT PRIMARY KEY, harness TEXT NOT NULL, harness_version TEXT, model TEXT NOT NULL, effort TEXT, adapter_hash TEXT, capability TEXT NOT NULL, result TEXT NOT NULL, evidence_hash TEXT, details TEXT, proved_at TEXT NOT NULL);
@@ -130,6 +151,19 @@ CREATE TABLE IF NOT EXISTS deviations(id TEXT PRIMARY KEY, run_id TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS commands(id TEXT PRIMARY KEY, kind TEXT NOT NULL, target TEXT, payload_json TEXT NOT NULL, payload_hash TEXT NOT NULL, origin TEXT, status TEXT NOT NULL, pid INTEGER, result_json TEXT, error TEXT, accepted_at TEXT NOT NULL, started_at TEXT, finished_at TEXT);
 CREATE TABLE IF NOT EXISTS sched_items(id TEXT PRIMARY KEY, kind TEXT NOT NULL, run_id TEXT, task_id TEXT, ref TEXT, title TEXT, priority TEXT NOT NULL DEFAULT 'normal', paused INTEGER NOT NULL DEFAULT 0, pause_reason TEXT, paused_at TEXT, demoted_seq INTEGER, enqueued_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sched_state(scope TEXT PRIMARY KEY, auto_mode TEXT NOT NULL, reason TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS startup_prompts(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, dispatch_id TEXT NOT NULL, pane_id TEXT NOT NULL, agent TEXT NOT NULL, harness TEXT, screen TEXT NOT NULL, fingerprint TEXT NOT NULL, options_json TEXT, snapshot_path TEXT, state TEXT NOT NULL, round INTEGER NOT NULL DEFAULT 1, launcher_pid INTEGER, launcher_identity TEXT, answer TEXT, reported INTEGER NOT NULL DEFAULT 0, resolution TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expires_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS startup_prompts_dispatch ON startup_prompts(dispatch_id, state);
+CREATE TABLE IF NOT EXISTS route_probes(key TEXT PRIMARY KEY, harness TEXT, harness_version TEXT, adapter_hash TEXT, profile TEXT, invocation_model_id TEXT, effort TEXT, result TEXT CHECK(result IN ('pass','fail','pending')), reason_class TEXT CHECK(reason_class IN ('unsupported-model-effort','auth-quota-blocked','transient','isolation-missing','conformance-failed')), detail TEXT, probed_at TEXT, run_id TEXT, dispatch_id TEXT, attempt_id TEXT);
+CREATE TABLE IF NOT EXISTS route_probe_reservations(id TEXT PRIMARY KEY, run_id TEXT, probe_key TEXT, dispatch_id TEXT, task_id TEXT, status TEXT CHECK(status IN ('reserved','completed','failed','abandoned','expired')), claim_token TEXT, reserved_at TEXT, finished_at TEXT);
+CREATE UNIQUE INDEX IF NOT EXISTS route_probe_inflight ON route_probe_reservations(probe_key) WHERE status='reserved';
+CREATE INDEX IF NOT EXISTS route_probe_run ON route_probe_reservations(run_id);
+CREATE TABLE IF NOT EXISTS route_trials(id TEXT PRIMARY KEY, run_id TEXT, task_id TEXT, dispatch_id TEXT, role TEXT, route TEXT, probe_key TEXT, fallback_route TEXT, policy_digest TEXT, reason TEXT, status TEXT CHECK(status IN ('reserved','launched','launch-failed','fell-back','submitted','accepted','rejected','abandoned')), outcome TEXT, created_at TEXT, updated_at TEXT);
+CREATE INDEX IF NOT EXISTS route_trial_run ON route_trials(run_id, role);
+CREATE TABLE IF NOT EXISTS route_discovery_events(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, attempt_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('probe-reserved','probe-result','probe-cache-hit','probe-refused','probe-expired','probe-abandoned','dispatch-linked','trial-reserved','trial-launched','trial-launch-failed','trial-fell-back','trial-submitted','trial-accepted','trial-rejected','trial-abandoned')), origin TEXT NOT NULL CHECK(origin IN ('preflight','manual','dispatch','recovery','job')), run_id TEXT, plan_version INTEGER, task_id TEXT, dispatch_id TEXT, role TEXT, policy_digest TEXT NOT NULL, policy_version TEXT NOT NULL, probe_key TEXT NOT NULL, fingerprint_json TEXT NOT NULL, candidate_route TEXT NOT NULL, primary_route TEXT, fallback_route TEXT, reason TEXT NOT NULL, probe_freshness TEXT NOT NULL CHECK(probe_freshness IN ('fresh-run','cached-fresh','stale','none')), source_attempt_id TEXT, allocation_json TEXT NOT NULL, outcome TEXT, reason_class TEXT, detail TEXT, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS route_discovery_attempt ON route_discovery_events(attempt_id,seq);
+CREATE INDEX IF NOT EXISTS route_discovery_run ON route_discovery_events(run_id,seq);
+CREATE INDEX IF NOT EXISTS route_discovery_probe ON route_discovery_events(probe_key,seq);
+CREATE UNIQUE INDEX IF NOT EXISTS route_discovery_trial_terminal ON route_discovery_events(attempt_id) WHERE kind IN ('trial-accepted','trial-rejected');
 """
 
 # #131 F6: a 3.1 finding must name a recorded dispatch. Scoped to 3.1 rows
@@ -141,6 +175,45 @@ WHEN NEW.run_id IS NOT NULL AND NEW.dispatch_id IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'finding references an unrecorded dispatch'); END;
 """
 
+DISCOVERY_TRIGGERS = ("""
+CREATE TRIGGER IF NOT EXISTS route_discovery_no_update BEFORE UPDATE ON route_discovery_events
+BEGIN SELECT RAISE(ABORT, 'route discovery events are append-only'); END;
+""", """CREATE TRIGGER IF NOT EXISTS route_discovery_no_delete BEFORE DELETE ON route_discovery_events
+BEGIN SELECT RAISE(ABORT, 'route discovery events are append-only'); END;
+""", """CREATE TRIGGER IF NOT EXISTS route_discovery_no_replace BEFORE INSERT ON route_discovery_events
+WHEN EXISTS (SELECT 1 FROM route_discovery_events WHERE id=NEW.id OR seq=NEW.seq
+ OR (attempt_id=NEW.attempt_id AND kind IN ('trial-accepted','trial-rejected')
+     AND NEW.kind IN ('trial-accepted','trial-rejected')))
+BEGIN SELECT RAISE(ABORT, 'route discovery events are append-only'); END;
+""")
+
+
+def _enter_wal(con: sqlite3.Connection, attempts: int = 40) -> None:
+    """Put the database in WAL mode, once.
+
+    Switching the journal mode needs a lock SQLite can refuse with `database is
+    locked` without consulting the busy timeout while another connection is
+    creating the file or converting it, so concurrent first opens could crash here.
+    A file already in WAL mode needs no switch, so that is read first. Otherwise
+    the switch is retried with jittered backoff, bounded; any other error raises."""
+    delay = 0.02
+    for attempt in range(attempts):
+        try:
+            mode = con.execute("PRAGMA journal_mode").fetchone()[0]
+            if str(mode).lower() != "wal":
+                mode = con.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) and "busy" not in str(exc):
+                raise
+            if attempt == attempts - 1:
+                raise RuntimeError(f"runs.db could not enter WAL mode (still locked after {attempts} tries)") from exc
+            time.sleep(delay * (0.5 + random.random()))
+            delay = min(delay * 2, 0.5)
+            continue
+        if str(mode).lower() != "wal":  # pragma: no cover - platform specific
+            raise RuntimeError(f"runs.db could not enter WAL mode ({mode})")
+        return
+
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
     db_path = Path(path) if path else paths.runs_db()
@@ -148,9 +221,7 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     con = sqlite3.connect(str(db_path), timeout=30, isolation_level=None)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA busy_timeout=30000")
-    mode = con.execute("PRAGMA journal_mode=WAL").fetchone()[0]
-    if str(mode).lower() != "wal":  # pragma: no cover - platform specific
-        raise RuntimeError(f"runs.db could not enter WAL mode ({mode})")
+    _enter_wal(con)
     con.execute("PRAGMA foreign_keys=ON")
     migrate(con)
     return con
@@ -174,12 +245,40 @@ def migrate(con: sqlite3.Connection) -> None:
                 if col.split()[0] not in have:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
         con.execute(TRIGGERS)
+        for trigger in DISCOVERY_TRIGGERS:
+            con.execute(trigger)
         con.execute("CREATE INDEX IF NOT EXISTS runs_repo ON runs(git_common_dir, phase)")
         con.execute("CREATE INDEX IF NOT EXISTS findings_task ON findings(run_id, task_id, state)")
         con.execute("CREATE INDEX IF NOT EXISTS dispatches_run ON dispatches(run_id, task_id)")
+        _repair_historical_plan_review_routes(con)
         # Never lower a stamp a newer runtime wrote; drift repair runs below it.
         con.execute("INSERT OR REPLACE INTO schema_meta(key, value) VALUES('office_schema', ?)",
                     (str(max(SCHEMA_VERSION, _schema_version(con))),))
+
+
+
+def _repair_historical_plan_review_routes(con: sqlite3.Connection) -> tuple[int, int]:
+    """Recover original route evidence only; unknown values stay NULL."""
+    repaired = 0
+    for row in con.execute("SELECT id, model, effort, route_json FROM dispatches "
+                           "WHERE role='plan_reviewer' AND (model IS NULL OR model='' "
+                           "OR effort IS NULL OR effort='')"):
+        try:
+            payload = json.loads(row["route_json"] or "{}")
+        except (ValueError, TypeError):
+            payload = {}
+        candidate = payload.get("candidate") if isinstance(payload, dict) else None
+        if not isinstance(candidate, dict):
+            continue
+        model = row["model"] or candidate.get("invocation_model_id")
+        effort = row["effort"] or candidate.get("effort")
+        if not isinstance(model, str) or not model.strip() or not isinstance(effort, str) or not effort.strip():
+            continue
+        con.execute("UPDATE dispatches SET model=?, effort=? WHERE id=?", (model, effort, row["id"]))
+        repaired += 1
+    unknown = con.execute("SELECT COUNT(*) FROM dispatches WHERE role='plan_reviewer' "
+                          "AND (model IS NULL OR model='' OR effort IS NULL OR effort='')").fetchone()[0]
+    return repaired, unknown
 
 
 def missing_columns(con: sqlite3.Connection) -> list[str]:
@@ -204,12 +303,21 @@ def _schema_version(con: sqlite3.Connection) -> int:
 
 
 _TABLES = re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", LEGACY_DDL + OFFICE_DDL)
+_ROUTE_INDEXES = {"route_probe_inflight", "route_probe_run", "route_trial_run", "route_discovery_attempt",
+                  "route_discovery_run", "route_discovery_probe", "route_discovery_trial_terminal"}
+_ROUTE_TRIGGERS = {"route_discovery_no_update", "route_discovery_no_delete", "route_discovery_no_replace"}
 
 
 def _drifted(con: sqlite3.Connection) -> bool:
     """True when a table or shared column this version expects is absent."""
     have = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if not have.issuperset(_TABLES):
+        return True
+    indexes = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    if not indexes.issuperset(_ROUTE_INDEXES):
+        return True
+    triggers = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+    if not triggers.issuperset(_ROUTE_TRIGGERS):
         return True
     for table, columns in SHARED_COLUMNS.items():
         cols = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}

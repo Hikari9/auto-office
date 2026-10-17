@@ -11,13 +11,14 @@ import re
 import os
 from pathlib import Path
 
-from office import amend, contract, paths, planpath, plans, state
+from office import amend, contract, paths, planpath, plans, route_learning, state
 from office.result import Result
 from office.util import atomic_write_text, short
 
 ORCH_EVENT_KINDS = None  # every orchestrator-audience event
 
 IDLE_STALL_DEFAULT_S = 60.0
+BUG_HINT_LIMIT = 5
 
 
 def idle_stall_s() -> float:
@@ -54,6 +55,17 @@ def ready_tasks(con, run: dict) -> list[str]:
     tasks = state.tasks(con, run["id"])
     by_id = {t["id"]: t for t in tasks}
     return [t["id"] for t in tasks if t["status"] == "planned" and not unaccepted_dependencies(t, by_id)]
+
+
+def trial_notes(con, tasks: list[dict]) -> list[str]:
+    """One note per task whose current dispatch is a live discovery trial (#494): the route is
+    named as a trial, with the known-working route it falls back to."""
+    notes = []
+    for t in tasks:
+        trial = route_learning.live_trial(con, t.get("current_dispatch_id"))
+        if trial:
+            notes.append(f"{t['id']} runs a discovery trial of {trial['route']}, fallback {trial['fallback'] or 'none'}")
+    return notes
 
 
 def held_by_dependencies(con, run: dict) -> list[str]:
@@ -123,6 +135,15 @@ def next_action(con, run: dict) -> str:
         if c.get(status):
             tid = c[status][0]
             t = next(x for x in tasks if x["id"] == tid)
+            from office import gates as gates_review
+            block = gates_review.unavailable_review_block(con, run, t)
+            if block:
+                return (f"{tid} code review of {block['revision_id']} returned no verdict "
+                        f"({block['verdict'] or block.get('review_status')}; runtime status, no round spent). Re-run only the "
+                        f"review on a fallback reviewer: office review {tid} [--as <harness>/<model>[@effort]]; or review it "
+                        f"yourself as the orchestrator (recorded degraded, non-independent; refused for the session that "
+                        f"produced it): office review {tid} --report <file>; office resume retries the same reviewer chain. "
+                        f"A waiver is the user's last resort: office approve waive {tid}:code --quote \"<words>\"")
             return f"resolve {tid} ({t.get('pause_reason') or status}); office inspect task {tid}"
     from office import gates as gates_mod
     if contract.is_convergence(run):
@@ -134,6 +155,11 @@ def next_action(con, run: dict) -> str:
     for t in tasks:
         if t["status"] == "changes_required" and not gates_mod.worker_live(con, t.get("current_dispatch_id")):
             # Findings wait for the orchestrator's choice (R8); nothing relaunches on its own.
+            if (t.get("pause_reason") or "").endswith("the session ended without submitting"):
+                return (f"{t['id']} {t['pause_reason']}: office rerun {t['id']} --resume (resubmit on the amended "
+                        "contract) | --fresh")
+            if (t.get("pause_reason") or "").startswith("restack:"):
+                return f"{t['id']} {t['pause_reason']}: office rerun {t['id']} --resume | --fresh"
             return f"findings on {t['id']} wait for you: office rerun {t['id']} --resume | --fresh"
     for t in tasks:
         if t["status"] == "changes_required":
@@ -141,7 +167,7 @@ def next_action(con, run: dict) -> str:
             return (f"no action; {t['id']}'s worker is fixing its findings (if it stops: "
                     f"office rerun {t['id']} --resume | --fresh)")
     for t in tasks:
-        if t["status"] == "submitted":
+        if t["status"] in ("submitted", "accepted"):
             stale = gates_mod.stale_dependency(con, run, t)
             if stale:
                 return f"{t['id']} {stale}"
@@ -150,8 +176,8 @@ def next_action(con, run: dict) -> str:
         return "choose execution strategy; office dispatch " + " ".join(ready) + (" --parallel" if len(ready) > 1 else "")
     live = [t for t in tasks if t["status"] not in ("accepted", "cancelled", "planned")]
     if live:
-        held = held_by_dependencies(con, run)
-        return "exceptions only; office status" + (f" ({held[0]})" if held else "")
+        notes = [*trial_notes(con, live), *held_by_dependencies(con, run)[:1]]
+        return "exceptions only; office status" + (f" ({'; '.join(notes)})" if notes else "")
     if contract.is_convergence(run):
         from office import convergence
         nxt = convergence.next_action(con, run, dispositions=True)
@@ -240,11 +266,22 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         drift = cfg.config_drift(run)
         if drift:
             res.add(drift)
+        routing_drift = cfg.routing_inputs_drift(run)
+        if routing_drift:
+            res.add(routing_drift)
     if tasks:
         parts = [f"accepted {len(c.get('accepted', []))}/{len([t for t in tasks if t['status'] != 'cancelled'])}"]
-        for label, keys in (("live", ("running", "launching", "submitted", "changes_required")), ("queued", ("queued",)),
-                            ("paused", ("paused",)), ("blocked", ("blocked",))):
-            ids = [i for k in keys for i in c.get(k, [])]
+        # `live` is a task with a live or launching session. A task whose session ended is
+        # `submitted` (its revision waits on gates, its lane or its dependencies) or `idle`
+        # (it waits for the orchestrator: next: names the rerun), never live (#398).
+        from office import gates as gates_mod
+        open_ids = [t["id"] for t in tasks if t["status"] in ("running", "launching", "submitted", "changes_required")]
+        live_ids = {i for i in open_ids if gates_mod.live_task_session(con, run["id"], i)}
+        groups = {"live": [i for i in open_ids if i in live_ids],
+                  "submitted": [i for i in c.get("submitted", []) if i not in live_ids],
+                  "idle": [i for i in open_ids if i not in live_ids and i not in c.get("submitted", [])]}
+        for label in ("live", "submitted", "idle", "queued", "paused", "blocked"):
+            ids = groups.get(label, c.get(label, []))
             if ids:
                 parts.append(f"{label} {','.join(ids)}")
         res.add(" | ".join(parts))
@@ -294,6 +331,11 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         from office import db
         with db.transaction(con):
             state.consume_events(con, run["id"], events)
+    # A successful check result is never evidence that the undispatched pytest
+    # tiers passed. Keep the omission visible even after its original event was read.
+    detail = ((run.get("landing") or {}).get("integration") or {}).get("detail") or ""
+    if "FULL SUITE NOT VERIFIED" in detail:
+        res.add(f"verification warning: {detail}")
     res.next = next_action(con, run)
     res.data = {"run_id": run["id"], "phase": run["phase"], "office_version": run["office_version"],
                 "requirements_version": run["requirements_version"], "plan_version": run["plan_version"],
@@ -301,6 +343,20 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
                 "open_defects": [d["code"] for d in rs["open_defects"]], "next": res.next}
     if resumed:
         res.verbose.append("resumed: pending jobs and deliveries reconstructed from runs.db")
+    return res
+
+
+def add_bug_hints(con, run: dict, res: Result) -> Result:
+    """Attach the run's current `bug?:` lines to a status-shaped result as `data["bug_hints"]`; the CLI prints
+    them and `--json` carries them as a `bug_hints` list. Read-only and best effort. A worker is not told:
+    it never files an Office defect. The session-start hook calls `status` directly and never gets hints."""
+    if os.environ.get("OFFICE_DISPATCH_ID"):
+        return res
+    from office import bughint
+    try:
+        res.data["bug_hints"] = bughint.lines(bughint.collect(con, run["id"]), limit=BUG_HINT_LIMIT)
+    except Exception:  # a hint must never fail the command it rides on
+        pass
     return res
 
 
@@ -325,6 +381,10 @@ def effective_routes(con, run: dict, tasks: list[dict]) -> dict[str, str]:
     out = {}
     for t in tasks:
         if t["status"] in ("accepted", "cancelled"):
+            continue
+        trial = route_learning.live_trial(con, t.get("current_dispatch_id"))
+        if trial:
+            out[t["id"]] = f"{trial['route']} (trial, fallback {trial['fallback'] or 'none'})"
             continue
         rec = state.recorded_route(t)
         if rec:
@@ -519,15 +579,20 @@ def worker_signals(con, run: dict) -> tuple[list[str], int]:
 
 
 def _needs_orchestrator(con, run: dict) -> bool:
-    if any(t["status"] in ("paused", "blocked", "changes_required") for t in state.tasks(con, run["id"])):
+    tasks = state.tasks(con, run["id"])
+    if any(t["status"] in ("paused", "blocked") for t in tasks):
+        return True
+    # Preserve v3.1's existing changes-required wakeup. Convergence waits
+    # for the precise repair eligibility, including a live scope lease (#561).
+    if not contract.is_convergence(run) and any(t["status"] == "changes_required" for t in tasks):
         return True
     return not next_action(con, state.get_run(con, run["id"])).startswith(("exceptions only", "no action"))
 
 
 def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
     """Block until something needs the orchestrator, then print status.
-    Exit 0: a task, phase, plan or requirements change, or a new orchestrator
-    event. Exit 3: a stall (work marked in progress that nothing can advance).
+    Exit 0: a task, phase, plan or requirements change, or a new actionable
+    orchestrator event. Exit 3: a stall (work marked in progress that nothing can advance).
     Exit 5: an agent is waiting on a question (a `question:` line names it and
     the `office answer` command). Exit 124: timeout with nothing new. A watcher
     keys on the exit code, never on matching status text."""
@@ -549,10 +614,23 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         asked, _, acts = questions.scan(con, run)
         stuck = stalls(con, run, since=started_at, acts=acts) + signals
         changed = _snapshot(con, run) != start
-        news = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=1)
+        # Only an *actionable* orchestrator event warrants an exit 0: a task paused on a
+        # refused submit, a gate failure, a recheck the orchestrator must route. A pure
+        # lifecycle notification (a launch.session, a setup.done) carries no command to
+        # run, so an event older than the cursor must not wake an otherwise-idle wait into
+        # exit 0, which an orchestrator reads as "act now" and busy-loops on. Stalls and
+        # signals that DO carry a next step wake via the stall pass; real state
+        # transitions still wake via `changed`. (#296) Scan *all* unread events, not a
+        # bounded prefix: many older informational events must not hide a newer urgent
+        # one (e.g. a late pr.error behind 64 launch.session/setup.done notes).
+        news = [e for e in state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=None)
+                if _urgent(e)]
         # Something already waiting on the orchestrator ends the wait at once;
         # otherwise a blocker present at the start would sit until the timeout.
-        pending = first and _needs_orchestrator(con, run)
+        # A scope lease may become dormant when its holder ends without a new
+        # task revision or status event. Recheck actionable work on every poll:
+        # the initial snapshot alone cannot observe that transition (#561).
+        pending = _needs_orchestrator(con, run)
         first = False
         if asked or stuck or changed or news or pending or state.is_terminal(state.get_run(con, run["id"])) \
                 or time.time() >= deadline:
@@ -571,7 +649,7 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
             elif not (stuck or changed or news or pending):
                 res.lines.insert(1, f"wait: nothing new in {int(timeout)}s")
                 res.exit_code = 124
-            return res
+            return add_bug_hints(con, run, res)
         time.sleep(poll)
 
 
@@ -600,7 +678,7 @@ def _waiting_on(con, run: dict, task: dict) -> str:
             owner = gates_mod.owner_state(con, run, g) if g["status"] == "running" else ("", "")
             # An owner whose liveness cannot be read is shown, never reclaimed.
             parts.append(f"{g['kind']} {g['status']}" + (f" ({owner[1]})" if owner[0] == "unknown" else ""))
-        if task["status"] == "submitted" and not parts:
+        if task["status"] in ("submitted", "accepted") and not parts:
             from office import gates
             stale = gates.stale_dependency(con, run, task)
             if stale:
@@ -609,6 +687,7 @@ def _waiting_on(con, run: dict, task: dict) -> str:
 
 
 def worker_status(con, run: dict, dispatch_id: str) -> Result:
+    from office import raising
     d = state.get_dispatch(con, dispatch_id)
     task = state.get_task(con, run["id"], d["task_id"]) if d and d.get("task_id") else None
     if task is None:
@@ -629,6 +708,9 @@ def worker_status(con, run: dict, dispatch_id: str) -> Result:
         res.next = "fix the findings, then office submit"
     elif task["status"] in ("submitted",):
         res.next = "no action; verification is running"
+    elif raising.open_raises(con, run, dispatch_id=dispatch_id):
+        res.next = ("stop and wait; you raised it and the orchestrator answers: the answer arrives as a message in "
+                    "this session. Do not submit unfinished work")
     elif task["status"] in ("paused", "blocked"):
         res.next = f"stop; {task.get('pause_reason') or task['status']}"
     elif task["status"] == "accepted":
@@ -660,8 +742,8 @@ def piggyback(con, run: dict, res: Result) -> None:
 
 # Kinds that mean something failed or waits on the orchestrator. Everything else is informational.
 _URGENT_KINDS = frozenset({
-    "task.blocked", "task.paused", "task.findings_queued", "task.scope_requested", "task.restack_needed",
-    "task.amend_undelivered", "submit.refused", "submit.rejected", "integration.conflict", "integration.failed",
+    "task.blocked", "task.paused", "task.findings_queued", "task.scope_requested", "task.raised", "task.restack_needed",
+    "task.amend_undelivered", "submit.refused", "submit.rejected", "integration.conflict", "integration.stale", "integration.failed",
     "gate.unavailable", "gate.changes_required", "gate.attention", "gate.escalated", "gate.brief_defect",
     "plan.unavailable", "plan.changes_required", "plan.attention", "plan.escalated", "plan.defect",
     "plan.questions", "plan.contract_requested", "pr.error", "lease.revoked",

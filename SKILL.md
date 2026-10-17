@@ -10,6 +10,13 @@ You are the orchestrator. You own strategy: decomposition, what runs, in what or
 The `office` runtime owns everything mechanical: IDs, versions, hashes, routing, packets, worktrees, leases, launches, checks, review dispatch, evidence, receipts, delivery, retries, and resume state.
 Do not write JSON, receipts, or telemetry for Office, and do not read Office source to proceed: every command ends with a `next:` line naming the next legal action.
 
+## Issue-only self-improvement
+
+On a `bug?:` line, or on any Office defect you notice yourself (a `next:` line that contradicts a refusal, a wrong dispatch base), you run the
+bug-report workflow in `skills/auto-self-improve/SKILL.md`: decide it is an Office defect, dedupe against open and closed issues, sanitize, and
+file with `gh issue create` on **Hikari9/auto-office**, by hand or through a cheap read-only subagent. The runtime only prints the `bug?:` hint;
+it never investigates or files. Issues only: never fix the bug or open a PR as part of it, and never block the run on it.
+
 ## Permanent invariants
 
 - Merging to `main` is the user's boundary; no agent lifts it without an explicit per-run user statement.
@@ -23,9 +30,7 @@ Do not write JSON, receipts, or telemetry for Office, and do not read Office sou
 
 Take every decision to the user through the harness's native question tool when it has one, not free text in chat: intake questions, plan `## Questions`, plan/merge/trust/waive authorization, escalations, and route notices. Show the plan or notice first; the tool carries the decision.
 - Claude Code: `AskUserQuestion` (1-4 questions, 2-4 options each; list your recommendation first with "(Recommended)" in its label; "Other" is added automatically).
-- Codex: `request_user_input`, when the session exposes it.
-- Antigravity (`agy`): `ask_question`.
-- Hermes: `clarify` (up to 4 choices; "Other" is added automatically).
+- Codex: `request_user_input`, when the session exposes it. Antigravity (`agy`): `ask_question`. Hermes: `clarify` (up to 4 choices; "Other" is added automatically).
 - Any other harness, or when the tool is unavailable: concise numbered plain-text questions in one batch.
 
 `--quote` records the user's selected answer or typed words verbatim, whichever tool carried them.
@@ -33,10 +38,22 @@ Take every decision to the user through the harness's native question tool when 
 ## Install check (every session, before anything else)
 
 Run `office --version`. This skill's directory is the `auto-office` package, so it is the install source.
-- **Not found:** stop and ask the user to approve installing it; never install silently. Then `uv tool install "<this skill's directory>"`, `office install`, `office doctor`.
+- **Not found:** stop and ask the user to approve installing it; never install silently. Then `uv tool install "<this skill's directory>"`, `office install --no-hooks` (onboarding offers hooks), `office doctor`.
 - **Release differs from this directory's `VERSION`, or `office doctor` prints `install: STALE`:** tell the user and offer `uv tool install --force --reinstall "<this skill's directory>"`, then `office install`. Runs already started keep their pinned runtime.
 
 At lifecycle intake, run `office update --check`; if it reports an update, offer it in the next native intake question round. A failed or offline check does not block intake. Detail: `docs/orchestrator-reference.md`.
+
+## First-run onboarding (after the install check, before intake)
+
+`office onboard --harness <your harness> --json`. If `data.due` is false, go to Start. Otherwise hold the user's request and onboard (`docs/onboarding.md`).
+You are the orchestrator; never ask for one. Round 1: if `harness.offer` is non-empty, ask **Install recommended** (`office install --only <harness>`),
+**Review individually** (show each `integration.items[].change`, then `office install --only <harness> --item <id>` per accepted item) or **Skip**;
+never write another harness's config. Ask too whether to set preferences now or Skip onboarding (keeps every preference).
+Round 2: the three `questions` in order, each with **Let Office decide** (Recommended), its other `options` (current, seeded) and a custom
+`harness/model@effort` from `eligible`. Show `current`, `about` and the `disclaimer`: a preference, never a guarantee.
+Record with `office onboard --planner <a> --executor <a> --reviewer <a>` (`office`, `keep` or a route) or `office onboard --skip`; a refused
+answer writes nothing, so re-ask it. Then continue the original request at Start; never make the user repeat it. Headless, or no way to ask:
+never wait or `--skip`; continue on the current preferences and tell the user to run `office onboard`.
 
 ## Start
 
@@ -66,26 +83,29 @@ At lifecycle intake, run `office update --check`; if it reports an update, offer
   planned route is out, it stops: `office dispatch <task> --reroute`. The effective route (harness, model, effort) is recorded at
   dispatch; `office status` lists it and `office inspect route <task>` adds every change (old/new, reason, actor, time). To change a
   pending or running task's route: `office amend route <task> --as <harness>/<model>[@effort] --quote "<words>"`. Office follows the
-  recorded route on redispatch and rerun and never swaps it silently.
+  recorded route on redispatch and rerun, never swaps it silently, and waives only unverified trust for a declared one; every later routing stage applies. Builder discovery and failed-trial recovery: `docs/route-discovery.md`; explicit pins skip discovery.
 - When the user names a model, dispatch with `--as <harness>/<model>[@effort]` (`--cli "<argv>"` for an exact command, `--external` to
   only print how to start it). `--review-as` pins the reviewer of the task (v3.1) or lane (convergence-v1). A reviewer is always a
-  fresh session, never the executor's, though it may share the executor's model.
+  fresh session, never the executor's, though it may share the executor's model. `office rerun <task> --resume|--fresh [--as <route>] [--review-as <route>]` relaunches on a named route; `--resume` needs the route it ran on (another route needs `--fresh`).
+- Route and config changes reach a live run only on opt-in: `office config --run <id> --apply-routing --quote "<words>"` re-pins that run from the current config files. User denial blocks automatic and convenience manual routes; scoped user overkill affects matching automatic choices only. Probe passes, learned quality and adapter trust stay separate; only bounded builders trial, never reviewers or final gate roles. Policy, caps, inspect and rollback: `docs/route-discovery.md`.
 - A dispatch failure is a recovery checkpoint, not permission to abandon the run: read the launch notice, `office inspect task <T> --verbose`
   and any pane Office names, then follow the printed `next:` (re-prompt, `office resume`, `office rerun <task> --resume|--fresh`,
   `office dispatch <task> --reroute`). Never approve hook trust, other directories, credentials, irreversible actions or user authority for
   the user. Close a pane only by the id Office names, never your own (`$HERDR_PANE_ID`). Detail: `docs/orchestrator-reference.md`.
+- Office types into a pane only once Herdr's own record shows it is that dispatch's (cwd, agent kind and name, session) and no other dispatch holds it.
+  A mismatch sends nothing, starts no headless copy and prints a `pane-mismatch` notice: inspect the pane, then `office revoke <task>`. Revoke
+  restores a task to accepted only when an amendment alone demoted it; one reopened for owed work (RECHECK or cleanup findings, a restack, a hold) stays reopened.
 - `office wait`: exit 0 means act, 3 a stall, 5 an agent asked a question, 124 nothing new. Key on the exit code, never on status text.
-  Exit 5 prints a `question:` line. Decide planning, scope, ordering and test detail yourself (amend the contract first if the answer
-  changes it), then `office answer <task|dispatch> <n>` or `-- "<text>"`. Take it to the user (native question tool) only when it hints at
-  requirements, authority, or an irreversible or external action; never answer those on your own.
-- `office status` makes one `herdr agent list` call and prints a `blocker:` line for a live pane dispatch herdr reports `blocked` with no
-  recorded question. Run `office wait` to record it; status itself records nothing.
-- Executors push their task branch as they work and submit; the runtime pushes the accepted revision to the task's draft PR (stacked on its
-  parent's), posts review results, and marks it ready on acceptance. Reviewers are dispatched and read by the runtime, only from their reply
-  files, never pane text. A bad reply re-prompts the same reviewer (no round spent); after three it needs you.
-- Never run commands inside a task worktree yourself; reproduce a check in a scratch copy. A stalled executor, quota wall, host-load timeout
-  or headless worker is handled as `docs/orchestrator-reference.md` says, via `office wait`, `office prompt` and the printed `next:`.
-
+  Exit 5 prints a `question:` line. Decide planning, scope, ordering and test detail yourself (amend the contract first if the answer changes
+  it), then `office answer <task|dispatch> <n>` or `-- "<text>"` (a `[startup]` held screen, #510: the printed `--choice|--keys --expect`).
+  Take it to the user (native question tool) on requirements, authority (trust, login, update), irreversible or external actions; never answer those.
+- `office status` prints a `blocker:` line for a live pane herdr reports `blocked` with no recorded question; `office wait` records it.
+- Executors push their task branch as they work and submit; the runtime pushes the accepted revision to the task's draft PR (stacked on its parent's),
+  posts review results, and marks it ready on acceptance. Reviewers are read only from their reply files, never pane text. A bad reply re-prompts
+  the same reviewer (no round spent); after three it needs you.
+- Never run commands inside a task worktree yourself; reproduce a check in a scratch copy. Stalls, quota walls, host-load timeouts and headless
+  workers: `docs/orchestrator-reference.md`, via `office wait`, `office prompt` and the printed `next:`.
+- An executor that cannot finish stops with `office raise --kind question|blocker|scope-request [--path P] -- "<text>"`, not `submit`; its task stays blocked. Answer with `office answer <task> -- "<text>"`. Grant a scope-request only by `office amend <scope> --contract`, which also unblocks it.
 - Executors simplify (behavior-preserving, in SCOPE), self-review on four lenses at a depth Office sets from the run's
   gear and risk (`inline`, `single`, or `deep`; an unset blast radius is never `inline`), record every finding in
   `OFFICE_SELF_REVIEW.md` (severity as found; low findings are fixed but do not trigger a re-review; a medium or high fix
@@ -96,9 +116,8 @@ At lifecycle intake, run `office update --check`; if it reports an update, offer
   an inline-tier `--self-review-exempt trivial|mechanical`) on the revision, and an exemption never weakens independent review. Each ends
   with one `TASK=... SUBMIT=... NEXT=...` line (saved in `pane-final.txt`); act on its `NEXT=`. A worker
   refused as lease-lost, superseded-dispatch, or task-paused is done: never prompt it to retry.
-- Before submitting a plan inline, run the same four lenses over it and put what they surface in tasks' `accept:` criteria. Plan seams, not
-  internals (`scope:` is an ownership envelope; `shared:`, `lane:`, `converge:`, `accept_needs:`, `integration_risk: high`): see
-  `docs/orchestrator-reference.md`.
+- Before submitting a plan inline, run the same four lenses over it and put what they surface in tasks' `accept:` criteria. Plan seams, not internals
+  (`scope:` is an ownership envelope; `shared:`, `lane:`, `converge:`, `accept_needs:`, `integration_risk: high`): `docs/orchestrator-reference.md`.
 - Ordinary amendments (decomposition, ordering, acceptance detail, tests) are yours: `office amend <T2|plan> -- "<delta>"`. Plan review
   reviews the initial plan only: once it closes (APPROVED, its round cap, or a waiver) no amendment is reviewed again; you own them. While
   it is still open a revision is its next round; to skip that for a trivial one, `office amend plan --no-review --reason "<why>" -- "<delta>"`.
@@ -115,30 +134,32 @@ At lifecycle intake, run `office update --check`; if it reports an update, offer
 ## Review
 
 New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` is the reference.
-- Plan, convergence and visual reviews answer APPROVED (advance now; findings get a disposition, not another review), RECHECK (producers
-  repair blocking findings; the same reviewer rechecks) or INTAKE_GAP (ask the user the missing decision now). UNAVAILABLE and other runtime
-  failures are not verdicts: `office resume`, no round spent. Independent means a different producer and reviewer session.
+- Plan, convergence and visual reviews answer APPROVED (advance now; findings get a disposition, not another review), RECHECK (producers repair
+  blocking findings; the same reviewer rechecks) or INTAKE_GAP (ask the user the missing decision now). UNAVAILABLE and other runtime failures are not
+  verdicts: no round spent. Independent means a different producer and reviewer session.
 - Plan RECHECK holds only the tasks its blocking findings name: revise `PLAN.md`, then `office amend plan --contract -- "<what changed>"`;
   dispatch unaffected work meanwhile. At the plan round cap (3, or `office start --plan-review-rounds N`) plan review closes unapproved and
   you own the findings: fix each in the plan or accept it, then `office disposition plan:<code> fixed|dismissed|follow-up -- "<rationale>"`.
   Do not ask the user just because the rounds ran out. Another plan review only on the user's ask: `office review plan --quote "<words>" [--rounds N]`.
-- A task is accepted on its own checks. When a lane's tasks (joined by `depends` or `lane:`) are all accepted, Office composes them and runs
+- A task is accepted on its own checks. A check that also fails the same way on the revision's base (never when its output names a changed file, or on
+  timeout) is pre-existing: a nonblocking note, and lane review still runs. Re-accepting a task reopens its stale accepted dependents (`restack:`):
+  `office rerun <dependent> --resume|--fresh`; integration reports `stale` and names the task to restack. When a lane's tasks (joined by `depends` or `lane:`) are all accepted, Office composes them and runs
   one convergence review, plus a visual review for user-visible acceptance. Lanes sharing a boundary, or a run with risk or a shared
   outcome the runtime names, get one integrated review (#422); `office inspect convergence` states why it was required or skipped.
 - Findings never relaunch anything on their own. A RECHECK routes every blocking finding to its owning tasks at once: `office rerun <task>
   --resume|--fresh` for each, in parallel. Before landing, give each APPROVED finding a disposition: `office disposition <scope>:<code>
-  fix|fixed|dismissed|follow-up -- "<note>"` (`fix` reopens the owner without re-review).
-- At the lane round cap (3 by default; `office start --review-rounds N` or `review.max_rounds`, pinned per run) nothing runs and review does
-  not stay blocked. Choose one: waive and accept the residual risk with a substantive reason, `office waive <scope> --reason "<why the open
+  fix|fixed|dismissed|follow-up -- "<note>"` (`fix` reopens the owner without re-review). Only the user dismisses a blocking finding: `dismissed --quote "<words>"`.
+- At the lane round cap (3 by default; `office start --review-rounds N` or `review.max_rounds`, pinned per run) nothing runs and review does not stay blocked. Choose one: waive and accept the residual risk with a substantive reason, `office waive <scope> --reason "<why the open
   findings are acceptable>"`, or escalate to the user with the findings, attempts, risk and your recommendation, then `office decide <scope>
-  escalate|continue|waive|stop --quote "<words>"`. A waiver never becomes APPROVED (the verdict stays RECHECK and the receipt records the
+  escalate|continue|waive|stop|review --quote "<words>"` (`review` runs another round of the composed lane without reopening accepted tasks). `office revoke <scope>:convergence|visual` cancels a running lane review. A waiver never becomes APPROVED (the verdict stays RECHECK and the receipt records the
   reason, findings, composed commit and your session) and is not landing authority: landing still needs the user's authorization.
 - Outside the cap, only landing authority waives a required review: the user (`office approve waive L-T1:convergence|visual --quote "<words>"
   --reason "<why>"`), or you (`--as orchestrator --reason "<why>"`) only when the end state is merge/e2e or a merge is authorized. If your
   host blocks `--as orchestrator` as self-approval (Claude Code auto mode), never work around it: ask the user.
-- When no specialist reviewer returns a verdict (every route UNAVAILABLE, or the last reply INVALID_RESULT), the orchestrator may review on its
-  behalf: `office review L-T1:convergence --report <file>` (visual: `--inspected <every screenshot>`). Specialists come first. It counts as
-  independent only when your session did not produce the work; a session that did is refused. Runs started before #423 record it as degraded and non-independent.
+- A review that returned no verdict (UNAVAILABLE, ATTENTION, INVALID_RESULT) is re-run alone on the same revision: `office review <T1|L-T1[:convergence|visual]> [--as <route>]`
+  (also `rerun --review-as`, `office resume`). No executor starts and no round is spent; the pinned reviewer is kept unless `--as` re-pins it, else the next fallback route runs.
+- When no specialist reviewer returns a verdict, you may review it yourself: `office review L-T1:convergence --report <file>` (visual: `--inspected <every screenshot>`; v3.1 runs: `office review T1 --report <file>`).
+  Specialists come first. It counts as independent only when your session did not produce the work (that session is refused). Runs started before #423 record it as degraded and non-independent.
 - **v3.1 runs** (started before #337; `office inspect run` names the contract) keep PASS | CHANGES_REQUIRED | PLAN_DEFECT | BRIEF_DEFECT,
   per-task review and `--redirect`: follow their `next:` lines and `docs/v31-rolling-review-gates.md`. Runs started before #423 and #418 keep
   their older cap, waiver and plan-review behavior until `office upgrade`.
@@ -156,10 +177,9 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
 
 ## Herdr agents
 
-Inside Herdr, each dispatch is a real interactive agent in a pane beside yours, closed once its result is accepted (`office dismiss` closes kept
-panes). Message a live worker only with `office prompt <T2|dispatch> -- "<message>"`, never `herdr pane run` or `pane send-text` on an agent
-pane. A `launch` notice in `office status` means the agent never started or the prompt never landed; a worker with no pane runs headless and
-queues prompts. Pane, headless and manual-relaunch detail: `docs/orchestrator-reference.md`.
+Inside Herdr, each dispatch is a real interactive agent in a pane beside yours, closed once accepted (`office dismiss` closes kept panes). Message a
+live worker only with `office prompt <T2|dispatch> -- "<message>"`, never `herdr pane run` or `pane send-text`. A `launch` notice in `office status`
+means the agent never started or the prompt never landed; a worker with no pane runs headless and queues prompts. Detail: `docs/orchestrator-reference.md`.
 
 ## Land and close
 
@@ -167,7 +187,8 @@ When every task is accepted and every lane converged, the runtime composes and v
 end state. `ask` lists the task PRs: ask the user and record the choice with `office land --merge|--preview|--e2e --quote "<words>"`, or stop
 with `office close --handoff <pr-url>`. `preview` deploys and verifies the integrated result. `merge`/`e2e` merge the PRs bottom-up after required
 checks, confirm the default branch matches the reviewed tree, close the issue, and (e2e) deploy prod and verify; a failure names what merged and
-the rollback target. Then `office close`. If the default branch moved, run `office land --rebase` first. `office close --abandon "<reason>"` stops
+the rollback target. Then `office close`. If the default branch moved, run `office land --rebase` first. A task PR GitHub reports conflicting is
+recovered once when its head is one Office reviewed or pushed and folding the open tasks onto the default branch reproduces the reviewed tree; else land refuses and pushes nothing. `office close --abandon "<reason>"` stops
 early; `--landed-externally <merged-pr-url>` closes work that landed through a PR Office did not open. Rebase, `--no-prs` and PR-body detail:
 `docs/orchestrator-reference.md`.
 
@@ -179,11 +200,11 @@ it. It composes one integration branch, runs file-disjoint Herdr lanes and exits
 ## Resume
 
 After a restart or compaction: `office resume` (or `office resume <id>` when several runs exist). It reconstructs pending
-work from runs.db; never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract.
+work from runs.db (`office context` adds a bounded snapshot with stale references flagged); never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract.
 
 ## Diagnostics
 
-`office inspect run|plan|task|gate|evidence|events|route|learner|convergence [id]` and `--verbose`/`--json` show the detail default output hides.
+`office inspect run|plan|task|gate|evidence|events|route|learner|convergence|startup|economics [id]` and `--verbose`/`--json` show the detail default output hides (economics is opt-in: `docs/orchestrator-reference.md`).
 `office doctor` checks the install, hooks, pinned runtimes, and known harness defects. `office list` and `office prune` (dry run; `-f` to delete) maintain runs.
 
 Review semantics live in `docs/review-convergence.md` and the runtime design in `docs/v31-implementation.md`; you need neither to run the lifecycle.
