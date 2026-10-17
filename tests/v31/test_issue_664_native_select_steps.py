@@ -103,6 +103,23 @@ def test_css_attribute_commas_and_quoted_contents_remain_one_selector():
     ]
 
 
+def test_quote_closed_after_escaped_backslash_allows_next_step_boundary():
+    bs = chr(92) * 2  # value ends in an escaped backslash, so the quote closes
+    sel = f'[data-x="a{bs}"]'
+    data = visual.states({"states": f"chosen = click {sel}, wait main ;; click #go"})
+    assert data[0]["steps"] == [
+        {"verb": "click", "arg": sel},
+        {"verb": "wait", "arg": "main"},
+        {"verb": "click", "arg": "#go"},
+    ]
+
+
+def test_escaped_quote_keeps_comma_inside_selector():
+    sel = '[data-x="a' + chr(92) + '", b"]'
+    data = visual.states({"states": f"chosen = click {sel}, wait main"})
+    assert data[0]["steps"][0] == {"verb": "click", "arg": sel}
+
+
 def test_select_option_explicit_label_supports_selector_spaces():
     assert visual._select_target('[data-name="Kids Room"] label:Big Heroes') == (
         '[data-name="Kids Room"]', "Big Heroes", "label")

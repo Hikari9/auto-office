@@ -81,8 +81,12 @@ def _state_steps(actions: str) -> list[str]:
     matching = {")": "(", "]": "[", "}": "{"}
     for i, ch in enumerate(actions):
         if quote:
-            if ch == quote and (i == 0 or actions[i - 1] != chr(92)):
-                quote = None
+            if ch == quote:
+                slashes = 0
+                while i - 1 - slashes >= 0 and actions[i - 1 - slashes] == chr(92):
+                    slashes += 1
+                if slashes % 2 == 0:
+                    quote = None
             continue
         if ch in ("'", '"'):
             quote = ch
