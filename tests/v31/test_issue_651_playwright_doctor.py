@@ -57,4 +57,21 @@ def test_missing_optional_python_package_stays_optional(monkeypatch):
     assert not problem and "playwright missing" in message.lower()
 
 
-def test_other_launch_failure_cannot_claim_available(monkeypatc...[truncated]
+def test_other_launch_failure_cannot_claim_available(monkeypatch):
+    fake_playwright(monkeypatch, failure="Host is missing required shared libraries")
+    message, problem = doctor._visual_capture_status()
+    assert problem and "cannot launch" in message
+    assert "shared libraries" in message
+
+
+def test_doctor_matches_visual_capture_chrome_override(monkeypatch, tmp_path):
+    chrome = tmp_path / "chrome"
+    chrome.write_text("mock")
+    monkeypatch.setenv("OFFICE_CHROME", str(chrome))
+    calls = fake_playwright(monkeypatch)
+    message, problem = doctor._visual_capture_status()
+    assert not problem
+    assert calls == [
+        ("launch", {"headless": True, "executable_path": str(chrome), "timeout": 10000}),
+        "close",
+    ]
