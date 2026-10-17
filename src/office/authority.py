@@ -111,16 +111,63 @@ def _envelope_entry(con, run, entry_id, quote) -> Result:
     return Result(lines=[f"{entry_id} ({hit[0]['action']}) authorized"], next="exceptions only; office status")
 
 
+def _canonical_trust_route(triple: str) -> str:
+    """Resolve a user-facing route to the exact identity routing evaluates.
+
+    A trust act is an attribution, not an availability/permission override.
+    Bare codex/luna@medium must not record an unconsumed act while routing
+    checks codex@0/luna@medium.
+    """
+    from office import adapters, candidates
+
+    route = re.fullmatch(
+        r"(?P<harness>[^@/\s]+)(?:@(?P<version>[^/\s]+))?/"
+        r"(?P<model>[^@/\s]+)@(?P<effort>[^@/\s]+)",
+        triple.strip(),
+    )
+    if route is None:
+        raise Usage("invalid-trust-route", f"trust route {triple!r} is not a concrete model/effort",
+                    next_step="office inspect trust; approve an exact <harness>/<model>@<effort> route")
+
+    harness, model, effort = (route.group(k) for k in ("harness", "model", "effort"))
+    adapter = adapters.load_all().get(harness)
+    if adapter is None:
+        raise Usage("unknown-harness", f"no registered adapter is available for {harness!r}",
+                    next_step="office harness list; register or install the harness first")
+    current = adapters.route_version(harness, adapter)
+    major = scoring.harness_major(current)
+    version = route.group("version")
+    if version is not None and scoring.harness_major(version) != major:
+        raise Refused("stale-trust-route",
+                      f"{triple} names harness version {version}, but {harness} currently routes as {major}",
+                      next_step="office inspect trust; approve the current exact route instead")
+
+    # Bind to the catalog's public route ID, not its invocation slug. Alias
+    # rows have independent identities; approval of one must not grant another.
+    matches = {r["model_id"] for r in candidates.catalog_rows()
+               if r.get("invocation_harness") == harness
+               and r.get("model_id") == model and r.get("effort") == effort}
+    if len(matches) != 1:
+        raise Usage("unknown-trust-route",
+                    f"no unambiguous catalog route matches {harness}/{model}@{effort}",
+                    next_step="office model list; select an exact catalog model and effort")
+    return f"{harness}@{major}/{matches.pop()}@{effort}"
+
+
 def _trust(con, run, triple: str, quote: str) -> Result:
-    """#134: the missing CLI path for an explicit, attributed trust act."""
+    """#625/#627: user attribution must bind to the route admission checks."""
     from office import paths
-    act = scoring.record_trust_act(paths.runs_db(), triple, "proven", "user",
+
+    canonical = _canonical_trust_route(triple)
+    act = scoring.record_trust_act(paths.runs_db(), canonical, "proven", "user",
                                    f"user authorized in run {short(run['id'])}: {quote.strip()}",
                                    evidence_reference=f"run:{run['id']}")
-    return Result(lines=[f"{triple} trust recorded as proven (attributed to the user)"],
-                  next="retry the dispatch that needed it",
-                  data={"trust_act_id": act["trust_act_id"]})
-
+    resolution = f" (resolved from {triple})" if triple != canonical else ""
+    return Result(lines=[
+        f"{canonical} trust recorded as proven (attributed to the user){resolution}",
+        "Trust approval does not bypass conformance probes, user policy, quota, or safety gates.",
+    ], next="office inspect trust; satisfy any remaining route gates before dispatch",
+        data={"trust_act_id": act["trust_act_id"], "triple": canonical})
 
 def _waive(con, run, spec: str, quote: str, root_cause: str | None = None) -> Result:
     from office import gates, plans, redirect
