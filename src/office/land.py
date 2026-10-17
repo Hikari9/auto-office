@@ -56,6 +56,18 @@ def end_state(con, run: dict) -> dict:
     return {"mode": frozen.get("end_state") or "ask", "deploy": frozen.get("deploy") or {}}
 
 
+def _require_executable_deploy(mode: str, deploy: dict) -> None:
+    """Reject manual placeholders before merge, checkout or deploy execution (#662)."""
+    from office import planfile
+    keys = ("preview", "verify") if mode == "preview" else ("prod", "verify") if mode == "e2e" else ()
+    for key in keys:
+        cmd = deploy.get(key)
+        if planfile.manual_deploy_placeholder(cmd):
+            raise Refused("manual-deploy-command", f"deploy_{key} is a manual handoff, not a shell command: {cmd!r}",
+                          preserved="nothing was merged or deployed",
+                          next_step="amend requirements with a confirmed deploy command, or office close --handoff")
+
+
 def land(con, run: dict, *, mode: str | None = None, quote: str | None = None, redeploy: bool = False,
          mark_deployed: bool = False) -> Result:
     if os.environ.get("OFFICE_DISPATCH_ID"):
@@ -67,15 +79,19 @@ def land(con, run: dict, *, mode: str | None = None, quote: str | None = None, r
         raise Refused("not-ready", "nothing verified to land: " + ("; ".join(blockers[:3]) or "integration not accepted"),
                       next_step="office status")
     es = end_state(con, run)
+    explicit_mode = bool(mode)
     if mode:
         if mode not in MODES:
             raise Usage("unknown-mode", f"land mode must be one of {', '.join(MODES)}")
         if not quote or len(re.sub(r"\s+", "", quote)) < 2:
             raise Usage("user-quote-required", "landing beyond PRs records the user's own words",
                         next_step=f'office land --{mode} --quote "<user\'s exact words>"')
-        _authorize(con, run, mode, quote)
     else:
         mode = es["mode"]
+    # No user authorization or PR merge is recorded for a manual handoff.
+    _require_executable_deploy(mode, es["deploy"])
+    if explicit_mode:
+        _authorize(con, run, mode, quote)
     if mode == "ask":
         return _ask(con, run)
     if (redeploy or mark_deployed) and mode != "e2e":
@@ -832,6 +848,7 @@ def _deploy(con, run: dict, target: str, deploy: dict, cwd: Path, res: Result, r
     """Every event names the commit, tree and cwd checked out. `land.deploy.start`
     goes first, so a land killed mid-deploy leaves a start with no result,
     which `_require_deploy_proof` treats as unknown rather than not deployed."""
+    _require_executable_deploy("preview" if target == "preview" else "e2e", deploy)
     link = Path(run["repo_root"]) / ".vercel"
     if link.is_dir() and not (cwd / ".vercel").exists():
         shutil.copytree(link, cwd / ".vercel")  # the local project link is untracked
