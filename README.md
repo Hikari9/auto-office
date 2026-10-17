@@ -627,6 +627,14 @@ COMPARABLE | INVALID_COMPARISON | NOT_APPLICABLE | CAPTURE_BLOCKED
 
 A visual reviewer is eligible only after its exact harness/model/effort path passes an image-sensitive conformance probe. Code review and visual judgment are different dispatches. Under `convergence-v1` the visual review runs once per lane, on the same composed commit as the lane's convergence review.
 
+A `visual:` contract can use `states: default; chosen = select #room vip ;; click #continue -> expect main`.
+Within one state, `;;` separates interaction steps without splitting CSS selectors (including `:is(a, b)` or selector
+lists). Legacy commas before another action verb still work. Native `<select>` controls use
+`select <CSS-selector> <option-value>`; use `label:<visible label>` for a label containing spaces, for example
+`select #room label:Big Heroes`. A bare option tries matching the value first, then the visible label.
+The selector itself may contain spaces when you use an explicit `label:` or `value:` choice. These state-step selectors may use Playwright selectors; `visual.selectors:` for DOM measurements
+accepts plain CSS only.
+
 Install the visual extra when you expect browser/UI work:
 
 ```bash
