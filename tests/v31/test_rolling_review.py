@@ -111,7 +111,7 @@ def test_ordinary_amendment_cannot_change_scope_or_authority(env):
     assert code == 4 and "contract-level-change" in out and "T1" in out, out
     env.write_plan(PLAN_ONE)
     code, out = env.office("amend", "T1", "--", "then deploy to production")
-    assert code == 4 and "authority envelope" in out, out
+    assert code == 4 and "contract-level-change" in out and "authority action 'deploy'" in out, out
 
 
 def test_contract_amendment_adding_an_action_needs_user_authorization(env):

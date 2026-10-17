@@ -487,9 +487,12 @@ def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:
                             "limit_fingerprint=NULL WHERE id=?", (d["id"],))
         changed = act["hash"] is not None and d.get("idle_hash") not in (None, act["hash"])
         # Herdr's explicit idle state plus the executor's terminal status line
-        # wins over a stale spinner/busy marker in scrollback (#671). Do not
-        # trust idle alone: agy reports idle while a turn is still progressing.
-        final = (_final_status(act["text"]) if not act["busy"] or act.get("status") == "idle" else None)
+        # wins over a stale spinner/busy marker above it in scrollback (#671).
+        # Idle alone is not enough: agy reports idle mid-turn, so a busy marker
+        # below the status line means the agent kept working.
+        final = _final_status(act["text"])
+        if final is not None and act["busy"] and (act.get("status") != "idle" or dispatch._pane_busy(final["below"])):
+            final = None
         if final is not None:
             tail = _write_pane_tail(run, d, act)
             out.append(f"{who}: ended its turn with SUBMIT={final['submit']}{why}; NEXT={final['next']}; "
@@ -529,8 +532,9 @@ _FINAL_SUBMIT = re.compile(r"\bSUBMIT=(not attempted|refused\b.*?)\s+NEXT=(.*)",
 
 def _final_status(text: str | None) -> dict | None:
     """The pane's last status line when it says the executor ended without a
-    submit ({"submit", "next"}), else None. A status line followed by a newer
-    turn (an echoed prompt or new assistant output) is history, not the end."""
+    submit ({"submit", "next", "below"}), else None. `below` is the pane text
+    after the status-line block. A status line followed by a newer turn (an
+    echoed prompt or new assistant output) is history, not the end."""
     from office import dispatch
     lines = (text or "").splitlines()
     start = next((i for i in range(len(lines) - 1, -1, -1) if "SUBMIT=" in lines[i]), None)
@@ -542,7 +546,8 @@ def _final_status(text: str | None) -> dict | None:
     m = _FINAL_SUBMIT.search(" ".join(line.strip() for line in lines[start:end]))
     if not m:
         return None
-    return {"submit": m.group(1).strip(), "next": " ".join(m.group(2).split())[:300]}
+    return {"submit": m.group(1).strip(), "next": " ".join(m.group(2).split())[:300],
+            "below": "\n".join(lines[end:])}
 
 
 def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str) -> str:
