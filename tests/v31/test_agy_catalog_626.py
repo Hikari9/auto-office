@@ -98,6 +98,8 @@ def test_approve_trust_resolves_agy_alias_and_refuses_unknown_without_writing(re
     assert f"{route} trust recorded as proven" in output
     assert "remaining gate:" in output and "remedy:" in output
     con = env.con()
+    recorded_route = con.execute("SELECT triple, target_state FROM adapter_trust_acts WHERE triple=?", (route,)).fetchall()
+    assert [tuple(row) for row in recorded_route] == [(route, "proven")]
     _, trust = scoring.evaluate_trust_state(con, route)
     assert trust == "proven"
     recorded = con.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0]
@@ -107,4 +109,3 @@ def test_approve_trust_resolves_agy_alias_and_refuses_unknown_without_writing(re
     assert code != 0
     assert "unknown route" in output.lower()
     assert con.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0] == recorded
-
