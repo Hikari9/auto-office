@@ -1,0 +1,78 @@
+"""#662: manual handoff text must never be mistaken for a deploy command."""
+from contextlib import nullcontext
+
+import pytest
+
+from office import land, planfile
+from office.result import Result
+from office.state import Refused
+
+
+HANDOFF = "manual: actions A3-A5 (handoff); no web deploy in this run"
+
+
+@pytest.mark.parametrize("mode,commands", [
+    ("e2e", {"prod": HANDOFF}),
+    ("preview", {"preview": HANDOFF}),
+    ("e2e", {"prod": "echo deployed", "verify": HANDOFF}),
+])
+def test_manual_deploy_placeholder_is_invalid_in_plan(mode, commands):
+    errors, _warnings = planfile.end_state_problems(mode, commands)
+    assert any("manual" in e and "deploy_" in e for e in errors), errors
+
+
+@pytest.mark.parametrize("mode,commands", [
+    ("e2e", {"prod": "echo shipped"}),
+    ("preview", {"preview": "python3 -c 'print(123)'"}),
+    ("merge", {"prod": HANDOFF}),
+])
+def test_valid_commands_and_nonexecuting_modes_are_preserved(mode, commands):
+    errors, _warnings = planfile.end_state_problems(mode, commands)
+    assert not errors, errors
+
+
+@pytest.mark.parametrize("deploy", [
+    {"prod": HANDOFF},
+    {"prod": "echo deployed", "verify": HANDOFF},
+])
+def test_land_refuses_manual_placeholder_before_any_merging(monkeypatch, deploy):
+    called = []
+    monkeypatch.setattr(land, "_snapshot", lambda *a: {"commit": "deadbeef"})
+    monkeypatch.setattr(land, "end_state", lambda *a: {"mode": "e2e", "deploy": deploy})
+    monkeypatch.setattr(land, "_land_lock", lambda *a: nullcontext())
+    monkeypatch.setattr(land, "_require_unchanged", lambda *a, **k: None)
+    monkeypatch.setattr(land, "_land_merge", lambda *a, **k: called.append(True) or Result())
+    with pytest.raises(Refused) as caught:
+        land.land(None, {"id": "deadbeef", "repo_root": "/tmp/unmodified"})
+    assert caught.value.category == "manual-deploy-command"
+    assert not called, "land must refuse before any PR is merged"
+
+
+def test_manual_placeholder_is_rejected_during_plan_submit(env):
+    from test_land import _plan
+    code, out = env.office("start", "manual deploy case", "--planner", "inline")
+    assert code == 0, out
+    env.write_plan(_plan("e2e", prod=HANDOFF))
+    code, out = env.office("submit")
+    assert code == 4, out
+    assert "manual" in out and "deploy_prod" in out, out
+
+
+@pytest.mark.parametrize("value", ["manual", "manual: handoff", "none", "n/a", "skip", "no deploy", "not applicable"])
+def test_manual_sentinels_are_recognized(value):
+    assert planfile.manual_deploy_placeholder(value)
+
+
+def test_valid_executable_command_containing_word_manual_is_not_blocked():
+    assert not planfile.manual_deploy_placeholder("echo 'manual: this is a valid shell argument'")
+
+
+def test_deploy_internal_guard_refuses_before_env_copy_or_subprocess(tmp_path, monkeypatch):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    monkeypatch.setattr(land.shutil, "copytree", lambda *a, **k: pytest.fail("copied env before refusal"))
+    monkeypatch.setattr(land.subprocess, "run", lambda *a, **k: pytest.fail("spawned manual handoff as command"))
+    with pytest.raises(Refused) as caught:
+        land._deploy(None, {"id": "R1", "repo_root": str(tmp_path)}, "prod",
+                     {"prod": HANDOFF}, checkout, Result(), commit="sha", tree="tree")
+    assert caught.value.category == "manual-deploy-command"
