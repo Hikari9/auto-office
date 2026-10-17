@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 from pathlib import Path
 
 from office import config as cfg
@@ -29,6 +30,43 @@ def _ensure_local_exclude(common_dir: Path) -> None:
                 fh.write(".office/\n")
     except OSError:
         pass
+
+
+def _safe_start_base(repo: Path, explicit: str | None) -> str:
+    # A task PR targets the default branch. A feature-only run base silently
+    # includes unrelated commits in every PR (#678); refuse before run creation.
+    candidate = paths.git(repo, "rev-parse", explicit or "HEAD")
+    default = paths.git(repo, "symbolic-ref", "-q", "refs/remotes/origin/HEAD",
+                        check=False).strip()
+    if not default:
+        # Some clones have a tracking branch but no origin/HEAD symref.
+        # Only infer main/master when exactly one exists; never guess between
+        # two different remote branches or make a network call during start.
+        refs = [ref for ref in ("refs/remotes/origin/main", "refs/remotes/origin/master")
+                if subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "-q", ref],
+                                  capture_output=True).returncode == 0]
+        if len(refs) == 1:
+            default = refs[0]
+        elif len(refs) > 1:
+            raise Usage("ambiguous-default-branch",
+                        "origin/HEAD is not set and both origin/main and origin/master exist, "
+                        "so the default branch cannot be determined to check the run base",
+                        next_step="run git remote set-head origin -a to configure origin/HEAD, then retry")
+    if not default:
+        return candidate  # Local-only/offline worktrees retain existing behavior.
+    check = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", candidate, default],
+                           capture_output=True)
+    if check.returncode == 1:
+        ref = default.removeprefix("refs/remotes/")
+        raise Usage("unsafe-run-base",
+                    f"run base {candidate[:12]} contains commits not in tracked default {ref}; "
+                    "starting here would put unrelated feature commits into task PRs",
+                    next_step=f"start this goal from the default branch, or use office start --base {ref} "
+                              "with the same goal")
+    if check.returncode != 0:
+        raise Usage("base-check-failed", "cannot prove run base is on the tracked default branch",
+                    next_step="inspect the repository's git refs before starting this run")
+    return candidate
 
 
 def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbook: str = "Change",
@@ -97,7 +135,7 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                         "pins the v3.1 contract", next_step="drop --review-rounds")
         gates["convergence_max_rounds"] = contract.check_round_cap(review_rounds)
         gates["visual_review_max_rounds"] = gates["convergence_max_rounds"]
-    base_sha = paths.git(top, "rev-parse", base or "HEAD")
+    base_sha = _safe_start_base(top, base)
     run_id = new_run_id()
     sdir = paths.run_dir(run_id)
     sdir.mkdir(parents=True, exist_ok=True)
