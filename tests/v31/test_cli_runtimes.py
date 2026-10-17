@@ -44,8 +44,9 @@ def test_sync_saves_manifest_and_canonical_models_without_modifying_seed(isolate
     assert yes and len(entries) == 8
     statuses, yes = cli_runtimes.statuses()
     assert yes
-    assert {e["key"] for e in statuses if e["configured"]} == {"claude", "codex", "agy"}
-    assert next(e for e in statuses if e["key"] == "opencode")["adapter"] == "missing"
+    # More harnesses may have been registered since this draft was created.
+    assert {"claude", "codex", "agy"} <= {e["key"] for e in statuses if e["configured"]}
+    assert next(e for e in statuses if e["key"] == "opencode")["adapter"] == "registered"
     assert next(e for e in statuses if e["key"] == "pi")["skill"] == "missing"
     for entry in entries:
         model_file = cli_runtimes.resolve(entry, "models")
@@ -91,10 +92,9 @@ def test_custom_paths_are_read_only_and_comments_survive_sync(isolated):
     assert result.exit_code == 0 and any("custom models_path" in l for l in result.lines)
     assert custom.read_text(encoding="utf-8") == '{"untouched":true}\n'
     assert p.read_text().startswith(manual)
-    # The user deliberately supplied only Claude; sync adds loaded adapters,
-    # never reintroduces an absent, unregistered OpenCode row by surprise.
+    # User rows are preserved; newly registered adapters are appended.
     assert "pi\tskills/pi-cli/SKILL.md\tmodels/pi.json" in p.read_text()
-    assert "opencode\tskills/opencode-cli/SKILL.md\tmodels/opencode.json" not in p.read_text()
+    assert "opencode\tskills/opencode-cli/SKILL.md\tmodels/opencode.json" in p.read_text()
     status, _ = cli_runtimes.statuses()
     assert next(r for r in status if r["key"] == "claude")["models"] == "stale"
     # A second sync without new adapters must not rewrite user comments.
@@ -209,3 +209,50 @@ def test_doctor_reports_corrupt_mapping_without_repairing_it(env):
     code, out = env.office("doctor")
     assert "CLI runtime TSV: invalid:" in out and "repair the TSV" in out
     assert target.read_text() == raw
+
+
+@pytest.mark.parametrize(("field", "replacement"), [
+    ("invocation_source", "unverified: invocation evidence revoked"),
+    ("source_name", "withdrawn-source"),
+    ("source_effort", "unverified effort"),
+    ("effort_confidence", "unverified"),
+    ("source_snapshot_metadata", {"provenance": "revoked"}),
+])
+def test_change_to_technical_provenance_marks_projection_stale(isolated, monkeypatch, field, replacement):
+    assert harnesscmd.manifest_sync().exit_code == 0
+    model_file = cli_runtimes.location().parent / "models" / "claude.json"
+    initial = json.loads(model_file.read_text(encoding="utf-8"))
+    original_rows = candidates.catalog_rows()
+    changed = [dict(row) for row in original_rows]
+    row = next(row for row in changed if row.get("invocation_harness") == "claude")
+    assert row.get(field) != replacement
+    row[field] = replacement
+    monkeypatch.setattr(candidates, "catalog_rows", lambda: changed)
+
+    state = next(s for s in cli_runtimes.statuses()[0] if s["key"] == "claude")
+    assert state["models"] == "stale"
+    assert state["configured"] is False
+    assert initial["content_hash"] != cli_runtimes.projection(changed, "claude")["content_hash"]
+    assert cli_runtimes.refresh_if_saved() == "CLI model projections refreshed: 1"
+    after = json.loads(model_file.read_text(encoding="utf-8"))
+    assert after["models"] != initial["models"]
+    assert next(s for s in cli_runtimes.statuses()[0] if s["key"] == "claude")["models"] == "ok"
+
+
+def test_unreadable_skill_never_reports_configured(isolated):
+    assert harnesscmd.manifest_sync().exit_code == 0
+    path = isolated / "unreadable-skill.md"
+    path.write_text("Available", encoding="utf-8")
+    entries, _ = cli_runtimes.load()
+    changed = [cli_runtimes.Entry(e.key, str(path) if e.key == "claude" else e.skill_path,
+                                 e.models_path) for e in entries]
+    cli_runtimes.location().write_text(cli_runtimes.render(changed), encoding="utf-8")
+    path.chmod(0)
+    try:
+        state = next(s for s in cli_runtimes.statuses()[0] if s["key"] == "claude")
+        assert state["skill"] == "unreadable"
+        assert state["models"] == "ok"
+        assert state["adapter"] == "registered"
+        assert state["configured"] is False
+    finally:
+        path.chmod(0o600)
