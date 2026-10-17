@@ -1060,18 +1060,43 @@ def resolve_trust_targets(spec: str, con: sqlite3.Connection | None = None,
         else:
             # Check discovery configuration
             repo = paths.repo_identity()
+            repo_root = Path(run["repo_root"]) if (run and run.get("repo_root")) else (repo[0] if repo else None)
             from office.config import resolve
+            config_error = None
+            live_cfg = None
             try:
-                cfg = (run.get("policy") if (run and run.get("policy")) else (resolve(repo[0] if repo else None)[0] if repo else {})) or {}
-            except Exception:
-                cfg = {}
-            disc_settings = route_policy.discovery_settings(cfg)
-            discovery_enabled = bool(disc_settings.get("enabled"))
-            if not discovery_enabled:
-                gate_lines.append("remaining gate: discovery off or blocked (remedy: office config routing.discovery.enabled true)")
-                remedy = remedy or "office config routing.discovery.enabled true"
+                live_cfg, _ = resolve(repo_root)
+            except Exception as exc:
+                config_error = str(exc)
+
+            if config_error:
+                gate_lines.append(f"remaining gate: config unreadable (remedy: repair the unreadable config: {config_error})")
+                remedy = remedy or f"repair the unreadable config: {config_error}"
+            else:
+                is_existing_run = bool(run and (run.get("id") or run.get("policy")))
+                if is_existing_run:
+                    pinned_policy = run.get("policy")
+                    if pinned_policy is None and con is not None and run.get("id"):
+                        try:
+                            loaded = state.get_run(con, run["id"])
+                            if loaded:
+                                pinned_policy = loaded.get("policy")
+                        except Exception:
+                            pass
+                    run_disc = route_policy.discovery_settings(pinned_policy or {})
+                    if not run_disc.get("enabled"):
+                        gate_lines.append("remaining gate: discovery off or blocked (remedy: enable discovery at the applicable config tier and then authorize office config --run <id> --apply-routing --quote \"<words>\" for this run)")
+                        remedy = remedy or "enable discovery at the applicable config tier and then authorize office config --run <id> --apply-routing --quote \"<words>\" for this run"
+                else:
+                    disc_settings = route_policy.discovery_settings(live_cfg or {})
+                    if not disc_settings.get("enabled"):
+                        gate_lines.append("remaining gate: discovery off or blocked (remedy: office config routing.discovery.enabled true)")
+                        remedy = remedy or "office config routing.discovery.enabled true"
 
             # Check exact conformance probe status
+            disc_settings = route_policy.discovery_settings(
+                (run.get("policy") if (run and run.get("policy")) else live_cfg) or {}
+            )
             probe_passed = False
             if con is not None:
                 try:

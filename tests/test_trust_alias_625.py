@@ -158,4 +158,58 @@ def test_gated_route_output_names_remaining_gates_and_remedies(test_db):
     assert any("conformance probe required" in l or "discovery off or blocked" in l for l in res_discovery.lines)
     assert any("remedy:" in l for l in res_discovery.lines)
     assert res_discovery.next != "retry the dispatch that needed it"
-    assert "office doctor --probe-route" in "".join(res_discovery.lines) or "office config routing.discovery.enabled" in "".join(res_discovery.lines)
+    assert any("office config --run <id> --apply-routing --quote \"<words>\"" in l for l in res_discovery.lines)
+    assert any("enable discovery at the applicable config tier" in l for l in res_discovery.lines)
+
+
+def test_gated_route_no_run_suggests_enabling_discovery(test_db, monkeypatch):
+    """When no existing run is passed and discovery is disabled in config, gating directs to office config routing.discovery.enabled."""
+    con = test_db
+    quote = "approve without an existing run"
+
+    monkeypatch.setattr("office.config.resolve", lambda *a, **kw: ({"_provenance": {}, "routing": {"discovery": {"enabled": False}}}, []))
+
+    res = authority.approve(con, None, "trust", quote, ["codex/gpt-6.1-sol@high"])
+    assert any("remaining gate: discovery off or blocked" in l for l in res.lines)
+    assert any("office config routing.discovery.enabled true" in l for l in res.lines)
+    assert "--apply-routing" not in "".join(res.lines)
+
+
+def test_gated_route_unreadable_config_reports_repair(test_db, monkeypatch):
+    """When config resolution fails, report how to repair the unreadable config instead of
+    suggesting that enabling discovery alone clears the gate."""
+    con = test_db
+    run = {"id": "run-unreadable-001"}
+    quote = "approve route with unreadable config"
+
+    def _failing_resolve(*args, **kwargs):
+        raise ValueError("invalid YAML mapping in ~/.config/office/config.yaml: line 4")
+
+    monkeypatch.setattr("office.config.resolve", _failing_resolve)
+
+    res = authority.approve(con, run, "trust", quote, ["codex/gpt-6.1-sol@high"])
+    assert any("remaining gate: config unreadable" in l for l in res.lines)
+    assert any("repair the unreadable config: invalid YAML mapping" in l for l in res.lines)
+    assert "repair the unreadable config: invalid YAML mapping" in res.next
+    # Must NOT suggest that enabling discovery alone clears the gate
+    assert "office config routing.discovery.enabled true" not in "".join(res.lines)
+    assert "enable discovery at the applicable config tier" not in "".join(res.lines)
+
+
+def test_gated_route_pinned_run_with_discovery_enabled_omits_discovery_gate(test_db):
+    """An existing run with discovery enabled in its pinned policy does not report discovery off."""
+    con = test_db
+    run = {
+        "id": "run-disc-enabled-001",
+        "policy": {
+            "_provenance": {"routing.discovery.enabled": "run"},
+            "routing": {"discovery": {"enabled": True}},
+        },
+    }
+    quote = "approve route in discovery-enabled run"
+
+    res = authority.approve(con, run, "trust", quote, ["codex/gpt-6.1-sol@high"])
+    assert not any("discovery off or blocked" in l for l in res.lines)
+    # Conformance probe gate remains because it has not been probed yet
+    assert any("remaining gate: conformance probe required" in l for l in res.lines)
+
