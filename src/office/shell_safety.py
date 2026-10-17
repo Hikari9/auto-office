@@ -11,6 +11,8 @@ import shlex
 from pathlib import PurePosixPath
 
 _NEGATED = re.compile(r"^\s*(?:never(?!\s+mind\b)|do\s+not|don't|must\s+not|avoid|forbid)\b", re.I)
+_CLAUSE_SPLIT = re.compile(r",|\.\s|\s(?:but|and|then|also|however|instead)\s", re.I)
+_CONTINUES_NEGATION = re.compile(r"^\s*(?:or|nor)\b", re.I)
 _GLOBAL_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--config-env", "--namespace",
                       "--exec-path", "--super-prefix"}
 
@@ -55,7 +57,17 @@ def unsafe_manual_push(command: str, *, prose: bool = False) -> bool:
     if not isinstance(command, str) or not command.strip():
         return False
     if prose and _NEGATED.match(command) and not re.search(r"[;&|\n]", command):
-        return False
+        # Only the opening negated clause is exempt. Later clauses (after a
+        # comma, "but", "and", "then", "also", or a sentence break) may carry a
+        # positive instruction, so they are scanned. "or"/"nor" continue the
+        # negation and stay exempt.
+        clauses = _CLAUSE_SPLIT.split(command)[1:]
+        return any(
+            not _CONTINUES_NEGATION.match(clause)
+            and not _NEGATED.match(clause)
+            and unsafe_manual_push(clause, prose=True)
+            for clause in clauses
+        )
     if prose:
         command = _INLINE_CODE.sub(lambda match: match.group(2), command)
     return _scan(command, 0, prose=prose)

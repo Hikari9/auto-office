@@ -30,9 +30,21 @@ def test_plain_prose_does_not_trigger_manual_push_guard(text):
     "echo $(git push)",
     "git push origin 'unclosed",
     "Never mind, run git push origin main",
+    "Never run git push, but also run git push origin main",
+    "Do not run git push. Then run git push origin main",
+    "Never run git push and then git push origin main",
 ])
 def test_actual_or_unverifiable_manual_push_still_denied(text):
     assert shell_safety.unsafe_manual_push(text, prose=True)
+
+
+@pytest.mark.parametrize("text", [
+    "Never run git push to a shared branch",
+    "Do not run git push or git push --force",
+    "Never run git push, but run git fetch instead",
+])
+def test_purely_negated_push_prose_allowed(text):
+    assert not shell_safety.unsafe_manual_push(text, prose=True)
 
 
 def test_full_plan_allows_types_in_interfaces_accept_and_done():
