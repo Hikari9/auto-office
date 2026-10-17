@@ -48,6 +48,16 @@ if args == ["auth", "list"]:
         raise SystemExit(7)
     if state == "empty":
         raise SystemExit(0)
+    if state == "bad-utf8-stdout":
+        sys.stdout.buffer.write(b"1 credentials in \\xff\\xfe/auth.json\\n")
+        raise SystemExit(0)
+    if state == "bad-utf8-stderr":
+        sys.stderr.buffer.write(b"warn \\xff\\xfe\\n")
+        print("1 credentials in /home/test/auth.json")
+        raise SystemExit(0)
+    if state == "bad-utf8-stderr-nonzero":
+        sys.stderr.buffer.write(b"fail \\xff\\xfe\\n")
+        raise SystemExit(7)
     if state == "junk":
         print("Kilo account status unknown")
         raise SystemExit(0)
@@ -164,6 +174,14 @@ def test_kilo_auth_list_positive_count_with_extra_junk_is_missing(kilo_on_path, 
                        "1 credentials in /home/test/auth.json\nKilo account status unknown")
     state, reason = onboarding.credentials("kilo")
     assert state == "missing" and "no recognizable credential entry" in reason
+
+
+@pytest.mark.parametrize("auth_state", ["bad-utf8-stdout", "bad-utf8-stderr", "bad-utf8-stderr-nonzero"])
+def test_kilo_auth_list_invalid_utf8_is_missing_not_a_crash(kilo_on_path, monkeypatch, auth_state):
+    monkeypatch.delenv("OFFICE_AUTH_FIXTURE", raising=False)
+    monkeypatch.setenv("FAKE_KILO_AUTH", auth_state)
+    state, reason = onboarding.credentials("kilo")
+    assert state == "missing" and "unparseable output" in reason
 
 
 def test_kilo_auth_list_recognizes_credential_entry(kilo_on_path, monkeypatch):

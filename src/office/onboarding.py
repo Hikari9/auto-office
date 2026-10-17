@@ -185,6 +185,9 @@ def _kilo_signed_in() -> tuple[bool, str]:
                               stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return False, "kilo auth list timed out"
+    except UnicodeDecodeError:
+        # text=True decodes both stdout and stderr, so invalid UTF-8 on either raises here.
+        return False, "kilo auth list printed unparseable output"
     except (OSError, subprocess.SubprocessError):
         return False, "could not run kilo auth list"
     if proc.returncode != 0:
