@@ -213,7 +213,7 @@ def parse(text: str) -> ParsedPlan:
         if t["visual"] == {}:
             t["visual"] = None
             plan.warnings.append(f"{t['id']}: empty visual block ignored")
-    _validate(plan)
+    _validate(plan, source_lines=text.splitlines())
     return plan
 
 
@@ -290,7 +290,14 @@ def _unsafe_force_push_requirement(plan: ParsedPlan) -> str | None:
     return next((cmd for cmd in commands if shell_safety.unsafe_manual_push(cmd)), None)
 
 
-def _validate(plan: ParsedPlan) -> None:
+def _line_for_instruction(lines: list[str], instruction: str, start: int = 1) -> int:
+    """Find the source line for an unsafe plan fragment, even if list-split."""
+    return next((i for i, line in enumerate(lines, 1)
+                 if i >= start and instruction in line), start)
+
+
+def _validate(plan: ParsedPlan, *, source_lines: list[str] | None = None) -> None:
+    source_lines = source_lines or []
     ids = [t["id"] for t in plan.tasks]
     if not plan.tasks:
         plan.errors.append("no tasks: add `### T1: <title>` blocks under `## Tasks`")
@@ -298,9 +305,11 @@ def _validate(plan: ParsedPlan) -> None:
     for d in sorted(dup):
         plan.errors.append(f"{d}: duplicate task id")
     known = set(ids)
-    if _unsafe_force_push_requirement(plan):
-        plan.errors.append("run-level Requirements: unsafe manual git push with unverified remote ownership; "
-                           "use the Office-owned task PR workflow")
+    forbidden_req = _unsafe_force_push_requirement(plan)
+    if forbidden_req:
+        line = _line_for_instruction(source_lines, forbidden_req)
+        plan.errors.append(f"run-level Requirements: unsafe manual git push with unverified remote ownership "
+                           f"(line {line}, instruction {forbidden_req!r}); use the Office-owned task PR workflow")
     for t in plan.tasks:
         if not t["scope"] and not t.get("scope_none"):
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `scope:` (paths this task may write)")
@@ -314,7 +323,9 @@ def _validate(plan: ParsedPlan) -> None:
                 plan.entry_problems.append((t["id"], entry, err))
         forbidden_push = _unsafe_force_push_in_plan(t)
         if forbidden_push:
-            plan.errors.append(f"{t['id']}: unsafe manual git push with unverified remote ownership; "
+            line = _line_for_instruction(source_lines, forbidden_push, t["line"])
+            plan.errors.append(f"{t['id']}: unsafe manual git push with unverified remote ownership "
+                               f"(line {line}, instruction {forbidden_push!r}); "
                                "remove it and use the Office-owned task PR workflow")
         if not t["accept"]:
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `accept:` criteria")
