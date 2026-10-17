@@ -2,7 +2,7 @@
 import sys
 from types import ModuleType
 
-from office import doctor
+from office import doctor, visual
 
 
 def fake_playwright(monkeypatch, *, failure=None):
@@ -34,7 +34,12 @@ def fake_playwright(monkeypatch, *, failure=None):
     return calls
 
 
+def headless_shell_only(monkeypatch):
+    monkeypatch.setattr(visual, "launch_args", lambda: {"headless": True})
+
+
 def test_missing_headless_shell_provides_install_command(monkeypatch):
+    headless_shell_only(monkeypatch)
     calls = fake_playwright(
         monkeypatch, failure="BrowserType.launch: Executable doesn't exist at "
         "/cache/chromium_headless_shell-1248/chrome-headless-shell")
@@ -45,6 +50,7 @@ def test_missing_headless_shell_provides_install_command(monkeypatch):
 
 
 def test_launch_and_close_means_available(monkeypatch):
+    headless_shell_only(monkeypatch)
     calls = fake_playwright(monkeypatch)
     message, problem = doctor._visual_capture_status()
     assert not problem and "available" in message.lower()
