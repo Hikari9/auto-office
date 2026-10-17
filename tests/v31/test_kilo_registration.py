@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from conftest import GOOD_ADD, approved_run, task_row
-from office import adapters, candidates, configcmd, routing, scoring
+from office import adapters, candidates, configcmd, onboarding, routing, scoring
 from office.state import Refused
 
 MODEL_ID = "mimo-v2.6-flash"
@@ -36,6 +36,38 @@ if args == ["--version"]:
 if args == ["models"]:
     models = os.environ.get("FAKE_KILO_MODELS", "kilo/xiaomi/mimo-v2.6-flash\\nkilo/xiaomi/mimo-v2.6-pro\\nkilo/stepfun/step-5-preview-free")
     print(models.replace("\\\\n", "\\n"))
+    raise SystemExit(0)
+if args == ["auth", "list"]:
+    log = os.environ.get("KILO_AUTH_LOG")
+    if log:
+        with open(log, "a") as f:
+            f.write("auth list\\n")
+    state = os.environ.get("FAKE_KILO_AUTH", "count")
+    if state == "nonzero":
+        print("auth list failed", file=sys.stderr)
+        raise SystemExit(7)
+    if state == "empty":
+        raise SystemExit(0)
+    if state == "bad-utf8-stdout":
+        sys.stdout.buffer.write(b"1 credentials in \\xff\\xfe/auth.json\\n")
+        raise SystemExit(0)
+    if state == "bad-utf8-stderr":
+        sys.stderr.buffer.write(b"warn \\xff\\xfe\\n")
+        print("1 credentials in /home/test/auth.json")
+        raise SystemExit(0)
+    if state == "bad-utf8-stderr-nonzero":
+        sys.stderr.buffer.write(b"fail \\xff\\xfe\\n")
+        raise SystemExit(7)
+    if state == "junk":
+        print("Kilo account status unknown")
+        raise SystemExit(0)
+    if state == "long-count":
+        print("9" * 5000 + " credentials in /home/test/auth.json")
+        raise SystemExit(0)
+    if state == "entry":
+        print("OpenAI | API key")
+        raise SystemExit(0)
+    print(os.environ.get("FAKE_KILO_AUTH_OUTPUT", "0 credentials in /home/test/.local/share/kilo/auth.json"))
     raise SystemExit(0)
 if args[:1] == ["run"]:
     log = os.environ.get("KILO_RUN_LOG")
@@ -113,6 +145,116 @@ def _log(env, row) -> str:
 
 def _run_log(env, mode="events") -> Path:
     return env.tmp / f"kilo-{mode}.jsonl"
+
+
+def test_kilo_auth_list_uses_a_positive_credential_count(kilo_on_path, monkeypatch):
+    monkeypatch.delenv("OFFICE_AUTH_FIXTURE", raising=False)
+    monkeypatch.setenv("FAKE_KILO_AUTH", "count")
+    monkeypatch.setenv("FAKE_KILO_AUTH_OUTPUT", "3 credentials in /home/test/.local/share/kilo/auth.json")
+    state, reason = onboarding.credentials("kilo")
+    assert state == "found" and "3 credentials" in reason
+
+
+def test_kilo_auth_list_zero_count_overrides_empty_auth_file(kilo_on_path, monkeypatch, tmp_path):
+    monkeypatch.delenv("OFFICE_AUTH_FIXTURE", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("FAKE_KILO_AUTH", "count")
+    auth_file = tmp_path / ".local" / "share" / "kilo" / "auth.json"
+    auth_file.parent.mkdir(parents=True)
+    auth_file.write_text("")
+    monkeypatch.setenv("FAKE_KILO_AUTH_OUTPUT", f"0 credentials in {auth_file}")
+    state, reason = onboarding.credentials("kilo")
+    assert state == "missing" and "zero credentials" in reason
+
+
+def test_kilo_auth_list_positive_count_with_extra_junk_is_missing(kilo_on_path, monkeypatch):
+    monkeypatch.delenv("OFFICE_AUTH_FIXTURE", raising=False)
+    monkeypatch.setenv("FAKE_KILO_AUTH", "count")
+    monkeypatch.setenv("FAKE_KILO_AUTH_OUTPUT",
+                       "1 credentials in /home/test/auth.json\nKilo account status unknown")
+    state, reason = onboarding.credentials("kilo")
+    assert state == "missing" and "no recognizable credential entry" in reason
+
+
+@pytest.mark.parametrize("auth_state", ["bad-utf8-stdout", "bad-utf8-stderr", "bad-utf8-stderr-nonzero"])
+def test_kilo_auth_list_invalid_utf8_is_missing_not_a_crash(kilo_on_path, monkeypatch, auth_state):
+    monkeypatch.delenv("OFFICE_AUTH_FIXTURE", raising=False)
+    monkeypatch.setenv("FAKE_KILO_AUTH", auth_state)
+    state, reason = onboarding.credentials("kilo")
+    assert state == "missing" and "unparseable output" in reason
+
+
+def test_kilo_auth_list_recognizes_credential_entry(kilo_on_path, monkeypatch):
+    monkeypatch.delenv("OFFICE_AUTH_FIXTURE", raising=False)
+    monkeypatch.setenv("FAKE_KILO_AUTH", "entry")
+    state, reason = onboarding.credentials("kilo")
+    assert state == "found" and "1 credential entry" in reason
+
+
+@pytest.mark.parametrize(("auth_state", "expected"), [
+    ("nonzero", "exited 7"),
+    ("empty", "printed nothing"),
+    ("junk", "no recognizable credential entry"),
+    ("long-count", "no recognizable credential entry"),
+])
+def test_kilo_auth_list_missing_reasons_are_distinct(kilo_on_path, monkeypatch, auth_state, expected):
+    monkeypatch.delenv("OFFICE_AUTH_FIXTURE", raising=False)
+    monkeypatch.setenv("FAKE_KILO_AUTH", auth_state)
+    state, reason = onboarding.credentials("kilo")
+    assert state == "missing" and expected in reason
+
+
+def test_kilo_auth_list_not_installed_has_distinct_reason(monkeypatch):
+    monkeypatch.delenv("OFFICE_AUTH_FIXTURE", raising=False)
+    monkeypatch.setattr(onboarding.shutil, "which", lambda _: None)
+    assert onboarding.credentials("kilo") == ("missing", "kilo is not installed")
+
+
+def test_kilo_auth_list_timeout_uses_argv_and_bounded_no_shell_run(kilo_on_path, monkeypatch):
+    monkeypatch.delenv("OFFICE_AUTH_FIXTURE", raising=False)
+    calls = []
+
+    def timeout(argv, **kwargs):
+        calls.append((argv, kwargs))
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(onboarding.subprocess, "run", timeout)
+    assert onboarding.credentials("kilo") == ("missing", "kilo auth list timed out")
+    assert calls[0][0] == ["kilo", "auth", "list"]
+    assert calls[0][1]["timeout"] == 10 and calls[0][1]["stdin"] is subprocess.DEVNULL
+    assert "shell" not in calls[0][1]
+
+
+def test_kilo_auth_fixture_short_circuits_binary(kilo_on_path, monkeypatch, tmp_path):
+    log = tmp_path / "invoked"
+    monkeypatch.setenv("KILO_AUTH_LOG", str(log))
+    monkeypatch.setenv("OFFICE_AUTH_FIXTURE", json.dumps({"kilo": "found"}))
+    assert onboarding.credentials("kilo") == ("found", "fixture")
+    assert not log.exists()
+
+
+def test_kilo_auth_list_missing_reasons_are_pairwise_distinct(kilo_on_path, monkeypatch):
+    monkeypatch.delenv("OFFICE_AUTH_FIXTURE", raising=False)
+    monkeypatch.setenv("FAKE_KILO_AUTH", "count")
+    monkeypatch.setenv("FAKE_KILO_AUTH_OUTPUT", "0 credentials in /home/test/auth.json")
+    original_which = onboarding.shutil.which
+    original_run = onboarding.subprocess.run
+    reasons = [onboarding.credentials("kilo")[1]]
+    monkeypatch.setattr(onboarding.shutil, "which", lambda _: None)
+    reasons.append(onboarding.credentials("kilo")[1])
+    monkeypatch.setattr(onboarding.shutil, "which", lambda _: "/fake/kilo")
+
+    def timeout(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(onboarding.subprocess, "run", timeout)
+    reasons.append(onboarding.credentials("kilo")[1])
+    monkeypatch.setattr(onboarding.shutil, "which", original_which)
+    monkeypatch.setattr(onboarding.subprocess, "run", original_run)
+    for auth_state in ("nonzero", "empty", "junk"):
+        monkeypatch.setenv("FAKE_KILO_AUTH", auth_state)
+        reasons.append(onboarding.credentials("kilo")[1])
+    assert len(set(reasons)) == len(reasons)
 
 
 def _trust_acts(env) -> int:
