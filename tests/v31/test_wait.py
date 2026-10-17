@@ -5,6 +5,8 @@ silent through an amendment deadlock and a stalled gate that printed none of the
 """
 from __future__ import annotations
 
+import time
+
 import pytest
 from pathlib import Path
 
@@ -746,3 +748,16 @@ def test_idle_terminal_refused_submit_overrides_a_stale_busy_spinner(env):
     assert dispatch._pane_busy("esc to cancel"), "must reproduce the stale busy marker"
     code, out = _wait(env, e, timeout="3")
     assert code == 3 and "SUBMIT=refused" in out and "stall:" in out, out
+
+
+@pytest.mark.approved
+def test_wait_on_an_already_terminal_run_returns_at_once_not_124(env):
+    _go(env)
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()[0]
+    con.execute("UPDATE runs SET phase='abandoned' WHERE id=?", (run_id,))
+    con.commit()
+    started = time.monotonic()
+    code, out = env.office("wait", "--run", run_id, "--timeout", "60", "--poll", "0.2", env=EXTERNAL)
+    assert time.monotonic() - started < 30, "wait did not wake at once on a terminal run"
+    assert code == 0 and "abandoned" in out and "nothing new" not in out, out

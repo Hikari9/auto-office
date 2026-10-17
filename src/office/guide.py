@@ -671,7 +671,8 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         pending = _needs_orchestrator(con, run)
         action_signature = _action_signature(con, run) if pending else None
         first = False
-        if asked or stuck or changed or news or pending or time.time() >= deadline:
+        terminal = state.is_terminal(state.get_run(con, run["id"]))
+        if asked or stuck or changed or news or pending or terminal or time.time() >= deadline:
             res = status(con, run)
             if pending:
                 with db.transaction(con):
@@ -696,7 +697,7 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
                 res.lines = [res.lines[0], *[f"question: {q}" for q in asked],
                              *[ln for ln in res.lines[1:] if ln.removeprefix("question: ") not in asked]]
                 res.exit_code = questions.EXIT
-            elif not (stuck or changed or news or pending):
+            elif not (stuck or changed or news or pending or terminal):
                 res.lines.insert(1, f"wait: nothing new in {int(timeout)}s")
                 res.exit_code = 124
             return add_bug_hints(con, run, res)
