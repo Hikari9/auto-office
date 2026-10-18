@@ -374,6 +374,11 @@ def test_a_low_fix_needs_neither_test_nor_mutation_but_a_given_mutation_must_be_
     ("tests/helpers/util.py", True), ("test.py", True), ("src/calc-test.js", True), ("src/test-calc.js", True),
     ("lib/calc_spec.rb", True), ("web/calc-spec.ts", True), ("Calc.Tests/CalcTests.cs", True), ("Calc.Tests/Helpers.cs", True), ("calc-tests/util.go", True), ("src/CalcTest.java", True),
     ("cypress/e2e/calc.cy.ts", True), ("e2e/calc.ts", True), ("src/calc.rs::tests::adds", True), ("src/calc.rs::test::adds", True), ("tests\\calc.py", True), ("src\\calc.py", False), ("src/calc.tests.ts", True),
+    ("ios/FeatureUITests.swift", True), ("ios/FeatureUITest.swift", True),
+    ("ios/UITests.swift", True), ("ios/AppUITests/Feature.swift", True),
+    ("ios/AppUITest/Feature.swift", True),
+    ("ios/FeatureUIExam.swift", False), ("ios/AppUIViews/Feature.swift", False),
+    ("ios/FeatureUITests.md", False),
     ("README.md", False), ("calc.py", False), ("docs/test_plan.md", False),
     ("src/calc.rs", False), ("src/calc.rs::adds", False), ("src/Contest.java", False),
     ("src/spec.py", False),
@@ -382,6 +387,20 @@ def test_a_low_fix_needs_neither_test_nor_mutation_but_a_given_mutation_must_be_
 def test_which_paths_count_as_a_test_file(name, ok):
     from office import preflight
     assert preflight._is_test_path(name) is ok
+
+
+def test_xctest_ui_files_are_accepted_as_committed_medium_mutation_proof(repo):
+    """An XCTest file is valid even without a generic tests/ directory or *Tests.swift stem."""
+    (repo / "ios" / "AppUITests").mkdir(parents=True)
+    (repo / "ios" / "FeatureUITests.swift").write_text("import XCTest\n")
+    (repo / "ios" / "AppUITests" / "Helper.swift").write_text("import XCTest\n")
+    commit_all(repo, "XCTest UI files")
+    head = _git(repo, "rev-parse", "HEAD")
+    for name in ("ios/FeatureUITests.swift", "ios/AppUITests/Helper.swift"):
+        finding = f"FINDING medium security calc.py:9 | XCTest proof | fixed {name} mutation=failed"
+        assert fixes(repo, ledger_text(head, findings=[finding])) == []
+
+
 
 
 _NON_CODE = [".md", ".json", ".svg", ".jpeg", ".html", ".csv", ".jsonl", ".sql", ".bin", ".snap", ".yaml", ".txt"]
