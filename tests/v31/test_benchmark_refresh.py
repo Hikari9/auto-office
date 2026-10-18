@@ -81,7 +81,10 @@ def test_refresh_is_bounded_validated_and_bound_to_later_routes(env, monkeypatch
     after = candidates.route_role(env.con(), run["policy"], run, "executor", probe=False)
     assert before["benchmark_snapshot"] == run["catalog_hash"] and after["benchmark_snapshot"] == snap
     scored = [c for c in after["request"]["candidates"] if c["model_id"] == row["model_id"] and c["effort"] == row["effort"]]
-    assert all(c["benchmark_indexes"][index] == 44.5 for c in scored)
+    refreshed = [c for c in scored if c["harness"] == row["invocation_harness"]]
+    assert refreshed and all(c["benchmark_indexes"][index] == 44.5 for c in refreshed)
+    other_harness = [c for c in scored if c["harness"] != row["invocation_harness"]]
+    assert all(c["benchmark_indexes"][index] != 44.5 for c in other_harness)
 
 
 def test_delta_never_replaces_a_trusted_score_or_names_unknown_rows(env, monkeypatch):
