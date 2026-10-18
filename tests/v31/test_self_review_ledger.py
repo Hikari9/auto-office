@@ -378,7 +378,8 @@ def test_a_low_fix_needs_neither_test_nor_mutation_but_a_given_mutation_must_be_
     ("ios/UITests.swift", True), ("ios/AppUITests/Feature.swift", True),
     ("ios/AppUITest/Feature.swift", True),
     ("ios/FeatureUIExam.swift", False), ("ios/AppUIViews/Feature.swift", False),
-    ("ios/FeatureUITests.md", False),
+    ("ios/FeatureUITests.md", False), ("ios/FeatureUITest.md", False),
+    ("ios/AppUITests/README.md", False), ("ios/AppUITests/config.json", False),
     ("README.md", False), ("calc.py", False), ("docs/test_plan.md", False),
     ("src/calc.rs", False), ("src/calc.rs::adds", False), ("src/Contest.java", False),
     ("src/spec.py", False),
@@ -391,16 +392,17 @@ def test_which_paths_count_as_a_test_file(name, ok):
 
 def test_xctest_ui_files_are_accepted_as_committed_medium_mutation_proof(repo):
     """An XCTest file is valid even without a generic tests/ directory or *Tests.swift stem."""
-    (repo / "ios" / "AppUITests").mkdir(parents=True)
-    (repo / "ios" / "FeatureUITests.swift").write_text("import XCTest\n")
-    (repo / "ios" / "AppUITests" / "Helper.swift").write_text("import XCTest\n")
+    for folder in ("AppUITests", "AppUITest"):
+        (repo / "ios" / folder).mkdir(parents=True)
+        (repo / "ios" / folder / "Helper.swift").write_text("import XCTest\n")
+    for filename in ("FeatureUITests.swift", "FeatureUITest.swift"):
+        (repo / "ios" / filename).write_text("import XCTest\n")
     commit_all(repo, "XCTest UI files")
     head = _git(repo, "rev-parse", "HEAD")
-    for name in ("ios/FeatureUITests.swift", "ios/AppUITests/Helper.swift"):
+    for name in ("ios/FeatureUITests.swift", "ios/FeatureUITest.swift",
+                 "ios/AppUITests/Helper.swift", "ios/AppUITest/Helper.swift"):
         finding = f"FINDING medium security calc.py:9 | XCTest proof | fixed {name} mutation=failed"
         assert fixes(repo, ledger_text(head, findings=[finding])) == []
-
-
 
 
 _NON_CODE = [".md", ".json", ".svg", ".jpeg", ".html", ".csv", ".jsonl", ".sql", ".bin", ".snap", ".yaml", ".txt"]
