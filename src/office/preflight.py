@@ -73,9 +73,9 @@ _LOCATION = re.compile(r"(.+):[0-9]+(?:-[0-9]+)?")
 _MUTATION = "mutation=failed"
 _BLOCKERS = ("high", "medium")
 _TEST_DIRS = ("test", "tests", "__tests__", "spec", "specs", "e2e")
-_TEST_DIR_SUFFIX = re.compile(r"[._-]tests?$")  # Calc.Tests/
+_TEST_DIR_SUFFIX = re.compile(r"(?:[._-]tests?|uitests?)$")  # Calc.Tests/, AppUITests/
 _TEST_NAME = re.compile(r"(^tests?\.|^test[_-]|[_-]tests?\.|\.tests?\.|[_.-]spec\.|\.cy\.)")
-_TEST_STEM = re.compile(r"[a-z0-9]Tests?\.")  # CalcTests.cs, CalcTest.java
+_TEST_STEM = re.compile(r"(?:[a-z0-9]Tests?|UITests?)\.")  # CalcTests.cs, FeatureUITests.swift
 _NOT_TESTS = ("__init__.py", "conftest.py")
 _NOT_CODE = (".md", ".markdown", ".txt", ".rst", ".json", ".yml", ".yaml", ".toml", ".lock", ".csv", ".snap", ".bin", ".xml",
              ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".pdf", ".html", ".log", ".ini", ".cfg", ".pyc", ".jsonl", ".tsv", ".sql", ".golden")
