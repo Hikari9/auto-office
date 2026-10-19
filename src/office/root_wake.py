@@ -281,8 +281,8 @@ def _finish(con, run_id: str, seqs: list[int], token: str, state_name: str, erro
         if state_name == "delivered":
             # The root may already have read `office context` while Herdr was
             # still confirming the landing; keep that stronger `observed` receipt.
-            con.executemany("UPDATE root_wake_intents SET state=CASE WHEN state='observed' THEN 'observed' "
-                            "ELSE 'delivered' END, delivered_at=?, token=NULL, "
+            con.executemany("UPDATE root_wake_intents SET state=CASE WHEN state IN "
+                            "('observed','root_activity_observed') THEN state ELSE 'delivered' END, delivered_at=?, token=NULL, "
                             "lease_until=NULL, last_error=NULL WHERE run_id=? AND event_seq=? AND token=?",
                             [(now_iso(), run_id, seq, token) for seq in seqs])
             if signature is not None and generation is not None:
@@ -293,7 +293,8 @@ def _finish(con, run_id: str, seqs: list[int], token: str, state_name: str, erro
             # A root that already observed fresh state outranks any transport
             # outcome; only release the claim on those receipts.
             con.executemany("UPDATE root_wake_intents SET token=NULL, lease_until=NULL "
-                            "WHERE run_id=? AND event_seq=? AND token=? AND state='observed'",
+                            "WHERE run_id=? AND event_seq=? AND token=? "
+                            "AND state IN ('observed','root_activity_observed')",
                             [(run_id, seq, token) for seq in seqs])
             for seq in seqs:
                 row = con.execute("SELECT attempts FROM root_wake_intents WHERE run_id=? AND event_seq=? "
@@ -344,6 +345,14 @@ def poll(con, run: dict) -> str:
         # authoritative action *immediately* before the external prompt.
         # Fence the final check and the prompt against --wake-off and rebinds.
         with _delivery_lock(run["id"]):
+            # The root may have started a turn since the idle check above.
+            again = _agent_in_pane(binding["pane_id"])
+            if again is None or again[0] != binding["agent_name"]:
+                _finish(con, run["id"], seqs, token, "awaiting_attachment", "root agent unavailable or mismatched")
+                return "detached"
+            if again[1] not in IDLE_STATES:
+                _finish(con, run["id"], seqs, token, "defer", "root busy; queued for idle")
+                return "busy"
             current = _actionable_now(con, run, seqs)
             live = _binding(con, run["id"])
             if (not live or live["generation"] != binding["generation"] or

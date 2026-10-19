@@ -496,3 +496,46 @@ def test_723_wake_off_cannot_complete_between_final_check_and_prompt(env, monkey
     with db.transaction(con):
         state.emit(con, run, "task.paused", "after wake-off", task_id="T1")
     assert root_wake.poll(con, run) == "no-action" and len(sent) == 1
+
+
+def _pending_wake(env, monkeypatch):
+    approved_run(env, plan=PLAN_TWO, executor=[{"submit": False}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    con, run = setup_root(env, monkeypatch)
+    with db.transaction(con):
+        state.emit(con, run, "task.paused", "fake actionable pause", task_id="T1")
+    with db.transaction(con):
+        con.execute("UPDATE root_wake_bindings SET last_action_signature='stale' WHERE run_id=?", (run["id"],))
+    return con, run
+
+
+def test_723_late_landing_receipt_keeps_root_activity(env, monkeypatch):
+    """Review P2: context, then a state-changing root command, both before Herdr
+    confirms the landing. The late receipt must not demote root activity."""
+    con, run = _pending_wake(env, monkeypatch)
+
+    def send(name, text, *, pane=None):
+        root_wake.observe(con, run)
+        before = con.execute("SELECT MAX(seq) FROM events WHERE run_id=?", (run["id"],)).fetchone()[0]
+        with db.transaction(con):
+            state.emit(con, run, "note", "root command", audience="runtime")
+        root_wake.record_root_activity(con, run, before=before, command="dispatch")
+        return "landed"
+
+    monkeypatch.setattr(dispatch, "submit_prompt", send)
+    assert root_wake.poll(con, run) == "delivered"
+    rows = events(con, run)
+    assert {r["state"] for r in rows} == {"root_activity_observed"}
+    assert all(r["delivered_at"] and r["token"] is None for r in rows)
+
+
+def test_723_root_that_turns_busy_before_the_send_is_deferred(env, monkeypatch):
+    """Review P2: the idle check is repeated at the delivery boundary."""
+    con, run = _pending_wake(env, monkeypatch)
+    statuses = iter(["done", "working"])
+    monkeypatch.setattr(root_wake, "_agent_in_pane",
+                        lambda pane: ("root-claude", next(statuses)) if pane == PANE else None)
+    sent = []
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda name, text, *, pane=None: sent.append(1) or "landed")
+    assert root_wake.poll(con, run) == "busy" and not sent
+    assert {r["state"] for r in events(con, run)} == {"retry"}
