@@ -174,6 +174,19 @@ def next_action(con, run: dict) -> str:
                         "contract) | --fresh")
             if (t.get("pause_reason") or "").startswith("restack:"):
                 return f"{t['id']} {t['pause_reason']}: office rerun {t['id']} --resume | --fresh"
+            awaiting_ack = con.execute(
+                "SELECT amendment_id FROM deliveries WHERE run_id=? AND task_id=? "
+                "AND status IN ('queued','delivered') ORDER BY created_at LIMIT 1",
+                (run["id"], t["id"])).fetchone()
+            if awaiting_ack:
+                return (f"{t['id']} awaits amendment {awaiting_ack['amendment_id']} ack; "
+                        f"office rerun {t['id']} --resume | --fresh to deliver/ack it")
+            outstanding = con.execute("SELECT 1 FROM findings WHERE run_id=? AND task_id=? AND "
+                                      + contract.TASK_WORK_FINDINGS + " LIMIT 1",
+                                      (run["id"], t["id"])).fetchone()
+            if not outstanding:
+                return (f"{t['id']} requires continuation (no open review findings); "
+                        f"office inspect task {t['id']}, then office rerun {t['id']} --resume | --fresh")
             return f"findings on {t['id']} wait for you: office rerun {t['id']} --resume | --fresh"
     if held_repairs:
         return "no action; " + "; ".join(held_repairs) + "; office wait for the holder or dependency to finish"
@@ -336,6 +349,9 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     for q in questions.recorded(con, run):
         res.add(f"question: {q}")
     if probe_panes:
+        from office import watchdog
+        for stall in watchdog.reviewer_stalls(con, run):
+            res.add(f"blocker: {stall}")
         # One `herdr agent list` call, made only by `office status` itself: never from hooks
         # (session start) or `office wait`, which scans panes on its own.
         for b in questions.blocked_unrecorded(con, run):
@@ -445,6 +461,8 @@ def stalls(con, run: dict, since: str = "", acts: dict | None = None) -> list[st
                          (run["id"], since)).fetchall():
         out.append(f"job {j['kind']} failed: {(j['error'] or '')[:120]}")
     out.extend(_idle_executors(con, run, acts))
+    from office import watchdog
+    out.extend(watchdog.reviewer_stalls(con, run))
     return out
 
 
@@ -499,6 +517,13 @@ def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:
                        f"pane tail in {tail}; next: {actions}")
             continue
         if act["busy"] or changed:
+            from office import watchdog
+            # A spinner, even a ticking spinner, is not progress by itself (#701).
+            # Watchdog reports only after unchanged pane, worktree and log evidence.
+            if act["busy"]:
+                hang = watchdog.check(con, run, d, role="executor", activity=act)
+                if hang:
+                    out.append(hang)
             idle_since = None
         else:
             idle_since = d.get("idle_since") or now_iso()
@@ -604,6 +629,22 @@ def worker_signals(con, run: dict) -> tuple[list[str], int]:
 
 WAIT_ACTION_KIND = "wait.action_reported"
 
+WAIT_STALL_KIND = "wait.stall_reported"
+
+
+def _fresh_stall(con, run: dict, stuck: list[str]) -> tuple[bool, str | None]:
+    if not stuck:
+        return False, None
+    # Ignore numeric duration as idle age advances every second with no new evidence.
+    # Every duration ("idle 40s", "180s elapsed past review wall budget 3600s") grows
+    # or is fixed config; neither is new stall evidence.
+    stable = [re.sub(r"\b\d+s\b", "Xs", line) for line in stuck]
+    signature = sha256_obj((_snapshot(con, run), tuple(sorted(stable))))
+    row = con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind=? ORDER BY seq DESC LIMIT 1",
+                      (run["id"], WAIT_STALL_KIND)).fetchone()
+    prior = json.loads(row["payload_json"] or "{}").get("signature") if row else None
+    return signature != prior, signature
+
 
 def _action_signature(con, run: dict) -> str | None:
     """The currently actionable guidance, including its source state.
@@ -656,6 +697,7 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         signals, signals_seq = worker_signals(con, run)
         asked, _, acts = questions.scan(con, run)
         stuck = stalls(con, run, since=started_at, acts=acts) + signals
+        fresh_stall, stall_signature = _fresh_stall(con, run, stuck)
         changed = _snapshot(con, run) != start
         # Only an *actionable* orchestrator event warrants an exit 0: a task paused on a
         # refused submit, a gate failure, a recheck the orchestrator must route. A pure
@@ -677,7 +719,7 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         action_signature = _action_signature(con, run) if pending else None
         first = False
         terminal = state.is_terminal(state.get_run(con, run["id"]))
-        if asked or stuck or changed or news or pending or terminal or time.time() >= deadline:
+        if asked or fresh_stall or changed or news or pending or terminal or time.time() >= deadline:
             res = status(con, run)
             if pending:
                 with db.transaction(con):
@@ -694,7 +736,10 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
             if signals:
                 with db.transaction(con):
                     state.advance_cursor(con, run["id"], state.SIGNAL_CONSUMER, signals_seq)
-            if stuck:
+            if fresh_stall:
+                with db.transaction(con):
+                    state.emit(con, run, WAIT_STALL_KIND, "worker stall reported by office wait",
+                               audience="runtime", payload={"signature": stall_signature})
                 res.lines[1:1] = [f"stall: {s}" for s in stuck]
                 res.exit_code = 3
             if asked:
@@ -702,7 +747,7 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
                 res.lines = [res.lines[0], *[f"question: {q}" for q in asked],
                              *[ln for ln in res.lines[1:] if ln.removeprefix("question: ") not in asked]]
                 res.exit_code = questions.EXIT
-            elif not (stuck or changed or news or pending or terminal):
+            elif not (fresh_stall or changed or news or pending or terminal):
                 res.lines.insert(1, f"wait: nothing new in {int(timeout)}s")
                 res.exit_code = 124
             return add_bug_hints(con, run, res)

@@ -251,3 +251,28 @@ def test_an_amendment_applied_at_or_below_the_fix_of_revisions_version_is_not_ne
     _commit_work(env, wt3)
     code, out = env.office("preflight", cwd=wt3, env=wenv3)
     assert code == 4 and "no open findings or amendments" in out, out
+
+
+
+def test_717_a_pending_amendment_ack_is_not_reported_as_findings(env):
+    """#717: a fix round paused with an unacknowledged amendment and no open findings
+    must name the amendment ack, never 'findings wait for you'."""
+    from office import guide, state
+    approved_run(env, executor=[{"submit": False}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    did = task_row(env)["current_dispatch_id"]
+    con.execute("UPDATE dispatches SET status='exited', ended_at='2026-01-01T00:00:00+00:00' WHERE id=?", (did,))
+    con.execute("UPDATE tasks SET status='changes_required', pause_reason=NULL WHERE id='T1'")
+    con.execute("INSERT INTO deliveries(id, run_id, amendment_id, task_id, dispatch_id, target_version, status, "
+                "content, created_at) VALUES('DL1', ?, 'A1', 'T1', ?, 2, 'queued', ?, '2026-01-01T00:00:00+00:00')",
+                (run["id"], did, DELTA))
+    con.commit()
+    action = guide.next_action(con, run)
+    assert "awaits amendment A1 ack" in action and "findings on T1" not in action, action
+    con.execute("UPDATE deliveries SET status='applied', applied_at='2026-01-01T00:00:01+00:00'")
+    con.commit()
+    action = guide.next_action(con, run)
+    assert "requires continuation (no open review findings)" in action, action
+    assert "findings on T1" not in action, action

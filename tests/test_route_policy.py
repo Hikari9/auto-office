@@ -153,7 +153,9 @@ def test_additive_migration_fresh_and_prechange_copy(tmp_path, historical):
     # v12 appended nullable evidence columns (T1: dispatch receipts; T2: convergence membership and finding
     # attribution); every other column of a pre-existing table is unchanged.
     v12 = {"predecessor_dispatch_id", "first_executor_dispatch_id", "accepted_producer_dispatch_id",
-           "members_json", "attribution_basis", "attributed_task", "clone_of"}
+           "members_json", "attribution_basis", "attributed_task", "clone_of",
+           # v14 (#701/#722): passive progress-watchdog state on dispatches.
+           "watchdog_progress_hash", "watchdog_progress_since"}
     assert all([col for col in columns[table] if col[1] not in v12] == info for table, info in old_columns.items())
     assert {"route_probes", "route_probe_reservations", "route_trials", "route_discovery_events"} <= columns.keys()
     expected = {

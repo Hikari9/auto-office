@@ -25,7 +25,7 @@ from office import paths
 # Bump when SHARED_COLUMNS or the DDL changes. The version is a record, not the
 # gate: every open also runs the additive column pass (see `migrate`), so a
 # column added without a bump still reaches existing databases.
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -74,6 +74,8 @@ SHARED_COLUMNS = {
         "stall_kind TEXT", "resets_at TEXT", "limit_label TEXT", "limit_fingerprint TEXT",
         # v12: the executor dispatch this one replaced (same run, same task).
         "predecessor_dispatch_id TEXT",
+        # #701/#722: passive progress-watchdog state; not lifecycle authority.
+        "watchdog_progress_hash TEXT", "watchdog_progress_since TEXT",
     ],
     # v2 (#185): user-declared model overrides.
     "tasks": [
