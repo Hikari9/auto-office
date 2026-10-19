@@ -183,8 +183,12 @@ def reconcile(con, run: dict) -> int:
 
 
 def _human_only(action: str) -> bool:
+    """Guidance needing the user. Every Office command that records user
+    authority (approve, decide, waive, amend route, ...) takes `--quote`, so
+    that marker classifies it structurally, independent of the wording."""
     low = action.lower()
-    return "ask the user" in low or "authorization" in low or "intake_gap" in low
+    return ("--quote" in low or "ask the user" in low or "authorization" in low
+            or "intake_gap" in low or "user's words" in low or "user words" in low)
 
 
 def _actionable_now(con, run: dict, seqs: list[int]) -> tuple[str, str, bool] | None:

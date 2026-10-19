@@ -541,16 +541,24 @@ def test_723_root_that_turns_busy_before_the_send_is_deferred(env, monkeypatch):
     assert {r["state"] for r in events(con, run)} == {"retry"}
 
 
+GUIDANCE_NEEDING_USER = [
+    'ask the user (native question tool) for authorization of r2, then office approve plan --quote "<w>"',
+    # stale waiver: no "ask the user" wording, but it records user authority
+    'L-T1 historical waiver is stale and cannot authorize the latest accepted revision; '
+    'record a new review decision: office decide L-T1 review --quote "<user words>"',
+]
+
+
+@pytest.mark.parametrize("guidance", GUIDANCE_NEEDING_USER)
 @pytest.mark.parametrize("path", ["watchdog.stall", "worker.signal"])
-def test_723_signal_and_stall_wakes_keep_the_human_decision_guard(env, monkeypatch, path):
+def test_723_signal_and_stall_wakes_keep_the_human_decision_guard(env, monkeypatch, path, guidance):
     """Review P1: a stall or worker-stop wake while current guidance needs the user
     must carry the ask-the-user-and-stop guard, never a bare continue."""
     from office import guide
     approved_run(env, plan=PLAN_TWO, executor=[{"submit": False}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     con, run = setup_root(env, monkeypatch)
-    monkeypatch.setattr(guide, "next_action", lambda con, run: (
-        'ask the user (native question tool) for authorization of r2, then office approve plan --quote "<w>"'))
+    monkeypatch.setattr(guide, "next_action", lambda con, run: guidance)
     did = task_row(env)["current_dispatch_id"]
     with db.transaction(con):
         if path == "watchdog.stall":
@@ -564,3 +572,14 @@ def test_723_signal_and_stall_wakes_keep_the_human_decision_guard(env, monkeypat
     monkeypatch.setattr(dispatch, "submit_prompt", lambda name, text, *, pane=None: sent.append(text) or "landed")
     assert root_wake.poll(con, run) == "delivered"
     assert "HUMAN DECISION REQUIRED" in sent[0] and "No authorization" in sent[0]
+
+
+@pytest.mark.parametrize("action,human", [
+    ('office decide L-T1 review --quote "<user words>"', True),
+    ('office approve waive T1:c --quote "<words>"', True),
+    ("office amend route T1 --as claude/sonnet --quote \"<user's words>\"", True),
+    ("office dispatch T2", False),
+    ("office review T1:convergence", False),
+])
+def test_723_human_only_classifies_user_authority_commands(action, human):
+    assert root_wake._human_only(action) is human
