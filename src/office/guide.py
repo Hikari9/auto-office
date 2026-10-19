@@ -345,6 +345,9 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     from office import dispatch as dispatch_mod
     for line in dispatch_mod.headless_fallbacks(con, run):
         res.add(line)
+    from office import root_wake
+    for line in root_wake.lines(con, run):
+        res.add(line)
     from office import questions
     for q in questions.recorded(con, run):
         res.add(f"question: {q}")
@@ -373,6 +376,7 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
                 "requirements_version": run["requirements_version"], "plan_version": run["plan_version"],
                 "tasks": {t["id"]: t["status"] for t in tasks}, "routes": routes, "plan_review": {k: v for k, v in rs.items() if k != "open_defects"},
                 "open_defects": [d["code"] for d in rs["open_defects"]], "next": res.next}
+    res.data["root_wake"] = root_wake.metrics(con, run)
     if resumed:
         res.verbose.append("resumed: pending jobs and deliveries reconstructed from runs.db")
     return res

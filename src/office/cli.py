@@ -22,6 +22,7 @@ Auto Office {ver}
 
   office start "<goal>"             create a run; queues the planner when policy requires one
   office resume [run]               bind this session to a run and show where it stands
+  office resume --auto-wake         opt in to safe Claude/Herdr root wake-up (only when bound in its pane)
   office status                     what matters now, ending with the next legal action
   office wait [--timeout S]         block until something needs you (exit 0), a stall (3), an agent's
                                     question (5), or timeout (124)
@@ -244,6 +245,9 @@ def _parser() -> argparse.ArgumentParser:
 
     s = sp.add_parser("resume", parents=[common])
     s.add_argument("target", nargs="?")
+    wake = s.add_mutually_exclusive_group()
+    wake.add_argument("--auto-wake", action="store_true", help="opt in to verified Claude/Herdr root continuation")
+    wake.add_argument("--wake-off", action="store_true", help="turn off autonomous root wake-up for this run")
     sp.add_parser("status", parents=[common])
     s = sp.add_parser("wait", parents=[common])
     s.add_argument("--timeout", type=float, default=1500.0, help="seconds before exit 124 (default 1500)")
@@ -516,6 +520,8 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--attempt", dest="job_attempt", default=None)
     s = sp.add_parser("_supervise", add_help=False)
     s.add_argument("dispatch_id")
+    s = sp.add_parser("_wake_supervise", add_help=False)
+    s.add_argument("run_id")
     return p
 
 
@@ -721,6 +727,9 @@ def _run(args, unknown) -> int:
     if cmd == "_supervise":
         from office import dispatch
         return dispatch.supervise(args.dispatch_id)
+    if cmd == "_wake_supervise":
+        from office import root_wake
+        return root_wake.supervise(args.run_id)
     from office.state import OfficeError
     if cmd not in _NO_SWEEP:
         # Expire probe reservations whose owner died (the outbox dead-claim pattern). Never fails a command.
@@ -884,7 +893,11 @@ def _run(args, unknown) -> int:
             return emit(res, args)
         run = target.run
         args._run_id = run["id"]
+        from office import root_wake, state
+        before_seq = con.execute("SELECT COALESCE(MAX(seq),0) FROM events WHERE run_id=?", (run["id"],)).fetchone()[0]
         res = _dispatch_command(con, run, args, unknown, cwd, target)
+        if res.exit_code == 0 and cmd not in ("status", "wait", "context", "resume", "inspect", "preflight"):
+            root_wake.record_root_activity(con, state.get_run(con, run["id"]), before=before_seq, command=cmd)
         if target.note:
             res.notices.append(target.note)
         if cmd not in ("status", "resume", "preflight", "context"):
@@ -898,8 +911,13 @@ def _run(args, unknown) -> int:
 def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     cmd = args.cmd
     if cmd == "resume":
-        from office import lifecycle
-        return lifecycle.resume(con, target, harness=args.harness, session=args.session, cwd=cwd)
+        from office import lifecycle, root_wake, state
+        res = lifecycle.resume(con, target, harness=args.harness, session=args.session, cwd=cwd)
+        if args.auto_wake or args.wake_off:
+            res.notices.append(root_wake.attach(con, state.get_run(con, run["id"]), off=args.wake_off))
+            if args.auto_wake:
+                root_wake.ensure(state.get_run(con, run["id"]))
+        return res
     if cmd == "status":
         from office import guide, jobs, lifecycle, db, state
         if not state.is_terminal(run):
@@ -908,9 +926,14 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
             with db.transaction(con):
                 lifecycle.reconcile(con, run)
             jobs.kick(con, run["id"])
+        from office import root_wake
+        if not os.environ.get("OFFICE_DISPATCH_ID"):
+            root_wake.ensure(state.get_run(con, run["id"]))
         return guide.add_bug_hints(con, run, guide.status(con, run, verbose=args.verbose, probe_panes=True))
     if cmd == "wait":
-        from office import guide
+        from office import guide, root_wake, state
+        if not os.environ.get("OFFICE_DISPATCH_ID"):
+            root_wake.ensure(state.get_run(con, run["id"]))
         return guide.wait(con, run, timeout=args.timeout, poll=args.poll)
     if cmd == "dispatch":
         from office import dispatch
@@ -971,8 +994,10 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
             raise OfficeError("usage", "name the delta file", next_step=benchmarks.SUBMIT_FORM, exit_code=2)
         return benchmarks.submit(con, run, args.file)
     if cmd == "context":
-        from office import context_snapshot
-        return context_snapshot.context(con, run, since=args.since)
+        from office import context_snapshot, root_wake
+        res = context_snapshot.context(con, run, since=args.since)
+        root_wake.observe(con, run)
+        return res
     if cmd == "economics":
         from office import economics
         return economics.ingest(con, run, file=args.file, harness=args.usage_harness,
