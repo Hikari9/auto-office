@@ -364,10 +364,18 @@ def test_status_json_has_an_empty_list_when_nothing_is_wrong(run):
     assert code == 0 and data["bug_hints"] == []
 
 
+def _forget_reported_stalls(run):
+    from office import guide
+    con = run.con()
+    con.execute("DELETE FROM events WHERE kind=?", (guide.WAIT_STALL_KIND,))
+    con.commit()
+
+
 def test_wait_prints_the_hints(run):
     seed_job(run, kind="launch_agent")
     code, out = run.office("wait", "--timeout", "2", "--poll", "0.1")
     assert len(_hints(out)) == 1, out
+    _forget_reported_stalls(run)  # wait reports an unchanged stall once (#697)
     code_json, data = run.ojson("wait", "--timeout", "2", "--poll", "0.1")
     assert code_json == code and len(data["bug_hints"]) == 1
 
@@ -380,6 +388,7 @@ def test_hints_do_not_change_the_exit_code(run, monkeypatch):
         plain_status, plain_out = run.office("status")
         plain_wait, _ = run.office("wait", "--timeout", "2", "--poll", "0.1")
     assert not _hints(plain_out)
+    _forget_reported_stalls(run)  # compare like with like: wait reports an unchanged stall once (#697)
     code, out = run.office("status")
     assert _hints(out) and code == plain_status
     code, out = run.office("wait", "--timeout", "2", "--poll", "0.1")

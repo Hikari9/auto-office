@@ -1238,7 +1238,9 @@ def test_s12_db_changes_are_additive_and_the_previous_runtime_keeps_working_on_t
     # v12 appended nullable evidence columns (T1: dispatch receipts; T2: convergence membership and finding
     # attribution); every other column and row is unchanged.
     v12 = {"predecessor_dispatch_id", "first_executor_dispatch_id", "accepted_producer_dispatch_id",
-           "members_json", "attribution_basis", "attributed_task", "clone_of"}
+           "members_json", "attribution_basis", "attributed_task", "clone_of",
+           # v14 (#701/#722): passive progress-watchdog state on dispatches.
+           "watchdog_progress_hash", "watchdog_progress_since"}
     for table, (cols, rows) in now_dump.items():
         keep = [c[0] for c in cols if c[1] in v12]
         now_dump[table] = ([c for c in cols if c[1] not in v12],
