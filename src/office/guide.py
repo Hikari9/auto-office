@@ -636,7 +636,9 @@ def _fresh_stall(con, run: dict, stuck: list[str]) -> tuple[bool, str | None]:
     if not stuck:
         return False, None
     # Ignore numeric duration as idle age advances every second with no new evidence.
-    stable = [re.sub(r"\b(idle|progress for|elapsed past review wall budget) \d+s\b", r"\1 s", line) for line in stuck]
+    # Every duration ("idle 40s", "180s elapsed past review wall budget 3600s") grows
+    # or is fixed config; neither is new stall evidence.
+    stable = [re.sub(r"\b\d+s\b", "Xs", line) for line in stuck]
     signature = sha256_obj((_snapshot(con, run), tuple(sorted(stable))))
     row = con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind=? ORDER BY seq DESC LIMIT 1",
                       (run["id"], WAIT_STALL_KIND)).fetchone()
