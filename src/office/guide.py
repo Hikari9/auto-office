@@ -174,6 +174,19 @@ def next_action(con, run: dict) -> str:
                         "contract) | --fresh")
             if (t.get("pause_reason") or "").startswith("restack:"):
                 return f"{t['id']} {t['pause_reason']}: office rerun {t['id']} --resume | --fresh"
+            awaiting_ack = con.execute(
+                "SELECT amendment_id FROM deliveries WHERE run_id=? AND task_id=? "
+                "AND status IN ('queued','delivered') ORDER BY created_at LIMIT 1",
+                (run["id"], t["id"])).fetchone()
+            if awaiting_ack:
+                return (f"{t['id']} awaits amendment {awaiting_ack['amendment_id']} ack; "
+                        f"office rerun {t['id']} --resume | --fresh to deliver/ack it")
+            outstanding = con.execute("SELECT 1 FROM findings WHERE run_id=? AND task_id=? AND "
+                                      + contract.TASK_WORK_FINDINGS + " LIMIT 1",
+                                      (run["id"], t["id"])).fetchone()
+            if not outstanding:
+                return (f"{t['id']} requires continuation (no open review findings); "
+                        f"office inspect task {t['id']}, then office rerun {t['id']} --resume | --fresh")
             return f"findings on {t['id']} wait for you: office rerun {t['id']} --resume | --fresh"
     if held_repairs:
         return "no action; " + "; ".join(held_repairs) + "; office wait for the holder or dependency to finish"
@@ -336,6 +349,9 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     for q in questions.recorded(con, run):
         res.add(f"question: {q}")
     if probe_panes:
+        from office import watchdog
+        for stall in watchdog.reviewer_stalls(con, run):
+            res.add(f"blocker: {stall}")
         # One `herdr agent list` call, made only by `office status` itself: never from hooks
         # (session start) or `office wait`, which scans panes on its own.
         for b in questions.blocked_unrecorded(con, run):
@@ -445,6 +461,8 @@ def stalls(con, run: dict, since: str = "", acts: dict | None = None) -> list[st
                          (run["id"], since)).fetchall():
         out.append(f"job {j['kind']} failed: {(j['error'] or '')[:120]}")
     out.extend(_idle_executors(con, run, acts))
+    from office import watchdog
+    out.extend(watchdog.reviewer_stalls(con, run))
     return out
 
 
@@ -499,6 +517,13 @@ def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:
                        f"pane tail in {tail}; next: {actions}")
             continue
         if act["busy"] or changed:
+            from office import watchdog
+            # A spinner, even a ticking spinner, is not progress by itself (#701).
+            # Watchdog reports only after unchanged pane, worktree and log evidence.
+            if act["busy"]:
+                hang = watchdog.check(con, run, d, role="executor", activity=act)
+                if hang:
+                    out.append(hang)
             idle_since = None
         else:
             idle_since = d.get("idle_since") or now_iso()
@@ -604,6 +629,20 @@ def worker_signals(con, run: dict) -> tuple[list[str], int]:
 
 WAIT_ACTION_KIND = "wait.action_reported"
 
+WAIT_STALL_KIND = "wait.stall_reported"
+
+
+def _fresh_stall(con, run: dict, stuck: list[str]) -> tuple[bool, str | None]:
+    if not stuck:
+        return False, None
+    # Ignore numeric duration as idle age advances every second with no new evidence.
+    stable = [re.sub(r"\b(idle|progress for|elapsed past review wall budget) \d+s\b", r"\1 s", line) for line in stuck]
+    signature = sha256_obj((_snapshot(con, run), tuple(sorted(stable))))
+    row = con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind=? ORDER BY seq DESC LIMIT 1",
+                      (run["id"], WAIT_STALL_KIND)).fetchone()
+    prior = json.loads(row["payload_json"] or "{}").get("signature") if row else None
+    return signature != prior, signature
+
 
 def _action_signature(con, run: dict) -> str | None:
     """The currently actionable guidance, including its source state.
@@ -656,6 +695,7 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         signals, signals_seq = worker_signals(con, run)
         asked, _, acts = questions.scan(con, run)
         stuck = stalls(con, run, since=started_at, acts=acts) + signals
+        fresh_stall, stall_signature = _fresh_stall(con, run, stuck)
         changed = _snapshot(con, run) != start
         # Only an *actionable* orchestrator event warrants an exit 0: a task paused on a
         # refused submit, a gate failure, a recheck the orchestrator must route. A pure
@@ -677,167 +717,6 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         action_signature = _action_signature(con, run) if pending else None
         first = False
         terminal = state.is_terminal(state.get_run(con, run["id"]))
-        if asked or stuck or changed or news or pending or terminal or time.time() >= deadline:
-            res = status(con, run)
-            if pending:
-                with db.transaction(con):
-                    state.emit(con, run, WAIT_ACTION_KIND, "orchestrator action reported by office wait",
-                               audience="runtime", payload={"signature": action_signature})
-            if news:
-                # status shows a bounded prefix of events; a newer urgent event
-                # behind a long informational backlog must be shown and consumed
-                # now, rather than wake every subsequent wait with the same news.
-                res.lines[1:1] = [f"· {e['summary']}" for e in news[-6:]
-                                  if f"· {e['summary']}" not in res.lines]
-                with db.transaction(con):
-                    state.consume_events(con, run["id"], news)
-            if signals:
-                with db.transaction(con):
-                    state.advance_cursor(con, run["id"], state.SIGNAL_CONSUMER, signals_seq)
-            if stuck:
-                res.lines[1:1] = [f"stall: {s}" for s in stuck]
-                res.exit_code = 3
-            if asked:
-                # status() already printed every recorded question; the new ones lead and set the exit.
-                res.lines = [res.lines[0], *[f"question: {q}" for q in asked],
-                             *[ln for ln in res.lines[1:] if ln.removeprefix("question: ") not in asked]]
-                res.exit_code = questions.EXIT
-            elif not (stuck or changed or news or pending or terminal):
-                res.lines.insert(1, f"wait: nothing new in {int(timeout)}s")
-                res.exit_code = 124
-            return add_bug_hints(con, run, res)
-        time.sleep(poll)
-
-
-def _waiting_on(con, run: dict, task: dict) -> str:
-    """What a live task is actually waiting on, so `live` never hides a stall:
-    an amendment its session must ack, a submission held for one, or gates."""
-    rid = run["id"]
-    # Only a held revision newer than the current one is still waiting; an older
-    # one was replaced by a later submission.
-    held = con.execute("SELECT id FROM revisions WHERE run_id=? AND task_id=? AND status='amendment_pending' "
-                       "AND seq > COALESCE((SELECT seq FROM revisions WHERE id=?), 0) ORDER BY seq DESC LIMIT 1",
-                       (rid, task["id"], task.get("current_revision_id"))).fetchone()
-    parts = []
-    for dl in con.execute("SELECT amendment_id, dispatch_id FROM deliveries WHERE run_id=? AND task_id=? "
-                          "AND status IN ('queued','delivered') ORDER BY created_at", (rid, task["id"])).fetchall():
-        holder = dl["dispatch_id"]
-        stale = holder and holder != task["current_dispatch_id"]
-        parts.append(f"{dl['amendment_id']} ack by {holder or 'next session'}"
-                     + (" (not the current session; it can ack it)" if stale else ""))
-    if held:
-        parts.insert(0, f"{held['id']} held for amendment")
-    if task.get("current_revision_id"):
-        from office import gates as gates_mod
-        for g in con.execute("SELECT * FROM gates WHERE revision_id=? AND status IN ('queued','running','waiting')",
-                             (task["current_revision_id"],)).fetchall():
-            owner = gates_mod.owner_state(con, run, g) if g["status"] == "running" else ("", "")
-            # An owner whose liveness cannot be read is shown, never reclaimed.
-            parts.append(f"{g['kind']} {g['status']}" + (f" ({owner[1]})" if owner[0] == "unknown" else ""))
-        if task["status"] in ("submitted", "accepted") and not parts:
-            from office import gates
-            stale = gates.stale_dependency(con, run, task)
-            if stale:
-                parts.append(stale)
-    return "; ".join(parts)
-
-
-def worker_status(con, run: dict, dispatch_id: str) -> Result:
-    from office import raising
-    d = state.get_dispatch(con, dispatch_id)
-    task = state.get_task(con, run["id"], d["task_id"]) if d and d.get("task_id") else None
-    if task is None:
-        return Result(lines=[f"{short(run['id'])} {run['phase']}"], next="no action")
-    res = Result()
-    res.add(f"{task['id']} {task['status']} | rev {task.get('current_revision_id') or '-'} | plan p{run['plan_version']}")
-    findings = con.execute("SELECT code, severity, location, summary, action FROM findings WHERE run_id=? AND task_id=? "
-                           "AND " + contract.TASK_WORK_FINDINGS + " ORDER BY created_at", (run["id"], task["id"])).fetchall()
-    for f in findings[:8]:
-        res.add(f"{f['code']} {f['severity']} {f['location'] or ''} — {f['summary'][:140]}"
-                + (f" -> {f['action'][:80]}" if f["action"] else ""))
-    block = amend.pending_block(con, run, dispatch_id)
-    res.lines.extend(block)
-    res.lines.extend(amend.pending_messages(con, run, dispatch_id))
-    if block:
-        res.next = "apply the amendment at a safe boundary, then office ack <id>"
-    elif task["status"] == "changes_required":
-        res.next = "fix the findings, then office submit"
-    elif task["status"] in ("submitted",):
-        res.next = "no action; verification is running"
-    elif raising.open_raises(con, run, dispatch_id=dispatch_id):
-        res.next = ("stop and wait; you raised it and the orchestrator answers: the answer arrives as a message in "
-                    "this session. Do not submit unfinished work")
-    elif task["status"] in ("paused", "blocked"):
-        res.next = f"stop; {task.get('pause_reason') or task['status']}"
-    elif task["status"] == "accepted":
-        res.next = "none; the task is accepted"
-    else:
-        res.next = "continue the task; office submit when ready"
-    return res
-
-
-def piggyback(con, run: dict, res: Result) -> None:
-    """Attach pending deliveries (workers) or new orchestrator events."""
-    worker = os.environ.get("OFFICE_DISPATCH_ID")
-    if worker:
-        res.notices.extend(amend.pending_block(con, run, worker))
-        res.notices.extend(amend.pending_messages(con, run, worker))
-        return
-    from office import db
-    unread = state.unread_events(con, run["id"], "orchestrator", ("orchestrator",), limit=200)
-    held = _held_seqs(con, run["id"])
-    shown = _notice_batch([e for e in unread if e["seq"] not in held], limit=4)
-    if shown:
-        res.notices.extend(f"· {e['summary']}" for e in shown)
-        with db.transaction(con):
-            _consume(con, run["id"], unread, held | {e["seq"] for e in shown})
-            signals = [e["seq"] for e in shown if e["kind"] == state.SIGNAL_KIND]
-            if signals:
-                state.advance_cursor(con, run["id"], state.SIGNAL_CONSUMER, max(signals))
-
-
-# Kinds that mean something failed or waits on the orchestrator. Everything else is informational.
-_URGENT_KINDS = frozenset({
-    "task.blocked", "task.paused", "task.findings_queued", "task.scope_requested", "task.raised", "task.restack_needed",
-    "task.amend_undelivered", "submit.refused", "submit.rejected", "integration.conflict", "integration.stale", "integration.failed",
-    "gate.unavailable", "gate.changes_required", "gate.attention", "gate.escalated", "gate.brief_defect",
-    "plan.unavailable", "plan.changes_required", "plan.attention", "plan.escalated", "plan.defect",
-    "plan.questions", "plan.contract_requested", "pr.error", "lease.revoked",
-    # convergence contract (#337)
-    "gate.recheck", "plan.recheck", "plan.intake_gap", "plan.budget_exhausted", "convergence.recheck",
-    "convergence.intake_gap", "convergence.escalation", "convergence.unavailable", "convergence.blocked",
-    "convergence.conflict"})
-_SEEN = "orchestrator:seen:"
-
-
-def _urgent(event: dict) -> bool:
-    return event["kind"] in _URGENT_KINDS or event["kind"].endswith(".failed")
-
-
-def _notice_batch(pending: list[dict], *, limit: int) -> list[dict]:
-    """The events to show: failures and blockers first, then informational notices in order,
-    `limit` in all. What does not fit stays unread for the next command."""
-    return ([e for e in pending if _urgent(e)] + [e for e in pending if not _urgent(e)])[:limit]
-
-
-def _held_seqs(con, run_id: str) -> set[int]:
-    """Events shown while an older one was still waiting: the cursor is one number, so each is
-    remembered on its own until the cursor passes it."""
-    return {int(r[0][len(_SEEN):]) for r in con.execute(
-        "SELECT consumer FROM cursors WHERE run_id=? AND consumer LIKE ?", (run_id, _SEEN + "%"))}
-
-
-def _consume(con, run_id: str, unread: list[dict], consumed: set[int]) -> None:
-    """Move the orchestrator cursor over the leading run of consumed events; remember the rest by seq."""
-    through = 0
-    for e in unread:
-        if e["seq"] not in consumed:
-            break
-        through = e["seq"]
-    if through:
-        state.advance_cursor(con, run_id, "orchestrator", through)
-        con.execute("DELETE FROM cursors WHERE run_id=? AND consumer LIKE ? AND CAST(substr(consumer, ?) AS INTEGER)<=?",
-                    (run_id, _SEEN + "%", len(_SEEN) + 1, through))
-    for seq in consumed:
-        if seq > through:
-            state.advance_cursor(con, run_id, _SEEN + str(seq), seq)
+        if asked or fresh_stall or changed or news or pending or terminal or time.time() >= deadline:
+... (output truncated, full output saved to: /mnt/files/.composio/output/bash_tune_stdout.txt)
+Run 'cat /mnt/files/.composio/output/bash_tune_stdout.txt' to view the full output, or use 'head -n 100 /mnt/files/.composio/output/bash_tune_stdout.txt' / 'tail -n 100 /mnt/files/.composio/output/bash_tune_stdout.txt' to view parts of it.

@@ -761,3 +761,68 @@ def test_wait_on_an_already_terminal_run_returns_at_once_not_124(env):
     code, out = env.office("wait", "--run", run_id, "--timeout", "60", "--poll", "0.2", env=EXTERNAL)
     assert time.monotonic() - started < 30, "wait did not wake at once on a terminal run"
     assert code == 0 and "abandoned" in out and "nothing new" not in out, out
+
+# --- #697, #701, #722: independent pending action vs watchdog progress ---
+
+@pytest.mark.approved
+def test_723_reported_pending_action_does_not_suppress_new_other_stalls(env):
+    from office import state
+    _go(env)
+    env.office("revoke", "T1", check=0)
+    code, _ = _wait(env, EXTERNAL, timeout="2")
+    assert code == 0
+    # A second wait is free to monitor other work despite an unchanged blocker.
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs LIMIT 1").fetchone()[0])
+    con.execute("INSERT INTO gates(id, run_id, subject, task_id, kind, input_key, status, created_at) "
+                "VALUES('G-watch',?, 'task','T1','checks','orphan','running','2026-01-01')", (run["id"],))
+    con.commit()
+    code, out = _wait(env, EXTERNAL, timeout="2")
+    assert code == 3 and "G-watch" in out, out
+    code, out = _wait(env, EXTERNAL, timeout="1")
+    assert code == 124, out  # unchanged stall is not sent again every second
+
+
+def test_723_busy_spinner_hangs_only_without_actual_progress(env, monkeypatch):
+    from office import watchdog, state
+    _go(env)
+    d = _as_herdr(env)
+    con = env.con()
+    run = state.get_run(con, d["run_id"])
+    monkeypatch.setenv("OFFICE_EXECUTOR_PROGRESS_STALL_S", "2")
+    act = {"alive": True, "busy": True, "status": "working", "text": "Reading file... (2m 10s)"}
+    assert watchdog.check(con, run, d, role="executor", activity=act) is None
+    con.execute("UPDATE dispatches SET watchdog_progress_since='2000-01-01T00:00:00+00:00' WHERE id=?", (d["id"],))
+    con.commit()
+    d = state.get_dispatch(con, d["id"])
+    act["text"] = "Reading file... (30m 1s)"  # cosmetic time advances, no evidence of work
+    stalled = watchdog.check(con, run, d, role="executor", activity=act)
+    assert stalled and "no pane, worktree or log progress" in stalled and d["id"] in stalled
+    # A real file update is progress, even while the spinner keeps spinning.
+    from pathlib import Path
+    (Path(d["worktree"]) / "calc.py").write_text("# real progress\n")
+    d = state.get_dispatch(con, d["id"])
+    assert watchdog.check(con, run, d, role="executor", activity=act) is None
+
+
+def test_723_running_reviewer_with_no_output_surfaces_stall_without_minting_a_verdict(env, monkeypatch):
+    from office import watchdog, state, rerun, guide
+    _go(env)
+    d = _as_herdr(env)
+    con = env.con()
+    con.execute("UPDATE dispatches SET role='code_reviewer', task_id='T1', status='running' WHERE id=?", (d["id"],))
+    con.commit()
+    d = state.get_dispatch(con, d["id"])
+    run = state.get_run(con, d["run_id"])
+    monkeypatch.setenv("OFFICE_REVIEW_NO_PROGRESS_S", "2")
+    monkeypatch.setenv("OFFICE_REVIEW_WALL_S", "3600")
+    act = {"alive": True, "busy": True, "status": "working", "text": "Reviewing... (2m 30s)"}
+    monkeypatch.setattr(rerun, "agent_activity", lambda _d: act)
+    assert watchdog.reviewer_stalls(con, run) == []
+    con.execute("UPDATE dispatches SET watchdog_progress_since='2000-01-01T00:00:00+00:00' WHERE id=?", (d["id"],))
+    con.commit()
+    reports = watchdog.reviewer_stalls(con, run)
+    assert len(reports) == 1 and "reviewer" in reports[0] and "no output" in reports[0]
+    status = guide.status(con, run, probe_panes=True)
+    assert any("blocker:" in ln and "reviewer" in ln for ln in status.lines)
+    assert con.execute("SELECT COUNT(*) FROM gates WHERE verdict IS NOT NULL").fetchone()[0] == 0
