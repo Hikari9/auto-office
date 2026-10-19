@@ -408,3 +408,24 @@ def test_723_new_review_record_wakes_even_when_short_next_action_is_unchanged(en
     with db.transaction(con):
         state.emit(con, run, "gate.recheck", "duplicate review report", task_id="T1")
     assert root_wake.poll(con, run) == "no-action"
+
+
+@pytest.mark.parametrize("status,expected", [("done", "delivered"), ("idle", "delivered"),
+                                             ("working", "busy"), ("blocked", "unsupported")])
+def test_723_root_whose_turn_finished_unfocused_is_idle_for_delivery(env, monkeypatch, status, expected):
+    """Herdr reports a finished, unfocused Claude turn as `done`, not `idle`.
+    That is the normal state of an unattended root, so it must still be woken."""
+    approved_run(env, plan=PLAN_TWO, executor=[{"submit": False}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    con, run = setup_root(env, monkeypatch)
+    monkeypatch.setattr(root_wake, "_agent_in_pane",
+                        lambda pane: ("root-claude", status) if pane == PANE else None)
+    sent = []
+    monkeypatch.setattr(dispatch, "submit_prompt",
+                        lambda name, text, *, pane=None: sent.append(name) or "landed")
+    with db.transaction(con):
+        state.emit(con, run, "task.paused", "fake actionable pause", task_id="T1")
+    with db.transaction(con):
+        con.execute("UPDATE root_wake_bindings SET last_action_signature='stale' WHERE run_id=?", (run["id"],))
+    assert root_wake.poll(con, run) == expected
+    assert bool(sent) == (expected == "delivered")

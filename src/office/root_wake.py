@@ -39,6 +39,10 @@ ACTIONABLE = frozenset({
 MIN_POLL = 0.5
 MAX_ATTEMPTS = 4
 WATCHDOG_POLL_SECONDS = 15.0  # separate from completion wake
+# Herdr reports a Claude agent whose turn finished as `done` until its pane is
+# focused, then `idle`. Both mean the turn ended and the composer is free; an
+# unattended root that just finished its turn is normally `done`.
+IDLE_STATES = frozenset({"idle", "done"})
 
 
 
@@ -306,7 +310,7 @@ def poll(con, run: dict) -> str:
         if verified is None or verified[0] != binding["agent_name"]:
             _finish(con, run["id"], seqs, token, "awaiting_attachment", "root agent unavailable or mismatched")
             return "detached"
-        if verified[1] != "idle":
+        if verified[1] not in IDLE_STATES:
             if verified[1] == "working":
                 _finish(con, run["id"], seqs, token, "defer", "root busy; queued for idle")
                 return "busy"
