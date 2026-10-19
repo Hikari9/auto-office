@@ -429,3 +429,27 @@ def test_723_root_whose_turn_finished_unfocused_is_idle_for_delivery(env, monkey
         con.execute("UPDATE root_wake_bindings SET last_action_signature='stale' WHERE run_id=?", (run["id"],))
     assert root_wake.poll(con, run) == expected
     assert bool(sent) == (expected == "delivered")
+
+
+@pytest.mark.parametrize("landing", ["landed", ""])
+def test_723_root_reading_context_during_landing_confirmation_is_observed(env, monkeypatch, landing):
+    """Live pilot: Herdr confirms a landing seconds after the prompt arrives, and the
+    root runs `office context` before that. Its observation must not be dropped,
+    and a late or unknown transport result must not downgrade it."""
+    approved_run(env, plan=PLAN_TWO, executor=[{"submit": False}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    con, run = setup_root(env, monkeypatch)
+
+    def send(name, text, *, pane=None):
+        root_wake.observe(con, run)  # root reacts before submit_prompt returns
+        return landing
+
+    monkeypatch.setattr(dispatch, "submit_prompt", send)
+    with db.transaction(con):
+        state.emit(con, run, "task.paused", "fake actionable pause", task_id="T1")
+    with db.transaction(con):
+        con.execute("UPDATE root_wake_bindings SET last_action_signature='stale' WHERE run_id=?", (run["id"],))
+    root_wake.poll(con, run)
+    rows = events(con, run)
+    assert rows and {r["state"] for r in rows} == {"observed"}
+    assert all(r["observed_at"] and r["token"] is None for r in rows)

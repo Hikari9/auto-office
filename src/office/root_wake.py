@@ -264,7 +264,10 @@ def _finish(con, run_id: str, seqs: list[int], token: str, state_name: str, erro
             *, signature: str | None = None, generation: int | None = None) -> None:
     with db.transaction(con):
         if state_name == "delivered":
-            con.executemany("UPDATE root_wake_intents SET state='delivered', delivered_at=?, token=NULL, "
+            # The root may already have read `office context` while Herdr was
+            # still confirming the landing; keep that stronger `observed` receipt.
+            con.executemany("UPDATE root_wake_intents SET state=CASE WHEN state='observed' THEN 'observed' "
+                            "ELSE 'delivered' END, delivered_at=?, token=NULL, "
                             "lease_until=NULL, last_error=NULL WHERE run_id=? AND event_seq=? AND token=?",
                             [(now_iso(), run_id, seq, token) for seq in seqs])
             if signature is not None and generation is not None:
@@ -272,6 +275,11 @@ def _finish(con, run_id: str, seqs: list[int], token: str, state_name: str, erro
                             "WHERE run_id=? AND enabled=1 AND generation=?",
                             (signature, run_id, generation))
         else:
+            # A root that already observed fresh state outranks any transport
+            # outcome; only release the claim on those receipts.
+            con.executemany("UPDATE root_wake_intents SET token=NULL, lease_until=NULL "
+                            "WHERE run_id=? AND event_seq=? AND token=? AND state='observed'",
+                            [(run_id, seq, token) for seq in seqs])
             for seq in seqs:
                 row = con.execute("SELECT attempts FROM root_wake_intents WHERE run_id=? AND event_seq=? "
                                   "AND token=?", (run_id, seq, token)).fetchone()
@@ -367,8 +375,10 @@ def observe(con, run: dict) -> None:
     if not binding or ("herdr", binding["session_id"]) not in discovery.session_keys():
         return
     with db.transaction(con):
+        # `claimed` too: Herdr's landing confirmation takes seconds, and a root
+        # that is already reading context must not lose its observation receipt.
         con.execute("UPDATE root_wake_intents SET state='observed', observed_at=? WHERE run_id=? "
-                    "AND state='delivered'", (now_iso(), run["id"]))
+                    "AND state IN ('delivered','claimed')", (now_iso(), run["id"]))
 
 
 def record_root_activity(con, run: dict, *, before: int, command: str) -> None:
