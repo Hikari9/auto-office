@@ -417,7 +417,7 @@ The shipped config currently expresses preferences such as:
 | Plan reviewer | Prefer `luna@high`, then Claude `opus@low` (only fallback); requires review capability and benchmark index score >= 31. |
 | Executor | Requires builder capability and benchmark index score >= 31; selection is shaped by task evidence, quota, policy, and cost. |
 | Code reviewer | Reviews each lane's composed result (per task on `v3.1` runs). Prefer `luna@high`, then Claude `opus@low` (only fallback); independent from the producer's model family; benchmark score >= 31. |
-| Visual reviewer | Prefer agy `gemini-3.8-flash` routes, then Sonnet, then Luna; also requires a passing image-sensitive conformance proof for that exact route. |
+| Visual reviewer | Prefer agy `gemini-3.8-flash` routes, fallback Sonnet only; also requires a passing image-sensitive conformance proof for that exact route. |
 | Closeout verifier | Requires verification capability and at least medium effort. |
 
 These are policy defaults, not promises that a particular route will always be selected. Installed harnesses, trust evidence, task shape, model-family floors, live quota, benchmark availability, and explicit user overrides can all change the result.
