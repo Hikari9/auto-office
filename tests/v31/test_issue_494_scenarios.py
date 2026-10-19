@@ -1249,7 +1249,9 @@ def test_s12_db_changes_are_additive_and_the_previous_runtime_keeps_working_on_t
     assert after.execute("SELECT value FROM schema_meta WHERE key='office_schema'").fetchone()[0] == str(db.SCHEMA_VERSION)
     assert now_dump == expected  # no column changed, no row changed, in any pre-existing table
     new = tables_after - tables_before
-    assert new == {"route_probes", "route_probe_reservations", "route_trials", "route_discovery_events"}
+    assert new == {"route_probes", "route_probe_reservations", "route_trials", "route_discovery_events",
+                   # #723: opt-in root wake receipts (new tables only; no existing table changed).
+                   "root_wake_bindings", "root_wake_intents", "root_wake_stall_state"}
     assert all(after.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] == 0 for t in new)
     after.close()
     again = old.connect(path)  # the previous runtime still opens it and keeps writing its own tables

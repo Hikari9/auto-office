@@ -578,8 +578,59 @@ def test_723_signal_and_stall_wakes_keep_the_human_decision_guard(env, monkeypat
     ('office decide L-T1 review --quote "<user words>"', True),
     ('office approve waive T1:c --quote "<words>"', True),
     ("office amend route T1 --as claude/sonnet --quote \"<user's words>\"", True),
+    ("T1: plan review RECHECK; a fix that changes requirements or authority still needs the user", True),
+    ("land it: push b and open a PR (merge to main stays with the user), then office close", True),
+    ("T2 needs user-visible acceptance evidence; office dispatch T2", False),
     ("office dispatch T2", False),
     ("office review T1:convergence", False),
 ])
 def test_723_human_only_classifies_user_authority_commands(action, human):
     assert root_wake._human_only(action) is human
+
+
+def test_723_session_moving_to_another_run_waits_for_an_in_flight_wake(env, monkeypatch):
+    """Review P1: office start/resume moving the root pane to another run takes the
+    old run's delivery lock, so it cannot complete between the final check and the send."""
+    import threading
+    import time as _time
+    from office import discovery
+    con, run = _pending_wake(env, monkeypatch)
+    moved = []
+
+    def rebind():
+        other = db.connect()
+        try:
+            with root_wake.rebind_fence(other, [("herdr", PANE)]), db.transaction(other):
+                other.execute("UPDATE session_bindings SET run_id='other-run' WHERE harness='herdr' AND session_id=?",
+                              (PANE,))
+            moved.append(_time.monotonic())
+        finally:
+            other.close()
+
+    sent = []
+
+    def send(name, text, *, pane=None):
+        t = threading.Thread(target=rebind)
+        t.start()
+        _time.sleep(0.5)
+        assert t.is_alive() and not moved, "session moved while a prompt was in flight"
+        sent.append(_time.monotonic())
+        send.thread = t
+        return "landed"
+
+    monkeypatch.setattr(dispatch, "submit_prompt", send)
+    assert root_wake.poll(con, run) == "delivered"
+    send.thread.join(10)
+    assert moved and moved[0] >= sent[0]
+    with db.transaction(con):
+        state.emit(con, run, "task.paused", "after move", task_id="T1")
+    with db.transaction(con):
+        con.execute("UPDATE root_wake_bindings SET last_action_signature='stale' WHERE run_id=?", (run["id"],))
+    assert root_wake.poll(con, run) == "detached" and len(sent) == 1
+
+
+def test_723_lifecycle_start_and_resume_bind_inside_the_rebind_fence():
+    import inspect
+    from office import lifecycle
+    src = inspect.getsource(lifecycle)
+    assert src.count("root_wake.rebind_fence(") == 2

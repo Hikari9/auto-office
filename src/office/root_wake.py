@@ -47,18 +47,59 @@ IDLE_STATES = frozenset({"idle", "done"})
 
 
 
+_LOCAL = threading.local()  # per-thread reentrancy; other threads must block
+
+
+def _held() -> dict[str, int]:
+    if not hasattr(_LOCAL, "held"):
+        _LOCAL.held = {}
+    return _LOCAL.held
+
+
 @contextlib.contextmanager
 def _delivery_lock(run_id: str):
     """Serialize the final pre-send check and the Herdr prompt against a
-    disable (`--wake-off`) or rebind, so neither can complete between them."""
+    disable (`--wake-off`), a rebind, or a session moving to another run, so
+    none can complete between them. Reentrant within one process. Always
+    taken before any DB transaction (lock order: flock, then SQLite)."""
+    held = _held()
+    if run_id in held:
+        held[run_id] += 1
+        try:
+            yield
+        finally:
+            held[run_id] -= 1
+        return
     run_dir = paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     with (run_dir / "root-wake.deliver.lock").open("a+") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
+        held[run_id] = 1
         try:
             yield
         finally:
+            del held[run_id]
             fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def rebind_fence(con, keys):
+    """Hold the delivery lock of every auto-wake run whose root is one of these
+    session keys while the caller (office start/resume) moves the session
+    binding, so an in-flight wake cannot prompt a pane that just changed runs."""
+    panes = sorted({s for h, s in keys if h == "herdr" and s})
+    runs: list[str] = []
+    if panes:
+        marks = ",".join("?" for _ in panes)
+        try:
+            runs = sorted({r[0] for r in con.execute(
+                f"SELECT run_id FROM root_wake_bindings WHERE enabled=1 AND session_id IN ({marks})", panes)})
+        except Exception:
+            runs = []  # a database without the wake tables has nothing to fence
+    with contextlib.ExitStack() as stack:
+        for rid in runs:
+            stack.enter_context(_delivery_lock(rid))
+        yield
 
 
 def _binding(con, run_id: str) -> dict | None:
@@ -183,12 +224,16 @@ def reconcile(con, run: dict) -> int:
 
 
 def _human_only(action: str) -> bool:
-    """Guidance needing the user. Every Office command that records user
-    authority (approve, decide, waive, amend route, ...) takes `--quote`, so
-    that marker classifies it structurally, independent of the wording."""
-    low = action.lower()
-    return ("--quote" in low or "ask the user" in low or "authorization" in low
-            or "intake_gap" in low or "user's words" in low or "user words" in low)
+    """Guidance that involves the user, decided conservatively.
+
+    Every Office command that records user authority takes `--quote`, and
+    guidance that needs a person names "the user" (ask the user, still needs
+    the user, only the user may, stays with the user, ...). A false positive
+    costs one ask-the-user round trip; a false negative could let the root
+    mint authority, so any user mention except user-visible behaviour counts."""
+    low = action.lower().replace("user-visible", "")
+    return ("--quote" in low or "authorization" in low or "intake_gap" in low
+            or re.search(r"\buser", low) is not None)
 
 
 def _actionable_now(con, run: dict, seqs: list[int]) -> tuple[str, str, bool] | None:

@@ -11,7 +11,7 @@ import subprocess
 from pathlib import Path
 
 from office import config as cfg
-from office import db, discovery, jobs, legacy, paths, planpath, scoring, state, version
+from office import db, discovery, jobs, legacy, paths, planpath, root_wake, scoring, state, version
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, new_run_id, now_iso, pid_alive, sha256_obj, short
@@ -167,7 +167,7 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
             planner_problem = f"no qualifying planner route ({planner_decision.get('status')}); planning inline instead"
             planner_mode, planner_decision = "inline", None
     try:
-        with db.transaction(con):
+        with root_wake.rebind_fence(con, discovery.session_keys(harness, session)), db.transaction(con):
             now = now_iso()
             con.execute(
                 "INSERT INTO runs(id, family_id, created_at, plugin_commit, policy_hash, catalog_hash, adapter_hash, "
@@ -286,7 +286,7 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
         by_session = discovery.executor_session_dispatch(con, keys)
         if by_session:
             raise discovery.refuse_executor_binding(by_session[0], by_session[1], "this session")
-    with db.transaction(con):
+    with root_wake.rebind_fence(con, [] if worker else keys), db.transaction(con):
         if not worker:
             # Only `office resume <run>` is an explicit choice that wins across repositories;
             # a bare resume binds by cwd and yields like an `office start` binding.
