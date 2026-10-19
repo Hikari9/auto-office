@@ -539,3 +539,28 @@ def test_723_root_that_turns_busy_before_the_send_is_deferred(env, monkeypatch):
     monkeypatch.setattr(dispatch, "submit_prompt", lambda name, text, *, pane=None: sent.append(1) or "landed")
     assert root_wake.poll(con, run) == "busy" and not sent
     assert {r["state"] for r in events(con, run)} == {"retry"}
+
+
+@pytest.mark.parametrize("path", ["watchdog.stall", "worker.signal"])
+def test_723_signal_and_stall_wakes_keep_the_human_decision_guard(env, monkeypatch, path):
+    """Review P1: a stall or worker-stop wake while current guidance needs the user
+    must carry the ask-the-user-and-stop guard, never a bare continue."""
+    from office import guide
+    approved_run(env, plan=PLAN_TWO, executor=[{"submit": False}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    con, run = setup_root(env, monkeypatch)
+    monkeypatch.setattr(guide, "next_action", lambda con, run: (
+        'ask the user (native question tool) for authorization of r2, then office approve plan --quote "<w>"'))
+    did = task_row(env)["current_dispatch_id"]
+    with db.transaction(con):
+        if path == "watchdog.stall":
+            con.execute("INSERT INTO root_wake_stall_state(run_id, fingerprint, last_alert_at) VALUES(?,?,?)",
+                        (run["id"], "fp1", "2026-01-01T00:00:00+00:00"))
+            state.emit(con, run, "watchdog.stall", "stall", payload={"fingerprint": "fp1"})
+        else:
+            state.emit(con, run, "worker.signal", "preflight stop", task_id="T1", dispatch_id=did,
+                       payload={"signal": "stop"})
+    sent = []
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda name, text, *, pane=None: sent.append(text) or "landed")
+    assert root_wake.poll(con, run) == "delivered"
+    assert "HUMAN DECISION REQUIRED" in sent[0] and "No authorization" in sent[0]

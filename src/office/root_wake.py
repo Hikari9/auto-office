@@ -182,6 +182,11 @@ def reconcile(con, run: dict) -> int:
     return len(rows)
 
 
+def _human_only(action: str) -> bool:
+    low = action.lower()
+    return "ask the user" in low or "authorization" in low or "intake_gap" in low
+
+
 def _actionable_now(con, run: dict, seqs: list[int]) -> tuple[str, str, bool] | None:
     """Derive a fresh reason to notify from the *current* Office authority.
 
@@ -201,6 +206,10 @@ def _actionable_now(con, run: dict, seqs: list[int]) -> tuple[str, str, bool] | 
         (run["id"], *seqs)).fetchall()
     if not candidates:
         return None
+    # Human-only guidance is derived first so every wake reason below carries
+    # the stop-and-ask guard; a signal or stall never bypasses it.
+    action = guide.next_action(con, current)
+    human = _human_only(action)
 
     # A confirmed stall is only live while its fingerprint remains the latest
     # active watchdog state. Clearing the stall makes old event rows inert.
@@ -212,7 +221,7 @@ def _actionable_now(con, run: dict, seqs: list[int]) -> tuple[str, str, bool] | 
         payload = json.loads(e["payload_json"] or "{}")
         if payload.get("fingerprint") == stall["fingerprint"]:
             return (sha256_obj(("watchdog.stall", e["seq"], stall["fingerprint"])),
-                    "A confirmed silent stall requires orchestrator attention", False)
+                    "A confirmed silent stall requires orchestrator attention", human)
 
     # Terminal preflight stops can carry their own durable signal even when
     # guide.next_action still says "exceptions only" for the worker.
@@ -225,16 +234,13 @@ def _actionable_now(con, run: dict, seqs: list[int]) -> tuple[str, str, bool] | 
             payload = e["payload_json"] or ""
             return (sha256_obj(("worker.signal", e["task_id"], e["dispatch_id"], payload,
                                 task["status"])),
-                    f"Worker {e['task_id']} reported an unresolved stop or decision", False)
+                    f"Worker {e['task_id']} reported an unresolved stop or decision", human)
 
     # The same action-signature mechanism that protects office wait is derived
     # from phase, task/revision status, frozen requirements/plan and next action.
     sig = _authoritative_action_signature(con, current)
     if sig is None:
         return None
-    action = guide.next_action(con, current)
-    human = ("ask the user" in action.lower() or "authorization" in action.lower()
-             or "needs authorization" in action.lower() or "intake_gap" in action.lower())
     return sig, action, human
 
 
