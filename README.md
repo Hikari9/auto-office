@@ -414,9 +414,9 @@ The shipped config currently expresses preferences such as:
 | Role | Example preference / floor |
 |---|---|
 | Planner | Prefer `opus@medium`, then `astra@low`; requires planning capability and at least low effort. |
-| Plan reviewer | Prefer `luna@xhigh`, then Claude `opus@low`; requires review capability and benchmark index score >= 31. |
+| Plan reviewer | Prefer `luna@high`, then Claude `opus@low` (only fallback); requires review capability and benchmark index score >= 31. |
 | Executor | Requires builder capability and benchmark index score >= 31; selection is shaped by task evidence, quota, policy, and cost. |
-| Code reviewer | Reviews each lane's composed result (per task on `v3.1` runs). Prefer `luna@xhigh`, then Claude `opus@low`; independent from the producer's model family; benchmark score >= 31. |
+| Code reviewer | Reviews each lane's composed result (per task on `v3.1` runs). Prefer `luna@high`, then Claude `opus@low` (only fallback); independent from the producer's model family; benchmark score >= 31. |
 | Visual reviewer | Prefer agy `gemini-3.8-flash` routes, then Sonnet, then Luna; also requires a passing image-sensitive conformance proof for that exact route. |
 | Closeout verifier | Requires verification capability and at least medium effort. |
 
