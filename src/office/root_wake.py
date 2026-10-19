@@ -174,6 +174,10 @@ def attach(con, run: dict, *, off: bool = False) -> str:
     # the same human decision or unchanged next action is not a wake trigger.
     initial_action = _authoritative_action_signature(con, run)
     with _delivery_lock(run["id"]), db.transaction(con):
+        # The pane may have moved to another run since the check above.
+        if not con.execute("SELECT 1 FROM session_bindings WHERE run_id=? AND harness='herdr' AND session_id=? "
+                           "AND ended_at IS NULL", (run["id"], pane)).fetchone():
+            raise Refused("wake-unbound", "this Herdr pane was rebound to another run before auto-wake registered")
         con.execute("INSERT INTO root_wake_bindings(run_id, harness, session_id, pane_id, agent_name, enabled, "
                     "generation, registered_at, last_event_seq, last_action_signature) VALUES(?,?,?,?,?,1,1,?, "
                     "(SELECT COALESCE(MAX(seq),0) FROM events WHERE run_id=?), ?) "

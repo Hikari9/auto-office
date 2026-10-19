@@ -634,3 +634,24 @@ def test_723_lifecycle_start_and_resume_bind_inside_the_rebind_fence():
     from office import lifecycle
     src = inspect.getsource(lifecycle)
     assert src.count("root_wake.rebind_fence(") == 2
+
+
+def test_723_attach_refuses_if_the_pane_is_rebound_before_registration(env, monkeypatch):
+    """Review P2: the session-binding check is repeated inside the lock and transaction."""
+    approved_run(env, plan=PLAN_TWO, executor=[{"submit": False}])
+    monkeypatch.setenv("HERDR_PANE_ID", PANE)
+    monkeypatch.delenv("OFFICE_DISPATCH_ID", raising=False)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()[0])
+    with db.transaction(con):
+        discovery.bind(con, run, [("herdr", PANE)], "resume")
+
+    def verified_then_moved(pane):
+        with db.transaction(con):  # another office start moves the pane meanwhile
+            con.execute("UPDATE session_bindings SET run_id='other-run' WHERE session_id=?", (PANE,))
+        return ("root-claude", "idle")
+
+    monkeypatch.setattr(root_wake, "_agent_in_pane", verified_then_moved)
+    with pytest.raises(state.Refused, match="rebound"):
+        root_wake.attach(con, run)
+    assert root_wake._binding(con, run["id"]) is None
