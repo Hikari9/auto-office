@@ -827,3 +827,19 @@ def test_723_running_reviewer_with_no_output_surfaces_stall_without_minting_a_ve
     status = guide.status(con, run, probe_panes=True)
     assert any("blocker:" in ln and "reviewer" in ln for ln in status.lines)
     assert con.execute("SELECT COUNT(*) FROM gates WHERE verdict IS NOT NULL").fetchone()[0] == 0
+
+
+def test_wall_budget_stall_signature_ignores_the_growing_elapsed_age(env):
+    """A reviewer past its wall budget is one stall episode: its elapsed age grows on
+    every poll and must not make each `office wait` report the same stall again."""
+    from office import db, guide, state
+    approved_run(env)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    line = "T1 reviewer D1: {}s elapsed past review wall budget 3600s; preserve the attempt"
+    fresh, sig = guide._fresh_stall(con, run, [line.format(3700)])
+    assert fresh and sig
+    with db.transaction(con):
+        state.emit(con, run, guide.WAIT_STALL_KIND, "stall", audience="runtime", payload={"signature": sig})
+    assert guide._fresh_stall(con, run, [line.format(3760)]) == (False, sig)
+    assert guide._fresh_stall(con, run, [line.format(3760).replace("D1", "D2")])[0]
