@@ -655,3 +655,54 @@ def test_723_attach_refuses_if_the_pane_is_rebound_before_registration(env, monk
     with pytest.raises(state.Refused, match="rebound"):
         root_wake.attach(con, run)
     assert root_wake._binding(con, run["id"]) is None
+
+
+def test_723_rebind_fence_is_keyed_on_the_pane_not_on_discovered_runs(env, monkeypatch):
+    """Review P1: a rebind that starts before any wake binding exists still fences
+    a concurrent attach and any delivery to that pane, because it locks the pane."""
+    import threading
+    import time as _time
+    approved_run(env, plan=PLAN_TWO, executor=[{"submit": False}])
+    monkeypatch.setenv("HERDR_PANE_ID", PANE)
+    monkeypatch.delenv("OFFICE_DISPATCH_ID", raising=False)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()[0])
+    with db.transaction(con):
+        discovery.bind(con, run, [("herdr", PANE)], "resume")
+    monkeypatch.setattr(root_wake, "_agent_in_pane", lambda pane: ("root-claude", "idle"))
+    assert root_wake._binding(con, run["id"]) is None  # nothing to discover yet
+    inside, release, done = threading.Event(), threading.Event(), []
+
+    def rebinding():
+        other = db.connect()
+        try:
+            with root_wake.rebind_fence(other, [("herdr", PANE)]):
+                inside.set()
+                release.wait(5)
+                with db.transaction(other):
+                    other.execute("UPDATE session_bindings SET run_id='other-run' WHERE session_id=?", (PANE,))
+        finally:
+            other.close()
+
+    t = threading.Thread(target=rebinding)
+    t.start()
+    assert inside.wait(5)
+
+    def attach_now():
+        con2 = db.connect()
+        try:
+            root_wake.attach(con2, run)
+            done.append("attached")
+        except state.Refused as exc:
+            done.append(exc)
+        finally:
+            con2.close()
+
+    a = threading.Thread(target=attach_now)
+    a.start()
+    _time.sleep(0.5)
+    assert not done, "attach completed inside another command's rebind"
+    release.set()
+    t.join(5)
+    a.join(5)
+    assert done and isinstance(done[0], state.Refused)  # the pane now belongs to another run

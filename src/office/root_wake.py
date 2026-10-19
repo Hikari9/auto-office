@@ -57,48 +57,49 @@ def _held() -> dict[str, int]:
 
 
 @contextlib.contextmanager
-def _delivery_lock(run_id: str):
-    """Serialize the final pre-send check and the Herdr prompt against a
-    disable (`--wake-off`), a rebind, or a session moving to another run, so
-    none can complete between them. Reentrant within one process. Always
-    taken before any DB transaction (lock order: flock, then SQLite)."""
+def _flock(key: str, path: Path):
+    """Exclusive file lock, reentrant within one thread; other threads block."""
     held = _held()
-    if run_id in held:
-        held[run_id] += 1
+    if key in held:
+        held[key] += 1
         try:
             yield
         finally:
-            held[run_id] -= 1
+            held[key] -= 1
         return
-    run_dir = paths.run_dir(run_id)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    with (run_dir / "root-wake.deliver.lock").open("a+") as fh:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
-        held[run_id] = 1
+        held[key] = 1
         try:
             yield
         finally:
-            del held[run_id]
+            del held[key]
             fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _pane_lock(pane: str):
+    """Fences everything that can change which run a root pane belongs to
+    (office start/resume rebinding, attach) against a wake being sent to it.
+    Lock order everywhere: pane lock, then run lock, then SQLite."""
+    name = sha256_obj(("herdr", pane))[:32]
+    return _flock(f"pane:{pane}", paths.state_home() / "root-wake-locks" / f"{name}.lock")
+
+
+def _delivery_lock(run_id: str):
+    """Serializes the final pre-send check and prompt with --wake-off and attach."""
+    return _flock(f"run:{run_id}", paths.run_dir(run_id) / "root-wake.deliver.lock")
 
 
 @contextlib.contextmanager
 def rebind_fence(con, keys):
-    """Hold the delivery lock of every auto-wake run whose root is one of these
-    session keys while the caller (office start/resume) moves the session
-    binding, so an in-flight wake cannot prompt a pane that just changed runs."""
+    """Held by office start/resume while they move the session binding: locks
+    every Herdr pane among the caller's session keys, with no lookup first, so
+    no wake to that pane can be between its final check and its send."""
     panes = sorted({s for h, s in keys if h == "herdr" and s})
-    runs: list[str] = []
-    if panes:
-        marks = ",".join("?" for _ in panes)
-        try:
-            runs = sorted({r[0] for r in con.execute(
-                f"SELECT run_id FROM root_wake_bindings WHERE enabled=1 AND session_id IN ({marks})", panes)})
-        except Exception:
-            runs = []  # a database without the wake tables has nothing to fence
     with contextlib.ExitStack() as stack:
-        for rid in runs:
-            stack.enter_context(_delivery_lock(rid))
+        for pane in panes:
+            stack.enter_context(_pane_lock(pane))
         yield
 
 
@@ -173,7 +174,7 @@ def attach(con, run: dict, *, off: bool = False) -> str:
     # Capture existing guidance as an initial baseline. A later event that leaves
     # the same human decision or unchanged next action is not a wake trigger.
     initial_action = _authoritative_action_signature(con, run)
-    with _delivery_lock(run["id"]), db.transaction(con):
+    with _pane_lock(pane), _delivery_lock(run["id"]), db.transaction(con):
         # The pane may have moved to another run since the check above.
         if not con.execute("SELECT 1 FROM session_bindings WHERE run_id=? AND harness='herdr' AND session_id=? "
                            "AND ended_at IS NULL", (run["id"], pane)).fetchone():
@@ -403,7 +404,7 @@ def poll(con, run: dict) -> str:
         # superseded while Herdr was reporting idle. Re-evaluate Office's
         # authoritative action *immediately* before the external prompt.
         # Fence the final check and the prompt against --wake-off and rebinds.
-        with _delivery_lock(run["id"]):
+        with _pane_lock(binding["pane_id"]), _delivery_lock(run["id"]):
             # The root may have started a turn since the idle check above.
             again = _agent_in_pane(binding["pane_id"])
             if again is None or again[0] != binding["agent_name"]:
