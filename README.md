@@ -464,7 +464,7 @@ The runtime still records the override, resolves catalog aliases when possible, 
 ### Example: prepare a task for an externally started agent
 
 ```bash
-office dispatch T2 --as codex/luna@xhigh --external
+office dispatch T2 --as codex/luna@high --external
 ```
 
 Office prepares the task worktree, lease, brief, and environment, but does not launch the agent. It prints the commands required to start the external/Herdr agent against that exact task contract.
@@ -503,7 +503,7 @@ Details: [`docs/onboarding.md`](docs/onboarding.md).
 
 ```bash
 office setup                                   # prompts per role, then cost policy; --repo for this repository
-office config roles.code_reviewer.preferred_seed claude/sonnet@high,codex/luna@xhigh
+office config roles.code_reviewer.preferred_seed claude/sonnet@high,codex/luna@high
 office config roles.code_reviewer.preferred_seed   # read the effective value
 office config cost_policy.default quota_saver --repo
 office config --list [--all] [--show-origin]   # what the files set (--all: every effective value)
