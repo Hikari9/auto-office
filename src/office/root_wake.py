@@ -162,40 +162,43 @@ def attach(con, run: dict, *, off: bool = False) -> str:
         with _delivery_lock(run["id"]), db.transaction(con):
             con.execute("UPDATE root_wake_bindings SET enabled=0, generation=generation+1 WHERE run_id=?", (run["id"],))
         return "root auto-wake disabled (pending receipts preserved)"
-    binding = con.execute("SELECT 1 FROM session_bindings WHERE run_id=? AND harness='herdr' AND session_id=? "
-                          "AND ended_at IS NULL", (run["id"], pane)).fetchone()
-    if not binding:
-        raise Refused("wake-unbound", "this Herdr pane is not bound to the run as its orchestrator")
-    verified = _agent_in_pane(pane)
-    if verified is None:
-        raise Refused("wake-unsupported", "Herdr did not verify exactly one named Claude agent in the bound root pane; "
-                      "no autonomous prompt will be sent", next_step="office status; use office wait manually")
-    name, _ = verified
-    # Capture existing guidance as an initial baseline. A later event that leaves
-    # the same human decision or unchanged next action is not a wake trigger.
-    initial_action = _authoritative_action_signature(con, run)
-    with _pane_lock(pane), _delivery_lock(run["id"]), db.transaction(con):
-        # The pane may have moved to another run since the check above.
-        if not con.execute("SELECT 1 FROM session_bindings WHERE run_id=? AND harness='herdr' AND session_id=? "
-                           "AND ended_at IS NULL", (run["id"], pane)).fetchone():
-            raise Refused("wake-unbound", "this Herdr pane was rebound to another run before auto-wake registered")
-        con.execute("INSERT INTO root_wake_bindings(run_id, harness, session_id, pane_id, agent_name, enabled, "
-                    "generation, registered_at, last_event_seq, last_action_signature) VALUES(?,?,?,?,?,1,1,?, "
-                    "(SELECT COALESCE(MAX(seq),0) FROM events WHERE run_id=?), ?) "
-                    "ON CONFLICT(run_id) DO UPDATE SET harness=excluded.harness, session_id=excluded.session_id, "
-                    "pane_id=excluded.pane_id, agent_name=excluded.agent_name, enabled=1, "
-                    "generation=root_wake_bindings.generation+1, registered_at=excluded.registered_at, "
-                    "last_event_seq=root_wake_bindings.last_event_seq, last_action_signature=NULL, "
-                    "supervisor_pid=NULL", (run["id"], "herdr", pane, pane, name, now_iso(), run["id"], initial_action))
-        # Explicit opt-in after inspecting the pane safely retries undelivered
-        # receipts. An in-flight claim's outcome is *ambiguous* on rebind and
-        # must remain stopped for a further operator inspection.
-        con.execute("UPDATE root_wake_intents SET state='pending', token=NULL, lease_until=NULL, "
-                    "not_before=NULL WHERE run_id=? AND state='awaiting_attachment'", (run["id"],))
-        con.execute("UPDATE root_wake_intents SET state='awaiting_attachment', token=NULL, "
-                    "lease_until=NULL, last_error='binding replaced during delivery; inspect pane' "
-                    "WHERE run_id=? AND state='claimed'", (run["id"],))
-    return f"auto-wake enabled for the verified Claude agent {name} in pane {pane}"
+    # Pane lock, then run lock, then reads: nothing that moves this pane or
+    # delivers to it can interleave with verification and registration.
+    with _pane_lock(pane), _delivery_lock(run["id"]):
+        binding = con.execute("SELECT 1 FROM session_bindings WHERE run_id=? AND harness='herdr' AND session_id=? "
+                              "AND ended_at IS NULL", (run["id"], pane)).fetchone()
+        if not binding:
+            raise Refused("wake-unbound", "this Herdr pane is not bound to the run as its orchestrator")
+        verified = _agent_in_pane(pane)
+        if verified is None:
+            raise Refused("wake-unsupported", "Herdr did not verify exactly one named Claude agent in the bound root pane; "
+                          "no autonomous prompt will be sent", next_step="office status; use office wait manually")
+        name, _ = verified
+        # Capture existing guidance as an initial baseline. A later event that leaves
+        # the same human decision or unchanged next action is not a wake trigger.
+        initial_action = _authoritative_action_signature(con, run)
+        with db.transaction(con):
+            # The pane may have moved to another run since the check above.
+            if not con.execute("SELECT 1 FROM session_bindings WHERE run_id=? AND harness='herdr' AND session_id=? "
+                               "AND ended_at IS NULL", (run["id"], pane)).fetchone():
+                raise Refused("wake-unbound", "this Herdr pane was rebound to another run before auto-wake registered")
+            con.execute("INSERT INTO root_wake_bindings(run_id, harness, session_id, pane_id, agent_name, enabled, "
+                        "generation, registered_at, last_event_seq, last_action_signature) VALUES(?,?,?,?,?,1,1,?, "
+                        "(SELECT COALESCE(MAX(seq),0) FROM events WHERE run_id=?), ?) "
+                        "ON CONFLICT(run_id) DO UPDATE SET harness=excluded.harness, session_id=excluded.session_id, "
+                        "pane_id=excluded.pane_id, agent_name=excluded.agent_name, enabled=1, "
+                        "generation=root_wake_bindings.generation+1, registered_at=excluded.registered_at, "
+                        "last_event_seq=root_wake_bindings.last_event_seq, last_action_signature=NULL, "
+                        "supervisor_pid=NULL", (run["id"], "herdr", pane, pane, name, now_iso(), run["id"], initial_action))
+            # Explicit opt-in after inspecting the pane safely retries undelivered
+            # receipts. An in-flight claim's outcome is *ambiguous* on rebind and
+            # must remain stopped for a further operator inspection.
+            con.execute("UPDATE root_wake_intents SET state='pending', token=NULL, lease_until=NULL, "
+                        "not_before=NULL WHERE run_id=? AND state='awaiting_attachment'", (run["id"],))
+            con.execute("UPDATE root_wake_intents SET state='awaiting_attachment', token=NULL, "
+                        "lease_until=NULL, last_error='binding replaced during delivery; inspect pane' "
+                        "WHERE run_id=? AND state='claimed'", (run["id"],))
+        return f"auto-wake enabled for the verified Claude agent {name} in pane {pane}"
 
 
 def reconcile(con, run: dict) -> int:
