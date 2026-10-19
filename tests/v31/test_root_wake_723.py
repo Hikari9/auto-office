@@ -245,3 +245,26 @@ print(json.dumps({"result": result}))
         deadline = time.monotonic() + 3
         while pid and pid_alive(pid) and time.monotonic() < deadline:
             time.sleep(0.05)
+
+
+def test_723_silent_stall_is_a_separate_deduplicated_event_and_wakes_idle_root(env, monkeypatch):
+    """A stuck pane generates a slow-watch event once; fast notifier only sees DB events."""
+    from office import guide, questions
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    symptoms = ["T1 reviewer D-test no output or progress for 900s"]
+    monkeypatch.setattr(questions, "scan", lambda *a, **kw: ([], [], {}))
+    monkeypatch.setattr(guide, "stalls", lambda *a, **kw: list(symptoms))
+    calls = []
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **kw: calls.append(a) or "landed")
+    assert root_wake.watchdog_tick(con, run) == "alerted"
+    assert root_wake.watchdog_tick(con, run) == "unchanged"
+    assert con.execute("SELECT COUNT(*) FROM events WHERE run_id=? AND kind='watchdog.stall'", (run["id"],)).fetchone()[0] == 1
+    assert root_wake.poll(con, run) == "delivered"
+    assert len(calls) == 1
+    symptoms.clear()
+    assert root_wake.watchdog_tick(con, run) == "cleared"
+    symptoms.append("T1 reviewer D-test no output or progress for 1200s")
+    assert root_wake.watchdog_tick(con, run) == "alerted"  # new episode, not a ticking timer
+    assert root_wake.poll(con, run) == "delivered"
+    assert len(calls) == 2

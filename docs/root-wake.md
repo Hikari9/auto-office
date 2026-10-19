@@ -4,7 +4,7 @@
 
 This release introduces a **single opt-in Claude/Herdr root delivery adapter**. It does not borrow `/goal` or any slash-goal runtime, create agents, restart dead orchestrators, or bypass the Office lifecycle. SQLite `runs.db`, including its committed `events`, tasks, reviews, authorizations and outbox, remains the only authority. The notification transport is a **receipt**, not a new task or an approval. Independent code/visual reviews, risk gates, scope leases, explicit user decisions, and the final merge boundary stay unchanged.
 
-The standalone [silent-stall watchdog](../src/office/watchdog.py) handles stalled spinners and quiet reviewers. The root completion wake-up does not wait for that watchdog's longer detection threshold.
+The standalone [silent-stall watchdog](../src/office/watchdog.py) handles stalled spinners and quiet reviewers. An independent slow watchdog loop (15-second cadence, default progress thresholds 10 minutes for executors and 15 minutes for reviewers) samples panes/worktrees, persists a deduplicated `watchdog.stall` Office event, and wakes the idle root through the **same event notification ledger**. The root completion wake-up does not wait for this expensive watchdog's longer detection threshold. Stall alerts do not revoke or retry any agent or reviewer automatically.
 
 ## Opt-in
 

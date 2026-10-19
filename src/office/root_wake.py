@@ -12,11 +12,13 @@ import subprocess
 import sys
 import time
 import uuid
+import re
+import threading
 from datetime import timedelta
 from pathlib import Path
 
 from office import db, discovery, paths, state
-from office.util import now_iso, parse_iso, pid_alive
+from office.util import now_iso, parse_iso, pid_alive, sha256_obj
 
 # Event families with an actual lifecycle outcome or a possible next step.
 # In particular launch.*, setup.*, logs, and wait.* must never wake a root.
@@ -31,11 +33,13 @@ ACTIONABLE = frozenset({
     "convergence.verdict", "convergence.approved", "convergence.recheck",
     "convergence.unavailable", "convergence.intake_gap", "convergence.escalation",
     "integration.accepted", "integration.failed", "integration.conflict", "integration.stale",
-    "pr.error", "pr.merged", "worker.signal", "amendment.applied", "amendment.contract_changed",
+    "pr.error", "pr.merged", "worker.signal", "watchdog.stall", "amendment.applied", "amendment.contract_changed",
     "requirements.changed", "finding.disposition", "authority.plan", "authority.land",
 })
 MIN_POLL = 0.5
 MAX_ATTEMPTS = 4
+WATCHDOG_POLL_SECONDS = 15.0  # separate from completion wake
+
 
 
 def _binding(con, run_id: str) -> dict | None:
@@ -295,6 +299,56 @@ def lines(con, run: dict) -> list[str]:
     return [text]
 
 
+def watchdog_tick(con, run: dict) -> str:
+    """Slow, separate no-model stall pass, persistently deduped by episode.
+
+    The root's fast completion path never reads the agent pane or worktree for
+    stalls. A new *confirmed* stalled state emits one ordinary Office event.
+    This event only wakes the attached root; it never changes a gate or dispatch.
+    """
+    if not _binding(con, run["id"]) or state.is_terminal(state.get_run(con, run["id"])):
+        return "inactive"
+    from office import guide, questions
+    _, _, acts = questions.scan(con, run)
+    stalls = guide.stalls(con, run, acts=acts)
+    stable = tuple(sorted(re.sub(r"\b\d+s\b", "Xs", s) for s in stalls))
+    signature = sha256_obj(stable) if stalls else None
+    with db.transaction(con):
+        row = con.execute("SELECT fingerprint FROM root_wake_stall_state WHERE run_id=?", (run["id"],)).fetchone()
+        prior = row[0] if row else None
+        if signature == prior:
+            return "unchanged"
+        con.execute("INSERT INTO root_wake_stall_state(run_id, fingerprint, last_alert_at) VALUES(?,?,?) "
+                    "ON CONFLICT(run_id) DO UPDATE SET fingerprint=excluded.fingerprint, "
+                    "last_alert_at=excluded.last_alert_at", (run["id"], signature, now_iso() if signature else None))
+        if signature:
+            state.emit(con, run, "watchdog.stall", f"silent-stall watchdog detected {len(stalls)} blocker(s): "
+                       + "; ".join(stalls)[:260], payload={"fingerprint": signature, "count": len(stalls)},
+                       audience="orchestrator")
+            return "alerted"
+    return "cleared"
+
+
+def _watchdog_loop(run_id: str) -> None:
+    """Dedicated slower thread with its own DB connection; cannot hold the wake poll."""
+    while True:
+        con = None
+        try:
+            con = db.connect()
+            run = state.get_run(con, run_id)
+            if not run or state.is_terminal(run) or not _binding(con, run_id):
+                return
+            watchdog_tick(con, run)
+        except Exception as exc:
+            # Monitoring failures never mean a worker is stalled. Keep normal
+            # completion notification healthy and retry on the next slow tick.
+            print(f"root wake watchdog probe unavailable: {type(exc).__name__}", file=sys.stderr)
+        finally:
+            if con is not None:
+                con.close()
+        time.sleep(WATCHDOG_POLL_SECONDS)
+
+
 def ensure(run: dict) -> None:
     """Restore a non-model supervisor after a crash from a normal Office command."""
     con = db.connect()
@@ -330,6 +384,10 @@ def supervise(run_id: str, *, once: bool = False) -> int:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return 0
+        # Pane/worktree stall probes can be slow or unavailable. Run them off
+        # the 0.5s completion-wake critical path, with an independent cadence.
+        threading.Thread(target=_watchdog_loop, args=(run_id,), daemon=True,
+                         name=f"office-stall-{run_id[:8]}").start()
         while True:
             con = db.connect()
             try:
