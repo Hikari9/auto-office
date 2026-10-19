@@ -83,8 +83,9 @@ def test_worker_submit_when_root_idle_wakes_and_fake_root_continues_without_a_hu
         code, out = env.office("dispatch", "T2", env={**EXTERNAL, "HERDR_PANE_ID": PANE})
         assert code == 0, out
     assert state.get_task(con, run["id"], "T2")["status"] == "running"
-    assert {x["state"] for x in events(con, run)} == {"acted"}
-    assert all(x["state"] == "acted" for x in events(con, run))  # old receipt never re-delivered
+    assert {x["state"] for x in events(con, run)} == {"root_activity_observed"}
+    assert all(x["root_activity_at"] and x["acted_at"] is None for x in events(con, run))
+    assert all(x["root_activity_command"] == "dispatch" for x in events(con, run))
 
 
 def test_restarts_coalesce_bursts_and_never_awaken_for_informational_events(env, monkeypatch):
@@ -98,6 +99,7 @@ def test_restarts_coalesce_bursts_and_never_awaken_for_informational_events(env,
     assert root_wake.poll(con, run) == "no-action"
     assert not sent and not events(con, run)
     with db.transaction(con):
+        state.update_task(con, run["id"], "T1", status="blocked", pause_reason="decision required")
         for i in range(3):
             state.emit(con, run, "gate.recheck", f"review result {i}")
     assert root_wake.poll(con, run) == "delivered"
@@ -113,6 +115,7 @@ def test_busy_root_defers_without_burning_retry_budget(env, monkeypatch):
     approved_run(env)
     con, run = setup_root(env, monkeypatch)
     with db.transaction(con):
+        state.update_task(con, run["id"], "T1", status="blocked", pause_reason="worker blocked")
         state.emit(con, run, "task.blocked", "T1 blocked")
     monkeypatch.setattr(root_wake, "_agent_in_pane", lambda _pane: ("root-claude", "working"))
     monkeypatch.setattr(dispatch, "submit_prompt", lambda *_a, **_kw: pytest.fail("busy root must not be prompted"))
@@ -127,6 +130,7 @@ def test_detached_and_rebound_root_never_receives_a_wrong_pane_prompt(env, monke
     approved_run(env)
     con, run = setup_root(env, monkeypatch)
     with db.transaction(con):
+        state.update_task(con, run["id"], "T1", status="blocked", pause_reason="review needs decision")
         state.emit(con, run, "gate.recheck", "review finished")
         con.execute("UPDATE session_bindings SET ended_at=? WHERE harness='herdr' AND session_id=?", ("2026-01-01", PANE))
     monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **kw: pytest.fail("stale binding was prompted"))
@@ -146,6 +150,7 @@ def test_unknown_prompt_delivery_requires_manual_inspection_not_duplicate_retrie
     approved_run(env)
     con, run = setup_root(env, monkeypatch)
     with db.transaction(con):
+        state.update_task(con, run["id"], "T1", status="blocked", pause_reason="worker refused")
         state.emit(con, run, "task.blocked", "worker refused")
     calls = []
     monkeypatch.setattr(dispatch, "submit_prompt", lambda *args, **kw: calls.append(args) or "")
@@ -167,9 +172,17 @@ def test_723_background_supervisor_wakes_idle_root_and_root_dispatches_within_fi
     import time
     from pathlib import Path
 
-    approved_run(env, plan=PLAN_TWO)
+    approved_run(env, plan=PLAN_TWO, executor=[{"submit": False}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
     con = env.con()
     run = state.get_run(con, con.execute("SELECT id FROM runs LIMIT 1").fetchone()[0])
+    d = dict(con.execute("SELECT * FROM dispatches WHERE id=?",
+                         (task_row(env)["current_dispatch_id"],)).fetchone())
+    wt = Path(d["worktree"])
+    (wt / "calc.py").write_text(GOOD_ADD)
+    self_reviewed(wt, "calc.py")
+    worker_env = {"OFFICE_RUN_ID": run["id"], "OFFICE_DISPATCH_ID": d["id"],
+                  "OFFICE_TASK_ID": "T1", "OFFICE_ROLE": "executor", "OFFICE_JOBS": "manual"}
     marker = env.tmp / "root-was-prompted.json"
     responded = env.tmp / "root-auto-continued.json"
     responder = env.tmp / "fake-root-responder.py"
@@ -218,9 +231,9 @@ print(json.dumps({"result": result}))
     code, output = env.office("resume", "--auto-wake", env={"HERDR_PANE_ID": PANE})
     assert code == 0 and "auto-wake enabled" in output, output
     try:
+        code, out = env.office("submit", cwd=wt, env=worker_env)
+        assert code == 0, out
         start = time.monotonic()
-        with db.transaction(con):
-            state.emit(con, run, "gate.recheck", "reviewer returned actionable RECHECK", audience="orchestrator")
         while not marker.exists() and time.monotonic() - start < 5:
             time.sleep(0.05)
         elapsed = time.monotonic() - start
@@ -234,7 +247,7 @@ print(json.dumps({"result": result}))
         assert result["context"] == result["dispatch"] == 0, result
         assert state.get_task(con, run["id"], "T2")["status"] == "running"
         print(f"ISSUE_723_FAKE_HERDR_CONTINUATION_MS={int((time.monotonic()-start)*1000)}")
-        assert {x["state"] for x in events(con, run)} & {"acted"}
+        assert {x["state"] for x in events(con, run)} & {"root_activity_observed"}
         assert root_wake.metrics(con, run)["last_delivery_ms"] < 5000
     finally:
         # Process exits when the opt-in is revoked; no background test pollution.
@@ -268,3 +281,109 @@ def test_723_silent_stall_is_a_separate_deduplicated_event_and_wakes_idle_root(e
     assert root_wake.watchdog_tick(con, run) == "alerted"  # new episode, not a ticking timer
     assert root_wake.poll(con, run) == "delivered"
     assert len(calls) == 2
+
+
+
+def test_723_settled_event_and_duplicate_do_not_prompt_unmodified_guidance(env, monkeypatch):
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **kw: pytest.fail("no authorized change"))
+    with db.transaction(con):
+        state.emit(con, run, "gate.recheck", "stale reviewer event")
+    assert root_wake.poll(con, run) == "no-action"
+    assert {x["state"] for x in events(con, run)} == {"settled"}
+    # A genuine new task state is different even though it uses the same
+    # broad event name; no hardcoded event->permission mapping.
+    delivered = []
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **kw: delivered.append(a) or "landed")
+    with db.transaction(con):
+        state.update_task(con, run["id"], "T1", status="blocked", pause_reason="needs repair")
+        state.emit(con, run, "gate.recheck", "new review finding")
+    assert root_wake.poll(con, run) == "delivered"
+    assert len(delivered) == 1
+    with db.transaction(con):
+        state.emit(con, run, "gate.recheck", "repeated result, no new work")
+    assert root_wake.poll(con, run) == "no-action"
+    assert len(delivered) == 1
+    assert events(con, run)[-1]["state"] == "settled"
+
+
+def test_723_settled_between_claim_and_send_is_not_delivered(env, monkeypatch):
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    with db.transaction(con):
+        state.update_task(con, run["id"], "T1", status="blocked", pause_reason="needs repair")
+        state.emit(con, run, "task.blocked", "T1 needs repair")
+    def changed_during_probe(pane):
+        with db.transaction(con):
+            state.update_task(con, run["id"], "T1", status="planned", pause_reason=None)
+        return "root-claude", "idle"
+    monkeypatch.setattr(root_wake, "_agent_in_pane", changed_during_probe)
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **kw: pytest.fail("stale state"))
+    assert root_wake.poll(con, run) == "no-action"
+    assert events(con, run)[0]["state"] == "settled"
+
+
+def test_723_human_only_guidance_is_raised_once_without_granting_authority(env, monkeypatch):
+    from office.util import now_iso
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    got = []
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **kw: got.append(a) or "landed")
+    with db.transaction(con):
+        con.execute("UPDATE authorizations SET revoked_at=? WHERE run_id=? AND kind='plan'",
+                    (now_iso(), run["id"]))
+        state.emit(con, run, "authority.plan", "new plan authorization needed")
+    assert root_wake.poll(con, run) == "delivered"
+    assert len(got) == 1 and "HUMAN DECISION REQUIRED" in got[0][1]
+    assert state.active_authorization(con, run, "plan") is None
+    with db.transaction(con):
+        state.emit(con, run, "authority.plan", "duplicate authorization reminder")
+    assert root_wake.poll(con, run) == "no-action"
+
+
+def test_723_preexisting_human_blocker_not_reawakened_by_stale_event(env, monkeypatch):
+    from conftest import start_inline
+    start_inline(env)
+    con, run = setup_root(env, monkeypatch)  # before plan is authorized
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **kw: pytest.fail("no new decision"))
+    with db.transaction(con):
+        state.emit(con, run, "gate.recheck", "old event; still awaiting user approval")
+    assert root_wake.poll(con, run) == "no-action"
+
+
+def test_723_durable_worker_stop_is_actionable_while_guide_says_wait(env, monkeypatch):
+    approved_run(env)
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    con, run = setup_root(env, monkeypatch)
+    d = state.get_task(con, run["id"], "T1")["current_dispatch_id"]
+    sent = []
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **kw: sent.append(a) or "landed")
+    with db.transaction(con):
+        state.emit(con, run, "worker.signal", "executor terminal preflight stop", task_id="T1",
+                   dispatch_id=d, payload={"reason": "self-review cap", "source": "preflight"})
+    assert root_wake.poll(con, run) == "delivered"
+    assert len(sent) == 1
+    assert "Auto Office run" in sent[0][1]
+
+
+def test_723_unrelated_root_event_records_activity_not_completion(env, monkeypatch):
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **kw: "landed")
+    with db.transaction(con):
+        state.update_task(con, run["id"], "T1", status="blocked", pause_reason="unfinished finding")
+        state.emit(con, run, "task.blocked", "pending finding", task_id="T1")
+    assert root_wake.poll(con, run) == "delivered"
+    monkeypatch.setattr(discovery, "session_keys", lambda: [("herdr", PANE)])
+    root_wake.observe(con, run)
+    before = con.execute("SELECT MAX(seq) FROM events WHERE run_id=?", (run["id"],)).fetchone()[0]
+    with db.transaction(con):
+        state.emit(con, run, "setup.done", "unrelated housekeeping", audience="runtime")
+    root_wake.record_root_activity(con, run, before=before, command="setup")
+    rows = events(con, run)
+    assert rows[0]["state"] == "root_activity_observed"
+    assert rows[0]["root_activity_at"] and rows[0]["root_activity_command"] == "setup"
+    assert rows[0]["root_activity_event_seq"] > before
+    assert rows[0]["acted_at"] is None
+    assert state.get_task(con, run["id"], "T1")["status"] == "blocked"

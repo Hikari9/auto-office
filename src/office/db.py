@@ -25,7 +25,7 @@ from office import paths
 # Bump when SHARED_COLUMNS or the DDL changes. The version is a record, not the
 # gate: every open also runs the additive column pass (see `migrate`), so a
 # column added without a bump still reaches existing databases.
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -77,6 +77,10 @@ SHARED_COLUMNS = {
         # #701/#722: passive progress-watchdog state; not lifecycle authority.
         "watchdog_progress_hash TEXT", "watchdog_progress_since TEXT",
     ],
+    # #723 remediation: action signature is a wake-suppression cursor, not authority.
+    "root_wake_bindings": ["last_action_signature TEXT"],
+    # Record root activity without confusing it with completion of an event.
+    "root_wake_intents": ["root_activity_at TEXT", "root_activity_command TEXT", "root_activity_event_seq INTEGER"],
     # v2 (#185): user-declared model overrides.
     "tasks": [
         "review_override_json TEXT", "pr_json TEXT", "descriptor_json TEXT",
@@ -147,8 +151,8 @@ CREATE TABLE IF NOT EXISTS self_improve_attempts(id TEXT PRIMARY KEY, run_id TEX
 CREATE TABLE IF NOT EXISTS evidence(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT, revision_id TEXT, gate_id TEXT, kind TEXT NOT NULL, path TEXT, sha256 TEXT, bytes INTEGER, meta_json TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS session_bindings(harness TEXT NOT NULL, session_id TEXT NOT NULL, run_id TEXT NOT NULL, bound_at TEXT NOT NULL, bound_by TEXT NOT NULL, ended_at TEXT, PRIMARY KEY(harness, session_id));
 -- #723: wake delivery receipts only. The lifecycle/event ledger remains the authority.
-CREATE TABLE IF NOT EXISTS root_wake_bindings(run_id TEXT PRIMARY KEY, harness TEXT NOT NULL, session_id TEXT NOT NULL, pane_id TEXT NOT NULL, agent_name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, generation INTEGER NOT NULL DEFAULT 1, registered_at TEXT NOT NULL, last_event_seq INTEGER NOT NULL DEFAULT 0, supervisor_pid INTEGER);
-CREATE TABLE IF NOT EXISTS root_wake_intents(run_id TEXT NOT NULL, event_seq INTEGER NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, token TEXT, lease_until TEXT, not_before TEXT, created_at TEXT NOT NULL, delivered_at TEXT, observed_at TEXT, acted_at TEXT, last_error TEXT, PRIMARY KEY(run_id, event_seq));
+CREATE TABLE IF NOT EXISTS root_wake_bindings(run_id TEXT PRIMARY KEY, harness TEXT NOT NULL, session_id TEXT NOT NULL, pane_id TEXT NOT NULL, agent_name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, generation INTEGER NOT NULL DEFAULT 1, registered_at TEXT NOT NULL, last_event_seq INTEGER NOT NULL DEFAULT 0, supervisor_pid INTEGER, last_action_signature TEXT);
+CREATE TABLE IF NOT EXISTS root_wake_intents(run_id TEXT NOT NULL, event_seq INTEGER NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, token TEXT, lease_until TEXT, not_before TEXT, created_at TEXT NOT NULL, delivered_at TEXT, observed_at TEXT, acted_at TEXT, root_activity_at TEXT, root_activity_command TEXT, root_activity_event_seq INTEGER, last_error TEXT, PRIMARY KEY(run_id, event_seq));
 CREATE INDEX IF NOT EXISTS root_wake_pending ON root_wake_intents(run_id, state, not_before);
 CREATE TABLE IF NOT EXISTS root_wake_stall_state(run_id TEXT PRIMARY KEY, fingerprint TEXT, last_alert_at TEXT);
 

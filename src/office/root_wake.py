@@ -85,14 +85,19 @@ def attach(con, run: dict, *, off: bool = False) -> str:
         raise Refused("wake-unsupported", "Herdr did not verify exactly one named Claude agent in the bound root pane; "
                       "no autonomous prompt will be sent", next_step="office status; use office wait manually")
     name, _ = verified
+    # Capture existing guidance as an initial baseline. A later event that leaves
+    # the same human decision or unchanged next action is not a wake trigger.
+    from office import guide
+    initial_action = guide._action_signature(con, run)
     with db.transaction(con):
         con.execute("INSERT INTO root_wake_bindings(run_id, harness, session_id, pane_id, agent_name, enabled, "
-                    "generation, registered_at, last_event_seq) VALUES(?,?,?,?,?,1,1,?, "
-                    "(SELECT COALESCE(MAX(seq),0) FROM events WHERE run_id=?)) "
+                    "generation, registered_at, last_event_seq, last_action_signature) VALUES(?,?,?,?,?,1,1,?, "
+                    "(SELECT COALESCE(MAX(seq),0) FROM events WHERE run_id=?), ?) "
                     "ON CONFLICT(run_id) DO UPDATE SET harness=excluded.harness, session_id=excluded.session_id, "
                     "pane_id=excluded.pane_id, agent_name=excluded.agent_name, enabled=1, "
                     "generation=root_wake_bindings.generation+1, registered_at=excluded.registered_at, "
-                    "last_event_seq=root_wake_bindings.last_event_seq, supervisor_pid=NULL", (run["id"], "herdr", pane, pane, name, now_iso(), run["id"]))
+                    "last_event_seq=root_wake_bindings.last_event_seq, last_action_signature=NULL, "
+                    "supervisor_pid=NULL", (run["id"], "herdr", pane, pane, name, now_iso(), run["id"], initial_action))
         # Explicit opt-in after inspecting the pane safely retries undelivered
         # receipts. An in-flight claim's outcome is *ambiguous* on rebind and
         # must remain stopped for a further operator inspection.
@@ -134,13 +139,63 @@ def reconcile(con, run: dict) -> int:
     return len(rows)
 
 
-def _runnable(con, run: dict) -> bool:
+def _actionable_now(con, run: dict, seqs: list[int]) -> tuple[str, str, bool] | None:
+    """Derive a fresh reason to notify from the *current* Office authority.
+
+    Event names are a cheap candidate filter, not a permission to prompt. The
+    actual next action comes from Office's canonical guide, except for a live,
+    durable worker-stop signal or confirmed watchdog episode that Office may
+    show as a blocker while other work is running. No pane/network reads here.
+    """
     from office import guide
-    action = guide.next_action(con, run)
-    return not action.startswith(("no action", "exceptions only", "none;"))
+    current = state.get_run(con, run["id"])
+    if not current or state.is_terminal(current):
+        return None
+    keys = ",".join("?" for _ in seqs)
+    candidates = con.execute(
+        f"SELECT seq, kind, task_id, dispatch_id, payload_json FROM events "
+        f"WHERE run_id=? AND seq IN ({keys}) ORDER BY seq",
+        (run["id"], *seqs)).fetchall()
+    if not candidates:
+        return None
+
+    # A confirmed stall is only live while its fingerprint remains the latest
+    # active watchdog state. Clearing the stall makes old event rows inert.
+    stall = con.execute("SELECT fingerprint FROM root_wake_stall_state WHERE run_id=?",
+                        (run["id"],)).fetchone()
+    for e in reversed(candidates):
+        if e["kind"] != "watchdog.stall" or not stall or not stall["fingerprint"]:
+            continue
+        payload = json.loads(e["payload_json"] or "{}")
+        if payload.get("fingerprint") == stall["fingerprint"]:
+            return (sha256_obj(("watchdog.stall", e["seq"], stall["fingerprint"])),
+                    "A confirmed silent stall requires orchestrator attention", False)
+
+    # Terminal preflight stops can carry their own durable signal even when
+    # guide.next_action still says "exceptions only" for the worker.
+    for e in reversed(candidates):
+        if e["kind"] != "worker.signal" or not e["task_id"] or not e["dispatch_id"]:
+            continue
+        task = state.get_task(con, run["id"], e["task_id"])
+        if (task and task["status"] not in state.TASK_TERMINAL
+                and task.get("current_dispatch_id") == e["dispatch_id"]):
+            payload = e["payload_json"] or ""
+            return (sha256_obj(("worker.signal", e["task_id"], e["dispatch_id"], payload,
+                                task["status"])),
+                    f"Worker {e['task_id']} reported an unresolved stop or decision", False)
+
+    # The same action-signature mechanism that protects office wait is derived
+    # from phase, task/revision status, frozen requirements/plan and next action.
+    sig = guide._action_signature(con, current)
+    if sig is None:
+        return None
+    action = guide.next_action(con, current)
+    human = ("ask the user" in action.lower() or "authorization" in action.lower()
+             or "needs authorization" in action.lower() or "intake_gap" in action.lower())
+    return sig, action, human
 
 
-def _claim(con, run: dict) -> tuple[dict, list[int], str] | None:
+def _claim(con, run: dict) -> tuple[dict, list[int], str, str, str, bool] | None:
     binding = _binding(con, run["id"])
     if not binding:
         return None
@@ -154,25 +209,40 @@ def _claim(con, run: dict) -> tuple[dict, list[int], str] | None:
                               "ORDER BY event_seq LIMIT 100", (run["id"], now)).fetchall()
         if not pending:
             return None
+        seqs = [r[0] for r in pending]
+        actionable = _actionable_now(con, run, seqs)
+        if not actionable or actionable[0] == live["last_action_signature"]:
+            # Events may settle before their delayed notification, or be
+            # duplicates of guidance the root has already received. Preserve
+            # receipts for audit, but do not spend a redundant model turn.
+            con.executemany(
+                "UPDATE root_wake_intents SET state='settled', last_error=? "
+                "WHERE run_id=? AND event_seq=? AND state IN ('pending','retry')",
+                [("no new authoritative next action", run["id"], seq) for seq in seqs])
+            return None
         # One claimed batch per run. One other supervisor cannot deliver a competing prompt.
         held = con.execute("SELECT 1 FROM root_wake_intents WHERE run_id=? AND state='claimed' "
                            "AND lease_until>? LIMIT 1", (run["id"], now)).fetchone()
         if held:
             return None
         token = uuid.uuid4().hex
-        seqs = [r[0] for r in pending]
         con.executemany("UPDATE root_wake_intents SET state='claimed', token=?, "
                         "lease_until=?, attempts=attempts+1 WHERE run_id=? AND event_seq=?",
                         [(token, (parse_iso(now) + timedelta(seconds=30)).isoformat(), run["id"], seq) for seq in seqs])
-    return binding, seqs, token
+    return binding, seqs, token, *actionable
 
 
-def _finish(con, run_id: str, seqs: list[int], token: str, state_name: str, error: str = "") -> None:
+def _finish(con, run_id: str, seqs: list[int], token: str, state_name: str, error: str = "",
+            *, signature: str | None = None, generation: int | None = None) -> None:
     with db.transaction(con):
         if state_name == "delivered":
             con.executemany("UPDATE root_wake_intents SET state='delivered', delivered_at=?, token=NULL, "
                             "lease_until=NULL, last_error=NULL WHERE run_id=? AND event_seq=? AND token=?",
                             [(now_iso(), run_id, seq, token) for seq in seqs])
+            if signature is not None and generation is not None:
+                con.execute("UPDATE root_wake_bindings SET last_action_signature=? "
+                            "WHERE run_id=? AND enabled=1 AND generation=?",
+                            (signature, run_id, generation))
         else:
             for seq in seqs:
                 row = con.execute("SELECT attempts FROM root_wake_intents WHERE run_id=? AND event_seq=? "
@@ -196,7 +266,7 @@ def poll(con, run: dict) -> str:
     batch = _claim(con, run)
     if batch is None:
         return "no-action"
-    binding, seqs, token = batch
+    binding, seqs, token, _, _, _ = batch
     try:
         # Revalidate current run, root ownership and registered pane immediately
         # before touching Herdr, never trust a stale session id or an output pane.
@@ -218,15 +288,37 @@ def poll(con, run: dict) -> str:
                 return "busy"
             _finish(con, run["id"], seqs, token, "awaiting_attachment", "root state not safely idle")
             return "unsupported"
+        # The worker/reviewer may have finished, been accepted or been
+        # superseded while Herdr was reporting idle. Re-evaluate Office's
+        # authoritative action *immediately* before the external prompt.
+        current = _actionable_now(con, run, seqs)
+        live = _binding(con, run["id"])
+        if (not live or live["generation"] != binding["generation"] or
+                live["pane_id"] != binding["pane_id"] or
+                not con.execute("SELECT 1 FROM session_bindings WHERE run_id=? AND harness='herdr' "
+                                "AND session_id=? AND ended_at IS NULL",
+                                (run["id"], binding["pane_id"])).fetchone()):
+            _finish(con, run["id"], seqs, token, "awaiting_attachment",
+                    "root detached or rebound during actionability check")
+            return "detached"
+        if current is None or current[0] == live["last_action_signature"]:
+            _finish(con, run["id"], seqs, token, "settled", "transition was settled before delivery")
+            return "no-action"
+        signature, _, human = current
+        guard = (" HUMAN DECISION REQUIRED: ask the user and stop. No authorization, "
+                 "waiver, approval, or merge may be inferred."
+                 if human else "")
         msg = (f"Auto Office run {run['id']} has new lifecycle transitions (through event {max(seqs)}). "
                f"Read `office --run {run['id']} context`, then follow only its authorized next action; "
                "continue through checks, independent reviews and closeout until a genuine wait or human decision. "
-               "Do not infer success from a submit. This notification may be a duplicate; use fresh Office state.")
+               "Do not infer success from a submit. This notification may be a duplicate; use fresh Office state."
+               + guard)
         # Herdr prompt landed != root observation. The next `office context`
         # advances the distinct observed cursor; no repeated model keepalives.
         landed = dispatch.submit_prompt(binding["agent_name"], msg, pane=binding["pane_id"])
         if landed == "landed":
-            _finish(con, run["id"], seqs, token, "delivered")
+            _finish(con, run["id"], seqs, token, "delivered",
+                    signature=signature, generation=binding["generation"])
             return "delivered"
         _finish(con, run["id"], seqs, token, "awaiting_attachment",
                 f"prompt receipt {landed or 'unknown'}; cannot prove delivery; inspect pane before manual recovery")
@@ -251,8 +343,13 @@ def observe(con, run: dict) -> None:
                     "AND state='delivered'", (now_iso(), run["id"]))
 
 
-def acted(con, run: dict, *, before: int, command: str) -> None:
-    """Record that a *root-invoked* lifecycle command changed authoritative state."""
+def record_root_activity(con, run: dict, *, before: int, command: str) -> None:
+    """Record root activity, NOT completion of any particular wake intent.
+
+    A state-changing authorized root command is evidence that the root resumed,
+    but unrelated commands cannot prove the event's requested work is done.
+    The authoritative task/gate state remains the only completion evidence.
+    """
     binding = _binding(con, run["id"])
     if not binding or os.environ.get("OFFICE_DISPATCH_ID") or ("herdr", binding["session_id"]) not in discovery.session_keys():
         return
@@ -260,8 +357,10 @@ def acted(con, run: dict, *, before: int, command: str) -> None:
     if latest <= before:
         return
     with db.transaction(con):
-        con.execute("UPDATE root_wake_intents SET state='acted', acted_at=? WHERE run_id=? "
-                    "AND state='observed'", (now_iso(), run["id"]))
+        con.execute("UPDATE root_wake_intents SET state='root_activity_observed', "
+                    "root_activity_at=?, root_activity_command=?, root_activity_event_seq=? "
+                    "WHERE run_id=? AND state='observed'",
+                    (now_iso(), command, latest, run["id"]))
 
 
 def metrics(con, run: dict) -> dict:
@@ -270,7 +369,8 @@ def metrics(con, run: dict) -> dict:
     if not binding:
         return {"enabled": False}
     row = con.execute("SELECT i.event_seq, i.kind, e.created_at AS event_at, i.delivered_at, "
-                      "i.observed_at, i.acted_at, i.last_error "
+                      "i.observed_at, i.acted_at, i.root_activity_at, i.root_activity_command, "
+                      "i.root_activity_event_seq, i.last_error "
                       "FROM root_wake_intents i JOIN events e ON e.run_id=i.run_id AND e.seq=i.event_seq "
                       "WHERE i.run_id=? AND i.delivered_at IS NOT NULL ORDER BY i.delivered_at DESC LIMIT 1",
                       (run["id"],)).fetchone()
