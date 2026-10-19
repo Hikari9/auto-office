@@ -805,12 +805,13 @@ def test_723_busy_spinner_hangs_only_without_actual_progress(env, monkeypatch):
     assert watchdog.check(con, run, d, role="executor", activity=act) is None
 
 
-def test_723_running_reviewer_with_no_output_surfaces_stall_without_minting_a_verdict(env, monkeypatch):
+@pytest.mark.parametrize("reviewer_role", ["code_reviewer", "integration_reviewer"])
+def test_723_running_reviewer_with_no_output_surfaces_stall_without_minting_a_verdict(env, monkeypatch, reviewer_role):
     from office import watchdog, state, rerun, guide
     _go(env)
     d = _as_herdr(env)
     con = env.con()
-    con.execute("UPDATE dispatches SET role='code_reviewer', task_id='T1', status='running' WHERE id=?", (d["id"],))
+    con.execute("UPDATE dispatches SET role=?, task_id='T1', status='running' WHERE id=?", (reviewer_role, d["id"]))
     con.commit()
     d = state.get_dispatch(con, d["id"])
     run = state.get_run(con, d["run_id"])

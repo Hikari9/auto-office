@@ -120,7 +120,7 @@ def reviewer_stalls(con, run: dict) -> list[str]:
     from office import rerun
     out = []
     for row in con.execute("SELECT * FROM dispatches WHERE run_id=? AND role IN "
-                           "('code_reviewer','plan_reviewer','visual_reviewer','convergence_reviewer') "
+                           "('code_reviewer','plan_reviewer','integration_reviewer','visual_reviewer','convergence_reviewer','visual_verifier','browser_verifier','closeout_verifier') "
                            "AND status='running' AND ended_at IS NULL", (run["id"],)).fetchall():
         d = dict(row)
         act = rerun.agent_activity(d) if d.get("launcher") == "herdr" else None
