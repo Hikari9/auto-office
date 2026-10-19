@@ -387,3 +387,24 @@ def test_723_unrelated_root_event_records_activity_not_completion(env, monkeypat
     assert rows[0]["root_activity_event_seq"] > before
     assert rows[0]["acted_at"] is None
     assert state.get_task(con, run["id"], "T1")["status"] == "blocked"
+
+
+def test_723_new_review_record_wakes_even_when_short_next_action_is_unchanged(env, monkeypatch):
+    from office import guide
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    before = guide.next_action(con, run)
+    seen = []
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **kw: seen.append(a) or "landed")
+    with db.transaction(con):
+        con.execute("INSERT INTO gates(id, run_id, subject, task_id, kind, input_key, status, "
+                    "verdict, summary, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    ("G-new-review", run["id"], "task", "T1", "code", "review-result", "done",
+                     "RECHECK", "reviewer finished with a new finding", "2026-10-19T12:00:00+00:00"))
+        state.emit(con, run, "gate.recheck", "fresh independent review verdict", task_id="T1")
+    assert guide.next_action(con, run) == before
+    assert root_wake.poll(con, run) == "delivered"
+    assert len(seen) == 1
+    with db.transaction(con):
+        state.emit(con, run, "gate.recheck", "duplicate review report", task_id="T1")
+    assert root_wake.poll(con, run) == "no-action"

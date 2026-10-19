@@ -47,6 +47,31 @@ def _binding(con, run_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def _authoritative_action_signature(con, run: dict) -> str | None:
+    """Canonical next action plus durable review/finding/amendment changes.
+
+    `guide._action_signature` intentionally tracks only task/revision/plan
+    guidance for `office wait`. A second review verdict or amendment can be
+    relevant even if that short guidance remains identical. Keep those *actual*
+    SQLite lifecycle records in the wake signature; never hash mere log events.
+    """
+    from office import guide
+    action = guide._action_signature(con, run)
+    if action is None:
+        return None
+    rid = run["id"]
+    gates = tuple(tuple(r) for r in con.execute(
+        "SELECT id, task_id, revision_id, kind, status, verdict, round, attempt, summary "
+        "FROM gates WHERE run_id=? ORDER BY id", (rid,)).fetchall())
+    findings = tuple(tuple(r) for r in con.execute(
+        "SELECT id, task_id, revision_id, state, severity, blocking, disposition, summary "
+        "FROM findings WHERE run_id=? ORDER BY id", (rid,)).fetchall())
+    deliveries = tuple(tuple(r) for r in con.execute(
+        "SELECT id, task_id, amendment_id, status, target_version FROM deliveries "
+        "WHERE run_id=? ORDER BY id", (rid,)).fetchall())
+    return sha256_obj((action, gates, findings, deliveries))
+
+
 def _agent_in_pane(pane: str) -> tuple[str, str] | None:
     """Only Herdr's named Claude agent is supported by the pilot, never a shell."""
     from office import dispatch
@@ -87,8 +112,7 @@ def attach(con, run: dict, *, off: bool = False) -> str:
     name, _ = verified
     # Capture existing guidance as an initial baseline. A later event that leaves
     # the same human decision or unchanged next action is not a wake trigger.
-    from office import guide
-    initial_action = guide._action_signature(con, run)
+    initial_action = _authoritative_action_signature(con, run)
     with db.transaction(con):
         con.execute("INSERT INTO root_wake_bindings(run_id, harness, session_id, pane_id, agent_name, enabled, "
                     "generation, registered_at, last_event_seq, last_action_signature) VALUES(?,?,?,?,?,1,1,?, "
@@ -186,7 +210,7 @@ def _actionable_now(con, run: dict, seqs: list[int]) -> tuple[str, str, bool] | 
 
     # The same action-signature mechanism that protects office wait is derived
     # from phase, task/revision status, frozen requirements/plan and next action.
-    sig = guide._action_signature(con, current)
+    sig = _authoritative_action_signature(con, current)
     if sig is None:
         return None
     action = guide.next_action(con, current)
