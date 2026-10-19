@@ -453,3 +453,46 @@ def test_723_root_reading_context_during_landing_confirmation_is_observed(env, m
     rows = events(con, run)
     assert rows and {r["state"] for r in rows} == {"observed"}
     assert all(r["observed_at"] and r["token"] is None for r in rows)
+
+
+def test_723_wake_off_cannot_complete_between_final_check_and_prompt(env, monkeypatch):
+    """Review P1: --wake-off or a rebind racing an in-flight poll must not slip in after
+    the final binding check; it waits for the send, and a later poll sends nothing."""
+    import threading
+    import time as _time
+    approved_run(env, plan=PLAN_TWO, executor=[{"submit": False}])
+    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    con, run = setup_root(env, monkeypatch)
+    finished = []
+
+    def wake_off():
+        other = db.connect()
+        try:
+            root_wake.attach(other, run, off=True)
+            finished.append(_time.monotonic())
+        finally:
+            other.close()
+
+    sent = []
+
+    def send(name, text, *, pane=None):
+        t = threading.Thread(target=wake_off)
+        t.start()
+        _time.sleep(0.5)
+        assert t.is_alive() and not finished, "wake-off completed while a prompt was in flight"
+        sent.append(_time.monotonic())
+        send.thread = t
+        return "landed"
+
+    monkeypatch.setattr(dispatch, "submit_prompt", send)
+    with db.transaction(con):
+        state.emit(con, run, "task.paused", "fake actionable pause", task_id="T1")
+    with db.transaction(con):
+        con.execute("UPDATE root_wake_bindings SET last_action_signature='stale' WHERE run_id=?", (run["id"],))
+    assert root_wake.poll(con, run) == "delivered"
+    send.thread.join(10)
+    assert finished and finished[0] >= sent[0]
+    assert root_wake._binding(con, run["id"]) is None
+    with db.transaction(con):
+        state.emit(con, run, "task.paused", "after wake-off", task_id="T1")
+    assert root_wake.poll(con, run) == "no-action" and len(sent) == 1

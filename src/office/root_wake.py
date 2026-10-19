@@ -5,6 +5,7 @@ are durable notification receipts. No agent is started or user authority minted.
 """
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
@@ -44,6 +45,20 @@ WATCHDOG_POLL_SECONDS = 15.0  # separate from completion wake
 # unattended root that just finished its turn is normally `done`.
 IDLE_STATES = frozenset({"idle", "done"})
 
+
+
+@contextlib.contextmanager
+def _delivery_lock(run_id: str):
+    """Serialize the final pre-send check and the Herdr prompt against a
+    disable (`--wake-off`) or rebind, so neither can complete between them."""
+    run_dir = paths.run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    with (run_dir / "root-wake.deliver.lock").open("a+") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def _binding(con, run_id: str) -> dict | None:
@@ -102,7 +117,7 @@ def attach(con, run: dict, *, off: bool = False) -> str:
         raise Refused("wake-no-pane", "auto-wake pilot requires the active HERDR_PANE_ID; no detached root launch",
                       next_step="office resume without --auto-wake")
     if off:
-        with db.transaction(con):
+        with _delivery_lock(run["id"]), db.transaction(con):
             con.execute("UPDATE root_wake_bindings SET enabled=0, generation=generation+1 WHERE run_id=?", (run["id"],))
         return "root auto-wake disabled (pending receipts preserved)"
     binding = con.execute("SELECT 1 FROM session_bindings WHERE run_id=? AND harness='herdr' AND session_id=? "
@@ -117,7 +132,7 @@ def attach(con, run: dict, *, off: bool = False) -> str:
     # Capture existing guidance as an initial baseline. A later event that leaves
     # the same human decision or unchanged next action is not a wake trigger.
     initial_action = _authoritative_action_signature(con, run)
-    with db.transaction(con):
+    with _delivery_lock(run["id"]), db.transaction(con):
         con.execute("INSERT INTO root_wake_bindings(run_id, harness, session_id, pane_id, agent_name, enabled, "
                     "generation, registered_at, last_event_seq, last_action_signature) VALUES(?,?,?,?,?,1,1,?, "
                     "(SELECT COALESCE(MAX(seq),0) FROM events WHERE run_id=?), ?) "
@@ -327,38 +342,40 @@ def poll(con, run: dict) -> str:
         # The worker/reviewer may have finished, been accepted or been
         # superseded while Herdr was reporting idle. Re-evaluate Office's
         # authoritative action *immediately* before the external prompt.
-        current = _actionable_now(con, run, seqs)
-        live = _binding(con, run["id"])
-        if (not live or live["generation"] != binding["generation"] or
-                live["pane_id"] != binding["pane_id"] or
-                not con.execute("SELECT 1 FROM session_bindings WHERE run_id=? AND harness='herdr' "
-                                "AND session_id=? AND ended_at IS NULL",
-                                (run["id"], binding["pane_id"])).fetchone()):
+        # Fence the final check and the prompt against --wake-off and rebinds.
+        with _delivery_lock(run["id"]):
+            current = _actionable_now(con, run, seqs)
+            live = _binding(con, run["id"])
+            if (not live or live["generation"] != binding["generation"] or
+                    live["pane_id"] != binding["pane_id"] or
+                    not con.execute("SELECT 1 FROM session_bindings WHERE run_id=? AND harness='herdr' "
+                                    "AND session_id=? AND ended_at IS NULL",
+                                    (run["id"], binding["pane_id"])).fetchone()):
+                _finish(con, run["id"], seqs, token, "awaiting_attachment",
+                        "root detached or rebound during actionability check")
+                return "detached"
+            if current is None or current[0] == live["last_action_signature"]:
+                _finish(con, run["id"], seqs, token, "settled", "transition was settled before delivery")
+                return "no-action"
+            signature, _, human = current
+            guard = (" HUMAN DECISION REQUIRED: ask the user and stop. No authorization, "
+                     "waiver, approval, or merge may be inferred."
+                     if human else "")
+            msg = (f"Auto Office run {run['id']} has new lifecycle transitions (through event {max(seqs)}). "
+                   f"Read `office --run {run['id']} context`, then follow only its authorized next action; "
+                   "continue through checks, independent reviews and closeout until a genuine wait or human decision. "
+                   "Do not infer success from a submit. This notification may be a duplicate; use fresh Office state."
+                   + guard)
+            # Herdr prompt landed != root observation. The next `office context`
+            # advances the distinct observed cursor; no repeated model keepalives.
+            landed = dispatch.submit_prompt(binding["agent_name"], msg, pane=binding["pane_id"])
+            if landed == "landed":
+                _finish(con, run["id"], seqs, token, "delivered",
+                        signature=signature, generation=binding["generation"])
+                return "delivered"
             _finish(con, run["id"], seqs, token, "awaiting_attachment",
-                    "root detached or rebound during actionability check")
-            return "detached"
-        if current is None or current[0] == live["last_action_signature"]:
-            _finish(con, run["id"], seqs, token, "settled", "transition was settled before delivery")
-            return "no-action"
-        signature, _, human = current
-        guard = (" HUMAN DECISION REQUIRED: ask the user and stop. No authorization, "
-                 "waiver, approval, or merge may be inferred."
-                 if human else "")
-        msg = (f"Auto Office run {run['id']} has new lifecycle transitions (through event {max(seqs)}). "
-               f"Read `office --run {run['id']} context`, then follow only its authorized next action; "
-               "continue through checks, independent reviews and closeout until a genuine wait or human decision. "
-               "Do not infer success from a submit. This notification may be a duplicate; use fresh Office state."
-               + guard)
-        # Herdr prompt landed != root observation. The next `office context`
-        # advances the distinct observed cursor; no repeated model keepalives.
-        landed = dispatch.submit_prompt(binding["agent_name"], msg, pane=binding["pane_id"])
-        if landed == "landed":
-            _finish(con, run["id"], seqs, token, "delivered",
-                    signature=signature, generation=binding["generation"])
-            return "delivered"
-        _finish(con, run["id"], seqs, token, "awaiting_attachment",
-                f"prompt receipt {landed or 'unknown'}; cannot prove delivery; inspect pane before manual recovery")
-        return "unknown"
+                    f"prompt receipt {landed or 'unknown'}; cannot prove delivery; inspect pane before manual recovery")
+            return "unknown"
     except Exception as exc:
         # A transport exception can happen *after* Herdr took the prompt. Never
         # issue a second unverified model turn; require explicit inspection.
