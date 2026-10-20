@@ -54,6 +54,12 @@ _WRAPPERS = frozenset({"env", "timeout", "nice", "sudo", "nohup", "stdbuf", "com
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
 _SEPARATORS = frozenset({";", "&", "|", "(", ")"})
 
+# Prose words that make a following `git` read as the English noun ("from git
+# for one SHA", "a temp git repo"). Only these relax the unknown-subcommand
+# (possible alias) rule; any other context is scanned strictly.
+_ENGLISH_BEFORE = frozenset({"from", "with", "in", "of", "on", "by", "a", "an", "the",
+                             "temp", "bare", "local", "no", "any", "each", "one"})
+
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # In plan prose, matching Markdown code delimiters are formatting, not shell
 # substitution. Retain the code text so actual git pushes/aliases still scan.
@@ -81,7 +87,14 @@ def unsafe_manual_push(command: str, *, prose: bool = False) -> bool:
     if prose and _NEGATED.match(command):
         return _negated_prose_unsafe(command)
     if prose:
+        # Backticked `git ...` is command-shaped: scan it strictly, so an unknown
+        # subcommand (possible alias) still refuses even where bare prose would not.
+        for span in _INLINE_CODE.finditer(command):
+            if re.match(r"\s*git\s", span.group(2)) and _scan(span.group(2), 0):
+                return True
         command = _INLINE_CODE.sub(lambda match: match.group(2), command)
+        # An apostrophe inside a word ("41806c9's") is English, not a shell quote.
+        command = re.sub(r"(?<=\w)'(?=\w)", "", command)
     return _scan(command, 0, prose=prose)
 
 
@@ -146,6 +159,7 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
             return True
     if _scan_wrappers(tokens, depth, prose=prose):
         return True
+    starts = set(_command_starts(tokens))
     for i, token in enumerate(tokens):
         if PurePosixPath(token).name != "git":
             continue
@@ -158,8 +172,14 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
                 j += 1
             else:
                 break
-        if j < len(tokens) and (tokens[j] == "push" or tokens[j] not in _KNOWN_GIT_COMMANDS):
-            return True
+        if j < len(tokens):
+            # In prose, "git" mid-sentence ("from git for one SHA") is an English
+            # word, so an unknown word after it is not an alias; `git push` still is.
+            english = (prose and i not in starts and i > 0 and not tokens[i + 1].startswith("-")
+                       and tokens[i - 1].lower() in _ENGLISH_BEFORE)
+            unknown = tokens[j] not in _KNOWN_GIT_COMMANDS and not english
+            if tokens[j] == "push" or unknown:
+                return True
     # Dynamic executable construction must not bypass a detectable push token.
     if "push" in tokens and (
         re.search(r"\bgit\b", command, re.I)
