@@ -31,7 +31,7 @@ and its `next:` line; never run the 3.0 `office_runtime.py` helpers for a 3.x ru
      compose to the reviewed integration tree. `merge-conflict`, `branch-moved` or `recovery-tree-mismatch` push nothing: compose by hand
      as the refusal says, then `office close --landed-externally <pr-url>`.
    - Merged through a PR Office did not open: `office close --landed-externally <pr-url>` (add `--quote` when the merge lacks an accepted revision).
-   - Not authorized to merge: `office close --handoff <pr-url>`; the PR is marked ready, and base sync and worktree removal wait for the user.
+   - Not authorized to merge: `office close --handoff <pr-url>`; a PR Office opened is marked ready (an external PR keeps its draft state), and base sync and worktree removal wait for the user.
 3. **Document.** Update the docs the repo already maintains (CHANGELOG, README, doc comments) and make the PR body accurate. Do not invent a
    docs file. `office close` prints a non-blocking `warning:` when code changed but no CHANGELOG/README did: act on it or say why not.
 4. **Sync base and remove worktrees (runtime).** On a merged close the runtime fast-forwards local `<base>` to `origin/<base>` and verifies

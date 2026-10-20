@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from conftest import GOOD_ADD, approved_run
+from office import closeout
 from test_land import _plan, _run
 from test_task_prs import remote_head
 
@@ -102,3 +103,20 @@ def test_refused_close_still_ends_with_the_report_line(env):
     assert code == 4 and "landing not recorded" in out, out
     assert _last(out) == DONE + "stopped early (close-blocked); nothing closed or cleaned up", out
     assert Path(env.repo).is_dir()
+
+
+def test_handoff_leaves_a_pr_office_did_not_open_in_draft(monkeypatch):
+    """#731: `gh pr ready` runs only for a PR number Office recorded on a task."""
+    import subprocess
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(closeout.subprocess, "run", fake_run)
+    external = closeout.mark_ready("/repo", "https://github.com/o/r/pull/7", {"3"})
+    assert calls == [] and "not opened by Office" in external, (calls, external)
+    owned = closeout.mark_ready("/repo", "https://github.com/o/r/pull/3", {"3"})
+    assert calls == [["gh", "pr", "ready", "https://github.com/o/r/pull/3"]] and "marked ready" in owned, (calls, owned)
+    assert closeout.mark_ready("/repo", "#3", {"3"}) and len(calls) == 2
