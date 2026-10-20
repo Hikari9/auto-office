@@ -231,6 +231,15 @@ def test_issue_693_733_git_words_and_apostrophes_are_not_pushes(text):
     "Step: `git publish-alias` to upload; it's fine",
     "Then run git publish-alias origin; it's fine",
     "Use `git push origin main` after 41806c9's change",
+    # Review of #736: only an English word before `git` relaxes the alias rule.
+    "```\ngit ship\n```",
+    "Run:\n    git ship",
+    "1. git publish-alias origin",
+    "Step: git publish-alias origin",
+    "we need git -c alias.x=push x origin",
+    "please git up",
+    "Afterwards, git ship it",
+    "using git ship",
 ])
 def test_issue_693_apostrophe_does_not_hide_real_push(text):
     assert shell_safety.unsafe_manual_push(text, prose=True)

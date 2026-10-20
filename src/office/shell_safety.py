@@ -54,9 +54,11 @@ _WRAPPERS = frozenset({"env", "timeout", "nice", "sudo", "nohup", "stdbuf", "com
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
 _SEPARATORS = frozenset({";", "&", "|", "(", ")"})
 
-# Prose words that make a following `git <word>` read as a command to run.
-_RUN_VERBS = frozenset({"run", "runs", "running", "use", "uses", "using", "execute", "executing",
-                        "invoke", "invoking", "call", "calling", "exec", "then", "via", "try"})
+# Prose words that make a following `git` read as the English noun ("from git
+# for one SHA", "a temp git repo"). Only these relax the unknown-subcommand
+# (possible alias) rule; any other context is scanned strictly.
+_ENGLISH_BEFORE = frozenset({"from", "with", "in", "of", "on", "by", "a", "an", "the",
+                             "temp", "bare", "local", "no", "any", "each", "one"})
 
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # In plan prose, matching Markdown code delimiters are formatting, not shell
@@ -173,8 +175,9 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
         if j < len(tokens):
             # In prose, "git" mid-sentence ("from git for one SHA") is an English
             # word, so an unknown word after it is not an alias; `git push` still is.
-            unknown = tokens[j] not in _KNOWN_GIT_COMMANDS and not (
-                prose and i not in starts and (i == 0 or tokens[i - 1].lower() not in _RUN_VERBS))
+            english = (prose and i not in starts and i > 0 and not tokens[i + 1].startswith("-")
+                       and tokens[i - 1].lower() in _ENGLISH_BEFORE)
+            unknown = tokens[j] not in _KNOWN_GIT_COMMANDS and not english
             if tokens[j] == "push" or unknown:
                 return True
     # Dynamic executable construction must not bypass a detectable push token.
