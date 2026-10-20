@@ -121,10 +121,19 @@ def docs_warning(repo: Path, base_sha: str | None, commit: str | None) -> str | 
             "if the change warrants it (non-blocking)")
 
 
-def mark_ready(repo: str, ref: str) -> str | None:
-    """Handoff: take the PR out of draft. Best effort; returns a note."""
+def _pr_number(ref: str) -> str:
+    return ref.strip().rstrip("/").rsplit("/", 1)[-1].lstrip("#")
+
+
+def mark_ready(repo: str, ref: str, owned: set[str] | frozenset[str] = frozenset()) -> str | None:
+    """Handoff: take an Office-opened PR out of draft. Best effort; returns a note.
+
+    A PR Office did not open (not among `owned` PR numbers) keeps its draft
+    state: that decision belongs to the user."""
     if not _PR_REF.match(ref.strip()):
         return None
+    if _pr_number(ref) not in owned:
+        return f"{ref} not opened by Office: draft state left as is"
     try:
         proc = subprocess.run(["gh", "pr", "ready", ref.strip().lstrip("#")], cwd=repo, capture_output=True,
                               text=True, timeout=60)

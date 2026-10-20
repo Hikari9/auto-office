@@ -391,7 +391,9 @@ def _closeout(con, run: dict, landing: dict, res: Result, *, handoff: str | None
     if warn:
         res.notices.append(warn)
     if handoff:
-        note = closeout.mark_ready(run["repo_root"], handoff)
+        owned = {str(t["pr"]["number"]) for t in state.tasks(con, run["id"])
+                 if (t.get("pr") or {}).get("number")}
+        note = closeout.mark_ready(run["repo_root"], handoff, owned)
         if note:
             res.add(note)
         res.add("handed off: base sync and worktree removal left for after the user merges")
