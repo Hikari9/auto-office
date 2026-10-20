@@ -211,3 +211,26 @@ def test_executable_fields_stay_strict(field):
     else:
         plan = plan.replace("blast_radius: repo", "blast_radius: repo\ndeploy_prod: echo $(git push)")
     assert any("unsafe manual git push" in e for e in planfile.parse(plan).errors)
+
+
+@pytest.mark.parametrize("text", [
+    # #693: an in-word apostrophe is not a shell quote swallowing later code spans.
+    "First step: `git fetch` then `git merge 57ea68bd` into the task branch, so 57ea68bd "
+    "stays an ancestor. It supersedes 41806c9's AsInteger approach. Verify with "
+    "`git merge-base --is-ancestor 57ea68bd HEAD`.",
+    # #733 / #713: "git" as an English word, and backticked read-only git commands.
+    "reads author/committer from git for one SHA",
+    "tests build a temp git repo with commits",
+    "`git grep -n \"API_TOKEN\" src` shows only the config definition",
+])
+def test_issue_693_733_git_words_and_apostrophes_are_not_pushes(text):
+    assert not shell_safety.unsafe_manual_push(text, prose=True)
+
+
+@pytest.mark.parametrize("text", [
+    "Step: `git publish-alias` to upload; it's fine",
+    "Then run git publish-alias origin; it's fine",
+    "Use `git push origin main` after 41806c9's change",
+])
+def test_issue_693_apostrophe_does_not_hide_real_push(text):
+    assert shell_safety.unsafe_manual_push(text, prose=True)
