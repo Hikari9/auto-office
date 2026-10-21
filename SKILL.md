@@ -68,7 +68,7 @@ never wait or `--skip`; continue on the current preferences and tell the user to
    unset is unknown, never low risk: an unknown run keeps independent code review under every gear until the plan
    classifies it; see "Risk floor and the lightweight path" below). Never ask about benchmark refreshes; that is the
    `auto-update-benchmarks` skill, run only when the user explicitly calls it.
-4. If a planner was queued, wait (`office wait`). Otherwise interview for anything you would guess, then write the exact plan path `office start` prints.
+4. If a planner was queued, wait (`office wait`). Otherwise you plan inline: interview for anything you would guess, then write the exact plan path `office start` prints.
    Linked callers retain their selected base/configuration; the run and inline draft use the durable main/common-Git root. Format: `office submit --help`; then `office submit`.
    On `repository-unavailable`, restore the named repository, then `office resume`; never edit run state to redirect it. Detail: `docs/orchestrator-reference.md`.
 5. `office submit` prints the plan diagram (waves, stacking, each task's route slate, checkpoints;
