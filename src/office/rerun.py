@@ -233,16 +233,15 @@ def _sticky_check(con, run: dict, task: dict, parent: dict) -> str | None:
 
 
 def _route_decision(con, run: dict, task: dict, parent: dict, *, as_model: str | None, reroute: bool,
-                    resume: bool) -> dict | None:
+                    resume: bool, quote: str | None = None) -> dict | None:
     """The route this rerun declares or re-evaluates, or None to keep the parent's route.
 
-    `--as` names a route (bypassing trust and floors, as dispatch does); `--reroute`
+    `--as` names a route with orchestrator authority unless `--quote` records the user; `--reroute`
     routes from current evidence; a route declared between rounds (`office amend route`)
     is followed. A resumed session keeps its harness, so only `--as` on the same harness resumes."""
     if as_model is not None:
-        decision = candidates.declared_decision(as_model)
         if resume:
-            cand = decision["candidate"]
+            cand = candidates.declared_decision(as_model, role="executor", config=state.pinned_config(run))["candidate"]
             if cand["harness"] != (parent.get("adapter_id") or parent.get("harness")):
                 raise Refused("resume-impossible", f"cannot resume {task['id']} on {cand['harness']}: "
                               f"{parent['id']}'s session belongs to {parent.get('adapter_id') or parent.get('harness')}",
@@ -251,6 +250,10 @@ def _route_decision(con, run: dict, task: dict, parent: dict, *, as_model: str |
                 raise Refused("resume-impossible", f"cannot resume {task['id']} on {as_model}: {parent['id']}'s session "
                               f"keeps its model and effort ({parent.get('model')}@{parent.get('effort')})",
                               scope=task["id"], preserved="the task worktree", next_step=f"{_fresh_cmd(task['id'])} --as {as_model}")
+        decision = dispatch.named_executor_route(con, run, task, as_model, quote=quote)
+        if decision.get("status") != "selected":
+            raise Refused("no-route", dispatch._route_failure(task["id"], decision), scope=task["id"],
+                          next_step=dispatch._route_next(decision, task["id"], run))
         return decision
     if reroute:
         decision = dispatch.planned_route(con, run, task, reroute=True)
@@ -285,7 +288,7 @@ def _mode_required(tid: str) -> Usage:
 
 
 def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False,
-          as_model: str | None = None, cli: str | None = None, external: bool = False,
+          as_model: str | None = None, quote: str | None = None, cli: str | None = None, external: bool = False,
           review_as: str | None = None, review_cli: str | None = None, review_external: bool = False) -> Result:
     if resume == fresh and review_as is None:
         raise _mode_required(tid)
@@ -294,6 +297,7 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
                     next_step=f"{_fresh_cmd(tid)} --reroute")
     if reroute and as_model is not None:
         raise Usage("invalid-override", "--reroute routes from evidence; --as names the route yourself")
+    dispatch.validate_route_quote(quote, as_model)
     if cli and as_model is None:
         raise Usage("invalid-override", "--cli needs --as <harness>/<model>[@effort] so the rerun records what runs")
     if cli and external:
@@ -329,7 +333,7 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
     if parent is None:
         raise Refused("no-ended-executor", f"{tid} has no ended executor session to rerun", scope=tid,
                       next_step=f"office dispatch {tid}")
-    decision = _route_decision(con, run, task, parent, as_model=as_model, reroute=reroute, resume=resume)
+    decision = _route_decision(con, run, task, parent, as_model=as_model, quote=quote, reroute=reroute, resume=resume)
     extra = None
     if resume:
         why = None
@@ -395,6 +399,8 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         note = "rerouted"
     elif ((launch or parent.get("route")) or {}).get("override"):
         note = "user override"
+    elif ((launch or parent.get("route")) or {}).get("route_authority", {}).get("actor") == "orchestrator":
+        note = "orchestrator choice"
     else:
         note = "original route"
     route = launch["selected"] if launch else parent.get("triple")

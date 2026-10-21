@@ -19,6 +19,7 @@ from office.util import dumps, loads, now_iso
 USAGE = 'office amend route <task|dispatch> --as <harness>/<model>[@effort] --quote "<user\'s words>" [--restart]'
 LIVE = ("launching", "running")
 PENDING = ("planned", "queued", "changes_required")  # no live agent: a route change declares the route the next dispatch/rerun runs
+DECLARABLE = (*PENDING, "accepted")
 
 
 def change_route(con, run: dict, target: str | None, as_route: str | None, quote: str | None, *,
@@ -90,6 +91,7 @@ def _declared_payload(cand: dict, before: str | None, quote: str) -> dict:
     relaunch follow it (`declared`), with no fallback behind it."""
     triple = routing.candidate_id(cand)
     return {"candidate": cand, "declared": True, "override": True, "route_source": "declared",
+            "route_authority": {"actor": "user", "quote": quote, "reason": f'user route change: "{quote}"'},
             "selection_disclosure": {"triple": triple, "override": True,
                                      "reason": f"declared route change ({before or 'unrecorded'} -> {triple})"},
             "route_change": {"before": before, "after": triple, "quote": quote}}
@@ -101,9 +103,9 @@ def _pending_task(con, run: dict, target: str) -> dict | None:
     if target[:1] in "dD" and len(target) > 2:
         return None
     task = state.get_task(con, run["id"], target.upper())
-    if task is None or task["role"] == "planner" or task["status"] not in PENDING:
+    if task is None or task["role"] == "planner" or task["status"] not in DECLARABLE:
         return None
-    if task.get("current_dispatch_id"):
+    if task.get("current_dispatch_id") and task["status"] != "accepted":
         d = state.get_dispatch(con, task["current_dispatch_id"])
         if d and not d.get("ended_at"):
             return None
@@ -137,12 +139,15 @@ def _declare(con, run: dict, task: dict, as_route: str, quote: str, restart: boo
         raise Refused("route-unchanged", f"{tid} already runs {before}", scope=tid)
     with db.transaction(con):
         cur = state.get_task(con, run["id"], tid)
-        if cur["status"] not in PENDING or cur.get("current_dispatch_id") != task.get("current_dispatch_id"):
+        if cur["status"] != task["status"] or cur.get("current_dispatch_id") != task.get("current_dispatch_id"):
             raise Refused("state-changed", f"{tid} changed while the route was being recorded; re-run", scope=tid,
                           next_step=USAGE)
         state.update_task(con, run["id"], tid, route_json=dumps(_declared_payload(cand, before, quote)))
         state.record_route_change(con, run, tid, before, after, kind="reroute", actor="user",
                                   reason=f"user route change: \"{quote.strip()}\"", extra={"quote": quote, "pending": True})
+    if task["status"] == "accepted":
+        return Result(lines=[f"{tid} route {before or 'unrecorded'} -> {after} (declared for the next reopen; "
+                             "accepted producer evidence kept)"], next="the next amendment or review that reopens this task uses it")
     return Result(lines=[f"{tid} route {before or 'unrecorded'} -> {after} (declared; dispatch runs it, no fallback)"],
                   next=f"office dispatch {tid}")
 
@@ -203,10 +208,12 @@ def _record(con, d: dict, cand: dict, change: dict) -> None:
     reason = f"user route change ({change['before']} -> {triple})"
     route = {**(d.get("route") or {}), "candidate": cand, "override": True,
              "selection_disclosure": {"triple": triple, "reason": reason, "override": True},
+             "route_authority": {"actor": "user", "quote": change["quote"], "reason": reason},
              "route_change": {k: change[k] for k in ("before", "after", "quote")}}
     route.pop("launch", None)  # a --cli argv names the old model
     route.pop("discovery", None)  # a declared route is no trial and has no discovery fallback
     with_override = {**loads(d.get("override_json"), {}), "by": "user", "declared": True, "triple": triple,
+                     "quote": change["quote"],
                      "route_changed_from": change["before"], "route_changed_at": now_iso()}
     with_override.pop("cli", None)
     con.execute("UPDATE dispatches SET triple=?, invocation_model_id=?, model=?, effort=?, selection_reason=?, "

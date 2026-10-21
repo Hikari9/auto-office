@@ -700,7 +700,7 @@ def protected_quota_remedy(run: dict, role: str, task_id: str | None = None) -> 
               "config edits do not apply to it")
     route = "<harness>/<model>[@effort]"
     if role == "executor" and task_id:
-        fix = f"office dispatch {task_id} --as {route}"
+        fix = f'office dispatch {task_id} --as {route} --quote "<user\'s words>"'
     elif role == "code_reviewer" and task_id:
         fix = f"office dispatch {task_id} --review-as {route}"
     elif role == "visual_reviewer" and task_id:

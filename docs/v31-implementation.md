@@ -191,12 +191,20 @@ task check that does (`lint --fix`) makes the gate STALE.
 
 ### 6.1 User model overrides (#185)
 
-`office dispatch T1 --as <harness>/<model>[@effort]` runs the executor on a model the user names. It
-skips the candidate registry, trust, and floors, because the user's choice is the authority. It still
+`office dispatch T1 --as <harness>/<model>[@effort]` records an orchestrator choice and applies ordinary
+registry, trust, capability, quota and user-policy gates. `rerun --as` follows the same rule. An unquoted
+choice can be superseded by `rerun --fresh --reroute`; it never acquires user-override authority.
+Adding `--quote "<user's verbatim words>"` records an explicit user override, which skips registry,
+trust and floors while preserving capability and hard user-denial rules. It still
 resolves through a matching catalog row, so `agy/gemini-3.8-flash@medium` invokes `gemini-3.8-flash-medium`.
-The dispatch records `override_json` (`by: user`, `declared`, the triple, and any launch form), and
+The dispatch records `override_json` (`by: user`, `declared`, the triple, quote, and any launch form), and
 `office inspect task` shows "user override". Stacked starts and relaunches keep the override and launch
 form, because both travel in the stored route.
+
+`office amend route T1 --as <route> --quote "<user's words>"` can record the next executor's route while
+T1 is accepted. It launches nothing and preserves the submitted producer's route and all accepted
+evidence. The next legal reopen uses the declared route. Revoking an amendment worker preserves the
+need to satisfy newly added acceptance criteria; only the previously accepted revision remains audit evidence.
 
 - `--cli "<argv>"` (needs `--as`): starts exactly that argv in a herdr pane (`--kind` comes from the
   executable) through the normal landed-prompt path. Outside herdr, or if the agent does not start, the

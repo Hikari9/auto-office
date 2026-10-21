@@ -373,7 +373,7 @@ CODEX = "codex@1/gpt-6-astra@low"
 
 def _planned_executor_ended(env, *, as_route=None):
     _approve(env)
-    args = ["dispatch", "T1", *(["--as", as_route] if as_route else [])]
+    args = ["dispatch", "T1", *(["--as", as_route, "--quote", "Use this executor route"] if as_route else [])]
     code, out = env.office(*args, env=_quota(env))
     assert code == 0, out
     con = env.con()
@@ -390,7 +390,8 @@ def _latest(env):
 
 def test_as_external_records_the_launch_form_of_the_named_route(env):
     _planned_executor_ended(env)
-    code, out = env.office("rerun", "T1", "--fresh", "--as", FB1, "--external", env=_quota(env))
+    code, out = env.office("rerun", "T1", "--fresh", "--as", FB1, "--quote", "Use this executor route",
+                           "--external", env=_quota(env))
     assert code == 0 and f"on {CODEX} (user override) launching" in out, out
     did, _ = _latest(env)
     override = json.loads(env.con().execute("SELECT override_json FROM dispatches WHERE id=?", (did,)).fetchone()[0])
@@ -412,7 +413,7 @@ def test_resume_cannot_move_to_another_harness(env):
 
 def test_fresh_as_runs_the_named_route_and_says_it_is_a_user_override(env):
     _planned_executor_ended(env)
-    code, out = env.office("rerun", "T1", "--fresh", "--as", FB1, env=_quota(env))
+    code, out = env.office("rerun", "T1", "--fresh", "--as", FB1, "--quote", "Use this executor route", env=_quota(env))
     assert code == 0 and f"on {CODEX} (user override) launching" in out, out
     assert _latest(env)[1] == CODEX
 

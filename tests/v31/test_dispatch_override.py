@@ -23,11 +23,13 @@ def _dispatch_row(env, tid="T1"):
 def test_as_dispatches_an_unrouted_model_and_records_the_override(env):
     approved_run(env)
     # Not in the registry at all: routing alone would refuse it.
-    code, out = env.office("dispatch", "T1", "--as", "claude/some-future-model@low", env=EXTERNAL)
+    code, out = env.office("dispatch", "T1", "--as", "claude/some-future-model@low",
+                           "--quote", "Use this future model", env=EXTERNAL)
     assert code == 0 and "(user override)" in out, out
     d = _dispatch_row(env)
     assert d["triple"].endswith("/some-future-model@low") and d["harness"] == "claude"
-    assert json.loads(d["override_json"]) == {"by": "user", "declared": True, "triple": d["triple"]}
+    assert json.loads(d["override_json"]) == {"by": "user", "declared": True, "triple": d["triple"],
+                                             "quote": "Use this future model"}
     code, out = env.office("inspect", "task", "T1")
     assert "user override" in out, out
 
@@ -119,7 +121,8 @@ def test_cli_without_herdr_is_left_external_not_run_headless(env):
 
 def test_stacked_task_keeps_the_override_and_launch_form(env):
     approved_run(env, plan=PLAN_TWO)
-    code, out = env.office("dispatch", "T1", "T2", "--as", "claude/claude-sonnet-5-5@high", "--external")
+    code, out = env.office("dispatch", "T1", "T2", "--as", "claude/claude-sonnet-5-5@high",
+                           "--quote", "Use Sonnet for both tasks", "--external")
     assert "T2 stacked after T1" in out, out
     con = env.con()
     stash = json.loads(con.execute("SELECT route_json FROM tasks WHERE id='T2'").fetchone()[0])
@@ -130,7 +133,8 @@ def test_stacked_task_keeps_the_override_and_launch_form(env):
 @pytest.mark.approved
 def test_relaunch_keeps_the_override(env):
     approved_run(env)
-    env.office("dispatch", "T1", "--as", "claude/some-future-model@low", env=EXTERNAL, check=0)
+    env.office("dispatch", "T1", "--as", "claude/some-future-model@low",
+               "--quote", "Use this future model", env=EXTERNAL, check=0)
     first = _dispatch_row(env)
     from office import db, dispatch, state
     con = env.con()

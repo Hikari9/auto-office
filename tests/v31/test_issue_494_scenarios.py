@@ -757,7 +757,8 @@ def test_s09_work_that_already_started_is_never_discarded(cold, trees):
 
 def test_s09_a_user_pinned_route_is_never_switched_silently(cold):
     # --as: dispatched as asked, never probed, never a trial; its failure surfaces as it does today (a same-route relaunch)
-    dispatch.dispatch(cold.con, state.get_run(cold.con, "run-A"), ["T1"], as_model=f"codex/{SOL}@high")
+    dispatch.dispatch(cold.con, state.get_run(cold.con, "run-A"), ["T1"], as_model=f"codex/{SOL}@high",
+                      quote="Use this route for the task")
     (d,) = cold.dispatches()
     assert d["triple"] == cold.sol["high"] and not cold.trials() and not cold.events() and not cold.cache()
     launched(cold, d)

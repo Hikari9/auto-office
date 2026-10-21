@@ -177,7 +177,7 @@ def create_planner_task(con, run: dict, *, contract_request: str | None = None, 
 # ------------------------------------------------------------------ dispatch command
 
 def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, route: str | None = None,
-             as_model: str | None = None, cli: str | None = None, external: bool = False,
+             as_model: str | None = None, quote: str | None = None, cli: str | None = None, external: bool = False,
              review_as: str | None = None, review_cli: str | None = None, review_external: bool = False,
              reroute: bool = False) -> Result:
     if not task_ids:
@@ -186,6 +186,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
         raise Usage("invalid-override", "use --as or --route, not both")
     if reroute and (as_model or route):
         raise Usage("invalid-override", "--reroute routes from evidence; --as/--route name the route yourself")
+    validate_route_quote(quote, as_model or route)
     if cli and external or review_cli and review_external:
         raise Usage("invalid-override", "a CLI launch and an external launch are mutually exclusive")
     if cli and not as_model:
@@ -224,9 +225,9 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                                     f"office review {tid} --report <file> reviews it as the orchestrator")
         if block:
             continue
-        if as_model:
-            routes[tid] = candidates.declared_decision(as_model, role="executor",
-                                                       config=state.pinned_config(run))
+        if as_model or route:
+            routes[tid] = named_executor_route(con, run, task, as_model or route, quote=quote,
+                                                flag="--as" if as_model else "--route")
         else:
             routes[tid] = planned_route(con, run, task, override=route, reroute=reroute)
             if not (route or launch_prefs) and (parallel or index == 0):  # a stacked task launches later, not now
@@ -334,6 +335,39 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
     return res
 
 
+def validate_route_quote(quote: str | None, route: str | None) -> None:
+    if quote is not None and (not quote.strip() or not route):
+        raise Usage("invalid-quote", "--quote needs the user's nonempty words and an explicit --as/--route")
+
+
+def named_executor_route(con, run: dict, task: dict, text: str, *, quote: str | None = None,
+                         flag: str = "--as") -> dict:
+    """An unquoted name is the orchestrator's selection, with ordinary safety gates.
+
+    Only the user's verbatim words confer override authority. Keep that origin in
+    the decision itself so queued starts and later reruns cannot upgrade authority.
+    """
+    validate_route_quote(quote, text)
+    config = state.pinned_config(run)
+    named = candidates.declared_decision(text, flag=flag, role="executor", config=config)
+    actor = "user" if quote is not None else "orchestrator"
+    reason = f'user override ({flag} {text}): "{quote}"' if quote is not None \
+        else f"orchestrator choice ({flag} {text})"
+    authority = {"actor": actor, "reason": reason, **({"quote": quote} if quote is not None else {})}
+    if quote is not None:
+        decision = named
+        decision["selection_disclosure"]["reason"] = reason
+    else:
+        decision = candidates.route_role(con, config, run, "executor", task_id=task["id"],
+                                         exact=named["selected"], manual=True,
+                                         dispatch_kind="fix" if task.get("current_dispatch_id") else "fresh")
+        if decision.get("status") == "selected":
+            decision["selection_disclosure"] = {**(decision.get("selection_disclosure") or {}), "reason": reason}
+            decision["route_note"] = "orchestrator choice"
+    decision.update(route_authority=authority, route_source="override" if quote is not None else "orchestrator")
+    return decision
+
+
 def _planned_slate(con, run: dict, tid: str) -> dict | None:
     """The approved plan's route plan for `tid` (#300), or None for a legacy preview."""
     from office import plan_view
@@ -400,9 +434,12 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     disclosure["reason"] = f"{disclosure['reason'].split('; ')[0]}; {note}"
     disclosure["adaptive"] = True
     disclosure["route_plan"] = {k: planned.get(k) for k in ("primary", "fallbacks", "chooser", "audit_id")}
+    rec = state.recorded_route(task)
+    origin = {k: rec[k] for k in ("route_authority", "route_change", "override", "declared") if k in rec} \
+        if i == 0 and rec else {}
     return {**fresh, "status": "selected", "selected": rid, "candidate": cand, "selection_disclosure": disclosure,
             "route_source": "plan", "route_note": None if i == 0 else note, "fallbacks_taken": taken,
-            "planned": planned,
+            "planned": planned, **origin,
             "decision_hash": sha256_obj({"planned": planned.get("decision_hash"), "fresh": fresh.get("decision_hash"),
                                          "dispatched": rid, "fallbacks_taken": taken})}
 
@@ -483,7 +520,8 @@ def _route_payload(decision: dict) -> dict:
     """What a dispatch keeps of its decision, so a stacked start or a relaunch
     reproduces the same route, override, and launch form."""
     out = {"candidate": decision.get("candidate"), "selection_disclosure": decision.get("selection_disclosure")}
-    for key in ("override", "launch", "benchmark_snapshot", "route_source", "fallbacks_taken", "audit_id"):
+    for key in ("override", "launch", "benchmark_snapshot", "route_source", "fallbacks_taken", "audit_id",
+                "route_authority", "route_change"):
         if decision.get(key):
             out[key] = decision[key]
     unknown = candidates.quota_unknown_record(decision.get("candidate"))
@@ -527,14 +565,18 @@ def note_route(con, run: dict, task: dict, decision: dict) -> None:
     elif source == "reroute":
         before = recorded or ((state.task_dispatches(con, run["id"], tid) or [{}])[-1].get("triple"))
         change = (before, "reroute", "rerouted from current evidence", "orchestrator")
-    elif source == "override":
+    elif source in ("override", "orchestrator"):
         before = recorded or (_planned_slate(con, run, tid) or {}).get("primary")
-        change = (before, "override", (decision.get("selection_disclosure") or {}).get("reason") or "route override",
-                  "user")
+        authority = decision.get("route_authority") or {}
+        change = (before, "override" if source == "override" else "reroute",
+                  authority.get("reason") or (decision.get("selection_disclosure") or {}).get("reason") or "route choice",
+                  authority.get("actor") or "orchestrator")
     else:
         before, change = None, None
     if change and before and norm(before) != norm(after):
-        state.record_route_change(con, run, tid, before, after, kind=change[1], reason=change[2], actor=change[3])
+        state.record_route_change(con, run, tid, before, after, kind=change[1], reason=change[2], actor=change[3],
+                                  extra=({"quote": decision["route_authority"]["quote"]}
+                                         if (decision.get("route_authority") or {}).get("quote") is not None else None))
     state.update_task(con, run["id"], tid, route_json=dumps(_route_payload(decision)))
 
 
@@ -929,8 +971,12 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
         con.execute("UPDATE dispatches SET descriptor_json=? WHERE id=?",
                     (dumps(task["descriptor"]), dispatch_id))
     if decision.get("override") or decision.get("launch"):
+        authority = decision.get("route_authority") or {}
+        quote = authority.get("quote") or (decision.get("route_change") or {}).get("quote")
         con.execute("UPDATE dispatches SET override_json=? WHERE id=?",
-                    (dumps({"by": "user", "declared": bool(decision.get("override")), "triple": routing.candidate_id(cand),
+                    (dumps({"by": authority.get("actor") or ("user" if quote else "orchestrator"),
+                            "declared": bool(decision.get("override")), "triple": routing.candidate_id(cand),
+                            **({"quote": quote} if quote else {}),
                             **(decision.get("launch") or {})}), dispatch_id))
     # This session starts from the current contract, so an amendment still
     # waiting on an earlier session of the task is already in its brief; left
@@ -1067,9 +1113,9 @@ def _revoke_standing(con, run_id: str, task: dict) -> tuple[str | None, str | No
     A task whose current revision is its accepted revision stays accepted: revoking a worker that only held the
     lease (an amendment relaunch whose submit was refused, an ack-only session) does not undo accepted work.
     Revision identity decides, not status, because `amend._deliver` already demoted the task and a refused submit
-    already blocked it. A `contract_version` bump from an ordinary amendment does not demote: its check and
-    acceptance edits are enforced by the gate rerun the amendment triggered, and its delta is listed as unapplied.
-    An unapplied amendment that is not ordinary (scope, interfaces, ownership) is changes_required naming it.
+    already blocked it. A version bump for prose alone does not demote, and checks-only edits are re-gated.
+    Structured acceptance or ownership changes still need executor work, even for an ordinary amendment;
+    they and unapplied contract-class amendments leave changes_required naming the amendment.
     A task that is not accepted now is restored only when an amendment delivery alone demoted it (`_demoted_by_amendment`):
     a task with no such delivery was blocked or paused for something else, open blocking findings (a convergence
     RECHECK, an APPROVED-cleanup fix), a restack or a hold reopened it without a new revision, and that work is still
@@ -1080,13 +1126,22 @@ def _revoke_standing(con, run_id: str, task: dict) -> tuple[str | None, str | No
     rev = con.execute("SELECT applied_version FROM revisions WHERE id=?", (rev_id,)).fetchone() if rev_id else None
     if rev is None or rev_id != task.get("current_revision_id"):
         return "paused", None, [], []
-    pending = con.execute("SELECT d.amendment_id, COALESCE(a.class, 'contract') AS class FROM deliveries d "
+    pending = con.execute("SELECT d.amendment_id, COALESCE(a.class, 'contract') AS class, a.structured_json FROM deliveries d "
                           "LEFT JOIN amendments a ON a.run_id=d.run_id AND a.id=substr(d.run_id, 1, 8) || ':' || d.amendment_id "
                           "WHERE d.run_id=? AND d.task_id=? AND d.target_version>? ORDER BY d.target_version",
                           (run_id, task["id"], rev["applied_version"] or 0)).fetchall()
     if not _demoted_by_amendment(con, run_id, task, pending):
         return "paused", None, [], []
-    contract = list(dict.fromkeys(r["amendment_id"] for r in pending if r["class"] != "ordinary"))
+    def owes_work(row):
+        if row["class"] != "ordinary":
+            return True
+        edit = (loads(row["structured_json"], {}).get("changed") or {}).get(task["id"]) or {}
+        before, after = edit.get("before") or {}, edit.get("after") or {}
+        # Checks-only amendments are independently re-gated; new acceptance or
+        # ownership work needs a new accepted revision before revoke can restore it.
+        return any(before.get(k) != after.get(k) for k in ("scope", "depends", "interfaces", "accept"))
+
+    contract = list(dict.fromkeys(r["amendment_id"] for r in pending if owes_work(r)))
     ordinary = [i for i in dict.fromkeys(r["amendment_id"] for r in pending) if i not in contract]
     if contract:
         return "changes_required", f"amended by {', '.join(contract)}", ordinary, contract
