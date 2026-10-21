@@ -136,15 +136,19 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
         elif dt and (rev_id or dt["status"] == "changes_required"):
             reopened.append({"task": dep, "status": dt["status"], "revision": rev_id})
     note = ", ".join(f"{r['task']} is {r['status']} and was not restacked" for r in reopened)
+    tips = {sha for _, sha in integration.dependency_tips(run, [(dep, sha) for dep, _, sha in pending])}
+    pending = [item for item in pending if item[2] in tips]
     if not pending:
-        if rebased:
+        if accepted:
             try:
                 base = integration.combine(run, accepted)
             except (integration.CombineConflict, paths.GitError) as exc:
-                raise Refused("rebase-conflict", f"{task['id']} cannot combine the rebased main with accepted dependencies: {exc}",
+                raise Refused("rebase-conflict" if rebased else "dependency-conflict",
+                              f"{task['id']} cannot combine the current base with accepted dependencies: {exc}",
                               preserved="task worktree and accepted revisions", next_step="resolve the conflicting base, then rerun") from exc
             return {"base": base, "merged": [], "conflict": None, "reopened": reopened,
-                    "line": "; ".join(x for x in ("task base updated to the rebased default branch", note) if x)}
+                    "line": "; ".join(x for x in ("task base updated to the rebased default branch" if rebased else
+                                                 "task base updated to the accepted dependencies", note) if x)}
         return {"base": None, "merged": [], "conflict": None, "reopened": reopened, "line": note} if reopened else None
     # Scratch first: conflicting later dependency must never advance the real
     # task HEAD after a successful earlier merge (#580).

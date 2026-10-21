@@ -54,7 +54,8 @@ def _safe_start_base(repo: Path, explicit: str | None) -> str:
                         next_step="run git remote set-head origin -a to configure origin/HEAD, then retry")
     if not default:
         return candidate  # Local-only/offline worktrees retain existing behavior.
-    check = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", candidate, default],
+    remote_base = paths.git(repo, "rev-parse", f"{default}^{{commit}}")
+    check = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", candidate, remote_base],
                            capture_output=True)
     if check.returncode == 1:
         ref = default.removeprefix("refs/remotes/")
@@ -66,7 +67,14 @@ def _safe_start_base(repo: Path, explicit: str | None) -> str:
     if check.returncode != 0:
         raise Usage("base-check-failed", "cannot prove run base is on the tracked default branch",
                     next_step="inspect the repository's git refs before starting this run")
-    return candidate
+    if explicit and candidate != remote_base:
+        ref = default.removeprefix("refs/remotes/")
+        raise Usage("stale-run-base", f"explicit run base {candidate[:12]} is behind fetched default "
+                    f"{ref} at {remote_base[:12]}; upstream changes must not enter the task's scope diff",
+                    next_step=f"retry office start --base {ref} with the same goal")
+    # The caller may be detached or its local main may lag the already-fetched
+    # remote. Pin the fetched commit without moving either local branch (#734).
+    return remote_base
 
 
 def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbook: str = "Change",
