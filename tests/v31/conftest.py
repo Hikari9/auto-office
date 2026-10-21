@@ -26,6 +26,12 @@ ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
 FAKE = Path(__file__).resolve().parent / "fake_agent.py"
 
+
+def _use_source():
+    """Keep this checkout first without growing PYTHONPATH on every DB read."""
+    src = str(SRC)
+    sys.path[:] = [src, *(p for p in sys.path if p != src)]
+
 PLAN_ONE = """# Plan
 
 ## Requirements
@@ -218,7 +224,7 @@ class Env:
             (tmp / "user-config.yaml").write_text(f"review:\n  contract: {contract}\n")
         if not restored:
             self._init_repo()
-        sys.path.insert(0, str(SRC))
+        _use_source()
         from office import dispatch
         from office.util import claim_identity
         # A disposable state home: reporters working it are reclaimed when this
@@ -308,7 +314,7 @@ class Env:
             raise AssertionError(out)
 
     def con(self):
-        sys.path.insert(0, str(SRC))
+        _use_source()
         from office import db
         return db.connect()
 
@@ -344,7 +350,7 @@ class Env:
         builds the candidates and keeps the acts it recorded. Later calls restore those acts in one
         transaction: same triples, states, actors and reasons, a fresh id and time for each.
         """
-        sys.path.insert(0, str(SRC))
+        _use_source()
         from office import candidates, paths, routing, scoring
         key = None
         if self.trust_snapshots is not None and not triple_prefix:
@@ -395,7 +401,7 @@ class Env:
 def _activate(e: Env, monkeypatch) -> Env:
     """Point this process at `e`: its repo as cwd, fresh version and quota caches."""
     monkeypatch.chdir(e.repo)
-    sys.path.insert(0, str(SRC))
+    _use_source()
     from office import candidates, version
     version.current.cache_clear()
     candidates._QUOTA_CACHE.clear()
