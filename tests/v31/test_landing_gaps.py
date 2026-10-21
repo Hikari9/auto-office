@@ -48,7 +48,7 @@ def test_executor_notes_in_the_pr_body_survive_the_next_sync(env, monkeypatch):
 
 def _advance_main(env, bare, path: str, text: str) -> None:
     clone = env.tmp / "advance"
-    subprocess.run(["git", "clone", "-q", str(bare), str(clone)], check=True)
+    subprocess.run(["git", "clone", "-q", "--branch", "main", str(bare), str(clone)], check=True)
     (clone / path).write_text(text)
     for args in (("add", path), ("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "main moved"),
                  ("push", "-q", "origin", "main")):
