@@ -22,6 +22,7 @@ import shlex
 import signal
 import socket
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -198,6 +199,13 @@ def capture_backend_missing() -> str | None:
     except ImportError:
         return "browser capture unavailable: install the visual extra (uv tool install 'auto-office[visual]')"
     return None
+
+
+def missing_browser_install(error: Exception | str) -> str | None:
+    """The install remedy for Playwright's known missing-executable failure."""
+    if "Executable doesn't exist" not in str(error):
+        return None
+    return f"install the matching browser: {shlex.quote(sys.executable)} -m playwright install chromium-headless-shell"
 
 
 def validate_navigate(base_url: str, arg: str, allow_remote_preview: bool = False, reference: bool = False) -> tuple[str | None, str | None]:
@@ -561,7 +569,14 @@ def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Pat
                 ref = reference_path(run, task, worktree)
                 with db.transaction(con):
                     ref_row = register_reference(con, run, task, ref) if ref else None
-                result = _playwright_capture(url, spec, evdir, ref)
+                try:
+                    result = _playwright_capture(url, spec, evdir, ref)
+                except Exception as exc:
+                    install = missing_browser_install(exc)
+                    if install is None:
+                        raise
+                    reason = (str(exc).splitlines() or [type(exc).__name__])[0][:240]
+                    capture_block = f"Chromium headless shell missing ({reason}); {install}"
                 if ref is not None and sha256_file(ref) != (ref_row or {}).get("sha256"):
                     capture_invalid = "reference changed during capture (stale reference)"
     finally:

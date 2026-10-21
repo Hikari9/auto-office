@@ -287,7 +287,14 @@ def _submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect
     ident = paths.repo_identity(cwd)
     if ident is None and not plan_path:
         raise Usage("no-repository", "run office submit from the repository", next_step="cd into the repository")
-    path = Path(plan_path) if plan_path else _draft(con, ident[0], run)
+    if plan_path:
+        path = Path(plan_path)
+    else:
+        root = planpath.orchestrator_root(run, ident)
+        if root is None:
+            raise Usage("wrong-repository", f"the run's inline plan belongs to {run['repo_root']}, not {ident[0]}",
+                        next_step=f"cd {shlex.quote(run['repo_root'])} && office submit --run {short(run['id'])}")
+        path = _draft(con, root, run)
     return plans.submit_plan(con, run, path, submitter="orchestrator", redirect=redirect)
 
 

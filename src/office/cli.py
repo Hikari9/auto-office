@@ -931,7 +931,10 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
             root_wake.ensure(state.get_run(con, run["id"]))
         return guide.add_bug_hints(con, run, guide.status(con, run, verbose=args.verbose, probe_panes=True))
     if cmd == "wait":
-        from office import guide, root_wake, state
+        from office import db, guide, lifecycle, root_wake, state
+        with db.transaction(con):
+            lifecycle.reconcile_repository(con, run)
+        run = state.get_run(con, run["id"])
         if not os.environ.get("OFFICE_DISPATCH_ID"):
             root_wake.ensure(state.get_run(con, run["id"]))
         return guide.wait(con, run, timeout=args.timeout, poll=args.poll)

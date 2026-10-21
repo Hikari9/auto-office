@@ -159,6 +159,25 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
 
 ## Root context snapshot
 
+`office start` resolves the base and pins configuration from the caller's checkout, then records the durable repository root
+identified by the shared Git directory. A removable linked caller such as `.claude/worktrees/agent-*` is not the run's Git cwd.
+Inline plan drafts live under the recorded root; use the path printed by `start` and `status` when operating from a linked checkout.
+Dedicated planners continue to author their drafts in their own dispatch worktrees.
+For a linked caller with a separate external Git directory, that common directory is the durable Git anchor; inline drafts live
+there too. A primary checkout using `--separate-git-dir` keeps its actual working root. Pinned configuration does not change when
+the durable root has different config files; status reports the difference without assuming anyone edited the files.
+
+When an older run's recorded repository disappears, `office status`, `wait` and `resume` recover to the primary/shared-Git root
+only after proving it has the recorded common Git directory. The base, pinned policy and review records stay unchanged, and a
+`run.repository_reanchored` event records the old and new paths. If no such root is available, `repository-unavailable` names the
+missing path and tells you to restore it before `office resume`. Unsubmitted edits in a deleted caller checkout cannot be recovered
+from Office; submitted plans and revisions remain in the run's authority and evidence.
+
+A capture whose Playwright browser executable is missing reports `CAPTURE_BLOCKED` immediately, with no visual verdict or review
+round spent. Follow its printed command to install the matching browser, verify with `office doctor`, then `office resume` to
+capture again. The required screenshots still block landing; changing reviewers or amending the visual contract does not install
+the browser. Browser installation and a live capture remain host-dependent verification, never inferred from a synthetic test.
+
 `office context [--json] [--since SEQ]` prints a bounded, read-only snapshot of the run for a root that restarted or compacted: goal,
 requirements and plan versions with hashes, open tasks, pending gates, blocking findings, recent amendments and authorizations,
 referenced evidence with its hash status, the `next:` action, and the event cursor (`--since` lists up to 20 later events). It is

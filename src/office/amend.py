@@ -221,8 +221,11 @@ def _orchestrator_plan_path(con, run: dict, cwd: Path | None) -> Path | None:
     ident = paths.repo_identity(cwd)
     if ident is None:
         return None
-    planpath.relocate_legacy(con, ident[0])
-    draft = planpath.draft(ident[0], run)
+    root = planpath.orchestrator_root(run, ident)
+    if root is None:
+        return None
+    planpath.relocate_legacy(con, root)
+    draft = planpath.draft(root, run)
     return draft if draft.is_file() else None
 
 
