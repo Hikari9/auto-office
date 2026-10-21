@@ -55,7 +55,7 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
 
 ## Waiting, questions, stalls
 
-- `office wait` exits 0 (act), 3 (stall), 5 (an agent asked a question), 124 (nothing new). Key on the exit code.
+- `office wait` exits 0 (act), 3 (stall or an already-reported action with no work in flight), 5 (an agent asked a question), 124 (nothing new). On 3, follow `next:` before waiting again. An amendment awaiting an ended executor's acknowledgement is a blocker and names a fresh recovery; resume is offered only when the adapter and stored session support it. Key on the exit code.
 - Exit 5 prints a `question:` line (dispatch, pane, question, options, answer command). Decide planning, scope, ordering and
   test detail yourself: amend the contract first if the answer changes it, then `office answer <task|dispatch> <n>` (a number
   presses that option in a selection widget; `office prompt` types text, which a widget ignores) or
@@ -131,7 +131,9 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
   failure is a nonblocking note and the lane review still runs; on a v3.1 run the checks gate passes without cancelling code review, and a waiver of
   checks re-queues the reviews checks had cancelled.
 - Re-accepting a task reopens its accepted dependents whose revision does not contain the new one: each is paused `restack: ...` and `office status`
-  prints `office rerun <T> --resume | --fresh`. Integration refuses a stale composition with `INTEGRATION stale: <T> accepted on ... does not
+  prints a rerun command supported by its stored session and adapter. If the original route is unavailable, inspect the route before selecting another.
+  A conflicting restack leaves HEAD unchanged and tells the executor to merge every missing accepted dependency, resolve within its scope, and rerun checks.
+  Integration refuses a stale composition with `INTEGRATION stale: <T> accepted on ... does not
   contain <dep> accepted on ...; restack <T> onto <dep>` instead of reporting a merge conflict.
 
 ## Landing detail

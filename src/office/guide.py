@@ -131,6 +131,12 @@ def next_action(con, run: dict) -> str:
             return f'new authority entry {e["id"]} ({e["action"]}) needs authorization: ask the user (native question tool), then office approve {e["id"]} --quote "<words>"'
     tasks = state.tasks(con, run["id"])
     c = _counts(tasks)
+    stranded = _stranded_amendments(con, run)
+    if stranded:
+        from office import rerun
+        a = stranded[0]
+        return (f"{a['task_id']} awaits amendment {a['amendment_id']} ack, but its executor {a['dispatch_id']} "
+                f"has ended; {rerun.recovery_hint(con, run, a['task_id'], fresh=True)} to deliver/ack it")
     for status in ("blocked", "paused"):
         if c.get(status):
             tid = c[status][0]
@@ -154,7 +160,7 @@ def next_action(con, run: dict) -> str:
             return nxt
     # A rerun is only actionable if its dependency barrier and scope lease will
     # admit it. Otherwise `office wait` would wake to suggest a refused command.
-    from office import dispatch
+    from office import dispatch, rerun
     by_id = {t["id"]: t for t in tasks}
     held_repairs = []
     for t in tasks:
@@ -170,24 +176,24 @@ def next_action(con, run: dict) -> str:
                 continue
             # Findings wait for the orchestrator's choice (R8); nothing relaunches on its own.
             if (t.get("pause_reason") or "").endswith("the session ended without submitting"):
-                return (f"{t['id']} {t['pause_reason']}: office rerun {t['id']} --resume (resubmit on the amended "
-                        "contract) | --fresh")
+                return (f"{t['id']} {t['pause_reason']}: {rerun.recovery_hint(con, run, t['id'])} "
+                        "(resubmit on the amended contract)")
             if (t.get("pause_reason") or "").startswith("restack:"):
-                return f"{t['id']} {t['pause_reason']}: office rerun {t['id']} --resume | --fresh"
+                return f"{t['id']} {t['pause_reason']}: {rerun.recovery_hint(con, run, t['id'])}"
             awaiting_ack = con.execute(
                 "SELECT amendment_id FROM deliveries WHERE run_id=? AND task_id=? "
                 "AND status IN ('queued','delivered') ORDER BY created_at LIMIT 1",
                 (run["id"], t["id"])).fetchone()
             if awaiting_ack:
                 return (f"{t['id']} awaits amendment {awaiting_ack['amendment_id']} ack; "
-                        f"office rerun {t['id']} --resume | --fresh to deliver/ack it")
+                        f"{rerun.recovery_hint(con, run, t['id'])} to deliver/ack it")
             outstanding = con.execute("SELECT 1 FROM findings WHERE run_id=? AND task_id=? AND "
                                       + contract.TASK_WORK_FINDINGS + " LIMIT 1",
                                       (run["id"], t["id"])).fetchone()
             if not outstanding:
                 return (f"{t['id']} requires continuation (no open review findings); "
-                        f"office inspect task {t['id']}, then office rerun {t['id']} --resume | --fresh")
-            return f"findings on {t['id']} wait for you: office rerun {t['id']} --resume | --fresh"
+                        f"office inspect task {t['id']}, then {rerun.recovery_hint(con, run, t['id'])}")
+            return f"findings on {t['id']} wait for you: {rerun.recovery_hint(con, run, t['id'])}"
     if held_repairs:
         return "no action; " + "; ".join(held_repairs) + "; office wait for the holder or dependency to finish"
     for t in tasks:
@@ -351,6 +357,8 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     from office import questions
     for q in questions.recorded(con, run):
         res.add(f"question: {q}")
+    for line in _amendment_stalls(con, run):
+        res.add(f"blocker: {line}")
     if probe_panes:
         from office import watchdog
         for stall in watchdog.reviewer_stalls(con, run):
@@ -464,10 +472,39 @@ def stalls(con, run: dict, since: str = "", acts: dict | None = None) -> list[st
     for j in con.execute("SELECT kind, error FROM outbox WHERE run_id=? AND status='failed' AND finished_at > ?",
                          (run["id"], since)).fetchall():
         out.append(f"job {j['kind']} failed: {(j['error'] or '')[:120]}")
+    out.extend(_amendment_stalls(con, run))
     out.extend(_idle_executors(con, run, acts))
     from office import watchdog
     out.extend(watchdog.reviewer_stalls(con, run))
     return out
+
+
+def _stranded_amendments(con, run: dict) -> list[dict]:
+    """Unapplied deliveries still bound to the task's ended executor (#718).
+
+    A live nonresumable worker can acknowledge normally. A replacement dispatch
+    takes over its own deliveries, so an old ended recipient does not stall it.
+    Dependencies and scope holders still own their normal admission barriers:
+    their completion can release the deferred amendment without intervention.
+    """
+    rows = con.execute(
+        "SELECT dl.task_id, dl.amendment_id, dl.dispatch_id FROM deliveries dl "
+        "JOIN tasks t ON t.run_id=dl.run_id AND t.id=dl.task_id AND t.current_dispatch_id=dl.dispatch_id "
+        "JOIN dispatches d ON d.id=dl.dispatch_id AND d.role='executor' "
+        "WHERE dl.run_id=? AND dl.status IN ('queued','delivered') AND d.ended_at IS NOT NULL "
+        "AND t.status NOT IN ('accepted','cancelled') ORDER BY dl.created_at", (run["id"],)).fetchall()
+    from office import dispatch
+    by_id = {t["id"]: t for t in state.tasks(con, run["id"])}
+    return [dict(row) for row in rows
+            if not unaccepted_dependencies(by_id[row["task_id"]], by_id)
+            and not dispatch.scope_holder(con, run, by_id[row["task_id"]])]
+
+
+def _amendment_stalls(con, run: dict) -> list[str]:
+    from office import rerun
+    return [f"{a['task_id']} amendment {a['amendment_id']} awaits ack from ended executor {a['dispatch_id']}; "
+            f"next: {rerun.recovery_hint(con, run, a['task_id'], fresh=True)} to deliver/ack it"
+            for a in _stranded_amendments(con, run)]
 
 
 def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:
@@ -677,10 +714,22 @@ def _needs_orchestrator(con, run: dict) -> bool:
     return _fresh_action(con, run)[0]
 
 
+def _work_in_flight(con, run: dict) -> bool:
+    """Persisted work that can advance without a new orchestrator command."""
+    queries = (
+        "SELECT 1 FROM outbox WHERE run_id=? AND status IN ('queued','claimed') LIMIT 1",
+        "SELECT 1 FROM gates WHERE run_id=? AND status IN ('queued','running') LIMIT 1",
+        "SELECT 1 FROM dispatches WHERE run_id=? AND status IN ('launching','running') "
+        "AND ended_at IS NULL LIMIT 1",
+    )
+    return any(con.execute(q, (run["id"],)).fetchone() is not None for q in queries)
+
+
 def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
     """Block until something needs the orchestrator, then print status.
     Exit 0: a task, phase, plan or requirements change, or a new actionable
-    orchestrator event. Exit 3: a stall (work marked in progress that nothing can advance).
+    orchestrator event. Exit 3: a stall, or an already-reported orchestrator
+    action with no work in flight to advance it (your move, #735).
     Exit 5: an agent is waiting on a question (a `question:` line names it and
     the `office answer` command). Exit 124: timeout with nothing new. A watcher
     keys on the exit code, never on matching status text."""
@@ -721,9 +770,12 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         # the initial snapshot alone cannot observe that transition (#561).
         pending = _needs_orchestrator(con, run)
         action_signature = _action_signature(con, run) if pending else None
+        fresh_action, prior_action = _fresh_action(con, run) if not pending else (True, None)
+        your_move = (not pending and not fresh_action and prior_action is not None
+                     and not _work_in_flight(con, run))
         first = False
         terminal = state.is_terminal(state.get_run(con, run["id"]))
-        if asked or fresh_stall or changed or news or pending or terminal or time.time() >= deadline:
+        if asked or fresh_stall or changed or news or pending or your_move or terminal or time.time() >= deadline:
             res = status(con, run)
             if pending:
                 with db.transaction(con):
@@ -746,12 +798,15 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
                                audience="runtime", payload={"signature": stall_signature})
                 res.lines[1:1] = [f"stall: {s}" for s in stuck]
                 res.exit_code = 3
+            elif your_move and not (changed or news):
+                res.lines.insert(1, "stall: no work is in flight; the pending orchestrator action still needs you")
+                res.exit_code = 3
             if asked:
                 # status() already printed every recorded question; the new ones lead and set the exit.
                 res.lines = [res.lines[0], *[f"question: {q}" for q in asked],
                              *[ln for ln in res.lines[1:] if ln.removeprefix("question: ") not in asked]]
                 res.exit_code = questions.EXIT
-            elif not (fresh_stall or changed or news or pending or terminal):
+            elif not (fresh_stall or changed or news or pending or your_move or terminal):
                 res.lines.insert(1, f"wait: nothing new in {int(timeout)}s")
                 res.exit_code = 124
             return add_bug_hints(con, run, res)

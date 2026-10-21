@@ -1240,14 +1240,9 @@ def close_blockers(con, run: dict) -> list[str]:
 
 
 def _rerun_modes(con, run: dict, tid: str) -> str:
-    """Do not suggest resume for a dispatch lacking a stored harness session (#581).
-
-    A stored session alone is not sufficient to guarantee resumption, but its
-    absence is enough to rule resume out. Backfilling remains rerun's job.
-    """
+    """Only name resume when both its session and adapter form exist (#581, #699)."""
     from office import rerun
-    parent = rerun._last_ended_executor(con, run, tid)
-    return "--resume|--fresh" if parent and parent.get("session_id") else "--fresh"
+    return rerun.modes(con, run, tid)
 
 
 def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
@@ -1296,10 +1291,11 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
                 else:
                     ready.append(t)
             if ready:
+                from office import rerun
                 what = " in parallel" if len(ready) > 1 else ""
                 note = f"; {'; '.join(held)}" if held else ""
                 return (f"{sid} RECHECK repairs ready{what}: "
-                        + " ; ".join(f"office rerun {t['id']} {_rerun_modes(con, run, t['id'])}" for t in ready) + note)
+                        + " ; ".join(rerun.recovery_hint(con, run, t['id']) for t in ready) + note)
             if held:
                 held_rechecks.append(f"{sid} RECHECK: {'; '.join(held)}")
 
@@ -2080,10 +2076,13 @@ def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | 
 
 
 def _settle_dismissed(con, run: dict, scope_id: str, codes: list[str], *, note: str, quote: str) -> str | None:
-    """After the user dismissed blocking findings of a lane or shared scope: every unmet gate left with no
-    open finding of its kind is waived on the user's authority (its RECHECK verdict stands), the repairs
-    the dismissed findings had routed are released, and the scope settles once nothing unmet remains. A
-    scope that still has an unmet gate keeps waiting. Returns what happened, or None. Caller holds tx."""
+    """Release repairs the user dismissed, then continue the authorized review.
+
+    An active RECHECK with an available round queues an independent review. A
+    held scope keeps the existing user-authorized waiver behavior: an unmet
+    RECHECK gate with no remaining findings of its kind may be waived, preserving
+    its verdict. A scope with any unmet gate keeps waiting. Caller holds tx.
+    """
     scope = find_scope(con, run, scope_id)
     st = scope_state(run, scope_id)
     commit = st.get("commit")
@@ -2096,6 +2095,9 @@ def _settle_dismissed(con, run: dict, scope_id: str, codes: list[str], *, note: 
                                     (run["id"], tid)).fetchone()):
             state.update_task(con, run["id"], tid, status=gates.derive_status(con, run, t), pause_reason=None)
     latest = _latest(con, run, scope_id, commit)
+    queued = _queue_dismissal_review(con, state.get_run(con, run["id"]), scope)
+    if queued:
+        return queued
     waived = []
     for kind, g in latest.items():
         if (g["status"] == "done" and g.get("review_status") == contract.COMPLETED and g["verdict"] == "RECHECK"
@@ -2110,6 +2112,58 @@ def _settle_dismissed(con, run: dict, scope_id: str, codes: list[str], *, note: 
         return None
     settle(con, run, scope)
     return f"{scope_id} settled ({', '.join(waived)} waived on the user's authority; the RECHECK verdict stands)"
+
+
+def _queue_dismissal_review(con, run: dict, scope: dict) -> str | None:
+    """Resume an already-authorized review after user dismissals release its repairs.
+
+    The old verdict remains evidence. A same-tree review needs its own outbox key
+    because the original composition job has already completed. Caller holds tx.
+    """
+    scope_id = scope["id"]
+    st = scope_state(run, scope_id)
+    key = _key(con, run, scope)
+    if st.get("status") != "recheck" or key is None or not st.get("commit"):
+        return None
+    if scope.get("shared") and any(not converged(con, run, lane) for lane in lanes(con, run)
+                                   if lane["id"] in scope.get("lanes", [])):
+        return None
+    latest = _latest(con, run, scope_id, st["commit"])
+    if not latest or any(g["status"] != "done" for g in latest.values()):
+        return None
+    if con.execute("SELECT 1 FROM findings WHERE run_id=? AND scope=? AND state='open'",
+                   (run["id"], scope_id)).fetchone():
+        return None
+    # Historical dismissals do not authorize repeating unrelated newer reviews.
+    eligible = [g["id"] for g in latest.values()
+                if g.get("review_status") == contract.COMPLETED and g.get("verdict") in ("RECHECK", "INTAKE_GAP")]
+    if not eligible or not con.execute(
+            f"SELECT 1 FROM findings WHERE gate_id IN ({','.join('?' * len(eligible))}) "
+            "AND disposition='dismissed' AND disposition_by='user' AND state='nonblocking' LIMIT 1", eligible).fetchone():
+        return None
+    cycle, round_no = int(st.get("cycle") or 1), int(st.get("round") or 1)
+    if round_no > contract.round_cap(run):
+        return None
+    _set_scope(con, run, scope_id, status="pending", key=key, carry_from=None, hold_key=None,
+               detail="dismissed repairs released; independent review queued")
+    state.enqueue(con, run, "converge", {"scope": scope_id, "key": key},
+                  dedup_key=f"converge:{run['id']}:{scope_id}:{key}:c{cycle}:r{round_no}:dismissal",
+                  max_attempts=2)
+    state.emit(con, run, "convergence.dismissal_review", f"{scope_id}: every repair finding was "
+               f"dismissed; independent review queued for cycle {cycle} round {round_no}", audience="runtime")
+    return f"{scope_id} independent review queued (cycle {cycle}, round {round_no})"
+
+
+def reconcile_dismissals(con, run: dict) -> list[str]:
+    """Recover the stranded pre-#665 state on resume/wait, without minting approval."""
+    if not contract.is_convergence(run) or state.is_terminal(run):
+        return []
+    notes = []
+    for scope in all_scopes(con, run):
+        note = _queue_dismissal_review(con, state.get_run(con, run["id"]), scope)
+        if note:
+            notes.append(note)
+    return notes
 
 
 def receipt(con, run: dict) -> dict:

@@ -1843,11 +1843,23 @@ def stale_dependency(con, run: dict, task: dict) -> str | None:
         dep_rev = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (dt["accepted_revision_id"],)).fetchone()
         if dep_rev is None or _is_ancestor(run, dep_rev["commit_sha"], rev["commit_sha"]):
             continue
-        built = con.execute("SELECT id FROM revisions WHERE run_id=? AND task_id=? AND commit_sha=?",
-                            (run["id"], dep, rev["base_commit"])).fetchone()
-        on = f"{dep} {built['id']}" if built else f"{dep} {(rev['base_commit'] or '')[:7]}"
-        return (f"built on {on}, but {dep} was accepted on {dt['accepted_revision_id']}; restack: "
-                f"office rerun {task['id']} --resume|--fresh merges it into the worktree first")
+        base = rev["base_commit"]
+        if base and _is_ancestor(run, base, rev["commit_sha"]):
+            built = con.execute("SELECT id FROM revisions WHERE run_id=? AND task_id=? AND commit_sha=?",
+                                (run["id"], dep, base)).fetchone()
+            on = f"built on {dep} {built['id']}" if built else f"built on {dep} {base[:7]}"
+        else:
+            # A recorded base is metadata, never proof of containment. Name the
+            # graph's common bases if that metadata is stale; criss-cross history
+            # can have more than one and none may be invented as the sole base.
+            common = paths.git(Path(run["repo_root"]), "merge-base", "--all", rev["commit_sha"],
+                               dep_rev["commit_sha"], check=False).splitlines()
+            on = ("history shares base " + (", ".join(c[:7] for c in common) or "unknown")
+                  + f" with {dep}; recorded base {(base or 'unknown')[:7]} is not an ancestor")
+        from office import rerun
+        return (f"{on}, but {dep} was accepted on {dt['accepted_revision_id']} ({dep_rev['commit_sha'][:7]}); "
+                f"recorded task base {(base or 'unknown')[:7]}; restack: {rerun.recovery_hint(con, run, task['id'])}; "
+                "the rerun merges accepted dependencies first")
     return None
 
 

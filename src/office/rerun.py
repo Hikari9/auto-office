@@ -30,6 +30,63 @@ def _last_ended_executor(con, run: dict, tid: str) -> dict | None:
     return state.get_dispatch(con, row["id"]) if row else None
 
 
+def modes(con, run: dict, tid: str) -> str:
+    """Resume guidance from the same adapter form rerun actually executes.
+
+    Session backfill and live-agent checks remain launch-time guards. Status
+    does not infer a resumable session from an adapter name or a session alone.
+    """
+    parent = _last_ended_executor(con, run, tid)
+    if not parent or not parent.get("session_id"):
+        return "--fresh"
+    adapter = adapters.load_all().get(parent.get("adapter_id") or parent.get("harness") or "")
+    if adapter is None or adapters.resume_argv(
+            adapter, "worker", session_id=parent["session_id"], model=parent.get("model") or "",
+            effort=parent.get("effort") or "", cwd=Path(parent.get("worktree") or ".")) is None:
+        return "--fresh"
+    return "--resume|--fresh"
+
+
+def _recovery_route_block(con, run: dict, task: dict, parent: dict) -> str | None:
+    """Read route eligibility without touching the caller's lifecycle transaction.
+
+    Candidate construction defensively initializes older routing schemas and
+    may emit probe notices. Those writes and commits are inappropriate for a
+    status hint, especially when acceptance asks for it inside a transaction.
+    Use a separate read-only view; unavailable evidence keeps rerun's existing
+    admission-time check authoritative.
+    """
+    filename = next((r[2] for r in con.execute("PRAGMA database_list") if r[1] == "main"), "")
+    if not filename:
+        return None
+    reader = sqlite3.connect(Path(filename).as_uri() + "?mode=ro", uri=True, timeout=0)
+    reader.row_factory = sqlite3.Row
+    try:
+        return _sticky_check(reader, run, task, parent)
+    finally:
+        reader.close()
+
+
+def recovery_hint(con, run: dict, tid: str, *, fresh: bool = False) -> str:
+    """Name a usable recovery entry point; a rejected sticky route needs inspection.
+
+    Reading this hint grants no reroute authority and launches no model. The
+    command rechecks admission at dispatch time because quota can change again.
+    """
+    task = state.get_task(con, run["id"], tid)
+    parent = _last_ended_executor(con, run, tid)
+    if task and parent:
+        recorded = state.recorded_route(task)
+        changed = recorded.get("declared") and routing.candidate_id(recorded["candidate"]) != parent.get("triple")
+        blocked = None if changed else _recovery_route_block(con, run, task, parent)
+        if blocked:
+            return (f"office inspect route {tid} (original route {parent.get('triple')} unavailable: {blocked}; "
+                    "select an eligible route before rerunning)")
+        if changed:
+            fresh = True
+    return f"office rerun {tid} " + ("--fresh" if fresh else modes(con, run, tid))
+
+
 def agent_alive(d: dict) -> bool | None:
     """True, False, or None when liveness cannot be known (herdr unreachable).
     A pane-hosted agent is asked through herdr; a headless one by its pid."""
@@ -375,7 +432,14 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         extra = {**(extra or {}), "restack": {k: restack.get(k) for k in ("merged", "conflict", "unmerged", "reopened")}}
         if resume:
             # A resumed session reads only its prompt pointer first: name the restack there.
-            extra["resume"]["findings"] = "; ".join(x for x in (restack["line"], extra["resume"]["findings"]) if x)
+            instruction = restack["line"]
+            if restack.get("conflict"):
+                missing = restack.get("unmerged") or [restack["conflict"]]
+                instruction = ("RESTACK FIRST: merge the accepted dependencies "
+                               + ", ".join(f"{m['task']} {m['commit']}" for m in missing)
+                               + "; resolve conflicts inside your scope, commit each merge, then run checks and submit. "
+                               "Read the updated brief for every required merge; do not rebase or force-push")
+            extra["resume"]["findings"] = "; ".join(x for x in (instruction, extra["resume"]["findings"]) if x)
     with db.transaction(con):
         if decision:
             dispatch._record_routing(con, run, decision)

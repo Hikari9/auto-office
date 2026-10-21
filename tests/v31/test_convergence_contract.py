@@ -738,14 +738,16 @@ def test_a_blocking_finding_is_dismissed_only_with_the_users_quote(env):
 
 def test_dismissal_releases_the_task_that_continue_reopened(env):
     """#455: `decide continue` names the tasks it reopens; dismissing the finding afterwards returns the accepted
-    producer to accepted and settles the lane."""
+    producer to accepted and runs the newly authorized independent review (#665)."""
     _escalate(env)
     code, out = env.office("decide", "L-T1", "continue", "--quote", "one more try")
     assert code == 0 and "reopens T1" in out and "decide L-T1 review" in out and "dismissed --quote" in out, out
     assert task_row(env)["status"] == "changes_required"
+    env.script(convergence_reviewer=[{"reply": APPROVED}])
     env.office("disposition", "L-T1:F1", "dismissed", "--quote", "reviewer defect, not a code defect", check=0)
     assert task_row(env)["status"] == "accepted" and task_row(env)["pause_reason"] is None
-    assert _scope(env, "L-T1")["status"] == "waived"
+    assert _scope(env, "L-T1")["status"] == "approved"
+    assert _gates(env, "convergence_review")[-1]["cycle"] == 2
 
 
 def test_decide_review_starts_another_round_without_reopening_producers(env):
@@ -980,8 +982,10 @@ def test_intake_gap_answer_reviews_the_same_composition_again(env):
 
 @pytest.mark.parametrize("session,expected", [(None, "--fresh"), ("session-123", "--resume|--fresh")])
 def test_issue_581_rerun_hint_depends_on_stored_session(monkeypatch, session, expected):
-    from office import convergence, rerun
-    monkeypatch.setattr(rerun, "_last_ended_executor", lambda con, run, tid: {"session_id": session})
+    from office import adapters, convergence, rerun
+    from test_rerun import RESUMABLE
+    monkeypatch.setattr(rerun, "_last_ended_executor", lambda con, run, tid: {"session_id": session, "adapter_id": "claude"})
+    monkeypatch.setattr(adapters, "load_all", lambda: {"claude": RESUMABLE})
     assert convergence._rerun_modes(None, {}, "T4") == expected
 
 def test_issue_542_plan_reviewer_persists_model_and_effort(env):
