@@ -50,6 +50,18 @@ def session_keys(harness: str | None = None, session: str | None = None) -> list
     return keys
 
 
+def fast_session_keys() -> list[tuple[str, str]]:
+    """Known harness keys without walking the process tree; safe for status hooks."""
+    keys = []
+    env_h, env_s = os.environ.get("OFFICE_HARNESS"), os.environ.get("OFFICE_SESSION")
+    if env_h and env_s:
+        keys.append((env_h, env_s))
+    pane = os.environ.get("HERDR_PANE_ID")
+    if pane:
+        keys.append(("herdr", pane))
+    return keys
+
+
 def process_key() -> str | None:
     """'<harness>:<pid>:<start>' for the nearest ancestor harness process."""
     try:

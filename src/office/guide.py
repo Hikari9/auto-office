@@ -348,6 +348,8 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     from office import root_wake
     for line in root_wake.lines(con, run):
         res.add(line)
+    from office import ctx_alert
+    ctx_alert.notice(con, run)
     from office import questions
     for q in questions.recorded(con, run):
         res.add(f"question: {q}")
@@ -699,6 +701,8 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         jobs.kick(con, run["id"])
         amend.confirm_launch_deliveries(con, run)
         signals, signals_seq = worker_signals(con, run)
+        from office import ctx_alert
+        ctx_alert.notice(con, run)
         asked, _, acts = questions.scan(con, run)
         stuck = stalls(con, run, since=started_at, acts=acts) + signals
         fresh_stall, stall_signature = _fresh_stall(con, run, stuck)
@@ -860,7 +864,7 @@ _SEEN = "orchestrator:seen:"
 
 
 def _urgent(event: dict) -> bool:
-    return event["kind"] in _URGENT_KINDS or event["kind"].endswith(".failed")
+    return event["kind"] in _URGENT_KINDS or event["kind"] == "ctx.high" or event["kind"].endswith(".failed")
 
 
 def _notice_batch(pending: list[dict], *, limit: int) -> list[dict]:
