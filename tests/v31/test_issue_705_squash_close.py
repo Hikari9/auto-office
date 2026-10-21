@@ -68,6 +68,32 @@ def test_owned_squash_pr_close_proves_heads_and_checks_without_fake_ancestry_or_
     assert receipt["landing"]["squash_proof"] == proof
 
 
+@pytest.mark.parametrize("archive_fails", [False, True])
+def test_squash_close_preserves_interrupted_deploy_output_before_terminal_state(env, monkeypatch, archive_fails):
+    from pathlib import Path
+    from office import deploy_artifacts
+    _interrupted(env, monkeypatch)
+    run = _run_row(env)
+    checkout = gates.detached_checkout(run, run["base_sha"], "deploy-prod-interrupted", purpose="deploy")
+    backup = checkout / "rollback.json"
+    backup.write_text("rollback before deployment")
+    if archive_fails:
+        def fail(*args, **kwargs):
+            raise OSError("archive disk full")
+        monkeypatch.setattr(deploy_artifacts, "preserve", fail)
+    code, out = env.office("close", "--landed-externally", "2")
+    if archive_fails:
+        assert code == 4 and "deploy-artifacts-unpreserved" in out, out
+        assert _run_row(env)["phase"] != "closed"
+        assert backup.read_text() == "rollback before deployment"
+    else:
+        assert code == 0 and _run_row(env)["phase"] == "closed", out
+        receipt = json.loads((env.state / "runs" / run["id"] / "archive-receipt.json").read_text())
+        archive = next(r for r in receipt["deploy_artifacts"] if "rollback.json" in r["files"])
+        assert (Path(archive["archive"]) / "files/rollback.json").read_text() == "rollback before deployment"
+        assert not checkout.exists() and archive["archive"] in out
+
+
 def test_an_external_pr_with_the_exact_reviewed_tree_has_a_separate_proof(env, monkeypatch):
     _interrupted(env, monkeypatch)
     s = gh(env)
