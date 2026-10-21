@@ -121,7 +121,8 @@ def notice(con, run: dict, *, now: float | None = None) -> str | None:
             threshold = DEFAULT_THRESHOLD
     except (TypeError, ValueError):
         threshold = DEFAULT_THRESHOLD
-
+    if threshold == 0:
+        return None
     root_session = None
     for harness, session_id in discovery.fast_session_keys():
         bound = con.execute("SELECT 1 FROM session_bindings WHERE harness=? AND session_id=? AND run_id=? "

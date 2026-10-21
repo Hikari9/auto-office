@@ -81,6 +81,20 @@ def test_notice_silently_skips_unbound_or_disabled_sessions(monkeypatch):
     assert ctx_alert.notice(con, {"id": "run-1", "policy": {"orchestrator_context": {"enabled": False}}}) is None
 
 
+def test_notice_threshold_zero_disables_without_resolving_or_measuring(monkeypatch):
+    con = _event_db()
+    run = {"id": "run-1", "policy": {"orchestrator_context": {"threshold_tokens": 0}}}
+    monkeypatch.setattr(ctx_alert.discovery, "fast_session_keys",
+                        lambda: (_ for _ in ()).throw(AssertionError("session lookup should be skipped")))
+    monkeypatch.setattr(ctx_alert, "_transcript_path",
+                        lambda *_args: (_ for _ in ()).throw(AssertionError("transcript lookup should be skipped")))
+    monkeypatch.setattr(ctx_alert, "context_tokens",
+                        lambda *_args: (_ for _ in ()).throw(AssertionError("transcript should not be measured")))
+
+    assert ctx_alert.notice(con, run, now=1000) is None
+    assert con.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+
+
 def test_notice_resolves_unique_claude_session_from_bound_herdr_root(tmp_path, monkeypatch):
     con = _event_db()
     con.executemany("INSERT INTO session_bindings VALUES(?, ?, 'run-1', NULL)", [
