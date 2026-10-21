@@ -43,7 +43,7 @@ def mergeability(s: dict, pr: dict) -> dict:
     return {"mergeable": s.get("mergeable", "MERGEABLE"), "mergeStateStatus": s.get("merge_state", "CLEAN")}
 
 
-def git_merge(pr: dict, method: str) -> None:
+def git_merge(pr: dict, method: str) -> str:
     """Really merge the PR head into its base on the bare origin."""
     origin = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
     with tempfile.TemporaryDirectory() as tmp:
@@ -56,6 +56,7 @@ def git_merge(pr: dict, method: str) -> None:
             run("merge", "--squash", "-q", f"origin/{pr['head']}")
             run("commit", "-q", "-m", f"{pr['title']} (#{pr['number']})")
         run("push", "-q", "origin", pr["base"])
+        return run("rev-parse", "HEAD").stdout.strip()
 
 
 def main(argv: list[str]) -> int:
@@ -82,7 +83,7 @@ def main(argv: list[str]) -> int:
                          "draft": "--draft" in argv, "state": "open", "comments": []})
         out = url
     else:
-        pr = next((p for p in s["prs"] if len(argv) > 2 and str(p["number"]) == argv[2]), None)
+        pr = next((p for p in s["prs"] if len(argv) > 2 and argv[2] in (str(p["number"]), p["url"])), None)
         if pr is None:
             code, out = 1, "no such pull request"
         elif argv[1] == "edit" and (s.get("edit_failures") or {}).get(str(pr["number"]), 0) > 0:
@@ -110,12 +111,15 @@ def main(argv: list[str]) -> int:
                 code, out = 1, f"X Pull request #{pr['number']} is not mergeable: the merge commit cannot be cleanly created."
             else:
                 method = next(a for a in argv if a in ("--merge", "--squash", "--rebase"))
-                git_merge(pr, method)
+                pr["merged_head"] = remote_head(pr)
+                pr["merge_commit"] = git_merge(pr, method)
                 pr["state"], pr["merged_with"] = "merged", method
         elif argv[1] == "view":
-            out = json.dumps({"number": pr["number"], "body": pr["body"], "title": pr["title"],
+            out = json.dumps({"number": pr["number"], "url": pr["url"], "body": pr["body"], "title": pr["title"],
                               "state": pr["state"].upper(), "isDraft": pr["draft"],
-                              "baseRefName": pr["base"], "headRefOid": remote_head(pr), **mergeability(s, pr),
+                              "baseRefName": pr["base"], "headRefName": pr["head"],
+                              "headRefOid": pr.get("merged_head") or remote_head(pr),
+                              "mergeCommit": {"oid": pr.get("merge_commit")}, **mergeability(s, pr),
                               "statusCheckRollup": s.get("checks", [])})
         elif argv[1] == "checks":
             code = s.get("checks_exit", 0)

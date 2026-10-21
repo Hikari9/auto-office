@@ -420,7 +420,7 @@ def _merged_pr(run: dict, ref: str) -> dict:
     import json
     import subprocess
     try:
-        proc = subprocess.run(["gh", "pr", "view", ref, "--json", "state,mergeCommit,url,number,baseRefName"], cwd=run["repo_root"],
+        proc = subprocess.run(["gh", "pr", "view", ref, "--json", "state,mergeCommit,url,number,baseRefName,headRefOid,headRefName"], cwd=run["repo_root"],
                               capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError) as exc:
         raise Refused("pr-unverified", f"cannot ask GitHub about {ref}: {exc}", next_step=LANDED_FORM)
@@ -428,14 +428,18 @@ def _merged_pr(run: dict, ref: str) -> dict:
         info = json.loads(proc.stdout or "{}") if proc.returncode == 0 else {}
     except ValueError:
         info = {}
-    if not info:
+    if not isinstance(info, dict) or not info:
         raise Refused("pr-unverified", f"gh pr view {ref} failed: {(proc.stderr or proc.stdout).strip()[:200]}",
                       next_step=LANDED_FORM)
-    if info.get("state") != "MERGED" or not (info.get("mergeCommit") or {}).get("oid"):
+    merge = info.get("mergeCommit") if isinstance(info.get("mergeCommit"), dict) else {}
+    if info.get("state") != "MERGED" or not merge.get("oid"):
         raise Refused("pr-not-merged", f"{info.get('url') or ref} is {info.get('state') or 'unknown'}, not merged",
                       next_step="merge it first, or office close --handoff <pr-url> to hand it to the user")
-    return {"url": info.get("url") or ref, "number": info.get("number"), "merge_commit": info["mergeCommit"]["oid"],
-            "base": info.get("baseRefName")}
+    import re
+    if not isinstance(merge["oid"], str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", merge["oid"]):
+        raise Refused("pr-unverified", f"GitHub did not return a complete merge commit for {ref}", next_step=LANDED_FORM)
+    return {"url": info.get("url") or ref, "number": info.get("number"), "merge_commit": merge["oid"],
+            "base": info.get("baseRefName"), "head_commit": info.get("headRefOid"), "branch": info.get("headRefName")}
 
 
 def _contains(run: dict, commit: str, merge: str) -> bool:
@@ -448,12 +452,19 @@ def _contains(run: dict, commit: str, merge: str) -> bool:
 
 
 def close_landed_externally(con, run: dict, ref: str, quote: str | None = None) -> Result:
-    """Close a run whose work reached the target through a PR Office did not
-    open (#239). The PR must be merged. It is landing evidence on its own when
-    its merge commit contains every accepted revision and no task is left;
-    otherwise the user's words (--quote) record the override. Open gates,
-    blockers, and an unaccepted integration no longer apply: the work has landed."""
-    from office import closeout
+    from office import land
+    if state.is_terminal(run):
+        return _close_landed_externally(con, run, ref, quote)
+    with land._land_lock(run):
+        return _close_landed_externally(con, run, ref, quote)
+
+
+def _close_landed_externally(con, run: dict, ref: str, quote: str | None = None) -> Result:
+    """Close work landed through a merged PR. Actual accepted-commit ancestry
+    or the user's explicit quote retain the external-close behavior (#239).
+    Squash recovery instead requires the current accepted integration, proven
+    PR heads or exact tree equality, and fresh post-merge checks (#705)."""
+    from office import closeout, landing_recovery
     if state.is_terminal(run):
         return Result(lines=[f"{short(run['id'])} already {run['phase']}"], next=None,
                       final=closeout.done(f"already {run['phase']}, nothing to do"))
@@ -464,6 +475,13 @@ def close_landed_externally(con, run: dict, ref: str, quote: str | None = None) 
     contained = sorted(tid for tid, sha in accepted.items() if _contains(run, sha, pr["merge_commit"]))
     unproven = sorted(set(accepted) - set(contained)) + [f"{t['id']} ({t['status']})" for t in tasks
                                                          if t["status"] not in ("accepted", "cancelled")]
+    recovered = None
+    if unproven and not (quote and quote.strip()):
+        recovered = landing_recovery.prove(con, run, pr)
+        if recovered:
+            accepted = {tid: proof["accepted_commit"] for tid, proof in recovered[0]["tasks"].items()}
+            contained = sorted(tid for tid, sha in accepted.items() if _contains(run, sha, pr["merge_commit"]))
+            unproven = []
     if (unproven or not accepted) and not (quote and quote.strip()):
         raise Refused("landing-unproven", f"{pr['url']} is merged, but its merge commit {pr['merge_commit'][:12]} does not "
                       f"contain {', '.join(unproven) or 'any accepted revision'}", scope=f"run {short(run['id'])}",
@@ -472,11 +490,15 @@ def close_landed_externally(con, run: dict, ref: str, quote: str | None = None) 
     landing = {"status": "landed-externally", "pr": pr["url"], "merge_commit": pr["merge_commit"],
                **({"base": pr["base"]} if pr.get("base") else {}),
                "contains": contained, "unproven": unproven, "quote": (quote or "").strip() or None}
+    if recovered:
+        landing["squash_proof"] = recovered[0]
     with db.transaction(con):
         current = state.get_run(con, run["id"])
         if state.is_terminal(current):
             return Result(lines=[f"{short(run['id'])} already {current['phase']}"], next=None,
                           final=closeout.done(f"already {current['phase']}, nothing to do"))
+        if recovered:
+            landing_recovery.require_current(con, current, recovered[1])
         live = _stop_work(con, run)
         con.execute("UPDATE gates SET status='cancelled', stale_reason='landed externally' WHERE run_id=? "
                     "AND status IN ('queued','running','waiting')", (run["id"],))
@@ -499,6 +521,10 @@ def close_landed_externally(con, run: dict, ref: str, quote: str | None = None) 
     lines = [f"{short(run['id'])} closed | landed externally via {pr['url']} ({pr['merge_commit'][:12]})"]
     if unproven:
         lines.append(f"not in the merge commit, closed on the user's word: {', '.join(unproven)}")
+    if recovered:
+        proof = recovered[0]
+        lines.append(f"verified {proof['kind']} at {pr['merge_commit'][:12]}; {proof['checks']['summary']}; "
+                     "squash proof recorded separately from commit ancestry")
     res = Result(lines=lines + [f"archive receipt {receipt['digest'][7:15]}"], data={"archive_digest": receipt["digest"],
                                                                                    "landing": landing})
     _append_verification_disclosure(res, receipt)
