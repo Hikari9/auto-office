@@ -50,7 +50,7 @@ if [[ -f "$EXITFILE" ]]; then
     EXIT_CODE=$(cat "$EXITFILE")
 fi
 
-OUTPUT_BYTES=$(stat -f %z "$LOGFILE" 2>/dev/null || stat -c %s "$LOGFILE" || echo 0)
+OUTPUT_BYTES=$(wc -c < "$LOGFILE" 2>/dev/null || echo 0)
 
 # Output tail, escaping for JSON
 # This correctly escapes quotes, backslashes, and newlines
