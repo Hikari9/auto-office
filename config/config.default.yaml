@@ -342,3 +342,7 @@ web:
 # Disable with `office config economics.collect false`.
 economics:
   collect: false
+orchestrator_context:
+  enabled: true
+  # Set to 0 to disable context-high notices.
+  threshold_tokens: 272000
