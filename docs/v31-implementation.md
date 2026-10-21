@@ -194,6 +194,8 @@ task check that does (`lint --fix`) makes the gate STALE.
 `office dispatch T1 --as <harness>/<model>[@effort]` records an orchestrator choice and applies ordinary
 registry, trust, capability, quota and user-policy gates. `rerun --as` follows the same rule. An unquoted
 choice can be superseded by `rerun --fresh --reroute`; it never acquires user-override authority.
+`--route` retains its model-only selector and model-family-floor exception; trust, role capability,
+quota, and user-denial gates still apply, and an unquoted choice has orchestrator authority.
 Adding `--quote "<user's verbatim words>"` records an explicit user override, which skips registry,
 trust and floors while preserving capability and hard user-denial rules. It still
 resolves through a matching catalog row, so `agy/gemini-3.8-flash@medium` invokes `gemini-3.8-flash-medium`.
@@ -205,6 +207,11 @@ form, because both travel in the stored route.
 T1 is accepted. It launches nothing and preserves the submitted producer's route and all accepted
 evidence. The next legal reopen uses the declared route. Revoking an amendment worker preserves the
 need to satisfy newly added acceptance criteria; only the previously accepted revision remains audit evidence.
+Reused routes are checked against current factual gates before a new lease or launch is scheduled,
+including the run repository's live denial policy when a background caller runs elsewhere.
+A legacy override without a recorded quote is requalified with orchestrator authority for the new
+dispatch; the historical producer record stays unchanged. If an amendment's future route is refused,
+the amendment and its launch are rolled back together, and the refusal names the failed routing gate.
 
 - `--cli "<argv>"` (needs `--as`): starts exactly that argv in a herdr pane (`--kind` comes from the
   executable) through the normal landed-prompt path. Outside herdr, or if the agent does not start, the

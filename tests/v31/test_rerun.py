@@ -30,9 +30,9 @@ print(json.dumps({{"result": {{}}}}))
 '''
 
 
-def _setup(env, monkeypatch, *, session="sess-123", launcher="herdr"):
+def _setup(env, monkeypatch, *, session="sess-123", launcher="herdr", route=None):
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}] * 3)
-    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    env.office("dispatch", "T1", *(["--as", route] if route else []), env=EXTERNAL, check=0)
     herdr = env.bin / "herdr"
     herdr.write_text(FAKE_HERDR.format(python=sys.executable))
     herdr.chmod(0o755)
@@ -45,7 +45,7 @@ def _setup(env, monkeypatch, *, session="sess-123", launcher="herdr"):
             con.execute(f"ALTER TABLE dispatches ADD COLUMN {col} TEXT")
     did = con.execute("SELECT current_dispatch_id FROM tasks WHERE id='T1'").fetchone()[0]
     con.execute("UPDATE dispatches SET status='exited', terminal_classification='success', ended_at=started_at, "
-                "launcher=?, pane_id='w1:p5', session_id=?, adapter_id='claude', model='m' WHERE id=?",
+                "launcher=?, pane_id='w1:p5', session_id=? WHERE id=?",
                 (launcher, session, did))
     con.commit()
     return did
@@ -143,11 +143,11 @@ def test_resume_launches_a_linked_dispatch_carrying_the_resume_argv(env, monkeyp
 @pytest.mark.parametrize("adapter,form", [("claude", ["--resume"]), ("codex", ["resume"])])
 def test_resume_argv_comes_from_the_recorded_id_after_the_pane_closed(env, monkeypatch, adapter, form):
     sid = "6f1c2a9e-3b7d-4c55-9a41-0d2e8b7a1f33"
-    parent = _setup(env, monkeypatch, session=sid)
+    route = {"claude": "claude/claude-opus-5-5@high", "codex": "codex/gpt-6-astra@high"}[adapter]
+    parent = _setup(env, monkeypatch, session=sid, route=route)
     monkeypatch.setenv("FAKE_HERDR_AGENT", "gone")
     con = env.con()
-    con.execute("UPDATE dispatches SET adapter_id=?, harness=?, effort='high', pane_closed_at='2026-10-05T00:00:00Z' WHERE id=?",
-                (adapter, adapter, parent))
+    con.execute("UPDATE dispatches SET pane_closed_at='2026-10-05T00:00:00Z' WHERE id=?", (parent,))
     con.commit()
     from office import rerun
     rerun.rerun(con, _run(con), "T1", resume=True, fresh=False)  # the seed adapter, not a stand-in

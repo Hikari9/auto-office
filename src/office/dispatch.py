@@ -349,22 +349,103 @@ def named_executor_route(con, run: dict, task: dict, text: str, *, quote: str | 
     """
     validate_route_quote(quote, text)
     config = state.pinned_config(run)
-    named = candidates.declared_decision(text, flag=flag, role="executor", config=config)
     actor = "user" if quote is not None else "orchestrator"
     reason = f'user override ({flag} {text}): "{quote}"' if quote is not None \
         else f"orchestrator choice ({flag} {text})"
-    authority = {"actor": actor, "reason": reason, **({"quote": quote} if quote is not None else {})}
+    authority = {"actor": actor, "reason": reason, "flag": flag,
+                 **({"quote": quote} if quote is not None else {})}
     if quote is not None:
-        decision = named
+        decision = candidates.declared_decision(text, flag=flag, role="executor", config=config,
+                                                repo_root=run.get("repo_root"))
         decision["selection_disclosure"]["reason"] = reason
     else:
+        # --route historically allows a model-only selector and is exempt from
+        # the default model-family version floor. Neither exception grants trust.
+        selection = {"override": text} if flag == "--route" else {
+            "exact": candidates.declared_decision(text, flag=flag, role="executor", config=config,
+                                                  repo_root=run.get("repo_root"))["selected"]}
         decision = candidates.route_role(con, config, run, "executor", task_id=task["id"],
-                                         exact=named["selected"], manual=True,
+                                         **selection, manual=True,
                                          dispatch_kind="fix" if task.get("current_dispatch_id") else "fresh")
         if decision.get("status") == "selected":
             decision["selection_disclosure"] = {**(decision.get("selection_disclosure") or {}), "reason": reason}
             decision["route_note"] = "orchestrator choice"
-    decision.update(route_authority=authority, route_source="override" if quote is not None else "orchestrator")
+    decision.update(route_authority=authority, route_source="override" if quote is not None else "orchestrator",
+                    _qualified=True)
+    return decision
+
+
+def _route_quote(route: dict) -> str | None:
+    quote = (route.get("route_authority") or {}).get("quote") or (route.get("route_change") or {}).get("quote")
+    return quote if isinstance(quote, str) and quote.strip() else None
+
+
+def _route_origin(route: dict) -> dict:
+    """Authority for a new decision, without rewriting old producer evidence."""
+    quote = _route_quote(route)
+    authority = route.get("route_authority") or {}
+    if not authority and route.get("route_source") == "override" and not route.get("override"):
+        authority = {"actor": "orchestrator", "flag": "--route", "reason": "orchestrator choice (recorded --route)"}
+    if quote:
+        return {"route_authority": {**authority, "actor": "user", "quote": quote,
+                                    "reason": authority.get("reason") or f'user route change: "{quote}"'},
+                "override": True, "declared": True,
+                **({"route_change": route["route_change"]} if route.get("route_change") else {})}
+    if authority or route.get("override") or route.get("declared"):
+        return {"route_authority": {"actor": "orchestrator", "reason": (authority.get("reason")
+                                    if authority.get("actor") == "orchestrator" else None) or
+                                    "orchestrator choice (legacy route has no recorded user quote)",
+                                    **({"flag": authority["flag"]} if authority.get("flag") else {})}}
+    return {}
+
+
+def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: bool = False) -> dict:
+    """Revalidate a reused executor route before its new lease/outbox is written.
+
+    A quoted --as keeps the explicit unknown-model override contract. An amend
+    route pin waives only unverified trust; all its other factual gates apply.
+    Historical unquoted overrides grant no authority to a new dispatch.
+    """
+    cand = route.get("candidate") or {}
+    if not cand:
+        raise Refused("no-route", f"{task['id']}: no recorded executor candidate", scope=task["id"])
+    text = f"{cand['harness']}/{cand['model_id']}@{cand['effort']}"
+    triple = routing.candidate_id(cand)
+    config = state.pinned_config(run)
+    origin = _route_origin(route)
+    quote = _route_quote(route)
+    authority = origin.get("route_authority") or {}
+    if quote and not route.get("route_change"):
+        decision = candidates.declared_decision(text, role="executor", config=config, repo_root=run.get("repo_root"))
+        triple = routing.candidate_id(decision["candidate"])
+        # Explicit consent bypasses registry/trust/floors, not a standing
+        # quarantine or a known exhausted reserve on a later automatic launch.
+        if scoring.evaluate_trust_state(con, triple)[1] == "quarantined":
+            raise Refused("route-unavailable", f"{triple} is quarantined", scope=task["id"])
+        quota = candidates.probe_quota(adapters.load_all()[cand["harness"]])
+        decision["candidate"]["quota"] = quota
+        reserve = float((config.get("quota") or {}).get("reserve_percent", routing.DEFAULT_RESERVE_PERCENT))
+        if (quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None
+                and float(quota["tightest_remaining_percent"]) - float(quota.get("projected_burn_percent") or 0) < reserve):
+            raise Refused("route-unavailable", f"{triple}: its quota would cross the protected reserve", scope=task["id"])
+    else:
+        selection = {"override": text} if authority.get("flag") == "--route" else {"exact": triple}
+        options = {**selection, "task_id": task["id"], "dispatch_kind": "fix",
+                   "manual": bool(authority), "declared": triple if quote else None}
+        decision = candidates.route_role(con, config, run, "executor", **options, observe=observe)
+        if decision.get("status") != "selected":
+            raise Refused("route-unavailable", _route_failure(task["id"], decision), scope=task["id"],
+                          next_step=_route_next(decision, task["id"], run))
+    decision.update(origin)
+    decision["route_source"] = route.get("route_source") or "router"
+    if authority.get("actor") == "orchestrator":
+        decision["route_source"], decision["route_note"] = "orchestrator", "orchestrator choice"
+    if authority:
+        decision["selection_disclosure"] = {**(decision.get("selection_disclosure") or {}),
+                                             "reason": authority["reason"]}
+    if route.get("launch"):
+        decision["launch"] = route["launch"]
+    decision["_qualified"] = True
     return decision
 
 
@@ -402,6 +483,7 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
                                   dispatch_kind=kind, manual=bool(declared), declared=declared,
                                   exclude=exclude, discovery_input=discovery_input)
+    fresh["_qualified"] = True
     if reroute and fresh.get("status") == "selected":
         fresh["route_source"], fresh["route_note"] = "reroute", "rerouted from current evidence"
     if discovery_input and fresh.get("status") == "selected" and (fresh.get("discovery") or {}).get("intent") == "trial":
@@ -435,8 +517,7 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     disclosure["adaptive"] = True
     disclosure["route_plan"] = {k: planned.get(k) for k in ("primary", "fallbacks", "chooser", "audit_id")}
     rec = state.recorded_route(task)
-    origin = {k: rec[k] for k in ("route_authority", "route_change", "override", "declared") if k in rec} \
-        if i == 0 and rec else {}
+    origin = _route_origin(rec) if i == 0 and rec else {}
     return {**fresh, "status": "selected", "selected": rid, "candidate": cand, "selection_disclosure": disclosure,
             "route_source": "plan", "route_note": None if i == 0 else note, "fallbacks_taken": taken,
             "planned": planned, **origin,
@@ -455,7 +536,7 @@ def _effective_slate(con, run: dict, task: dict) -> dict | None:
     if not rec:
         return plan
     primary = routing.candidate_id(rec["candidate"])
-    declared = bool(rec.get("declared"))
+    declared = bool(rec.get("declared") and _route_quote(rec))
     order = [] if declared else [r for r in [(plan or {}).get("primary"), *((plan or {}).get("fallbacks") or [])]
                                  if r and r != primary]
     return {**(plan or {}), "primary": primary, "fallbacks": order, "chooser": "declared" if declared else "recorded",
@@ -943,6 +1024,10 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
             decision = {**s, "status": "selected", "selected": routing.candidate_id(s["candidate"])}
     if decision is None:
         raise Refused("no-route", f"{task_id}: no route recorded for relaunch", scope=task_id)
+    if role == "executor" and not decision.get("_qualified"):
+        decision = qualify_recorded_route(con, run, task, decision)
+        _record_routing(con, run, decision)
+        note_route(con, run, task, decision)
     cand = decision["candidate"]
     dispatch_id = "D" + uuid.uuid4().hex[:8]
     lease = acquire_lease(con, run, task, dispatch_id, role)

@@ -1,6 +1,8 @@
 """An accepted producer stays immutable while the next executor route changes."""
 import json
 
+import pytest
+
 from conftest import task_row
 from test_revoke_accepted import EXTERNAL, _accepted
 
@@ -50,3 +52,38 @@ def test_revoke_of_new_acceptance_work_does_not_restore_stale_acceptance(env):
     code, out = env.office("rerun", "T1", "--fresh", "--as", NEW, env=EXTERNAL)
     assert code == 0 and "task-done" not in out, out
     assert _dispatch(env, task_row(env, "T1")["current_dispatch_id"])["triple"] == "codex@1/gpt-6-astra@low"
+
+
+@pytest.mark.parametrize("block", ["denied", "quota", "quarantined", "capabilities"])
+def test_accepted_future_route_rechecks_factual_gates_and_refusal_is_atomic(env, monkeypatch, block):
+    accepted = _accepted(env)
+    producer = _dispatch(env, accepted["current_dispatch_id"])
+    env.office("amend", "route", "T1", "--as", NEW, "--quote", QUOTE, env=EXTERNAL, check=0)
+    con = env.con()
+    tables = ("dispatches", "plans", "amendments", "deliveries", "leases", "outbox", "route_audit")
+    counts = {table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables}
+    before = task_row(env, "T1")
+    extra = EXTERNAL
+    if block == "denied":
+        (env.tmp / "user-config.yaml").write_text(f"routing:\n  user_policy:\n    denied_models: [{NEW}]\n")
+    elif block == "quota":
+        from test_adaptive_dispatch import _quota
+        extra = _quota(env, codex=1)
+    elif block == "quarantined":
+        from test_declared_route_426 import _trust
+        _trust(monkeypatch, "codex@1/gpt-6-astra@low", "quarantined")
+    else:
+        from office import adapters
+        real = adapters.load_sources
+        def without_builder():
+            sources = real()
+            adapter, *rest = sources["codex"]
+            sources["codex"] = ({**adapter, "capabilities": []}, *rest)
+            return sources
+        monkeypatch.setattr(adapters, "load_sources", without_builder)
+    code, out = env.office("amend", "T1", "--add-accept", "reject nonnumeric arguments", "--",
+                          "tighten input handling", env=extra)
+    assert code == 4 and block in out.lower(), out
+    assert {table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables} == counts
+    assert _dispatch(env, producer["id"]) == producer
+    assert task_row(env, "T1") == before

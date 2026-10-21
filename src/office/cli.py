@@ -255,7 +255,7 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("dispatch", parents=[common])
     s.add_argument("tasks", nargs="*")
     s.add_argument("--parallel", action="store_true")
-    s.add_argument("--route", help="advanced: select the executor route (harness/model@effort)")
+    s.add_argument("--route", help="advanced: select the executor route ([harness/]model[@effort])")
     s.add_argument("--reroute", action="store_true",
                    help="ignore the plan's route slate and route from current evidence")
     s.add_argument("--as", dest="as_model", metavar="HARNESS/MODEL[@EFFORT]",
