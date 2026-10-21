@@ -92,6 +92,7 @@ def test_699_rerun_guidance_uses_actual_adapter_resume_capability(monkeypatch, a
 
 @pytest.mark.review_contract("v3.1")
 def test_699_stale_status_wait_and_resume_refusal_offer_only_fresh(env, monkeypatch):
+    import copy
     from office import adapters
     _, _, w2, wt = _t2_on_superseded_t1(env)
     _commit(env, wt, {"mul.py": GOOD_MUL}, "dependent awaiting restack")
@@ -100,7 +101,9 @@ def test_699_stale_status_wait_and_resume_refusal_offer_only_fresh(env, monkeypa
     con.execute("UPDATE dispatches SET status='exited', ended_at=started_at, session_id='stored-but-not-resumable', "
                 "adapter_id='claude' WHERE id=?", (w2["OFFICE_DISPATCH_ID"],))
     con.commit()
-    monkeypatch.setattr(adapters, "load_all", lambda: {"claude": NO_RESUME})
+    current = copy.deepcopy(adapters.load_all())
+    current["claude"]["office_profiles"]["worker"]["interactive"].pop("resume_argv", None)
+    monkeypatch.setattr(adapters, "load_all", lambda: current)
     for args in (("status",), ("wait", "--timeout", "0")):
         _, out = env.office(*args)
         assert "office rerun T2 --fresh" in out and "--resume" not in out, out
@@ -133,11 +136,48 @@ def test_709_quota_blocked_route_is_not_repeated_in_recovery_guidance(env, monke
     con.execute("UPDATE dispatches SET status='exited', ended_at=started_at, session_id='old-session' WHERE id=?", (did,))
     con.execute("UPDATE tasks SET status='changes_required', pause_reason='restack: parent changed' WHERE id='T1'")
     con.commit()
-    monkeypatch.setattr(rerun, "_sticky_check", lambda *args: "projected quota crosses reserve")
+    monkeypatch.setattr(rerun, "_recovery_route", lambda *args: (None, "projected quota crosses reserve"))
     run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
     hint = guide.next_action(con, run)
     assert "office inspect route T1" in hint and "projected quota crosses reserve" in hint, hint
     assert "office rerun T1 --resume" not in hint and "office rerun T1 --fresh" not in hint, hint
+
+
+def test_recovery_hint_reads_pending_trust_changes_without_committing_them(env):
+    from office import db, rerun, state
+    from test_issue_707_route_authority import FB1, _approve, _ended, _latest, _quota
+    _approve(env)
+    env.office("dispatch", "T1", "--as", FB1, env=_quota(env), check=0)
+    _ended(env)
+    con = env.con()
+    parent = state.get_dispatch(con, _latest(env)["id"])
+    run = state.get_run(con, parent["run_id"])
+    before = con.execute("SELECT COUNT(*) FROM adapter_trust_acts WHERE triple LIKE 'codex@%'").fetchone()[0]
+    assert before > 0
+    with pytest.raises(RuntimeError, match="roll back the caller"):
+        with db.transaction(con):
+            con.execute("DELETE FROM adapter_trust_acts WHERE triple LIKE 'codex@%'")
+            hint = rerun.recovery_hint(con, run, "T1")
+            assert "office inspect route T1" in hint and "trust" in hint, hint
+            assert con.in_transaction
+            raise RuntimeError("roll back the caller")
+    assert con.execute("SELECT COUNT(*) FROM adapter_trust_acts WHERE triple LIKE 'codex@%'").fetchone()[0] == before
+    assert not con.in_transaction
+
+
+def test_recovery_hint_rechecks_a_changed_future_pin_before_offering_fresh(env):
+    from office import rerun, state
+    from test_issue_721_accepted_route import NEW, QUOTE, _accepted
+    accepted = _accepted(env)
+    env.office("amend", "route", "T1", "--as", NEW, "--quote", QUOTE, env=EXTERNAL, check=0)
+    con = env.con()
+    con.execute("UPDATE tasks SET status='changes_required' WHERE id='T1'")
+    con.commit()
+    (env.tmp / "user-config.yaml").write_text(f"routing:\n  user_policy:\n    denied_models: [{NEW}]\n")
+    run = state.get_run(con, accepted["run_id"])
+    hint = rerun.recovery_hint(con, run, "T1")
+    assert "office inspect route T1" in hint and "denied" in hint and "gpt-6-astra" in hint, hint
+    assert "office rerun T1" not in hint, hint
 
 
 @pytest.mark.review_contract("v3.1")

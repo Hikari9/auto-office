@@ -47,24 +47,18 @@ def modes(con, run: dict, tid: str) -> str:
     return "--resume|--fresh"
 
 
-def _recovery_route_block(con, run: dict, task: dict, parent: dict) -> str | None:
-    """Read route eligibility without touching the caller's lifecycle transaction.
+def _recovery_route(con, run: dict, task: dict, route: dict) -> tuple[dict | None, str | None]:
+    """Observe current admission and invocation without committing or emitting notices.
 
-    Candidate construction defensively initializes older routing schemas and
-    may emit probe notices. Those writes and commits are inappropriate for a
-    status hint, especially when acceptance asks for it inside a transaction.
-    Use a separate read-only view; unavailable evidence keeps rerun's existing
-    admission-time check authoritative.
+    Use the caller's evidence, including changes in its current transaction.
+    An unreadable decision is a blocker, never permission to suggest a launch.
     """
-    filename = next((r[2] for r in con.execute("PRAGMA database_list") if r[1] == "main"), "")
-    if not filename:
-        return None
-    reader = sqlite3.connect(Path(filename).as_uri() + "?mode=ro", uri=True, timeout=0)
-    reader.row_factory = sqlite3.Row
     try:
-        return _sticky_check(reader, run, task, parent)
-    finally:
-        reader.close()
+        return dispatch.qualify_recorded_route(con, run, task, route, observe=True), None
+    except (Refused, Usage) as exc:
+        return None, exc.message
+    except sqlite3.Error as exc:
+        return None, f"route evidence could not be read: {exc}"
 
 
 def recovery_hint(con, run: dict, tid: str, *, fresh: bool = False) -> str:
@@ -77,12 +71,18 @@ def recovery_hint(con, run: dict, tid: str, *, fresh: bool = False) -> str:
     parent = _last_ended_executor(con, run, tid)
     if task and parent:
         recorded = state.recorded_route(task)
-        changed = recorded.get("declared") and routing.candidate_id(recorded["candidate"]) != parent.get("triple")
-        blocked = None if changed else _recovery_route_block(con, run, task, parent)
+        declared = bool(recorded.get("declared") and dispatch._route_quote(recorded))
+        changed = declared and routing.candidate_id(recorded["candidate"]) != parent.get("triple")
+        route = recorded if declared else parent.get("route") or {}
+        decision, blocked = _recovery_route(con, run, task, route)
+        route_id = routing.candidate_id(route["candidate"]) if route.get("candidate") else parent.get("triple")
         if blocked:
-            return (f"office inspect route {tid} (original route {parent.get('triple')} unavailable: {blocked}; "
+            return (f"office inspect route {tid} (route {route_id} unavailable: {blocked}; "
                     "select an eligible route before rerunning)")
-        if changed:
+        candidate = decision["candidate"]
+        invocation = (candidate["harness"], candidate.get("invocation_model_id"), candidate.get("effort"))
+        original = (parent.get("adapter_id") or parent.get("harness"), parent.get("model"), parent.get("effort"))
+        if changed or invocation != original:
             fresh = True
     return f"office rerun {tid} " + ("--fresh" if fresh else modes(con, run, tid))
 
