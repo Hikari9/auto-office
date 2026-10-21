@@ -40,7 +40,7 @@ def compose(tmp_path, monkeypatch, scopes, *, content=MARKER, target="pkg/__init
             self.sha = sha
 
         def fetchone(self):
-            return (self.sha,)
+            return (self.sha, root)
 
     class Conn:
         def execute(self, sql, args):
@@ -81,7 +81,7 @@ def test_declared_shared_differing_new_file_still_conflicts(tmp_path, monkeypatc
             self.sha = sha
 
         def fetchone(self):
-            return (self.sha,)
+            return (self.sha, git(repo, "rev-parse", "main"))
 
     class Conn:
         def execute(self, sql, args):

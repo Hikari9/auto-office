@@ -152,11 +152,11 @@ def compose_disposable(monkeypatch, tmp_path, repo, root, branches):
             self.sha = sha
 
         def fetchone(self):
-            return (self.sha,)
+            return (self.sha, root)
 
     class Conn:
         def execute(self, statement, args):
-            assert "SELECT commit_sha FROM revisions" in statement
+            assert "SELECT commit_sha, base_commit FROM revisions" in statement
             return Row(git(repo, "rev-parse", args[0]))
 
     monkeypatch.setattr(state, "get_task", lambda con, rid, tid: tasks[tid])
