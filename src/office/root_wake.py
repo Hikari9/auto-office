@@ -36,6 +36,7 @@ ACTIONABLE = frozenset({
     "integration.accepted", "integration.failed", "integration.conflict", "integration.stale",
     "pr.error", "pr.merged", "worker.signal", "watchdog.stall", "amendment.applied", "amendment.contract_changed",
     "requirements.changed", "finding.disposition", "authority.plan", "authority.land",
+    "ctx.high",
 })
 MIN_POLL = 0.5
 MAX_ATTEMPTS = 4
@@ -203,6 +204,8 @@ def attach(con, run: dict, *, off: bool = False) -> str:
 
 def reconcile(con, run: dict) -> int:
     """Turn committed authoritative transitions into idempotent notification receipts."""
+    from office import ctx_alert
+    ctx_alert.notice(con, run)
     binding = _binding(con, run["id"])
     if not binding:
         return 0
@@ -258,7 +261,7 @@ def _actionable_now(con, run: dict, seqs: list[int]) -> tuple[str, str, bool] | 
         return None
     keys = ",".join("?" for _ in seqs)
     candidates = con.execute(
-        f"SELECT seq, kind, task_id, dispatch_id, payload_json FROM events "
+        f"SELECT seq, kind, task_id, dispatch_id, summary, payload_json FROM events "
         f"WHERE run_id=? AND seq IN ({keys}) ORDER BY seq",
         (run["id"], *seqs)).fetchall()
     if not candidates:
@@ -267,6 +270,10 @@ def _actionable_now(con, run: dict, seqs: list[int]) -> tuple[str, str, bool] | 
     # the stop-and-ask guard; a signal or stall never bypasses it.
     action = guide.next_action(con, current)
     human = _human_only(action)
+
+    for e in reversed(candidates):
+        if e["kind"] == "ctx.high":
+            return (sha256_obj(("ctx.high", e["seq"], e["summary"])), e["summary"], human)
 
     # A confirmed stall is only live while its fingerprint remains the latest
     # active watchdog state. Clearing the stall makes old event rows inert.
@@ -429,7 +436,7 @@ def poll(con, run: dict) -> str:
             if current is None or current[0] == live["last_action_signature"]:
                 _finish(con, run["id"], seqs, token, "settled", "transition was settled before delivery")
                 return "no-action"
-            signature, _, human = current
+            signature, action, human = current
             guard = (" HUMAN DECISION REQUIRED: ask the user and stop. No authorization, "
                      "waiver, approval, or merge may be inferred."
                      if human else "")
@@ -438,6 +445,8 @@ def poll(con, run: dict) -> str:
                    "continue through checks, independent reviews and closeout until a genuine wait or human decision. "
                    "Do not infer success from a submit. This notification may be a duplicate; use fresh Office state."
                    + guard)
+            if action.startswith("ctx-high:"):
+                msg += "\n\n" + action
             # Herdr prompt landed != root observation. The next `office context`
             # advances the distinct observed cursor; no repeated model keepalives.
             landed = dispatch.submit_prompt(binding["agent_name"], msg, pane=binding["pane_id"])

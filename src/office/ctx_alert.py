@@ -10,7 +10,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from office import discovery, paths
+from office import db, discovery, paths, state as office_state
 from office.util import atomic_write_text
 
 DEFAULT_THRESHOLD = 272_000
@@ -50,7 +50,8 @@ def tick(high: bool, tokens: int | None, threshold: int) -> tuple[bool, str | No
         return True, None
     tokens_k = math.floor(tokens / 1000 + 0.5)
     threshold_k = math.floor(threshold / 1000 + 0.5)
-    return True, f"ctx-high: orchestrator {tokens_k}k > {threshold_k}k; run /compactable at a boundary"
+    return True, (f"ctx-high: orchestrator {tokens_k}k > {threshold_k}k; run /compactable at the next boundary; "
+                  "compact on COMPACT NOW")
 
 
 def _transcript_path(harness: str, session_id: str) -> Path | None:
@@ -157,6 +158,11 @@ def notice(con, run: dict, *, now: float | None = None) -> str | None:
                 return None
             state["high"], line = tick(state["high"], tokens, threshold)
             state["checked_at"] = checked_at
+            if line:
+                with db.transaction(con):
+                    office_state.emit(con, run, "ctx.high", line, payload={"session_id": session_id,
+                                                                            "tokens": tokens,
+                                                                            "threshold": threshold})
             _save_state(path, state)
             return line
     except OSError:
