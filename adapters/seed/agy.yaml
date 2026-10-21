@@ -46,7 +46,7 @@ failure_signatures:
 conformance:
   deterministic: pending
   live: pending
-source_notes: Current office-skills Agy mechanics seeded for migration; exact model display names are dynamic and must come from local discovery.
+source_notes: Current office-skills Agy mechanics seeded for migration; exact model display names are dynamic and must come from local discovery. The quota probe reports independent Gemini and Claude family results and retains a harness-wide compatibility value.
 # 3.1: agy is the Gemini route on accounts where the Gemini CLI reports
 # IneligibleTierError. agy has no verified read-only isolation, so it is not a
 # code reviewer; visual judgment runs in the run's private evidence directory.

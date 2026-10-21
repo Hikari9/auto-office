@@ -17,6 +17,10 @@ DISPLAY = {
 }
 
 
+# Launch evidence is recorded per row; a row whose banner never named it stays gated.
+UNVERIFIED_LAUNCH = {("claude-opus-5-5", "low")}
+
+
 def _seed():
     return yaml.safe_load((paths.resources_root() / "catalog/seed.yaml").read_text())
 
@@ -34,9 +38,13 @@ def test_agy_claude_rows_use_local_display_names_and_match_benchmarks():
     for key, display_name in DISPLAY.items():
         row = agy[key]
         assert row["invocation_model_id"] == display_name
-        assert row["invocation_source"] == "local-evidence:agy models"
-        assert row["dispatchable"] is False
-        assert row["discovery"] == "eligible"
+        if key in UNVERIFIED_LAUNCH:
+            assert row["invocation_source"] == "local-evidence:agy models"
+            assert row["dispatchable"] is False
+            assert row["discovery"] == "eligible"
+        else:  # dispatchable only with a launch whose banner named this exact model (see the row comment)
+            assert row["invocation_source"].startswith("local-evidence:agy 1.4.3 startup banner")
+            assert row["dispatchable"] is True
         if key == ("claude-sonnet-5-5", "low"):
             assert row["benchmark_indexes"] == {}
             assert "no published" in row["source_snapshot_metadata"]["notes"].lower()

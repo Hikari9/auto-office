@@ -162,7 +162,8 @@ def _shrink(prior: float | None, local: float | None, k: float, n: float) -> tup
 
 
 def _quota_component(c: dict, reserve: float) -> tuple[float, str]:
-    q = c.get("quota") or {}
+    from office import candidates
+    q = candidates.quota_for_candidate(c)
     rem = q.get("tightest_remaining_percent")
     if q.get("status") != "ok" or rem is None:
         return 0.35, "unknown"

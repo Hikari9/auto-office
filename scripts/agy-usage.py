@@ -4,14 +4,15 @@
 Reads OAuth credentials from the first of these that exists:
   1. ~/.gemini/antigravity-cli/antigravity-oauth-token   (legacy)
   2. ~/.gemini/jetski-standalone-oauth-token             (written by agy 1.3)
-refreshes the access token via Google OAuth2, and queries the CloudCode API endpoint:
-https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota
+refreshes the access token via Google OAuth2, and queries the CloudCode API endpoints:
+https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota         (per-model buckets)
+https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary  (account view: per-family 5h/weekly)
 
 Usage:
     ./agy-usage.py           # human-readable (Gemini models by default)
     ./agy-usage.py --all     # include other non-Claude models
     ./agy-usage.py --claude  # ALSO include Claude buckets (opt-in, see Note)
-    ./agy-usage.py --json    # machine-readable, for routing
+    ./agy-usage.py --json    # machine-readable, with independent Gemini and Claude families
     ./agy-usage.py --percent # bare integer percentage (lowest remaining among Gemini models)
 
 Exit codes:
@@ -19,14 +20,13 @@ Exit codes:
     2  headroom unknown / error reading credentials
 
 Note:
-    Produces Gemini numbers by default, and never Claude numbers unless --claude
-    is passed. agy is used here for Gemini-based models only; a Claude model is
-    routed through the claude harness, which has its own quota. The Claude
-    buckets on this endpoint are a separate allowance on a different reset
-    schedule (observed 2026-09-17: gemini 20 buckets at one shared percentage
-    and reset, claude 2 buckets at 0% with a reset six hours later), so folding
-    them into the default headroom number would let an allowance nobody is
-    routing against veto a Gemini dispatch.
+    The machine-readable result always reports Gemini and Claude as independent
+    families. The legacy top-level number remains Gemini-only unless --claude is
+    passed. The endpoint gives these families separate allowances and reset
+    schedules. `families` uses the summary endpoint when it answers, else the
+    per-model buckets (`family_source` names which). Observed 2026-09-17: 20
+    Gemini buckets shared one percentage and reset, while two Claude buckets were
+    at 0% and reset six hours later.
 
     --all is for inspection, not routing. It admits buckets such as
     gpt-oss-120b-medium that sit at 0% and would drive tightest_remaining_percent
@@ -82,6 +82,11 @@ def token_paths():
 # ---------------------------------------------------------------------------
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 QUOTA_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
+# The account view agy itself shows ("5h ... weekly ..."): per model GROUP, with a
+# five-hour and a weekly window. Found in agy 1.4.3's own log
+# (~/.gemini/antigravity-cli/log, quota_manager.go) and callable with the same
+# OAuth token and an empty JSON body.
+SUMMARY_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
 UA = "antigravity-cli"
 
 CLIENT_ID_RE = re.compile(rb"[0-9]{10,}-[a-z0-9]{28,}\.apps\.googleusercontent\.com")
@@ -276,18 +281,14 @@ def get_refreshed_access_token():
     return None, last_error or "No OAuth client candidates available"
 
 
-def fetch_agy_quota():
-    access_token, err = get_refreshed_access_token()
-    if err:
-        return None, err
-
+def _post_quota(url, access_token):
     headers = {
         "Authorization": f"Bearer {access_token}",
         "User-Agent": UA,
         "Content-Type": "application/json"
     }
 
-    req = urllib.request.Request(QUOTA_URL, data=b"{}", headers=headers)
+    req = urllib.request.Request(url, data=b"{}", headers=headers)
 
     try:
         with urllib.request.urlopen(req, timeout=10) as res:
@@ -299,6 +300,51 @@ def fetch_agy_quota():
         return None, f"Quota API unreachable: {e.reason}"
     except Exception as e:
         return None, f"Failed to query quota API: {e}"
+
+
+def fetch_agy_quota():
+    """(per-model quota, account-view summary, error). The summary is best effort:
+    None when that endpoint fails, in which case families fall back to the buckets."""
+    access_token, err = get_refreshed_access_token()
+    if err:
+        return None, None, err
+    data, err = _post_quota(QUOTA_URL, access_token)
+    if err:
+        return None, None, err
+    summary, _ = _post_quota(SUMMARY_URL, access_token)
+    return data, summary, None
+
+
+def _summary_family(group):
+    name = str(group.get("displayName") or "").lower()
+    ids = " ".join(str(b.get("bucketId") or "") for b in group.get("buckets") or []).lower()
+    if "gemini" in name or "gemini" in ids:
+        return "gemini"
+    if "claude" in name or "3p-" in ids:
+        return "claude"
+    return None
+
+
+def summary_families(summary):
+    """Per-family tightest window from the account-view summary, {} when unusable.
+
+    A family's headroom is its tightest window (5h or weekly) -- the same number
+    agy's status line shows against the model."""
+    families = {}
+    groups = summary.get("groups") if isinstance(summary, dict) else None
+    for group in groups if isinstance(groups, list) else []:
+        family = _summary_family(group) if isinstance(group, dict) else None
+        buckets = [b for b in group.get("buckets") or [] if isinstance(b, dict)] if family else []
+        buckets = [b for b in buckets if isinstance(b.get("remainingFraction"), (int, float))]
+        if not buckets:
+            continue
+        tightest = min(buckets, key=lambda b: b["remainingFraction"])
+        families[family] = {
+            "tightest_remaining_percent": int(round(tightest["remainingFraction"] * 100, 1)),
+            "reset_time": tightest.get("resetTime"),
+            "status": "ok",
+        }
+    return families
 
 
 def process_quota(data, all_models=False, include_claude=False):
@@ -340,8 +386,33 @@ def process_quota(data, all_models=False, include_claude=False):
         elif not found_target and pct < min_pct:
             min_pct = pct
 
+    family_buckets = {"gemini": [], "claude": []}
+    for bucket in buckets:
+        model_id = str(bucket.get("modelId") or "").lower()
+        if model_id.startswith("gemini"):
+            family_buckets["gemini"].append(bucket)
+        elif "claude" in model_id:
+            family_buckets["claude"].append(bucket)
+
+    families = {}
+    for family, members in family_buckets.items():
+        if not members:
+            families[family] = {
+                "tightest_remaining_percent": None,
+                "reset_time": None,
+                "status": "unknown",
+            }
+            continue
+        tightest = min(members, key=lambda bucket: float(bucket.get("remainingFraction", 1.0)))
+        families[family] = {
+            "tightest_remaining_percent": int(round(float(tightest.get("remainingFraction", 1.0)) * 100, 1)),
+            "reset_time": tightest.get("resetTime"),
+            "status": "ok",
+        }
+
     return {
         "tightest_remaining_percent": int(min_pct) if (found_target or models) else 100,
+        "families": families,
         "models": models,
         "raw_buckets": filtered_buckets,
         "note": (
@@ -353,10 +424,20 @@ def process_quota(data, all_models=False, include_claude=False):
 
 
 def main(argv):
-    raw_data, err = fetch_agy_quota()
+    raw_data, summary, err = fetch_agy_quota()
     if err:
         if "--json" in argv:
-            print(json.dumps({"error": err, "remaining_percent": None}, indent=2))
+            unknown_family = {
+                "tightest_remaining_percent": None,
+                "reset_time": None,
+                "status": "unknown",
+            }
+            print(json.dumps({
+                "error": err,
+                "remaining_percent": None,
+                "tightest_remaining_percent": None,
+                "families": {"gemini": dict(unknown_family), "claude": dict(unknown_family)},
+            }, indent=2))
         else:
             print(f"AGY quota probe UNKNOWN: {err}", file=sys.stderr)
         return 2
@@ -366,6 +447,9 @@ def main(argv):
     processed = process_quota(
         raw_data, all_models=all_models, include_claude=include_claude
     )
+    account = summary_families(summary)
+    processed["family_source"] = "retrieveUserQuotaSummary" if account else "retrieveUserQuota"
+    processed["families"].update(account)
     processed["scope"] = "gemini+claude" if include_claude else (
         "gemini+other" if all_models else "gemini"
     )

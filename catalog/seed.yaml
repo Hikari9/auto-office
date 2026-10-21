@@ -837,10 +837,9 @@ models:
   - model_id: claude-sonnet-5-5
     invocation_model_id: Claude Sonnet 5.5 (Low)
     invocation_harness: agy
-    invocation_source: 'local-evidence:agy models'
-    dispatchable: false
-    discovery: eligible
-    discovery_reason: 'Local Agy display-name evidence; exact route conformance probe required'
+    invocation_source: 'local-evidence:agy 1.4.3 startup banner 2026-10-21'
+    # Launch evidence (pty launch, 2026-10-21, no prompt sent): the Agy 1.4.3 banner status line named Claude Sonnet 5.5 (Low).
+    dispatchable: true
     source_identifier:
     source_name: shipped-seed
     effort: low
@@ -856,10 +855,9 @@ models:
   - model_id: claude-sonnet-5-5
     invocation_model_id: Claude Sonnet 5.5 (Medium)
     invocation_harness: agy
-    invocation_source: 'local-evidence:agy models'
-    dispatchable: false
-    discovery: eligible
-    discovery_reason: 'Local Agy display-name evidence; exact route conformance probe required'
+    invocation_source: 'local-evidence:agy 1.4.3 startup banner 2026-10-21'
+    # Launch evidence (pty launch, 2026-10-21, no prompt sent): the Agy 1.4.3 banner status line named Claude Sonnet 5.5 (Medium).
+    dispatchable: true
     source_identifier: claude-sonnet-5-5-medium
     source_name: artificial-analysis
     effort: medium
@@ -875,10 +873,9 @@ models:
   - model_id: claude-sonnet-5-5
     invocation_model_id: Claude Sonnet 5.5 (High)
     invocation_harness: agy
-    invocation_source: 'local-evidence:agy models'
-    dispatchable: false
-    discovery: eligible
-    discovery_reason: 'Local Agy display-name evidence; exact route conformance probe required'
+    invocation_source: 'local-evidence:agy 1.4.3 startup banner 2026-10-21'
+    # Launch evidence (pty launch, 2026-10-21, no prompt sent): the Agy 1.4.3 banner status line named Claude Sonnet 5.5 (High).
+    dispatchable: true
     source_identifier: claude-sonnet-5-5-high
     source_name: artificial-analysis
     effort: high
@@ -895,6 +892,9 @@ models:
     invocation_model_id: Claude Opus 5.5 (Low)
     invocation_harness: agy
     invocation_source: 'local-evidence:agy models'
+    # Gated: on 2026-10-21 four Agy 1.4.3 launches with --model "Claude Opus 5.5 (Low)" never
+    # showed that name in the banner (it stayed on the default Gemini 3.8 Flash (low)), though
+    # the other five Claude rows did. Flip only with a banner naming this exact model.
     dispatchable: false
     discovery: eligible
     discovery_reason: 'Local Agy display-name evidence; exact route conformance probe required'
@@ -913,10 +913,9 @@ models:
   - model_id: claude-opus-5-5
     invocation_model_id: Claude Opus 5.5 (Medium)
     invocation_harness: agy
-    invocation_source: 'local-evidence:agy models'
-    dispatchable: false
-    discovery: eligible
-    discovery_reason: 'Local Agy display-name evidence; exact route conformance probe required'
+    invocation_source: 'local-evidence:agy 1.4.3 startup banner 2026-10-21'
+    # Launch evidence (pty launch, 2026-10-21, no prompt sent): the Agy 1.4.3 banner status line named Claude Opus 5.5 (Medium).
+    dispatchable: true
     source_identifier: claude-opus-5-5-medium
     source_name: artificial-analysis
     effort: medium
@@ -932,10 +931,9 @@ models:
   - model_id: claude-opus-5-5
     invocation_model_id: Claude Opus 5.5 (High)
     invocation_harness: agy
-    invocation_source: 'local-evidence:agy models'
-    dispatchable: false
-    discovery: eligible
-    discovery_reason: 'Local Agy display-name evidence; exact route conformance probe required'
+    invocation_source: 'local-evidence:agy 1.4.3 startup banner 2026-10-21'
+    # Launch evidence (pty launch, 2026-10-21, no prompt sent): the Agy 1.4.3 banner status line named Claude Opus 5.5 (High).
+    dispatchable: true
     source_identifier: claude-opus-5-5-high
     source_name: artificial-analysis
     effort: high

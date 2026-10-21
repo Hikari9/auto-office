@@ -268,8 +268,11 @@ def probe_quota(adapter: dict) -> dict:
     if fixed:
         # Test/eval fixture: {"codex": 40, "claude": null} — never a live probe.
         value = json.loads(fixed).get(harness)
-        result = ({"status": "ok", "tightest_remaining_percent": float(value)} if value is not None
-                  else unknown("fixture returned null"))
+        if isinstance(value, dict):
+            result = _normalize_probe_result(value, unknown)
+        else:
+            result = ({"status": "ok", "tightest_remaining_percent": float(value)} if value is not None
+                      else unknown("fixture returned null"))
         _QUOTA_CACHE[harness] = (time.time(), result)
         return result
     if disabled:
@@ -315,15 +318,36 @@ def _run_probe(argv: list[str], unknown) -> dict:
             data = json.loads(proc.stdout)
         except ValueError:
             return unknown("command returned invalid JSON")
-        if not isinstance(data, dict) or "tightest_remaining_percent" not in data:
-            return unknown("command response missing tightest_remaining_percent")
-        if data["tightest_remaining_percent"] is None:
-            return unknown("command returned null tightest_remaining_percent")
-        try:
-            return {"status": "ok", "tightest_remaining_percent": float(data["tightest_remaining_percent"])}
-        except (TypeError, ValueError):
-            return unknown("command could not be run or parsed")
+        return _normalize_probe_result(data, unknown)
     return unknown("command could not be run or parsed")  # pragma: no cover
+
+
+def _normalize_probe_result(data: dict, unknown) -> dict:
+    if not isinstance(data, dict) or "tightest_remaining_percent" not in data:
+        return unknown("command response missing tightest_remaining_percent")
+    if data["tightest_remaining_percent"] is None:
+        return unknown("command returned null tightest_remaining_percent")
+    try:
+        result = {"status": "ok", "tightest_remaining_percent": float(data["tightest_remaining_percent"])}
+    except (TypeError, ValueError):
+        return unknown("command could not be run or parsed")
+
+    if isinstance(data.get("families"), dict):
+        result["families"] = {str(f): _normalize_family(str(f), raw) for f, raw in data["families"].items()}
+    return result
+
+
+def _normalize_family(family: str, raw) -> dict:
+    """One probe family result; anything but a readable ok percent is unknown."""
+    raw = raw if isinstance(raw, dict) else {}
+    try:
+        remaining = float(raw["tightest_remaining_percent"]) if raw.get("status") == "ok" else None
+    except (KeyError, TypeError, ValueError):
+        remaining = None
+    if remaining is None:
+        return {"status": "unknown", "tightest_remaining_percent": None,
+                "reset_time": raw.get("reset_time"), "cause": f"{family} family quota not reported"}
+    return {"status": "ok", "tightest_remaining_percent": remaining, "reset_time": raw.get("reset_time")}
 
 
 # Quota moves slowly relative to a dispatch; one successful probe result serves every
@@ -534,14 +558,14 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
     skipped.extend(not_routable)
     if quota_snapshot is not None:
         for c in candidates:
-            c["quota"] = quota_snapshot.get(c["adapter_id"], c["quota"])
+            c["quota"] = quota_for_candidate(c, quota_snapshot.get(c["adapter_id"], c["quota"]))
     elif probe and candidates:
         # One probe per harness that has a candidate, all at once.
         needed = sorted({c["adapter_id"] for c in candidates})
         with ThreadPoolExecutor(max_workers=len(needed)) as pool:
             quotas = dict(zip(needed, pool.map(lambda h: probe_quota(all_adapters[h]), needed)))
         for c in candidates:
-            c["quota"] = quotas[c["adapter_id"]]
+            c["quota"] = quota_for_candidate(c, quotas[c["adapter_id"]])
     return candidates, skipped
 
 
@@ -585,6 +609,26 @@ def model_family(model_id: str | None) -> str | None:
     independence unit for review. `claude-sonnet-5-5` and `sonnet` are both claude."""
     head = (model_id or "").lower().split("-", 1)[0]
     return _FAMILY_ALIASES.get(head, head) or None
+
+
+# agy's "Claude and GPT models" group shares one allowance.
+_AGY_QUOTA_FAMILY = {"gpt": "claude"}
+
+
+def quota_for_candidate(candidate: dict, quota: dict | None = None) -> dict:
+    """Return an Agy candidate's model-family quota, or the harness-wide result.
+
+    Probes without a ``families`` mapping keep the pre-family contract and apply
+    to every candidate on the harness.
+    """
+    result = quota if quota is not None else candidate.get("quota") or {}
+    if candidate.get("adapter_id") != "agy" and candidate.get("harness") != "agy":
+        return result
+    families = result.get("families") if isinstance(result, dict) else None
+    family = model_family(candidate.get("model_id"))
+    family = _AGY_QUOTA_FAMILY.get(family, family)
+    family_result = families.get(family) if isinstance(families, dict) else None
+    return family_result if isinstance(family_result, dict) else result
 
 
 def declared_candidate(harness: str, model: str, effort: str | None = None) -> dict:

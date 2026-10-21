@@ -423,9 +423,10 @@ def route(request: dict, discovery_input: dict | None = None) -> dict:
 
         # 6 quota safety: unknown quota is scored conservatively downstream, not
         # excluded when a known-safe route is also available.
+        from office import candidates as candidate_builder
         safe = []; unknown = []; unsafe = []
         for c in stage:
-            q = c.get("quota", {}); status = q.get("status", "unknown")
+            q = candidate_builder.quota_for_candidate(c); status = q.get("status", "unknown")
             if status != "ok" or q.get("tightest_remaining_percent") is None:
                 unknown.append(c); continue
             remaining = float(q["tightest_remaining_percent"]); burn = float(q.get("projected_burn_percent") or 0)
