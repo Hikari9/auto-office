@@ -348,6 +348,10 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     from office import root_wake
     for line in root_wake.lines(con, run):
         res.add(line)
+    from office import ctx_alert
+    context_notice = ctx_alert.notice(con, run)
+    if context_notice:
+        res.add(context_notice)
     from office import questions
     for q in questions.recorded(con, run):
         res.add(f"question: {q}")
