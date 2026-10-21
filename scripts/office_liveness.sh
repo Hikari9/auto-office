@@ -66,8 +66,8 @@ fi
 
 OUTPUT_BYTES=0
 if [[ -f "$LOGFILE" ]]; then
-    # OS X stat uses -f %z, Linux stat uses -c %s
-    OUTPUT_BYTES=$(stat -f %z "$LOGFILE" 2>/dev/null || stat -c %s "$LOGFILE" || echo 0)
+    # wc's byte count is portable; GNU stat -f may print filesystem data before failing.
+    OUTPUT_BYTES=$(wc -c < "$LOGFILE" 2>/dev/null || echo 0)
 fi
 
 LAST_SIZE=0

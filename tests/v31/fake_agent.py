@@ -269,5 +269,8 @@ if __name__ == "__main__":
     sys.stdout.write(out)
     sys.stdout.flush()
     if code < 0:
+        # A launcher may ignore SIGHUP; scripted signal death must be explicit.
+        if -code != signal.SIGKILL:
+            signal.signal(-code, signal.SIG_DFL)
         os.kill(os.getpid(), -code)
     sys.exit(code)
