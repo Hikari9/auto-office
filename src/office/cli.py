@@ -255,11 +255,12 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("dispatch", parents=[common])
     s.add_argument("tasks", nargs="*")
     s.add_argument("--parallel", action="store_true")
-    s.add_argument("--route", help="advanced: override the route (harness/model@effort)")
+    s.add_argument("--route", help="advanced: select the executor route ([harness/]model[@effort])")
     s.add_argument("--reroute", action="store_true",
                    help="ignore the plan's route slate and route from current evidence")
     s.add_argument("--as", dest="as_model", metavar="HARNESS/MODEL[@EFFORT]",
-                   help="run the executor on this model, bypassing registry, trust and floors (a user override)")
+                   help="select this executor route as the orchestrator; ordinary routing safety gates apply")
+    s.add_argument("--quote", help="with --as/--route: record the user's verbatim authority for a user override")
     s.add_argument("--cli", metavar="ARGV", help="with --as: start exactly this agent argv in a herdr pane")
     s.add_argument("--external", action="store_true",
                    help="prepare the dispatch and print how to start it; launch nothing")
@@ -488,7 +489,8 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--reroute", action="store_true",
                    help="with --fresh: route from current evidence instead of keeping the original route")
     s.add_argument("--as", dest="as_model", metavar="HARNESS/MODEL[@EFFORT]",
-                   help="run on this route (a user override, as dispatch --as); --resume needs the same harness, model and effort")
+                   help="select this route as the orchestrator; --resume needs the same harness, model and effort")
+    s.add_argument("--quote", help="with --as: record the user's verbatim authority for a user override")
     s.add_argument("--cli", metavar="ARGV", help="with --as: start exactly this agent argv in a herdr pane")
     s.add_argument("--external", action="store_true",
                    help="prepare the rerun and print how to start it; launch nothing")
@@ -938,7 +940,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "dispatch":
         from office import dispatch
         return dispatch.dispatch(con, run, args.tasks, parallel=args.parallel, route=args.route,
-                                 as_model=args.as_model, cli=args.cli, external=args.external,
+                                 as_model=args.as_model, quote=args.quote, cli=args.cli, external=args.external,
                                  review_as=args.review_as, review_cli=args.review_cli,
                                  review_external=args.review_external, reroute=args.reroute)
     if cmd == "preflight":
@@ -1044,7 +1046,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "rerun":
         from office import rerun
         return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh, reroute=args.reroute,
-                           as_model=args.as_model, cli=args.cli, external=args.external, review_as=args.review_as,
+                           as_model=args.as_model, quote=args.quote, cli=args.cli, external=args.external, review_as=args.review_as,
                            review_cli=args.review_cli, review_external=args.review_external)
     if cmd == "dismiss":
         from office import rerun

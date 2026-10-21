@@ -737,7 +737,7 @@ def test_cli_an_overkill_route_stays_selectable_by_as_and_amend_route(env):
     assert code == 0 and "declared" in out, out
     (event,) = [json.loads(r[0]) for r in env.con().execute("SELECT payload_json FROM events WHERE kind='route.changed'")]
     assert event["after"] == CLI_DENIED.replace("codex/", "codex@1/") and event["actor"] == "user"
-    code, out = env.office("dispatch", "T1", "--as", CLI_DENIED, env=EXTERNAL)
+    code, out = env.office("dispatch", "T1", "--as", CLI_DENIED, "--quote", "use astra here", env=EXTERNAL)
     assert code == 0 and "(user override)" in out, out
     assert env.con().execute("SELECT triple FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC").fetchone()[0] \
         == CLI_DENIED.replace("codex/", "codex@1/")

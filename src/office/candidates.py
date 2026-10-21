@@ -587,7 +587,7 @@ def model_family(model_id: str | None) -> str | None:
     return _FAMILY_ALIASES.get(head, head) or None
 
 
-def declared_candidate(harness: str, model: str, effort: str | None = None) -> dict:
+def declared_candidate(harness: str, model: str, effort: str | None = None, *, repo_root=None) -> dict:
     """A candidate the user named with --as/--review-as. It bypasses the
     registry, trust, and floors, but still resolves through the catalog when a
     row matches, so `agy/gemini-3.8-flash@medium` invokes the combined slug
@@ -624,7 +624,7 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
              "effort": effort or (row or {}).get("effort") or "none",
              "lineage_key": (row or {}).get("lineage_key"),
              "generation_version": (row or {}).get("generation_version")}
-    for policy in required_user_policies():
+    for policy in required_user_policies(repo_root):
         denied = route_policy.is_denied(named, policy)
         if denied:
             raise state.Refused("route-denied", denied, next_step=(
@@ -652,7 +652,7 @@ def declared_candidate(harness: str, model: str, effort: str | None = None) -> d
 
 
 def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
-                      config: dict | None = None) -> dict:
+                      config: dict | None = None, repo_root=None) -> dict:
     """A routing decision for a user-declared `harness/model[@effort]`.
 
     A user override bypasses the registry, trust and floors, but not what the
@@ -663,7 +663,7 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
     want = parse_route_override(text)
     if not want["harness"] or not want["model_id"]:
         raise Usage("invalid-override", f"{flag} {text!r}: expected <harness>/<model>[@effort]")
-    cand = declared_candidate(want["harness"], want["model_id"], want["effort"])
+    cand = declared_candidate(want["harness"], want["model_id"], want["effort"], repo_root=repo_root)
     if role:
         required = set(role_policy(config or {}, role).get("required_capabilities") or [])
         missing = sorted(required - set(cand.get("capabilities") or []))
@@ -700,7 +700,7 @@ def protected_quota_remedy(run: dict, role: str, task_id: str | None = None) -> 
               "config edits do not apply to it")
     route = "<harness>/<model>[@effort]"
     if role == "executor" and task_id:
-        fix = f"office dispatch {task_id} --as {route}"
+        fix = f'office dispatch {task_id} --as {route} --quote "<user\'s words>"'
     elif role == "code_reviewer" and task_id:
         fix = f"office dispatch {task_id} --review-as {route}"
     elif role == "visual_reviewer" and task_id:
@@ -782,7 +782,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                dispatch_kind: str = "fresh", wave_load: dict | None = None, pending_explorations: int = 0,
                quota_snapshot: dict[str, dict] | None = None,
                quota_event_seen: set[str] | None = None, discovery_input: dict | None = None,
-               manual: bool = False, declared: str | None = None) -> dict:
+               manual: bool = False, declared: str | None = None, observe: bool = False) -> dict:
     """Build the request and route. Returns the routing result plus request.
     `declared` is a user-declared route identity that passes unverified adapter trust.
     `discovery_input` is the dispatch preflight's recompute handle (#494); a manual
@@ -791,7 +791,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     rules, but it keeps the ordinary candidate set, floors and discovery inputs.
     `exact` keeps only the candidate with that route identity (harness@major/model@effort).
     Executor and worker requests carry the adaptive inputs (#300); `wave_load`
-    counts routes already planned for other tasks of the same wave."""
+    counts routes already planned for other tasks of the same wave. `observe`
+    reads the supplied evidence connection without emitting quota notices."""
     from office import onboarding
 
     live = required_user_policies(run.get("repo_root"))
@@ -810,7 +811,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
             wanted = f"{entry.get('harness') + '/' if entry.get('harness') else ''}{entry.get('model_id')}" \
                      f"{'@' + entry['effort'] if entry.get('effort') else ''}"
             skipped.append({"candidate": wanted, "reason": "preferred_seed entry matches no candidate"})
-    if probe and os.environ.get("OFFICE_QUOTA_PROBE") != "off" and run.get("id"):
+    if probe and not observe and os.environ.get("OFFICE_QUOTA_PROBE") != "off" and run.get("id"):
         # One notice per call, naming every harness whose quota could not be read. A probe the
         # operator switched off is a choice, not a failure, and says nothing.
         seen = quota_event_seen if quota_event_seen is not None else set()
@@ -888,7 +889,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         request["size_class"] = (run.get("risk") or {}).get("size_class")
         if override or manual:
             request["manual_route"] = True
-    result = routing.route(request)
+    result = routing.route(request, connection=con) if observe or con.in_transaction else routing.route(request)
     result["benchmark_snapshot"] = snapshot
     result["skipped"] = skipped
     result["request"] = request

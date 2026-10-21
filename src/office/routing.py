@@ -249,12 +249,14 @@ def _connect(db_path):
     return con
 
 
-def route(request: dict, discovery_input: dict | None = None) -> dict:
+def route(request: dict, discovery_input: dict | None = None, *,
+          connection: sqlite3.Connection | None = None) -> dict:
     """Route one request. `discovery_input` (#494) is the preflight's recompute handle:
     {"candidate", "probe_key", "reservation_id", "attempt_id"} naming the one discovery
     candidate whose fresh exact probe record the request now carries. The recompute
     re-evaluates every gate against the request's current state, never draws again and
-    never swaps in a different untried route."""
+    never swaps in a different untried route. A supplied connection belongs to the
+    caller; read its current evidence without committing or closing it."""
     discovery_input = discovery_input or request.get("discovery_input")
     role = request["role"]
     playbook = request.get("playbook")
@@ -302,7 +304,7 @@ def route(request: dict, discovery_input: dict | None = None) -> dict:
             and override_record["bypass_stage"] == stage_no
         )
 
-    con = _connect(db_path)
+    con = connection if connection is not None else _connect(db_path)
     try:
         # 1 hard exclusions, then the user's denied and overkill policy (#494). Denial blocks
         # every role and every route, manual or automatic. Overkill skips a route only in
@@ -527,7 +529,7 @@ def route(request: dict, discovery_input: dict | None = None) -> dict:
             "decision_hash": sha256_obj({"role": role, "playbook": playbook, "selected": cid, "policy": policy, "candidate": chosen}),
         }
     finally:
-        if con is not None:
+        if connection is None and con is not None:
             con.close()
 
 

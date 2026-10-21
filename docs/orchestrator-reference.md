@@ -55,6 +55,8 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
 
 ## Waiting, questions, stalls
 
+`dispatch --as` and `rerun --as` record orchestrator choices with ordinary routing safety gates. Add `--quote "<user's words>"` only for actual user authority. `amend route` can record an accepted task's future route without rewriting its submitted producer; its next legal reopen uses that route. Revoking new acceptance work does not mark the new criteria satisfied.
+
 - `office wait` exits 0 (act), 3 (stall or an already-reported action with no work in flight), 5 (an agent asked a question), 124 (nothing new). On 3, follow `next:` before waiting again. An amendment awaiting an ended executor's acknowledgement is a blocker and names a fresh recovery; resume is offered only when the adapter and stored session support it. Key on the exit code.
 - Exit 5 prints a `question:` line (dispatch, pane, question, options, answer command). Decide planning, scope, ordering and
   test detail yourself: amend the contract first if the answer changes it, then `office answer <task|dispatch> <n>` (a number
