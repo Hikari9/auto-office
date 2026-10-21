@@ -358,6 +358,8 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
         raise Refused("close-blocked", "cannot close: " + "; ".join(blockers[:4]),
                       scope=f"run {short(run['id'])}", preserved="all work, evidence and reviews",
                       next_step=guide.next_action(con, run))
+    from office import deploy_artifacts
+    deploy_artifacts.preserve_interrupted(run)
     with db.transaction(con):
         current = state.get_run(con, run["id"])
         if state.is_terminal(current):
@@ -472,6 +474,8 @@ def close_landed_externally(con, run: dict, ref: str, quote: str | None = None) 
     landing = {"status": "landed-externally", "pr": pr["url"], "merge_commit": pr["merge_commit"],
                **({"base": pr["base"]} if pr.get("base") else {}),
                "contains": contained, "unproven": unproven, "quote": (quote or "").strip() or None}
+    from office import deploy_artifacts
+    deploy_artifacts.preserve_interrupted(run)
     with db.transaction(con):
         current = state.get_run(con, run["id"])
         if state.is_terminal(current):
@@ -591,6 +595,8 @@ def _archive_receipt(con, run: dict, landing: dict, handoff: str | None) -> dict
             "policy_hash": run["policy_hash"], "config_hash": run["config_hash"], "tasks": tasks,
             "accepted_commits": {t["id"]: revs.get(t["accepted_revision"]) for t in tasks},
             "landing": landing, "handoff": handoff}
+    from office import deploy_artifacts
+    body["deploy_artifacts"] = deploy_artifacts.receipt(run)
     verification = _verified_test_tiers(con, run)
     if verification:
         body["verification"] = verification

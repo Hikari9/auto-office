@@ -187,7 +187,7 @@ When every task is accepted and every lane converged, the runtime composes and v
 end state. `ask` lists the task PRs: ask the user and record the choice with `office land --merge|--preview|--e2e --quote "<words>"`, or stop
 with `office close --handoff <pr-url>`. `preview` deploys and verifies the integrated result. `merge`/`e2e` merge the PRs bottom-up after required
 checks, confirm the default branch matches the reviewed tree, close the issue, and (e2e) deploy prod and verify; a failure names what merged and
-the rollback target. Then `office close`. If the default branch moved, run `office land --rebase` first. A task PR GitHub reports conflicting is
+the rollback target. Deploy output is verified into a private rollback archive before checkout removal; archive failure keeps the checkout. Then `office close`. If the default branch moved, run `office land --rebase` first. A task PR GitHub reports conflicting is
 recovered once when its head is one Office reviewed or pushed and folding the open tasks onto the default branch reproduces the reviewed tree; else land refuses and pushes nothing. `office close --abandon "<reason>"` stops
 early; `--landed-externally <merged-pr-url>` closes work that landed through a PR Office did not open. Rebase, `--no-prs` and PR-body detail:
 `docs/orchestrator-reference.md`.

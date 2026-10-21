@@ -96,6 +96,18 @@ def remove_worktrees(con, run: dict) -> dict:
         proc = _git(repo, "worktree", "remove", "--force", str(wt))
         (removed if proc.returncode == 0 else kept).append(wt.name if proc.returncode == 0
                                                            else f"{wt.name} ({proc.stderr.strip()[:80]})")
+    from office import deploy_artifacts
+    for wt in deploy_artifacts.checkouts(run):
+        # Recheck immediately before removal; close saved a receipt before it
+        # became terminal, but a leftover deployment writer may have changed it.
+        try:
+            deploy_artifacts.preserve_or_refuse(run, wt)
+        except Exception as exc:
+            kept.append(f"{wt.name} ({exc})")
+            continue
+        proc = _git(repo, "worktree", "remove", "--force", str(wt))
+        (removed if proc.returncode == 0 else kept).append(wt.name if proc.returncode == 0
+                                                           else f"{wt.name} ({proc.stderr.strip()[:80]})")
     _git(repo, "worktree", "prune")
     deleted, branches_kept = [], []
     prefix = f"refs/heads/office/{run['id'][:8]}/"
@@ -151,6 +163,9 @@ def finish(con, run: dict, landing: dict, *, pr: str | None = None) -> tuple[lis
     sync = sync_base(repo, base)
     cleaned = remove_worktrees(con, run)
     lines = [sync["line"]]
+    from office import deploy_artifacts
+    for archive in deploy_artifacts.receipt(run):
+        lines.append(f"rollback output preserved: {archive['archive']} ({len(archive['files'])} files; manifest.json)")
     if cleaned["removed"] or cleaned["branches"]:
         lines.append(f"removed {len(cleaned['removed'])} run worktree(s), deleted {len(cleaned['branches'])} branch(es); "
                      "git worktree prune")
