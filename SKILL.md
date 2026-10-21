@@ -203,7 +203,7 @@ After a restart or compaction: `office resume` (or `office resume <id>` when sev
 work from runs.db (`office context` adds a bounded snapshot with stale references flagged); never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract.
 
 When `office status` shows `ctx-high:`, wait for a natural boundary and run `/compactable`. Compact only when it returns `COMPACT NOW`; then verify compaction and continue. The notice fires once per high-context episode and rearms after context drops below the configured threshold.
-Configure `orchestrator_context.threshold_tokens` to change the default 272000-token threshold, or set `orchestrator_context.enabled: false` to disable the notice.
+Configure `orchestrator_context.threshold_tokens` to change the default 272000-token threshold; set it to `0` or set `orchestrator_context.enabled: false` to disable the notice.
 
 ## Diagnostics
 
