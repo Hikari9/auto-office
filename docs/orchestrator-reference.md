@@ -161,6 +161,11 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
   `--quote "<words>"` only for their explicit confirmation that the PR landed this run's work.
 - Deploys run in a fresh checkout of the landed commit. Each deploy and verify step reports its cwd (`deploy ok: <cmd> (cwd <path>)`),
   and a failure names the same cwd, so a path a command expects is checked against that checkout.
+- Before removing a deploy checkout, Office copies and verifies all untracked and ignored output into a private
+  `deploy-artifacts/<run>/<checkout>-<id>/` archive under the state home. The deploy log, close output and archive receipt name it;
+  `manifest.json` maps the original checkout paths to files, hashes, modes and symlink targets. Links are copied without following
+  them. These archives survive `office prune`; retain them for your rollback policy. An archive failure keeps the checkout and
+  refuses cleanup. `office close` also preserves output left by an interrupted deployment before becoming terminal.
 - `office land --detect` warns when a deploy command names a repo path the fresh checkout lacks (gitignored or untracked, e.g. `.env`
   or `myaccount/.env` passed to a sourced script). Fix it by listing the path under `deploy.env_files` in the config: Office copies each
   listed file into the deploy checkout with its mode preserved, never stages or commits it, and refuses an entry outside the repo.
