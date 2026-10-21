@@ -174,7 +174,7 @@ def _land_preview(con, run: dict, snap: dict, deploy: dict) -> Result:
         res.add(f"preview already deployed from this tree ({tree[:12]}); skipped")
     else:
         # A checkout of its own: a compose may remove `_integration`, and another land may run its own deploy.
-        with _deploy_checkout(run, commit, "deploy-preview") as (checkout, head, head_tree):
+        with _deploy_checkout(run, commit, "deploy-preview", res=res) as (checkout, head, head_tree):
             _require_unchanged(con, run, snap, "before the preview deploy")
             _require_tree(head_tree, tree, "the accepted integration")
             _deploy(con, run, "preview", deploy, checkout, res, commit=head, tree=head_tree)
@@ -235,7 +235,7 @@ def _land_merge(con, run: dict, mode: str, snap: dict, deploy: dict, *, redeploy
         else:
             if not redeploy:
                 _require_deploy_proof(con, run, tree)
-            with _deploy_checkout(run, main, "deploy-prod") as (checkout, head, head_tree):
+            with _deploy_checkout(run, main, "deploy-prod", res=res) as (checkout, head, head_tree):
                 _require_unchanged(con, run, snap, "before the prod deploy",
                                    preserved=f"the merges; nothing was deployed; rollback target {before[:12]}")
                 # The tree _verify_main passed: the reviewed integration tree, or main's re-checked tree.
@@ -326,12 +326,13 @@ def _require_deploy_proof(con, run: dict, tree: str) -> None:
 
 
 @contextlib.contextmanager
-def _deploy_checkout(run: dict, commit: str, name: str):
+def _deploy_checkout(run: dict, commit: str, name: str, *, res: Result | None = None):
     """A detached checkout of `commit` at a path unique to this invocation,
-    removed afterwards. Yields (path, the commit and tree actually checked out),
+    removed after rollback output is preserved. Yields (path, commit and tree),
     which is what the deployed record names."""
     import uuid
     checkout = gates.detached_checkout(run, commit, f"{name}-{uuid.uuid4().hex[:8]}", purpose="deploy")
+    primary = None
     try:
         head = paths.git(checkout, "rev-parse", "HEAD")
         head_tree = paths.git(checkout, "rev-parse", "HEAD^{tree}")
@@ -339,8 +340,45 @@ def _deploy_checkout(run: dict, commit: str, name: str):
             raise Refused("checkout-mismatch", f"the deploy checkout holds {head[:12]}, not {commit[:12]}",
                           preserved="nothing was deployed", next_step="office land again")
         yield checkout, head, head_tree
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
-        gates.remove_checkout(run, checkout)
+        from office import deploy_artifacts
+        try:
+            archive = deploy_artifacts.preserve(run, checkout)
+        except (OSError, ValueError) as exc:
+            detail = f"deploy checkout {checkout} kept: rollback output could not be archived ({exc})"
+            if primary is None:
+                raise Refused("deploy-artifacts-unpreserved", detail, preserved="the checkout and all rollback files",
+                              next_step="make the archive storage writable, then retry office close; do not delete the checkout") from exc
+            if isinstance(primary, state.OfficeError):
+                primary.preserved = f"{primary.preserved}; {detail}" if primary.preserved else detail
+            else:
+                primary.add_note(detail)
+        else:
+            if archive:
+                detail = f"rollback output preserved: {archive['archive']} ({len(archive['files'])} files; manifest.json)"
+                if res is not None:
+                    res.add(detail)
+                if isinstance(primary, state.OfficeError):
+                    primary.preserved = f"{primary.preserved}; {detail}" if primary.preserved else detail
+                for log in (paths.run_dir(run["id"]) / "deploys").glob(f"{name.removeprefix('deploy-')}-*.log"):
+                    try:
+                        with log.open("a", encoding="utf-8") as fh:
+                            fh.write(f"\n# {detail}\n")
+                    except OSError as exc:
+                        warning = f"could not annotate {log}: {exc}; {detail}"
+                        if res is not None:
+                            res.notices.append(warning)
+                        if isinstance(primary, state.OfficeError):
+                            primary.preserved = f"{primary.preserved}; {warning}"
+                        elif primary is not None:
+                            primary.add_note(warning)
+                        elif res is None:
+                            import warnings
+                            warnings.warn(warning, RuntimeWarning)
+            gates.remove_checkout(run, checkout)
 
 
 def _deployed(con, run: dict, target: str, tree: str) -> bool:

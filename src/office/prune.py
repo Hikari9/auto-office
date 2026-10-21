@@ -185,6 +185,11 @@ def _prune_one(con, run_id: str) -> str | None:
             reason = _eligibility(con, run)
             if reason is not None:
                 return f"no longer eligible: {reason}"
+            from office import deploy_artifacts
+            try:
+                deploy_artifacts.preserve_interrupted(run)
+            except (Refused, OSError, ValueError) as exc:
+                return f"rollback output kept: {exc}"
             # Claim the prune in the same transaction that re-checked
             # eligibility; a later `resume` of a terminal run is refused.
             state.update_run(con, run_id, prune_status="in_progress", pruned_at=now_iso())
@@ -213,6 +218,12 @@ def _prune_one(con, run_id: str) -> str | None:
     shutil.rmtree(wt_root, ignore_errors=True)
     sdir = Path(run["state_dir"]) if run.get("state_dir") else None
     if sdir and sdir.exists():
+        # Recheck before the recursive deletion as well: close may have kept
+        # a checkout, or a late deployment writer may have added new output.
+        try:
+            deploy_artifacts.preserve_interrupted(run)
+        except (Refused, OSError, ValueError) as exc:
+            return f"rollback output kept: {exc}"
         shutil.rmtree(sdir, ignore_errors=True)
         if sdir.exists():
             problems.append("run directory not fully removed")
