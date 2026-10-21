@@ -166,12 +166,12 @@ def test_a_reviewer_naming_the_member_that_owns_the_path_is_reviewer_declared(en
 
 
 def test_a_declared_owner_that_does_not_own_the_path_is_not_reviewer_declared(env):
-    """The reviewer says T1 but the path is T2's scope alone: the repair still goes to T1 (unchanged),
-    the evidence says T2 by unique path."""
+    """The reviewer says T1 but the path is T2's scope alone: both repair ownership and
+    evidence use T2's actual envelope (#720)."""
     _lane_run(env, recheck(finding("F1", "T1", where="mul.py:1")), APPROVED)
     (row,) = _findings(env, "F1")
-    assert (row["attribution_basis"], row["attributed_task"], row["task_id"]) == ("unique-path", "T2", "T1")
-    assert task_row(env, "T1")["status"] == "changes_required" and task_row(env, "T2")["status"] == "accepted"
+    assert (row["attribution_basis"], row["attributed_task"], row["task_id"]) == ("unique-path", "T2", "T2")
+    assert task_row(env, "T2")["status"] == "changes_required" and task_row(env, "T1")["status"] == "accepted"
 
 
 def test_a_path_in_exactly_one_members_scope_is_unique_path(env):
@@ -182,9 +182,9 @@ def test_a_path_in_exactly_one_members_scope_is_unique_path(env):
 
 
 def test_an_ambiguous_recheck_stays_unassigned_and_counts_once(env):
-    """No owner and no member owns the path: repair goes to every member (unchanged), attribution is
+    """An area-level finding with no file path: repair goes to every member, attribution is
     `unassigned`, and the repair-owner copies are marked so a report counts the finding once."""
-    _lane_run(env, recheck(_ownerless("F1", "README.md:1")), APPROVED)
+    _lane_run(env, recheck(_ownerless("F1", "composition")), APPROVED)
     rows = _findings(env, "F1")
     assert [r["task_id"] for r in rows] == ["T1", "T2"]
     assert {(r["attribution_basis"], r["attributed_task"]) for r in rows} == {("unassigned", None)}
@@ -218,26 +218,27 @@ def test_a_path_in_a_members_accepted_revision_counts_as_owned(env, monkeypatch)
 
 def test_text_named_owners_route_the_repair_but_are_not_reviewer_declared(env):
     """`_owners` falls back to a `T2` mentioned in the summary; that is routing, not a reviewer-declared owner."""
-    _lane_run(env, recheck(_ownerless("F1", "README.md:1", what="T2 forgot the docs")), APPROVED)
+    _lane_run(env, recheck(_ownerless("F1", "composition", what="T2 forgot the docs")), APPROVED)
     (row,) = _findings(env, "F1")
     assert (row["task_id"], row["attribution_basis"], row["attributed_task"]) == ("T2", "unassigned", None)
 
 
-# ------------------------------------------------------------------ repair routing unchanged
+# ------------------------------------------------------------------ repair routing respects ownership
 
-def test_repair_routing_is_the_same_for_every_owner_shape(env):
-    """`_owners` is unchanged: each shape routes to the same task set as before this change."""
+def test_repair_routing_handles_owner_shapes_without_widening_file_authority(env):
+    """Named owners remain useful, but cannot assign a concrete file outside its envelope."""
     convergence, _, _ = _modules()
     _lane_run(env, APPROVED)
     con = env.con()
     run = dict(con.execute("SELECT * FROM runs").fetchone())
     scope = {"id": "L-core", "tasks": ["T1", "T2"]}
     cases = [
-        ({"owners": ["T2"], "location": "calc.py:1"}, ["T2"]),                     # named wins over the path
+        ({"owners": ["T2"], "location": "calc.py:1"}, ["T1"]),                     # path ownership wins
         ({"owners": ["T9"], "location": "calc.py:1"}, ["T1"]),                     # unknown owner: the path decides
         ({"location": "mul.py:2", "summary": "x"}, ["T2"]),                       # the path
-        ({"location": "README.md:1", "summary": "T1 and T2 both"}, ["T1", "T2"]),  # ids in the text
-        ({"location": "README.md:1", "summary": "nothing"}, ["T1", "T2"]),         # nobody can tell: everyone
+        ({"location": "README.md:1", "summary": "T1 and T2 both"}, []),             # an unowned file stays a gap
+        ({"location": "README.md:1", "summary": "nothing"}, []),
+        ({"location": "composition", "summary": "T1 and T2 both"}, ["T1", "T2"]), # area-level inference
         ({}, ["T1", "T2"]),
     ]
     for f, expected in cases:
@@ -245,7 +246,7 @@ def test_repair_routing_is_the_same_for_every_owner_shape(env):
 
 
 def test_recheck_repair_actions_are_unchanged(env):
-    _lane_run(env, recheck(finding("F1", "T1"), _ownerless("F2", "README.md:1")), APPROVED)
+    _lane_run(env, recheck(finding("F1", "T1"), _ownerless("F2", "composition")), APPROVED)
     tasks = _status(env)["data"]["tasks"]
     assert tasks["T1"] == "changes_required" and tasks["T2"] == "changes_required", tasks
     nxt = _status(env)["next"]
@@ -262,7 +263,7 @@ def test_route_learning_reads_the_same_findings_with_or_without_attribution(env)
     """Route learning keys findings by the producing dispatch of each repair-owner row, as before; the
     attribution columns and the clone marks never reach it."""
     _, _, route_learning = _modules()
-    _lane_run(env, recheck(finding("F1", "T1"), _ownerless("F2", "README.md:1")), APPROVED)
+    _lane_run(env, recheck(finding("F1", "T1"), _ownerless("F2", "composition")), APPROVED)
     con = env.con()
     with_marks = route_learning.derive_outcomes(con)
     assert con.execute("SELECT COUNT(*) FROM findings WHERE attribution_basis IS NOT NULL").fetchone()[0] == 3

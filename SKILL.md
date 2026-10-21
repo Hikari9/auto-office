@@ -127,7 +127,7 @@ never wait or `--skip`; continue on the current preferences and tell the user to
   queues plan review. Authority words in an edit are refused. Scope, interfaces, ownership and authority are contract amendments
   (`--set scope=...` / `--set interfaces=...` need `--contract`; a changed scope or interface reopens the task and its dependants):
   `office amend <scope> --contract -- "<request>"`. Requirements change only on the user's words:
-  `office amend requirements --quote "<words>" -- "<change>"`.
+  `office amend requirements --quote "<words>" -- "<change>"` (`--drop-criterion` / `--add-criterion` edit done criteria; `--drop-non-goal` / `--add-non-goal` edit non-goals; reauthorize the new version).
 - A paused or blocked task names its blocker and what was preserved: resolve it, or take the decision to the user. A missing route or trust
   shows a route notice; only the user promotes trust (`office approve trust <route> --quote "<words>"`).
 
@@ -148,7 +148,7 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
   outcome the runtime names, get one integrated review (#422); `office inspect convergence` states why it was required or skipped.
 - Findings never relaunch anything on their own. A RECHECK routes every blocking finding to its owning tasks at once: `office rerun <task>
   --resume|--fresh` for each, in parallel. Before landing, give each APPROVED finding a disposition: `office disposition <scope>:<code>
-  fix|fixed|dismissed|follow-up -- "<note>"` (`fix` reopens the owner without re-review). Only the user dismisses a blocking finding: `dismissed --quote "<words>"`.
+  fix|fixed|dismissed|follow-up -- "<note>"` (`fix` reopens the owner without re-review). Only the user dismisses a blocking finding: `dismissed --quote "<words>"`. Foreign file findings hold a scope gap: coordinate the owning lane or amend ownership.
 - At the lane round cap (3 by default; `office start --review-rounds N` or `review.max_rounds`, pinned per run) nothing runs and review does not stay blocked. Choose one: waive and accept the residual risk with a substantive reason, `office waive <scope> --reason "<why the open
   findings are acceptable>"`, or escalate to the user with the findings, attempts, risk and your recommendation, then `office decide <scope>
   escalate|continue|waive|stop|review --quote "<words>"` (`review` runs another round of the composed lane without reopening accepted tasks). `office revoke <scope>:convergence|visual` cancels a running lane review. A waiver never becomes APPROVED (the verdict stays RECHECK and the receipt records the

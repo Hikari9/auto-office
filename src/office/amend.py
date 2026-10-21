@@ -90,6 +90,7 @@ AUTHORITY_TERMS = _AuthorityTerms()
 def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, requirements: bool = False,
           quote: str | None = None, cwd: Path | None = None, redirect: dict | None = None,
           drop_criteria: list[str] | None = None, add_criteria: list[str] | None = None,
+          drop_non_goals: list[str] | None = None, add_non_goals: list[str] | None = None,
           no_review: bool = False, reason: str | None = None, edits: dict | None = None) -> Result:
     """`edits` ({add_accept, drop_accept, add_checks, drop_checks, set_fields}) change the named tasks' structured
     contract in the plan itself (`planfile.edit_task`), so the amendment is enforced, not only delivered as prose.
@@ -116,6 +117,9 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
     if (drop_criteria or add_criteria) and not (requirements or scope == "requirements"):
         raise Usage("criteria-are-requirements", "done criteria change only with a requirements amendment",
                     next_step=CRITERIA_FORM)
+    if (drop_non_goals or add_non_goals) and not (requirements or scope == "requirements"):
+        raise Usage("non-goals-are-requirements", "non-goals change only with a requirements amendment",
+                    next_step=CRITERIA_FORM)
     if reason and not no_review:
         raise Usage("reason-needs-no-review", "--reason records why plan review is vetoed; it goes with --no-review",
                     next_step=NO_REVIEW_FORM)
@@ -132,7 +136,8 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
                     "amend the task contract and the requirements separately", next_step=EDIT_FORM)
     if requirements or scope == "requirements":
         to = [] if scope == "requirements" else _scope_ids(con, run, scope)
-        return _requirements_change(con, run, delta, quote, drop_criteria or [], add_criteria or [], to)
+        return _requirements_change(con, run, delta, quote, drop_criteria or [], add_criteria or [], to,
+                                    drop_non_goals=drop_non_goals or [], add_non_goals=add_non_goals or [])
     plan_path = _orchestrator_plan_path(con, run, cwd)
     with _draft_lock(plan_path if any((edits or {}).values()) else None):
         return _amend_plan(con, run, scope, delta, contract, redirect, plan_path, no_review, reason, edits)
@@ -227,13 +232,14 @@ def _orchestrator_plan_path(con, run: dict, cwd: Path | None) -> Path | None:
 
 
 def _requirements_change(con, run: dict, delta: str, quote: str | None, drop: list[str], add: list[str],
-                         to: list[str]) -> Result:
+                         to: list[str], *, drop_non_goals: list[str] = (), add_non_goals: list[str] = ()) -> Result:
     if not quote or not quote.strip():
         raise Refused("user-quote-required", "only the user can change requirements; record their words",
                       next_step='office amend requirements --quote "<user\'s exact words>" -- "<change>"')
     with db.transaction(con):
         version, targets = record_requirements(con, state.get_run(con, run["id"]), delta, quote, drop=drop, add=add,
-                                                to=to, with_targets=True)
+                                               to=to, with_targets=True,
+                                               drop_non_goals=drop_non_goals, add_non_goals=add_non_goals)
         delivery = f"delivered to {', '.join(targets)}" if targets else "not delivered to live tasks"
         state.emit(con, run, "requirements.changed",
                    f"REQUIREMENTS r{version}: {delta.strip()[:100]}; {delivery}; authorization required")
@@ -243,7 +249,8 @@ def _requirements_change(con, run: dict, delta: str, quote: str | None, drop: li
 
 
 def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[str] = (), add: list[str] = (),
-                        to: list[str] = (), with_targets: bool = False):
+                        to: list[str] = (), with_targets: bool = False,
+                        drop_non_goals: list[str] = (), add_non_goals: list[str] = ()):
     """Record requirements r(n+1) from the user's words and deliver it to live
     workers. Caller holds the tx. Returns the new version (with `with_targets`, also the tasks
     it was delivered to). `drop` names frozen done criteria the user removed (each must match
@@ -257,6 +264,11 @@ def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[st
     added = [a.strip() for a in add if a.strip() and a.strip() not in criteria]
     criteria += added
     frozen["done_criteria"] = criteria
+    non_goals = list(frozen.get("non_goals") or [])
+    for text in drop_non_goals:
+        non_goals.remove(_match_criterion(non_goals, text, kind="non-goal"))
+    non_goals += [a.strip() for a in add_non_goals if a.strip() and a.strip() not in non_goals]
+    frozen["non_goals"] = non_goals
     frozen.setdefault("user_changes", []).append(delta.strip())
     version = cur["version"] + 1
     con.execute("INSERT INTO requirements(run_id, version, frozen_json, source, quote, created_at) VALUES(?,?,?,?,?,?)",
@@ -264,7 +276,7 @@ def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[st
     state.update_run(con, run["id"], requirements_version=version)
     amendment_id = _record(con, run, "requirements", [], delta, run["plan_version"], run["plan_version"])
     live = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] not in ("accepted", "cancelled", "planned")]
-    if added and not drop:
+    if added and not (drop or drop_non_goals or add_non_goals):
         live = [t for t in live if t in to]
     targets = _deliver(con, state.get_run(con, run["id"]), amendment_id, live, f"requirements r{version}: {delta.strip()}",
                        run["plan_version"])
@@ -272,10 +284,11 @@ def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[st
 
 
 CRITERIA_FORM = ('office amend requirements --quote "<user\'s words>" [--drop-criterion "<criterion>"]... '
-                 '[--add-criterion "<criterion>"]... -- "<change>"')
+                 '[--add-criterion "<criterion>"]... [--drop-non-goal "<non-goal>"]... '
+                 '[--add-non-goal "<non-goal>"]... -- "<change>"')
 
 
-def _match_criterion(criteria: list[str], text: str) -> str:
+def _match_criterion(criteria: list[str], text: str, *, kind: str = "criterion") -> str:
     """The one frozen done criterion `text` names: an exact match, else the only one containing it."""
     want = " ".join(text.split()).lower()
     exact = [c for c in criteria if " ".join(str(c).split()).lower() == want]
@@ -283,8 +296,9 @@ def _match_criterion(criteria: list[str], text: str) -> str:
     if len(hits) == 1:
         return hits[0]
     listing = "; ".join(str(c)[:80] for c in criteria) or "none"
-    raise Refused("ambiguous-criterion" if hits else "unknown-criterion",
-                  f"{text!r} names {len(hits)} frozen done criteria (current: {listing})", scope="requirements",
+    raise Refused(f"ambiguous-{kind}" if hits else f"unknown-{kind}",
+                  f"{text!r} names {len(hits)} frozen {'done criteria' if kind == 'criterion' else 'non-goals'} "
+                  f"(current: {listing})", scope="requirements",
                   preserved="requirements unchanged", next_step=CRITERIA_FORM)
 
 

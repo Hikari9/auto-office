@@ -83,6 +83,20 @@ Plan review, convergence review and visual review all answer with one of three v
 Every reply also gives `NEXT <recommended next action>`. It is guidance (fix inline before the next
 irreversible action, fix concurrently, follow up), never a verdict.
 
+Each convergence brief is regenerated from the current requirements version, user amendments, plan,
+task contracts and accepted task revisions, and names the composed commit it reviews. A resumed
+reviewer must read that new brief. Recorded dismissals and their rationale accompany later reviews;
+raising the same concern again requires explaining materially new evidence or scope.
+
+Requirements amendments can explicitly update non-goals with `--drop-non-goal "<text>"` and
+`--add-non-goal "<text>"`. Like done-criterion changes, these require the user's `--quote` and a fresh
+requirements authorization. Editing the plan alone does not change frozen requirements.
+
+A finding in a concrete file outside every member task's ownership envelope remains an open
+scope gap for the orchestrator. The lane identifies any owning tasks elsewhere and does not dispatch
+a non-owning producer. Coordinate the owning lane's repair or amend the ownership contract before
+requesting another review; the recorded finding still blocks convergence.
+
 Severity (`high | medium | low`) says how serious a finding is. Blocking (`blocking | non-blocking`)
 says whether progression must wait for another independent review. They are decided separately: a
 high finding can be non-blocking and a low one blocking.
