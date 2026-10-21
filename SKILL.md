@@ -200,10 +200,7 @@ it. It composes one integration branch, runs file-disjoint Herdr lanes and exits
 ## Resume
 
 After a restart or compaction: `office resume` (or `office resume <id>` when several runs exist). It reconstructs pending
-work from runs.db (`office context` adds a bounded snapshot with stale references flagged); never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract.
-
-When `office status` shows `ctx-high:`, wait for a natural boundary and run `/compactable`. Compact only when it returns `COMPACT NOW`; then verify compaction and continue. The notice fires once per high-context episode and rearms after context drops below the configured threshold.
-Configure `orchestrator_context.threshold_tokens` to change the default 272000-token threshold; set it to `0` or set `orchestrator_context.enabled: false` to disable the notice.
+work from runs.db (`office context` adds a bounded snapshot with stale references flagged); never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract. When `office status` shows `ctx-high:`, wait for a natural boundary and run `/compactable`; compact only on `COMPACT NOW`, then verify compaction and continue. It fires once per high-context episode and rearms below the configured threshold. Set `orchestrator_context.threshold_tokens` to change the 272000-token default, `0` or `orchestrator_context.enabled: false` to disable it.
 
 ## Diagnostics
 
