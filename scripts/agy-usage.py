@@ -21,8 +21,8 @@ Exit codes:
 
 Note:
     The machine-readable result always reports Gemini and Claude as independent
-    families. The legacy top-level number is the Gemini family result (min with
-    Claude when --claude is passed); null with a cause when unknown. The endpoint gives these families separate allowances and reset
+    families. The legacy top-level number is always the Gemini family result
+    (--all/--claude only widen the model listing); null with a cause when unknown. The endpoint gives these families separate allowances and reset
     schedules. `families` uses the summary endpoint when it answers, else the
     per-model buckets (`family_source` names which). Observed 2026-09-17: 20
     Gemini buckets shared one percentage and reset, while two Claude buckets were
@@ -452,14 +452,15 @@ def main(argv):
     processed["scope"] = "gemini+claude" if include_claude else (
         "gemini+other" if all_models else "gemini"
     )
-    if not all_models:
-        # The legacy number is the scoped family result, so it never disagrees with
-        # `families` (and stays unknown, with the family's cause, when that is).
-        scoped = [processed["families"][f] for f in ("gemini", "claude") if f == "gemini" or include_claude]
-        known = [f["tightest_remaining_percent"] for f in scoped if f["status"] == "ok"]
-        processed["tightest_remaining_percent"] = min(known) if len(known) == len(scoped) else None
-        if processed["tightest_remaining_percent"] is None:
-            processed["cause"] = "; ".join(f.get("cause") or "quota unavailable" for f in scoped if f["status"] != "ok")
+    # The legacy number is always the Gemini family result, whatever --all/--claude
+    # list, so it never disagrees with `families.gemini` (and stays unknown, with
+    # the family's cause, when that is).
+    gemini = processed["families"]["gemini"]
+    if gemini["status"] == "ok":
+        processed["tightest_remaining_percent"] = gemini["tightest_remaining_percent"]
+    else:
+        processed["tightest_remaining_percent"] = None
+        processed["cause"] = gemini.get("cause") or "quota unavailable"
     tightest_pct = processed["tightest_remaining_percent"]
     if tightest_pct is None:
         processed.setdefault("cause", "no quota bucket with a readable remainingFraction")

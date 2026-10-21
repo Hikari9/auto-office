@@ -186,6 +186,20 @@ def test_main_prefers_account_summary_for_families(agy, monkeypatch, capsys):
     assert out["tightest_remaining_percent"] == 96  # legacy number is the Gemini family result
 
 
+@pytest.mark.parametrize("flags", [[], ["--claude"], ["--all"], ["--all", "--claude"]])
+def test_legacy_number_is_gemini_family_for_every_flag_combination(agy, monkeypatch, capsys, flags):
+    raw = {"buckets": [
+        {"modelId": "gemini-3.8-flash-high", "remainingFraction": 0.5, "resetTime": "g"},
+        {"modelId": "claude-sonnet-5-5-high", "remainingFraction": 0.1, "resetTime": "c"},
+        {"modelId": "other-model", "remainingFraction": 0.0, "resetTime": "o"},
+    ]}
+    monkeypatch.setattr(agy, "fetch_agy_quota", lambda: (raw, None, None))
+    assert agy.main(["--json", *flags]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["families"]["gemini"]["tightest_remaining_percent"] == 50
+    assert out["tightest_remaining_percent"] == 50
+
+
 def test_legacy_number_is_unknown_when_gemini_family_has_no_source(agy, monkeypatch, capsys):
     raw = {"buckets": [{"modelId": "claude-sonnet-5-5-high", "remainingFraction": 0.8, "resetTime": "c"}]}
     monkeypatch.setattr(agy, "fetch_agy_quota", lambda: (raw, None, None))
