@@ -4,12 +4,14 @@ from __future__ import annotations
 import sqlite3
 import pytest
 
-from office import authority, db, scoring
+from office import adapters, authority, db, scoring
 from office.state import OfficeError
 
 
 @pytest.fixture
-def test_db():
+def test_db(monkeypatch):
+    # Trust assertions use a fixed harness major, independent of host installs.
+    monkeypatch.setattr(adapters, "harness_version", lambda adapter: "0.0.0")
     con = sqlite3.connect(":memory:")
     db.migrate(con)
     scoring.ensure_trust_schema(con)
