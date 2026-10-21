@@ -21,8 +21,8 @@ Exit codes:
 
 Note:
     The machine-readable result always reports Gemini and Claude as independent
-    families. The legacy top-level number remains Gemini-only unless --claude is
-    passed. The endpoint gives these families separate allowances and reset
+    families. The legacy top-level number is the Gemini family result (min with
+    Claude when --claude is passed); null with a cause when unknown. The endpoint gives these families separate allowances and reset
     schedules. `families` uses the summary endpoint when it answers, else the
     per-model buckets (`family_source` names which). Observed 2026-09-17: 20
     Gemini buckets shared one percentage and reset, while two Claude buckets were
@@ -351,10 +351,12 @@ def process_quota(data, all_models=False, include_claude=False):
     buckets = data.get("buckets", [])
     models = {}
     filtered_buckets = []
-    min_pct = 100.0
-    found_target = False
+    min_pct = None
 
     for b in buckets:
+        frac = b.get("remainingFraction")
+        if not isinstance(frac, (int, float)):
+            continue  # a bucket with no readable fraction is unknown, never 100%
         model_id = b.get("modelId") or ""
         model_lower = model_id.lower()
 
@@ -368,7 +370,6 @@ def process_quota(data, all_models=False, include_claude=False):
         if not all_models and not (is_gemini or is_claude):
             continue
 
-        frac = b.get("remainingFraction", 1.0)
         pct = round(frac * 100, 1)
         reset_time = b.get("resetTime")
 
@@ -378,16 +379,13 @@ def process_quota(data, all_models=False, include_claude=False):
         }
         filtered_buckets.append(b)
 
-        # Track minimum remaining percentage for active model buckets
-        if is_gemini or is_claude or all_models:
-            if not found_target or pct < min_pct:
-                min_pct = pct
-                found_target = True
-        elif not found_target and pct < min_pct:
+        if min_pct is None or pct < min_pct:
             min_pct = pct
 
     family_buckets = {"gemini": [], "claude": []}
     for bucket in buckets:
+        if not isinstance(bucket.get("remainingFraction"), (int, float)):
+            continue
         model_id = str(bucket.get("modelId") or "").lower()
         if model_id.startswith("gemini"):
             family_buckets["gemini"].append(bucket)
@@ -401,17 +399,18 @@ def process_quota(data, all_models=False, include_claude=False):
                 "tightest_remaining_percent": None,
                 "reset_time": None,
                 "status": "unknown",
+                "cause": f"{family} family quota not reported",
             }
             continue
-        tightest = min(members, key=lambda bucket: float(bucket.get("remainingFraction", 1.0)))
+        tightest = min(members, key=lambda bucket: bucket["remainingFraction"])
         families[family] = {
-            "tightest_remaining_percent": int(round(float(tightest.get("remainingFraction", 1.0)) * 100, 1)),
+            "tightest_remaining_percent": int(round(tightest["remainingFraction"] * 100, 1)),
             "reset_time": tightest.get("resetTime"),
             "status": "ok",
         }
 
     return {
-        "tightest_remaining_percent": int(min_pct) if (found_target or models) else 100,
+        "tightest_remaining_percent": int(min_pct) if min_pct is not None else None,
         "families": families,
         "models": models,
         "raw_buckets": filtered_buckets,
@@ -453,9 +452,22 @@ def main(argv):
     processed["scope"] = "gemini+claude" if include_claude else (
         "gemini+other" if all_models else "gemini"
     )
+    if not all_models:
+        # The legacy number is the scoped family result, so it never disagrees with
+        # `families` (and stays unknown, with the family's cause, when that is).
+        scoped = [processed["families"][f] for f in ("gemini", "claude") if f == "gemini" or include_claude]
+        known = [f["tightest_remaining_percent"] for f in scoped if f["status"] == "ok"]
+        processed["tightest_remaining_percent"] = min(known) if len(known) == len(scoped) else None
+        if processed["tightest_remaining_percent"] is None:
+            processed["cause"] = "; ".join(f.get("cause") or "quota unavailable" for f in scoped if f["status"] != "ok")
     tightest_pct = processed["tightest_remaining_percent"]
+    if tightest_pct is None:
+        processed.setdefault("cause", "no quota bucket with a readable remainingFraction")
 
     if "--percent" in argv:
+        if tightest_pct is None:
+            print(f"AGY quota probe UNKNOWN: {processed['cause']}", file=sys.stderr)
+            return 2
         print(tightest_pct)
         return 0
     elif "--json" in argv:
@@ -465,7 +477,8 @@ def main(argv):
         print("=== AGY (Antigravity/Gemini) Quota ===")
         print(f"Scope: {processed['scope']}"
               + ("" if include_claude else "  (Claude excluded; pass --claude to include)"))
-        print(f"Overall Tightest Headroom: {tightest_pct}% left")
+        print("Overall Tightest Headroom: "
+              + (f"{tightest_pct}% left" if tightest_pct is not None else f"UNKNOWN ({processed['cause']})"))
         print("\nModel Breakdown (quota-tracked models only — NOT an exhaustive catalog;")
         print("a model missing here may still be valid, check `agy models` before ruling it out):")
         for model_id, info in processed["models"].items():

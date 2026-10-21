@@ -297,3 +297,23 @@ def test_zero_gemini_family_still_leaves_agy_claude_eligible():
     rows = {r["route"]: r for r in result["routing"]["candidates"]}
     claude_row = next(r for k, r in rows.items() if "claude-sonnet-5-5" in k)
     assert claude_row["quota"]["state"] == "80% left"
+
+
+def test_zero_claude_family_rejects_agy_claude_and_leaves_gemini_eligible():
+    quota = _agy_family_quota()
+    fam = quota["families"]
+    fam["gemini"], fam["claude"] = fam["claude"], fam["gemini"]  # claude 0%, gemini 80%
+    result = _route([_routable("agy", "gemini-3.8-flash", quota), _routable("agy", "claude-sonnet-5-5", quota)])
+    assert result["selected"].startswith("agy@") and "gemini-3.8-flash" in result["selected"]
+    assert any(r["stage"] == 6 and "claude-sonnet-5-5" in r["candidate"] for r in result["rejected"])
+    rows = {r["route"]: r for r in result["routing"]["candidates"]}
+    assert next(r for k, r in rows.items() if "gemini-3.8-flash" in k)["quota"]["state"] == "80% left"
+
+
+def test_unknown_top_level_keeps_family_quota():
+    result = candidates._normalize_probe_result(
+        {"tightest_remaining_percent": None, "cause": "gemini family quota not reported",
+         "families": {"gemini": {"status": "unknown", "tightest_remaining_percent": None},
+                      "claude": {"status": "ok", "tightest_remaining_percent": 80}}}, lambda c: {"status": "unknown", "tightest_remaining_percent": None, "cause": c})
+    assert result["status"] == "unknown" and result["cause"] == "gemini family quota not reported"
+    assert result["families"]["claude"]["tightest_remaining_percent"] == 80.0

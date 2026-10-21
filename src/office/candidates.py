@@ -326,7 +326,10 @@ def _normalize_probe_result(data: dict, unknown) -> dict:
     if not isinstance(data, dict) or "tightest_remaining_percent" not in data:
         return unknown("command response missing tightest_remaining_percent")
     if data["tightest_remaining_percent"] is None:
-        return unknown("command returned null tightest_remaining_percent")
+        result = unknown(str(data.get("cause") or "command returned null tightest_remaining_percent"))
+        if isinstance(data.get("families"), dict):  # a known family can still gate its own models
+            result["families"] = {str(f): _normalize_family(str(f), raw) for f, raw in data["families"].items()}
+        return result
     try:
         result = {"status": "ok", "tightest_remaining_percent": float(data["tightest_remaining_percent"])}
     except (TypeError, ValueError):

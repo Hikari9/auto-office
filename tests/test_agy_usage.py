@@ -183,7 +183,24 @@ def test_main_prefers_account_summary_for_families(agy, monkeypatch, capsys):
     assert out["family_source"] == "retrieveUserQuotaSummary"
     assert out["families"]["gemini"]["tightest_remaining_percent"] == 96
     assert out["families"]["claude"]["tightest_remaining_percent"] == 0
-    assert out["tightest_remaining_percent"] == 50  # legacy number is still Gemini-only
+    assert out["tightest_remaining_percent"] == 96  # legacy number is the Gemini family result
+
+
+def test_legacy_number_is_unknown_when_gemini_family_has_no_source(agy, monkeypatch, capsys):
+    raw = {"buckets": [{"modelId": "claude-sonnet-5-5-high", "remainingFraction": 0.8, "resetTime": "c"}]}
+    monkeypatch.setattr(agy, "fetch_agy_quota", lambda: (raw, None, None))
+    assert agy.main(["--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["tightest_remaining_percent"] is None and out["cause"]
+    assert out["families"]["gemini"]["status"] == "unknown" and out["families"]["gemini"]["cause"]
+    assert out["families"]["claude"]["tightest_remaining_percent"] == 80
+    assert agy.main(["--percent"]) == 2
+
+
+def test_bucket_without_fraction_is_unknown_not_full(agy):
+    result = agy.process_quota({"buckets": [{"modelId": "gemini-3.8-flash-high", "resetTime": "g"}]})
+    assert result["tightest_remaining_percent"] is None
+    assert result["families"]["gemini"]["status"] == "unknown"
 
 
 def test_main_falls_back_to_per_model_buckets_without_summary(agy, monkeypatch, capsys):
