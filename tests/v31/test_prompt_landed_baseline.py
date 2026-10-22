@@ -96,3 +96,18 @@ def test_submit_prompt_reports_a_prompt_left_in_a_busy_composer_as_held(pane, mo
     pane.extend([busy(10), busy(11, f"│ {PROMPT}\n")])
     assert dispatch.submit_prompt("a", PROMPT) == "held"
     assert any(a[-1] == "Enter" for a in sent)
+
+
+def test_deliver_prompt_to_an_already_busy_pane_is_not_landed(pane, monkeypatch):
+    _sent(monkeypatch)
+    monkeypatch.setattr(dispatch, "_await_agent_ui", lambda *a, **kw: "ready")
+    monkeypatch.setattr(dispatch, "_agent_up", lambda *a, **kw: True)
+    pane.append(busy(10))
+    assert dispatch._deliver_prompt("a", "w1:p1", PROMPT) is False
+
+
+def test_deliver_prompt_lands_when_the_pane_goes_busy_after_the_prompt(pane, monkeypatch):
+    _sent(monkeypatch)
+    monkeypatch.setattr(dispatch, "_await_agent_ui", lambda *a, **kw: "ready")
+    pane.extend([IDLE, busy(1)])
+    assert dispatch._deliver_prompt("a", "w1:p1", PROMPT) is True
