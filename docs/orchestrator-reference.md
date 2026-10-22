@@ -77,6 +77,9 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
 
 ## Planning inline
 
+Start from the fetched remote default branch. Office pins that commit even when the caller's local main or detached checkout
+lags it; an explicitly selected stale base refuses with the current `origin/<default>` remedy. Fetch first when newer upstream work is expected.
+
 Run the four self-review lenses (`skills/office-submit`) over the plan and write what they surface into tasks' `accept:`
 criteria. Plan the seams, not the internals: `scope:` is an ownership envelope (module or domain dirs plus their tests); name
 exact files only where tasks collide or depend. Append-only registries several tasks touch (gate manifests, endpoint/grant lists,
@@ -133,6 +136,8 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
 - Re-accepting a task reopens its accepted dependents whose revision does not contain the new one: each is paused `restack: ...` and `office status`
   prints `office rerun <T> --resume | --fresh`. Integration refuses a stale composition with `INTEGRATION stale: <T> accepted on ... does not
   contain <dep> accepted on ...; restack <T> onto <dep>` instead of reporting a merge conflict.
+- A multi-parent restack first selects the accepted dependency tips that contain the other parents. A dependency already merged
+  by the worker still becomes the recorded scope-diff base. Shared-append verification uses that accepted base and skips paths the task never changed.
 
 ## Landing detail
 

@@ -88,11 +88,11 @@ def test_identical_sibling_appends_do_not_collapse_when_git_merges_cleanly(tmp_p
             self.sha = sha
 
         def fetchone(self):
-            return (self.sha,)
+            return (self.sha, root)
 
     class Conn:
         def execute(self, sql, args):
-            assert "SELECT commit_sha FROM revisions" in sql
+            assert "SELECT commit_sha, base_commit FROM revisions" in sql
             return Row(revisions[args[0]])
 
     monkeypatch.setattr(state, "get_task", lambda con, rid, tid: tasks[tid])

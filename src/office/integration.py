@@ -332,7 +332,9 @@ def _integrate(con, run: dict, job: dict) -> dict:
                 state.emit(con, run, "integration.conflict", f"INTEGRATION CONFLICT: {detail}")
             return {"status": "conflict"}
         try:
-            preserve_shared_append_multiplicity(wt, t, previous, env=genv)
+            preserve_shared_append_multiplicity(
+                wt, {**t, "base_commit": revs[t["id"]].get("base_commit") or run["base_sha"]},
+                previous, env=genv)
         except SharedAppendUnsafe as exc:
             detail = f"{t['id']}: shared append integrity unverified: {exc}; resolve shared edits or serialize tasks, then office resume"
             with db.transaction(con):
@@ -532,10 +534,35 @@ def preserve_shared_append_multiplicity(wt: Path, task: dict, previous: list[dic
         return False
     parents = paths.git(wt, "rev-list", "--parents", "-n", "1", "HEAD").split()
     if len(parents) != 3:
-        raise SharedAppendUnsafe("merge has no two parents; cannot verify shared append ancestry")
-    bases = paths.git(wt, "merge-base", "--all", parents[1], parents[2]).splitlines()
+        raise SharedAppendUnsafe(f"{', '.join(sorted(eligible))}: merge has no two parents; "
+                                 "cannot verify shared append ancestry")
+    task_base = task.get("base_commit")
+    if task_base:
+        # Declaring a shared file does not mean this revision wrote it (#700).
+        # Its recorded dependency base is the scope-diff authority, including a
+        # synthetic combine commit which the composition contains by its parents.
+        ancestry = {"repo_root": str(wt)}
+        if not contains(ancestry, parents[2], task_base):
+            raise SharedAppendUnsafe(f"{', '.join(sorted(eligible))}: incoming revision does not contain "
+                                     f"recorded task base {task_base}")
+        try:
+            changed = set(paths.git(wt, "diff", "--name-only", "-z", task_base, parents[2]).split("\0"))
+        except paths.GitError as exc:
+            raise SharedAppendUnsafe(f"{', '.join(sorted(eligible))}: cannot read task diff from "
+                                     f"{task_base}: {exc}") from exc
+        eligible &= changed
+        if not eligible:
+            return False
+        if not contains(ancestry, parents[1], task_base):
+            raise SharedAppendUnsafe(f"{', '.join(sorted(eligible))}: composition {parents[1]} does not "
+                                     f"contain task base {task_base}; restack accepted dependencies")
+        bases = [task_base]
+    else:
+        bases = paths.git(wt, "merge-base", "--all", parents[1], parents[2]).splitlines()
     if len(bases) != 1:
-        raise SharedAppendUnsafe("multiple or missing merge bases; shared append ancestry is ambiguous")
+        raise SharedAppendUnsafe(f"{', '.join(sorted(eligible))}: multiple or missing merge bases "
+                                 f"({', '.join(bases) or 'none'}) between {parents[1]} and {parents[2]}; "
+                                 "shared append ancestry is ambiguous")
 
     def blob(commit: str, path: str, *, absent_ok: bool = False) -> tuple[str, bytes] | None:
         if Path(path).is_absolute() or ".." in Path(path).parts:
@@ -710,6 +737,22 @@ def _merge_in_scratch(repo: str, a: str, b: str) -> tuple[str, list[str]]:
             subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", scratch], capture_output=True)
 
 
+def dependency_tips(run: dict, parents: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Keep distinct maximal heads before merging any ancestors (#714).
+
+    A later accepted task may already resolve a conflict between two earlier
+    parents. Trying those ancestors first would reject a valid accepted tip.
+    """
+    unique = []
+    seen = set()
+    for label, commit in parents:
+        if commit not in seen:
+            unique.append((label, commit))
+            seen.add(commit)
+    return [(label, commit) for label, commit in unique
+            if not any(commit != other and gates._is_ancestor(run, commit, other) for _, other in unique)]
+
+
 def combine(run: dict, parents: list[tuple[str, str]]) -> str:
     """One commit containing every `(label, commit)` head. A head that is an ancestor of another adds
     nothing; the rest are merged without touching any worktree. Raises CombineConflict naming the
@@ -718,7 +761,7 @@ def combine(run: dict, parents: list[tuple[str, str]]) -> str:
     repo = run["repo_root"]
     acc = None
     seen: list[tuple[str, str]] = []
-    for label, commit in parents:
+    for label, commit in dependency_tips(run, parents):
         if acc is None:
             acc = commit
         elif commit == acc or gates._is_ancestor(run, commit, acc):

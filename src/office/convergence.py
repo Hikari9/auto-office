@@ -492,7 +492,9 @@ def _compose(con, run: dict, scope: dict) -> dict:
     try:
         previous = []
         for t in tasks:
-            commit = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (t["accepted_revision_id"],)).fetchone()[0]
+            revision = con.execute("SELECT commit_sha, base_commit FROM revisions WHERE id=?",
+                                   (t["accepted_revision_id"],)).fetchone()
+            commit, task_base = revision[0], revision[1]
             if subprocess.run(["git", "-C", str(wt), "merge-base", "--is-ancestor", commit, "HEAD"],
                               capture_output=True).returncode == 0:
                 previous.append(t)
@@ -506,7 +508,8 @@ def _compose(con, run: dict, scope: dict) -> dict:
                 return {"status": "conflict", "detail": f"{t['id']} conflicts with the rest of {scope['id']} on "
                                                        f"{conflicted.replace(chr(10), ', ') or 'files'}"}
             try:
-                integration.preserve_shared_append_multiplicity(wt, t, previous, env=genv)
+                integration.preserve_shared_append_multiplicity(
+                    wt, {**t, "base_commit": task_base or run["base_sha"]}, previous, env=genv)
             except integration.SharedAppendUnsafe as exc:
                 return {"status": "conflict", "detail":
                         f"{t['id']}: shared append integrity unverified: {exc}; serialize tasks or repair the append-only history, then office resume"}
