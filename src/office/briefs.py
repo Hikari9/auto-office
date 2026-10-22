@@ -133,6 +133,7 @@ A tooling, quota or evidence failure is not a verdict: if you cannot review, say
 CONVERGENCE_REVIEW_FORMAT = """\
 Write your review to the reply file your prompt names, containing ONLY these lines (no other prose);
 Office reads only that file, never your terminal. If your prompt names no file, reply with ONLY these lines:
+REVIEWED_COMMIT <the full commit sha you reviewed: `git rev-parse HEAD` in the checkout your prompt names>
 VERDICT: APPROVED | RECHECK | INTAKE_GAP
 FINDING <F-id> | high|medium|low | blocking|non-blocking | <file:line or area> | <what is wrong, with a concrete failure> | <the fix> | owner: <T-ids that must repair it> [| seam: <hard seam>] [| root-cause: <class>]
 RESOLVED <F-id>
@@ -586,6 +587,10 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
             out.append(f"  accepted revision: {t['accepted_revision_id']}; contract v{t.get('contract_version')}; "
                        f"acceptance v{t.get('acceptance_version')}")
     out += [f"REVISION {revision['id']} commit {revision['commit_sha'][:12]}; a read-only checkout is at {checkout}",
+            f"REVIEWED_COMMIT {revision['commit_sha']} is the commit under review this round. State it on a "
+            "`REVIEWED_COMMIT <sha>` line of your reply. Any checkout path named in an earlier round or reply is "
+            "stale and must not be used: review only the checkout above. A reply whose REVIEWED_COMMIT is missing "
+            "or is not this commit is rejected unread (no round is spent) and you are asked again.",
             f"DETERMINISTIC CHECKS {checks_summary}",
             "Each executor already ran its checks and a four-lens self-review (security, edge cases, platform/build, "
             "test strength). Judge the composed result: does it meet the acceptance and requirements together, are the "
