@@ -95,7 +95,7 @@ never wait or `--skip`; continue on the current preferences and tell the user to
 - Office types into a pane only once Herdr's own record shows it is that dispatch's (cwd, agent kind and name, session) and no other dispatch holds it.
   A mismatch sends nothing, starts no headless copy and prints a `pane-mismatch` notice: inspect the pane, then `office revoke <task>`. Revoke
   restores a task to accepted only when an amendment alone demoted it; one reopened for owed work (RECHECK or cleanup findings, a restack, a hold) stays reopened.
-- `office wait`: exit 0 means act, 3 a stall, 5 an agent asked a question, 124 nothing new. Key on the exit code, never on status text.
+- `office wait`: exit 0 means act, 3 a stall or your already-reported action with no work in flight, 5 an agent asked a question, 124 nothing new. On 3, follow `next:` before waiting again. Key on the exit code, never on status text.
   Exit 5 prints a `question:` line. Decide planning, scope, ordering and test detail yourself (amend the contract first if the answer changes
   it), then `office answer <task|dispatch> <n>` or `-- "<text>"` (a `[startup]` held screen, #510: the printed `--choice|--keys --expect`).
   Take it to the user (native question tool) on requirements, authority (trust, login, update), irreversible or external actions; never answer those.

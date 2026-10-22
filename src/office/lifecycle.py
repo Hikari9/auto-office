@@ -362,6 +362,8 @@ def reconcile(con, run: dict) -> list[str]:
     from office import gates
     notes += [f"{tid} accepted" for tid in gates.reevaluate_submitted(con, run)]
     jobs.reclaim(con, run["id"])
+    from office import convergence
+    notes += convergence.reconcile_dismissals(con, state.get_run(con, run["id"]))
     # A gate left open after its job failed has no owner and never finishes:
     # settle it the way a failed job does now (#404).
     for g, job in gates.orphaned_gates(con, run):

@@ -195,7 +195,7 @@ def test_status_resume_and_wait_agree_while_t1_checks_then_has_findings_then_is_
         con.execute("UPDATE outbox SET status='done' WHERE id=?", (job["id"],))
     assert con.execute("SELECT status FROM tasks WHERE id='T1'").fetchone()[0] == "changes_required"
     lines = _next_lines(env)
-    assert set(lines.values()) == {"findings on T1 wait for you: office rerun T1 --resume | --fresh"}, lines
+    assert set(lines.values()) == {"findings on T1 wait for you: office rerun T1 --resume|--fresh"}, lines
 
     # Only an accepted T1 opens T2.
     con.execute("UPDATE tasks SET status='accepted', accepted_revision_id=current_revision_id WHERE id='T1'")

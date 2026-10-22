@@ -313,10 +313,13 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
         out.append("RESTACK SKIPPED " + ", ".join(f"{r['task']} is {r['status']}" for r in restack["reopened"])
                    + " again, so Office did not merge it; it needs a restack once it is accepted")
     if restack.get("conflict"):
-        c = restack["conflict"]
-        out += ["", f"RESTACK FIRST: {c['task']} was accepted on {c['revision']}, which this worktree lacks. Run "
-                f"`git merge {c['commit']}`, resolve the conflicts inside your scope, and commit the merge. "
-                "Never rebase or force-push."]
+        missing = restack.get("unmerged") or [restack["conflict"]]
+        out += ["", "RESTACK FIRST: Office's attempted merge conflicted and was aborted; your task HEAD is unchanged."]
+        for c in missing:
+            out.append(f"{c['task']} was accepted on {c['revision']}, which this worktree lacks. Run "
+                       f"`git merge {c['commit']}`, resolve the conflicts inside your scope, and commit the merge.")
+        out.append("Complete every listed merge and run the checks before submitting. Never rebase or force-push. "
+                   "If a conflict needs edits outside your scope, ask the orchestrator to amend ownership first.")
     fix = packet.get("fix_of")
     if fix:
         findings = con.execute("SELECT code, severity, location, summary, action FROM findings WHERE run_id=? AND task_id=? "

@@ -380,10 +380,13 @@ office disposition <scope>:<code>[,<code>] dismissed --quote "<user's words>"
 Without `--quote` a blocking finding is refused and the message names `--quote`; `fixed`, `follow-up` and `fix`
 never apply to a blocking finding. With it, the quote is recorded as the user's authority (the note defaults to it),
 the finding stops holding work (state `nonblocking`, disposition `dismissed` by the user), and any repair the finding had
-routed is released. Each unmet gate left with no open finding is waived on the user's authority, so its
-`RECHECK` verdict stands, and the scope settles once no unmet gate remains. A gate that still has open findings
-keeps the scope waiting. The archive receipt lists the dismissal (`convergence.dispositions`, with `blocking`,
-`disposition_by` and `authority_quote`) and the waiver.
+routed is released. When the scope is already in `recheck`, dismissing its last open finding queues the next
+independent review in the remaining authorized round or cycle, even when the composition is unchanged. It does
+not mint APPROVED or consume new user consent. `office resume` and `office wait` recover this state for older runs
+whose dismissal was recorded without the review job. At a held round cap, an unmet `RECHECK` gate left with no
+open finding may still be waived on the user's recorded authority; the verdict stays `RECHECK`. A gate that still
+has open findings keeps the scope waiting. The archive receipt lists the dismissal (`convergence.dispositions`,
+with `blocking`, `disposition_by` and `authority_quote`) and any waiver.
 
 **Tree carry-over.** A scope that is settled (approved, waived, or not required) or still reviewing, and
 recomposes to a tree equal to its previous composed tree, starts no new convergence or visual cycle. A

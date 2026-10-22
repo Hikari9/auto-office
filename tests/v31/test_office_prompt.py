@@ -68,8 +68,68 @@ def test_prompt_refuses_a_dispatch_whose_agent_is_gone(env, monkeypatch):
     from office import prompting
     with pytest.raises(prompting.Refused) as err:
         prompting.prompt(con, run, "T1", TEXT)
-    assert "no live agent" in err.value.message and "office rerun T1" in err.value.next_step
+    assert "no live agent" in err.value.message and err.value.next_step == "office status"
     assert not _sent(_calls(state_file))[0]
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("restriction", ["nonresumable", "denied"])
+def test_gone_executor_prompt_delegates_route_recovery_to_status(env, monkeypatch, restriction):
+    import copy
+    from office import adapters, prompting
+
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY], status="exited", agent="gone")
+    con.execute("UPDATE dispatches SET ended_at=started_at, session_id='ended-session' WHERE id=?", (d["id"],))
+    con.execute("UPDATE tasks SET status='changes_required', pause_reason='restack: parent changed' WHERE id='T1'")
+    con.commit()
+    if restriction == "nonresumable":
+        current = copy.deepcopy(adapters.load_all())
+        current[d["adapter_id"]]["office_profiles"]["worker"]["interactive"].pop("resume_argv", None)
+        monkeypatch.setattr(adapters, "load_all", lambda: current)
+    else:
+        candidate = d["route"]["candidate"]
+        route = f"{candidate['harness']}/{candidate['model_id']}@{candidate['effort']}"
+        (env.tmp / "user-config.yaml").write_text(f"routing:\n  user_policy:\n    denied_models: [{route}]\n")
+    with pytest.raises(prompting.Refused) as err:
+        prompting.prompt(con, run, "T1", TEXT)
+    assert err.value.next_step == "office status"
+    code, out = env.office("status")
+    assert code == 0, out
+    nxt = out.splitlines()[-1]
+    if restriction == "nonresumable":
+        assert "office rerun T1 --fresh" in nxt and "--resume" not in nxt, out
+    else:
+        assert "office inspect route T1" in nxt and "denied" in nxt and "office rerun" not in nxt, out
+    assert _sent(_calls(state_file)) == ([], [])
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("task_state", ["running", "accepted", "cancelled", "superseded"])
+def test_gone_executor_prompt_only_suggests_revoking_its_current_unfinished_task(env, monkeypatch, task_state):
+    state_file, run, d, con = _herdr_worker(env, monkeypatch, reads=[EMPTY], agent="gone")
+    if task_state == "superseded":
+        # A stale pane can remain after a newer dispatch took over. Prompting its
+        # historical id must not direct the operator to revoke the current worker.
+        replacement = dict(con.execute("SELECT * FROM dispatches WHERE id=?", (d["id"],)).fetchone())
+        replacement.update(id="Dreplacement", pane_id="w1:p8", lease_id=None)
+        con.execute(f"INSERT INTO dispatches ({','.join(replacement)}) VALUES ({','.join('?' * len(replacement))})",
+                    tuple(replacement.values()))
+        con.execute("UPDATE tasks SET current_dispatch_id='Dreplacement' WHERE id='T1'")
+    else:
+        con.execute("UPDATE tasks SET status=? WHERE id='T1'", (task_state,))
+    con.commit()
+    task_before = dict(con.execute("SELECT * FROM tasks WHERE id='T1'").fetchone())
+    dispatches_before = [dict(row) for row in con.execute("SELECT * FROM dispatches ORDER BY id")]
+    leases_before = [dict(row) for row in con.execute("SELECT * FROM leases ORDER BY id")]
+    from office import prompting
+    with pytest.raises(prompting.Refused) as err:
+        prompting.prompt(con, run, d["id"], TEXT)
+    expected = "office revoke T1, then office status" if task_state == "running" else "office status"
+    assert err.value.next_step == expected
+    assert dict(con.execute("SELECT * FROM tasks WHERE id='T1'").fetchone()) == task_before
+    assert [dict(row) for row in con.execute("SELECT * FROM dispatches ORDER BY id")] == dispatches_before
+    assert [dict(row) for row in con.execute("SELECT * FROM leases ORDER BY id")] == leases_before
+    assert _sent(_calls(state_file)) == ([], [])
 
 
 @pytest.mark.approved

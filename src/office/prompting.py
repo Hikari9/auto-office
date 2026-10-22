@@ -58,9 +58,13 @@ def prompt(con, run: dict, target: str | None, text: str) -> Result:
     if not gates._agent_alive(dispatch.herdr_agent_name(d["id"])):
         nxt = "office status"
         if d.get("task_id") and d.get("role") == "executor":
-            # The dispatch row still says live until it is revoked, and rerun refuses a live one.
-            nxt = (f"office revoke {who}, then office rerun {who} --resume | --fresh" if gates.worker_live(con, d["id"])
-                   else f"office rerun {who} --resume | --fresh")
+            # Status derives recovery from the current task, route and adapter.
+            # An old pane must never direct a revoke of its replacement worker.
+            task = state.get_task(con, run["id"], d["task_id"])
+            if (task and task.get("current_dispatch_id") == d["id"]
+                    and task["status"] not in ("accepted", "cancelled")
+                    and not d.get("ended_at") and gates.worker_live(con, d["id"])):
+                nxt = f"office revoke {who}, then office status"
         raise Refused("dispatch-ended", f"{d['id']} ({who}) has no live agent; nothing is listening in its pane",
                       scope=who, next_step=nxt)
     try:
